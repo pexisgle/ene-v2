@@ -26,6 +26,7 @@
           packages = rustComponents ++ (with pkgs; [
             rust-analyzer
             pkg-config
+            python3
             git
             just
           ]);
