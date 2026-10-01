@@ -11,6 +11,7 @@ use axum::{
     routing::get,
 };
 use ene_protocol::host::{Companion, Cursor, Message, Notification, Page, Settings, Snapshot};
+use futures_util::SinkExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -324,7 +325,9 @@ async fn stream(app: App, mut socket: WebSocket) {
         }
     }
     app.boundary.lock().await.connections.remove(&id);
-    let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(WsMessage::Close(None))).await;
+    // The peer's Close queues a reply; close the sink to flush it without
+    // attempting another send after the protocol has entered the closing state.
+    let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
 }
 
 #[cfg(test)]
