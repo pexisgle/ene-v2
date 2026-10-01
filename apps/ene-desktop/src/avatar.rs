@@ -19,6 +19,7 @@ use std::{
 pub struct ClientSettings {
     pub font_family: String,
     pub text_size: i32,
+    pub theme_index: i32,
     pub avatar: AvatarSettings,
 }
 impl Default for ClientSettings {
@@ -34,6 +35,7 @@ impl Default for ClientSettings {
         Self {
             font_family: "Noto Sans CJK JP".into(),
             text_size: 16,
+            theme_index: 0,
             avatar,
         }
     }
@@ -56,6 +58,7 @@ impl ClientSettings {
                 let mut settings: Self =
                     serde_json::from_slice(&bytes).map_err(|e| format!("設定を読めません: {e}"))?;
                 settings.avatar.validate()?;
+                settings.theme_index = settings.theme_index.clamp(0, 2);
                 settings.text_size = settings.text_size.clamp(12, 28);
                 Ok(settings)
             }
@@ -347,11 +350,14 @@ mod tests {
         settings.avatar.motion = Some("/tmp/挨拶.vrma".into());
         settings.avatar.motion_playing = false;
         settings.avatar.motion_loop = false;
+        settings.theme_index = 2;
+        settings.avatar.size_percent = 150;
         settings.avatar.right = 123;
         settings.avatar.output = Some("DP-2".into());
         settings.save(&path).unwrap();
         let loaded = ClientSettings::load(&path).unwrap();
         assert_eq!(loaded.avatar, settings.avatar);
+        assert_eq!(loaded.theme_index, settings.theme_index);
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

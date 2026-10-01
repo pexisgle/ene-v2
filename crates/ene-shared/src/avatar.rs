@@ -9,6 +9,8 @@ pub struct AvatarSettings {
     pub motion_loop: bool,
     pub visible: bool,
     pub fps: u32,
+    /// Logical surface size relative to the default avatar size.
+    pub size_percent: u32,
     /// Logical margins from the bottom-right of the selected output.
     pub right: i32,
     pub bottom: i32,
@@ -23,6 +25,7 @@ impl Default for AvatarSettings {
             motion_loop: true,
             visible: true,
             fps: 30,
+            size_percent: 100,
             right: 24,
             bottom: 24,
             output: None,
@@ -33,6 +36,9 @@ impl AvatarSettings {
     pub fn validate(&self) -> Result<(), String> {
         if ![30, 60].contains(&self.fps) {
             return Err("描画速度は30または60fpsを選んでください。".into());
+        }
+        if !(50..=200).contains(&self.size_percent) {
+            return Err("キャラクターの大きさは50〜200%を選んでください。".into());
         }
         if !(0..=32768).contains(&self.right) || !(0..=32768).contains(&self.bottom) {
             return Err("キャラクター位置が範囲外です。".into());

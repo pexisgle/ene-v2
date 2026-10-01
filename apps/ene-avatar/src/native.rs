@@ -109,14 +109,26 @@ impl State {
         self.layer
             .set_keyboard_interactivity(KeyboardInteractivity::None);
         self.layer.set_exclusive_zone(0);
-        self.layer.set_size(WIDTH, HEIGHT);
+        let size = self.requested_size();
+        self.layer.set_size(size.0, size.1);
+        if self.configured && (self.width, self.height) != size {
+            // Await the compositor's new size before presenting a resized frame.
+            self.configured = false;
+            self.drag = None;
+            self.drag_pending = false;
+            self.input_runs.clear();
+            self.set_input(&[]);
+        }
+        let previous = (self.settings.right, self.settings.bottom);
         self.clamp_position();
+        if previous != (self.settings.right, self.settings.bottom) {
+            self.notify_position();
+        }
         self.layer
             .set_margin(0, self.settings.right, self.settings.bottom, 0);
     }
-    pub fn clamp_position(&mut self) {
-        let size = self
-            .outputs
+    fn output_size(&self) -> (i32, i32) {
+        self.outputs
             .outputs()
             .find_map(|o| {
                 self.outputs.info(&o).and_then(|i| {
@@ -132,15 +144,28 @@ impl State {
                     }
                 })
             })
-            .unwrap_or((32768, 32768));
-        self.settings.right = self
-            .settings
-            .right
-            .clamp(0, (size.0 - self.width as i32).max(0));
+            .unwrap_or((32768, 32768))
+    }
+    fn requested_size(&self) -> (u32, u32) {
+        let width = WIDTH * self.settings.size_percent / 100;
+        let height = HEIGHT * self.settings.size_percent / 100;
+        let output = self.output_size();
+        let fit = (output.0.max(1) as f64 / width as f64)
+            .min(output.1.max(1) as f64 / height as f64)
+            .min(1.0);
+        (
+            (width as f64 * fit).floor().max(1.0) as u32,
+            (height as f64 * fit).floor().max(1.0) as u32,
+        )
+    }
+    pub fn clamp_position(&mut self) {
+        let size = self.output_size();
+        let (width, height) = self.requested_size();
+        self.settings.right = self.settings.right.clamp(0, (size.0 - width as i32).max(0));
         self.settings.bottom = self
             .settings
             .bottom
-            .clamp(0, (size.1 - self.height as i32).max(0));
+            .clamp(0, (size.1 - height as i32).max(0));
     }
     pub fn recreate(&mut self, qh: &QueueHandle<Self>) {
         let output = self.outputs.outputs().find(|o| {
@@ -338,13 +363,14 @@ impl LayerShellHandler for State {
         if layer != &self.layer {
             return;
         }
+        let requested = self.requested_size();
         let width = if c.new_size.0 == 0 {
-            WIDTH
+            requested.0
         } else {
             c.new_size.0
         };
         let height = if c.new_size.1 == 0 {
-            HEIGHT
+            requested.1
         } else {
             c.new_size.1
         };

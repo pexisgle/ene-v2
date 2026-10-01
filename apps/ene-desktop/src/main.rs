@@ -193,6 +193,13 @@ fn bind_chat(ui: &ChatWindow, mode: Mode) -> Rc<VecModel<ChatEntry>> {
     messages
 }
 
+fn apply_theme(ui: &ChatWindow, settings: &SettingsWindow, index: i32) {
+    ui.global::<Theme>().invoke_apply(index);
+    settings.global::<Theme>().invoke_apply(index);
+    ui.set_theme_index(index);
+    settings.set_theme_index(index);
+}
+
 fn bind_settings(ui: &ChatWindow, settings: &SettingsWindow) {
     let weak = settings.as_weak();
     let chat_weak = ui.as_weak();
@@ -208,6 +215,7 @@ fn bind_settings(ui: &ChatWindow, settings: &SettingsWindow) {
             if !settings.invoke_commit_avatar_settings() {
                 return;
             }
+            apply_theme(&ui, &settings, settings.get_theme_index());
             let font = settings.get_font_family();
             if !font.trim().is_empty() {
                 ui.set_font_family(font);
@@ -227,6 +235,8 @@ fn show_chat(ui: &ChatWindow) {
 }
 
 fn show_settings(ui: &ChatWindow, settings: &SettingsWindow) {
+    settings.set_theme_index(ui.get_theme_index());
+    settings.set_avatar_size_percent(ui.get_avatar_size_percent());
     settings.set_font_family(ui.get_font_family());
     settings.set_text_size(ui.get_text_size());
     settings.set_avatar_model(ui.get_avatar_model());
@@ -262,6 +272,9 @@ fn bind_avatar(
         eprintln!("{error}");
         avatar::ClientSettings::default()
     });
+    apply_theme(ui, settings, initial.theme_index);
+    ui.set_avatar_size_percent(initial.avatar.size_percent as i32);
+    settings.set_avatar_size_percent(initial.avatar.size_percent as i32);
     ui.set_font_family(initial.font_family.clone().into());
     ui.set_text_size(initial.text_size);
     ui.set_avatar_model(initial.avatar.model.clone().into());
@@ -331,6 +344,8 @@ fn bind_avatar(
             if !font.trim().is_empty() {
                 updated.font_family = font.to_string();
             }
+            updated.theme_index = settings.get_theme_index().clamp(0, 2);
+            updated.avatar.size_percent = settings.get_avatar_size_percent().clamp(50, 200) as u32;
             updated.text_size = settings.get_text_size().clamp(12, 28);
             updated.avatar.model = settings.get_avatar_model().to_string();
             let motion = settings.get_avatar_motion();
@@ -351,6 +366,7 @@ fn bind_avatar(
                 settings.set_avatar_status(error.into());
                 return false;
             }
+            ui.set_avatar_size_percent(updated.avatar.size_percent as i32);
             ui.set_avatar_model(updated.avatar.model.clone().into());
             ui.set_avatar_motion(updated.avatar.motion.clone().unwrap_or_default().into());
             ui.set_motion_playing(updated.avatar.motion_playing);

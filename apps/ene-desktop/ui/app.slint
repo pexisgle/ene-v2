@@ -1,9 +1,110 @@
-import { AboutSlint, Button, TextEdit, ScrollView, VerticalBox, HorizontalBox, LineEdit, SpinBox, CheckBox, ComboBox } from "std-widgets.slint";
+import { AboutSlint, Button, ScrollView, VerticalBox, HorizontalBox, LineEdit, SpinBox, CheckBox, ComboBox, Palette } from "std-widgets.slint";
+export { Palette } from "std-widgets.slint";
+export global Theme {
+    public function apply(index: int) {
+        Palette.color-scheme = index == 2 ? ColorScheme.dark : index == 1 ? ColorScheme.light : ColorScheme.unknown;
+    }
+}
 
 export struct ChatEntry {
     author: string,
     body: string,
     provisional: bool,
+}
+
+component MessageInput inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> font-family <=> input.font-family;
+    in property <length> font-size <=> input.font-size;
+    in property <string> placeholder-text;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback submit;
+    private property <bool> composing;
+    private property <bool> ime-settling;
+    Timer {
+        interval: 150ms;
+        running: root.ime-settling;
+        triggered => { root.ime-settling = false; }
+    }
+    forward-focus: input;
+    background: Palette.control-background;
+    border-width: 1px;
+    border-color: input.has-focus ? Palette.accent-background : Palette.border;
+    border-radius: 4px;
+    ContextMenuArea {
+        Menu {
+            MenuItem { title: "切り取り"; activated => { input.cut(); } }
+            MenuItem { title: "コピー"; activated => { input.copy(); } }
+            MenuItem { title: "貼り付け"; activated => { input.paste(); } }
+            MenuItem { title: "すべて選択"; activated => { input.select-all(); } }
+        }
+        scroll := ScrollView {
+            x: 10px;
+            y: 8px;
+            width: parent.width - 20px;
+            height: parent.height - 16px;
+            content-width: self.visible-width;
+            content-height: max(self.visible-height, input.preferred-height);
+            input := TextInput {
+                width: scroll.visible-width;
+                height: max(scroll.visible-height, self.preferred-height);
+                single-line: false;
+                wrap: word-wrap;
+                color: Palette.foreground;
+                selection-background-color: Palette.selection-background;
+                selection-foreground-color: Palette.selection-foreground;
+                page-height: scroll.visible-height;
+                edited => { root.edited(self.text); }
+                changed preedit-text => {
+                    if self.preedit-text != "" {
+                        root.composing = true;
+                        root.ime-settling = false;
+                    } else if root.composing {
+                        root.composing = false;
+                        // Some IMEs finish composition before forwarding Enter.
+                        // Key release clears this; a short fallback also covers
+                        // confirmation by mouse or IMEs consuming the release.
+                        root.ime-settling = true;
+                    }
+                }
+                key-released(event) => {
+                    if event.text == Key.Return { root.ime-settling = false; }
+                    return reject;
+                }
+                key-pressed(event) => {
+                    if event.text == Key.Return {
+                        // An IME confirmation is never a send or a newline.
+                        if self.preedit-text != "" || root.ime-settling { return accept; }
+                        if !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
+                            if !event.repeat { root.submit(); }
+                            return accept;
+                        }
+                    }
+                    return reject;
+                }
+                cursor-position-changed(pos) => {
+                    if pos.y + scroll.content-y < 0px {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, -pos.y));
+                    } else if pos.y + scroll.content-y > scroll.visible-height - root.font-size {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, scroll.visible-height - pos.y - root.font-size));
+                    }
+                }
+            }
+        }
+    }
+    Text {
+        x: scroll.x;
+        y: scroll.y;
+        width: scroll.width;
+        text: root.text == "" && input.preedit-text == "" ? root.placeholder-text : "";
+        font-family: root.font-family;
+        font-size: root.font-size;
+        color: Palette.foreground;
+        opacity: 0.6;
+        overflow: elide;
+        accessible-role: none;
+    }
 }
 
 export component ChatWindow inherits Window {
@@ -12,12 +113,13 @@ export component ChatWindow inherits Window {
     preferred-height: 760px;
     min-width: 420px;
     min-height: 480px;
-    background: #f3f5fa;
+    background: Palette.background;
     default-font-family: root.font-family;
     default-font-size: root.text-size * 1px;
 
     in-out property <string> font-family: "Noto Sans CJK JP";
     in-out property <int> text-size: 16;
+    in property <int> theme-index;
     in-out property <string> draft;
     in property <[ChatEntry]> messages;
     in property <bool> can-send;
@@ -32,6 +134,7 @@ export component ChatWindow inherits Window {
     in property <bool> motion-failed;
     in property <bool> avatar-visible;
     in property <int> avatar-fps-index;
+    in property <int> avatar-size-percent: 100;
     in property <bool> avatar-failed;
     in property <string> avatar-status;
     callback avatar-events-available;
@@ -57,8 +160,8 @@ export component ChatWindow inherits Window {
             VerticalBox {
                 padding: 0px;
                 spacing: 2px;
-                Text { text: "ene"; font-size: 20px; font-weight: 700; color: #172548; }
-                Text { text: root.demo-mode ? "デモモード · 仮応答" : "ホスト未接続"; color: #536381; font-size: 13px; }
+                Text { text: "ene"; font-size: 20px; font-weight: 700; color: Palette.foreground; }
+                Text { text: root.demo-mode ? "デモモード · 仮応答" : "ホスト未接続"; color: Palette.foreground; opacity: 0.7; font-size: 13px; }
             }
             Rectangle { horizontal-stretch: 1; }
             Button { text: "設定"; clicked => { root.open-settings(); } }
@@ -66,12 +169,12 @@ export component ChatWindow inherits Window {
 
         if root.avatar-failed : HorizontalBox {
             padding: 4px;
-            Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: #8f3d24; horizontal-stretch: 1; }
+            Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; horizontal-stretch: 1; }
             Button { text: "再起動"; clicked => { root.restart-avatar(); } }
         }
         if root.motion-failed : HorizontalBox {
             padding: 4px;
-            Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: #8f3d24; horizontal-stretch: 1; }
+            Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; horizontal-stretch: 1; }
             Button { text: "設定"; clicked => { root.open-settings(); } }
         }
         history := ScrollView {
@@ -81,21 +184,23 @@ export component ChatWindow inherits Window {
                 padding: 4px;
                 spacing: 12px;
                 if root.messages.length == 0 : Rectangle {
-                    background: #ffffff;
+                    background: Palette.alternate-background;
                     border-radius: 12px;
                     min-height: 140px;
                     VerticalBox {
                         padding: 20px;
                         spacing: 10px;
-                        Text { text: "ここから、話しかけてください。"; color: #172548; font-weight: 600; wrap: word-wrap; }
+                        Text { text: "ここから、話しかけてください。"; color: Palette.foreground; font-weight: 600; wrap: word-wrap; }
                         Text {
                             text: root.demo-mode ? "日本語や複数行の入力を試せます。返答は固定の仮応答です。会話はクライアントを終了すると消えます。" : "ホスト接続は準備中です。入力を試すには --demo を付けて起動してください。";
-                            wrap: word-wrap; color: #536381;
+                            wrap: word-wrap; color: Palette.foreground; opacity: 0.7;
                         }
                     }
                 }
                 for entry in root.messages : Rectangle {
-                    background: entry.provisional ? #ffffff : #e8edff;
+                    background: entry.provisional ? Palette.alternate-background : Palette.control-background;
+                    border-width: entry.provisional ? 0px : 1px;
+                    border-color: Palette.accent-background;
                     border-radius: 12px;
                     vertical-stretch: 0;
                     VerticalBox {
@@ -103,11 +208,11 @@ export component ChatWindow inherits Window {
                         spacing: 8px;
                         HorizontalBox {
                             padding: 0px;
-                            Text { text: entry.author; color: #172548; font-weight: 600; font-size: 13px; }
+                            Text { text: entry.author; color: Palette.foreground; font-weight: 600; font-size: 13px; }
                             Rectangle { horizontal-stretch: 1; }
-                            if entry.provisional : Text { text: "仮応答"; color: #3059d6; font-size: 12px; }
+                            if entry.provisional : Text { text: "仮応答"; color: Palette.accent-background; font-size: 12px; }
                         }
-                        Text { text: entry.body; wrap: word-wrap; color: #172548; }
+                        Text { text: entry.body; wrap: word-wrap; color: Palette.foreground; }
                     }
                 }
                 Rectangle { vertical-stretch: 1; }
@@ -115,7 +220,7 @@ export component ChatWindow inherits Window {
         }
 
         composer := Rectangle {
-            background: #ffffff;
+            background: Palette.alternate-background;
             border-radius: 12px;
             vertical-stretch: 0;
             height: min(180px, max(86px, draft-measure.preferred-height + 54px));
@@ -137,7 +242,7 @@ export component ChatWindow inherits Window {
                     padding: 0px;
                     spacing: 10px;
                     vertical-stretch: 1;
-                    editor := TextEdit {
+                    editor := MessageInput {
                         text <=> root.draft;
                         font-family: root.font-family;
                         font-size: root.text-size * 1px;
@@ -145,8 +250,8 @@ export component ChatWindow inherits Window {
                         min-height: 36px;
                         vertical-stretch: 1;
                         horizontal-stretch: 1;
-                        // Enter and IME confirmation never submit.
                         edited(text) => { root.draft-edited(text); }
+                        submit => { if root.can-send { root.submit(); } }
                     }
                     VerticalBox {
                         padding: 0px;
@@ -154,7 +259,7 @@ export component ChatWindow inherits Window {
                         Button { height: 40px; text: "送信"; enabled: root.can-send; clicked => { root.submit(); } }
                     }
                 }
-                Text { text: "Enter は改行 · 送信はボタンから"; color: #536381; font-size: 11px; vertical-stretch: 0; }
+                Text { text: "Enter で送信 · Shift+Enter で改行"; color: Palette.foreground; opacity: 0.7; font-size: 11px; vertical-stretch: 0; }
             }
         }
 
@@ -169,6 +274,7 @@ export component SettingsWindow inherits Window {
     default-font-family: "Noto Sans CJK JP";
     in-out property <string> font-family;
     in-out property <int> text-size;
+    in-out property <int> theme-index;
     callback apply-settings;
     callback commit-avatar-settings() -> bool;
     commit-avatar-settings => { true }
@@ -180,6 +286,7 @@ export component SettingsWindow inherits Window {
     callback select-motion;
     in-out property <bool> avatar-visible;
     in-out property <int> avatar-fps-index;
+    in-out property <int> avatar-size-percent: 100;
     in property <string> avatar-status;
     callback select-model;
     callback restart-avatar;
@@ -198,6 +305,11 @@ export component SettingsWindow inherits Window {
                 padding: 8px;
                 spacing: 14px;
                 Text { text: "会話画面の表示"; font-size: 20px; font-weight: 600; }
+                HorizontalBox {
+                    padding: 0px;
+                    Text { text: "テーマ"; vertical-alignment: center; }
+                    ComboBox { model: ["システムに合わせる", "ライト", "ダーク"]; current-index <=> root.theme-index; }
+                }
                 Text { text: "フォント名（インストール済みのもの）"; }
                 LineEdit { text <=> root.font-family; }
                 HorizontalBox {
@@ -207,16 +319,22 @@ export component SettingsWindow inherits Window {
                 }
                 Text { text: "キャラクター"; font-size: 18px; font-weight: 600; }
                 CheckBox { text: "キャラクターを表示"; checked <=> root.avatar-visible; }
-                Text { text: root.avatar-model; wrap: word-wrap; font-size: 12px; color: #536381; }
+                Text { text: root.avatar-model; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 HorizontalBox {
                     padding: 0px;
                     Button { text: "VRMを選ぶ"; clicked => { root.select-model(); } }
                     Text { text: "描画速度"; font-size: 13px; vertical-alignment: center; }
                     ComboBox { model: ["30 fps", "60 fps"]; current-index <=> root.avatar-fps-index; }
                 }
-                Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: #536381; }
+                HorizontalBox {
+                    padding: 0px;
+                    Text { text: "キャラクターの大きさ"; vertical-alignment: center; }
+                    SpinBox { value <=> root.avatar-size-percent; minimum: 50; maximum: 200; }
+                    Text { text: "%"; vertical-alignment: center; }
+                }
+                Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; }
-                Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: #536381; }
+                Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 HorizontalBox {
                     padding: 0px;
                     Button { text: "VRMAを選ぶ"; clicked => { root.select-motion(); } }
@@ -227,11 +345,11 @@ export component SettingsWindow inherits Window {
                     CheckBox { text: "再生"; checked <=> root.motion-playing; enabled: root.avatar-motion != ""; }
                     CheckBox { text: "繰り返す"; checked <=> root.motion-loop; enabled: root.avatar-motion != ""; }
                 }
-                Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: #536381; }
-                Text { text: "モーションはその場で再生します。横移動を固定し、上下の動きと回転を保ちます。"; wrap: word-wrap; font-size: 12px; color: #536381; }
+                Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
+                Text { text: "モーションはその場で再生します。横移動を固定し、上下の動きと回転を保ちます。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Button { text: "キャラクターを再起動"; clicked => { root.restart-avatar(); } }
-                Text { text: "表示設定とキャラクターの配置はこの端末に保存します。"; wrap: word-wrap; color: #536381; font-size: 12px; }
-                Text { text: root.tray-status; wrap: word-wrap; color: #536381; }
+                Text { text: "表示設定とキャラクターの配置はこの端末に保存します。"; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; font-size: 12px; }
+                Text { text: root.tray-status; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; }
                 if !root.tray-ready : Button { text: "クライアント終了"; clicked => { root.quit(); } }
                 AboutSlint { preferred-height: 100px; max-height: 120px; vertical-stretch: 0; }
             }
@@ -304,13 +422,13 @@ export component FilePickerWindow inherits Window {
                 for entry in root.entries : Rectangle {
                     height: 40px;
                     vertical-stretch: 0;
-                    background: root.selection == entry.path ? #e8edff : touch.has-hover ? #f3f5fa : #ffffff;
-                    Text { x: 10px; width: parent.width - 20px; text: entry.name; vertical-alignment: center; overflow: elide; }
+                    background: root.selection == entry.path ? Palette.accent-background : touch.has-hover ? Palette.alternate-background : Palette.background;
+                    Text { x: 10px; width: parent.width - 20px; text: entry.name; color: root.selection == entry.path ? Palette.accent-foreground : Palette.foreground; vertical-alignment: center; overflow: elide; }
                     touch := TouchArea { clicked => { root.open-entry(entry.path, entry.directory); } }
                 }
             }
         }
-        Text { text: root.picker-status; wrap: word-wrap; font-size: 12px; color: #536381; }
+        Text { text: root.picker-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
         Text { text: "選択するファイル（パスの貼り付けもできます）"; font-size: 13px; }
         LineEdit { text <=> root.selection; accepted => { root.accept(); } }
         HorizontalBox {

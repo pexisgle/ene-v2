@@ -116,6 +116,9 @@ pub fn bind(settings: &SettingsWindow, picker: &FilePickerWindow) {
 }
 
 fn open(picker: &FilePickerWindow, settings: &SettingsWindow, motion: bool) {
+    picker
+        .global::<crate::Palette>()
+        .set_color_scheme(settings.global::<crate::Palette>().get_color_scheme());
     picker.set_motion(motion);
     picker.set_picker_title(
         if motion {

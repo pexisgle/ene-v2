@@ -105,14 +105,20 @@ fn disconnected_ui_never_produces_a_fake_response() {
 }
 
 #[test]
-fn enter_and_clipboard_preserve_multiline_japanese_without_sending() {
+fn shift_enter_and_clipboard_preserve_multiline_and_enter_sends() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = ChatWindow::new().unwrap();
     let messages = bind_chat(&ui, Mode::Demo);
     ui.show().unwrap();
     ui.invoke_focus_input();
     type_text(&ui, "日本語");
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Shift.into(),
+    });
     type_text(&ui, Key::Return);
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Shift.into(),
+    });
     type_text(&ui, "二行目🙂");
     assert_eq!(ui.get_draft(), "日本語\n二行目🙂");
     assert_eq!(messages.row_count(), 0);
@@ -123,7 +129,7 @@ fn enter_and_clipboard_preserve_multiline_japanese_without_sending() {
     control_key(&ui, "v");
     assert_eq!(ui.get_draft(), "日本語\n二行目🙂");
     assert_eq!(messages.row_count(), 0);
-    click(&ui, "送信");
+    type_text(&ui, Key::Return);
     assert_eq!(messages.row_count(), 2);
     assert!(ui.get_draft().is_empty());
     assert!(ui.get_editor_focused());
@@ -141,9 +147,11 @@ fn settings_apply_to_chat_and_return_focus() {
     assert_eq!(settings.get_font_family(), "Noto Sans CJK JP");
     settings.set_font_family("Noto Serif CJK JP".into());
     settings.set_text_size(20);
+    settings.set_theme_index(2);
     click(&settings, "適用して閉じる");
     assert_eq!(ui.get_font_family(), "Noto Serif CJK JP");
     assert_eq!(ui.get_text_size(), 20);
+    assert_eq!(ui.get_theme_index(), 2);
     assert!(!settings.window().is_visible());
     assert!(ui.get_editor_focused());
 }
