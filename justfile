@@ -28,11 +28,8 @@ run-desktop:
     cargo build --locked -p ene-avatar
     cargo run --locked -p ene-desktop -- --demo
 
-fetch-avatar:
-    python3 scripts/fetch-seed.py
-
-fetch-vrma:
-    python3 scripts/fetch-vrma.py
+fetch-assets asset="all":
+    python3 scripts/fetch-assets.py "{{asset}}"
 
 run-avatar:
     cargo run --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm"

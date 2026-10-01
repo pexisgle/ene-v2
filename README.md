@@ -77,8 +77,7 @@ justをインストールしている場合は、同じ検査を`just verify`で
 | `just verify` | 整形確認、型検査、Clippy、テスト、ビルドを順に実行 |
 | `just run-host` | ホストの骨組みを起動 |
 | `just run-desktop` | Slint会話画面を明示的なデモモードで起動 |
-| `just fetch-avatar` | 固定コミットの公式Seed-sanをチェックサム付きで取得 |
-| `just fetch-vrma` | 固定コミットのVRMAサンプルをチェックサム付きで取得 |
+| `just fetch-assets` | 固定コミットの公式Seed-sanとVRMAサンプルをチェックサム付きで取得（`vrm` / `vrma`指定で個別取得） |
 | `just run-avatar` | キャラクター描画を単独起動 |
 
 ## VRMキャラクターの常駐表示
@@ -86,7 +85,7 @@ justをインストールしている場合は、同じ検査を`just verify`で
 KDE/KWinなどのWayland layer-shell対応環境で利用できます。XWaylandへの切替はありません。
 
 ```sh
-just fetch-avatar  # 固定コミット・SHA-256を検証して開発用Seed-sanをキャッシュへ取得
+just fetch-assets  # 固定コミット・SHA-256を検証して開発用VRM・VRMAをキャッシュへ取得
 just run-desktop  # ene-avatarもビルドし、会話画面とキャラクターを起動
 ```
 
@@ -100,7 +99,7 @@ Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](l
 
 VRMA 1.0は設定の「VRMAを選ぶ」から読み込み、再生・一時停止・繰り返しを設定できます。「静止姿勢に戻す」でモーションを外します。常駐表示では横移動を固定し、上下の動きと回転を保ちます。表示フレームとクリック領域は同時に更新します。
 
-`just fetch-vrma`で[pixiv three-vrmのサンプル](https://github.com/pixiv/three-vrm/blob/1b4fc0cc7ef39a49d62bb7a66dcfeca8f65316f7/packages/three-vrm-animation/examples/models/test.vrma)を取得できます。保存先は`$XDG_CACHE_HOME/ene/motions/three-vrm-sample.vrma`（既定`~/.cache/ene/motions/three-vrm-sample.vrma`）です。取得後、設定の「VRMAを選ぶ」でこのファイルを指定してください。Copyright (c) 2019-2026 pixiv Inc.／[MIT License](licenses/three-vrm-animation.txt)。ライセンスはキャッシュにも保存します。
+`just fetch-assets vrma`で[pixiv three-vrmのサンプル](https://github.com/pixiv/three-vrm/blob/1b4fc0cc7ef39a49d62bb7a66dcfeca8f65316f7/packages/three-vrm-animation/examples/models/test.vrma)だけを取得できます。VRMだけなら`just fetch-assets vrm`です。保存先は`$XDG_CACHE_HOME/ene/motions/three-vrm-sample.vrma`（既定`~/.cache/ene/motions/three-vrm-sample.vrma`）です。取得後、設定の「VRMAを選ぶ」でこのファイルを指定してください。Copyright (c) 2019-2026 pixiv Inc.／[MIT License](licenses/three-vrm-animation.txt)。ライセンスはキャッシュにも保存します。
 
 ```sh
 cargo run --locked -p ene-avatar -- --standalone --model /path/to/avatar.vrm --motion /path/to/motion.vrma
