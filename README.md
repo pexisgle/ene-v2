@@ -11,13 +11,11 @@
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | VRM 1.0の透明なWayland常駐表示 |
-| [`ene-api-types`](crates/ene-api-types/) | REST APIのDTO・OpenAPIスキーマ・通知同期規則 |
-| [`ene-api-client`](crates/ene-api-client/) | 型付きHTTP操作・認証付き通知WebSocket |
-| [`ene-protocol`](crates/ene-protocol/) | アバターIPC・プロバイダープラグインの通信型 |
+| [`ene-protocol`](crates/ene-protocol/) | クライアント・描画のIPC型、ホストAPI型と通知再同期 |
 
 ## 第1段階：Slint会話画面を試す
 
-現在の実装はSlint 1.18.1の会話画面です。日本語の複数行入力、Enter／ボタン送信、固定の日本語仮応答、表示設定、ksniのシステムトレイを備えています。会話は起動中のみ保持し、表示設定・VRM・配置は端末側に保存します。別プロセスのVRM常駐表示とVRMAモーション再生も実装しています。ホストはまだ骨組みで、実モデルとの対話・ファイル作業・音声は未実装です。
+現在の実装はSlint 1.18.1の会話画面です。日本語の複数行入力、Enter／ボタン送信、固定の日本語仮応答、表示設定、ksniのシステムトレイを備えています。会話は起動中のみ保持し、表示設定・VRM・配置は端末側に保存します。別プロセスのVRM常駐表示とVRMAモーション再生も実装しています。ホストの認証・初期化・履歴・通知購読も実装しています。実モデル対話への画面接続・ファイル作業・音声は未実装です。ホストの起動と実装状況は[第3段階の記録](docs/host-stage3.md)を参照してください。
 
 LinuxのWaylandセッションで起動してください。Nixを使わないDebian系の環境では、Rustに加えて次の依存が必要です（ほかのOSの対応は今回の対象外です）。
 
@@ -77,7 +75,8 @@ justをインストールしている場合は、同じ検査を`just verify`で
 | `just test` | ワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
 | `just verify` | 整形確認、Clippy（型検査を含む）、テスト、ビルドを順に実行 |
-| `just run-host` | ホストの骨組みを起動 |
+| `just run-host` | 認証付きループバックホストを起動 |
+| `just test-host` | 一時runtimeとDBでHTTP/WebSocket・終了・再起動を検証 |
 | `just run-desktop` | Slint会話画面を明示的なデモモードで起動 |
 | `just fetch-assets` | 固定コミットの公式Seed-sanとVRMA全4本をチェックサム付きで取得（`vrm` / `vrma`で種類を選択、個別名で1本を取得） |
 | `just run-avatar` | キャラクター描画を単独起動 |

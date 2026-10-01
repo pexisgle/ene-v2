@@ -8,3 +8,19 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ene-protocol = { path = "../../crates/ene-protocol" }
+fs2 = "0.4"
+libc = "0.2"
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
