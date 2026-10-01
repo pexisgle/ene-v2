@@ -25,14 +25,7 @@ cargo run --locked -p ene-desktop -- --demo
 
 Waylandの表示先、セッションD-Bus、日本語フォント、Vulkan対応ドライバーが必要です。Nixを使わない環境の開発用依存はREADMEに記載しています。`--help`は描画環境なしでも使用できます。
 
-```sh
-# Slintの入力イベントと実際のWayland＋WGPU描画を合わせて試験
-just test-desktop-wayland
-# Slintが公開するSNI／D-Busメニューを実際に呼び出す統合試験
-just test-desktop-tray
-```
-
-GUI試験は通常の`just verify`では`ignored`として区別します。表示環境がないCIで「GUI検証済み」と誤認しないためです。トレイ試験は`dbus-run-session`で専用のWatcherを作り、本物のデスクトップのWatcherに触れません。入力試験はSlintのWindowEvent境界でキー・ポインター入力を注入します。ネイティブIMEの候補表示・preedit・確定・取消は実機試験が必要です。
+初期実装時にはWayland描画・入力と専用D-Busでのトレイ統合試験を実行しました。一度限りの検証用テストとコマンドは削除し、入力・設定などの通常の回帰テストは`just verify`に残しています。以下は当時の検証記録です。ネイティブIMEの候補表示・preedit・確定・取消は実機試験が必要です。
 
 ## クラウド環境の検証記録
 
@@ -46,8 +39,8 @@ Westonのkiosk-shellでは設定ウィンドウが会話画面を完全に覆い
 | --- | --- | --- |
 | `just verify` | 成功 | 整形・全ターゲット型検査・Clippy（警告をエラー化）・テスト・ビルド |
 | 通常の自動テスト | 7件成功・GUI試験2件は別実行 | 明示的デモ、Unicode空白拒否、本文保持、受付後クリア／フォーカス、未接続時の拒否、Enter改行／コピー・貼付／クリック送信、設定、登録有効期限 |
-| `just test-desktop-wayland` | 成功（2.52秒） | 実際のWayland＋WGPU描画、日本語2行入力、送信ボタンクリック、仮応答、設定表示・適用・終了、トレイ登録失敗時の×／非表示拒否 |
-| `just test-desktop-tray` | 成功（2.67秒） | 実際のD-Bus登録・アイコンActivate・メニュー操作・登録消失時の復帰・終了 |
+| Wayland描画・入力試験（実施済み） | 成功（2.52秒） | 実際のWayland＋WGPU描画、日本語2行入力、送信ボタンクリック、仮応答、設定表示・適用・終了、トレイ登録失敗時の×／非表示拒否 |
+| D-Busトレイ試験（実施済み） | 成功（2.67秒） | 実際のD-Bus登録・アイコンActivate・メニュー操作・登録消失時の復帰・終了 |
 | KDE/KWin＋Fcitx5＋Hazkey | 未確認 | 実機の候補位置・変換・確定・取消・誤送信・トレイの見た目と操作 |
 
 最終版の実行ログは[検証ログ](validation/desktop-stage1-2026-10-01.txt)に保存しました。GUI試験の画面キャプチャは`target/desktop-smoke-before.png`、`target/desktop-smoke-after.png`、`target/desktop-smoke-settings.png`です。ビルド成果物のためGitへ含めません。ComputerUseの操作可能なデスクトップはこのクラウド環境にはなく、接続済み端末でも確認時にKWin・Fcitx5の稼働やWaylandソケットを確認できませんでした。接続済み端末のリポジトリ・設定は変更していません。

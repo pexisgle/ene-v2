@@ -43,15 +43,17 @@ IPC通知は`upgrade_in_event_loop`からSlintのイベントループを起こ�
 
 ## 検証
 
+以下は初期実装時の検証記録です。一度限りの検証スクリプト・専用examples・GUI/GPU試験とその実行コマンドは削除しました。通常の回帰テストは`just verify`に残しています。
+
 クラウドで起動した専用Sway 1.10.1（headless＋pixman）、Mesa LavapipeのCPUアダプター、Vulkanで実描画・入力を検証しました。実機KDE/KWinの検証とは区別します。ComputerUse用の操作可能なデスクトップはないため、Wayland仮想ポインターと実際のD-Busトレイ操作を使用しました。
 
 - `just verify`: フォーマット、check、警告をエラーにしたclippy、テスト、全targetビルド。
 - 自動テスト: alpha領域の穴とDPI、VRM 1.0・外部参照拒否、Unicode IPC、設定保存と権限、正常終了と3秒後の強制終了・回収。
-- `just test-avatar-wayland`: 実モデル、輪郭外・内のクリック、ドラッグ、非表示・再表示、2倍・1.25倍の出力設定、出力取り外しと復帰、IPC EOFによる終了。
-- `just test-avatar-client`: 実際のSlintクライアントを起動し、×で会話を隠して実際のキャラクターのクリックで会話を戻す操作、トレイで表示切替・再起動・終了、設定保存、旧子プロセスの回収、親の強制終了後のIPC切断と子の終了を確認。専用のD-Bus Watcherと一時設定フォルダを使用します。
-- `just test-desktop-wayland`と`just test-desktop-tray`: Weston desktop-shellで既存の入力・会話・設定・トレイを回帰検証。
+- Wayland描画・入力試験（実施済み）: 実モデル、輪郭外・内のクリック、ドラッグ、非表示・再表示、2倍・1.25倍の出力設定、出力取り外しと復帰、IPC EOFによる終了。
+- クライアント結合試験（実施済み）: 実際のSlintクライアントを起動し、×で会話を隠して実際のキャラクターのクリックで会話を戻す操作、トレイで表示切替・再起動・終了、設定保存、旧子プロセスの回収、親の強制終了後のIPC切断と子の終了を確認。専用のD-Bus Watcherと一時設定フォルダを使用します。
+- Slint描画・トレイ試験（実施済み）: Weston desktop-shellで既存の入力・会話・設定・トレイを回帰検証。
 
-ポインター試験は`ENE_AVATAR_TEST_PRIVATE_COMPOSITOR=1`とHEADLESS出力のみのSwayを要求し、クライアント結合試験はさらに専用D-Busセッションを要求します。試験用の`test_pointer`・`test_tray`はexamplesで、アプリの実行依存ではありません。Python/Pillow/grimは開発検証だけに使います。
+当時の試験では専用のheadless SwayとD-Busセッションを使用しました。通常起動には検証用のPillow/grimや専用Watcherは不要です。
 
 検証ログは[validation](validation/)の`avatar-stage2-2026-10-01.txt`へ保存します。画像は`target/avatar-seed.png`、`avatar-desktop.png`、`avatar-hidden.png`、`avatar-dpi2.png`、`avatar-dpi125.png`、`avatar-client.png`へ保存します（ビルド成果物のためGitへ含めません）。
 

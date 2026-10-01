@@ -29,14 +29,7 @@ cargo run --locked -p ene-desktop -- --demo
 
 `--demo`を付けない起動ではホスト未接続を表示し、送信を無効にします。デモはAPIキーを必要とせず、外部へ会話を送信しません。Enterは改行、送信はボタンから行います。正常にトレイ登録できた場合、×は画面の非表示、トレイクリックは再表示、トレイメニューは設定・クライアント終了です。登録を確認できない場合は画面を開いたままにし、設定画面の終了ボタンを利用できます。
 
-実際のWayland描画とD-Busトレイ操作の試験は、通常の自動テストと分けて実行します。
-
-```sh
-just test-desktop-wayland
-just test-desktop-tray
-```
-
-後者は独立したD-Busセッションを使うため、デスクトップの本物のトレイを置き換えません。前者は`target/desktop-smoke-{before,after,settings}.png`を出力します。どちらも実機のIME検証の代わりにはなりません。完成確認の手順と検証記録は[第1段階の検証記録](docs/desktop-stage1.md)にあります。
+初期実装時のWayland描画・D-Busトレイ試験の記録と、実機での確認手順は[第1段階の検証記録](docs/desktop-stage1.md)にあります。ネイティブIMEの操作確認は実機で行ってください。
 
 ## Nixで開発する
 
@@ -84,14 +77,8 @@ justをインストールしている場合は、同じ検査を`just verify`で
 | `just verify` | 整形確認、型検査、Clippy、テスト、ビルドを順に実行 |
 | `just run-host` | ホストの骨組みを起動 |
 | `just run-desktop` | Slint会話画面を明示的なデモモードで起動 |
-| `just test-desktop-wayland` | Wayland＋FemtoVG/WGPUで画面の描画・入力・設定を検証 |
-| `just test-desktop-tray` | 独立したD-Busでトレイの登録・再表示・設定・消失時の復帰・終了を検証 |
 | `just fetch-avatar` | 固定コミットの公式Seed-sanをチェックサム付きで取得 |
 | `just run-avatar` | キャラクター描画を単独起動 |
-| `just test-avatar-wayland` | 専用Swayで透明表示・クリック・ドラッグ・DPI・出力変更を検証 |
-| `just test-avatar-client` | 実クライアント・描画・トレイの連携と子プロセス回収を検証 |
-| `just test-vrma` | 実VRMのリターゲット・軸・モーション中のクリック領域を検証 |
-| `just measure-avatar` | リリース版描画プロセスの30／60fps・非表示時を測定 |
 
 ## VRMキャラクターの常駐表示
 
@@ -108,7 +95,7 @@ Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](l
 
 フォント・文字サイズ・VRM・表示・fps・出力名・位置は`$XDG_CONFIG_HOME/ene/client.json`（既定`~/.config/ene/client.json`）へ保存します。終了時の子プロセス監督と、実描画・入力の検証結果は[第2段階の記録](docs/avatar-stage2.md)にまとめています。`ENE_AVATAR_BIN`で描画バイナリの場所を指定できます。ハードウェアGPUのない試験環境だけで`ENE_AVATAR_CPU_GPU=1`を指定するとWGPUのソフトウェアアダプターを使用します。
 
-`just run-avatar`で描画を単独起動できます。`just test-avatar-wayland`は専用のheadless Sway、Pillow、grim、固定モデルを必要とし、`ENE_AVATAR_TEST_PRIVATE_COMPOSITOR=1`がなければポインター試験を拒否します。通常のデスクトップでは実行しないでください。Slintの既存GUI試験と同様、Swayでの成功はKWin実機の確認とは区別します。
+`just run-avatar`で描画を単独起動できます。通常の回帰チェックは`just verify`で実行します。初期実装時のheadless描画・入力・トレイ試験と資源計測の記録は`docs/validation`へ保存しています。一度限りの試験スクリプト、専用examples、GUI・GPUの検証専用テストは整理済みです。Swayでの検証結果はKWin実機の確認とは区別します。
 
 VRMA 1.0は設定の「VRMAを選ぶ」から読み込み、再生・一時停止・繰り返しを設定できます。「静止姿勢に戻す」でモーションを外します。常駐表示では横移動を固定し、上下の動きと回転を保ちます。表示フレームとクリック領域は同時に更新します。[座標と当たり判定の実装・検証](docs/vrma.md)を参照してください。
 

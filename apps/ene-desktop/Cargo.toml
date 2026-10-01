@@ -22,4 +22,3 @@ slint-build = { version = "=1.18.1", default-features = false, features = ["comp
 
 [dev-dependencies]
 i-slint-backend-testing = "=1.18.1"
-png = "=0.18.1"

@@ -2170,7 +2170,6 @@ dependencies = [
  "smithay-client-toolkit 0.21.1",
  "tracing-subscriber",
  "wayland-client",
- "wayland-protocols-wlr",
 ]
 
 [[package]]
@@ -2180,7 +2179,6 @@ dependencies = [
  "ene-shared",
  "i-slint-backend-testing",
  "libc",
- "png",
  "serde",
  "serde_json",
  "slint",

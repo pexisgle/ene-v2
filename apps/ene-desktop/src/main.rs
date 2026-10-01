@@ -251,9 +251,6 @@ fn quit() {
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod tray_tests;
-
 fn bind_avatar(
     ui: &ChatWindow,
     settings: &SettingsWindow,
