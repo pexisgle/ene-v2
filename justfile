@@ -31,5 +31,8 @@ run-desktop:
 fetch-avatar:
     python3 scripts/fetch-seed.py
 
+fetch-vrma:
+    python3 scripts/fetch-vrma.py
+
 run-avatar:
     cargo run --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm"
