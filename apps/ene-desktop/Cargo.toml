@@ -1,0 +1,10 @@
+[package]
+name = "ene-desktop"
+description = "ene desktop client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
