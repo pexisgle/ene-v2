@@ -1,4 +1,7 @@
-mod api;
+mod app;
+mod auth;
+mod error;
+mod routes;
 mod runtime;
 mod store;
 
@@ -34,12 +37,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let store = store::Store::open(database)
         .await
         .map_err(|_| "database initialization failed")?;
-    let app = api::App::new(store, runtime.token.clone());
+    let app = app::App::new(store, runtime.token.clone());
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;
     eprintln!("ene-host: loopback service ready (history and notifications; chat not yet enabled)");
     let shutdown = app.shutdown.clone();
-    axum::serve(listener, api::router(app))
+    axum::serve(listener, routes::router(app))
         .with_graceful_shutdown(async move {
             #[cfg(unix)]
             {
