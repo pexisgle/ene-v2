@@ -2,36 +2,30 @@ mod api;
 mod runtime;
 mod store;
 
+use clap::Parser;
 use std::{error::Error, path::PathBuf};
 use tokio::net::TcpListener;
 
+#[derive(Parser)]
+#[command(
+    about = "ene local host",
+    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. Chat is not enabled yet."
+)]
+struct Args {}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    if std::env::args()
-        .skip(1)
-        .any(|arg| arg == "--help" || arg == "-h")
-    {
-        println!(
-            "ene-host\n  XDG_RUNTIME_DIR/ene-host/connection.json に起動ごとの接続情報を公開します。\n  ENE_HOST_STATE_DIR でDB保存先を指定できます。\n  現在は認証・初期化・履歴・通知購読のみ対応しています。"
-        );
-        return Ok(());
-    }
-    if std::env::args().len() != 1 {
-        return Err("unsupported argument (use --help)".into());
-    }
-    let root =
-        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is required")?);
+    let _args = Args::parse();
+    let root = ene_shared::paths::runtime()?;
     let runtime = runtime::Runtime::acquire(&root)?;
     let state = if let Some(path) = std::env::var_os("ENE_HOST_STATE_DIR") {
         PathBuf::from(path)
     } else {
-        let base = if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
-            PathBuf::from(path)
-        } else {
-            PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?).join(".local/state")
-        };
-        std::fs::create_dir_all(&base)?;
-        base.join("ene")
+        let state = ene_shared::paths::state();
+        if let Some(base) = state.parent() {
+            std::fs::create_dir_all(base)?;
+        }
+        state
     };
     runtime::private_directory(&state)?;
     let database = state.join("host.sqlite3");
