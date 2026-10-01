@@ -1,0 +1,260 @@
+import { AboutSlint, Button, TextEdit, ScrollView, VerticalBox, HorizontalBox, LineEdit, SpinBox, CheckBox, ComboBox } from "std-widgets.slint";
+
+export struct ChatEntry {
+    author: string,
+    body: string,
+    provisional: bool,
+}
+
+export component ChatWindow inherits Window {
+    title: "ene — 会話";
+    preferred-width: 640px;
+    preferred-height: 760px;
+    min-width: 420px;
+    min-height: 480px;
+    background: #f3f5fa;
+    default-font-family: root.font-family;
+    default-font-size: root.text-size * 1px;
+
+    in-out property <string> font-family: "Noto Sans CJK JP";
+    in-out property <int> text-size: 16;
+    in-out property <string> draft;
+    in property <[ChatEntry]> messages;
+    in property <bool> can-send;
+    in property <bool> demo-mode;
+    in property <bool> tray-ready;
+    in property <string> status;
+    in property <string> avatar-model;
+    in property <string> avatar-motion;
+    in property <bool> motion-playing;
+    in property <bool> motion-loop;
+    in property <string> motion-status;
+    in property <bool> motion-failed;
+    in property <bool> avatar-visible;
+    in property <int> avatar-fps-index;
+    in property <bool> avatar-failed;
+    in property <string> avatar-status;
+    callback avatar-events-available;
+    callback restart-avatar;
+    in property <string> tray-status: "トレイを確認しています…";
+    out property <bool> editor-focused: editor.has-focus;
+    out property <length> composer-height: composer.height;
+    out property <length> conversation-height: history.visible-height;
+    callback draft-edited(string);
+    callback submit;
+    callback open-settings;
+
+    public function focus-input() { editor.focus(); }
+    public function scroll-to-latest() {
+        history.content-y = min(0px, history.visible-height - history.content-height);
+    }
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 10px;
+        HorizontalBox {
+            Image { source: @image-url("../assets/ene.svg"); width: 28px; height: 28px; }
+            VerticalBox {
+                padding: 0px;
+                spacing: 2px;
+                Text { text: "ene"; font-size: 20px; font-weight: 700; color: #172548; }
+                Text { text: root.demo-mode ? "デモモード · 仮応答" : "ホスト未接続"; color: #536381; font-size: 13px; }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "設定"; clicked => { root.open-settings(); } }
+        }
+
+        if root.avatar-failed : HorizontalBox {
+            padding: 4px;
+            Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: #8f3d24; horizontal-stretch: 1; }
+            Button { text: "再起動"; clicked => { root.restart-avatar(); } }
+        }
+        if root.motion-failed : HorizontalBox {
+            padding: 4px;
+            Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: #8f3d24; horizontal-stretch: 1; }
+            Button { text: "設定"; clicked => { root.open-settings(); } }
+        }
+        history := ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            VerticalBox {
+                padding: 4px;
+                spacing: 12px;
+                if root.messages.length == 0 : Rectangle {
+                    background: #ffffff;
+                    border-radius: 12px;
+                    min-height: 140px;
+                    VerticalBox {
+                        padding: 20px;
+                        spacing: 10px;
+                        Text { text: "ここから、話しかけてください。"; color: #172548; font-weight: 600; wrap: word-wrap; }
+                        Text {
+                            text: root.demo-mode ? "日本語や複数行の入力を試せます。返答は固定の仮応答です。会話はクライアントを終了すると消えます。" : "ホスト接続は準備中です。入力を試すには --demo を付けて起動してください。";
+                            wrap: word-wrap; color: #536381;
+                        }
+                    }
+                }
+                for entry in root.messages : Rectangle {
+                    background: entry.provisional ? #ffffff : #e8edff;
+                    border-radius: 12px;
+                    vertical-stretch: 0;
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 8px;
+                        HorizontalBox {
+                            padding: 0px;
+                            Text { text: entry.author; color: #172548; font-weight: 600; font-size: 13px; }
+                            Rectangle { horizontal-stretch: 1; }
+                            if entry.provisional : Text { text: "仮応答"; color: #3059d6; font-size: 12px; }
+                        }
+                        Text { text: entry.body; wrap: word-wrap; color: #172548; }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+
+        composer := Rectangle {
+            background: #ffffff;
+            border-radius: 12px;
+            vertical-stretch: 0;
+            height: min(180px, max(86px, draft-measure.preferred-height + 54px));
+            draft-measure := Text {
+                visible: false;
+                height: 0px;
+                width: max(1px, editor.width - 20px);
+                text: root.draft;
+                font-family: root.font-family;
+                font-size: root.text-size * 1px;
+                wrap: word-wrap;
+            }
+            VerticalBox {
+                width: parent.width;
+                height: parent.height;
+                padding: 10px;
+                spacing: 6px;
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 10px;
+                    vertical-stretch: 1;
+                    editor := TextEdit {
+                        text <=> root.draft;
+                        font-family: root.font-family;
+                        font-size: root.text-size * 1px;
+                        placeholder-text: root.demo-mode ? "メッセージを入力…" : "ホスト未接続";
+                        min-height: 36px;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                        // Enter and IME confirmation never submit.
+                        edited(text) => { root.draft-edited(text); }
+                    }
+                    VerticalBox {
+                        padding: 0px;
+                        Rectangle { vertical-stretch: 1; }
+                        Button { height: 40px; text: "送信"; enabled: root.can-send; clicked => { root.submit(); } }
+                    }
+                }
+                Text { text: "Enter は改行 · 送信はボタンから"; color: #536381; font-size: 11px; vertical-stretch: 0; }
+            }
+        }
+
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: "ene — 設定";
+    preferred-width: 440px;
+    preferred-height: 680px;
+    min-width: 360px;
+    default-font-family: "Noto Sans CJK JP";
+    in-out property <string> font-family;
+    in-out property <int> text-size;
+    callback apply-settings;
+    in-out property <string> avatar-model;
+    in-out property <string> avatar-motion;
+    in-out property <bool> motion-playing;
+    in-out property <bool> motion-loop;
+    in property <string> motion-status;
+    callback select-motion;
+    in-out property <bool> avatar-visible;
+    in-out property <int> avatar-fps-index;
+    in property <string> avatar-status;
+    callback select-model;
+    callback restart-avatar;
+    in property <bool> tray-ready;
+    in property <string> tray-status;
+    callback quit;
+
+    min-height: 360px;
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+        ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            VerticalBox {
+                padding: 8px;
+                spacing: 14px;
+                Text { text: "会話画面の表示"; font-size: 20px; font-weight: 600; }
+                Text { text: "フォント名（インストール済みのもの）"; }
+                LineEdit { text <=> root.font-family; }
+                HorizontalBox {
+                    padding: 0px;
+                    Text { text: "文字サイズ"; vertical-alignment: center; }
+                    SpinBox { value <=> root.text-size; minimum: 12; maximum: 28; }
+                }
+                Text { text: "キャラクター"; font-size: 18px; font-weight: 600; }
+                CheckBox { text: "キャラクターを表示"; checked <=> root.avatar-visible; }
+                Text { text: root.avatar-model; wrap: word-wrap; font-size: 12px; color: #536381; }
+                HorizontalBox {
+                    padding: 0px;
+                    Button { text: "VRMを選ぶ"; clicked => { root.select-model(); } }
+                    Text { text: "描画速度"; font-size: 13px; vertical-alignment: center; }
+                    ComboBox { model: ["30 fps", "60 fps"]; current-index <=> root.avatar-fps-index; }
+                }
+                Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: #536381; }
+                Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; }
+                Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: #536381; }
+                HorizontalBox {
+                    padding: 0px;
+                    Button { text: "VRMAを選ぶ"; clicked => { root.select-motion(); } }
+                    Button { text: "静止姿勢に戻す"; enabled: root.avatar-motion != ""; clicked => { root.avatar-motion = ""; } }
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    CheckBox { text: "再生"; checked <=> root.motion-playing; enabled: root.avatar-motion != ""; }
+                    CheckBox { text: "繰り返す"; checked <=> root.motion-loop; enabled: root.avatar-motion != ""; }
+                }
+                Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: #536381; }
+                Text { text: "モーションはその場で再生します。横移動を固定し、上下の動きと回転を保ちます。"; wrap: word-wrap; font-size: 12px; color: #536381; }
+                Button { text: "キャラクターを再起動"; clicked => { root.restart-avatar(); } }
+                Text { text: "表示設定とキャラクターの配置はこの端末に保存します。"; wrap: word-wrap; color: #536381; font-size: 12px; }
+                Text { text: root.tray-status; wrap: word-wrap; color: #536381; }
+                if !root.tray-ready : Button { text: "クライアント終了"; clicked => { root.quit(); } }
+                AboutSlint { preferred-height: 100px; max-height: 120px; vertical-stretch: 0; }
+            }
+        }
+        Button { text: "適用して閉じる"; clicked => { root.apply-settings(); } }
+    }
+}
+
+export component EneTray inherits SystemTrayIcon {
+    icon: @image-url("../assets/ene.svg");
+    title: "ene";
+    tooltip: "ene — クリックして会話を表示";
+    in property <bool> avatar-visible;
+    callback toggle-avatar;
+    callback restart-avatar;
+    callback show-chat;
+    callback open-settings;
+    callback quit;
+    clicked => { root.show-chat(); }
+    Menu {
+        MenuItem { title: "会話を表示"; activated => { root.show-chat(); } }
+        MenuItem { title: "設定"; activated => { root.open-settings(); } }
+        MenuItem { title: root.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示"; activated => { root.toggle-avatar(); } }
+        MenuItem { title: "キャラクターを再起動"; activated => { root.restart-avatar(); } }
+        MenuSeparator {}
+        MenuItem { title: "クライアント終了"; activated => { root.quit(); } }
+    }
+}

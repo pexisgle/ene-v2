@@ -1,0 +1,159 @@
+Stage 2 verification — 2026-10-01 UTC
+
+Environment: isolated Sway 1.10.1 headless/pixman and Weston desktop-shell;
+Mesa Lavapipe CPU Vulkan adapter. No physical KDE/KWin/IME/portal validation.
+ComputerUse desktop unavailable; real Wayland virtual pointer and private D-Bus menu calls used.
+All commands below exited successfully. Two ignored GUI tests were run separately.
+Resource results: avatar-resources-2026-10-01.json (renderer only, software GPU).
+
+===== just verify =====
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --all-features --locked
+   Compiling ene-desktop v0.1.0 (/workspace/ene-v2/apps/ene-desktop)
+    Checking ene-avatar v0.1.0 (/workspace/ene-v2/apps/ene-avatar)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.11s
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+   Compiling ene-desktop v0.1.0 (/workspace/ene-v2/apps/ene-desktop)
+    Checking ene-avatar v0.1.0 (/workspace/ene-v2/apps/ene-avatar)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.88s
+cargo test --workspace --all-features --locked
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling ene-avatar v0.1.0 (/workspace/ene-v2/apps/ene-avatar)
+   Compiling ene-desktop v0.1.0 (/workspace/ene-v2/apps/ene-desktop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.43s
+     Running unittests src/main.rs (target/debug/deps/ene_avatar-6b477e149acbdc16)
+
+running 2 tests
+test mask::tests::alpha_holes_and_dpi_are_preserved ... ok
+test model::tests::only_vrm_one_with_embedded_resources_is_accepted ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/ene_desktop-63322320cd2390e9)
+
+running 11 tests
+test tests::demo_is_explicit_and_unknown_arguments_are_rejected ... ok
+test avatar::tests::saved_configuration_preserves_unicode_position_and_permissions ... ok
+test tests::disconnected_ui_never_produces_a_fake_response ... ok
+test tests::acceptance_preserves_unicode_clears_draft_and_returns_focus ... ok
+test tests::wayland_rendering_and_input ... ignored, requires a running Wayland compositor and a Vulkan/GL adapter
+test tests::whitespace_is_rejected_including_japanese_spaces ... ok
+test tray::tests::failed_lost_and_stale_trays_never_allow_hiding ... ok
+test tray_tests::wayland_tray_lifecycle ... ignored, requires an isolated D-Bus session, Wayland and a rendering adapter; use just test-desktop-tray
+test tests::enter_and_clipboard_preserve_multiline_japanese_without_sending ... ok
+test tests::settings_apply_to_chat_and_return_focus ... ok
+test avatar::tests::child_is_reaped_after_graceful_exit_or_three_second_deadline ... ok
+
+test result: ok. 9 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 3.08s
+
+     Running unittests src/main.rs (target/debug/deps/ene_host-d705b8b1b628b8fb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/ene_shared-251fa270c2bd8ca3)
+
+running 1 test
+test avatar::tests::ipc_round_trip_keeps_unicode_and_rejects_unknown_actions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ene_shared
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+cargo build --workspace --all-targets --all-features --locked
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.42s
+
+===== just test-avatar-wayland =====
+cargo build --locked -p ene-avatar --example test_pointer
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+cargo build --locked -p ene-avatar
+   Compiling ene-avatar v0.1.0 (/workspace/ene-v2/apps/ene-avatar)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.66s
+cargo run --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm" --frames 150 --snapshot target/avatar-seed.png
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running `target/debug/ene-avatar --standalone --model /home/agent/.cache/ene/models/Seed-san.vrm --frames 150 --snapshot target/avatar-seed.png`
+{"type":"position_changed","right":24,"bottom":24,"output":"HEADLESS-1"}
+{"type":"ready","model":"Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/"}
+{"type":"visibility_changed","visible":true}
+{"type":"stopped"}
+python3 scripts/test-avatar-wayland.py
+{"type": "position_changed", "right": 24, "bottom": 24, "output": "HEADLESS-1"}
+{"type": "ready", "model": "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/"}
+{"type": "visibility_changed", "visible": true}
+{"type": "show_chat"}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-1"}
+{"type": "visibility_changed", "visible": false}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-1"}
+{"type": "ready", "model": "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/"}
+{"type": "visibility_changed", "visible": true}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-1"}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-1"}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-1"}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-1"}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-6"}
+{"type": "ready", "model": "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/"}
+{"type": "visibility_changed", "visible": true}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-6"}
+{"type": "position_changed", "right": 104, "bottom": 84, "output": "HEADLESS-1"}
+{"type": "ready", "model": "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/"}
+{"type": "visibility_changed", "visible": true}
+{"type": "stopped"}
+PASS: transparent click-through, click, drag, hide/show, DPI request, output replacement, IPC EOF exit (0.167s)
+
+===== just test-avatar-client =====
+cargo build --locked -p ene-avatar --example test_pointer
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+cargo build --locked -p ene-desktop --example test_tray
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+cargo build --locked -p ene-desktop -p ene-avatar
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
+dbus-run-session -- env ENE_TRAY_TEST_PRIVATE_BUS=1 python3 scripts/test-avatar-client.py
+PASS: real client close/avatar-click/tray hide/show/restart/quit, configuration persistence, child reaping, parent crash IPC exit (0.110s)
+
+===== just test-desktop-wayland =====
+cargo test --locked -p ene-desktop wayland_rendering_and_input -- --ignored --nocapture --test-threads=1
+   Compiling ene-desktop v0.1.0 (/workspace/ene-v2/apps/ene-desktop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.01s
+     Running unittests src/main.rs (target/debug/deps/ene_desktop-93ea7560c499572e)
+
+running 1 test
+test tests::wayland_rendering_and_input ... Slint: Failed to create system tray icon: Failed to spawn ksni tray: D-Bus connection error: Failed to connect to address `unix:path=/tmp/ene-runtime/bus`: No such file or directory (os error 2)
+Error watching for xdg desktop settings: Failed to connect to address `unix:path=/tmp/ene-runtime/bus`: No such file or directory (os error 2)
+GUI snapshot: /workspace/ene-v2/apps/ene-desktop/../../target/desktop-smoke-before.png
+GUI snapshot: /workspace/ene-v2/apps/ene-desktop/../../target/desktop-smoke-after.png
+GUI snapshot: /workspace/ene-v2/apps/ene-desktop/../../target/desktop-smoke-long-input.png
+GUI snapshot: /workspace/ene-v2/apps/ene-desktop/../../target/desktop-smoke-large.png
+GUI snapshot: /workspace/ene-v2/apps/ene-desktop/../../target/desktop-smoke-compact.png
+GUI snapshot: /workspace/ene-v2/apps/ene-desktop/../../target/desktop-smoke-settings.png
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 5.05s
+
+
+===== just test-desktop-tray =====
+dbus-run-session -- env ENE_TRAY_TEST_PRIVATE_BUS=1 cargo test --locked -p ene-desktop wayland_tray_lifecycle -- --ignored --nocapture --test-threads=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running unittests src/main.rs (target/debug/deps/ene_desktop-93ea7560c499572e)
+
+running 1 test
+test tray_tests::wayland_tray_lifecycle ... D-Bus menu activation: 設定, id=3
+D-Bus menu activation: 会話を表示, id=2
+D-Bus menu activation: クライアント終了, id=7
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 2.58s
+
+
+===== release renderer build =====
+   Compiling ene-avatar v0.1.0 (/workspace/ene-v2/apps/ene-avatar)
+    Finished `release` profile [optimized] target(s) in 6.55s
+

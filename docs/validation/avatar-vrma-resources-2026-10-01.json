@@ -1,0 +1,42 @@
+{
+  "renderer": "Bevy 0.19.1 / bevy_vrm1 0.9.5",
+  "model": "Seed-san, pinned SHA-256 in licenses/Seed-san.md",
+  "environment": "isolated Sway headless / Mesa Lavapipe CPU / Vulkan; hardware GPU performance is unmeasured",
+  "scope": "ene-avatar process only; excludes UI/host/voice engine",
+  "presentation": "offscreen GPU / maximum 4 readbacks / shm pixels and input in one commit",
+  "fps": "requested update limits; actual presentation FPS unmeasured",
+  "release_binary_mib": 118.22,
+  "gpu_memory": "unmeasured (software GPU)",
+  "measurements": [
+    {
+      "state": "visible_30fps",
+      "seconds": 5.22,
+      "cpu_percent": 112.42,
+      "mean_pss_mib": 577.91
+    },
+    {
+      "state": "visible_60fps",
+      "seconds": 5.21,
+      "cpu_percent": 134.72,
+      "mean_pss_mib": 578.27
+    },
+    {
+      "state": "vrma_30fps",
+      "seconds": 5.23,
+      "cpu_percent": 112.46,
+      "mean_pss_mib": 656.77
+    },
+    {
+      "state": "vrma_60fps",
+      "seconds": 5.24,
+      "cpu_percent": 137.08,
+      "mean_pss_mib": 661.59
+    },
+    {
+      "state": "hidden",
+      "seconds": 5.15,
+      "cpu_percent": 0.0,
+      "mean_pss_mib": 458.42
+    }
+  ]
+}
