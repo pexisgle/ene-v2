@@ -1,7 +1,8 @@
+use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
 use ene_shared::avatar::{AvatarEvent, AvatarRequest, AvatarSettings, MAX_IPC_LINE};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{BufRead, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -76,25 +77,16 @@ impl ClientSettings {
         self.avatar.validate()?;
         let directory = path.parent().ok_or("設定フォルダがありません")?;
         fs::create_dir_all(directory).map_err(|e| format!("設定フォルダを作れません: {e}"))?;
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        let mut created = false;
-        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
+        let result = (|| -> std::io::Result<()> {
+            let mut file = AtomicWriteFile::options()
                 .mode(0o600)
-                .open(&temporary)?;
-            created = true;
+                .preserve_mode(false)
+                .preserve_owner(false)
+                .open(path)?;
             serde_json::to_writer_pretty(&mut file, self)?;
             file.write_all(b"\n")?;
-            file.sync_all()?;
-            fs::rename(&temporary, path)?;
-            fs::File::open(directory)?.sync_all()?;
-            Ok(())
+            file.commit()
         })();
-        if result.is_err() && created {
-            let _ = fs::remove_file(&temporary);
-        }
         result.map_err(|e| format!("設定を保存できません: {e}"))
     }
 }

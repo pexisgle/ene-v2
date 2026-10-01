@@ -1,6 +1,7 @@
 //! The SRGB render target stores gamma-encoded *linear* premultiplied colors.
 //! Wayland shm expects SRGB-premultiplied ARGB: conversion matters for translucent
 //! hair/materials, while opaque samples can be copied without a lookup.
+use bevy::color::Srgba;
 use std::sync::OnceLock;
 
 pub fn argb(pixel: &[u8; 4]) -> [u8; 4] {
@@ -15,17 +16,9 @@ pub fn argb(pixel: &[u8; 4]) -> [u8; 4] {
                 for alpha in 1..255 {
                     for color in 0..256 {
                         let encoded = color as f32 / 255.;
-                        let linear = if encoded <= 0.04045 {
-                            encoded / 12.92
-                        } else {
-                            ((encoded + 0.055) / 1.055).powf(2.4)
-                        };
+                        let linear = Srgba::gamma_function(encoded);
                         let straight = (linear * 255. / alpha as f32).min(1.);
-                        let srgb = if straight <= 0.0031308 {
-                            straight * 12.92
-                        } else {
-                            1.055 * straight.powf(1. / 2.4) - 0.055
-                        };
+                        let srgb = Srgba::gamma_function_inverse(straight);
                         table[alpha * 256 + color] =
                             (srgb * alpha as f32).round().clamp(0., alpha as f32) as u8;
                     }
