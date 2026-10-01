@@ -76,7 +76,6 @@ justをインストールしている場合は、同じ検査を`just verify`で
 | `just build` | 全クレート・ターゲット・機能をビルド |
 | `just verify` | 整形確認、Clippy（型検査を含む）、テスト、ビルドを順に実行 |
 | `just run-host` | 認証付きループバックホストを起動 |
-| `just test-host` | 一時runtimeとDBでHTTP/WebSocket・終了・再起動を検証 |
 | `just run-desktop` | Slint会話画面を明示的なデモモードで起動 |
 | `just fetch-assets` | 固定コミットの公式Seed-sanとVRMA全4本をチェックサム付きで取得（`vrm` / `vrma`で種類を選択、個別名で1本を取得） |
 | `just run-avatar` | キャラクター描画を単独起動 |
