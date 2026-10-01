@@ -151,10 +151,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                         credit = model::validate(&PathBuf::from(&settings.model))?;
                         rebuild = true;
                     }
-                    if state.settings.motion != settings.motion
-                        || state.settings.motion_loop != settings.motion_loop
-                    {
-                        rebuild = true;
+                    if state.settings.motion != settings.motion {
+                        if let Some(renderer) = renderer.as_mut() {
+                            renderer.set_motion(settings.motion.as_deref());
+                        }
+                        motion_state = None;
                     }
                     if state.settings.output != settings.output {
                         rebuild = true;

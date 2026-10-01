@@ -276,6 +276,7 @@ export component SettingsWindow inherits Window {
     in-out property <int> text-size;
     in-out property <int> theme-index;
     callback apply-settings;
+    in-out property <string> apply-error;
     callback commit-avatar-settings() -> bool;
     commit-avatar-settings => { true }
     in-out property <string> avatar-model;
@@ -287,6 +288,7 @@ export component SettingsWindow inherits Window {
     in-out property <bool> avatar-visible;
     in-out property <int> avatar-fps-index;
     in-out property <int> avatar-size-percent: 100;
+    in-out property <string> avatar-size-text: root.avatar-size-percent;
     in property <string> avatar-status;
     callback select-model;
     callback restart-avatar;
@@ -329,9 +331,10 @@ export component SettingsWindow inherits Window {
                 HorizontalBox {
                     padding: 0px;
                     Text { text: "キャラクターの大きさ"; vertical-alignment: center; }
-                    SpinBox { value <=> root.avatar-size-percent; minimum: 50; maximum: 200; }
+                    LineEdit { text <=> root.avatar-size-text; input-type: number; placeholder-text: "50〜200"; }
                     Text { text: "%"; vertical-alignment: center; }
                 }
+                Text { text: "50〜200%で指定し、「適用して閉じる」で反映します。"; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; }
                 Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
@@ -354,6 +357,7 @@ export component SettingsWindow inherits Window {
                 AboutSlint { preferred-height: 100px; max-height: 120px; vertical-stretch: 0; }
             }
         }
+        if root.apply-error != "" : Text { text: root.apply-error; wrap: word-wrap; color: Palette.foreground; font-size: 12px; }
         Button { text: "適用して閉じる"; clicked => { root.apply-settings(); } }
     }
 }

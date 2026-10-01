@@ -235,8 +235,10 @@ fn show_chat(ui: &ChatWindow) {
 }
 
 fn show_settings(ui: &ChatWindow, settings: &SettingsWindow) {
+    settings.set_apply_error("".into());
     settings.set_theme_index(ui.get_theme_index());
     settings.set_avatar_size_percent(ui.get_avatar_size_percent());
+    settings.set_avatar_size_text(ui.get_avatar_size_percent().to_string().into());
     settings.set_font_family(ui.get_font_family());
     settings.set_text_size(ui.get_text_size());
     settings.set_avatar_model(ui.get_avatar_model());
@@ -275,6 +277,7 @@ fn bind_avatar(
     apply_theme(ui, settings, initial.theme_index);
     ui.set_avatar_size_percent(initial.avatar.size_percent as i32);
     settings.set_avatar_size_percent(initial.avatar.size_percent as i32);
+    settings.set_avatar_size_text(initial.avatar.size_percent.to_string().into());
     ui.set_font_family(initial.font_family.clone().into());
     ui.set_text_size(initial.text_size);
     ui.set_avatar_model(initial.avatar.model.clone().into());
@@ -339,13 +342,25 @@ fn bind_avatar(
     let tw = tray.as_weak();
     settings.on_commit_avatar_settings(move || {
         if let (Some(settings), Some(ui)) = (sw.upgrade(), uw.upgrade()) {
+            settings.set_apply_error("".into());
             let mut updated = config.borrow().clone();
             let font = settings.get_font_family();
             if !font.trim().is_empty() {
                 updated.font_family = font.to_string();
             }
             updated.theme_index = settings.get_theme_index().clamp(0, 2);
-            updated.avatar.size_percent = settings.get_avatar_size_percent().clamp(50, 200) as u32;
+            let size = settings.get_avatar_size_text();
+            let Ok(size) = size.trim().parse::<u32>() else {
+                settings.set_apply_error(
+                    "キャラクターの大きさは50〜200の整数で入力してください。".into(),
+                );
+                return false;
+            };
+            if !(50..=200).contains(&size) {
+                settings.set_apply_error("キャラクターの大きさは50〜200%を選んでください。".into());
+                return false;
+            }
+            updated.avatar.size_percent = size;
             updated.text_size = settings.get_text_size().clamp(12, 28);
             updated.avatar.model = settings.get_avatar_model().to_string();
             let motion = settings.get_avatar_motion();
@@ -363,10 +378,12 @@ fn bind_avatar(
                 30
             };
             if let Err(error) = updated.save(&avatar::config_path()) {
-                settings.set_avatar_status(error.into());
+                settings.set_apply_error(error.into());
                 return false;
             }
             ui.set_avatar_size_percent(updated.avatar.size_percent as i32);
+            settings.set_avatar_size_percent(updated.avatar.size_percent as i32);
+            settings.set_avatar_size_text(updated.avatar.size_percent.to_string().into());
             ui.set_avatar_model(updated.avatar.model.clone().into());
             ui.set_avatar_motion(updated.avatar.motion.clone().unwrap_or_default().into());
             ui.set_motion_playing(updated.avatar.motion_playing);

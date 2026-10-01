@@ -1,7 +1,7 @@
 use bevy::{
     app::{AnimationSystems, PluginsState},
-    asset::LoadState,
     asset::io::{AssetSourceBuilder, file::FileAssetReader},
+    asset::{AssetPath, LoadState},
     camera::RenderTarget,
     core_pipeline::tonemapping::Tonemapping,
     prelude::*,
@@ -60,26 +60,13 @@ impl Renderer {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Path::new(&settings.model);
         let mut app = App::new();
-        let motion_path = settings.motion.as_deref().map(Path::new);
-        let valid_motion = match motion_path {
-            Some(path) => match crate::motion::validate(path) {
-                Ok(()) => true,
-                Err(error) => {
-                    crate::emit(ene_shared::avatar::AvatarEvent::MotionError {
-                        message: format!("モーションを読めません: {error}"),
-                    });
-                    false
-                }
-            },
-            None => false,
-        };
-        if valid_motion && let Some(parent) = motion_path.and_then(Path::parent) {
-            let parent = parent.to_owned();
-            app.register_asset_source(
-                "motion",
-                AssetSourceBuilder::new(move || Box::new(FileAssetReader::new(parent.clone()))),
-            );
-        }
+        // Sources are registered before AssetPlugin. A fixed filesystem source
+        // lets later selections use another directory without rebuilding Bevy.
+        // Only validated, embedded VRMA files are passed to this reader.
+        app.register_asset_source(
+            "motion",
+            AssetSourceBuilder::new(|| Box::new(FileAssetReader::new("/"))),
+        );
         let parent = path.parent().ok_or("モデルのフォルダがありません")?;
         app.add_plugins(
             DefaultPlugins
@@ -158,51 +145,106 @@ impl Renderer {
                 .into_owned(),
         );
         let model = app.world_mut().spawn(VrmHandle(handle.clone())).id();
-        let motion = if valid_motion {
-            let name = motion_path
-                .unwrap()
-                .file_name()
-                .ok_or("モーション名がありません")?
-                .to_string_lossy();
-            let handle = app
-                .world()
-                .resource::<AssetServer>()
-                .load(format!("motion://{name}"));
-            let entity = app
-                .world_mut()
-                .spawn((VrmaHandle(handle.clone()), ChildOf(model)))
-                .id();
-            Some((handle, entity))
-        } else {
-            None
-        };
         while app.plugins_state() != PluginsState::Ready {
             bevy::tasks::tick_global_task_pools_on_main_thread();
             std::thread::yield_now();
         }
         app.finish();
         app.cleanup();
-        Ok(Self {
+        let mut renderer = Self {
             app,
             captures: Arc::new(Mutex::new(Capture::default())),
             handle,
             target,
             model,
-            motion,
+            motion: None,
             motion_started: false,
             motion_failed: false,
             motion_started_at: std::time::Instant::now(),
-            motion_state: if valid_motion {
-                MotionState::Loading
-            } else {
-                MotionState::None
-            },
+            motion_state: MotionState::None,
             center: None,
             distance: 0.,
             fitted: false,
             generation: 0,
             capture_sequence: 0,
-        })
+        };
+        renderer.set_motion(settings.motion.as_deref());
+        Ok(renderer)
+    }
+    pub fn set_motion(&mut self, path: Option<&str>) {
+        let world = self.app.world_mut();
+        if let Some((_, entity)) = self.motion.take() {
+            // ChildOf uses linked despawning: the old skeleton is removed too.
+            world.despawn(entity);
+        }
+        let players = world
+            .query::<(
+                Entity,
+                &mut AnimationPlayer,
+                Option<&mut AnimationTransitions>,
+            )>()
+            .iter_mut(world)
+            .map(|(entity, mut player, transitions)| {
+                player.stop_all();
+                if let Some(mut transitions) = transitions {
+                    *transitions = AnimationTransitions::default();
+                }
+                entity
+            })
+            .collect::<Vec<_>>();
+        for entity in players {
+            world.entity_mut(entity).remove::<AnimationGraphHandle>();
+        }
+        if let Some(hips) = world.get::<HipsBoneEntity>(self.model).map(|hips| **hips) {
+            world.entity_mut(hips).remove::<crate::motion::MotionAxes>();
+        }
+        for (rest, mut pose) in world
+            .query::<(&RestTransform, &mut Transform)>()
+            .iter_mut(world)
+        {
+            *pose = rest.0;
+        }
+        let expressions = world
+            .get::<ExpressionEntityMap>(self.model)
+            .map(|map| map.0.values().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for expression in expressions {
+            if let Some(mut pose) = world.get_mut::<Transform>(expression) {
+                pose.translation.x = 0.;
+            }
+        }
+        world.resource_mut::<Time<Virtual>>().unpause();
+        self.motion_started = false;
+        self.motion_failed = false;
+        self.motion_started_at = std::time::Instant::now();
+        self.motion_state = MotionState::None;
+        // Reject readbacks of the previous pose; retain the displayed frame and
+        // its input region until a matching new frame is available.
+        self.generation += 1;
+        let Some(path) = path else { return };
+        let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+            let path = std::fs::canonicalize(path)?;
+            crate::motion::validate(&path)?;
+            Ok(path.strip_prefix("/")?.to_path_buf())
+        })();
+        match result {
+            Ok(path) => {
+                let handle = world
+                    .resource::<AssetServer>()
+                    .load(AssetPath::from(path).with_source("motion"));
+                let entity = world
+                    .spawn((VrmaHandle(handle.clone()), ChildOf(self.model)))
+                    .id();
+                self.motion = Some((handle, entity));
+                self.motion_state = MotionState::Loading;
+            }
+            Err(error) => {
+                self.motion_failed = true;
+                crate::emit(ene_shared::avatar::AvatarEvent::MotionError {
+                    message: format!("モーションを読めません: {error}"),
+                });
+            }
+        }
     }
     pub fn drain_capture(&mut self) {
         // Deliver an already submitted readback before dropping its receiver.
@@ -401,6 +443,15 @@ impl Renderer {
                 self.generation += 1;
             }
             for mut player in world.query::<&mut AnimationPlayer>().iter_mut(world) {
+                for (_, animation) in player.playing_animations_mut() {
+                    if settings.motion_loop {
+                        animation.set_repeat(bevy::animation::RepeatAnimation::Forever);
+                    } else if animation.repeat_mode() == bevy::animation::RepeatAnimation::Forever {
+                        animation.set_repeat(bevy::animation::RepeatAnimation::Count(
+                            animation.completions().saturating_add(1),
+                        ));
+                    }
+                }
                 if settings.motion_playing {
                     player.resume_all();
                 } else {

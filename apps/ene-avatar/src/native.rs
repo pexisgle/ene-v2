@@ -34,8 +34,8 @@ struct Drag {
     relative_seen: bool,
 }
 
-pub const WIDTH: u32 = 360;
-pub const HEIGHT: u32 = 480;
+pub const WIDTH: u32 = 540;
+pub const HEIGHT: u32 = 720;
 
 pub struct State {
     pub registry: RegistryState,

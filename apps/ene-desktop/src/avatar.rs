@@ -32,6 +32,12 @@ impl Default for ClientSettings {
             .join("ene/models/Seed-san.vrm")
             .to_string_lossy()
             .into_owned();
+        avatar.motion = Some(
+            cache
+                .join("ene/motions/three-vrm-sample.vrma")
+                .to_string_lossy()
+                .into_owned(),
+        );
         Self {
             font_family: "Noto Sans CJK JP".into(),
             text_size: 16,

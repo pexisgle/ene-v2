@@ -91,13 +91,13 @@ just run-desktop  # ene-avatarもビルドし、会話画面とキャラクタ�
 
 Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](licenses/Seed-san.md)。モデルはGitへ含めず、`$XDG_CACHE_HOME/ene/models/Seed-san.vrm`（既定`~/.cache/ene/models/Seed-san.vrm`）に置きます。設定の「VRMを選ぶ」で手持ちの埋め込み形式のVRM 1.0を選択できます。ファイル選択はアプリ内で行い、フォルダ移動とファイルパスの貼り付けに対応します。外部ポータルは不要です。
 
-輪郭内のクリックは会話表示、ドラッグは配置変更です。透明部分はクリック透過し、キーボードフォーカスと作業領域を占有しません。トレイから表示切替・再起動を行えます。初期値30fps、設定で60fpsへ変更できます。大きさは設定で50〜200%に変更できます。非表示時はGPU描画を止めて資源を解放し、再表示時にモデルを読み直します。
+輪郭内のクリックは会話表示、ドラッグは配置変更です。透明部分はクリック透過し、キーボードフォーカスと作業領域を占有しません。トレイから表示切替・再起動を行えます。初期値30fps、設定で60fpsへ変更できます。基準サイズは540×720論理ピクセルで、画面に収まる範囲へ調整します。大きさは設定で50〜200%を直接入力し、「適用して閉じる」で反映・保存できます。非表示時はGPU描画を止めて資源を解放し、再表示時にモデルを読み直します。
 
 テーマ（システム・ライト・ダーク）・フォント・文字サイズ・VRM・大きさ・表示・fps・出力名・位置は`$XDG_CONFIG_HOME/ene/client.json`（既定`~/.config/ene/client.json`）へ保存します。終了時は描画プロセスへ停止を要求し、3秒以内に応答しなければ強制終了して回収します。`ENE_AVATAR_BIN`で描画バイナリの場所を指定できます。ハードウェアGPUのない試験環境だけで`ENE_AVATAR_CPU_GPU=1`を指定するとWGPUのソフトウェアアダプターを使用します。
 
 `just run-avatar`で描画を単独起動できます。通常の回帰チェックは`just verify`で実行します。
 
-VRMA 1.0は設定の「VRMAを選ぶ」から読み込み、再生・一時停止・繰り返しを設定できます。「静止姿勢に戻す」でモーションを外します。常駐表示では横移動を固定し、上下の動きと回転を保ちます。表示フレームとクリック領域は同時に更新します。
+初期設定では`just fetch-assets`で取得したサンプルVRMAを自動で繰り返し再生します。保存済みのモーション設定（静止姿勢を含む）は優先します。VRMA 1.0は設定の「VRMAを選ぶ」から読み込み、再生・一時停止・繰り返しを設定できます。「静止姿勢に戻す」でモーションを外します。モーションの切替・解除では描画環境とモデルを維持します。常駐表示では横移動を固定し、上下の動きと回転を保ちます。表示フレームとクリック領域は同時に更新します。
 
 `just fetch-assets vrma`で[pixiv three-vrmのサンプル](https://github.com/pixiv/three-vrm/blob/1b4fc0cc7ef39a49d62bb7a66dcfeca8f65316f7/packages/three-vrm-animation/examples/models/test.vrma)だけを取得できます。VRMだけなら`just fetch-assets vrm`です。保存先は`$XDG_CACHE_HOME/ene/motions/three-vrm-sample.vrma`（既定`~/.cache/ene/motions/three-vrm-sample.vrma`）です。取得後、設定の「VRMAを選ぶ」でこのファイルを指定してください。Copyright (c) 2019-2026 pixiv Inc.／[MIT License](licenses/three-vrm-animation.txt)。ライセンスはキャッシュにも保存します。
 
