@@ -1,0 +1,150 @@
+import { Button, Palette } from "std-widgets.slint";
+import { UiState } from "state.slint";
+// Native focus and keyboard behavior, with a label that wraps at large sizes.
+export component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+    in property <bool> checkable;
+    in-out property <bool> checked;
+    in property <bool> scroll-to-focus;
+    in property <bool> fill-width: true;
+    out property <bool> has-focus: control.has-focus;
+    callback clicked;
+    forward-focus: control;
+    changed has-focus => {
+        if self.has-focus && root.scroll-to-focus {
+            UiState.reveal-settings-item(self.absolute-position.y, self.height);
+        }
+    }
+    min-width: 0px;
+    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px;
+    horizontal-stretch: root.fill-width ? 1 : 0;
+    measure := Text { visible: false; text: root.text; }
+    min-height: max(44px, UiState.text-size * 1.8px, label-layout.min-height);
+    vertical-stretch: 0;
+    control := Button {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.enabled;
+        primary: root.primary;
+        checked <=> root.checked;
+        accessible-label: root.text;
+        accessible-checkable: root.checkable;
+        accessible-checked: root.checked;
+        clicked => {
+            root.clicked();
+        }
+    }
+    label-layout := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        Text {
+            text: root.text;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            color: root.primary || root.checked ? Palette.accent-foreground : Palette.foreground;
+            opacity: root.enabled ? 1 : 0.5;
+            accessible-role: none;
+        }
+    }
+}
+// Secondary navigation keeps a full hit area without a prominent button face.
+export component QuietButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> checked;
+    in property <bool> checkable;
+    in property <bool> leading;
+    in property <bool> fill-width;
+    in property <bool> scroll-to-focus;
+    out property <bool> has-focus: keyboard.has-focus;
+    callback clicked;
+    forward-focus: keyboard;
+    min-width: 0px;
+    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px;
+    preferred-width: measure.preferred-width + 24px;
+    min-height: max(44px, label.preferred-height + 16px);
+    horizontal-stretch: root.fill-width ? 1 : 0;
+    vertical-stretch: 0;
+    background: root.checked || (pointer.has-hover && root.enabled) ? Palette.alternate-background : transparent;
+    border-radius: 4px;
+    border-width: keyboard.has-focus ? 1px : 0px;
+    border-color: Palette.accent-background;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checkable: root.checkable;
+    accessible-checked: root.checked;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    changed has-focus => {
+        if root.has-focus && root.scroll-to-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); }
+    }
+    measure := Text { visible: false; text: root.text; font-size: max(12px, UiState.text-size * 0.875px); }
+    label := Text {
+        x: 12px;
+        width: max(0px, parent.width - 24px);
+        height: parent.height;
+        text: root.text;
+        wrap: word-wrap;
+        font-size: max(12px, UiState.text-size * 0.875px);
+        font-weight: root.checked ? 600 : 400;
+        horizontal-alignment: root.leading ? left : center;
+        vertical-alignment: center;
+        color: Palette.foreground;
+        opacity: root.enabled ? 1 : 0.5;
+        accessible-role: none;
+    }
+    if root.checked : Rectangle { x: 0px; y: 12px; width: 2px; height: max(0px, parent.height - 24px); background: Palette.accent-background; }
+    pointer := TouchArea { enabled: root.enabled; clicked => { keyboard.focus(); root.clicked(); } }
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+}
+export component BodyText inherits Text {
+    wrap: word-wrap;
+    color: Palette.foreground;
+    font-size: UiState.text-size * 1px;
+    vertical-stretch: 0;
+}
+export component HintText inherits BodyText {
+    font-size: max(12px, UiState.text-size * 0.8px);
+}
+export component SectionTitle inherits BodyText {
+    font-weight: 600;
+}
+// One control instance reflows without losing its focus, selection, or IME.
+export component SettingField inherits Rectangle {
+    in property <string> label;
+    in property <bool> wide;
+    out property <length> control-width: control-slot.width;
+    min-height: field-layout.min-height;
+    vertical-stretch: 0;
+    field-layout := GridLayout {
+        spacing: 8px;
+        BodyText {
+            row: 0;
+            col: 0;
+            max-width: root.wide ? 160px * UiState.scale : 100000px;
+            min-width: 0px;
+            horizontal-stretch: root.wide ? 0 : 1;
+            text: root.label;
+        }
+        control-slot := Rectangle {
+            row: root.wide ? 0 : 1;
+            col: root.wide ? 1 : 0;
+            min-height: max(44px, UiState.text-size * 1.8px);
+            min-width: 0px;
+            horizontal-stretch: 1;
+            @children
+        }
+    }
+}

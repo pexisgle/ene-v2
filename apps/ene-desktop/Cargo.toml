@@ -29,3 +29,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [build-dependencies]
 slint-build = { version = "=1.18.1", default-features = false, features = ["compat-1-18"] }
+
+[dev-dependencies]
+tempfile = "3"
+i-slint-backend-testing = { version = "=1.18.1", features = ["renderer-software"] }

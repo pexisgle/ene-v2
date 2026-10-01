@@ -1,334 +1,167 @@
-import { StatusBadge, ThemePicker, SizeControl, MessageBubble } from "visual.slint";
-import { Icons, ToolButton, Icon } from "icons.slint";
-import { AboutSlint, Button, ScrollView, VerticalBox, HorizontalBox, LineEdit, SpinBox, CheckBox, ComboBox, Palette } from "std-widgets.slint";
-export { Palette } from "std-widgets.slint";
-export global Theme {
-    public function apply(index: int) {
-        Palette.color-scheme = index == 2 ? ColorScheme.dark : index == 1 ? ColorScheme.light : ColorScheme.unknown;
+import { Palette, ScrollView } from "std-widgets.slint";
+import { UiState } from "state.slint";
+export { UiState, Theme, SettingsDraft, ChatEntry } from "state.slint";
+import { ConversationView } from "conversation.slint";
+import { HostSelectionView } from "host-selection.slint";
+import { SettingsView } from "settings.slint";
+import { ActionButton, QuietButton, BodyText, HintText } from "components.slint";
+component QuitConfirmation inherits Rectangle {
+    in property <bool> active;
+    background: Palette.background;
+    accessible-role: region;
+    accessible-label: "終了確認";
+    public function focus-return() {
+        return-button.focus();
     }
-}
-
-export struct ChatEntry {
-    author: string,
-    body: string,
-    provisional: bool,
-}
-
-component MessageInput inherits Rectangle {
-    in-out property <string> text <=> input.text;
-    in property <string> font-family <=> input.font-family;
-    in property <length> font-size <=> input.font-size;
-    in property <string> placeholder-text;
-    out property <bool> has-focus: input.has-focus;
-    callback edited(string);
-    callback submit;
-    private property <bool> composing;
-    private property <bool> ime-settling;
-    Timer {
-        interval: 150ms;
-        running: root.ime-settling;
-        triggered => { root.ime-settling = false; }
-    }
-    forward-focus: input;
-    background: Palette.control-background;
-    border-width: 1px;
-    border-color: input.has-focus ? Palette.accent-background : Palette.border;
-    border-radius: 4px;
-    ContextMenuArea {
-        Menu {
-            MenuItem { title: "切り取り"; activated => { input.cut(); } }
-            MenuItem { title: "コピー"; activated => { input.copy(); } }
-            MenuItem { title: "貼り付け"; activated => { input.paste(); } }
-            MenuItem { title: "すべて選択"; activated => { input.select-all(); } }
-        }
-        scroll := ScrollView {
-            x: 10px;
-            y: 8px;
-            width: parent.width - 20px;
-            height: parent.height - 16px;
-            content-width: self.visible-width;
-            content-height: max(self.visible-height, input.preferred-height);
-            input := TextInput {
-                width: scroll.visible-width;
-                height: max(scroll.visible-height, self.preferred-height);
-                single-line: false;
-                wrap: word-wrap;
-                color: Palette.foreground;
-                selection-background-color: Palette.selection-background;
-                selection-foreground-color: Palette.selection-foreground;
-                page-height: scroll.visible-height;
-                edited => { root.edited(self.text); }
-                changed preedit-text => {
-                    if self.preedit-text != "" {
-                        root.composing = true;
-                        root.ime-settling = false;
-                    } else if root.composing {
-                        root.composing = false;
-                        // Some IMEs finish composition before forwarding Enter.
-                        // Key release clears this; a short fallback also covers
-                        // confirmation by mouse or IMEs consuming the release.
-                        root.ime-settling = true;
-                    }
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+        content-width: self.visible-width;
+        horizontal-scrollbar-policy: always-off;
+        VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+            BodyText {
+                text: "未保存の変更があります";
+                font-weight: 600;
+            }
+            BodyText {
+                text: "変更を破棄してクライアントを終了しますか？ホストは終了しません。";
+            }
+            return-button := ActionButton {
+                text: "戻る";
+                enabled: root.active;
+                clicked => {
+                    UiState.cancel-quit();
                 }
-                key-released(event) => {
-                    if event.text == Key.Return { root.ime-settling = false; }
-                    return reject;
-                }
-                key-pressed(event) => {
-                    if event.text == Key.Return {
-                        // An IME confirmation is never a send or a newline.
-                        if self.preedit-text != "" || root.ime-settling { return accept; }
-                        if !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
-                            if !event.repeat { root.submit(); }
-                            return accept;
-                        }
-                    }
-                    return reject;
-                }
-                cursor-position-changed(pos) => {
-                    if pos.y + scroll.content-y < 0px {
-                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, -pos.y));
-                    } else if pos.y + scroll.content-y > scroll.visible-height - root.font-size {
-                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, scroll.visible-height - pos.y - root.font-size));
-                    }
+            }
+            ActionButton {
+                text: "破棄して終了";
+                enabled: root.active;
+                clicked => {
+                    UiState.discard-and-quit();
                 }
             }
         }
     }
-    Text {
-        x: scroll.x;
-        y: scroll.y;
-        width: scroll.width;
-        text: root.text == "" && input.preedit-text == "" ? root.placeholder-text : "";
-        font-family: root.font-family;
-        font-size: root.font-size;
-        color: Palette.foreground;
-        opacity: 0.6;
-        overflow: elide;
-        accessible-role: none;
-    }
 }
-
-export component ChatWindow inherits Window {
-    callback tray-action(int);
-    title: "ene — 会話";
-    preferred-width: 640px;
+export component AppWindow inherits Window {
+    title: "ene";
+    preferred-width: 720px;
     preferred-height: 760px;
     min-width: 420px;
     min-height: 480px;
     background: Palette.background;
-    default-font-family: root.font-family;
-    default-font-size: root.text-size * 1px;
-
-    in-out property <string> font-family: "Noto Sans CJK JP";
-    in-out property <int> text-size: 16;
-    in property <int> theme-index;
-    in-out property <string> draft;
-    in property <[ChatEntry]> messages;
-    in property <bool> can-send;
-    in property <bool> demo-mode;
-    in property <bool> tray-ready;
-    in property <string> status;
-    in property <string> avatar-model;
-    in property <string> avatar-motion;
-    in property <bool> motion-playing;
-    in property <bool> motion-loop;
-    in property <string> motion-status;
-    in property <bool> motion-failed;
-    in property <bool> avatar-visible;
-    in property <int> avatar-fps-index;
-    in property <int> avatar-size-percent: 100;
-    in property <bool> avatar-failed;
-    in property <string> avatar-status;
+    default-font-family: UiState.font-family;
+    default-font-size: UiState.text-size * 1px;
+    callback tray-action(int);
+    callback file-selection-ready(string, bool, string, bool, bool);
     callback avatar-events-available;
-    callback restart-avatar;
-    in property <string> tray-status: "トレイを確認しています…";
-    out property <bool> editor-focused: editor.has-focus;
-    out property <length> composer-height: composer.height;
-    out property <length> conversation-height: history.visible-height;
-    callback draft-edited(string);
-    callback submit;
-    callback open-settings;
-
-    public function focus-input() { editor.focus(); }
+    private property <length> measured-width: 720px;
+    changed width => {
+        root.measured-width = self.width;
+    }
+    out property <length> layout-padding: root.measured-width < 680px * UiState.scale ? 12px : 20px;
+    out property <bool> compact: root.measured-width - 2 * root.layout-padding < 640px * UiState.scale;
+    out property <bool> editor-focused: conversation.editor-focused;
+    out property <length> composer-height: conversation.composer-height;
+    out property <length> conversation-height: conversation.conversation-height;
+    out property <length> history-position: conversation.history-position;
+    in-out property <length> history-scroll <=> conversation.scroll-position;
+    in-out property <length> settings-scroll <=> settings.scroll-position;
+    out property <length> settings-form-width: settings.form-width;
+    out property <bool> settings-form-wide: settings.form-wide;
+    public function focus-entry() {
+        if UiState.quit-confirmation { quit-panel.focus-return(); }
+        else if UiState.host-selection-visible { host-selection.focus-entry(); }
+        else if UiState.page == 0 { conversation.focus-input(); }
+        else { settings.focus-entry(); }
+    }
+    public function focus-input() {
+        conversation.focus-input();
+    }
     public function scroll-to-latest() {
-        history.content-y = min(0px, history.visible-height - history.content-height);
+        conversation.scroll-to-latest();
     }
-
-    VerticalBox {
-        padding: 12px;
-        spacing: 10px;
-        HorizontalBox {
-            Image { source: @image-url("../assets/ene.svg"); width: 28px; height: 28px; }
-            VerticalBox {
-                padding: 0px;
-                spacing: 2px;
-                Text { text: "ene"; font-size: 20px; font-weight: 700; color: Palette.foreground; }
-
-            }
-            Rectangle { horizontal-stretch: 1; }
-            StatusBadge { icon: root.demo-mode ? Icons.demo : Icons.connection; label: root.demo-mode ? "デモ · 外部送信なし・会話は保存しません" : "ホスト未接続"; }
-            ToolButton { icon: Icons.settings; label: "設定"; clicked => { root.open-settings(); } }
-        }
-
-        if root.avatar-failed : HorizontalBox {
-            padding: 4px;
-            Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; horizontal-stretch: 1; }
-            ToolButton { icon: Icons.settings; label: "設定"; clicked => { root.open-settings(); } }
-            ToolButton { icon: Icons.refresh; label: "再起動"; clicked => { root.restart-avatar(); } }
-        }
-        if root.motion-failed : HorizontalBox {
-            padding: 4px;
-            Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; horizontal-stretch: 1; }
-            ToolButton { icon: Icons.settings; label: "設定"; clicked => { root.open-settings(); } }
-        }
-        history := ScrollView {
-            vertical-stretch: 1;
-            content-width: self.visible-width;
-            VerticalBox {
-                padding: 4px;
+    public function focus-settings() {
+        settings.focus-entry();
+    }
+    public function reveal-settings-item(y: length, h: length) {
+        settings.reveal-item(y, h);
+    }
+    public function focus-quit() {
+        quit-panel.focus-return();
+    }
+    public function focus-error() {
+        settings.focus-error();
+    }
+    Rectangle {
+        min-width: 0px;
+        min-height: 0px;
+        shell := VerticalLayout {
+            padding: root.layout-padding;
+            spacing: 8px;
+            HorizontalLayout {
                 spacing: 12px;
-                if root.messages.length == 0 : Rectangle {
-                    min-height: 160px;
-                    Icon { source: Icons.avatar; width: 64px; height: 64px; x: (parent.width - self.width) / 2; y: 40px; opacity: 0.35; }
-                }
-                for entry in root.messages : MessageBubble {
-                    author: entry.author; body: entry.body; provisional: entry.provisional;
-                }
-                Rectangle { vertical-stretch: 1; }
-            }
-        }
-
-        composer := Rectangle {
-            background: Palette.alternate-background;
-            border-radius: 12px;
-            vertical-stretch: 0;
-            height: min(180px, max(86px, draft-measure.preferred-height + 54px));
-            draft-measure := Text {
-                visible: false;
-                height: 0px;
-                width: max(1px, editor.width - 20px);
-                text: root.draft;
-                font-family: root.font-family;
-                font-size: root.text-size * 1px;
-                wrap: word-wrap;
-            }
-            VerticalBox {
-                width: parent.width;
-                height: parent.height;
-                padding: 10px;
-                spacing: 6px;
-                HorizontalBox {
-                    padding: 0px;
-                    spacing: 10px;
-                    vertical-stretch: 1;
-                    editor := MessageInput {
-                        text <=> root.draft;
-                        font-family: root.font-family;
-                        font-size: root.text-size * 1px;
-                        placeholder-text: root.demo-mode ? "メッセージを入力…" : "ホスト未接続";
-                        min-height: 36px;
-                        vertical-stretch: 1;
-                        horizontal-stretch: 1;
-                        edited(text) => { root.draft-edited(text); }
-                        submit => { if root.can-send { root.submit(); } }
+                BodyText { text: UiState.host-selection-visible ? "ホスト選択" : "ene"; font-weight: 600; horizontal-stretch: 1; }
+                if !UiState.host-selection-visible : HorizontalLayout {
+                    spacing: 8px;
+                    horizontal-stretch: 0;
+                    vertical-stretch: 0;
+                    if UiState.page == 1 && UiState.session-active : QuietButton {
+                        text: "ホスト選択";
+                        enabled: !UiState.quit-confirmation;
+                        clicked => { UiState.show-host-selection(); }
                     }
-                    VerticalBox {
-                        padding: 0px;
-                        Rectangle { vertical-stretch: 1; }
-                        ToolButton { icon: Icons.send; label: "送信 · Enter（改行はShift+Enter）"; enabled: root.can-send; clicked => { root.submit(); } }
+                    QuietButton {
+                        text: UiState.page == 0 ? "設定" : UiState.session-active ? "対話に戻る" : "ホスト選択に戻る";
+                        enabled: !UiState.quit-confirmation;
+                        clicked => { UiState.navigate(UiState.page == 0 ? 1 : 0); }
                     }
                 }
-
+            }
+            HintText {
+                text: (UiState.demo-mode && !UiState.host-selection-visible && UiState.page == 0 ? "デモ" : "ホスト未接続") + "  ·  " + (UiState.avatar-failed ? "描画エラー" : !UiState.avatar-ready ? "描画準備中" : !UiState.avatar-visible ? "キャラクター非表示" : "常駐表示中");
+            }
+            if UiState.avatar-failed || UiState.motion-failed || !UiState.tray-ready || UiState.apply-error != "" : QuietButton {
+                leading: true;
+                text: UiState.apply-error != "" ? "保存・操作エラーを確認" : UiState.avatar-failed || UiState.motion-failed ? "キャラクターの状態を確認" : "トレイなし · ホスト選択";
+                enabled: !UiState.quit-confirmation;
+                clicked => {
+                    if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" {
+                        UiState.category = 0;
+                        UiState.navigate(1);
+                        if UiState.apply-error != "" { root.focus-error(); }
+                    } else { UiState.show-host-selection(); }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                host-selection := HostSelectionView {
+                    width: min(parent.width, 600px * UiState.scale);
+                    x: (parent.width - self.width) / 2;
+                    visible: UiState.host-selection-visible;
+                    active: UiState.host-selection-visible && !UiState.quit-confirmation;
+                }
+                conversation := ConversationView {
+                    width: min(parent.width, 800px * UiState.scale);
+                    x: (parent.width - self.width) / 2;
+                    visible: !UiState.host-selection-visible && UiState.page == 0;
+                    active: !UiState.host-selection-visible && UiState.page == 0 && !UiState.quit-confirmation;
+                    compact: root.compact;
+                }
+                settings := SettingsView {
+                    width: min(parent.width, root.compact ? 800px * UiState.scale : 960px * UiState.scale + 12px);
+                    x: (parent.width - self.width) / 2;
+                    visible: !UiState.host-selection-visible && UiState.page == 1;
+                    active: !UiState.host-selection-visible && UiState.page == 1 && !UiState.quit-confirmation;
+                    compact: root.compact;
+                }
             }
         }
-
     }
-}
-
-export component SettingsWindow inherits Window {
-    title: "ene — 設定";
-    preferred-width: 440px;
-    preferred-height: 680px;
-    min-width: 360px;
-    default-font-family: "Noto Sans CJK JP";
-    in-out property <string> font-family;
-    in-out property <int> text-size;
-    in-out property <int> theme-index;
-    callback apply-settings;
-    in-out property <string> apply-error;
-    callback commit-avatar-settings() -> bool;
-    commit-avatar-settings => { true }
-    in-out property <string> avatar-model;
-    in-out property <string> avatar-motion;
-    in-out property <bool> motion-playing;
-    in-out property <bool> motion-loop;
-    in property <string> motion-status;
-    callback select-motion;
-    in-out property <bool> avatar-visible;
-    in-out property <int> avatar-fps-index;
-    in-out property <int> avatar-size-percent: 100;
-    in-out property <string> avatar-size-text: root.avatar-size-percent;
-    in property <string> avatar-status;
-    in property <bool> avatar-failed;
-    callback select-model;
-    callback restart-avatar;
-    callback recenter-avatar;
-    in property <bool> tray-ready;
-    in property <string> tray-status;
-    callback quit;
-
-    min-height: 360px;
-    VerticalBox {
-        padding: 16px;
-        spacing: 12px;
-        ScrollView {
-            vertical-stretch: 1;
-            content-width: self.visible-width;
-            VerticalBox {
-                padding: 0px;
-                padding-right: 12px;
-                spacing: 12px;
-                Text { text: "会話画面の表示"; font-size: 20px; font-weight: 600; }
-                Text { text: "テーマ"; }
-                ThemePicker { current-index <=> root.theme-index; }
-                Text { text: "フォント"; }
-                LineEdit { text <=> root.font-family; }
-                HorizontalBox {
-                    padding: 0px;
-                    Text { text: "文字サイズ"; vertical-alignment: center; }
-                    SpinBox { value <=> root.text-size; minimum: 12; maximum: 28; }
-                }
-                HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.avatar; } Text { text: "キャラクター"; font-size: 18px; font-weight: 600; } }
-                CheckBox { text: "キャラクターを表示"; checked <=> root.avatar-visible; }
-                Text { text: root.avatar-model; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                HorizontalBox { padding: 0px; ToolButton { icon: Icons.folder; label: "VRMを選ぶ"; clicked => { root.select-model(); } } Rectangle { horizontal-stretch: 1; } }
-                Text { text: "描画速度"; }
-                ComboBox { model: ["30 fps", "60 fps"]; current-index <=> root.avatar-fps-index; }
-                Text { text: "キャラクターの大きさ"; }
-                SizeControl { text <=> root.avatar-size-text; }
-                HorizontalBox { padding: 0px; ToolButton { icon: Icons.center; label: "キャラクターを画面中央へ戻す"; clicked => { root.recenter-avatar(); } } Rectangle { horizontal-stretch: 1; } }
-                if root.avatar-failed : Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; }
-                HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.motion; } Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; } }
-                Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                HorizontalBox {
-                    padding: 0px;
-                    ToolButton { icon: Icons.folder; label: "VRMAを選ぶ"; clicked => { root.select-motion(); } }
-                    ToolButton { icon: Icons.reset; label: "静止姿勢に戻す"; enabled: root.avatar-motion != ""; clicked => { root.avatar-motion = ""; } }
-                }
-                HorizontalBox {
-                    padding: 0px;
-                    ToolButton { icon: root.motion-playing ? Icons.pause : Icons.motion; label: root.motion-playing ? "一時停止" : "モーションを再生"; checkable: true; checked <=> root.motion-playing; enabled: root.avatar-motion != ""; }
-                    ToolButton { icon: Icons.loop; label: "繰り返し再生"; checkable: true; checked <=> root.motion-loop; enabled: root.avatar-motion != ""; }
-                }
-                HorizontalBox { padding: 0px; StatusBadge { icon: Icons.motion; label: root.motion-status; } Rectangle { horizontal-stretch: 1; } }
-                if root.avatar-failed : HorizontalBox { padding: 0px; ToolButton { icon: Icons.refresh; label: "描画エラーから再起動"; clicked => { root.restart-avatar(); } } Rectangle { horizontal-stretch: 1; } }
-                HorizontalBox { padding: 0px; StatusBadge { icon: Icons.tray; label: root.tray-status; state: root.tray-ready ? 1 : 3; } Rectangle { horizontal-stretch: 1; } }
-                if !root.tray-ready : HorizontalBox { padding: 0px; ToolButton { icon: Icons.exit; label: "クライアント終了"; clicked => { root.quit(); } } Rectangle { horizontal-stretch: 1; } }
-                AboutSlint { preferred-height: 100px; max-height: 120px; vertical-stretch: 0; }
-            }
-        }
-        if root.apply-error != "" : Text { text: root.apply-error; wrap: word-wrap; color: Palette.foreground; font-size: 12px; }
-        HorizontalBox { Rectangle { horizontal-stretch: 1; } ToolButton { icon: Icons.save; label: "適用して閉じる"; clicked => { root.apply-settings(); } } }
+    quit-panel := QuitConfirmation {
+        visible: UiState.quit-confirmation;
+        active: UiState.quit-confirmation;
     }
 }

@@ -1,0 +1,274 @@
+import { ScrollView, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
+import { UiState } from "state.slint";
+import { ActionButton, BodyText, HintText } from "components.slint";
+component MessageInput inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> font-family <=> input.font-family;
+    in property <length> font-size <=> input.font-size;
+    in property <string> placeholder-text;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback submit;
+    private property <bool> composing;
+    private property <bool> ime-settling;
+    Timer {
+        interval: 150ms;
+        running: root.ime-settling;
+        triggered => {
+            root.ime-settling = false;
+        }
+    }
+    in property <bool> active: true;
+    forward-focus: input;
+    background: Palette.control-background;
+    border-width: 1px;
+    border-color: input.has-focus ? Palette.accent-background : Palette.border;
+    border-radius: 4px;
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "切り取り";
+                activated => {
+                    input.cut();
+                }
+            }
+            MenuItem {
+                title: "コピー";
+                activated => {
+                    input.copy();
+                }
+            }
+            MenuItem {
+                title: "貼り付け";
+                activated => {
+                    input.paste();
+                }
+            }
+            MenuItem {
+                title: "すべて選択";
+                activated => {
+                    input.select-all();
+                }
+            }
+        }
+        scroll := ScrollView {
+            x: 10px;
+            y: 8px;
+            width: parent.width - 20px;
+            height: parent.height - 16px;
+            content-width: self.visible-width;
+            content-height: max(self.visible-height, input.preferred-height);
+            input := TextInput {
+                width: scroll.visible-width;
+                height: max(scroll.visible-height, self.preferred-height);
+                single-line: false;
+                enabled: root.active;
+                accessible-label: "メッセージ";
+                wrap: word-wrap;
+                color: Palette.foreground;
+                selection-background-color: Palette.selection-background;
+                selection-foreground-color: Palette.selection-foreground;
+                page-height: scroll.visible-height;
+                edited => {
+                    root.edited(self.text);
+                }
+                changed preedit-text => {
+                    if self.preedit-text != "" {
+                        root.composing = true;
+                        root.ime-settling = false;
+                    }
+                    else if root.composing {
+                        root.composing = false;
+                        // Some IMEs finish composition before forwarding Enter.
+                        // Key release clears this; a short fallback also covers
+                        // confirmation by mouse or IMEs consuming the release.
+                        root.ime-settling = true;
+                    }
+                }
+                key-released(event) => {
+                    if event.text == Key.Return {
+                        root.ime-settling = false;
+                    }
+                    return reject;
+                }
+                key-pressed(event) => {
+                    if event.text == Key.Return {
+                        // An IME confirmation is never a send or a newline.
+                        if self.preedit-text != "" || root.ime-settling {
+                            return accept;
+                        }
+                        if !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
+                            if !event.repeat {
+                                root.submit();
+                            }
+                            return accept;
+                        }
+                    }
+                    return reject;
+                }
+                cursor-position-changed(pos) => {
+                    if pos.y + scroll.content-y < 0px {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, -pos.y));
+                    }
+                    else if pos.y + scroll.content-y > scroll.visible-height - root.font-size {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, scroll.visible-height - pos.y - root.font-size));
+                    }
+                }
+            }
+        }
+    }
+    Text {
+        x: scroll.x;
+        y: scroll.y;
+        width: scroll.width;
+        text: root.text == "" && input.preedit-text == "" ? root.placeholder-text : "";
+        font-family: root.font-family;
+        font-size: root.font-size;
+        color: Palette.foreground;
+        opacity: 0.6;
+        overflow: elide;
+        accessible-role: none;
+    }
+}
+export component ConversationView inherits Rectangle {
+    in property <bool> active;
+    in property <bool> compact;
+    out property <bool> editor-focused: editor.has-focus;
+    out property <length> composer-height: composer.height;
+    out property <length> conversation-height: history.visible-height;
+    out property <length> history-position: history.content-y;
+    in-out property <length> scroll-position <=> history.content-y;
+    private property <bool> following: true;
+    private property <length> retained-scroll;
+    changed active => {
+        if root.active {
+            if root.following && UiState.messages.length > 0 {
+                root.scroll-to-latest();
+            }
+            else {
+                history.content-y = max(min(0px, history.visible-height - history.content-height), root.retained-scroll);
+            }
+        }
+        else {
+            root.retained-scroll = history.content-y;
+        }
+    }
+    public function focus-input() {
+        editor.focus();
+    }
+    public function scroll-to-latest() {
+        history.content-y = min(0px, history.visible-height - history.content-height);
+        root.following = true;
+    }
+    VerticalLayout {
+        spacing: 8px;
+        history := ScrollView {
+            vertical-stretch: 1;
+            min-height: 40px;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            changed content-height => {
+                if root.following && UiState.messages.length > 0 {
+                    root.scroll-to-latest();
+                }
+            }
+            scrolled => {
+                root.following = self.content-y <= self.visible-height - self.content-height + 24px;
+            }
+            VerticalLayout {
+                alignment: start;
+                spacing: 12px;
+                padding: 4px;
+                if UiState.messages.length == 0 : Rectangle {
+                    min-height: intro.min-height;
+                    vertical-stretch: 0;
+                    max-height: intro.min-height;
+                    intro := VerticalLayout {
+                        alignment: start;
+                        padding: 16px;
+                        spacing: 8px;
+                        BodyText {
+                            text: "話しかけてください。";
+                            font-weight: 600;
+                        }
+                        HintText {
+                            text: UiState.demo-mode ? "会話はクライアントを終了すると消えます。" : "ホストに接続すると対話できます。";
+                        }
+                    }
+                }
+                for entry in UiState.messages : Rectangle {
+                    background: entry.provisional ? Palette.alternate-background : Palette.control-background;
+                    border-radius: 12px;
+                    min-height: message.min-height;
+                    vertical-stretch: 0;
+                    message := VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        HintText {
+                            text: entry.author;
+                            font-weight: 600;
+                        }
+                        BodyText {
+                            text: entry.body;
+                        }
+                    }
+                }
+            }
+        }
+        composer := Rectangle {
+            background: Palette.alternate-background;
+            border-radius: 12px;
+            vertical-stretch: 0;
+            min-height: compose-layout.min-height;
+            preferred-height: min(max(compose-layout.min-height, root.height / 3), max(compose-layout.min-height, measure.preferred-height + (root.compact ? 82px : 24px)));
+            measure := Text {
+                visible: false;
+                width: max(1px, editor.width - 20px);
+                text: UiState.draft;
+                font-family: UiState.font-family;
+                font-size: UiState.text-size * 1px;
+                wrap: word-wrap;
+            }
+            compose-layout := GridLayout {
+                padding: 12px;
+                spacing: 8px;
+                editor := MessageInput {
+                    row: 0;
+                    col: 0;
+                    text <=> UiState.draft;
+                    font-family: UiState.font-family;
+                    font-size: UiState.text-size * 1px;
+                    placeholder-text: UiState.demo-mode ? "メッセージを入力…" : "ホスト未接続";
+                    active: root.active;
+                    min-height: UiState.text-size * 1px + 16px;
+                    min-width: 0px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    edited(text) => {
+                        UiState.draft-edited(text);
+                    }
+                    submit => {
+                        if root.active && UiState.can-send {
+                            UiState.submit();
+                        }
+                    }
+                }
+                ActionButton {
+                    row: root.compact ? 1 : 0;
+                    col: root.compact ? 0 : 1;
+                    vertical-stretch: 0;
+                    text: "送信";
+                    primary: true;
+                    fill-width: root.compact;
+                    enabled: root.active && UiState.can-send;
+                    clicked => {
+                        UiState.submit();
+                    }
+                }
+            }
+        }
+        HintText {
+            text: "Enterで送信 · Shift+Enterで改行 · 音声機能は準備中";
+        }
+    }
+}

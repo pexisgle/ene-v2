@@ -1,0 +1,469 @@
+import { AboutSlint, ScrollView, ComboBox, SpinBox, LineEdit, CheckBox, Palette } from "std-widgets.slint";
+import { UiState } from "state.slint";
+import { ActionButton, QuietButton, BodyText, HintText, SectionTitle, SettingField } from "components.slint";
+export component SettingsView inherits Rectangle {
+    in property <bool> active;
+    in property <bool> compact;
+    out property <length> form-width: max(0px, body.visible-width - 8px);
+    out property <bool> form-wide: root.form-width >= 560px * UiState.scale;
+    in-out property <length> scroll-position <=> body.content-y;
+    private property <length> retained-scroll;
+    changed active => {
+        if root.active {
+            body.content-y = max(min(0px, body.visible-height - body.content-height), root.retained-scroll);
+        }
+        else {
+            root.retained-scroll = body.content-y;
+        }
+    }
+    private property <bool> editing: root.active && UiState.category == 0;
+    public function reveal-item(y: length, item-height: length) {
+        if !root.editing {
+            return;
+        }
+        if y < body.absolute-position.y {
+            body.content-y = min(0px, body.content-y + body.absolute-position.y - y);
+        }
+        else if y + item-height > body.absolute-position.y + body.visible-height {
+            body.content-y = max(min(0px, body.visible-height - body.content-height), body.content-y - (y + item-height - body.absolute-position.y - body.visible-height));
+        }
+    }
+    public function focus-entry() {
+        if root.compact {
+            category-picker.focus();
+        }
+        else {
+            terminal-button.focus();
+        }
+    }
+    public function focus-error() {
+        if UiState.error-field == "size" {
+            body.content-y = min(0px, max(body.visible-height - body.content-height, body.content-y - (size-field.absolute-position.y - body.absolute-position.y)));
+            size-edit.focus();
+        }
+        else if UiState.error-field == "font" {
+            body.content-y = min(0px, max(body.visible-height - body.content-height, body.content-y - (font-field.absolute-position.y - body.absolute-position.y)));
+            font-edit.focus();
+        }
+        else {
+            body.content-y = 0px;
+        }
+    }
+    GridLayout {
+        spacing: 12px;
+        Rectangle {
+            row: 0;
+            col: 0;
+            min-width: root.compact ? 0px : 160px * UiState.scale;
+            max-width: root.compact ? 100000px : 160px * UiState.scale;
+            height: root.compact ? max(44px, UiState.text-size * 1.8px) : root.height;
+            vertical-stretch: root.compact ? 0 : 1;
+            VerticalLayout {
+                visible: !root.compact;
+                spacing: 2px;
+                terminal-button := QuietButton {
+                    leading: true;
+                    fill-width: true;
+                    text: "この端末";
+                    enabled: root.active && !root.compact;
+                    checked: UiState.category == 0;
+                    checkable: true;
+                    clicked => {
+                        UiState.category = 0;
+                    }
+                }
+                QuietButton {
+                    leading: true;
+                    fill-width: true;
+                    text: "コンパニオン";
+                    enabled: root.active && !root.compact;
+                    checked: UiState.category == 1;
+                    checkable: true;
+                    clicked => {
+                        UiState.category = 1;
+                    }
+                }
+                QuietButton {
+                    leading: true;
+                    fill-width: true;
+                    text: "ホスト・接続";
+                    enabled: root.active && !root.compact;
+                    checked: UiState.category == 2;
+                    checkable: true;
+                    clicked => {
+                        UiState.category = 2;
+                    }
+                }
+                QuietButton {
+                    leading: true;
+                    fill-width: true;
+                    text: "権限とデータ";
+                    enabled: root.active && !root.compact;
+                    checked: UiState.category == 3;
+                    checkable: true;
+                    clicked => {
+                        UiState.category = 3;
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+            }
+            category-picker := ComboBox {
+                visible: root.compact;
+                width: parent.width;
+                min-height: max(44px, UiState.text-size * 1.8px);
+                accessible-label: "設定カテゴリ";
+                enabled: root.active && root.compact;
+                model: ["この端末", "コンパニオン", "ホスト・接続", "権限とデータ"];
+                current-index <=> UiState.category;
+            }
+        }
+        Rectangle {
+            row: root.compact ? 1 : 0;
+            col: root.compact ? 0 : 1;
+            min-width: 0px;
+            vertical-stretch: 1;
+            // Stacked persistent pages: hiding does not remove editor instances.
+            VerticalLayout {
+                visible: UiState.category == 0;
+                spacing: 8px;
+                body := ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    horizontal-scrollbar-policy: always-off;
+                    VerticalLayout {
+                        spacing: 12px;
+                        padding: 4px;
+                        HintText {
+                            text: "この端末に保存 · 他の端末には影響しません";
+                        }
+                        if UiState.apply-error != "" : BodyText {
+                            text: UiState.apply-error;
+                            accessible-live-region: polite;
+                        }
+                        SectionTitle {
+                            text: "外観";
+                        }
+                        SettingField {
+                            label: "テーマ";
+                            wide: root.form-wide;
+                            ComboBox {
+                                changed has-focus => {
+                                    if self.has-focus {
+                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                    }
+                                }
+                                enabled: root.editing;
+                                accessible-label: "テーマ";
+                                width: parent.control-width;
+                                height: max(44px, UiState.text-size * 1.8px);
+                                model: ["システムに合わせる", "ライト", "ダーク"];
+                                current-index <=> UiState.settings-draft.theme-index;
+                                selected => {
+                                    UiState.settings-edited();
+                                }
+                            }
+                        }
+                        font-field := SettingField {
+                            label: "フォント名";
+                            wide: root.form-wide;
+                            font-edit := LineEdit {
+                                changed has-focus => {
+                                    if self.has-focus {
+                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                    }
+                                }
+                                enabled: root.editing;
+                                accessible-label: "フォント名";
+                                width: parent.control-width;
+                                height: max(44px, UiState.text-size * 1.8px);
+                                text <=> UiState.settings-draft.font-family;
+                                edited => {
+                                    UiState.settings-edited();
+                                }
+                            }
+                        }
+                        HintText {
+                            text: "この端末にインストール済みのフォントを指定します。";
+                        }
+                        SettingField {
+                            label: "文字サイズ";
+                            wide: root.form-wide;
+                            SpinBox {
+                                changed has-focus => {
+                                    if self.has-focus {
+                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                    }
+                                }
+                                enabled: root.editing;
+                                accessible-label: "文字サイズ";
+                                width: parent.control-width;
+                                height: max(44px, UiState.text-size * 1.8px);
+                                minimum: 12;
+                                maximum: 28;
+                                value <=> UiState.settings-draft.text-size;
+                                edited => {
+                                    UiState.settings-edited();
+                                }
+                            }
+                        }
+                        SectionTitle {
+                            text: "デスクトップ表示";
+                        }
+                        HintText {
+                            text: "以下の表示・復旧操作はすぐに反映されます。編集中の設定は保存しません。";
+                        }
+                        QuietButton {
+                            leading: true;
+                            scroll-to-focus: true;
+                            enabled: root.editing;
+                            text: UiState.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示";
+                            clicked => {
+                                UiState.toggle-avatar();
+                            }
+                        }
+                        QuietButton {
+                            leading: true;
+                            scroll-to-focus: true;
+                            enabled: root.editing;
+                            text: "キャラクターを画面中央へ戻す";
+                            clicked => {
+                                UiState.recenter-avatar();
+                            }
+                        }
+                        if UiState.avatar-failed : QuietButton {
+                            leading: true;
+                            scroll-to-focus: true;
+                            enabled: root.editing;
+                            text: "描画エラーから再起動";
+                            clicked => {
+                                UiState.restart-avatar();
+                            }
+                        }
+                        BodyText {
+                            text: UiState.avatar-status;
+                        }
+                        HintText {
+                            text: "ドラッグで位置を変更できます。画面外へ移動した場合は中央へ戻してください。";
+                        }
+                        size-field := SettingField {
+                            label: "大きさ（%）";
+                            wide: root.form-wide;
+                            size-edit := LineEdit {
+                                changed has-focus => {
+                                    if self.has-focus {
+                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                    }
+                                }
+                                enabled: root.editing;
+                                accessible-label: "キャラクターの大きさ";
+                                width: parent.control-width;
+                                height: max(44px, UiState.text-size * 1.8px);
+                                text <=> UiState.settings-draft.size-text;
+                                input-type: number;
+                                placeholder-text: "50〜200";
+                                edited => {
+                                    UiState.settings-edited();
+                                }
+                            }
+                        }
+                        HintText {
+                            text: "50〜200%。100%で画面の高さの約40%になります。保存すると反映されます。";
+                        }
+                        SettingField {
+                            label: "描画速度";
+                            wide: root.form-wide;
+                            ComboBox {
+                                changed has-focus => {
+                                    if self.has-focus {
+                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                    }
+                                }
+                                enabled: root.editing;
+                                accessible-label: "描画速度";
+                                width: parent.control-width;
+                                height: max(44px, UiState.text-size * 1.8px);
+                                model: ["30 fps", "60 fps"];
+                                current-index <=> UiState.settings-draft.fps-index;
+                                selected => {
+                                    UiState.settings-edited();
+                                }
+                            }
+                        }
+                        SectionTitle {
+                            text: "ローカル素材・モーション";
+                        }
+                        HintText {
+                            text: "この端末で読み込むファイルです。コンパニオンの共有設定には登録されません。";
+                        }
+                        SettingField {
+                            label: "VRMファイル";
+                            wide: root.form-wide;
+                            LineEdit {
+                                changed has-focus => {
+                                    if self.has-focus {
+                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                    }
+                                }
+                                enabled: root.editing;
+                                accessible-label: "VRMファイル";
+                                width: parent.control-width;
+                                height: max(44px, UiState.text-size * 1.8px);
+                                text <=> UiState.settings-draft.model;
+                                edited => {
+                                    UiState.settings-edited();
+                                }
+                            }
+                        }
+                        BodyText {
+                            text: UiState.settings-draft.model;
+                        }
+                        QuietButton {
+                            leading: true;
+                            scroll-to-focus: true;
+                            text: "VRMを選ぶ";
+                            enabled: root.editing && !UiState.picker-active;
+                            clicked => {
+                                UiState.select-model();
+                            }
+                        }
+                        SettingField {
+                            label: "VRMAファイル";
+                            wide: root.form-wide;
+                            LineEdit {
+                                changed has-focus => {
+                                    if self.has-focus {
+                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                    }
+                                }
+                                enabled: root.editing;
+                                accessible-label: "VRMAファイル";
+                                width: parent.control-width;
+                                height: max(44px, UiState.text-size * 1.8px);
+                                text <=> UiState.settings-draft.motion;
+                                edited => {
+                                    UiState.settings-edited();
+                                }
+                            }
+                        }
+                        BodyText {
+                            text: UiState.settings-draft.motion == "" ? "未選択 · 静止姿勢" : UiState.settings-draft.motion;
+                        }
+                        QuietButton {
+                            leading: true;
+                            scroll-to-focus: true;
+                            text: "VRMAを選ぶ";
+                            enabled: root.editing && !UiState.picker-active;
+                            clicked => {
+                                UiState.select-motion();
+                            }
+                        }
+                        QuietButton {
+                            leading: true;
+                            scroll-to-focus: true;
+                            text: "静止姿勢に戻す";
+                            enabled: root.editing && UiState.settings-draft.motion != "";
+                            clicked => {
+                                UiState.settings-draft.motion = "";
+                                UiState.settings-edited();
+                            }
+                        }
+                        CheckBox {
+                            changed has-focus => {
+                                if self.has-focus {
+                                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                }
+                            }
+                            text: "モーションを再生";
+                            min-height: max(44px, UiState.text-size * 1.8px);
+                            enabled: root.editing && UiState.settings-draft.motion != "";
+                            checked <=> UiState.settings-draft.motion-playing;
+                            toggled => {
+                                UiState.settings-edited();
+                            }
+                        }
+                        CheckBox {
+                            changed has-focus => {
+                                if self.has-focus {
+                                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                                }
+                            }
+                            text: "繰り返す";
+                            min-height: max(44px, UiState.text-size * 1.8px);
+                            enabled: root.editing && UiState.settings-draft.motion != "";
+                            checked <=> UiState.settings-draft.motion-loop;
+                            toggled => {
+                                UiState.settings-edited();
+                            }
+                        }
+                        BodyText {
+                            text: UiState.motion-status;
+                        }
+                        SectionTitle {
+                            text: "アプリ情報";
+                        }
+                        HintText {
+                            text: UiState.tray-status;
+                        }
+                        HintText {
+                            text: "接続先の変更とクライアント終了は、ホスト選択画面から行えます。";
+                        }
+                        AboutSlint {
+                            vertical-stretch: 0;
+                        }
+                    }
+                }
+                if UiState.apply-error != "" : ActionButton {
+                    text: "エラーの詳細";
+                    fill-width: false;
+                    enabled: root.editing;
+                    clicked => {
+                        root.focus-error();
+                    }
+                }
+                if UiState.save-status != "" : HintText {
+                    text: UiState.save-status;
+                    accessible-live-region: polite;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    vertical-stretch: 0;
+                    Rectangle { horizontal-stretch: 1; }
+                    QuietButton {
+                        text: "変更を戻す";
+                        enabled: root.editing && UiState.settings-dirty;
+                        clicked => { UiState.reset-settings(); }
+                    }
+                    ActionButton {
+                        text: "保存";
+                        primary: true;
+                        fill-width: false;
+                        enabled: root.editing && UiState.settings-dirty;
+                        clicked => { UiState.save-settings(); }
+                    }
+                }
+            }
+            if UiState.category != 0 : ScrollView {
+                content-width: self.visible-width;
+                horizontal-scrollbar-policy: always-off;
+                VerticalLayout {
+                    spacing: 12px;
+                    padding: 4px;
+                    SectionTitle {
+                        text: UiState.category == 1 ? "コンパニオン" : UiState.category == 2 ? "ホスト・接続" : "権限とデータ";
+                    }
+                    BodyText {
+                        text: "ホスト未接続 · 設定機能は準備中です。";
+                    }
+                    BodyText {
+                        text: UiState.category == 1 ? "名前、姿・声・性格、会話用・作業用AIをコンパニオンごとに管理します。変更は接続先ホストに保存されます。" : UiState.category == 2 ? "ホストが利用するAI・音声サービスを管理します。接続先はホスト選択画面から選び、サービスの資格情報はホスト側に保持します。" : "コンパニオンに許可する送信先・用途、作業フォルダ、操作範囲を管理します。許可する対象と実行環境を区別します。";
+                    }
+                    HintText {
+                        text: "この端末の表示設定は、ホストに接続していなくても変更できます。";
+                    }
+                }
+            }
+        }
+    }
+}

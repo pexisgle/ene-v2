@@ -1,0 +1,62 @@
+import { Palette } from "std-widgets.slint";
+export { Palette } from "std-widgets.slint";
+export global Theme {
+    public function apply(index: int) {
+        Palette.color-scheme = index == 2 ? ColorScheme.dark : index == 1 ? ColorScheme.light : ColorScheme.unknown;
+    }
+}
+export struct ChatEntry {
+    author: string, body: string, provisional: bool
+}
+export struct SettingsDraft {
+    font-family: string, text-size: int, theme-index: int,
+    model: string, motion: string, motion-playing: bool, motion-loop: bool,
+    fps-index: int, size-text: string,
+}
+// Projection of the Rust application state. Pages do not own controllers.
+export global UiState {
+    in-out property <bool> host-selection-visible: true;
+    in-out property <bool> session-active;
+    in-out property <int> page;
+    in-out property <int> category;
+    in-out property <string> font-family: "Noto Sans CJK JP";
+    in-out property <int> text-size: 16;
+    out property <float> scale: max(1, self.text-size / 16);
+    in-out property <bool> demo-mode;
+    in-out property <[ChatEntry]> messages;
+    in-out property <string> draft;
+    in-out property <bool> can-send;
+    in-out property <string> status;
+    in-out property <SettingsDraft> settings-draft;
+    in-out property <bool> settings-dirty;
+    in-out property <string> apply-error;
+    in-out property <string> error-field;
+    in-out property <string> save-status;
+    in-out property <bool> picker-active;
+    in-out property <bool> avatar-visible: true;
+    in-out property <bool> avatar-ready;
+    in-out property <bool> avatar-failed;
+    in-out property <string> avatar-status;
+    in-out property <string> motion-status;
+    in-out property <bool> motion-failed;
+    in-out property <bool> tray-ready;
+    in-out property <string> tray-status: "トレイを確認しています…";
+    in-out property <bool> quit-confirmation;
+    callback navigate(int);
+    callback show-host-selection;
+    callback start-demo;
+    callback reveal-settings-item(length, length);
+    callback settings-edited;
+    callback save-settings;
+    callback reset-settings;
+    callback select-model;
+    callback select-motion;
+    callback draft-edited(string);
+    callback submit;
+    callback toggle-avatar;
+    callback restart-avatar;
+    callback recenter-avatar;
+    callback request-quit;
+    callback discard-and-quit;
+    callback cancel-quit;
+}

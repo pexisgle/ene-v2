@@ -1,0 +1,55 @@
+import { ScrollView } from "std-widgets.slint";
+import { UiState } from "state.slint";
+import { ActionButton, QuietButton, BodyText, HintText, SectionTitle } from "components.slint";
+
+export component HostSelectionView inherits Rectangle {
+    in property <bool> active;
+    private property <bool> stacked: root.width < 300px * UiState.scale;
+    public function focus-entry() {
+        if UiState.demo-mode { demo-start.focus(); }
+        else { local-settings.focus(); }
+    }
+    VerticalLayout {
+        spacing: 12px;
+        ScrollView {
+            min-height: 0px;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding: 4px;
+                spacing: 12px;
+                BodyText { text: "コンパニオンが動くホストを選んで、対話を始めます。"; }
+                SectionTitle { text: "このPCのホスト"; }
+                HintText { text: "ホストへの接続機能は準備中です。"; }
+                demo-start := ActionButton {
+                    visible: UiState.demo-mode;
+                    enabled: root.active && UiState.demo-mode;
+                    fill-width: false;
+                    primary: true;
+                    text: UiState.session-active ? "対話を続ける" : "対話を始める";
+                    clicked => { UiState.start-demo(); }
+                }
+            }
+        }
+        GridLayout {
+            vertical-stretch: 0;
+            spacing: 8px;
+            local-settings := QuietButton {
+                row: 0; col: 0;
+                text: "この端末の設定";
+                enabled: root.active;
+                clicked => { UiState.category = 0; UiState.navigate(1); }
+            }
+            Rectangle { row: 0; col: 1; horizontal-stretch: 1; }
+            QuietButton {
+                row: root.stacked ? 1 : 0;
+                col: root.stacked ? 0 : 2;
+                text: "クライアント終了";
+                enabled: root.active;
+                clicked => { UiState.request-quit(); }
+            }
+        }
+        HintText { text: "クライアントを終了しても、ホストの稼働は継続します。"; }
+    }
+}
