@@ -92,6 +92,7 @@ impl ClientSettings {
 }
 enum Control {
     Configure(AvatarSettings),
+    Recenter,
     Restart(AvatarSettings),
     Shutdown,
 }
@@ -127,6 +128,9 @@ impl Controller {
     }
     pub fn restart(&self, settings: AvatarSettings) {
         let _ = self.commands.send(Control::Restart(settings));
+    }
+    pub fn recenter(&self) {
+        let _ = self.commands.send(Control::Recenter);
     }
 }
 impl Controller {
@@ -253,12 +257,14 @@ impl EventSink {
 fn supervise(executable: PathBuf, receiver: Receiver<Control>, sender: EventSink) {
     let mut process = None::<Process>;
     let mut pending = None;
+    let mut recenter = false;
     let mut quitting = false;
     loop {
         match receiver.recv_timeout(Duration::from_millis(25)) {
             Ok(Control::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 quitting = true;
                 pending = None;
+                recenter = false;
                 if let Some(p) = process.as_mut() {
                     p.stop();
                 }
@@ -269,6 +275,7 @@ fn supervise(executable: PathBuf, receiver: Receiver<Control>, sender: EventSink
                     p.stop();
                 }
             }
+            Ok(Control::Recenter) => recenter = true,
             Ok(Control::Configure(settings)) => {
                 if let Some(p) = process.as_mut() {
                     if p.stopping.is_some() {
@@ -284,6 +291,13 @@ fn supervise(executable: PathBuf, receiver: Receiver<Control>, sender: EventSink
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         if let Some(p) = process.as_mut() {
+            if recenter && p.stopping.is_none() {
+                recenter = false;
+                if let Err(error) = p.send(AvatarRequest::Recenter) {
+                    let _ = sender.send(AvatarEvent::Error { message: error });
+                    p.stop();
+                }
+            }
             for event in p.events.try_iter() {
                 let _ = sender.send(event);
             }

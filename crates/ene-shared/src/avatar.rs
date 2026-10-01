@@ -9,9 +9,9 @@ pub struct AvatarSettings {
     pub motion_loop: bool,
     pub visible: bool,
     pub fps: u32,
-    /// Logical surface size relative to the default avatar size.
+    /// Avatar height relative to its default share of the output height.
     pub size_percent: u32,
-    /// Logical margins from the bottom-right of the selected output.
+    /// Signed logical margins from the bottom-right of the selected output.
     pub right: i32,
     pub bottom: i32,
     pub output: Option<String>,
@@ -40,9 +40,6 @@ impl AvatarSettings {
         if !(50..=200).contains(&self.size_percent) {
             return Err("キャラクターの大きさは50〜200%を選んでください。".into());
         }
-        if !(0..=32768).contains(&self.right) || !(0..=32768).contains(&self.bottom) {
-            return Err("キャラクター位置が範囲外です。".into());
-        }
         Ok(())
     }
 }
@@ -50,6 +47,7 @@ impl AvatarSettings {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AvatarRequest {
     Configure { settings: AvatarSettings },
+    Recenter,
     Shutdown,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

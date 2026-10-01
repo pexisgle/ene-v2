@@ -50,6 +50,7 @@ pub struct Renderer {
     pub motion_state: MotionState,
     center: Option<Vec3>,
     distance: f32,
+    body_height: f32,
     fitted: bool,
     pub generation: u64,
     capture_sequence: u64,
@@ -158,6 +159,7 @@ impl Renderer {
             motion_state: MotionState::None,
             center: None,
             distance: 0.,
+            body_height: 0.,
             fitted: false,
             generation: 0,
             capture_sequence: 0,
@@ -202,6 +204,7 @@ impl Renderer {
         self.credit = credit;
         self.center = None;
         self.distance = 0.;
+        self.body_height = 0.;
         self.fitted = false;
         self.set_motion(settings.motion.as_deref());
         Ok(())
@@ -364,22 +367,26 @@ impl Renderer {
                 }
             });
     }
-    pub fn ready(&mut self) -> bool {
+    pub fn ready(&mut self, avatar_height: f32, viewport_height: u32) -> bool {
         if self.model_failed {
             return false;
         }
         let world = self.app.world_mut();
         let initialized = world.get::<Initialized>(self.model).is_some();
-        if initialized {
-            use bevy::camera::primitives::Aabb;
+        if initialized && !self.fitted {
+            use bevy::camera::primitives::MeshAabb;
             let mut minimum = Vec3::splat(f32::INFINITY);
             let mut maximum = Vec3::splat(f32::NEG_INFINITY);
-            // glTF uses DynamicSkinnedMeshBounds: Aabb follows skinned geometry,
-            // not a bind-pose box which can cull hands during a motion.
-            for (bounds, transform) in world
-                .query_filtered::<(&Aabb, &GlobalTransform), With<Mesh3d>>()
-                .iter(world)
-            {
+            let mut query =
+                world.query::<(&Mesh3d, &GlobalTransform, Option<&RestGlobalTransform>)>();
+            let meshes = world.resource::<Assets<Mesh>>();
+            // Frame the undeformed mesh once. Conservative skinned bounds
+            // remain enabled for culling, but must not shrink the displayed body.
+            for (mesh, global, rest) in query.iter(world) {
+                let Some(bounds) = meshes.get(&mesh.0).and_then(MeshAabb::compute_aabb) else {
+                    continue;
+                };
+                let transform = rest.map(|rest| &rest.0).unwrap_or(global);
                 let center: Vec3 = bounds.center.into();
                 let half: Vec3 = bounds.half_extents.into();
                 for x in [-1., 1.] {
@@ -401,25 +408,29 @@ impl Renderer {
                     .and_then(|hips| world.get::<RestGlobalTransform>(**hips))
                     .map(|rest| rest.translation())
                     .unwrap_or((minimum + maximum) * 0.5);
-                let target = *self.center.get_or_insert(anchor);
-                if let Ok((projection, mut transform)) = world
-                    .query_filtered::<(&Projection, &mut Transform), With<AvatarCamera>>()
-                    .single_mut(world)
-                    && let Projection::Perspective(p) = projection
-                {
-                    let tangent = (p.fov * 0.5).tan();
-                    let half = (maximum - target).abs().max((minimum - target).abs());
-                    let needed =
-                        (half.y / tangent).max(half.x / (tangent * p.aspect_ratio)) * 1.2 + half.z;
-                    // A one-way envelope avoids per-frame zoom oscillation.
-                    if !self.fitted || needed > self.distance * 1.01 {
-                        self.distance = (needed * 1.1).max(self.distance).max(0.1);
-                        *transform = Transform::from_translation(target + Vec3::Z * self.distance)
-                            .looking_at(target, Vec3::Y);
-                        self.fitted = true;
-                        self.generation += 1;
-                    }
-                }
+                self.center = Some(anchor);
+                let half = (maximum - anchor).abs().max((minimum - anchor).abs());
+                self.distance = (half.length() * 3.).max(1.);
+                self.body_height = (maximum.y - minimum.y).max(0.01);
+                self.fitted = true;
+            }
+        }
+        if self.fitted
+            && let Ok((mut projection, mut transform)) = world
+                .query_filtered::<(&mut Projection, &mut Transform), With<AvatarCamera>>()
+                .single_mut(world)
+            && let Projection::Perspective(p) = &mut *projection
+        {
+            let fov = 2.
+                * (self.body_height * viewport_height as f32
+                    / (2. * avatar_height * self.distance))
+                    .atan();
+            let target = self.center.unwrap();
+            let translation = target + Vec3::Z * self.distance;
+            if (p.fov - fov).abs() > 0.00001 || transform.translation != translation {
+                p.fov = fov;
+                *transform = Transform::from_translation(translation).looking_at(target, Vec3::Y);
+                self.generation += 1;
             }
         }
         initialized && self.fitted

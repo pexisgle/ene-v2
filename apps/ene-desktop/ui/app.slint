@@ -294,6 +294,7 @@ export component SettingsWindow inherits Window {
     in property <bool> avatar-failed;
     callback select-model;
     callback restart-avatar;
+    callback recenter-avatar;
     in property <bool> tray-ready;
     in property <string> tray-status;
     callback quit;
@@ -336,7 +337,9 @@ export component SettingsWindow inherits Window {
                     LineEdit { text <=> root.avatar-size-text; input-type: number; placeholder-text: "50〜200"; }
                     Text { text: "%"; vertical-alignment: center; }
                 }
-                Text { text: "50〜200%で指定し、「適用して閉じる」で反映します。"; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
+                Text { text: "100%で全身の高さが画面の約40%、200%で約80%になります。「適用して閉じる」で反映します。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
+                Button { text: "キャラクターを画面中央へ戻す"; clicked => { root.recenter-avatar(); } }
+                Text { text: "画面の端を越えてドラッグできます。見失ったときは中央へ戻してください。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; }
                 Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
@@ -372,6 +375,7 @@ export component EneTray inherits SystemTrayIcon {
     in property <bool> avatar-failed;
     callback toggle-avatar;
     callback restart-avatar;
+    callback recenter-avatar;
     callback show-chat;
     callback open-settings;
     callback quit;
@@ -380,6 +384,7 @@ export component EneTray inherits SystemTrayIcon {
         MenuItem { title: "会話を表示"; activated => { root.show-chat(); } }
         MenuItem { title: "設定"; activated => { root.open-settings(); } }
         MenuItem { title: root.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示"; activated => { root.toggle-avatar(); } }
+        MenuItem { title: "キャラクターを画面中央へ戻す"; activated => { root.recenter-avatar(); } }
         MenuItem { title: "描画エラーから再起動"; enabled: root.avatar-failed; activated => { root.restart-avatar(); } }
         MenuSeparator {}
         MenuItem { title: "クライアント終了"; activated => { root.quit(); } }

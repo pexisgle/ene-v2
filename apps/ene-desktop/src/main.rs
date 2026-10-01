@@ -59,12 +59,16 @@ fn bind_tray(
             show_chat(&ui);
         }
     });
-    let weak = settings.as_weak();
     let chat_weak = ui.as_weak();
     tray.on_open_settings(move || {
-        if let (Some(settings), Some(ui)) = (weak.upgrade(), chat_weak.upgrade()) {
-            show_settings(&ui, &settings);
-        }
+        // Let tray menu activation finish before creating/showing a window.
+        // Use the same callback as the chat's Settings button.
+        let chat_weak = chat_weak.clone();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            if let Some(ui) = chat_weak.upgrade() {
+                ui.invoke_open_settings();
+            }
+        });
     });
     tray.on_quit(quit);
     settings.on_quit(quit);
@@ -111,11 +115,14 @@ fn bind_tray(
             } else {
                 "トレイを利用できません。画面を開いたまま使用できます。".into()
             });
-            if let Some(settings) = settings_weak.upgrade() {
+            let settings_visible = if let Some(settings) = settings_weak.upgrade() {
                 settings.set_tray_ready(ready);
                 settings.set_tray_status(ui.get_tray_status());
-            }
-            if !ready && !ui.window().is_visible() {
+                settings.window().is_visible()
+            } else {
+                false
+            };
+            if !ready && !ui.window().is_visible() && !settings_visible {
                 show_chat(&ui);
             }
         },
@@ -201,6 +208,11 @@ fn apply_theme(ui: &ChatWindow, settings: &SettingsWindow, index: i32) {
 }
 
 fn bind_settings(ui: &ChatWindow, settings: &SettingsWindow) {
+    // Prepare the hidden window at startup, including its native adapter,
+    // instead of relying on an earlier visit from the chat window.
+    settings
+        .window()
+        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
     let weak = settings.as_weak();
     let chat_weak = ui.as_weak();
     ui.on_open_settings(move || {
@@ -252,6 +264,9 @@ fn show_settings(ui: &ChatWindow, settings: &SettingsWindow) {
     settings.set_tray_status(ui.get_tray_status());
     if let Err(error) = settings.show() {
         eprintln!("設定画面を表示できません: {error}");
+    } else {
+        settings.window().set_minimized(false);
+        settings.window().request_redraw();
     }
 }
 
@@ -311,6 +326,36 @@ fn bind_avatar(
     let c = controller.clone();
     let config = saved.clone();
     tray.on_restart_avatar(move || c.restart(config.borrow().avatar.clone()));
+    let c = controller.clone();
+    let config = saved.clone();
+    let sw = settings.as_weak();
+    let uw = ui.as_weak();
+    let tw = tray.as_weak();
+    settings.on_recenter_avatar(move || {
+        let mut config = config.borrow_mut();
+        config.avatar.visible = true;
+        if let Some(ui) = uw.upgrade() {
+            ui.set_avatar_visible(true);
+            if let Err(error) = config.save(&avatar::config_path()) {
+                ui.set_avatar_failed(true);
+                ui.set_avatar_status(error.into());
+            }
+        }
+        if let Some(settings) = sw.upgrade() {
+            settings.set_avatar_visible(true);
+        }
+        if let Some(tray) = tw.upgrade() {
+            tray.set_avatar_visible(true);
+        }
+        c.configure(config.avatar.clone());
+        c.recenter();
+    });
+    let sw = settings.as_weak();
+    tray.on_recenter_avatar(move || {
+        if let Some(settings) = sw.upgrade() {
+            settings.invoke_recenter_avatar();
+        }
+    });
     let c = controller.clone();
     let config = saved.clone();
     let sw = settings.as_weak();

@@ -150,6 +150,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         while let Ok(request) = rx.try_recv() {
             match request {
                 None | Some(AvatarRequest::Shutdown) => shutdown = true,
+                Some(AvatarRequest::Recenter) => state.request_recenter(),
                 Some(AvatarRequest::Configure { settings }) => {
                     if let Err(message) = settings.validate() {
                         emit(AvatarEvent::Error { message });
@@ -204,6 +205,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             load_started = Instant::now();
             resume_pending = true;
         }
+        state.apply_recenter();
         if !state.settings.visible {
             if !hidden {
                 // Destroy the mapped role, including queued configure events,
@@ -262,7 +264,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             emit(AvatarEvent::Error { message: error });
             continue;
         }
-        let initialized = renderer.ready();
+        let initialized = renderer.ready(state.avatar_height(), state.height);
         if motion_state != Some(renderer.motion_state) {
             motion_state = Some(renderer.motion_state);
             emit(AvatarEvent::MotionState {

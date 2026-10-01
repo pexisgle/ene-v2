@@ -34,9 +34,6 @@ struct Drag {
     relative_seen: bool,
 }
 
-pub const WIDTH: u32 = 540;
-pub const HEIGHT: u32 = 720;
-
 pub struct State {
     pub registry: RegistryState,
     pub seat: SeatState,
@@ -59,6 +56,7 @@ pub struct State {
     relative_state: RelativePointerState,
     relative_pointer: Option<ZwpRelativePointerV1>,
     drag_pending: bool,
+    recenter_pending: bool,
     input_runs: Vec<Run>,
     surface_output: Option<wl_output::WlOutput>,
 }
@@ -74,7 +72,7 @@ impl State {
         )?;
         let outputs = OutputState::new(globals, qh);
         let shm = Shm::bind(globals, qh)?;
-        let pool = SlotPool::new((WIDTH * HEIGHT * 4) as usize, &shm)?;
+        let pool = SlotPool::new(4, &shm)?;
         let surface = compositor.create_surface(qh);
         let layer = shell.create_layer_surface(qh, surface, Layer::Top, Some("ene-avatar"), None);
         let mut state = Self {
@@ -90,8 +88,8 @@ impl State {
             configured: false,
             closed: false,
             scale: 1,
-            width: WIDTH,
-            height: HEIGHT,
+            width: 1,
+            height: 1,
             resized: false,
             output_changed: false,
             pointer: None,
@@ -99,6 +97,7 @@ impl State {
             relative_state: RelativePointerState::bind(globals, qh),
             relative_pointer: None,
             drag_pending: false,
+            recenter_pending: false,
             input_runs: Vec::new(),
             surface_output: None,
         };
@@ -110,7 +109,7 @@ impl State {
         self.layer.set_anchor(Anchor::BOTTOM | Anchor::RIGHT);
         self.layer
             .set_keyboard_interactivity(KeyboardInteractivity::None);
-        self.layer.set_exclusive_zone(0);
+        self.layer.set_exclusive_zone(-1);
         let size = self.requested_size();
         self.layer.set_size(size.0, size.1);
         if self.configured && (self.width, self.height) != size {
@@ -121,15 +120,15 @@ impl State {
             self.input_runs.clear();
             self.set_input(&[]);
         }
-        let previous = (self.settings.right, self.settings.bottom);
-        self.clamp_position();
-        if previous != (self.settings.right, self.settings.bottom) {
-            self.notify_position();
-        }
         self.layer
             .set_margin(0, self.settings.right, self.settings.bottom, 0);
     }
     fn output_size(&self) -> (i32, i32) {
+        if let Some(output) = &self.surface_output
+            && let Some(size) = self.outputs.info(output).and_then(|info| info.logical_size)
+        {
+            return size;
+        }
         self.outputs
             .outputs()
             .find_map(|o| {
@@ -146,28 +145,41 @@ impl State {
                     }
                 })
             })
-            .unwrap_or((32768, 32768))
+            .unwrap_or((1920, 1080))
+    }
+    pub fn avatar_height(&self) -> f32 {
+        self.output_size().1.max(1) as f32 * 0.4 * self.settings.size_percent as f32 / 100.
     }
     fn requested_size(&self) -> (u32, u32) {
-        let width = WIDTH * self.settings.size_percent / 100;
-        let height = HEIGHT * self.settings.size_percent / 100;
         let output = self.output_size();
-        let fit = (output.0.max(1) as f64 / width as f64)
-            .min(output.1.max(1) as f64 / height as f64)
-            .min(1.0);
+        let height = self.avatar_height() * 2.;
+        // Keep room around the body for motions. Limiting the render target
+        // does not limit the avatar's scale: the camera sets its pixel height.
         (
-            (width as f64 * fit).floor().max(1.0) as u32,
-            (height as f64 * fit).floor().max(1.0) as u32,
+            (height * 4. / 3.)
+                .min(output.0.max(1) as f32)
+                .round()
+                .max(1.) as u32,
+            height.min(output.1.max(1) as f32).round().max(1.) as u32,
         )
     }
-    pub fn clamp_position(&mut self) {
+    pub fn request_recenter(&mut self) {
+        self.recenter_pending = true;
+        self.drag = None;
+        self.drag_pending = false;
+    }
+    pub fn apply_recenter(&mut self) {
+        if !self.recenter_pending || !self.configured {
+            return;
+        }
+        self.recenter_pending = false;
         let size = self.output_size();
-        let (width, height) = self.requested_size();
-        self.settings.right = self.settings.right.clamp(0, (size.0 - width as i32).max(0));
-        self.settings.bottom = self
-            .settings
-            .bottom
-            .clamp(0, (size.1 - height as i32).max(0));
+        self.settings.right = (size.0 - self.width as i32) / 2;
+        self.settings.bottom = (size.1 - self.height as i32) / 2;
+        self.layer
+            .set_margin(0, self.settings.right, self.settings.bottom, 0);
+        self.layer.commit();
+        self.notify_position();
     }
     pub fn recreate(&mut self, qh: &QueueHandle<Self>) {
         let output = self.outputs.outputs().find(|o| {
@@ -218,13 +230,12 @@ impl State {
             (drag.latest.0 - drag.press.0, drag.latest.1 - drag.press.1)
         };
         let desired = (
-            drag.margins.0 - delta.0.round() as i32,
-            drag.margins.1 - delta.1.round() as i32,
+            (f64::from(drag.margins.0) - delta.0).round() as i32,
+            (f64::from(drag.margins.1) - delta.1).round() as i32,
         );
         let previous = (self.settings.right, self.settings.bottom);
         self.settings.right = desired.0;
         self.settings.bottom = desired.1;
-        self.clamp_position();
         if previous != (self.settings.right, self.settings.bottom) {
             self.layer
                 .set_margin(0, self.settings.right, self.settings.bottom, 0);
@@ -322,6 +333,8 @@ impl CompositorHandler for State {
         if surface == self.layer.wl_surface() {
             self.surface_output = Some(output.clone());
             self.settings.output = self.outputs.info(output).and_then(|i| i.name);
+            self.properties();
+            self.layer.commit();
             self.notify_position();
         }
     }
@@ -340,8 +353,6 @@ impl OutputHandler for State {
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        self.clamp_position();
-        self.notify_position();
         if self.settings.visible {
             self.properties();
             self.layer.commit();
@@ -475,8 +486,8 @@ impl PointerHandler for State {
                     self.drag_pending = self.drag.is_some();
                     self.apply_drag();
                     if let Some(drag) = self.drag.take() {
-                        if (self.settings.right - drag.margins.0).abs()
-                            + (self.settings.bottom - drag.margins.1).abs()
+                        if (i64::from(self.settings.right) - i64::from(drag.margins.0)).abs()
+                            + (i64::from(self.settings.bottom) - i64::from(drag.margins.1)).abs()
                             < 4
                         {
                             crate::emit(AvatarEvent::ShowChat);
