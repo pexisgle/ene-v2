@@ -170,6 +170,8 @@ export component SettingsWindow inherits Window {
     in-out property <string> font-family;
     in-out property <int> text-size;
     callback apply-settings;
+    callback commit-avatar-settings() -> bool;
+    commit-avatar-settings => { true }
     in-out property <string> avatar-model;
     in-out property <string> avatar-motion;
     in-out property <bool> motion-playing;
@@ -256,5 +258,66 @@ export component EneTray inherits SystemTrayIcon {
         MenuItem { title: "キャラクターを再起動"; activated => { root.restart-avatar(); } }
         MenuSeparator {}
         MenuItem { title: "クライアント終了"; activated => { root.quit(); } }
+    }
+}
+
+export struct FileEntry {
+    name: string,
+    path: string,
+    directory: bool,
+}
+
+export component FilePickerWindow inherits Window {
+    title: root.picker-title;
+    preferred-width: 640px;
+    preferred-height: 520px;
+    min-width: 420px;
+    min-height: 360px;
+    default-font-family: "Noto Sans CJK JP";
+    in property <string> picker-title;
+    in property <bool> motion;
+    in property <int> request-generation;
+    in property <string> parent-directory;
+    in property <[FileEntry]> entries;
+    in property <string> picker-status;
+    in-out property <string> directory;
+    in-out property <string> selection;
+    callback browse(string);
+    callback open-entry(string, bool);
+    callback accept;
+    callback cancel;
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+        HorizontalBox {
+            padding: 0px;
+            Button { text: "上のフォルダ"; clicked => { root.browse(root.parent-directory); } }
+            LineEdit { text <=> root.directory; horizontal-stretch: 1; accepted => { root.browse(root.directory); } }
+            Button { text: "開く"; clicked => { root.browse(root.directory); } }
+        }
+        ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            VerticalBox {
+                padding: 0px;
+                spacing: 2px;
+                for entry in root.entries : Rectangle {
+                    height: 40px;
+                    vertical-stretch: 0;
+                    background: root.selection == entry.path ? #e8edff : touch.has-hover ? #f3f5fa : #ffffff;
+                    Text { x: 10px; width: parent.width - 20px; text: entry.name; vertical-alignment: center; overflow: elide; }
+                    touch := TouchArea { clicked => { root.open-entry(entry.path, entry.directory); } }
+                }
+            }
+        }
+        Text { text: root.picker-status; wrap: word-wrap; font-size: 12px; color: #536381; }
+        Text { text: "選択するファイル（パスの貼り付けもできます）"; font-size: 13px; }
+        LineEdit { text <=> root.selection; accepted => { root.accept(); } }
+        HorizontalBox {
+            padding: 0px;
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "キャンセル"; clicked => { root.cancel(); } }
+            Button { text: "このファイルを選ぶ"; enabled: root.selection != ""; clicked => { root.accept(); } }
+        }
     }
 }

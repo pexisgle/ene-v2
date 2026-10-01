@@ -152,6 +152,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .max(Duration::from_millis(1))
         };
         event_loop.dispatch(wait, &mut state)?;
+        state.apply_drag();
         connection.flush()?;
         let mut rebuild = state.output_changed;
         state.output_changed = false;
@@ -199,6 +200,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         if rebuild || hidden {
             release_renderer(&mut renderer);
+            motion_state = None;
             state.recreate(&qh);
             revision = 0;
             ready = false;

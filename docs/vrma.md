@@ -43,4 +43,4 @@ just verify
 
 [検証ログ](validation/vrma-2026-10-01.txt)と[リリース版測定](validation/avatar-vrma-resources-2026-10-01.json)を保存します。画像は`target/vrma-pose-0.png`〜`vrma-pose-4.png`と`vrma-dpi2.png`です。
 
-検証環境はSway headlessとMesa Lavapipeです。KDE/KWinの実GPU・実マウス、モーション中に止めたマウスへのfocus更新、混在DPI、KDEのファイル選択、手持ちのVRMAや別VRMでの見た目は実機確認が残ります。音声との同期、対話からのモーション選択、複数クリップのブレンドは今回の実装に含みません。
+検証環境はSway headlessとMesa Lavapipeです。KDE/KWinの実GPU・実マウス、モーション中に止めたマウスへのfocus更新、混在DPI、KDE上でのアプリ内ファイル選択、手持ちのVRMAや別VRMでの見た目は実機確認が残ります。音声との同期、対話からのモーション選択、複数クリップのブレンドは今回の実装に含みません。

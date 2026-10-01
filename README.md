@@ -102,7 +102,7 @@ just fetch-avatar  # 固定コミット・SHA-256を検証して開発用Seed-sa
 just run-desktop  # ene-avatarもビルドし、会話画面とキャラクターを起動
 ```
 
-Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](licenses/Seed-san.md)。モデルはGitへ含めず、`$XDG_CACHE_HOME/ene/models/Seed-san.vrm`（既定`~/.cache/ene/models/Seed-san.vrm`）に置きます。設定の「VRMを選ぶ」で手持ちの埋め込み形式のVRM 1.0を選択できます。ファイル選択には`xdg-desktop-portal`とデスクトップに対応するポータル実装（KDEでは`xdg-desktop-portal-kde`）が必要です。
+Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](licenses/Seed-san.md)。モデルはGitへ含めず、`$XDG_CACHE_HOME/ene/models/Seed-san.vrm`（既定`~/.cache/ene/models/Seed-san.vrm`）に置きます。設定の「VRMを選ぶ」で手持ちの埋め込み形式のVRM 1.0を選択できます。ファイル選択はアプリ内で行い、フォルダ移動とファイルパスの貼り付けに対応します。外部ポータルは不要です。
 
 輪郭内のクリックは会話表示、ドラッグは配置変更です。透明部分はクリック透過し、キーボードフォーカスと作業領域を占有しません。トレイから表示切替・再起動を行えます。初期値30fps、設定で60fpsへ変更できます。非表示時はGPU描画を止めて資源を解放し、再表示時にモデルを読み直します。
 

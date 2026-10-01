@@ -1,5 +1,6 @@
 mod avatar;
 mod chat;
+mod file_picker;
 mod tray;
 
 use std::cell::RefCell;
@@ -21,6 +22,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let settings = SettingsWindow::new()?;
     bind_chat(&ui, mode);
     bind_settings(&ui, &settings);
+    let file_picker = FilePickerWindow::new()?;
+    file_picker::bind(&settings, &file_picker);
 
     let (tray, monitor_timer) = bind_tray(&ui, &settings)?;
     let (avatar, avatar_timer) = bind_avatar(&ui, &settings, &tray);
@@ -33,7 +36,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // join the supervisor while the UI is still alive, rather than relying on
     // the last Rc being dropped during process teardown.
     avatar.shutdown();
-    drop((avatar_timer, avatar, monitor_timer, tray, settings));
+    drop((
+        avatar_timer,
+        avatar,
+        monitor_timer,
+        tray,
+        file_picker,
+        settings,
+    ));
     run_result?;
     Ok(())
 }
@@ -195,15 +205,16 @@ fn bind_settings(ui: &ChatWindow, settings: &SettingsWindow) {
     let chat_weak = ui.as_weak();
     settings.on_apply_settings(move || {
         if let (Some(settings), Some(ui)) = (weak.upgrade(), chat_weak.upgrade()) {
+            if !settings.invoke_commit_avatar_settings() {
+                return;
+            }
             let font = settings.get_font_family();
             if !font.trim().is_empty() {
                 ui.set_font_family(font);
             }
             ui.set_text_size(settings.get_text_size().clamp(12, 28));
             show_chat(&ui);
-            if let Err(error) = settings.hide() {
-                eprintln!("設定画面を閉じられません: {error}");
-            }
+            let _ = settings.hide();
         }
     });
 }
@@ -316,7 +327,7 @@ fn bind_avatar(
     let sw = settings.as_weak();
     let uw = ui.as_weak();
     let tw = tray.as_weak();
-    settings.on_apply_settings(move || {
+    settings.on_commit_avatar_settings(move || {
         if let (Some(settings), Some(ui)) = (sw.upgrade(), uw.upgrade()) {
             let mut updated = config.borrow().clone();
             let font = settings.get_font_family();
@@ -341,7 +352,7 @@ fn bind_avatar(
             };
             if let Err(error) = updated.save(&avatar::config_path()) {
                 settings.set_avatar_status(error.into());
-                return;
+                return false;
             }
             ui.set_avatar_model(updated.avatar.model.clone().into());
             ui.set_avatar_motion(updated.avatar.motion.clone().unwrap_or_default().into());
@@ -349,47 +360,14 @@ fn bind_avatar(
             ui.set_motion_loop(updated.avatar.motion_loop);
             ui.set_avatar_visible(updated.avatar.visible);
             ui.set_avatar_fps_index(i32::from(updated.avatar.fps == 60));
-            ui.set_font_family(updated.font_family.clone().into());
-            ui.set_text_size(updated.text_size);
             if let Some(tray) = tw.upgrade() {
                 tray.set_avatar_visible(updated.avatar.visible);
             }
             c.configure(updated.avatar.clone());
             *config.borrow_mut() = updated;
-            show_chat(&ui);
-            let _ = settings.hide();
+            return true;
         }
-    });
-    let weak = settings.as_weak();
-    settings.on_select_model(move || {
-        let weak = weak.clone();
-        std::thread::spawn(move || {
-            let file = rfd::FileDialog::new()
-                .set_title("VRM 1.0モデルを選択")
-                .add_filter("VRM 1.0", &["vrm"])
-                .pick_file();
-            if let Some(path) = file {
-                let _ = weak.upgrade_in_event_loop(move |settings| {
-                    settings.set_avatar_model(path.to_string_lossy().into_owned().into());
-                });
-            }
-        });
-    });
-    let weak = settings.as_weak();
-    settings.on_select_motion(move || {
-        let weak = weak.clone();
-        std::thread::spawn(move || {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_title("VRMA 1.0モーションを選択")
-                .add_filter("VRMA 1.0", &["vrma"])
-                .pick_file()
-            {
-                let _ = weak.upgrade_in_event_loop(move |settings| {
-                    settings.set_avatar_motion(path.to_string_lossy().into_owned().into());
-                    settings.set_motion_playing(true);
-                });
-            }
-        });
+        false
     });
     let weak = ui.as_weak();
     let sw = settings.as_weak();

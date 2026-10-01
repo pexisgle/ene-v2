@@ -8,6 +8,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        relative_pointer::{RelativeMotionEvent, RelativePointerHandler, RelativePointerState},
     },
     shell::{
         WaylandSurface,
@@ -22,6 +23,16 @@ use wayland_client::{
     Connection, QueueHandle,
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
+
+use smithay_client_toolkit::reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1;
+
+struct Drag {
+    press: (f64, f64),
+    latest: (f64, f64),
+    margins: (i32, i32),
+    delta: (f64, f64),
+    relative_seen: bool,
+}
 
 pub const WIDTH: u32 = 360;
 pub const HEIGHT: u32 = 480;
@@ -44,7 +55,10 @@ pub struct State {
     pub resized: bool,
     pub output_changed: bool,
     pointer: Option<wl_pointer::WlPointer>,
-    drag: Option<((f64, f64), (i32, i32))>,
+    drag: Option<Drag>,
+    relative_state: RelativePointerState,
+    relative_pointer: Option<ZwpRelativePointerV1>,
+    drag_pending: bool,
     input_runs: Vec<Run>,
 }
 impl State {
@@ -81,6 +95,9 @@ impl State {
             output_changed: false,
             pointer: None,
             drag: None,
+            relative_state: RelativePointerState::bind(globals, qh),
+            relative_pointer: None,
+            drag_pending: false,
             input_runs: Vec::new(),
         };
         state.properties();
@@ -148,12 +165,42 @@ impl State {
             output.as_ref(),
         );
         self.drag = None;
+        self.drag_pending = false;
         self.configured = false;
         self.closed = false;
         self.scale = 1;
         self.properties();
         self.empty_input(qh);
         self.layer.commit();
+    }
+    pub fn apply_drag(&mut self) {
+        if !self.drag_pending {
+            return;
+        }
+        self.drag_pending = false;
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let delta = if drag.relative_seen {
+            drag.delta
+        } else {
+            // Without relative motion keep the surface stationary until release,
+            // so all absolute samples still have the press-time coordinate system.
+            (drag.latest.0 - drag.press.0, drag.latest.1 - drag.press.1)
+        };
+        let desired = (
+            drag.margins.0 - delta.0.round() as i32,
+            drag.margins.1 - delta.1.round() as i32,
+        );
+        let previous = (self.settings.right, self.settings.bottom);
+        self.settings.right = desired.0;
+        self.settings.bottom = desired.1;
+        self.clamp_position();
+        if previous != (self.settings.right, self.settings.bottom) {
+            self.layer
+                .set_margin(0, self.settings.right, self.settings.bottom, 0);
+            self.layer.commit();
+        }
     }
     pub fn notify_position(&self) {
         crate::emit(AvatarEvent::PositionChanged {
@@ -291,18 +338,22 @@ impl LayerShellHandler for State {
         if layer != &self.layer {
             return;
         }
-        self.width = if c.new_size.0 == 0 {
+        let width = if c.new_size.0 == 0 {
             WIDTH
         } else {
             c.new_size.0
         };
-        self.height = if c.new_size.1 == 0 {
+        let height = if c.new_size.1 == 0 {
             HEIGHT
         } else {
             c.new_size.1
         };
+        // Margin-only configure events must not clear the input region or
+        // recreate the render target: this was a source of flicker while dragging.
+        self.resized |= (self.width, self.height) != (width, height);
+        self.width = width;
+        self.height = height;
         self.configured = true;
-        self.resized = true;
     }
 }
 impl SeatHandler for State {
@@ -322,7 +373,11 @@ impl SeatHandler for State {
         }
         if c == Capability::Pointer && self.pointer.is_none() {
             match self.seat.get_pointer(qh, &seat) {
-                Ok(pointer) => self.pointer = Some(pointer),
+                Ok(pointer) => {
+                    self.relative_pointer =
+                        self.relative_state.get_relative_pointer(&pointer, qh).ok();
+                    self.pointer = Some(pointer);
+                }
                 Err(error) => eprintln!("could not bind pointer: {error}"),
             }
         }
@@ -337,12 +392,17 @@ impl SeatHandler for State {
         if c == Capability::Pointer
             && let Some(p) = self.pointer.take()
         {
+            if let Some(relative) = self.relative_pointer.take() {
+                relative.destroy();
+            }
             p.release();
             self.drag = None;
+            self.drag_pending = false;
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {
         self.drag = None;
+        self.drag_pending = false;
     }
 }
 impl PointerHandler for State {
@@ -369,23 +429,27 @@ impl PointerHandler for State {
                 PointerEventKind::Press { button: 0x110, .. } => {
                     // Also reject a stale compositor focus after an arm moves
                     // away underneath a stationary mouse cursor.
-                    self.drag = crate::mask::contains(&self.input_runs, event.position)
-                        .then_some((event.position, (self.settings.right, self.settings.bottom)));
+                    self.drag =
+                        crate::mask::contains(&self.input_runs, event.position).then_some(Drag {
+                            press: event.position,
+                            latest: event.position,
+                            margins: (self.settings.right, self.settings.bottom),
+                            delta: (0.0, 0.0),
+                            relative_seen: false,
+                        });
+                    self.drag_pending = false;
                 }
                 PointerEventKind::Motion { .. } => {
-                    if let Some((start, _)) = self.drag {
-                        self.settings.right -= (event.position.0 - start.0).round() as i32;
-                        self.settings.bottom -= (event.position.1 - start.1).round() as i32;
-                        self.clamp_position();
-                        self.layer
-                            .set_margin(0, self.settings.right, self.settings.bottom, 0);
-                        self.layer.commit();
+                    if let Some(drag) = &mut self.drag {
+                        drag.latest = event.position;
                     }
                 }
                 PointerEventKind::Release { button: 0x110, .. } => {
-                    if let Some((_, start)) = self.drag.take() {
-                        if (self.settings.right - start.0).abs()
-                            + (self.settings.bottom - start.1).abs()
+                    self.drag_pending = self.drag.is_some();
+                    self.apply_drag();
+                    if let Some(drag) = self.drag.take() {
+                        if (self.settings.right - drag.margins.0).abs()
+                            + (self.settings.bottom - drag.margins.1).abs()
                             < 4
                         {
                             crate::emit(AvatarEvent::ShowChat);
@@ -400,6 +464,28 @@ impl PointerHandler for State {
                 }
                 _ => {}
             }
+        }
+    }
+}
+impl RelativePointerHandler for State {
+    fn relative_pointer_motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpRelativePointerV1,
+        pointer: &wl_pointer::WlPointer,
+        event: RelativeMotionEvent,
+    ) {
+        if self.pointer.as_ref() != Some(pointer) {
+            return;
+        }
+        if let Some(drag) = &mut self.drag {
+            // Relative movement does not depend on the surface's current origin.
+            // Accumulate subpixel motion, then commit once after dispatch.
+            drag.delta.0 += event.delta.0;
+            drag.delta.1 += event.delta.1;
+            drag.relative_seen = true;
+            self.drag_pending = true;
         }
     }
 }
