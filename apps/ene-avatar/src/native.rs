@@ -60,6 +60,7 @@ pub struct State {
     relative_pointer: Option<ZwpRelativePointerV1>,
     drag_pending: bool,
     input_runs: Vec<Run>,
+    surface_output: Option<wl_output::WlOutput>,
 }
 impl State {
     pub fn new(
@@ -99,6 +100,7 @@ impl State {
             relative_pointer: None,
             drag_pending: false,
             input_runs: Vec::new(),
+            surface_output: None,
         };
         state.properties();
         state.layer.commit();
@@ -194,6 +196,8 @@ impl State {
         self.configured = false;
         self.closed = false;
         self.scale = 1;
+        self.resized = true;
+        self.surface_output = None;
         self.properties();
         self.empty_input(qh);
         self.layer.commit();
@@ -316,6 +320,7 @@ impl CompositorHandler for State {
         output: &wl_output::WlOutput,
     ) {
         if surface == self.layer.wl_surface() {
+            self.surface_output = Some(output.clone());
             self.settings.output = self.outputs.info(output).and_then(|i| i.name);
             self.notify_position();
         }
@@ -342,8 +347,15 @@ impl OutputHandler for State {
             self.layer.commit();
         }
     }
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        self.output_changed = true;
+    fn output_destroyed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        if self.surface_output.as_ref() == Some(&output) {
+            self.output_changed = true;
+        }
     }
 }
 impl LayerShellHandler for State {

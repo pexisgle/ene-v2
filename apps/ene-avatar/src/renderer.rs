@@ -1,6 +1,5 @@
 use bevy::{
     app::{AnimationSystems, PluginsState},
-    asset::io::{AssetSourceBuilder, file::FileAssetReader},
     asset::{AssetPath, LoadState},
     camera::RenderTarget,
     core_pipeline::tonemapping::Tonemapping,
@@ -16,7 +15,7 @@ use bevy::{
 use bevy_vrm1::prelude::*;
 use ene_shared::avatar::{AvatarSettings, MotionState};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -40,7 +39,11 @@ pub struct Renderer {
     handle: Handle<VrmAsset>,
     target: Handle<Image>,
     model: Entity,
+    model_path: String,
+    pub model_failed: bool,
+    pub credit: String,
     motion: Option<(Handle<VrmaAsset>, Entity)>,
+    motion_path: Option<String>,
     motion_started: bool,
     motion_failed: bool,
     motion_started_at: std::time::Instant,
@@ -58,16 +61,7 @@ impl Renderer {
         scale: u32,
         settings: &AvatarSettings,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let path = Path::new(&settings.model);
         let mut app = App::new();
-        // Sources are registered before AssetPlugin. A fixed filesystem source
-        // lets later selections use another directory without rebuilding Bevy.
-        // Only validated, embedded VRMA files are passed to this reader.
-        app.register_asset_source(
-            "motion",
-            AssetSourceBuilder::new(|| Box::new(FileAssetReader::new("/"))),
-        );
-        let parent = path.parent().ok_or("モデルのフォルダがありません")?;
         app.add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -76,7 +70,9 @@ impl Renderer {
                     ..default()
                 })
                 .set(AssetPlugin {
-                    file_path: parent.to_string_lossy().into_owned(),
+                    // Load validated embedded files from any selected folder
+                    // without rebuilding the asset server or GPU environment.
+                    file_path: "/".into(),
                     ..default()
                 })
                 .set(RenderPlugin {
@@ -138,13 +134,7 @@ impl Renderer {
             brightness: 300.0,
             ..default()
         });
-        let handle = app.world().resource::<AssetServer>().load(
-            path.file_name()
-                .ok_or("モデル名がありません")?
-                .to_string_lossy()
-                .into_owned(),
-        );
-        let model = app.world_mut().spawn(VrmHandle(handle.clone())).id();
+        let model = app.world_mut().spawn_empty().id();
         while app.plugins_state() != PluginsState::Ready {
             bevy::tasks::tick_global_task_pools_on_main_thread();
             std::thread::yield_now();
@@ -154,10 +144,14 @@ impl Renderer {
         let mut renderer = Self {
             app,
             captures: Arc::new(Mutex::new(Capture::default())),
-            handle,
+            handle: Handle::default(),
             target,
             model,
+            model_path: String::new(),
+            model_failed: true,
+            credit: String::new(),
             motion: None,
+            motion_path: None,
             motion_started: false,
             motion_failed: false,
             motion_started_at: std::time::Instant::now(),
@@ -168,10 +162,53 @@ impl Renderer {
             generation: 0,
             capture_sequence: 0,
         };
-        renderer.set_motion(settings.motion.as_deref());
+        if let Err(message) = renderer.configure(settings) {
+            crate::emit(ene_shared::avatar::AvatarEvent::Error { message });
+        }
         Ok(renderer)
     }
+    /// Returns true only when a replacement model starts loading.
+    pub fn configure(&mut self, settings: &AvatarSettings) -> Result<bool, String> {
+        if self.model_path != settings.model || self.model_failed {
+            self.set_model(settings)?;
+            return Ok(true);
+        }
+        if self.motion_path != settings.motion || self.motion_failed {
+            self.set_motion(settings.motion.as_deref());
+        }
+        Ok(false)
+    }
+    fn set_model(&mut self, settings: &AvatarSettings) -> Result<(), String> {
+        let path = local_path(&settings.model).map_err(|error| {
+            format!("VRMを読めません: {error}。設定でモデルを選び直してください。")
+        })?;
+        let credit = crate::model::validate(&Path::new("/").join(&path))
+            .map_err(|error| error.to_string())?;
+        // Validate before removing the current model. A bad selection leaves
+        // the existing model usable and can be corrected through Configure.
+        let asset_path = AssetPath::from(path);
+        let server = self.app.world().resource::<AssetServer>();
+        if self.model_failed && self.model_path == settings.model {
+            server.reload(asset_path.clone());
+        }
+        let handle = server.load(asset_path);
+        self.set_motion(None);
+        let world = self.app.world_mut();
+        world.despawn(self.model);
+        self.model = world.spawn(VrmHandle(handle.clone())).id();
+        self.handle = handle;
+        self.model_path = settings.model.clone();
+        self.model_failed = false;
+        self.credit = credit;
+        self.center = None;
+        self.distance = 0.;
+        self.fitted = false;
+        self.set_motion(settings.motion.as_deref());
+        Ok(())
+    }
     pub fn set_motion(&mut self, path: Option<&str>) {
+        let retry = self.motion_failed && self.motion_path.as_deref() == path;
+        self.motion_path = path.map(str::to_owned);
         let world = self.app.world_mut();
         if let Some((_, entity)) = self.motion.take() {
             // ChildOf uses linked despawning: the old skeleton is removed too.
@@ -223,15 +260,18 @@ impl Renderer {
         self.generation += 1;
         let Some(path) = path else { return };
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let path = std::fs::canonicalize(path)?;
-            crate::motion::validate(&path)?;
-            Ok(path.strip_prefix("/")?.to_path_buf())
+            let path = local_path(path)?;
+            crate::motion::validate(&Path::new("/").join(&path))?;
+            Ok(path)
         })();
         match result {
             Ok(path) => {
-                let handle = world
-                    .resource::<AssetServer>()
-                    .load(AssetPath::from(path).with_source("motion"));
+                let asset_path = AssetPath::from(path);
+                let server = world.resource::<AssetServer>();
+                if retry {
+                    server.reload(asset_path.clone());
+                }
+                let handle = server.load(asset_path);
                 let entity = world
                     .spawn((VrmaHandle(handle.clone()), ChildOf(self.model)))
                     .id();
@@ -257,18 +297,30 @@ impl Renderer {
             std::thread::yield_now();
         }
     }
+    pub fn resume(&mut self) {
+        // Drop the wall-clock gap so hidden time never advances animation or
+        // spring physics when updates start again.
+        let world = self.app.world_mut();
+        if let Some(receiver) = world.get_resource::<bevy::time::TimeReceiver>() {
+            for _ in receiver.0.try_iter() {}
+        }
+        world
+            .resource_mut::<Time<Real>>()
+            .update_with_instant(bevy::platform::time::Instant::now());
+        self.motion_started_at = std::time::Instant::now();
+        self.generation += 1;
+    }
     pub fn resize(&mut self, width: u32, height: u32, scale: u32) {
         self.generation += 1;
-        self.app
-            .world_mut()
-            .resource_mut::<Assets<Image>>()
-            .get_mut(&self.target)
-            .unwrap()
-            .resize(bevy::render::render_resource::Extent3d {
-                width: width * scale,
-                height: height * scale,
-                depth_or_array_layers: 1,
-            });
+        let size = bevy::render::render_resource::Extent3d {
+            width: width * scale,
+            height: height * scale,
+            depth_or_array_layers: 1,
+        };
+        let mut images = self.app.world_mut().resource_mut::<Assets<Image>>();
+        if images.get(&self.target).unwrap().texture_descriptor.size != size {
+            images.get_mut(&self.target).unwrap().resize(size);
+        }
         if let Ok(mut projection) = self
             .app
             .world_mut()
@@ -313,6 +365,9 @@ impl Renderer {
             });
     }
     pub fn ready(&mut self) -> bool {
+        if self.model_failed {
+            return false;
+        }
         let world = self.app.world_mut();
         let initialized = world.get::<Initialized>(self.model).is_some();
         if initialized {
@@ -370,6 +425,9 @@ impl Renderer {
         initialized && self.fitted
     }
     pub fn update_motion(&mut self, settings: &AvatarSettings) {
+        if self.model_failed {
+            return;
+        }
         let Some((handle, entity)) = self.motion.as_ref() else {
             return;
         };
@@ -483,15 +541,28 @@ impl Renderer {
             }
         }
     }
-    pub fn load_error(&self) -> Option<String> {
+    pub fn load_error(&mut self) -> Option<String> {
+        if self.model_failed {
+            return None;
+        }
         match self
             .app
             .world()
             .resource::<AssetServer>()
             .get_load_state(self.handle.id())
         {
-            Some(LoadState::Failed(error)) => Some(format!("VRMを読み込めません: {error}")),
+            Some(LoadState::Failed(error)) => {
+                self.model_failed = true;
+                Some(format!(
+                    "VRMを読み込めません: {error}。設定でモデルを選び直してください。"
+                ))
+            }
             _ => None,
         }
     }
+}
+
+fn local_path(path: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = std::fs::canonicalize(path)?;
+    Ok(path.strip_prefix("/")?.to_path_buf())
 }

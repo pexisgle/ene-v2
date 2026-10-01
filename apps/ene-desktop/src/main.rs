@@ -239,6 +239,7 @@ fn show_settings(ui: &ChatWindow, settings: &SettingsWindow) {
     settings.set_theme_index(ui.get_theme_index());
     settings.set_avatar_size_percent(ui.get_avatar_size_percent());
     settings.set_avatar_size_text(ui.get_avatar_size_percent().to_string().into());
+    settings.set_avatar_failed(ui.get_avatar_failed());
     settings.set_font_family(ui.get_font_family());
     settings.set_text_size(ui.get_text_size());
     settings.set_avatar_model(ui.get_avatar_model());
@@ -463,7 +464,11 @@ fn bind_avatar(
         }
         if let Some(settings) = sw.upgrade() {
             settings.set_avatar_status(ui.get_avatar_status());
+            settings.set_avatar_failed(ui.get_avatar_failed());
             settings.set_motion_status(ui.get_motion_status());
+        }
+        if let Some(tray) = tw.upgrade() {
+            tray.set_avatar_failed(ui.get_avatar_failed());
         }
     });
     // A fallback tick also drains startup events queued before the loop starts.

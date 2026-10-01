@@ -13,7 +13,6 @@ use smithay_client_toolkit::{
 use std::{
     error::Error,
     io::{BufRead, Read, Write},
-    path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -112,7 +111,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
     settings.validate()?;
-    let mut credit = model::validate(&PathBuf::from(&settings.model))?;
     let connection = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init(&connection)?;
     let qh = queue.handle();
@@ -128,8 +126,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut ready = false;
     let mut load_started = Instant::now();
     let mut hidden = false;
+    let mut presented = false;
+    let mut resume_pending = false;
     loop {
-        let wait = if !state.settings.visible {
+        let wait = if !state.settings.visible
+            || renderer
+                .as_ref()
+                .is_some_and(|renderer| renderer.model_failed)
+        {
             Duration::from_millis(100)
         } else {
             Duration::from_secs_f64(1.0 / state.settings.fps as f64)
@@ -139,61 +143,89 @@ fn run() -> Result<(), Box<dyn Error>> {
         event_loop.dispatch(wait, &mut state)?;
         state.apply_drag();
         connection.flush()?;
-        let mut rebuild = state.output_changed;
+        let mut remap = state.output_changed || state.closed;
         state.output_changed = false;
+        let mut configure_renderer = false;
         let mut shutdown = false;
         while let Ok(request) = rx.try_recv() {
             match request {
                 None | Some(AvatarRequest::Shutdown) => shutdown = true,
                 Some(AvatarRequest::Configure { settings }) => {
-                    settings.validate()?;
-                    if state.settings.model != settings.model {
-                        credit = model::validate(&PathBuf::from(&settings.model))?;
-                        rebuild = true;
-                    }
-                    if state.settings.motion != settings.motion {
-                        if let Some(renderer) = renderer.as_mut() {
-                            renderer.set_motion(settings.motion.as_deref());
-                        }
-                        motion_state = None;
+                    if let Err(message) = settings.validate() {
+                        emit(AvatarEvent::Error { message });
+                        continue;
                     }
                     if state.settings.output != settings.output {
-                        rebuild = true;
+                        remap = true;
                     }
                     state.settings = settings;
-                    state.properties();
-                    state.layer.commit();
+                    configure_renderer = true;
                 }
             }
         }
         if shutdown {
             break;
         }
-        if state.closed && !rebuild {
-            return Err("キャラクターのWaylandウィンドウが閉じられました。".into());
+        // Coalesce settings to the last request. Model/motion changes update
+        // the existing asset server and GPU instead of rebuilding Bevy.
+        if configure_renderer {
+            if let Some(renderer) = renderer.as_mut() {
+                match renderer.configure(&state.settings) {
+                    Ok(true) => {
+                        ready = false;
+                        load_started = Instant::now();
+                        resume_pending = true;
+                    }
+                    Ok(false) if ready => {
+                        // Selecting the still-active model after a bad choice
+                        // also clears the error without reloading or restarting.
+                        emit(AvatarEvent::Ready {
+                            model: renderer.credit.clone(),
+                        });
+                    }
+                    Ok(false) => {}
+                    Err(message) => emit(AvatarEvent::Error { message }),
+                }
+                motion_state = None;
+            }
+            if !remap {
+                state.properties();
+                state.layer.commit();
+            }
+        }
+        if remap {
+            // Layer-shell fixes the output at creation. Replace only this role;
+            // the renderer, model and animation remain alive.
+            state.recreate(&qh);
+            if let Some(renderer) = renderer.as_mut() {
+                renderer.generation += 1;
+            }
+            presented = false;
+            load_started = Instant::now();
+            resume_pending = true;
         }
         if !state.settings.visible {
             if !hidden {
-                release_renderer(&mut renderer);
                 // Destroy the mapped role, including queued configure events,
                 // rather than unmapping and acknowledging a reset serial.
-                // The replacement layer has no buffer and an empty input region.
+                // Keep GPU/model resources; no updates run while hidden.
                 state.recreate(&qh);
+                if let Some(renderer) = renderer.as_mut() {
+                    renderer.drain_capture();
+                }
                 hidden = true;
+                presented = false;
                 emit(AvatarEvent::VisibilityChanged { visible: false });
             }
             continue;
         }
-        if rebuild || hidden {
-            release_renderer(&mut renderer);
-            motion_state = None;
-            state.recreate(&qh);
-            revision = 0;
-            ready = false;
+        if hidden {
+            resume_pending = true;
             hidden = false;
             load_started = Instant::now();
         }
         if !state.configured {
+            resume_pending = true;
             continue;
         }
         if renderer.is_none() {
@@ -206,10 +238,18 @@ fn run() -> Result<(), Box<dyn Error>> {
             load_started = Instant::now();
         }
         let renderer = renderer.as_mut().unwrap();
+        if renderer.model_failed {
+            continue;
+        }
         if state.resized {
             renderer.resize(state.width, state.height, state.scale);
             state.empty_input(&qh);
             state.resized = false;
+        }
+        if resume_pending {
+            renderer.resume();
+            load_started = Instant::now();
+            resume_pending = false;
         }
         if last_frame.elapsed() < Duration::from_secs_f64(1.0 / state.settings.fps as f64) {
             continue;
@@ -219,7 +259,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         renderer.capture();
         renderer.app.update();
         if let Some(error) = renderer.load_error() {
-            return Err(error.into());
+            emit(AvatarEvent::Error { message: error });
+            continue;
         }
         let initialized = renderer.ready();
         if motion_state != Some(renderer.motion_state) {
@@ -241,17 +282,22 @@ fn run() -> Result<(), Box<dyn Error>> {
             state.present(&captured.rgba, &runs)?;
             if initialized && !runs.is_empty() && !ready {
                 emit(AvatarEvent::Ready {
-                    model: credit.clone(),
+                    model: renderer.credit.clone(),
                 });
-                emit(AvatarEvent::VisibilityChanged { visible: true });
                 ready = true;
+            }
+            if !runs.is_empty() && !presented {
+                emit(AvatarEvent::VisibilityChanged { visible: true });
+                presented = true;
             }
         }
         if !ready && load_started.elapsed() > Duration::from_secs(90) {
-            return Err(
-                "モデルの表示が90秒以内に完了しませんでした。GPU・モデルを確認してください。"
-                    .into(),
-            );
+            renderer.model_failed = true;
+            emit(AvatarEvent::Error {
+                message:
+                    "モデルの表示が90秒以内に完了しませんでした。設定でモデルを選び直してください。"
+                        .into(),
+            });
         }
     }
     release_renderer(&mut renderer);

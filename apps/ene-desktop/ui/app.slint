@@ -170,6 +170,7 @@ export component ChatWindow inherits Window {
         if root.avatar-failed : HorizontalBox {
             padding: 4px;
             Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; horizontal-stretch: 1; }
+            Button { text: "設定"; clicked => { root.open-settings(); } }
             Button { text: "再起動"; clicked => { root.restart-avatar(); } }
         }
         if root.motion-failed : HorizontalBox {
@@ -290,6 +291,7 @@ export component SettingsWindow inherits Window {
     in-out property <int> avatar-size-percent: 100;
     in-out property <string> avatar-size-text: root.avatar-size-percent;
     in property <string> avatar-status;
+    in property <bool> avatar-failed;
     callback select-model;
     callback restart-avatar;
     in property <bool> tray-ready;
@@ -350,7 +352,7 @@ export component SettingsWindow inherits Window {
                 }
                 Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: "モーションはその場で再生します。横移動を固定し、上下の動きと回転を保ちます。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                Button { text: "キャラクターを再起動"; clicked => { root.restart-avatar(); } }
+                if root.avatar-failed : Button { text: "描画エラーから再起動"; clicked => { root.restart-avatar(); } }
                 Text { text: "表示設定とキャラクターの配置はこの端末に保存します。"; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; font-size: 12px; }
                 Text { text: root.tray-status; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; }
                 if !root.tray-ready : Button { text: "クライアント終了"; clicked => { root.quit(); } }
@@ -367,6 +369,7 @@ export component EneTray inherits SystemTrayIcon {
     title: "ene";
     tooltip: "ene — クリックして会話を表示";
     in property <bool> avatar-visible;
+    in property <bool> avatar-failed;
     callback toggle-avatar;
     callback restart-avatar;
     callback show-chat;
@@ -377,7 +380,7 @@ export component EneTray inherits SystemTrayIcon {
         MenuItem { title: "会話を表示"; activated => { root.show-chat(); } }
         MenuItem { title: "設定"; activated => { root.open-settings(); } }
         MenuItem { title: root.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示"; activated => { root.toggle-avatar(); } }
-        MenuItem { title: "キャラクターを再起動"; activated => { root.restart-avatar(); } }
+        MenuItem { title: "描画エラーから再起動"; enabled: root.avatar-failed; activated => { root.restart-avatar(); } }
         MenuSeparator {}
         MenuItem { title: "クライアント終了"; activated => { root.quit(); } }
     }
