@@ -1,19 +1,25 @@
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
-use ene_shared::avatar::{AvatarEvent, AvatarRequest, AvatarSettings, MAX_IPC_LINE};
+use ene_shared::avatar::{AvatarEvent, AvatarRequest, AvatarSettings};
+use ene_shared::ipc;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{BufRead, Read, Write},
-    os::unix::fs::OpenOptionsExt,
+    io::Write,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::Stdio,
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver, Sender},
     },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    thread::JoinHandle,
+    time::Duration,
 };
+use tokio::{
+    process::Command,
+    sync::{mpsc as channel, watch},
+};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -26,16 +32,14 @@ pub struct ClientSettings {
 impl Default for ClientSettings {
     fn default() -> Self {
         let mut avatar = AvatarSettings::default();
-        let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".cache"));
+        let cache = ene_shared::paths::cache();
         avatar.model = cache
-            .join("ene/models/Seed-san.vrm")
+            .join("models/Seed-san.vrm")
             .to_string_lossy()
             .into_owned();
         avatar.motion = Some(
             cache
-                .join("ene/motions/three-vrm-sample.vrma")
+                .join("motions/three-vrm-sample.vrma")
                 .to_string_lossy()
                 .into_owned(),
         );
@@ -47,16 +51,8 @@ impl Default for ClientSettings {
         }
     }
 }
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
 pub fn config_path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"))
-        .join("ene/client.json")
+    ene_shared::paths::config().join("client.json")
 }
 impl ClientSettings {
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -76,7 +72,11 @@ impl ClientSettings {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.avatar.validate()?;
         let directory = path.parent().ok_or("設定フォルダがありません")?;
-        fs::create_dir_all(directory).map_err(|e| format!("設定フォルダを作れません: {e}"))?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)
+            .map_err(|e| format!("設定フォルダを作れません: {e}"))?;
         let result = (|| -> std::io::Result<()> {
             let mut file = AtomicWriteFile::options()
                 .mode(0o600)
@@ -91,13 +91,13 @@ impl ClientSettings {
     }
 }
 enum Control {
-    Configure(AvatarSettings),
     Recenter,
-    Restart(AvatarSettings),
+    Restart,
     Shutdown,
 }
 pub struct Controller {
-    commands: Sender<Control>,
+    commands: channel::UnboundedSender<Control>,
+    settings: watch::Sender<Option<AvatarSettings>>,
     pub events: Receiver<AvatarEvent>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -113,27 +113,38 @@ impl Controller {
         Self::with_notifier(executable, Some(Arc::new(wake)))
     }
     fn with_notifier(executable: PathBuf, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
-        let (commands, receiver) = mpsc::channel();
+        let (commands, receiver) = channel::unbounded_channel();
+        let (settings, updates) = watch::channel(None);
         let (sender, events) = mpsc::channel();
-        let worker =
-            thread::spawn(move || supervise(executable, receiver, EventSink { sender, wake }));
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("avatar runtime");
+            runtime.block_on(supervise(
+                executable,
+                receiver,
+                updates,
+                EventSink { sender, wake },
+            ));
+        });
         Self {
             commands,
+            settings,
             events,
             worker: Mutex::new(Some(worker)),
         }
     }
     pub fn configure(&self, settings: AvatarSettings) {
-        let _ = self.commands.send(Control::Configure(settings));
+        self.settings.send_replace(Some(settings));
     }
     pub fn restart(&self, settings: AvatarSettings) {
-        let _ = self.commands.send(Control::Restart(settings));
+        self.configure(settings);
+        let _ = self.commands.send(Control::Restart);
     }
     pub fn recenter(&self) {
         let _ = self.commands.send(Control::Recenter);
     }
-}
-impl Controller {
     pub fn shutdown(&self) {
         let _ = self.commands.send(Control::Shutdown);
         if let Some(worker) = self.worker.lock().unwrap().take() {
@@ -146,205 +157,167 @@ impl Drop for Controller {
         self.shutdown();
     }
 }
-struct Process {
-    child: Child,
-    input: ChildStdin,
-    events: Receiver<AvatarEvent>,
-    reader: JoinHandle<()>,
-    stopping: Option<Instant>,
-}
-impl Process {
-    fn start(executable: &Path, settings: AvatarSettings) -> Result<Self, String> {
-        let mut child = Command::new(executable)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                format!("キャラクターを起動できません: {e}（ene-avatarをビルドしてください）")
-            })?;
-        let input = child.stdin.take().unwrap();
-        use std::os::fd::AsRawFd;
-        // SAFETY: input owns a live pipe FD; only its file status flags change.
-        let flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
-        // SAFETY: the owned pipe is still live, and O_NONBLOCK prevents a stuck
-        // renderer from blocking the supervisor's independent shutdown deadline.
-        if flags < 0
-            || unsafe { libc::fcntl(input.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
-                < 0
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("描画IPCを非同期にできません。".into());
-        }
-        let stdout = child.stdout.take().unwrap();
-        let (sender, events) = mpsc::channel();
-        let reader = thread::spawn(move || {
-            let mut reader = std::io::BufReader::new(stdout);
-            loop {
-                let mut line = Vec::new();
-                match (&mut reader)
-                    .take((MAX_IPC_LINE + 1) as u64)
-                    .read_until(b'\n', &mut line)
-                {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) if line.len() <= MAX_IPC_LINE => match serde_json::from_slice(&line) {
-                        Ok(event) => {
-                            if sender.send(event).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = sender.send(AvatarEvent::Error {
-                                message: format!("描画プロセスの応答が不正です: {e}"),
-                            });
-                            break;
-                        }
-                    },
-                    _ => {
-                        let _ = sender.send(AvatarEvent::Error {
-                            message: "描画プロセスの応答が大きすぎます。".into(),
-                        });
-                        break;
-                    }
-                }
-            }
-        });
-        let mut process = Self {
-            child,
-            input,
-            events,
-            reader,
-            stopping: None,
-        };
-        if let Err(error) = process.send(AvatarRequest::Configure { settings }) {
-            process.kill_and_reap();
-            return Err(error);
-        }
-        Ok(process)
-    }
-    fn send(&mut self, request: AvatarRequest) -> Result<(), String> {
-        serde_json::to_writer(&mut self.input, &request).map_err(|e| e.to_string())?;
-        self.input
-            .write_all(b"\n")
-            .and_then(|_| self.input.flush())
-            .map_err(|e| e.to_string())
-    }
-    fn stop(&mut self) {
-        if self.stopping.is_none() {
-            self.stopping = Some(Instant::now());
-            let _ = self.send(AvatarRequest::Shutdown);
-        }
-    }
-    fn kill_and_reap(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 struct EventSink {
     sender: Sender<AvatarEvent>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 impl EventSink {
-    fn send(&self, event: AvatarEvent) -> Result<(), mpsc::SendError<AvatarEvent>> {
-        self.sender.send(event)?;
+    fn send(&self, event: AvatarEvent) {
+        let _ = self.sender.send(event);
         if let Some(wake) = &self.wake {
             wake();
         }
-        Ok(())
+    }
+    fn error(&self, error: impl std::fmt::Display) {
+        self.send(AvatarEvent::Error {
+            message: error.to_string(),
+        });
     }
 }
-fn supervise(executable: PathBuf, receiver: Receiver<Control>, sender: EventSink) {
-    let mut process = None::<Process>;
-    let mut pending = None;
-    let mut recenter = false;
-    let mut quitting = false;
+async fn write_requests(
+    input: tokio::process::ChildStdin,
+    mut settings: watch::Receiver<AvatarSettings>,
+    mut centers: channel::Receiver<()>,
+    stop: CancellationToken,
+) -> Result<(), ipc::Error> {
+    let mut output = ipc::Writer::new(input);
+    let mut request = AvatarRequest::Configure {
+        settings: settings.borrow_and_update().clone(),
+    };
     loop {
-        match receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(Control::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                quitting = true;
-                pending = None;
-                recenter = false;
-                if let Some(p) = process.as_mut() {
-                    p.stop();
-                }
-            }
-            Ok(Control::Restart(settings)) => {
-                pending = Some(settings);
-                if let Some(p) = process.as_mut() {
-                    p.stop();
-                }
-            }
-            Ok(Control::Recenter) => recenter = true,
-            Ok(Control::Configure(settings)) => {
-                if let Some(p) = process.as_mut() {
-                    if p.stopping.is_some() {
-                        pending = Some(settings);
-                    } else if let Err(error) = p.send(AvatarRequest::Configure { settings }) {
-                        let _ = sender.send(AvatarEvent::Error { message: error });
-                        p.stop();
-                    }
-                } else {
-                    pending = Some(settings);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        // Cancelling a partially sent line drops the pipe. It is never reused.
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return Ok(()),
+            result = output.send(&request) => result?,
         }
-        if let Some(p) = process.as_mut() {
-            if recenter && p.stopping.is_none() {
-                recenter = false;
-                if let Err(error) = p.send(AvatarRequest::Recenter) {
-                    let _ = sender.send(AvatarEvent::Error { message: error });
-                    p.stop();
-                }
+        request = tokio::select! {
+            biased;
+            _ = stop.cancelled() => {
+                // This branch is reached between complete writes.
+                tokio::time::timeout(Duration::from_millis(100), output.send(&AvatarRequest::Shutdown)).await.ok();
+                return Ok(());
             }
-            for event in p.events.try_iter() {
-                let _ = sender.send(event);
+            result = settings.changed() => {
+                if result.is_err() { return Ok(()); }
+                AvatarRequest::Configure { settings: settings.borrow_and_update().clone() }
             }
-            if p.stopping
-                .is_some_and(|t| t.elapsed() >= Duration::from_secs(3))
-            {
-                p.kill_and_reap();
-            }
-            match p.child.try_wait() {
-                Ok(Some(status)) => {
-                    if p.stopping.is_none() {
-                        let _ = sender.send(AvatarEvent::Error {
-                            message: format!(
-                                "キャラクターが終了しました（{status}）。再起動できます。"
-                            ),
-                        });
-                    }
-                    let p = process.take().unwrap();
-                    let _ = p.reader.join();
-                    // Drain any final error produced just before exit.
-                    for event in p.events.try_iter() {
-                        let _ = sender.send(event);
-                    }
+            Some(()) = centers.recv() => AvatarRequest::Recenter,
+        };
+    }
+}
+async fn supervise(
+    executable: PathBuf,
+    mut controls: channel::UnboundedReceiver<Control>,
+    mut updates: watch::Receiver<Option<AvatarSettings>>,
+    sink: EventSink,
+) {
+    let mut pending = None;
+    let mut center = false;
+    loop {
+        while pending.is_none() {
+            tokio::select! {
+                biased;
+                command = controls.recv() => match command {
+                    None | Some(Control::Shutdown) => return,
+                    Some(Control::Recenter) => center = true,
+                    Some(Control::Restart) => pending = updates.borrow_and_update().clone(),
+                },
+                changed = updates.changed() => {
+                    if changed.is_err() { return; }
+                    pending = updates.borrow_and_update().clone();
                 }
-                Err(e) => {
-                    let _ = sender.send(AvatarEvent::Error {
-                        message: e.to_string(),
-                    });
-                    p.kill_and_reap();
-                    let p = process.take().unwrap();
-                    let _ = p.reader.join();
-                }
-                _ => {}
             }
         }
-        if process.is_none() {
-            if quitting {
-                break;
+        let settings = pending.take().unwrap();
+        let mut child = match Command::new(&executable)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                sink.error(format!("キャラクターを起動できません: {error}"));
+                continue;
             }
-            if let Some(settings) = pending.take() {
-                match Process::start(&executable, settings) {
-                    Ok(p) => process = Some(p),
-                    Err(error) => {
-                        let _ = sender.send(AvatarEvent::Error { message: error });
-                    }
+        };
+        let (configuration, incoming) = watch::channel(settings);
+        let (centers, outgoing) = channel::channel(1);
+        if center {
+            let _ = centers.try_send(());
+            center = false;
+        }
+        let stop = CancellationToken::new();
+        let mut writer = tokio::spawn(write_requests(
+            child.stdin.take().unwrap(),
+            incoming,
+            outgoing,
+            stop.clone(),
+        ));
+        let mut reader = ipc::Reader::new(child.stdout.take().unwrap());
+        let mut quitting = false;
+        let mut exited = false;
+        let mut writer_finished = false;
+        loop {
+            tokio::select! {
+                biased;
+                command = controls.recv() => match command {
+                    None | Some(Control::Shutdown) => { quitting = true; break; }
+                    Some(Control::Restart) => { pending = updates.borrow_and_update().clone(); break; }
+                    Some(Control::Recenter) => { let _ = centers.try_send(()); }
+                },
+                result = child.wait() => {
+                    exited = result.is_ok();
+                    match result { Ok(status) => sink.error(format!("キャラクターが終了しました（{status}）。再起動できます。")), Err(error) => sink.error(error) }
+                    break;
+                }
+                result = &mut writer => {
+                    writer_finished = true;
+                    match result { Ok(Err(error)) => sink.error(error), Err(error) => sink.error(error), _ => {} }
+                    break;
+                }
+                event = reader.receive::<AvatarEvent>() => match event {
+                    Ok(Some(event)) => sink.send(event),
+                    Ok(None) => { sink.error("描画IPCが切断されました。"); break; }
+                    Err(error) => { sink.error(error); break; }
+                },
+                changed = updates.changed() => {
+                    if changed.is_err() { quitting = true; break; }
+                    if let Some(settings) = updates.borrow_and_update().clone() { configuration.send_replace(settings); }
                 }
             }
+        }
+        // The deadline includes any pending pipe write; shutdown never queues
+        // behind configuration. EOF also releases the renderer's input wait.
+        stop.cancel();
+        if !exited
+            && !matches!(
+                tokio::time::timeout(Duration::from_secs(3), child.wait()).await,
+                Ok(Ok(_))
+            )
+        {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        if !writer_finished {
+            writer.abort();
+            let _ = writer.await;
+        }
+        if quitting {
+            return;
+        }
+        // A shutdown received during restart prevents spawning another child.
+        while let Ok(command) = controls.try_recv() {
+            match command {
+                Control::Shutdown => return,
+                Control::Restart => pending = updates.borrow_and_update().clone(),
+                Control::Recenter => center = true,
+            }
+        }
+        if pending.is_some() {
+            pending = updates.borrow_and_update().clone();
         }
     }
 }
@@ -355,8 +328,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     #[test]
     fn saved_configuration_preserves_unicode_position_and_permissions() {
-        let directory = std::env::temp_dir().join(format!("ene-settings-{}", std::process::id()));
-        let path = directory.join("client.json");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("client.json");
         let mut settings = ClientSettings::default();
         settings.avatar.model = "/tmp/日本語モデル.vrm".into();
         settings.avatar.motion = Some("/tmp/挨拶.vrma".into());
@@ -374,6 +347,162 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture(body: &str) -> (tempfile::TempDir, Controller) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("renderer");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '{{\"type\":\"ready\",\"model\":\"%s\"}}\\n' \"$$\"\n{body}\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        (directory, Controller::with_notifier(path, None))
+    }
+    fn pid(controller: &Controller) -> i32 {
+        loop {
+            match controller
+                .events
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+            {
+                AvatarEvent::Ready { model } => return model.parse().unwrap(),
+                AvatarEvent::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+    }
+    fn reaped(pid: i32) {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "child {pid} was not reaped"
+        );
+    }
+    #[test]
+    fn blocked_reader_and_restart_shutdown_race_still_kill_and_reap() {
+        let (_directory, controller) = fixture("exec sleep 60");
+        controller.configure(AvatarSettings {
+            model: "a".repeat(40_000),
+            ..Default::default()
+        });
+        let child = pid(&controller);
+        for index in 0..1000 {
+            controller.configure(AvatarSettings {
+                right: index,
+                model: "a".repeat(40_000),
+                ..Default::default()
+            });
+        }
+        let started = std::time::Instant::now();
+        controller.restart(AvatarSettings::default());
+        controller.shutdown();
+        assert!(started.elapsed() < Duration::from_millis(3500));
+        reaped(child);
+        // Shutdown is idempotent, including Drop.
+        controller.shutdown();
+    }
+    #[test]
+    fn invalid_response_and_abnormal_exit_stop_the_child_and_allow_restart() {
+        let (_directory, controller) = fixture("printf 'invalid-json\\n'; exec sleep 60");
+        controller.configure(AvatarSettings::default());
+        let first = pid(&controller);
+        assert!(matches!(
+            controller
+                .events
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            AvatarEvent::Error { .. }
+        ));
+        controller.restart(AvatarSettings::default());
+        let second = pid(&controller);
+        reaped(first);
+        assert_ne!(first, second);
+        controller.shutdown();
+        reaped(second);
+        let (_directory, controller) = fixture("exit 7");
+        controller.configure(AvatarSettings::default());
+        // Exit can win the select before the ready frame, but must report a failure.
+        assert!((0..2).any(|_| {
+            matches!(
+                controller
+                    .events
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap(),
+                AvatarEvent::Error { .. }
+            )
+        }));
+        controller.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+    #[tokio::test]
+    async fn updates_while_a_write_is_blocked_collapse_to_the_latest_settings() {
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let settings = AvatarSettings {
+            model: "a".repeat(40_000),
+            ..Default::default()
+        };
+        let (updates, incoming) = watch::channel(settings.clone());
+        let (center, outgoing) = channel::channel(1);
+        let stop = CancellationToken::new();
+        let writer = tokio::spawn(write_requests(
+            child.stdin.take().unwrap(),
+            incoming,
+            outgoing,
+            stop.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        for right in 1..=1000 {
+            updates.send_replace(AvatarSettings {
+                right,
+                ..settings.clone()
+            });
+        }
+        let mut reader = ipc::Reader::new(child.stdout.take().unwrap());
+        let read = async {
+            let Some(AvatarRequest::Configure { settings: first }) =
+                reader.receive().await.unwrap()
+            else {
+                panic!("initial configuration missing");
+            };
+            assert_eq!(first.right, settings.right);
+            let Some(AvatarRequest::Configure {
+                settings: final_settings,
+            }) = reader.receive().await.unwrap()
+            else {
+                panic!("latest configuration missing");
+            };
+            assert_eq!(final_settings.right, 1000);
+            center.send(()).await.unwrap();
+            assert!(matches!(
+                reader.receive::<AvatarRequest>().await.unwrap(),
+                Some(AvatarRequest::Recenter)
+            ));
+        };
+        tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .unwrap();
+        stop.cancel();
+        writer.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

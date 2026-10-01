@@ -1,187 +1,139 @@
-//! In-app model selection; does not depend on a desktop portal or external dialog.
-use crate::{FileEntry, FilePickerWindow, SettingsWindow};
+//! OS file chooser; cancellation leaves the settings draft untouched.
+use crate::SettingsWindow;
+use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 use slint::ComponentHandle;
-use std::path::{Path, PathBuf};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-pub fn bind(settings: &SettingsWindow, picker: &FilePickerWindow) {
-    let weak = picker.as_weak();
-    picker.on_browse(move |folder| {
-        let Some(picker) = weak.upgrade() else { return };
-        let generation = picker.get_request_generation().wrapping_add(1);
-        picker.set_request_generation(generation);
-        picker.set_picker_status("フォルダを読み込んでいます…".into());
-        picker.set_entries(slint::ModelRc::default());
-        let motion = picker.get_motion();
-        let weak = picker.as_weak();
-        let folder = folder.to_string();
-        std::thread::spawn(move || {
-            let listing = list(&folder, motion);
-            let _ = weak.upgrade_in_event_loop(move |picker| {
-                if picker.get_request_generation() != generation {
-                    return;
-                }
-                match listing {
-                    Ok((directory, entries)) => {
-                        picker.set_directory(directory.to_string_lossy().into_owned().into());
-                        picker.set_parent_directory(
-                            directory
-                                .parent()
-                                .unwrap_or(&directory)
-                                .to_string_lossy()
-                                .into_owned()
-                                .into(),
-                        );
-                        picker.set_entries(slint::ModelRc::new(slint::VecModel::from(
-                            entries
-                                .into_iter()
-                                .map(|(name, path, directory)| FileEntry {
-                                    name: name.into(),
-                                    path: path.into(),
-                                    directory,
-                                })
-                                .collect::<Vec<_>>(),
-                        )));
-                        picker.set_picker_status(
-                            "ファイルを選ぶか、下の欄にパスを貼り付けてください。".into(),
-                        );
-                    }
-                    Err(message) => picker.set_picker_status(message.into()),
-                }
-            });
-        });
-    });
-    let weak = picker.as_weak();
-    picker.on_open_entry(move |path, directory| {
-        if let Some(picker) = weak.upgrade() {
-            if directory {
-                picker.invoke_browse(path);
-            } else {
-                picker.set_selection(path);
+pub fn bind(settings: &SettingsWindow) {
+    let active = Arc::new(AtomicBool::new(false));
+    for motion in [false, true] {
+        let weak = settings.as_weak();
+        let active = active.clone();
+        let callback = move || {
+            if active.swap(true, Ordering::AcqRel) {
+                return;
             }
-        }
-    });
-    let weak = picker.as_weak();
-    let sw = settings.as_weak();
-    picker.on_accept(move || {
-        let (Some(picker), Some(settings)) = (weak.upgrade(), sw.upgrade()) else {
-            return;
+            let Some(settings) = weak.upgrade() else {
+                active.store(false, Ordering::Release);
+                return;
+            };
+            settings.set_apply_error("".into());
+            let weak = weak.clone();
+            let active = active.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                let result = match runtime {
+                    Ok(runtime) => runtime.block_on(select(motion)),
+                    Err(error) => Err(format!("ファイル選択を開始できません: {error}")),
+                };
+                let _ = weak.upgrade_in_event_loop(move |settings| {
+                    active.store(false, Ordering::Release);
+                    match result {
+                        Ok(Some(path)) if motion => {
+                            settings.set_avatar_motion(path.into());
+                            settings.set_motion_playing(true);
+                        }
+                        Ok(Some(path)) => settings.set_avatar_model(path.into()),
+                        Ok(None) => {}
+                        Err(error) => settings.set_apply_error(error.into()),
+                    }
+                });
+            });
         };
-        let path = PathBuf::from(picker.get_selection().as_str());
-        let extension = if picker.get_motion() { "vrma" } else { "vrm" };
-        if !path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(extension))
-            || !path.is_file()
-        {
-            picker.set_picker_status(
-                format!("存在する .{extension} ファイルを選んでください。").into(),
-            );
-            return;
-        }
-        let Ok(path) = path.canonicalize() else {
-            picker.set_picker_status("ファイルの場所を確認できません。".into());
-            return;
-        };
-        if picker.get_motion() {
-            settings.set_avatar_motion(path.to_string_lossy().into_owned().into());
-            settings.set_motion_playing(true);
-        } else {
-            settings.set_avatar_model(path.to_string_lossy().into_owned().into());
-        }
-        let _ = picker.hide();
-    });
-    let weak = picker.as_weak();
-    picker.on_cancel(move || {
-        if let Some(picker) = weak.upgrade() {
-            let _ = picker.hide();
-        }
-    });
-    picker
-        .window()
-        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
-    let weak = picker.as_weak();
-    let sw = settings.as_weak();
-    settings.on_select_model(move || {
-        if let (Some(picker), Some(settings)) = (weak.upgrade(), sw.upgrade()) {
-            open(&picker, &settings, false);
-        }
-    });
-    let weak = picker.as_weak();
-    let sw = settings.as_weak();
-    settings.on_select_motion(move || {
-        if let (Some(picker), Some(settings)) = (weak.upgrade(), sw.upgrade()) {
-            open(&picker, &settings, true);
-        }
-    });
-}
-
-fn open(picker: &FilePickerWindow, settings: &SettingsWindow, motion: bool) {
-    picker
-        .global::<crate::Palette>()
-        .set_color_scheme(settings.global::<crate::Palette>().get_color_scheme());
-    picker.set_motion(motion);
-    picker.set_picker_title(
         if motion {
+            settings.on_select_motion(callback);
+        } else {
+            settings.on_select_model(callback);
+        }
+    }
+}
+async fn select(motion: bool) -> Result<Option<String>, String> {
+    let extension = if motion { "vrma" } else { "vrm" };
+    let response = SelectedFiles::open_file()
+        .title(if motion {
             "VRMA 1.0モーションを選択"
         } else {
             "VRM 1.0モデルを選択"
-        }
-        .into(),
-    );
-    let selection = if motion {
-        settings.get_avatar_motion()
-    } else {
-        settings.get_avatar_model()
+        })
+        .multiple(false)
+        .filter(
+            FileFilter::new(extension)
+                .glob(&format!("*.{extension}"))
+                .glob(&format!("*.{}", extension.to_uppercase())),
+        )
+        .send()
+        .await
+        .and_then(|request| request.response());
+    selection(response, extension)
+}
+fn selection(
+    response: Result<SelectedFiles, ashpd::Error>,
+    extension: &str,
+) -> Result<Option<String>, String> {
+    let files = match response {
+        Ok(files) => files,
+        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => return Ok(None),
+        Err(error) => return Err(format!("ファイル選択ポータルを利用できません: {error}")),
     };
-    picker.set_selection(selection.clone());
-    let path = Path::new(selection.as_str());
-    let directory = path
-        .parent()
-        .filter(|p| p.is_dir())
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    if let Err(error) = picker.show() {
-        settings.set_avatar_status(format!("ファイル選択画面を開けません: {error}").into());
-        return;
+    let uri = files
+        .uris()
+        .first()
+        .ok_or("ファイルが選択されていません。")?;
+    local_path(uri, extension).map(Some)
+}
+fn local_path(uri: &ashpd::Uri, extension: &str) -> Result<String, String> {
+    let path: PathBuf = url::Url::parse(uri.as_str())
+        .map_err(|_| "ファイルURIが不正です。")?
+        .to_file_path()
+        .map_err(|_| "ローカルファイルを選択してください。")?;
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+        || !path.is_file()
+    {
+        return Err(format!("存在する .{extension} ファイルを選んでください。"));
     }
-    picker.invoke_browse(directory.to_string_lossy().into_owned().into());
+    path.canonicalize()
+        .map_err(|e| e.to_string())?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "UTF-8のファイル名を選択してください。".into())
 }
 
-type Entry = (String, String, bool);
-fn list(folder: &str, motion: bool) -> Result<(PathBuf, Vec<Entry>), String> {
-    let folder = Path::new(folder)
-        .canonicalize()
-        .map_err(|_| "フォルダの場所を確認できません。".to_string())?;
-    let entries = std::fs::read_dir(&folder).map_err(|_| {
-        "フォルダを読み込めません。場所とアクセス権を確認してください。".to_string()
-    })?;
-    let extension = if motion { "vrma" } else { "vrm" };
-    let mut result = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|_| "フォルダ内の項目を読み込めません。".to_string())?;
-        let path = entry.path();
-        let directory = path.is_dir();
-        if !directory
-            && (!path.is_file()
-                || !path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(extension)))
-        {
-            continue;
-        }
-        let (Some(name), Some(path)) = (
-            entry.file_name().to_str().map(str::to_owned),
-            path.to_str().map(str::to_owned),
-        ) else {
-            continue;
-        };
-        result.push((
-            if directory { format!("{name}/") } else { name },
-            path,
-            directory,
-        ));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancelled_portal_and_failures_are_distinct_and_japanese_paths_survive() {
+        use ashpd::desktop::ResponseError;
+        assert!(
+            selection(Err(ashpd::Error::Response(ResponseError::Cancelled)), "vrm")
+                .unwrap()
+                .is_none()
+        );
+        assert!(selection(Err(ashpd::Error::Response(ResponseError::Other)), "vrm").is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("日本語 モデル.vrm");
+        std::fs::write(&path, []).unwrap();
+        let uri = url::Url::from_file_path(&path).unwrap();
+        assert_eq!(
+            local_path(&ashpd::Uri::parse(uri.as_str()).unwrap(), "vrm").unwrap(),
+            path.to_str().unwrap()
+        );
+        assert!(
+            local_path(
+                &ashpd::Uri::parse("https://example.com/model.vrm").unwrap(),
+                "vrm"
+            )
+            .is_err()
+        );
     }
-    result.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-    Ok((folder, result))
 }

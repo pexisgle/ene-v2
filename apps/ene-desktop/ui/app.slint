@@ -108,6 +108,7 @@ component MessageInput inherits Rectangle {
 }
 
 export component ChatWindow inherits Window {
+    callback tray-action(int);
     title: "ene — 会話";
     preferred-width: 640px;
     preferred-height: 760px;
@@ -364,90 +365,5 @@ export component SettingsWindow inherits Window {
         }
         if root.apply-error != "" : Text { text: root.apply-error; wrap: word-wrap; color: Palette.foreground; font-size: 12px; }
         Button { text: "適用して閉じる"; clicked => { root.apply-settings(); } }
-    }
-}
-
-export component EneTray inherits SystemTrayIcon {
-    icon: @image-url("../assets/ene.svg");
-    title: "ene";
-    tooltip: "ene — クリックして会話を表示";
-    in property <bool> avatar-visible;
-    in property <bool> avatar-failed;
-    callback toggle-avatar;
-    callback restart-avatar;
-    callback recenter-avatar;
-    callback show-chat;
-    callback open-settings;
-    callback quit;
-    clicked => { root.show-chat(); }
-    Menu {
-        MenuItem { title: "会話を表示"; activated => { root.show-chat(); } }
-        MenuItem { title: "設定"; activated => { root.open-settings(); } }
-        MenuItem { title: root.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示"; activated => { root.toggle-avatar(); } }
-        MenuItem { title: "キャラクターを画面中央へ戻す"; activated => { root.recenter-avatar(); } }
-        MenuItem { title: "描画エラーから再起動"; enabled: root.avatar-failed; activated => { root.restart-avatar(); } }
-        MenuSeparator {}
-        MenuItem { title: "クライアント終了"; activated => { root.quit(); } }
-    }
-}
-
-export struct FileEntry {
-    name: string,
-    path: string,
-    directory: bool,
-}
-
-export component FilePickerWindow inherits Window {
-    title: root.picker-title;
-    preferred-width: 640px;
-    preferred-height: 520px;
-    min-width: 420px;
-    min-height: 360px;
-    default-font-family: "Noto Sans CJK JP";
-    in property <string> picker-title;
-    in property <bool> motion;
-    in property <int> request-generation;
-    in property <string> parent-directory;
-    in property <[FileEntry]> entries;
-    in property <string> picker-status;
-    in-out property <string> directory;
-    in-out property <string> selection;
-    callback browse(string);
-    callback open-entry(string, bool);
-    callback accept;
-    callback cancel;
-    VerticalBox {
-        padding: 16px;
-        spacing: 10px;
-        HorizontalBox {
-            padding: 0px;
-            Button { text: "上のフォルダ"; clicked => { root.browse(root.parent-directory); } }
-            LineEdit { text <=> root.directory; horizontal-stretch: 1; accepted => { root.browse(root.directory); } }
-            Button { text: "開く"; clicked => { root.browse(root.directory); } }
-        }
-        ScrollView {
-            vertical-stretch: 1;
-            content-width: self.visible-width;
-            VerticalBox {
-                padding: 0px;
-                spacing: 2px;
-                for entry in root.entries : Rectangle {
-                    height: 40px;
-                    vertical-stretch: 0;
-                    background: root.selection == entry.path ? Palette.accent-background : touch.has-hover ? Palette.alternate-background : Palette.background;
-                    Text { x: 10px; width: parent.width - 20px; text: entry.name; color: root.selection == entry.path ? Palette.accent-foreground : Palette.foreground; vertical-alignment: center; overflow: elide; }
-                    touch := TouchArea { clicked => { root.open-entry(entry.path, entry.directory); } }
-                }
-            }
-        }
-        Text { text: root.picker-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-        Text { text: "選択するファイル（パスの貼り付けもできます）"; font-size: 13px; }
-        LineEdit { text <=> root.selection; accepted => { root.accept(); } }
-        HorizontalBox {
-            padding: 0px;
-            Rectangle { horizontal-stretch: 1; }
-            Button { text: "キャンセル"; clicked => { root.cancel(); } }
-            Button { text: "このファイルを選ぶ"; enabled: root.selection != ""; clicked => { root.accept(); } }
-        }
     }
 }

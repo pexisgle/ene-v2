@@ -47,12 +47,24 @@ fn click<T: i_slint_backend_testing::ElementRoot + ComponentHandle>(ui: &T, labe
 
 #[test]
 fn demo_is_explicit_and_unknown_arguments_are_rejected() {
-    assert_eq!(parse_args([].into_iter()), Ok(Some(Mode::Disconnected)));
+    use clap::Parser;
     assert_eq!(
-        parse_args(["--demo".into()].into_iter()),
-        Ok(Some(Mode::Demo))
+        Args::try_parse_from(["ene-desktop"]).unwrap().mode(),
+        Mode::Disconnected
     );
-    assert!(parse_args(["--invalid".into()].into_iter()).is_err());
+    assert_eq!(
+        Args::try_parse_from(["ene-desktop", "--demo"])
+            .unwrap()
+            .mode(),
+        Mode::Demo
+    );
+    assert!(Args::try_parse_from(["ene-desktop", "--invalid"]).is_err());
+    assert_eq!(
+        Args::try_parse_from(["ene-desktop", "--help"])
+            .unwrap_err()
+            .kind(),
+        clap::error::ErrorKind::DisplayHelp
+    );
 }
 
 #[test]
@@ -154,4 +166,34 @@ fn settings_apply_to_chat_and_return_focus() {
     assert_eq!(ui.get_theme_index(), 2);
     assert!(!settings.window().is_visible());
     assert!(ui.get_editor_focused());
+}
+
+#[test]
+fn failed_save_preserves_visible_and_persisted_configuration() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = ChatWindow::new().unwrap();
+    let settings = SettingsWindow::new().unwrap();
+    let original = avatar::ClientSettings::default();
+    reflect_settings(&ui, &settings, None, &original);
+    let saved = RefCell::new(original.clone());
+    let controller = avatar::Controller::new(|| {});
+    let directory = tempfile::tempdir().unwrap();
+    let blocker = directory.path().join("保存できない場所");
+    std::fs::write(&blocker, b"existing").unwrap();
+    let mut updated = original.clone();
+    updated.avatar.visible = false;
+    assert!(!save_settings(
+        updated,
+        &saved,
+        &ui,
+        &settings,
+        None,
+        &controller,
+        &blocker.join("client.json")
+    ));
+    assert_eq!(saved.borrow().avatar, original.avatar);
+    assert!(ui.get_avatar_visible());
+    assert!(settings.get_avatar_visible());
+    assert!(!settings.get_apply_error().is_empty());
+    assert_eq!(std::fs::read(blocker).unwrap(), b"existing");
 }

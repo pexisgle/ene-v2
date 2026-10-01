@@ -14,16 +14,13 @@ use slint::{ComponentHandle, VecModel};
 slint::include_modules!();
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mode = match parse_args(std::env::args().skip(1))? {
-        Some(mode) => mode,
-        None => return Ok(()),
-    };
+    use clap::Parser;
+    let mode = Args::parse().mode();
     let ui = ChatWindow::new()?;
     let settings = SettingsWindow::new()?;
     bind_chat(&ui, mode);
     bind_settings(&ui, &settings);
-    let file_picker = FilePickerWindow::new()?;
-    file_picker::bind(&settings, &file_picker);
+    file_picker::bind(&settings);
 
     let (tray, monitor_timer) = bind_tray(&ui, &settings)?;
     let (avatar, avatar_timer) = bind_avatar(&ui, &settings, &tray);
@@ -36,14 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // join the supervisor while the UI is still alive, rather than relying on
     // the last Rc being dropped during process teardown.
     avatar.shutdown();
-    drop((
-        avatar_timer,
-        avatar,
-        monitor_timer,
-        tray,
-        file_picker,
-        settings,
-    ));
+    drop((avatar_timer, avatar, monitor_timer, tray, settings));
     run_result?;
     Ok(())
 }
@@ -51,8 +41,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn bind_tray(
     ui: &ChatWindow,
     settings: &SettingsWindow,
-) -> Result<(EneTray, slint::Timer), Box<dyn Error>> {
-    let tray = EneTray::new()?;
+) -> Result<(Rc<tray::Ui>, slint::Timer), Box<dyn Error>> {
+    let (tray, receiver) = tray::Ui::new(ui.as_weak());
     let weak = ui.as_weak();
     tray.on_show_chat(move || {
         if let Some(ui) = weak.upgrade() {
@@ -93,7 +83,6 @@ fn bind_tray(
             slint::CloseRequestResponse::KeepWindowShown
         }
     });
-    let receiver = tray::monitor();
     let weak = ui.as_weak();
     let settings_weak = settings.as_weak();
     let monitor_timer = slint::Timer::default();
@@ -131,25 +120,21 @@ fn bind_tray(
     Ok((tray, monitor_timer))
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String> {
-    let mut mode = Mode::Disconnected;
-    for arg in args {
-        match arg.as_str() {
-            "--demo" => mode = Mode::Demo,
-            "--help" | "-h" => {
-                println!(
-                    "ene-desktop [--demo]\n  --demo  日本語入力の検証用。固定の仮応答を返します（外部送信なし）。\n  指定なしではホスト未接続画面を表示します。"
-                );
-                return Ok(None);
-            }
-            _ => {
-                return Err(format!(
-                    "未対応の引数: {arg}（--help で起動方法を確認できます）"
-                ));
-            }
+#[derive(Debug, clap::Parser)]
+#[command(about = "ene 会話クライアント")]
+struct Args {
+    /// 固定の仮応答を利用する（外部送信なし）
+    #[arg(long)]
+    demo: bool,
+}
+impl Args {
+    fn mode(self) -> Mode {
+        if self.demo {
+            Mode::Demo
+        } else {
+            Mode::Disconnected
         }
     }
-    Ok(Some(mode))
 }
 
 fn bind_chat(ui: &ChatWindow, mode: Mode) -> Rc<VecModel<ChatEntry>> {
@@ -279,10 +264,61 @@ fn quit() {
 #[cfg(test)]
 mod tests;
 
+fn reflect_settings(
+    ui: &ChatWindow,
+    settings: &SettingsWindow,
+    tray: Option<&tray::Ui>,
+    value: &avatar::ClientSettings,
+) {
+    apply_theme(ui, settings, value.theme_index);
+    ui.set_font_family(value.font_family.clone().into());
+    ui.set_text_size(value.text_size);
+    ui.set_avatar_size_percent(value.avatar.size_percent as i32);
+    ui.set_avatar_model(value.avatar.model.clone().into());
+    ui.set_avatar_motion(value.avatar.motion.clone().unwrap_or_default().into());
+    ui.set_motion_playing(value.avatar.motion_playing);
+    ui.set_motion_loop(value.avatar.motion_loop);
+    ui.set_avatar_visible(value.avatar.visible);
+    ui.set_avatar_fps_index(i32::from(value.avatar.fps == 60));
+    settings.set_theme_index(value.theme_index);
+    settings.set_font_family(ui.get_font_family());
+    settings.set_text_size(value.text_size);
+    settings.set_avatar_size_percent(ui.get_avatar_size_percent());
+    settings.set_avatar_size_text(value.avatar.size_percent.to_string().into());
+    settings.set_avatar_model(ui.get_avatar_model());
+    settings.set_avatar_motion(ui.get_avatar_motion());
+    settings.set_motion_playing(value.avatar.motion_playing);
+    settings.set_motion_loop(value.avatar.motion_loop);
+    settings.set_avatar_visible(value.avatar.visible);
+    settings.set_avatar_fps_index(ui.get_avatar_fps_index());
+    if let Some(tray) = tray {
+        tray.set_avatar_visible(value.avatar.visible);
+    }
+}
+fn save_settings(
+    updated: avatar::ClientSettings,
+    saved: &RefCell<avatar::ClientSettings>,
+    ui: &ChatWindow,
+    settings: &SettingsWindow,
+    tray: Option<&tray::Ui>,
+    controller: &avatar::Controller,
+    path: &std::path::Path,
+) -> bool {
+    if let Err(error) = updated.save(path) {
+        settings.set_apply_error(error.clone().into());
+        ui.set_avatar_status(error.into());
+        return false;
+    }
+    reflect_settings(ui, settings, tray, &updated);
+    controller.configure(updated.avatar.clone());
+    *saved.borrow_mut() = updated;
+    true
+}
+
 fn bind_avatar(
     ui: &ChatWindow,
     settings: &SettingsWindow,
-    tray: &EneTray,
+    tray: &Rc<tray::Ui>,
 ) -> (Rc<avatar::Controller>, slint::Timer) {
     use ene_shared::avatar::AvatarEvent;
     let path = avatar::config_path();
@@ -290,27 +326,9 @@ fn bind_avatar(
         eprintln!("{error}");
         avatar::ClientSettings::default()
     });
-    apply_theme(ui, settings, initial.theme_index);
-    ui.set_avatar_size_percent(initial.avatar.size_percent as i32);
-    settings.set_avatar_size_percent(initial.avatar.size_percent as i32);
-    settings.set_avatar_size_text(initial.avatar.size_percent.to_string().into());
-    ui.set_font_family(initial.font_family.clone().into());
-    ui.set_text_size(initial.text_size);
-    ui.set_avatar_model(initial.avatar.model.clone().into());
-    ui.set_avatar_motion(initial.avatar.motion.clone().unwrap_or_default().into());
-    ui.set_motion_playing(initial.avatar.motion_playing);
-    ui.set_motion_loop(initial.avatar.motion_loop);
-    ui.set_avatar_visible(initial.avatar.visible);
-    ui.set_avatar_fps_index(i32::from(initial.avatar.fps == 60));
-    settings.set_avatar_model(initial.avatar.model.clone().into());
-    settings.set_avatar_motion(ui.get_avatar_motion());
-    settings.set_motion_playing(ui.get_motion_playing());
-    settings.set_motion_loop(ui.get_motion_loop());
-    settings.set_avatar_visible(initial.avatar.visible);
-    settings.set_avatar_fps_index(i32::from(initial.avatar.fps == 60));
+    reflect_settings(ui, settings, Some(tray), &initial);
     ui.set_avatar_status("キャラクターを読み込んでいます…".into());
     settings.set_avatar_status(ui.get_avatar_status());
-    tray.set_avatar_visible(initial.avatar.visible);
     let saved = Rc::new(RefCell::new(initial));
     let signal = ui.as_weak();
     let controller = Rc::new(avatar::Controller::new(move || {
@@ -332,23 +350,21 @@ fn bind_avatar(
     let uw = ui.as_weak();
     let tw = tray.as_weak();
     settings.on_recenter_avatar(move || {
-        let mut config = config.borrow_mut();
-        config.avatar.visible = true;
-        if let Some(ui) = uw.upgrade() {
-            ui.set_avatar_visible(true);
-            if let Err(error) = config.save(&avatar::config_path()) {
-                ui.set_avatar_failed(true);
-                ui.set_avatar_status(error.into());
+        if let (Some(ui), Some(settings)) = (uw.upgrade(), sw.upgrade()) {
+            let mut updated = config.borrow().clone();
+            updated.avatar.visible = true;
+            if save_settings(
+                updated,
+                &config,
+                &ui,
+                &settings,
+                tw.upgrade().as_deref(),
+                &c,
+                &avatar::config_path(),
+            ) {
+                c.recenter();
             }
         }
-        if let Some(settings) = sw.upgrade() {
-            settings.set_avatar_visible(true);
-        }
-        if let Some(tray) = tw.upgrade() {
-            tray.set_avatar_visible(true);
-        }
-        c.configure(config.avatar.clone());
-        c.recenter();
     });
     let sw = settings.as_weak();
     tray.on_recenter_avatar(move || {
@@ -362,24 +378,19 @@ fn bind_avatar(
     let uw = ui.as_weak();
     let tw = tray.as_weak();
     tray.on_toggle_avatar(move || {
-        let mut config = config.borrow_mut();
-        config.avatar.visible = !config.avatar.visible;
-        if let Some(ui) = uw.upgrade() {
-            ui.set_avatar_visible(config.avatar.visible);
+        if let (Some(ui), Some(settings)) = (uw.upgrade(), sw.upgrade()) {
+            let mut updated = config.borrow().clone();
+            updated.avatar.visible = !updated.avatar.visible;
+            save_settings(
+                updated,
+                &config,
+                &ui,
+                &settings,
+                tw.upgrade().as_deref(),
+                &c,
+                &avatar::config_path(),
+            );
         }
-        if let Err(error) = config.save(&avatar::config_path())
-            && let Some(ui) = uw.upgrade()
-        {
-            ui.set_avatar_failed(true);
-            ui.set_avatar_status(error.into());
-        }
-        if let Some(settings) = sw.upgrade() {
-            settings.set_avatar_visible(config.avatar.visible);
-        }
-        if let Some(tray) = tw.upgrade() {
-            tray.set_avatar_visible(config.avatar.visible);
-        }
-        c.configure(config.avatar.clone());
     });
     let c = controller.clone();
     let config = saved.clone();
@@ -423,25 +434,15 @@ fn bind_avatar(
             } else {
                 30
             };
-            if let Err(error) = updated.save(&avatar::config_path()) {
-                settings.set_apply_error(error.into());
-                return false;
-            }
-            ui.set_avatar_size_percent(updated.avatar.size_percent as i32);
-            settings.set_avatar_size_percent(updated.avatar.size_percent as i32);
-            settings.set_avatar_size_text(updated.avatar.size_percent.to_string().into());
-            ui.set_avatar_model(updated.avatar.model.clone().into());
-            ui.set_avatar_motion(updated.avatar.motion.clone().unwrap_or_default().into());
-            ui.set_motion_playing(updated.avatar.motion_playing);
-            ui.set_motion_loop(updated.avatar.motion_loop);
-            ui.set_avatar_visible(updated.avatar.visible);
-            ui.set_avatar_fps_index(i32::from(updated.avatar.fps == 60));
-            if let Some(tray) = tw.upgrade() {
-                tray.set_avatar_visible(updated.avatar.visible);
-            }
-            c.configure(updated.avatar.clone());
-            *config.borrow_mut() = updated;
-            return true;
+            return save_settings(
+                updated,
+                &config,
+                &ui,
+                &settings,
+                tw.upgrade().as_deref(),
+                &c,
+                &avatar::config_path(),
+            );
         }
         false
     });
@@ -487,13 +488,16 @@ fn bind_avatar(
                     bottom,
                     output,
                 } => {
-                    let mut config = saved.borrow_mut();
-                    config.avatar.right = right;
-                    config.avatar.bottom = bottom;
-                    config.avatar.output = output;
-                    if let Err(error) = config.save(&avatar::config_path()) {
-                        ui.set_avatar_failed(true);
-                        ui.set_avatar_status(error.into());
+                    let mut updated = saved.borrow().clone();
+                    updated.avatar.right = right;
+                    updated.avatar.bottom = bottom;
+                    updated.avatar.output = output;
+                    match updated.save(&avatar::config_path()) {
+                        Ok(()) => *saved.borrow_mut() = updated,
+                        Err(error) => {
+                            ui.set_avatar_status(error.into());
+                            c.configure(saved.borrow().avatar.clone());
+                        }
                     }
                 }
                 AvatarEvent::VisibilityChanged { visible } => {

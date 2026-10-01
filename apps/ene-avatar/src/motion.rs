@@ -2,27 +2,32 @@ use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 use std::path::Path;
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnimationExtension {
+    spec_version: String,
+    humanoid: Humanoid,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Humanoid {
+    human_bones: std::collections::BTreeMap<String, bevy_vrm1::prelude::VrmNode>,
+}
 pub fn validate(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let json = crate::model::read_glb_json(path)?;
-    let animation = &json["extensions"]["VRMC_vrm_animation"];
-    if animation["specVersion"] != "1.0" {
+    let animation: AnimationExtension =
+        serde_json::from_value(json["extensions"]["VRMC_vrm_animation"].clone())?;
+    if animation.spec_version != "1.0" {
         return Err("VRMA 1.0のモーションを選択してください。".into());
     }
     let nodes = json["nodes"].as_array().ok_or("VRMAの骨がありません。")?;
-    let bones = animation["humanoid"]["humanBones"]
-        .as_object()
-        .ok_or("VRMAのhumanoid情報がありません。")?;
-    if !bones.contains_key("hips")
-        || bones
-            .values()
-            .any(|b| b["node"].as_u64().is_none_or(|n| n as usize >= nodes.len()))
-    {
+    let bones = animation.humanoid.human_bones;
+    if !bones.contains_key("hips") || bones.values().any(|bone| bone.node >= nodes.len()) {
         return Err("VRMAのhumanoidの骨指定が不正です。".into());
     }
     if json["animations"].as_array().is_none_or(|a| a.len() != 1) {
         return Err("1つのアニメーションを含むVRMAに対応しています。".into());
     }
-    // VRMA is a skeleton, never another visible model or a source of materials.
     if json["meshes"].as_array().is_some_and(|m| !m.is_empty()) {
         return Err("メッシュを含むVRMAは利用できません。".into());
     }
@@ -155,18 +160,19 @@ mod tests {
 mod validation_tests {
     #[test]
     fn rejects_external_or_invalid_vrma_without_starting_an_asset_load() {
-        let path = std::env::temp_dir().join(format!("ene-vrma-{}.vrma", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("動き.vrma");
         for (json, valid) in [
             (
-                serde_json::json!({"nodes":[{}],"animations":[{}],"extensions":{"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"hips":{"node":0}}}}}}),
+                serde_json::json!({"asset":{"version":"2.0"},"nodes":[{}],"animations":[{"samplers":[],"channels":[]}],"extensions":{"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"hips":{"node":0}}}}}}),
                 true,
             ),
             (
-                serde_json::json!({"nodes":[{}],"animations":[{}],"extensions":{"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"hips":{"node":0}}}}},"buffers":[{"uri":"../secret.bin"}]}),
+                serde_json::json!({"asset":{"version":"2.0"},"nodes":[{}],"animations":[{"samplers":[],"channels":[]}],"extensions":{"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"hips":{"node":0}}}}},"buffers":[{"uri":"../secret.bin"}]}),
                 false,
             ),
             (
-                serde_json::json!({"nodes":[{}],"animations":[{}],"extensions":{"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"hips":{"node":2}}}}}}),
+                serde_json::json!({"asset":{"version":"2.0"},"nodes":[{}],"animations":[{"samplers":[],"channels":[]}],"extensions":{"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"hips":{"node":2}}}}}}),
                 false,
             ),
         ] {

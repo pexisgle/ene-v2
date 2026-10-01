@@ -1,3 +1,4 @@
+mod ipc;
 mod mask;
 mod model;
 mod motion;
@@ -5,32 +6,27 @@ mod native;
 mod pixels;
 mod renderer;
 
-use ene_shared::avatar::{AvatarEvent, AvatarRequest, AvatarSettings, MAX_IPC_LINE, MotionState};
+use ene_shared::avatar::{AvatarEvent, AvatarRequest, AvatarSettings, MotionState};
 use smithay_client_toolkit::{
     reexports::{calloop::EventLoop, calloop_wayland_source::WaylandSource},
     shell::WaylandSurface,
 };
 use std::{
     error::Error,
-    io::{BufRead, Read, Write},
-    sync::mpsc,
     time::{Duration, Instant},
 };
 use wayland_client::{Connection, globals::registry_queue_init};
 
-fn emit(event: AvatarEvent) {
-    let mut output = std::io::stdout().lock();
-    if serde_json::to_writer(&mut output, &event).is_ok() {
-        let _ = output.write_all(b"\n");
-        let _ = output.flush();
-    }
-}
+use ipc::emit;
 fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let result = std::panic::catch_unwind(run);
+    use clap::Parser;
+    let args = Args::parse();
+    let mut ipc = ipc::Ipc::new(args.standalone);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(args, &mut ipc)));
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -38,75 +34,39 @@ fn main() {
             emit(AvatarEvent::Error {
                 message: error.to_string(),
             });
+            drop(ipc);
             std::process::exit(1);
         }
         Err(_) => {
             emit(AvatarEvent::Error{message:"キャラクターの描画処理に失敗しました。GPU・モデルを確認して再起動してください。".into()});
+            drop(ipc);
             std::process::exit(1);
         }
     }
 }
-fn run() -> Result<(), Box<dyn Error>> {
-    let mut settings = AvatarSettings::default();
-    let mut standalone = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--standalone" => standalone = true,
-            "--model" => settings.model = args.next().ok_or("--model にVRMのパスが必要です")?,
-            "--motion" => {
-                settings.motion = Some(args.next().ok_or("--motion にVRMAのパスが必要です")?)
-            }
-            "--no-loop" => settings.motion_loop = false,
-            "--help" | "-h" => {
-                eprintln!(
-                    "ene-avatar [--standalone --model /path/to/model.vrm] [--motion /path/to/motion.vrma] [--no-loop]\n通常はene-desktopからNDJSONで制御します。layer-shellが必要です。"
-                );
-                return Ok(());
-            }
-            _ => return Err(format!("未対応の引数: {arg}").into()),
-        }
-    }
-    let (tx, rx) = mpsc::sync_channel(32);
-    if !standalone {
-        std::thread::spawn(move || {
-            let mut reader = std::io::BufReader::new(std::io::stdin());
-            loop {
-                let mut bytes = Vec::new();
-                match (&mut reader)
-                    .take((MAX_IPC_LINE + 1) as u64)
-                    .read_until(b'\n', &mut bytes)
-                {
-                    Ok(0) | Err(_) => {
-                        let _ = tx.send(None);
-                        break;
-                    }
-                    Ok(_) if bytes.len() > MAX_IPC_LINE => {
-                        emit(AvatarEvent::Error {
-                            message: "IPC要求が大きすぎます。".into(),
-                        });
-                        let _ = tx.send(None);
-                        break;
-                    }
-                    Ok(_) => match serde_json::from_slice(&bytes) {
-                        Ok(request) => {
-                            if tx.send(Some(request)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            emit(AvatarEvent::Error {
-                                message: format!("IPC形式が不正です: {e}"),
-                            });
-                            let _ = tx.send(None);
-                            break;
-                        }
-                    },
-                }
-            }
-        });
-        match rx.recv()? {
-            Some(AvatarRequest::Configure { settings: s }) => settings = s,
+#[derive(clap::Parser)]
+#[command(about = "Wayland layer-shell VRM renderer; normally controlled by ene-desktop")]
+struct Args {
+    #[arg(long)]
+    standalone: bool,
+    #[arg(long, required_if_eq("standalone", "true"))]
+    model: Option<String>,
+    #[arg(long)]
+    motion: Option<String>,
+    #[arg(long)]
+    no_loop: bool,
+}
+fn run(args: Args, ipc: &mut ipc::Ipc) -> Result<(), Box<dyn Error>> {
+    let mut settings = AvatarSettings {
+        model: args.model.unwrap_or_default(),
+        motion: args.motion,
+        motion_loop: !args.no_loop,
+        ..AvatarSettings::default()
+    };
+    let rx = &mut ipc.requests;
+    if !args.standalone {
+        match rx.blocking_recv().flatten() {
+            Some(AvatarRequest::Configure { settings: initial }) => settings = initial,
             _ => return Ok(()),
         }
     }
@@ -147,7 +107,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         state.output_changed = false;
         let mut configure_renderer = false;
         let mut shutdown = false;
-        while let Ok(request) = rx.try_recv() {
+        loop {
+            let request = match rx.try_recv() {
+                Ok(request) => request,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    shutdown = true;
+                    break;
+                }
+            };
             match request {
                 None | Some(AvatarRequest::Shutdown) => shutdown = true,
                 Some(AvatarRequest::Recenter) => state.request_recenter(),
