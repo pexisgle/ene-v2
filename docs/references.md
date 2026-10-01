@@ -340,6 +340,8 @@ eneでは通常のSlint画面とキャラクターの常駐ウィンドウを分
 
 [systemdのユーザーサービス](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)をLinuxでのホスト運用に使い、GUIの終了からホストの寿命を分離します。再接続では保存された結果と現在の状態を取得し、要求IDで開始要求の重複を防ぎます。ホスト停止後のタスク自動再開はMVPに含めません。
 
+[AxumのWebSocket資料](https://docs.rs/axum/latest/axum/extract/ws/index.html)はHTTPからの接続確立と送受信の並行処理を示しています。[Tokioのbroadcast資料](https://docs.rs/tokio/latest/tokio/sync/broadcast/index.html#lagging)は有限バッファで遅い受信側が通知を失い、`RecvError::Lagged`で検出できることを説明しています。eneでは通知と音声の接続・待ち行列を分け、通知欠落時は購読とスナップショットから再同期します。これはeneの通信契約であり、ライブラリが状態同期や停止制御まで自動で提供するという意味ではありません。具体的な設計は[ホストAPI設計案](api.md)にまとめます。
+
 <a id="mvp-reference-config"></a>
 
 ### AIと音声の確認用構成
@@ -348,15 +350,19 @@ OpenRouterの[GPT-6 Lunaモデルページ](https://openrouter.ai/openai/gpt-6-l
 
 モデルIDだけでは配信先は限定されません。[Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)の`only`と`allow_fallbacks`を用い、確認用構成は`provider.only: ["openai"]`、`provider.allow_fallbacks: false`とする方針です。送信先としてOpenRouterとOpenAIの双方を提示し、条件を満たす接続先が利用できなければエラーを報告します。指定モデル・配信先の実API呼び出しは本調査では行っていません。
 
-音声は同一PC上の外部VOICEVOX Engineへ接続します。資料で確認できるAPIと、eneからの合成・再生が動作したことは区別し、後者を実装後の検証条件にします。
+音声の参考候補として同一PC上の外部VOICEVOX Engineを調査しましたが、MVPの接続先をこれに限定しません。音声APIはエンジンから独立したストリーミング契約とし、合成・配信・再生の開始遅延、発話の自然さ、中断性能を検証して構成を1系統選定します。資料で確認できるAPIと、eneからの合成・再生が動作したことは区別し、後者を実装後の検証条件にします。
 
 <a id="mvp-audio"></a>
 
 ### 音声と認証情報
 
-[VOICEVOX Engineの公式README・API](https://github.com/VOICEVOX/voicevox_engine)は、`audio_query`と`synthesis`による音声合成、話者の取得を提供します。eneはユーザーが別途起動するエンジンを利用し、アプリの配布物に音声合成ランタイムを組み込みません。外部エンジン側のPython等の依存は、ene本体の依存と区別して扱います。
+[VOICEVOX Engineの公式README・API](https://github.com/VOICEVOX/voicevox_engine)は、`audio_query`と`synthesis`による音声合成、話者の取得を提供します。この既存の調査結果は、接続アダプターの参考として維持します。eneは外部エンジンを利用し、アプリの配布物に音声合成ランタイムを組み込みません。ローカルエンジン側のPython等の依存は、ene本体の依存と区別して扱います。
 
-[rodio](https://docs.rs/rodio/latest/rodio/)でWAVを再生し、音声デバイス連携にはその基盤の[CPAL](https://github.com/RustAudio/cpal#supported-platforms)を利用します。必要な再生・デコード機能だけを有効化し、UIのイベントループを再生待ちで止めません。読み上げオフ・切断時の待ち行列の取り消しと、合成・再生失敗時のテキスト継続はene側の設計です。
+2026年10月1日に追加確認した[公式READMEのストリーミング例](https://github.com/VOICEVOX/voicevox_engine/blob/master/README.md#ストリーミングで音声合成するサンプルコード)と[音声合成ルーターの公開ソース](https://github.com/VOICEVOX/voicevox_engine/blob/master/voicevox_engine/app/routers/tts_pipeline.py)には、`AudioQuery`を受けて音声を逐次返す`streaming_synthesis`があります。出力は`audio/wav`であり、WAVという形式とストリーミング配信は両立します。一方、増え続けるテキストの逐次入力への対応を示すものではありません。READMEは別リクエストの音声を結合する場合のつなぎ目にも注意を求めています。今回確認したのは`master`の資料で、採用リリース・コアの対応と実際の遅延は未検証です。
+
+[キャンセル可能な合成の説明](https://github.com/VOICEVOX/voicevox_engine/blob/master/README.md#キャンセル可能な音声合成)には、通常の`synthesis`は切断後も計算を続ける一方、実験的な`cancellable_synthesis`は起動オプションで有効化する必要があると記載されています。ストリーミング出力と合成キャンセルは別の能力として確認します。eneのAPIではテキスト逐次入力・音声逐次出力・合成キャンセルを区別し、発話を取り消した後の音声を配信・再生しない契約を持ちます。エンジン側で計算を中断できることを一律に保証しません。
+
+[rodio](https://docs.rs/rodio/latest/rodio/)をクライアントの音声再生基盤とし、音声デバイス連携にはその基盤の[CPAL](https://github.com/RustAudio/cpal#supported-platforms)を利用します。既存のWAV再生候補に加え、届いた音声チャンクから再生する連携を検証します。必要な再生・デコード機能だけを有効化し、UIのイベントループを再生待ちで止めません。コーデックやチャンクの解釈・バッファ量は未選定です。読み上げオフ・切断時の待ち行列の取り消し、遅着音声の破棄、合成・再生失敗時のテキスト継続はene側の設計です。
 
 [keyring-rsの公式構成説明](https://github.com/open-source-cooperative/keyring-rs/wiki/Keyring)を参照し、共通基盤のkeyring-coreとOS別の資格情報ストアを使います。LinuxはSecret Service、将来はWindows Credential Manager・macOS Keychainへ接続する構成です。ストアが使えない場合に、APIキーを通常の設定やSQLiteへ平文保存する代替処理は設けません。
 
