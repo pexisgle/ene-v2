@@ -2164,7 +2164,6 @@ dependencies = [
  "bevy",
  "bevy_vrm1",
  "ene-shared",
- "png",
  "raw-window-handle",
  "serde_json",
  "smithay-client-toolkit 0.21.1",

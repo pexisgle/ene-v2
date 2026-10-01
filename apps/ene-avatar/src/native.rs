@@ -368,9 +368,6 @@ impl SeatHandler for State {
         seat: wl_seat::WlSeat,
         c: Capability,
     ) {
-        if std::env::var_os("ENE_AVATAR_DEBUG").is_some() {
-            eprintln!("seat capability {c:?}");
-        }
         if c == Capability::Pointer && self.pointer.is_none() {
             match self.seat.get_pointer(qh, &seat) {
                 Ok(pointer) => {
@@ -414,14 +411,6 @@ impl PointerHandler for State {
         events: &[PointerEvent],
     ) {
         for event in events {
-            if std::env::var_os("ENE_AVATAR_DEBUG").is_some() {
-                eprintln!(
-                    "pointer {:?} at {:?}, avatar={}",
-                    event.kind,
-                    event.position,
-                    &event.surface == self.layer.wl_surface()
-                );
-            }
             if &event.surface != self.layer.wl_surface() {
                 continue;
             }

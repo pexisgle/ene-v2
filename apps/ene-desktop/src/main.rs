@@ -374,9 +374,6 @@ fn bind_avatar(
     ui.on_avatar_events_available(move || {
         let Some(ui) = weak.upgrade() else { return };
         for event in c.events.try_iter() {
-            if std::env::var_os("ENE_AVATAR_DEBUG").is_some() {
-                eprintln!("avatar event: {event:?}");
-            }
             match event {
                 AvatarEvent::MotionError { message } => {
                     ui.set_motion_failed(true);

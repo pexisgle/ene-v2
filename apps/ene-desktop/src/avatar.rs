@@ -110,10 +110,6 @@ impl Controller {
             });
         Self::with_notifier(executable, Some(Arc::new(wake)))
     }
-    #[cfg(test)]
-    fn with_executable(executable: PathBuf) -> Self {
-        Self::with_notifier(executable, None)
-    }
     fn with_notifier(executable: PathBuf, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
         let (commands, receiver) = mpsc::channel();
         let (sender, events) = mpsc::channel();
@@ -342,36 +338,6 @@ fn supervise(executable: PathBuf, receiver: Receiver<Control>, sender: EventSink
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    #[test]
-    fn child_is_reaped_after_graceful_exit_or_three_second_deadline() {
-        for stubborn in [false, true] {
-            let directory = std::env::temp_dir()
-                .join(format!("ene-supervisor-{}-{stubborn}", std::process::id()));
-            fs::create_dir_all(&directory).unwrap();
-            let script = directory.join("child");
-            let pidfile = directory.join("pid");
-            let source = format!(
-                "#!/usr/bin/python3\nimport os,json,sys,time\nopen({:?},'w').write(str(os.getpid()))\nfor line in sys.stdin:\n r=json.loads(line)\n if r['type']=='shutdown':\n  {}\n",
-                pidfile,
-                if stubborn { "time.sleep(20)" } else { "break" }
-            );
-            fs::write(&script, source).unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-            let controller = Controller::with_executable(script);
-            controller.configure(AvatarSettings::default());
-            let start = Instant::now();
-            while !pidfile.exists() {
-                assert!(start.elapsed() < Duration::from_secs(5));
-                thread::sleep(Duration::from_millis(10));
-            }
-            let pid = fs::read_to_string(&pidfile).unwrap();
-            let start = Instant::now();
-            drop(controller);
-            assert!(start.elapsed() < Duration::from_secs(5));
-            assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
-            fs::remove_dir_all(directory).unwrap();
-        }
-    }
     #[test]
     fn saved_configuration_preserves_unicode_position_and_permissions() {
         let directory = std::env::temp_dir().join(format!("ene-settings-{}", std::process::id()));

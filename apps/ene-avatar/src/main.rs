@@ -50,8 +50,6 @@ fn main() {
 fn run() -> Result<(), Box<dyn Error>> {
     let mut settings = AvatarSettings::default();
     let mut standalone = false;
-    let mut frames = None;
-    let mut snapshot = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -61,21 +59,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 settings.motion = Some(args.next().ok_or("--motion にVRMAのパスが必要です")?)
             }
             "--no-loop" => settings.motion_loop = false,
-            "--frames" => {
-                frames = Some(
-                    args.next()
-                        .ok_or("--frames にフレーム数が必要です")?
-                        .parse::<u64>()?,
-                )
-            }
-            "--snapshot" => {
-                snapshot = Some(PathBuf::from(
-                    args.next().ok_or("--snapshot にパスが必要です")?,
-                ))
-            }
             "--help" | "-h" => {
                 eprintln!(
-                    "ene-avatar [--standalone --model /path/to/model.vrm] [--motion /path/to/motion.vrma] [--no-loop] [--frames N --snapshot output.png]\n通常はene-desktopからNDJSONで制御します。layer-shellが必要です。"
+                    "ene-avatar [--standalone --model /path/to/model.vrm] [--motion /path/to/motion.vrma] [--no-loop]\n通常はene-desktopからNDJSONで制御します。layer-shellが必要です。"
                 );
                 return Ok(());
             }
@@ -140,7 +126,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut motion_state = None::<MotionState>;
     let mut revision = 0;
     let mut ready = false;
-    let mut frame_count = 0;
     let mut load_started = Instant::now();
     let mut hidden = false;
     loop {
@@ -232,7 +217,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         renderer.update_motion(&state.settings);
         renderer.capture();
         renderer.app.update();
-        frame_count += 1;
         if let Some(error) = renderer.load_error() {
             return Err(error.into());
         }
@@ -243,14 +227,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                 state: renderer.motion_state,
             });
         }
-        if std::env::var_os("ENE_AVATAR_DEBUG").is_some() && frame_count % 30 == 0 {
-            let world = renderer.app.world_mut();
-            let meshes = world.query::<&bevy::prelude::Mesh3d>().iter(world).count();
-            eprintln!(
-                "frame={frame_count} initialized={initialized} meshes={meshes} load={:?}",
-                renderer.load_state()
-            );
-        }
         let captured = renderer.captures.lock().unwrap();
         if captured.revision != revision
             && initialized
@@ -259,40 +235,15 @@ fn run() -> Result<(), Box<dyn Error>> {
             && captured.height == state.height * state.scale
         {
             revision = captured.revision;
-            if std::env::var_os("ENE_AVATAR_DEBUG").is_some() {
-                eprintln!(
-                    "capture {} {}x{} alpha={}",
-                    revision,
-                    captured.width,
-                    captured.height,
-                    captured
-                        .rgba
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .filter(|p| p[3] > 8)
-                        .count()
-                );
-            }
             let runs =
                 mask::alpha_runs(&captured.rgba, captured.width, captured.height, state.scale);
             state.present(&captured.rgba, &runs)?;
-            if initialized && !runs.is_empty() {
-                if !ready {
-                    emit(AvatarEvent::Ready {
-                        model: credit.clone(),
-                    });
-                    emit(AvatarEvent::VisibilityChanged { visible: true });
-                    ready = true;
-                }
-                if let Some(ref path) = snapshot {
-                    let file = std::fs::File::create(path)?;
-                    let mut encoder = png::Encoder::new(file, captured.width, captured.height);
-                    encoder.set_color(png::ColorType::Rgba);
-                    encoder.set_depth(png::BitDepth::Eight);
-                    encoder.write_header()?.write_image_data(&captured.rgba)?;
-                    snapshot = None;
-                }
+            if initialized && !runs.is_empty() && !ready {
+                emit(AvatarEvent::Ready {
+                    model: credit.clone(),
+                });
+                emit(AvatarEvent::VisibilityChanged { visible: true });
+                ready = true;
             }
         }
         if !ready && load_started.elapsed() > Duration::from_secs(90) {
@@ -300,12 +251,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                 "モデルの表示が90秒以内に完了しませんでした。GPU・モデルを確認してください。"
                     .into(),
             );
-        }
-        if frames.is_some_and(|n| frame_count >= n) {
-            if !ready || snapshot.is_some() {
-                return Err("検証フレーム数以内にモデルを描画できませんでした。".into());
-            }
-            break;
         }
     }
     release_renderer(&mut renderer);

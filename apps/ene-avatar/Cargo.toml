@@ -17,6 +17,5 @@ smithay-client-toolkit = { version = "=0.21.1", default-features = false, featur
 wayland-client = { version = "0.31", features = ["system"] }
 raw-window-handle = "0.6"
 serde_json = "1"
-png = "0.18"
 
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

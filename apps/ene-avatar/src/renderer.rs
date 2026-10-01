@@ -432,12 +432,6 @@ impl Renderer {
             }
         }
     }
-    pub fn load_state(&self) -> Option<LoadState> {
-        self.app
-            .world()
-            .resource::<AssetServer>()
-            .get_load_state(self.handle.id())
-    }
     pub fn load_error(&self) -> Option<String> {
         match self
             .app
