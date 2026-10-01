@@ -1,0 +1,155 @@
+{
+  "lifecycle_observed_events": [
+    {
+      "verify": false,
+      "observed_motion_states": [
+        "loading",
+        "none",
+        "paused",
+        "playing"
+      ],
+      "observed_visibility": [
+        false,
+        true
+      ],
+      "observed_outputs": [
+        "DP-1",
+        "HDMI-A-1"
+      ],
+      "ready_model_credits": [
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "ene coverage fixture / ene contributors / https://opensource.org/license/mit",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/"
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ],
+        [
+          1440,
+          1080,
+          1.0
+        ]
+      ],
+      "actions": 15,
+      "expected_model_errors": 1,
+      "accuracy": {
+        "available": true,
+        "samples": 1675,
+        "invalid_samples": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "true_positives": 74528993,
+        "true_negatives": 1656470815,
+        "false_positive_rate": 0.0,
+        "false_negative_rate": 0.0,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 1730999808,
+        "verification_raw_json_path": "/tmp/ene-avatar-final-lifecycle/s01-size100-scalenative-fps60-gpu-verify/raw.jsonl",
+        "verification_status": "ok"
+      }
+    },
+    {
+      "verify": true,
+      "observed_motion_states": [
+        "loading",
+        "none",
+        "paused",
+        "playing"
+      ],
+      "observed_visibility": [
+        false,
+        true
+      ],
+      "observed_outputs": [
+        "DP-1",
+        "HDMI-A-1"
+      ],
+      "ready_model_credits": [
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "ene coverage fixture / ene contributors / https://opensource.org/license/mit",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/",
+        "Seed-san / VirtualCast, Inc. / https://vrm.dev/licenses/1.0/"
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ],
+        [
+          1440,
+          1080,
+          1.0
+        ]
+      ],
+      "actions": 15,
+      "expected_model_errors": 1,
+      "accuracy": {
+        "available": true,
+        "samples": 1675,
+        "invalid_samples": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "true_positives": 74528993,
+        "true_negatives": 1656470815,
+        "false_positive_rate": 0.0,
+        "false_negative_rate": 0.0,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 1730999808,
+        "verification_raw_json_path": "/tmp/ene-avatar-final-lifecycle/s01-size100-scalenative-fps60-gpu-verify/raw.jsonl",
+        "verification_status": "ok"
+      }
+    }
+  ],
+  "pointer_atomic_gpu_commits": 60,
+  "motion_playing_before_measurement_processes": 96,
+  "rust_tests": {
+    "command": "direnv exec . cargo test --locked -p ene-avatar -j4",
+    "passed": 35,
+    "failed": 0,
+    "includes_gpu_execution": true
+  },
+  "clippy": {
+    "command": "direnv exec . cargo clippy --locked -p ene-avatar --all-targets -- -D warnings",
+    "status": "passed"
+  },
+  "benchmark_regression_tests": {
+    "command": "python3 scripts/benchmark-avatar.py --self-test",
+    "passed": 7,
+    "failed": 0
+  },
+  "release_build": {
+    "command": "direnv exec . cargo build --release --locked -p ene-avatar -j4",
+    "status": "passed"
+  }
+}

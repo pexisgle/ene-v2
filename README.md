@@ -24,7 +24,8 @@ sudo apt-get install pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-d
 just verify
 just run-desktop
 # justがない場合も、明示的なデモモードを起動できます。
-cargo run --locked -p ene-desktop -- --demo
+cargo build --release --locked -p ene-avatar
+ENE_AVATAR_BIN="$PWD/target/release/ene-avatar" cargo run --locked -p ene-desktop -- --demo
 ```
 
 `--demo`を付けない起動ではホスト未接続を表示し、送信を無効にします。デモはAPIキーを必要とせず、外部へ会話を送信しません。Enterで送信、Shift+Enterで改行します。IMEの変換・確定中は送信しません。送信ボタンも利用できます。正常にトレイ登録できた場合、×は画面の非表示、トレイクリックは再表示、トレイメニューは設定・クライアント終了です。登録を確認できない場合は画面を開いたままにし、設定画面の終了ボタンを利用できます。
@@ -93,6 +94,8 @@ Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](l
 
 輪郭内のクリックは会話表示、ドラッグは配置変更です。透明部分はクリック透過し、キーボードフォーカスと作業領域を占有しません。初期値30fps、設定で60fpsへ変更できます。大きさは静止時の全身を基準に、100%で画面の高さの約40%、200%で約80%とします。設定で50〜200%を直接入力し、「適用して閉じる」で反映・保存できます。ドラッグは画面の端を越えて移動でき、負の配置も保存します。見失ったときは設定またはトレイの「キャラクターを画面中央へ戻す」で再表示・配置できます。モデル・モーション・サイズ・fps・配置の変更とトレイでの表示切替は再起動不要です。非表示中は描画・アニメーション更新を止め、GPUとモデルをメモリに保持して再表示時に再開します。出力変更では必要なWaylandウィンドウだけを更新します。モデルの読込失敗も設定から選び直せます。「再起動」は描画エラー時の復旧操作です。
 
+`just run-desktop`と`just run-avatar`は描画プロセスを依存ライブラリも含めreleaseビルドします。Bevyを未最適化のdebugビルドで実行した性能とは区別してください。表示画像はGPUからWaylandへ渡し、入力領域もGPUで最終画像から生成します。通常動作で画像のCPU読み戻しは行いません。[描画設計と比較手順](docs/avatar-gpu-rendering.md)・[性能比較結果](docs/avatar-performance-results.md)を参照してください。
+
 テーマ（システム・ライト・ダーク）・フォント・文字サイズ・VRM・大きさ・表示・fps・出力名・位置は`$XDG_CONFIG_HOME/ene/client.json`（既定`~/.config/ene/client.json`）へ保存します。終了時は描画プロセスへ停止を要求し、3秒以内に応答しなければ強制終了して回収します。`ENE_AVATAR_BIN`で描画バイナリの場所を指定できます。ハードウェアGPUのない試験環境だけで`ENE_AVATAR_CPU_GPU=1`を指定するとWGPUのソフトウェアアダプターを使用します。
 
 `just run-avatar`で描画を単独起動できます。通常の回帰チェックは`just verify`で実行します。
@@ -113,6 +116,6 @@ Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](l
 three-vrmのサンプルはCopyright (c) 2019-2026 pixiv Inc.／[MIT License](licenses/three-vrm-animation.txt)です。追加3本はCC0 1.0で、作者・原配布元・固定コミットの取得元は[ライセンスと出典](licenses/vrma-cc0.md)に記録しています。ライセンス通知は各モーションの隣にも保存します。
 
 ```sh
-cargo run --locked -p ene-avatar -- --standalone --model /path/to/avatar.vrm --motion /path/to/motion.vrma
+cargo run --release --locked -p ene-avatar -- --standalone --model /path/to/avatar.vrm --motion /path/to/motion.vrma
 # 一度だけ再生する場合は --no-loop を追加
 ```

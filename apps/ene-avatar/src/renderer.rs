@@ -5,12 +5,16 @@ use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     prelude::*,
     render::{
-        RenderPlugin,
+        RenderApp, RenderPlugin,
+        render_asset::RenderAssets,
         settings::{RenderCreation, WgpuSettings},
+        texture::GpuImage,
         view::screenshot::{Screenshot, ScreenshotCaptured},
     },
     transform::TransformSystems,
-    window::{ExitCondition, WindowPlugin},
+    window::{
+        ExitCondition, RawHandleWrapper, RawHandleWrapperHolder, WindowPlugin, WindowWrapper,
+    },
 };
 use bevy_vrm1::prelude::*;
 use ene_shared::avatar::{AvatarSettings, MotionState};
@@ -18,6 +22,37 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+
+#[derive(Resource, Default)]
+struct ProfileFrame {
+    sequence: u64,
+    token: Option<usize>,
+}
+
+fn begin_scene_profile(
+    mut timer: ResMut<crate::telemetry::SceneTimer>,
+    mut frame: ResMut<ProfileFrame>,
+    mut pending: ResMut<bevy::render::renderer::PendingCommandBuffers>,
+) {
+    frame.token = timer.begin_buffered(frame.sequence, &mut pending);
+}
+fn finish_scene_profile(
+    mut timer: ResMut<crate::telemetry::SceneTimer>,
+    frame: Res<ProfileFrame>,
+    mut pending: ResMut<bevy::render::renderer::PendingCommandBuffers>,
+) {
+    if let Some(token) = frame.token {
+        timer.finish_buffered(token, &mut pending);
+    }
+}
+fn map_scene_profile(
+    mut timer: ResMut<crate::telemetry::SceneTimer>,
+    mut frame: ResMut<ProfileFrame>,
+) {
+    if let Some(token) = frame.token.take() {
+        timer.map_after_submit(token);
+    }
+}
 
 #[derive(Default)]
 pub struct Capture {
@@ -61,8 +96,19 @@ impl Renderer {
         height: u32,
         scale: u32,
         settings: &AvatarSettings,
+        native_window: crate::native::NativeWindow,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut app = App::new();
+        let window = WindowWrapper::new(native_window);
+        let wrapper = RawHandleWrapper::new(&window)?;
+        let resources = bevy::tasks::block_on(bevy::render::renderer::initialize_renderer(
+            bevy::render::settings::Backends::VULKAN,
+            Some(RawHandleWrapperHolder(Arc::new(Mutex::new(Some(wrapper))))),
+            &WgpuSettings {
+                force_fallback_adapter: std::env::var_os("ENE_AVATAR_CPU_GPU").is_some(),
+                ..default()
+            },
+        ));
         app.add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -77,10 +123,7 @@ impl Renderer {
                     ..default()
                 })
                 .set(RenderPlugin {
-                    render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                        force_fallback_adapter: std::env::var_os("ENE_AVATAR_CPU_GPU").is_some(),
-                        ..default()
-                    })),
+                    render_creation: RenderCreation::Manual(resources),
                     ..default()
                 })
                 .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
@@ -97,15 +140,20 @@ impl Renderer {
                 .before(TransformSystems::Propagate)
                 .before(VrmSystemSets::Constraints),
         );
-        let target =
-            app.world_mut()
-                .resource_mut::<Assets<Image>>()
-                .add(Image::new_target_texture(
-                    width * scale,
-                    height * scale,
-                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
-                    None,
-                ));
+        let mut target_image = Image::new_target_texture(
+            width * scale,
+            height * scale,
+            bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+            None,
+        );
+        target_image.texture_descriptor.usage |=
+            bevy::render::render_resource::TextureUsages::COPY_SRC;
+        target_image.data = None;
+        target_image.copy_on_resize = false;
+        let target = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(target_image);
         app.insert_resource(ClearColor(Color::NONE));
         app.world_mut().spawn((
             AvatarCamera,
@@ -142,6 +190,34 @@ impl Renderer {
         }
         app.finish();
         app.cleanup();
+        if std::env::var("ENE_AVATAR_PROFILE").as_deref() == Ok("1") {
+            let world = app.world();
+            let timer = crate::telemetry::SceneTimer::new(
+                world
+                    .resource::<bevy::render::renderer::RenderDevice>()
+                    .clone(),
+                world
+                    .resource::<bevy::render::renderer::RenderQueue>()
+                    .clone(),
+            );
+            if let Some(reason) = timer.unavailable_reason() {
+                eprintln!("avatar scene timing unavailable: {reason}");
+            }
+            use bevy::render::renderer::{RenderGraph, RenderGraphSystems};
+            app.sub_app_mut(RenderApp)
+                .insert_resource(timer)
+                .init_resource::<ProfileFrame>()
+                .add_systems(
+                    RenderGraph,
+                    (
+                        begin_scene_profile.in_set(RenderGraphSystems::Begin),
+                        finish_scene_profile
+                            .after(RenderGraphSystems::Render)
+                            .before(RenderGraphSystems::Submit),
+                        map_scene_profile.in_set(RenderGraphSystems::Finish),
+                    ),
+                );
+        }
         let mut renderer = Self {
             app,
             captures: Arc::new(Mutex::new(Capture::default())),
@@ -334,13 +410,13 @@ impl Renderer {
             p.aspect_ratio = width as f32 / height as f32;
         }
     }
-    pub fn capture(&mut self) {
+    pub fn capture(&mut self) -> Option<u64> {
         let shared = self.captures.clone();
         let generation = self.generation;
         {
             let mut s = shared.lock().unwrap();
             if s.pending >= 4 {
-                return;
+                return None;
             }
             s.pending += 1;
         }
@@ -366,6 +442,41 @@ impl Renderer {
                     shared.revision = sequence;
                 }
             });
+        Some(sequence)
+    }
+    pub fn profile_frame(&mut self, sequence: u64) {
+        if let Some(mut frame) = self
+            .app
+            .sub_app_mut(RenderApp)
+            .world_mut()
+            .get_resource_mut::<ProfileFrame>()
+        {
+            frame.sequence = sequence;
+        }
+    }
+    pub fn poll_scene_timings(&mut self) -> Vec<crate::telemetry::SceneTimestampSample> {
+        if let Some(mut timer) = self
+            .app
+            .sub_app_mut(RenderApp)
+            .world_mut()
+            .get_resource_mut::<crate::telemetry::SceneTimer>()
+        {
+            let samples = timer.poll();
+            for error in timer.take_errors() {
+                eprintln!("avatar scene timing: {error}");
+            }
+            samples
+        } else {
+            Vec::new()
+        }
+    }
+    pub fn rendered_texture(&self) -> Option<wgpu::Texture> {
+        self.app
+            .get_sub_app(RenderApp)?
+            .world()
+            .resource::<RenderAssets<GpuImage>>()
+            .get(&self.target)
+            .map(|image| (*image.texture).clone())
     }
     pub fn ready(&mut self, avatar_height: f32, viewport_height: u32) -> bool {
         if self.model_failed {

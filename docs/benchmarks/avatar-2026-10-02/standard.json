@@ -1,0 +1,1146 @@
+{
+  "metadata": {
+    "system": {
+      "kernel": "7.2.8",
+      "machine": "x86_64",
+      "python": "3.14.7"
+    },
+    "base_settings": {
+      "model": "/home/pexisgle/.cache/ene/models/Seed-san.vrm",
+      "motion": "/home/pexisgle/.cache/ene/motions/quaternius-dance.vrma",
+      "motion_playing": true,
+      "motion_loop": true,
+      "visible": true,
+      "fps": 60,
+      "size_percent": 100,
+      "right": -191,
+      "bottom": 26,
+      "output": "DP-1"
+    },
+    "repeats": 3,
+    "warmup_seconds": 10,
+    "measure_seconds": 60,
+    "backends": [
+      "gpu",
+      "geometry",
+      "empty",
+      "shm"
+    ],
+    "scenarios": [
+      {
+        "size_percent": 100,
+        "test_scale": null,
+        "fps": 60
+      }
+    ],
+    "notes": [
+      "Startup/Ready wait is excluded from warmup and measurement.",
+      "100% CPU equals one core; process totals include all native threads.",
+      "GPU process ns counters are deduplicated by device/client; engines are kept separate.",
+      "GPU queries and CPU work are profiled; overhead is part of these measurements.",
+      "Metrics are selected by host receipt in the measurement window; raw timestamps are preserved.",
+      "Verification processes are separate and excluded from performance aggregates.",
+      "No configuration files are modified; overrides affect only this process's Configure."
+    ]
+  },
+  "performance": [
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "gpu",
+      "repeat": 1,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.00535279,
+      "sent": 3600,
+      "sent_fps": 59.994647687496744,
+      "displayed": 3601,
+      "displayed_fps": 60.011312867409934,
+      "discarded": 0,
+      "interval_p95_ms": 16.672,
+      "interval_max_ms": 16.678,
+      "cpu_one_core_percent": 31.79818157434934,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.7264610518592733
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 7.917355371900826
+      },
+      "rss_mean_mib": 325.26769111570246,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 528529187.96694213,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 0.436648,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 0.03502,
+      "cpu_update_p95_ms": 2.848554,
+      "cpu_motion_p95_ms": 0.03883,
+      "cpu_coordinate_decode_p95_ms": 0.03499,
+      "cpu_total_p95_ms": 3.473975,
+      "cpu_input_region_p95_ms": 0.302829,
+      "cpu_present_submit_p95_ms": 0.30641,
+      "gpu_mask_p95_ms": 0.07148,
+      "gpu_copy_mask_p95_ms": 0.08676,
+      "gpu_scene_p95_ms": 0.22664,
+      "gpu_color_conversion_p95_ms": 0.0254,
+      "gpu_to_cpu_bytes_per_frame_p95": 65552,
+      "timestamp_bytes_per_frame_p95": 56,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 26.825276,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 302,
+        "invalid_samples": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "true_positives": 12536610,
+        "true_negatives": 288052446,
+        "false_positive_rate": 0.0,
+        "false_negative_rate": 0.0,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 300589056,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-gpu-r1/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "gpu",
+      "repeat": 2,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.045299546,
+      "sent": 3603,
+      "sent_fps": 60.0046969078701,
+      "displayed": 3601,
+      "displayed_fps": 59.97138872196509,
+      "discarded": 0,
+      "interval_p95_ms": 16.673,
+      "interval_max_ms": 33.33,
+      "cpu_one_core_percent": 31.394426434295298,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.5729556703255354
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 8.066115702479339
+      },
+      "rss_mean_mib": 331.90828383264466,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 528883948.9586777,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 0.438411,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 0.03553,
+      "cpu_update_p95_ms": 2.844622,
+      "cpu_motion_p95_ms": 0.03657,
+      "cpu_coordinate_decode_p95_ms": 0.0355,
+      "cpu_total_p95_ms": 3.473673,
+      "cpu_input_region_p95_ms": 0.30831,
+      "cpu_present_submit_p95_ms": 0.302591,
+      "gpu_mask_p95_ms": 0.07168,
+      "gpu_copy_mask_p95_ms": 0.08672,
+      "gpu_scene_p95_ms": 0.23644,
+      "gpu_color_conversion_p95_ms": 0.0254,
+      "gpu_to_cpu_bytes_per_frame_p95": 65552,
+      "timestamp_bytes_per_frame_p95": 56,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 32.922648,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 302,
+        "invalid_samples": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "true_positives": 12536610,
+        "true_negatives": 288052446,
+        "false_positive_rate": 0.0,
+        "false_negative_rate": 0.0,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 300589056,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-gpu-r2/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "gpu",
+      "repeat": 3,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.029433827,
+      "sent": 3602,
+      "sent_fps": 60.00389759431472,
+      "displayed": 3602,
+      "displayed_fps": 60.00389759431472,
+      "discarded": 0,
+      "interval_p95_ms": 16.675,
+      "interval_max_ms": 16.678,
+      "cpu_one_core_percent": 32.83481278489234,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.326735960064563
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 7.43801652892562
+      },
+      "rss_mean_mib": 324.79961905991735,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 528899926.74380165,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 0.447141,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 0.0342,
+      "cpu_update_p95_ms": 3.107752,
+      "cpu_motion_p95_ms": 0.03979,
+      "cpu_coordinate_decode_p95_ms": 0.03417,
+      "cpu_total_p95_ms": 3.776493,
+      "cpu_input_region_p95_ms": 0.313571,
+      "cpu_present_submit_p95_ms": 0.313031,
+      "gpu_mask_p95_ms": 0.07148,
+      "gpu_copy_mask_p95_ms": 0.0866,
+      "gpu_scene_p95_ms": 0.22612,
+      "gpu_color_conversion_p95_ms": 0.02608,
+      "gpu_to_cpu_bytes_per_frame_p95": 65552,
+      "timestamp_bytes_per_frame_p95": 56,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 21.410333,
+      "display_latency_bounds_p95_ns": 46,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 302,
+        "invalid_samples": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "true_positives": 12536610,
+        "true_negatives": 288052446,
+        "false_positive_rate": 0.0,
+        "false_negative_rate": 0.0,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 300589056,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-gpu-r3/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "geometry",
+      "repeat": 1,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.039853509,
+      "sent": 3601,
+      "sent_fps": 59.97682854872737,
+      "displayed": 3601,
+      "displayed_fps": 59.97682854872737,
+      "discarded": 0,
+      "interval_p95_ms": 16.674,
+      "interval_max_ms": 33.331,
+      "cpu_one_core_percent": 96.47298991387854,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.4402049390155716
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 7.231404958677686
+      },
+      "rss_mean_mib": 336.86412060950414,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 529731990.21487606,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 11.893905,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 11.494885,
+      "cpu_update_p95_ms": 2.987001,
+      "cpu_motion_p95_ms": 0.03875,
+      "cpu_coordinate_decode_p95_ms": 0.00121,
+      "cpu_total_p95_ms": 14.752536,
+      "cpu_input_region_p95_ms": 0.29471,
+      "cpu_present_submit_p95_ms": 0.41165,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.22964,
+      "gpu_color_conversion_p95_ms": 0.02576,
+      "gpu_to_cpu_bytes_per_frame_p95": 0,
+      "timestamp_bytes_per_frame_p95": 48,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 25.36605,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 235,
+        "invalid_samples": 0,
+        "false_positive": 84,
+        "false_negative": 148128,
+        "true_positives": 9605268,
+        "true_negatives": 224148600,
+        "false_positive_rate": 3.747512521643892e-07,
+        "false_negative_rate": 0.015187325522310382,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 233902080,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-geometry-r1/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "geometry",
+      "repeat": 2,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.041801575,
+      "sent": 3601,
+      "sent_fps": 59.97488259078775,
+      "displayed": 3600,
+      "displayed_fps": 59.95822752758564,
+      "discarded": 0,
+      "interval_p95_ms": 16.672,
+      "interval_max_ms": 33.338,
+      "cpu_one_core_percent": 97.13618538736387,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.575819303856184
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 7.652892561983471
+      },
+      "rss_mean_mib": 337.0379648760331,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 528494592.0,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 12.066442,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 11.653501,
+      "cpu_update_p95_ms": 2.75275,
+      "cpu_motion_p95_ms": 0.03414,
+      "cpu_coordinate_decode_p95_ms": 0.0011,
+      "cpu_total_p95_ms": 14.824071,
+      "cpu_input_region_p95_ms": 0.27658,
+      "cpu_present_submit_p95_ms": 0.40542,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.22776,
+      "gpu_color_conversion_p95_ms": 0.02528,
+      "gpu_to_cpu_bytes_per_frame_p95": 0,
+      "timestamp_bytes_per_frame_p95": 48,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 32.038924,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 235,
+        "invalid_samples": 0,
+        "false_positive": 84,
+        "false_negative": 148128,
+        "true_positives": 9605268,
+        "true_negatives": 224148600,
+        "false_positive_rate": 3.747512521643892e-07,
+        "false_negative_rate": 0.015187325522310382,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 233902080,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-geometry-r2/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "geometry",
+      "repeat": 3,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.038492902,
+      "sent": 3599,
+      "sent_fps": 59.944875796176255,
+      "displayed": 3599,
+      "displayed_fps": 59.944875796176255,
+      "discarded": 0,
+      "interval_p95_ms": 16.673,
+      "interval_max_ms": 50.005,
+      "cpu_one_core_percent": 93.0944873196672,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.3710748189081
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 7.793388429752066
+      },
+      "rss_mean_mib": 315.5594976756198,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 529448249.12396693,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 11.27487,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 10.88056,
+      "cpu_update_p95_ms": 2.75152,
+      "cpu_motion_p95_ms": 0.03219,
+      "cpu_coordinate_decode_p95_ms": 0.00111,
+      "cpu_total_p95_ms": 14.081421,
+      "cpu_input_region_p95_ms": 0.27463,
+      "cpu_present_submit_p95_ms": 0.39346,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.23176,
+      "gpu_color_conversion_p95_ms": 0.02576,
+      "gpu_to_cpu_bytes_per_frame_p95": 0,
+      "timestamp_bytes_per_frame_p95": 48,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 22.584234,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 235,
+        "invalid_samples": 0,
+        "false_positive": 84,
+        "false_negative": 148128,
+        "true_positives": 9605268,
+        "true_negatives": 224148600,
+        "false_positive_rate": 3.747512521643892e-07,
+        "false_negative_rate": 0.015187325522310382,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 233902080,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-geometry-r3/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "empty",
+      "repeat": 1,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.035446353,
+      "sent": 3602,
+      "sent_fps": 59.997888227910316,
+      "displayed": 3602,
+      "displayed_fps": 59.997888227910316,
+      "discarded": 0,
+      "interval_p95_ms": 16.67,
+      "interval_max_ms": 16.678,
+      "cpu_one_core_percent": 29.667097770313877,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.987180189546607
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 8.314049586776859
+      },
+      "rss_mean_mib": 328.73731275826447,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 528830802.5123967,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 0.08892,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 0.00101,
+      "cpu_update_p95_ms": 2.859449,
+      "cpu_motion_p95_ms": 0.0364,
+      "cpu_coordinate_decode_p95_ms": 0.00098,
+      "cpu_total_p95_ms": 3.178199,
+      "cpu_input_region_p95_ms": 0.01197,
+      "cpu_present_submit_p95_ms": 0.28106,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.30812,
+      "gpu_color_conversion_p95_ms": 0.03744,
+      "gpu_to_cpu_bytes_per_frame_p95": 0,
+      "timestamp_bytes_per_frame_p95": 48,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 23.649227,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": false,
+        "samples": 0,
+        "invalid_samples": 0,
+        "false_positive": null,
+        "false_negative": null,
+        "true_positives": null,
+        "true_negatives": null,
+        "false_positive_rate": null,
+        "false_negative_rate": null,
+        "reference_rules": [],
+        "reason": "separate verification run skipped or not yet completed"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-empty-r1/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "empty",
+      "repeat": 2,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.042336185,
+      "sent": 3603,
+      "sent_fps": 60.00765841120144,
+      "displayed": 3602,
+      "displayed_fps": 59.991003496294084,
+      "discarded": 0,
+      "interval_p95_ms": 16.67,
+      "interval_max_ms": 16.678,
+      "cpu_one_core_percent": 29.43040611557739,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.274373281839379
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 8.0
+      },
+      "rss_mean_mib": 325.76288094008265,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 528962145.322314,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 0.08093,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 0.0009,
+      "cpu_update_p95_ms": 2.799789,
+      "cpu_motion_p95_ms": 0.03642,
+      "cpu_coordinate_decode_p95_ms": 0.00087,
+      "cpu_total_p95_ms": 3.109828,
+      "cpu_input_region_p95_ms": 0.01113,
+      "cpu_present_submit_p95_ms": 0.27122,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.22576,
+      "gpu_color_conversion_p95_ms": 0.02516,
+      "gpu_to_cpu_bytes_per_frame_p95": 0,
+      "timestamp_bytes_per_frame_p95": 48,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 14.064513,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": false,
+        "samples": 0,
+        "invalid_samples": 0,
+        "false_positive": null,
+        "false_negative": null,
+        "true_positives": null,
+        "true_negatives": null,
+        "false_positive_rate": null,
+        "false_negative_rate": null,
+        "reference_rules": [],
+        "reason": "separate verification run skipped or not yet completed"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-empty-r2/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "empty",
+      "repeat": 3,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.038306126,
+      "sent": 3603,
+      "sent_fps": 60.01168641297986,
+      "displayed": 3602,
+      "displayed_fps": 59.995030380114756,
+      "discarded": 0,
+      "interval_p95_ms": 16.67,
+      "interval_max_ms": 16.678,
+      "cpu_one_core_percent": 30.83137301685239,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 3.2831698956367155
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 7.925619834710743
+      },
+      "rss_mean_mib": 323.2673360020661,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 528842988.9586777,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 0.09046,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 0.001,
+      "cpu_update_p95_ms": 3.135858,
+      "cpu_motion_p95_ms": 0.0464,
+      "cpu_coordinate_decode_p95_ms": 0.00097,
+      "cpu_total_p95_ms": 3.477168,
+      "cpu_input_region_p95_ms": 0.01272,
+      "cpu_present_submit_p95_ms": 0.28788,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.2272,
+      "gpu_color_conversion_p95_ms": 0.02532,
+      "gpu_to_cpu_bytes_per_frame_p95": 0,
+      "timestamp_bytes_per_frame_p95": 48,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 14.616019,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": false,
+        "samples": 0,
+        "invalid_samples": 0,
+        "false_positive": null,
+        "false_negative": null,
+        "true_positives": null,
+        "true_negatives": null,
+        "false_positive_rate": null,
+        "false_negative_rate": null,
+        "reference_rules": [],
+        "reason": "separate verification run skipped or not yet completed"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-empty-r3/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "shm",
+      "repeat": 1,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.027629524,
+      "sent": 3602,
+      "sent_fps": 60.00570118398334,
+      "displayed": 3600,
+      "displayed_fps": 59.97238319332038,
+      "discarded": 2,
+      "interval_p95_ms": 16.673,
+      "interval_max_ms": 33.327,
+      "cpu_one_core_percent": 66.07190026501831,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 5.639463431187484
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 15.363636363636363
+      },
+      "rss_mean_mib": 357.3630875516529,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 515884226.6446281,
+        "0000:26:00.0/memory-gtt": 71319552.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 5.158427,
+      "cpu_coverage_scope": "CPU alpha scan + shm image conversion/copy + Wayland registration",
+      "cpu_mask_p95_ms": 2.956198,
+      "cpu_update_p95_ms": 3.893828,
+      "cpu_motion_p95_ms": 0.03655,
+      "cpu_coordinate_decode_p95_ms": null,
+      "cpu_total_p95_ms": 8.985624,
+      "cpu_input_region_p95_ms": 2.276419,
+      "cpu_present_submit_p95_ms": null,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.24416,
+      "gpu_color_conversion_p95_ms": null,
+      "gpu_to_cpu_bytes_per_frame_p95": 3981312,
+      "timestamp_bytes_per_frame_p95": 16,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 37.724057,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": false,
+        "samples": 0,
+        "invalid_samples": 0,
+        "false_positive": null,
+        "false_negative": null,
+        "true_positives": null,
+        "true_negatives": null,
+        "false_positive_rate": null,
+        "false_negative_rate": null,
+        "reference_rules": [],
+        "reason": "separate verification run skipped or not yet completed"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-shm-r1/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "shm",
+      "repeat": 2,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.031707595,
+      "sent": 3601,
+      "sent_fps": 59.98496701599614,
+      "displayed": 3601,
+      "displayed_fps": 59.98496701599614,
+      "discarded": 0,
+      "interval_p95_ms": 16.672,
+      "interval_max_ms": 33.335,
+      "cpu_one_core_percent": 67.6997046480461,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 5.446578733970305
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 15.148760330578513
+      },
+      "rss_mean_mib": 372.9935111053719,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 515862561.8512397,
+        "0000:26:00.0/memory-gtt": 71319552.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 5.152436,
+      "cpu_coverage_scope": "CPU alpha scan + shm image conversion/copy + Wayland registration",
+      "cpu_mask_p95_ms": 2.983128,
+      "cpu_update_p95_ms": 4.084607,
+      "cpu_motion_p95_ms": 0.0458,
+      "cpu_coordinate_decode_p95_ms": null,
+      "cpu_total_p95_ms": 9.171753,
+      "cpu_input_region_p95_ms": 2.254958,
+      "cpu_present_submit_p95_ms": null,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.24052,
+      "gpu_color_conversion_p95_ms": null,
+      "gpu_to_cpu_bytes_per_frame_p95": 3981312,
+      "timestamp_bytes_per_frame_p95": 16,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 38.811074,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": false,
+        "samples": 0,
+        "invalid_samples": 0,
+        "false_positive": null,
+        "false_negative": null,
+        "true_positives": null,
+        "true_negatives": null,
+        "false_positive_rate": null,
+        "false_negative_rate": null,
+        "reference_rules": [],
+        "reason": "separate verification run skipped or not yet completed"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-shm-r2/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "shm",
+      "repeat": 3,
+      "status": "ok",
+      "verify": false,
+      "seconds": 60.037239341,
+      "sent": 3602,
+      "sent_fps": 59.996096415115474,
+      "displayed": 3602,
+      "displayed_fps": 59.996096415115474,
+      "discarded": 0,
+      "interval_p95_ms": 16.67,
+      "interval_max_ms": 16.678,
+      "cpu_one_core_percent": 68.70983135882761,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 5.4046169155557875
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 26.818181818181817
+      },
+      "rss_mean_mib": 368.52492252066116,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 514375409.19008267,
+        "0000:26:00.0/memory-gtt": 71319552.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 5.351526,
+      "cpu_coverage_scope": "CPU alpha scan + shm image conversion/copy + Wayland registration",
+      "cpu_mask_p95_ms": 3.213458,
+      "cpu_update_p95_ms": 3.948907,
+      "cpu_motion_p95_ms": 0.03938,
+      "cpu_coordinate_decode_p95_ms": null,
+      "cpu_total_p95_ms": 9.147463,
+      "cpu_input_region_p95_ms": 2.218768,
+      "cpu_present_submit_p95_ms": null,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.22832,
+      "gpu_color_conversion_p95_ms": null,
+      "gpu_to_cpu_bytes_per_frame_p95": 3981312,
+      "timestamp_bytes_per_frame_p95": 16,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 42.707157,
+      "display_latency_bounds_p95_ns": 71,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": false,
+        "samples": 0,
+        "invalid_samples": 0,
+        "false_positive": null,
+        "false_negative": null,
+        "true_positives": null,
+        "true_negatives": null,
+        "false_positive_rate": null,
+        "false_negative_rate": null,
+        "reference_rules": [],
+        "reason": "separate verification run skipped or not yet completed"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-shm-r3/raw.jsonl"
+    }
+  ],
+  "verification": [
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "gpu",
+      "repeat": 1,
+      "status": "ok",
+      "verify": true,
+      "seconds": 5.035081646,
+      "sent": 302,
+      "sent_fps": 59.97916642323301,
+      "displayed": 302,
+      "displayed_fps": 59.97916642323301,
+      "discarded": 0,
+      "interval_p95_ms": 16.674,
+      "interval_max_ms": 16.678,
+      "cpu_one_core_percent": 56.024757101760045,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 7.054632864725478
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 11.0
+      },
+      "rss_mean_mib": 311.2903645833333,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 527282176.0,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 0.44237,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 0.0345,
+      "cpu_update_p95_ms": 2.972591,
+      "cpu_motion_p95_ms": 0.03287,
+      "cpu_coordinate_decode_p95_ms": 0.03447,
+      "cpu_total_p95_ms": 3.550042,
+      "cpu_input_region_p95_ms": 0.3127,
+      "cpu_present_submit_p95_ms": 0.318781,
+      "gpu_mask_p95_ms": 0.0718,
+      "gpu_copy_mask_p95_ms": 0.0872,
+      "gpu_scene_p95_ms": 0.22496,
+      "gpu_color_conversion_p95_ms": 0.02604,
+      "gpu_to_cpu_bytes_per_frame_p95": 65552,
+      "timestamp_bytes_per_frame_p95": 56,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 21.832552,
+      "display_latency_bounds_p95_ns": 41,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 302,
+        "invalid_samples": 0,
+        "false_positive": 0,
+        "false_negative": 0,
+        "true_positives": 12536610,
+        "true_negatives": 288052446,
+        "false_positive_rate": 0.0,
+        "false_negative_rate": 0.0,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 300589056,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-gpu-verify/raw.jsonl"
+    },
+    {
+      "case": "standard",
+      "scenario": "s01-size100-scalenative-fps60",
+      "backend": "geometry",
+      "repeat": 1,
+      "status": "ok",
+      "verify": true,
+      "seconds": 5.035354805,
+      "sent": 235,
+      "sent_fps": 46.669998262416385,
+      "displayed": 235,
+      "displayed_fps": 46.669998262416385,
+      "discarded": 0,
+      "interval_p95_ms": 33.338,
+      "interval_max_ms": 33.344,
+      "cpu_one_core_percent": 110.25220044842908,
+      "gpu_process_engine_percent": {
+        "0000:26:00.0/gfx": 6.262253132820497
+      },
+      "gpu_whole_device_percent": {
+        "/sys/devices/pci0000:00/0000:00:03.1/0000:24:00.0/0000:25:00.0/0000:26:00.0/gpu_busy_percent": 10.083333333333334
+      },
+      "rss_mean_mib": 343.2083333333333,
+      "gpu_memory_mean_bytes": {
+        "0000:26:00.0/memory-vram": 530022400.0,
+        "0000:26:00.0/memory-gtt": 71335936.0,
+        "0000:26:00.0/memory-cpu": 0.0
+      },
+      "cpu_coverage_p95_ms": 11.309929,
+      "cpu_coverage_scope": "CPU preparation + coordinate decode/projection + Wayland registration",
+      "cpu_mask_p95_ms": 10.926759,
+      "cpu_update_p95_ms": 2.75047,
+      "cpu_motion_p95_ms": 0.03017,
+      "cpu_coordinate_decode_p95_ms": 0.00094,
+      "cpu_total_p95_ms": 13.968977,
+      "cpu_input_region_p95_ms": 0.24586,
+      "cpu_present_submit_p95_ms": 0.38078,
+      "gpu_mask_p95_ms": null,
+      "gpu_copy_mask_p95_ms": null,
+      "gpu_scene_p95_ms": 0.2268,
+      "gpu_color_conversion_p95_ms": 0.02564,
+      "gpu_to_cpu_bytes_per_frame_p95": 0,
+      "timestamp_bytes_per_frame_p95": 48,
+      "overflow_retries": 0,
+      "display_latency_p95_ms": 31.258991,
+      "display_latency_bounds_p95_ns": 36,
+      "display_latency_clock_mapping_assumptions": [
+        "Linux std::Instant and CLOCK_MONOTONIC advance at the same rate; the clock_gettime sample occurs inside the Instant bracket; the compositor's CLOCK_MONOTONIC timestamp shares the local epoch/rate; enqueue precedes display. Bounds cover registration bracket and clock resolution, not compositor timestamp error, clock drift, or physical photon timing."
+      ],
+      "observed_dimensions": [
+        [
+          1152,
+          864,
+          1.0
+        ]
+      ],
+      "scale_matches": null,
+      "requested_size_percent": 100,
+      "requested_scale": null,
+      "invalid_metric_lines": 0,
+      "ipc_errors": [],
+      "accuracy": {
+        "available": true,
+        "samples": 235,
+        "invalid_samples": 0,
+        "false_positive": 84,
+        "false_negative": 148128,
+        "true_positives": 9605268,
+        "true_negatives": 224148600,
+        "false_positive_rate": 3.747512521643892e-07,
+        "false_negative_rate": 0.015187325522310382,
+        "reference_rules": [
+          "any physical alpha byte > 8 in each logical pixel"
+        ],
+        "reason": null,
+        "pixels_compared": 233902080,
+        "verification_status": "ok"
+      },
+      "raw_source": "/tmp/ene-avatar-final-adoption/s01-size100-scalenative-fps60-geometry-verify/raw.jsonl"
+    }
+  ]
+}

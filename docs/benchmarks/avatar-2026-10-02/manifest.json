@@ -1,0 +1,48 @@
+{
+  "measured_at_jst": "2026-10-02",
+  "cpu": "AMD Ryzen 5 5600",
+  "gpu": "AMD Radeon RX 9060 XT",
+  "compositor": "KWin 6.7.5",
+  "driver": "Mesa 26.2.3 RADV",
+  "kernel": "7.2.8",
+  "outputs": [
+    {
+      "name": "HDMI-A-1",
+      "size": [
+        1920,
+        1080
+      ],
+      "refresh_hz": 60,
+      "scale": 1
+    },
+    {
+      "name": "DP-1",
+      "size": [
+        1920,
+        1080
+      ],
+      "refresh_hz": 60,
+      "scale": 1
+    }
+  ],
+  "binary_sha256": "9cea5e1b24db9926e693bd70ab811b2f62d20674e00760c9be6f4d3b2c3f51af",
+  "assets_sha256": {
+    "Seed-san.vrm": "624d0d554bc205bbdc33e22a68a2c3c20edebb3e573011ead8878a65e5329b23",
+    "josie-slow-run.vrma": "54fff21bbbbbe6364dc812f39dd849eadb61de3888b556580143d386592d17e5",
+    "josie-walk.vrma": "51c4158488a86a6bb99b978fb4d269e1798f9749bceaf0420473bae413fc3271",
+    "quaternius-dance.vrma": "878e8a7776a90b2a48ab5d2f5c57d83f11b9e537ab02eaeb66bd6dab27a2ed74",
+    "three-vrm-sample.vrma": "38d0fd12d61e896f1a970b5e358ebb41a96c8d5ee8e284496ea18f0ba1f04e7b",
+    "ene-coverage-final.vrm": "3f3670d1e3594cd5aeba13ba772ff6b594b89004d4863a81b9a37cc5285733c4"
+  },
+  "raw_standard_source": "/tmp/ene-avatar-final-adoption",
+  "raw_matrix_source": "/tmp/ene-avatar-validation-matrix",
+  "build": "direnv exec . cargo build --release --locked -p ene-avatar",
+  "detailed_reproduction": "../../avatar-gpu-rendering.md",
+  "notes": [
+    "All four final standard backends use the same binary hash.",
+    "Matrix screening: 1s warmup + 3s performance, separate 1s warmup + 4s verification; one run each.",
+    "DPI 2 uses ENE_AVATAR_TEST_SCALE=2 and real wl_surface.set_buffer_scale(2), without changing desktop output settings.",
+    "Readback in standard GPU performance consists of coordinates plus optional timestamps; verification image readback runs separately.",
+    "Earlier debug runs and CPU-contended runs are excluded from acceptance."
+  ]
+}

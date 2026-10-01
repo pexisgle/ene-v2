@@ -2324,6 +2324,7 @@ dependencies = [
  "ene-shared",
  "futures-util",
  "gltf-json",
+ "raw-window-handle",
  "rustix 1.1.5",
  "serde",
  "serde_json",
@@ -2333,6 +2334,7 @@ dependencies = [
  "tokio-util",
  "tracing-subscriber",
  "wayland-client",
+ "wgpu 29.0.4",
 ]
 
 [[package]]

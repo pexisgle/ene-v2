@@ -17,7 +17,7 @@ clap.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["time"] }
 
 ene-shared = { path = "../../crates/ene-shared" }
 bevy = { version = "=0.19.1", default-features = false, features = ["reflect_auto_register", "bevy_world_serialization", "bevy_log", "std", "async_executor", "multi_threaded", "bevy_asset", "bevy_scene", "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_gltf", "bevy_animation", "bevy_camera", "bevy_light", "bevy_image", "bevy_mesh", "bevy_window", "png", "morph", "morph_animation"] }
@@ -25,6 +25,8 @@ bevy_vrm1 = { version = "=0.9.5", default-features = false }
 smithay-client-toolkit = { version = "=0.21.1", default-features = false, features = ["calloop"] }
 wayland-client = { version = "0.31", features = ["system"] }
 serde_json = "1"
+wgpu = { version = "=29.0.4", default-features = false, features = ["vulkan", "wgsl"] }
+raw-window-handle = "0.6.2"
 
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

@@ -43,6 +43,40 @@ pub fn alpha_runs(data: &[u8], width: u32, height: u32, scale: u32) -> Vec<Run> 
     }
     runs
 }
+
+/// Verification only: compare coverage in logical coordinates, counting both
+/// transparent pixels intercepted and visible pixels missed by a candidate.
+pub fn coverage_errors(
+    reference: &[Run],
+    candidate: &[Run],
+    width: u32,
+    height: u32,
+) -> (u64, u64) {
+    fn coverage(runs: &[Run], width: u32, height: u32) -> Vec<bool> {
+        let mut pixels = vec![false; width as usize * height as usize];
+        for run in runs {
+            if run.y < 0 || run.y >= height as i32 {
+                continue;
+            }
+            let start = run.x.clamp(0, width as i32) as usize;
+            let end = (run.x.saturating_add(run.width)).clamp(0, width as i32) as usize;
+            if start < end {
+                pixels[run.y as usize * width as usize + start
+                    ..run.y as usize * width as usize + end]
+                    .fill(true);
+            }
+        }
+        pixels
+    }
+    let expected = coverage(reference, width, height);
+    let actual = coverage(candidate, width, height);
+    expected
+        .iter()
+        .zip(actual)
+        .fold((0, 0), |(fp, fn_), (&e, a)| {
+            (fp + u64::from(a && !e), fn_ + u64::from(e && !a))
+        })
+}
 #[cfg(test)]
 mod tests {
     use super::*;

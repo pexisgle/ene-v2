@@ -1,5 +1,16 @@
 use crate::mask::Run;
 use ene_shared::avatar::{AvatarEvent, AvatarSettings};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
+};
+use smithay_client_toolkit::presentation_time::{
+    PresentTime, PresentationTimeHandler, PresentationTimeState,
+};
+use smithay_client_toolkit::reexports::protocols::wp::idle_inhibit::zv1::client::{
+    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
+};
+use smithay_client_toolkit::reexports::protocols::wp::presentation_time::client::wp_presentation_feedback;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     output::{OutputHandler, OutputState},
@@ -19,10 +30,40 @@ use smithay_client_toolkit::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
+use std::ptr::NonNull;
 use wayland_client::{
     Connection, QueueHandle,
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
+use wayland_client::{Proxy, WEnum};
+
+/// Keeps the libwayland display and layer role alive for the WGPU surface.
+#[derive(Debug, Clone)]
+pub struct NativeWindow {
+    connection: Connection,
+    layer: LayerSurface,
+}
+impl HasWindowHandle for NativeWindow {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        use wayland_client::Proxy;
+        let ptr = NonNull::new(self.layer.wl_surface().id().as_ptr().cast())
+            .ok_or(HandleError::Unavailable)?;
+        // SAFETY: the owned layer retains its wl_surface throughout this borrow.
+        Ok(unsafe {
+            WindowHandle::borrow_raw(RawWindowHandle::Wayland(WaylandWindowHandle::new(ptr)))
+        })
+    }
+}
+impl HasDisplayHandle for NativeWindow {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        let ptr = NonNull::new(self.connection.backend().display_ptr().cast())
+            .ok_or(HandleError::Unavailable)?;
+        // SAFETY: the owned connection retains libwayland's display.
+        Ok(unsafe {
+            DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(ptr)))
+        })
+    }
+}
 
 use smithay_client_toolkit::reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1;
 
@@ -35,6 +76,12 @@ struct Drag {
 }
 
 pub struct State {
+    connection: Connection,
+    pub metrics: crate::telemetry::SharedRecorder,
+    presentation: PresentationTimeState,
+    test_scale: Option<u32>,
+    benchmark_idle_manager: Option<ZwpIdleInhibitManagerV1>,
+    benchmark_idle_inhibitor: Option<ZwpIdleInhibitorV1>,
     pub registry: RegistryState,
     pub seat: SeatState,
     pub outputs: OutputState,
@@ -44,6 +91,7 @@ pub struct State {
     pub shell: LayerShell,
     pub layer: LayerSurface,
     pub settings: AvatarSettings,
+    requested_layer_size: (u32, u32),
     pub configured: bool,
     pub closed: bool,
     pub scale: u32,
@@ -65,6 +113,8 @@ impl State {
         globals: &wayland_client::globals::GlobalList,
         qh: &QueueHandle<Self>,
         settings: AvatarSettings,
+        connection: Connection,
+        metrics: crate::telemetry::SharedRecorder,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let compositor = CompositorState::bind(globals, qh)?;
         let shell = LayerShell::bind(globals, qh).map_err(
@@ -76,6 +126,26 @@ impl State {
         let surface = compositor.create_surface(qh);
         let layer = shell.create_layer_surface(qh, surface, Layer::Top, Some("ene-avatar"), None);
         let mut state = Self {
+            connection,
+            metrics: metrics.clone(),
+            presentation: PresentationTimeState::bind(globals, qh),
+            // Actual presentation measurements require an awake output. No
+            // inhibitor is created in normal operation or while hidden.
+            benchmark_idle_manager: metrics
+                .lock()
+                .unwrap()
+                .enabled()
+                .then(|| {
+                    globals
+                        .bind::<ZwpIdleInhibitManagerV1, _, _>(qh, 1..=1, ())
+                        .ok()
+                })
+                .flatten(),
+            benchmark_idle_inhibitor: None,
+            test_scale: std::env::var("ENE_AVATAR_TEST_SCALE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|s| [1, 2].contains(s)),
             registry: RegistryState::new(globals),
             seat: SeatState::new(globals, qh),
             outputs,
@@ -85,6 +155,7 @@ impl State {
             shell,
             layer,
             settings,
+            requested_layer_size: (0, 0),
             configured: false,
             closed: false,
             scale: 1,
@@ -111,17 +182,55 @@ impl State {
             .set_keyboard_interactivity(KeyboardInteractivity::None);
         self.layer.set_exclusive_zone(-1);
         let size = self.requested_size();
+        let request_changed = self.requested_layer_size != size;
+        self.requested_layer_size = size;
         self.layer.set_size(size.0, size.1);
-        if self.configured && (self.width, self.height) != size {
+        if self.configured && request_changed && (self.width, self.height) != size {
             // Await the compositor's new size before presenting a resized frame.
             self.configured = false;
             self.drag = None;
             self.drag_pending = false;
-            self.input_runs.clear();
-            self.set_input(&[]);
+            // Retain the old buffer and its matching region until the resized
+            // GPU frame is ready; pending layer size does not replace pixels.
         }
         self.layer
             .set_margin(0, self.settings.right, self.settings.bottom, 0);
+    }
+    pub fn native_window(&self) -> NativeWindow {
+        NativeWindow {
+            connection: self.connection.clone(),
+            layer: self.layer.clone(),
+        }
+    }
+    /// Set pending input and scale before WGPU's present performs the commit.
+    pub fn prepare_gpu_present(&mut self, runs: &[Run]) {
+        self.set_input(runs);
+        self.input_runs.clear();
+        self.input_runs.extend_from_slice(runs);
+        self.layer.wl_surface().set_buffer_scale(self.scale as i32);
+        self.layer.wl_surface().damage_buffer(
+            0,
+            0,
+            (self.width * self.scale) as i32,
+            (self.height * self.scale) as i32,
+        );
+    }
+    pub fn request_feedback(&mut self, qh: &QueueHandle<Self>, sequence: u64) {
+        if !self.metrics.lock().unwrap().enabled() {
+            return;
+        }
+        match self.presentation.feedback(self.layer.wl_surface(), qh) {
+            Ok(feedback) => self
+                .metrics
+                .lock()
+                .unwrap()
+                .presentation_requested(feedback.id().protocol_id(), sequence),
+            Err(error) => self
+                .metrics
+                .lock()
+                .unwrap()
+                .presentation_unavailable(error.to_string()),
+        }
     }
     fn output_size(&self) -> (i32, i32) {
         if let Some(output) = &self.surface_output
@@ -182,6 +291,10 @@ impl State {
         self.notify_position();
     }
     pub fn recreate(&mut self, qh: &QueueHandle<Self>) {
+        self.metrics.lock().unwrap().reset_presentation();
+        if let Some(inhibitor) = self.benchmark_idle_inhibitor.take() {
+            inhibitor.destroy();
+        }
         let output = self.outputs.outputs().find(|o| {
             self.outputs.info(o).is_some_and(|i| {
                 self.settings
@@ -203,11 +316,18 @@ impl State {
             Some("ene-avatar"),
             output.as_ref(),
         );
+        if self.settings.visible
+            && let Some(manager) = &self.benchmark_idle_manager
+        {
+            self.benchmark_idle_inhibitor =
+                Some(manager.create_inhibitor(self.layer.wl_surface(), qh, ()));
+        }
         self.drag = None;
         self.drag_pending = false;
+        self.requested_layer_size = (0, 0);
         self.configured = false;
         self.closed = false;
-        self.scale = 1;
+        self.scale = self.test_scale.unwrap_or(1);
         self.resized = true;
         self.surface_output = None;
         self.properties();
@@ -252,8 +372,8 @@ impl State {
     fn set_input(&self, runs: &[Run]) {
         let region =
             smithay_client_toolkit::compositor::Region::new(&self.compositor).expect("wl_region");
-        for run in runs {
-            region.add(run.x, run.y, run.width, 1);
+        for (run, height) in input_rectangles(runs) {
+            region.add(run.x, run.y, run.width, height);
         }
         self.layer
             .wl_surface()
@@ -308,7 +428,7 @@ impl CompositorHandler for State {
         factor: i32,
     ) {
         if surface == self.layer.wl_surface() {
-            self.scale = factor.max(1) as u32;
+            self.scale = self.test_scale.unwrap_or(factor.max(1) as u32);
             self.resized = true;
             // Apply the new scale atomically with the matching-size buffer in
             // present(), keeping the old displayed frame at its old scale.
@@ -345,6 +465,47 @@ impl CompositorHandler for State {
         _: &wl_surface::WlSurface,
         _: &wl_output::WlOutput,
     ) {
+    }
+}
+impl PresentationTimeHandler for State {
+    fn presentation_time_state(&mut self) -> &mut PresentationTimeState {
+        &mut self.presentation
+    }
+    fn presented(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        feedback: &wp_presentation_feedback::WpPresentationFeedback,
+        _: &wl_surface::WlSurface,
+        _: Vec<wl_output::WlOutput>,
+        time: PresentTime,
+        refresh: u32,
+        seq: u64,
+        flags: WEnum<wp_presentation_feedback::Kind>,
+    ) {
+        let bits = match flags {
+            WEnum::Value(kind) => kind.bits(),
+            WEnum::Unknown(bits) => bits,
+        };
+        self.metrics.lock().unwrap().presented(
+            feedback.id().protocol_id(),
+            time,
+            refresh,
+            seq,
+            bits,
+        );
+    }
+    fn discarded(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        feedback: &wp_presentation_feedback::WpPresentationFeedback,
+        _: &wl_surface::WlSurface,
+    ) {
+        self.metrics
+            .lock()
+            .unwrap()
+            .discarded(feedback.id().protocol_id());
     }
 }
 impl OutputHandler for State {
@@ -541,3 +702,77 @@ impl ShmHandler for State {
         &mut self.shm
     }
 }
+
+/// Combine only identical intervals on adjacent rows, preserving every hole.
+fn input_rectangles(runs: &[Run]) -> Vec<(Run, i32)> {
+    let mut rectangles: Vec<(Run, i32)> = Vec::new();
+    let mut last = std::collections::BTreeMap::new();
+    for &run in runs {
+        let key = (run.x, run.width);
+        if let Some(&index) = last.get(&key) {
+            let (previous, height): &mut (Run, i32) = &mut rectangles[index];
+            if previous.y + *height == run.y {
+                *height += 1;
+                continue;
+            }
+        }
+        last.insert(key, rectangles.len());
+        rectangles.push((run, 1));
+    }
+    rectangles
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    #[test]
+    fn rectangles_preserve_gaps_and_separate_islands() {
+        let runs = vec![
+            Run {
+                x: 1,
+                y: 0,
+                width: 2,
+            },
+            Run {
+                x: 5,
+                y: 0,
+                width: 1,
+            },
+            Run {
+                x: 1,
+                y: 1,
+                width: 2,
+            },
+            Run {
+                x: 5,
+                y: 1,
+                width: 1,
+            },
+            Run {
+                x: 1,
+                y: 3,
+                width: 2,
+            },
+            Run {
+                x: 2,
+                y: 4,
+                width: 2,
+            },
+        ];
+        let rectangles = input_rectangles(&runs);
+        assert_eq!(rectangles.len(), 4);
+        let expanded: Vec<_> = rectangles
+            .into_iter()
+            .flat_map(|(run, height)| {
+                (0..height).map(move |dy| Run {
+                    y: run.y + dy,
+                    ..run
+                })
+            })
+            .collect();
+        assert_eq!(crate::mask::coverage_errors(&runs, &expanded, 8, 6), (0, 0));
+    }
+}
+
+wayland_client::delegate_noop!(State: ignore ZwpIdleInhibitManagerV1);
+wayland_client::delegate_noop!(State: ignore ZwpIdleInhibitorV1);

@@ -25,11 +25,11 @@ run-host:
     cargo run --locked -p ene-host
 
 run-desktop:
-    cargo build --locked -p ene-avatar
-    cargo run --locked -p ene-desktop -- --demo
+    cargo build --release --locked -p ene-avatar
+    ENE_AVATAR_BIN="${ENE_AVATAR_BIN:-{{justfile_directory()}}/target/release/ene-avatar}" cargo run --locked -p ene-desktop -- --demo
 
 fetch-assets asset="all":
     python3 scripts/fetch-assets.py "{{asset}}"
 
 run-avatar:
-    cargo run --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm"
+    cargo run --release --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm"
