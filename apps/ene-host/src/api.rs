@@ -18,6 +18,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, broadcast, watch};
 use uuid::Uuid;
 
@@ -116,22 +117,13 @@ async fn authenticate(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    // Fixed-length comparison avoids early exits depending on token contents.
     let provided = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    let allowed = provided.is_some_and(|value| {
-        let actual = value.as_bytes();
-        let expected = app.token.as_bytes();
-        actual.len() == expected.len()
-            && actual
-                .iter()
-                .zip(expected)
-                .fold(0u8, |d, (a, b)| d | (a ^ b))
-                == 0
-    });
+    let allowed =
+        provided.is_some_and(|value| bool::from(value.as_bytes().ct_eq(app.token.as_bytes())));
     if !allowed {
         return ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "認証が必要です")
             .into_response();

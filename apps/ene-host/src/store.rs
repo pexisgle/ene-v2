@@ -1,16 +1,22 @@
 use ene_protocol::host::{
     Companion, Failure, Message, MessageStatus, ModelAssignments, Page, Settings,
 };
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
-use std::{collections::BTreeMap, path::PathBuf};
-use tokio::sync::{mpsc, oneshot};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use tokio::sync::Semaphore;
+use tokio_rusqlite::{
+    Connection as AsyncConnection,
+    rusqlite::{Connection, OptionalExtension, params},
+};
 use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone)]
-pub struct Store(mpsc::Sender<Command>);
+pub struct Store {
+    db: AsyncConnection,
+    slots: Arc<Semaphore>,
+}
 
 pub struct StoredSnapshot {
     pub host_id: String,
@@ -21,79 +27,45 @@ pub struct StoredSnapshot {
     pub next_cursor: Option<String>,
 }
 
-enum Command {
-    Snapshot(oneshot::Sender<Result<StoredSnapshot>>),
-    Messages(
-        String,
-        Option<String>,
-        usize,
-        oneshot::Sender<Result<Page<Message>>>,
-    ),
-    Message(String, String, oneshot::Sender<Result<Option<Message>>>),
-}
-
 impl Store {
     pub async fn open(path: PathBuf) -> Result<Self> {
-        let (tx, mut rx) = mpsc::channel(64);
-        let (ready, wait) = oneshot::channel();
-        std::thread::Builder::new()
-            .name("ene-database".into())
-            .spawn(move || {
-                let db = Connection::open(path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|mut db| {
-                        initialize(&mut db)?;
-                        Ok(db)
-                    });
-                let mut db = match db {
-                    Ok(db) => {
-                        let _ = ready.send(Ok(()));
-                        db
-                    }
-                    Err(e) => {
-                        let _ = ready.send(Err(e));
-                        return;
-                    }
-                };
-                while let Some(command) = rx.blocking_recv() {
-                    match command {
-                        Command::Snapshot(reply) => {
-                            let _ = reply.send(snapshot(&mut db));
-                        }
-                        Command::Messages(c, cursor, limit, reply) => {
-                            let _ = reply.send(page(&db, &c, cursor.as_deref(), limit));
-                        }
-                        Command::Message(c, id, reply) => {
-                            let result = db
-                                .query_row(
-                                    "SELECT body FROM messages WHERE companion_id=?1 AND id=?2",
-                                    params![c, id],
-                                    |r| r.get::<_, String>(0),
-                                )
-                                .optional()
-                                .map_err(|e| e.to_string())
-                                .and_then(|s| {
-                                    s.map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
-                                        .transpose()
-                                });
-                            let _ = reply.send(result);
-                        }
-                    }
-                }
+        let store = Self {
+            db: AsyncConnection::open(path)
+                .await
+                .map_err(|e| e.to_string())?,
+            // Bound the library's unbounded queue, including the running operation.
+            slots: Arc::new(Semaphore::new(64)),
+        };
+        store.call(initialize).await?;
+        Ok(store)
+    }
+
+    async fn call<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let permit = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "database stopped".to_string())?;
+        self.db
+            .call(move |db| {
+                // Keep the slot until SQL finishes even if the caller is cancelled.
+                let _permit = permit;
+                operation(db)
             })
-            .map_err(|e| e.to_string())?;
-        wait.await
-            .map_err(|_| "database startup failed".to_string())??;
-        Ok(Self(tx))
+            .await
+            .map_err(|error| match error {
+                tokio_rusqlite::Error::Error(error) => error,
+                _ => "database stopped".into(),
+            })
     }
 
     pub async fn snapshot(&self) -> Result<StoredSnapshot> {
-        let (tx, rx) = oneshot::channel();
-        self.0
-            .send(Command::Snapshot(tx))
-            .await
-            .map_err(|_| "database stopped".to_string())?;
-        rx.await.map_err(|_| "database stopped".to_string())?
+        self.call(snapshot).await
     }
 
     pub async fn messages(
@@ -102,21 +74,25 @@ impl Store {
         cursor: Option<String>,
         limit: usize,
     ) -> Result<Page<Message>> {
-        let (tx, rx) = oneshot::channel();
-        self.0
-            .send(Command::Messages(c, cursor, limit, tx))
+        self.call(move |db| page(db, &c, cursor.as_deref(), limit))
             .await
-            .map_err(|_| "database stopped".to_string())?;
-        rx.await.map_err(|_| "database stopped".to_string())?
     }
 
     pub async fn message(&self, c: String, id: String) -> Result<Option<Message>> {
-        let (tx, rx) = oneshot::channel();
-        self.0
-            .send(Command::Message(c, id, tx))
-            .await
-            .map_err(|_| "database stopped".to_string())?;
-        rx.await.map_err(|_| "database stopped".to_string())?
+        self.call(move |db| {
+            db.query_row(
+                "SELECT body FROM messages WHERE companion_id=?1 AND id=?2",
+                params![c, id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+            .and_then(|s| {
+                s.map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+                    .transpose()
+            })
+        })
+        .await
     }
 }
 

@@ -1,3 +1,4 @@
+use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
 use ene_protocol::host::RuntimeConnection;
 use fs2::FileExt;
 use std::{
@@ -9,7 +10,6 @@ use std::{
 use uuid::Uuid;
 
 pub struct Runtime {
-    directory: PathBuf,
     descriptor: PathBuf,
     _lock: File,
     pub token: String,
@@ -79,7 +79,6 @@ impl Runtime {
             fs::remove_file(&descriptor)?;
         }
         Ok(Self {
-            directory,
             descriptor,
             _lock: lock,
             token,
@@ -87,31 +86,20 @@ impl Runtime {
     }
 
     pub fn publish(&self, endpoint: String) -> io::Result<()> {
-        let temporary = self
-            .directory
-            .join(format!(".connection-{}", Uuid::new_v4()));
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary)?;
-            serde_json::to_writer(
-                &mut file,
-                &RuntimeConnection {
-                    endpoint,
-                    token: self.token.clone(),
-                },
-            )?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-            fs::rename(&temporary, &self.descriptor)?;
-            File::open(&self.directory)?.sync_all()
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(temporary);
-        }
-        result
+        let mut file = AtomicWriteFile::options()
+            .mode(0o600)
+            .preserve_mode(false)
+            .preserve_owner(false)
+            .open(&self.descriptor)?;
+        serde_json::to_writer(
+            &mut file,
+            &RuntimeConnection {
+                endpoint,
+                token: self.token.clone(),
+            },
+        )?;
+        file.write_all(b"\n")?;
+        file.commit()
     }
 }
 
