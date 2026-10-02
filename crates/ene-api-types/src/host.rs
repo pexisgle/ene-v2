@@ -228,6 +228,7 @@ pub struct CheckInput {
 /// Provider-independent model reference. IDs are opaque and must be URL-encoded.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ModelAssignment {
     pub connection_id: String,
     pub model_id: String,

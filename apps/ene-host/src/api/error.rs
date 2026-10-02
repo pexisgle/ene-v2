@@ -69,9 +69,3 @@ impl From<ene_core::domain::Error> for ApiError {
         }
     }
 }
-pub(super) fn wire<T: serde::de::DeserializeOwned>(
-    value: impl serde::Serialize,
-) -> Result<T, ApiError> {
-    serde_json::from_value(serde_json::to_value(value).map_err(|_| ApiError::unavailable())?)
-        .map_err(|_| ApiError::unavailable())
-}

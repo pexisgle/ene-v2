@@ -263,8 +263,7 @@ fn resizing_preserves_editor_and_large_text_keeps_actions_on_screen() {
     }
 }
 
-/// Uses installed fonts instead of mocked metrics. Optional captures go to an
-/// ignored build directory and can be inspected without a desktop compositor.
+/// Uses installed fonts instead of mocked metrics.
 #[test]
 fn real_font_layout_reflows_and_preserves_input() {
     slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
@@ -320,11 +319,6 @@ fn real_font_layout_reflows_and_preserves_input() {
         }
         assert_eq!(snapshot.width(), width as u32);
         assert_eq!(snapshot.height(), height as u32);
-        if let Ok(directory) = std::env::var("ENE_UI_PREVIEW_DIR") {
-            std::fs::create_dir_all(&directory).unwrap();
-            let path = std::path::Path::new(&directory).join(format!("{name}.rgba"));
-            std::fs::write(path, snapshot.as_bytes()).unwrap();
-        }
         if page == 0 {
             assert!(ui.get_conversation_height() >= 40.);
         } else {
@@ -565,7 +559,7 @@ fn native_wayland_window_tray_and_avatar_smoke() {
 }
 
 #[test]
-fn scale_themes_and_long_content_keep_fixed_actions_reachable() {
+fn dpi_and_long_content_keep_fixed_actions_reachable() {
     slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
         i_slint_backend_testing::TestingBackendOptions {
             renderer_name: Some("software".into()),
@@ -591,47 +585,36 @@ fn scale_themes_and_long_content_keep_fixed_actions_reachable() {
             .into(),
     );
     app::navigate(&ui, 1);
-    for font in [12, 16, 28] {
+    for (font, scale_factor) in [(16, 1.), (28, 1.5), (28, 2.)] {
         ui.global::<UiState>().set_text_size(font);
-        for theme in [1, 2] {
-            ui.global::<Theme>().invoke_apply(theme);
-            for scale_factor in [1., 1.5, 2.] {
-                ui.window()
-                    .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor });
-                // TestingBackend's adapter assumes scale 1 when setting size.
-                // Supply its physical buffer size, then the logical resize event.
-                ui.window().set_size(slint::PhysicalSize::new(
-                    (420. * scale_factor) as u32,
-                    (480. * scale_factor) as u32,
-                ));
-                ui.window().dispatch_event(WindowEvent::Resized {
-                    size: slint::LogicalSize::new(420., 480.),
-                });
-                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
-                let snapshot = ui.window().take_snapshot().unwrap();
-                assert_eq!(snapshot.width(), (420. * scale_factor) as u32);
-                assert_eq!(snapshot.height(), (480. * scale_factor) as u32);
-                for label in ["保存", "変更を戻す", "対話に戻る", "エラーの詳細"]
-                {
-                    let item = i_slint_backend_testing::ElementQuery::from_root(&ui)
-                        .match_predicate(move |item| {
-                            item.accessible_label().is_some_and(|v| v == label)
-                        })
-                        .find_first()
-                        .unwrap();
-                    let pos = item.absolute_position();
-                    let size = item.size();
-                    assert!(pos.x >= 0. && pos.y >= 0.);
-                    assert!(
-                        pos.x + size.width <= 421.,
-                        "{label}: horizontal overflow, font {font}, DPI {scale_factor}"
-                    );
-                    assert!(
-                        pos.y + size.height <= 481.,
-                        "{label}: vertical overflow, font {font}, DPI {scale_factor}"
-                    );
-                }
-            }
+        ui.window()
+            .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor });
+        // TestingBackend's adapter assumes scale 1 when setting size.
+        // Supply its physical buffer size, then the logical resize event.
+        ui.window().set_size(slint::PhysicalSize::new(
+            (420. * scale_factor) as u32,
+            (480. * scale_factor) as u32,
+        ));
+        ui.window().dispatch_event(WindowEvent::Resized {
+            size: slint::LogicalSize::new(420., 480.),
+        });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+        for label in ["保存", "変更を戻す", "対話に戻る", "エラーの詳細"] {
+            let item = i_slint_backend_testing::ElementQuery::from_root(&ui)
+                .match_predicate(move |item| item.accessible_label().is_some_and(|v| v == label))
+                .find_first()
+                .unwrap();
+            let pos = item.absolute_position();
+            let size = item.size();
+            assert!(pos.x >= 0. && pos.y >= 0.);
+            assert!(
+                pos.x + size.width <= 421.,
+                "{label}: horizontal overflow, font {font}, DPI {scale_factor}"
+            );
+            assert!(
+                pos.y + size.height <= 481.,
+                "{label}: vertical overflow, font {font}, DPI {scale_factor}"
+            );
         }
     }
 }

@@ -1,8 +1,4 @@
-use crate::api::{
-    error::{ApiError, wire},
-    extractors::ApiQuery,
-    state::App,
-};
+use crate::api::{error::ApiError, extractors::ApiQuery, state::App};
 use axum::{Json, extract::State};
 use ene_api_types::host::{Message, Page};
 use serde::Deserialize;
@@ -27,11 +23,11 @@ async fn messages(
     crate::api::extractors::ApiPath(c): crate::api::extractors::ApiPath<String>,
     ApiQuery(query): ApiQuery<HistoryQuery>,
 ) -> Result<Json<Page<Message>>, ApiError> {
-    Ok(Json(wire(
+    Ok(Json(
         app.application
             .messages(c, query.cursor, query.limit.unwrap_or(50))
             .await?,
-    )?))
+    ))
 }
 #[utoipa::path(get, path = "/{message_id}", tag = "companions",
     params(("companion_id" = String, Path), ("message_id" = String, Path)),
@@ -41,5 +37,5 @@ async fn message(
     State(app): State<App>,
     crate::api::extractors::ApiPath((c, id)): crate::api::extractors::ApiPath<(String, String)>,
 ) -> Result<Json<Message>, ApiError> {
-    Ok(Json(wire(app.application.message(c, id).await?)?))
+    Ok(Json(app.application.message(c, id).await?))
 }

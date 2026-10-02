@@ -2506,6 +2506,7 @@ dependencies = [
 name = "ene-core"
 version = "0.1.0"
 dependencies = [
+ "ene-api-types",
  "futures-util",
  "serde",
  "serde_json",

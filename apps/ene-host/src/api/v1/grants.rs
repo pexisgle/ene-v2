@@ -1,8 +1,4 @@
-use crate::api::{
-    error::{ApiError, wire},
-    extractors::ApiQuery,
-    state::App,
-};
+use crate::api::{error::ApiError, extractors::ApiQuery, state::App};
 use axum::{Json, extract::State};
 use serde::Deserialize;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -22,9 +18,9 @@ async fn grants(
     State(app): State<App>,
     ApiQuery(query): ApiQuery<GrantQuery>,
 ) -> Result<Json<Vec<ene_api_types::DataTransferGrant>>, ApiError> {
-    Ok(Json(wire(
+    Ok(Json(
         app.application
             .grants(query.companion_id.as_deref())
             .await?,
-    )?))
+    ))
 }
