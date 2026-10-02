@@ -2,7 +2,7 @@
 use crate::{
     AppWindow, ChatEntry, SettingsDraft, Theme, UiState, avatar, chat::Mode, settings, tray,
 };
-use ene_shared::avatar::{AvatarEvent, MotionState};
+use ene_protocol::avatar::{AvatarEvent, MotionState};
 use slint::{ComponentHandle, VecModel};
 use std::{
     cell::RefCell,

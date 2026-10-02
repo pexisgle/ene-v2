@@ -1,4 +1,4 @@
-use crate::error::ApiError;
+use crate::api::error::ApiError;
 use axum::{extract::FromRequestParts, http::request::Parts};
 use serde::de::DeserializeOwned;
 

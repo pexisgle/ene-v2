@@ -4,13 +4,14 @@
 
 ## ワークスペース
 
-実行プロセスのパッケージは`apps/`、内部ライブラリは`crates/`に配置します。ホストのAPIは`apps/ene-host/src/api/v1/`にリソース別で配置し、親子のRouterを`nest`で組み立てます。`api/`に認証と共通の入力処理を集約し、対話処理・DB処理を分離します。共有状態は最上位のRouterで渡します。
+実行プロセスのパッケージは`apps/`、内部ライブラリは`crates/`に配置します。ホストのAPIは`apps/ene-host/src/api/v1/`にリソース別で配置し、親子のRouterを`nest`で組み立てます。`api/`に認証と共通の入力処理を集約し、対話処理・DB処理を分離します。共有状態は最上位のRouterで渡します。規則と処理手順は`ene-core`、SQL・OS依存の実装はホストの`infrastructure/`へ配置し、APIからapplicationを呼びます。
 
 | パッケージ | 今後の役割 |
 | --- | --- |
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | VRM 1.0の透明なWayland常駐表示 |
+| [`ene-core`](crates/ene-core/) | ホストの規則・処理手順と外部処理へのインターフェース |
 | [`ene-protocol`](crates/ene-protocol/) | クライアント・描画のIPC型、ホストAPI型と通知再同期 |
 
 ## 第1段階：Slint会話画面を試す

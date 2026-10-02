@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::Store;
+use crate::infrastructure::sqlite::Store;
 use axum::http::{StatusCode, header};
 use axum::{
     body::{Body, to_bytes},
@@ -10,7 +10,10 @@ use tower::ServiceExt;
 async fn app() -> (App, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.sqlite3")).await.unwrap();
-    (App::new(store, "private-token".into()), temp)
+    (
+        crate::bootstrap::application(store, "private-token".into()),
+        temp,
+    )
 }
 async fn request(app: &App, path: &str, token: Option<&str>) -> (StatusCode, Value) {
     let mut request = Request::builder().uri(path);
@@ -68,18 +71,18 @@ async fn snapshot_subscription_validation_and_truthful_capabilities() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    app.boundary.lock().await.connections.insert("live".into());
+    let subscription = app.application.subscribe().await;
     let (status, _) = request(
         &app,
-        "/v1/snapshot?connection_id=live",
+        &format!("/v1/snapshot?connection_id={}", subscription.id),
         Some("Bearer private-token"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    app.boundary.lock().await.connections.remove("live");
+    app.application.unsubscribe(&subscription.id).await;
     let (status, _) = request(
         &app,
-        "/v1/snapshot?connection_id=live",
+        &format!("/v1/snapshot?connection_id={}", subscription.id),
         Some("Bearer private-token"),
     )
     .await;
@@ -88,7 +91,14 @@ async fn snapshot_subscription_validation_and_truthful_capabilities() {
 #[tokio::test]
 async fn history_rejects_foreign_ids_bad_cursors_and_unknown_query_fields() {
     let (app, _temp) = app().await;
-    let c = app.store.snapshot().await.unwrap().companion.id;
+    let c = app
+        .application
+        .snapshot(None)
+        .await
+        .unwrap()
+        .stored
+        .companion
+        .id;
     for suffix in [
         "limit=0",
         "limit=201",

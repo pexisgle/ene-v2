@@ -42,3 +42,25 @@ impl IntoResponse for ApiError {
         (self.status,Json(json!({"error":{"code":self.code,"message":self.message,"details":{}},"request_id":Uuid::new_v4().to_string()}))).into_response()
     }
 }
+
+impl From<ene_core::domain::Error> for ApiError {
+    fn from(error: ene_core::domain::Error) -> Self {
+        use ene_core::domain::ErrorKind;
+        match error.kind {
+            ErrorKind::NotFound => Self::not_found(),
+            ErrorKind::InvalidRequest => Self::invalid(),
+            ErrorKind::ResyncRequired => Self::new(
+                StatusCode::CONFLICT,
+                "resync_required",
+                "通知購読からやり直してください",
+            ),
+            _ => Self::unavailable(),
+        }
+    }
+}
+pub(super) fn wire<T: serde::de::DeserializeOwned>(
+    value: impl serde::Serialize,
+) -> Result<T, ApiError> {
+    serde_json::from_value(serde_json::to_value(value).map_err(|_| ApiError::unavailable())?)
+        .map_err(|_| ApiError::unavailable())
+}

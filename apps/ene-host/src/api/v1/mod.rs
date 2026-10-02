@@ -4,7 +4,7 @@ mod grants;
 mod settings;
 mod snapshot;
 
-use crate::app::App;
+use crate::api::state::App;
 use axum::Router;
 
 pub(super) fn router() -> Router<App> {

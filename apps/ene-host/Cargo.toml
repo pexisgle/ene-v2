@@ -10,6 +10,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+ene-core = { path = "../../crates/ene-core" }
+xdg = "3"
 clap.workspace = true
 rustix.workspace = true
 thiserror.workspace = true

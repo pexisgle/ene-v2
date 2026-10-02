@@ -1,20 +1,20 @@
-use crate::api::extractors::ApiQuery;
-use crate::store;
-use crate::{app::App, error::ApiError};
+use crate::api::{
+    error::{ApiError, wire},
+    extractors::ApiQuery,
+    state::App,
+};
 use axum::{
     Json, Router,
     extract::{Path, State},
     routing::get,
 };
-use ene_shared::host::{Message, Page};
+use ene_protocol::host::{Message, Page};
 use serde::Deserialize;
-
 pub(super) fn router() -> Router<App> {
     Router::new()
         .route("/", get(messages))
         .route("/{message_id}", get(message))
 }
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HistoryQuery {
@@ -26,36 +26,15 @@ async fn messages(
     Path(c): Path<String>,
     ApiQuery(query): ApiQuery<HistoryQuery>,
 ) -> Result<Json<Page<Message>>, ApiError> {
-    app.store
-        .companion(&c)
-        .await
-        .map_err(|_| ApiError::unavailable())?
-        .ok_or_else(ApiError::not_found)?;
-    let limit = query.limit.unwrap_or(50);
-    if !(1..=200).contains(&limit)
-        || query
-            .cursor
-            .as_ref()
-            .is_some_and(|cursor| store::parse_cursor(&c, cursor).is_err())
-    {
-        return Err(ApiError::invalid());
-    }
-    Ok(Json(
-        app.store
-            .messages(c, query.cursor, limit)
-            .await
-            .map_err(|_| ApiError::unavailable())?,
-    ))
+    Ok(Json(wire(
+        app.application
+            .messages(c, query.cursor, query.limit.unwrap_or(50))
+            .await?,
+    )?))
 }
 async fn message(
     State(app): State<App>,
     Path((c, id)): Path<(String, String)>,
 ) -> Result<Json<Message>, ApiError> {
-    Ok(Json(
-        app.store
-            .message(c, id)
-            .await
-            .map_err(|_| ApiError::unavailable())?
-            .ok_or_else(ApiError::not_found)?,
-    ))
+    Ok(Json(wire(app.application.message(c, id).await?)?))
 }

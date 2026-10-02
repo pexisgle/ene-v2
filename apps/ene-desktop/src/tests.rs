@@ -141,7 +141,7 @@ fn live_position_and_visibility_changes_do_not_overwrite_edits() {
     ui.global::<UiState>().invoke_settings_edited();
     app.handle_avatar_event(
         &ui,
-        ene_shared::avatar::AvatarEvent::PositionChanged {
+        ene_protocol::avatar::AvatarEvent::PositionChanged {
             right: -250,
             bottom: 180,
             output: Some("DP-2".into()),
@@ -691,7 +691,7 @@ fn disconnected_startup_offers_settings_without_claiming_a_host_session() {
     assert_eq!(ui.global::<UiState>().get_page(), 1);
     click(&ui, "ホスト選択に戻る");
     assert!(ui.global::<UiState>().get_host_selection_visible());
-    app.handle_avatar_event(&ui, ene_shared::avatar::AvatarEvent::ShowChat);
+    app.handle_avatar_event(&ui, ene_protocol::avatar::AvatarEvent::ShowChat);
     assert!(ui.global::<UiState>().get_host_selection_visible());
     assert!(!ui.global::<UiState>().get_session_active());
     assert_eq!(app.messages.row_count(), 0);

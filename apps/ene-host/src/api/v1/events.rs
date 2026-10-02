@@ -1,4 +1,4 @@
-use crate::app::App;
+use crate::api::state::App;
 use axum::{
     Router,
     extract::{
@@ -12,7 +12,6 @@ use futures_util::SinkExt;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
 pub(super) fn router() -> Router<App> {
     Router::new().route("/", get(events))
@@ -35,16 +34,16 @@ async fn send(socket: &mut WebSocket, value: Value) -> bool {
     )
 }
 async fn stream(app: App, mut socket: WebSocket) {
-    let mut shutdown = app.shutdown.subscribe();
+    let mut shutdown = app.application.shutdown();
     if *shutdown.borrow() {
         return;
     }
-    let (id, mut notifications, cursor) = {
-        let mut boundary = app.boundary.lock().await;
-        let id = Uuid::new_v4().to_string();
-        let notifications = app.events.subscribe();
-        boundary.connections.insert(id.clone());
-        (id, notifications, boundary.cursor.clone())
+    let subscription = app.application.subscribe().await;
+    let id = subscription.id;
+    let mut notifications = subscription.receiver;
+    let cursor = ene_protocol::host::Cursor {
+        epoch: subscription.cursor.epoch,
+        seq: subscription.cursor.seq,
     };
     if send(
         &mut socket,
@@ -66,10 +65,10 @@ async fn stream(app: App, mut socket: WebSocket) {
                 }
                 event=notifications.recv()=> {
                     match event {
-                        Ok(event)=>if !send(&mut socket,serde_json::to_value(event).unwrap_or(Value::Null)).await {break;},
+                        Ok(event)=>if !send(&mut socket,json!({"epoch":event.epoch,"seq":event.seq,"type":event.kind,"companion_id":event.companion_id,"data":event.data})).await {break;},
                         Err(broadcast::error::RecvError::Lagged(_))=> {
                             // Invalidate before asking the client to obtain a fresh snapshot.
-                            app.boundary.lock().await.connections.remove(&id);
+                            app.application.unsubscribe(&id).await;
                             let _=send(&mut socket,json!({"type":"resync_required"})).await;
                             break;
                         }
@@ -79,7 +78,7 @@ async fn stream(app: App, mut socket: WebSocket) {
             }
         }
     }
-    app.boundary.lock().await.connections.remove(&id);
+    app.application.unsubscribe(&id).await;
     // The peer's Close queues a reply; close the sink to flush it without
     // attempting another send after the protocol has entered the closing state.
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;

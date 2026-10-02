@@ -1,11 +1,13 @@
 //! Compose versioned APIs, then apply authentication to routes and fallbacks.
 mod auth;
+pub(crate) mod error;
 mod extractors;
+pub(crate) mod state;
 #[cfg(test)]
 mod tests;
 mod v1;
 
-use crate::{app::App, error::ApiError};
+use crate::{api::error::ApiError, api::state::App};
 use axum::{Router, http::StatusCode, middleware};
 
 pub(crate) fn router(app: App) -> Router {

@@ -1,6 +1,6 @@
 //! Terminal settings and transactional drafts; serialization remains compatible.
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
-use ene_shared::avatar::AvatarSettings;
+use ene_protocol::avatar::AvatarSettings;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -20,7 +20,7 @@ pub struct ClientSettings {
 impl Default for ClientSettings {
     fn default() -> Self {
         let mut avatar = AvatarSettings::default();
-        let cache = ene_shared::paths::cache();
+        let cache = crate::platform::cache();
         avatar.model = cache
             .join("models/Seed-san.vrm")
             .to_string_lossy()
@@ -40,7 +40,7 @@ impl Default for ClientSettings {
     }
 }
 pub fn config_path() -> PathBuf {
-    ene_shared::paths::config().join("client.json")
+    crate::platform::config().join("client.json")
 }
 impl ClientSettings {
     pub fn load(path: &Path) -> Result<Self, String> {

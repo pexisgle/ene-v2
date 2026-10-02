@@ -1,4 +1,4 @@
-use ene_protocol::host::{
+use ene_core::domain::{
     Companion, Failure, Message, MessageStatus, ModelAssignments, Page, Settings,
 };
 use serde_json::json;
@@ -33,14 +33,7 @@ pub struct Store {
     slots: Arc<Semaphore>,
 }
 
-pub struct StoredSnapshot {
-    pub host_id: String,
-    pub environment_id: String,
-    pub companion: Companion,
-    pub settings: Settings,
-    pub messages: Vec<Message>,
-    pub next_cursor: Option<String>,
-}
+pub use ene_core::domain::StoredSnapshot;
 
 impl Store {
     pub async fn open(path: PathBuf) -> Result<Self> {
@@ -82,11 +75,6 @@ impl Store {
         self.call(snapshot).await
     }
 
-    pub async fn companion(&self, id: &str) -> Result<Option<Companion>> {
-        let companion = self.snapshot().await?.companion;
-        Ok((companion.id == id).then_some(companion))
-    }
-
     pub async fn messages(
         &self,
         c: String,
@@ -118,7 +106,7 @@ impl Store {
 fn migrations() -> rusqlite_migration::Migrations<'static> {
     use rusqlite_migration::{HookError, M, Migrations};
     Migrations::new(vec![M::up_with_hook(
-        include_str!("../migrations/001_initial.sql"),
+        include_str!("../../../migrations/001_initial.sql"),
         |tx| {
             seed(tx).map_err(|error| match error {
                 Error::Sql(error) => HookError::RusqliteError(error),
@@ -266,7 +254,7 @@ fn snapshot(db: &mut Connection) -> Result<StoredSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_protocol::host::Role;
+    use ene_core::domain::Role;
 
     #[test]
     fn initialization_is_stable_and_restart_preserves_partial_failure() {
@@ -380,7 +368,7 @@ mod migration_tests {
     fn seed_failure_rolls_back_schema_data_and_version() {
         use rusqlite_migration::{HookError, M, Migrations};
         let migrations = Migrations::new(vec![M::up_with_hook(
-            include_str!("../migrations/001_initial.sql"),
+            include_str!("../../../migrations/001_initial.sql"),
             |tx| {
                 seed(tx).unwrap();
                 Err(HookError::Hook("injected failure after seed".into()))
@@ -457,5 +445,35 @@ mod migration_tests {
             parse_cursor("c", "bad"),
             Err(Error::InvalidCursor)
         ));
+    }
+}
+
+impl ene_core::ports::Repository for Store {
+    fn snapshot(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, ene_core::ports::Result<StoredSnapshot>> {
+        Box::pin(async move { self.snapshot().await.map_err(core_error) })
+    }
+    fn messages(
+        &self,
+        c: String,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> futures_util::future::BoxFuture<'_, ene_core::ports::Result<Page<Message>>> {
+        Box::pin(async move { self.messages(c, cursor, limit).await.map_err(core_error) })
+    }
+    fn message(
+        &self,
+        c: String,
+        id: String,
+    ) -> futures_util::future::BoxFuture<'_, ene_core::ports::Result<Option<Message>>> {
+        Box::pin(async move { self.message(c, id).await.map_err(core_error) })
+    }
+}
+fn core_error(error: Error) -> ene_core::domain::Error {
+    use ene_core::domain::{Error as CoreError, ErrorKind};
+    match error {
+        Error::InvalidCursor => CoreError::invalid(),
+        _ => CoreError::new(ErrorKind::Unavailable),
     }
 }

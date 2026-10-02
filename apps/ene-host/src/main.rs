@@ -1,11 +1,9 @@
 mod api;
-mod app;
-mod error;
-mod runtime;
-mod store;
+mod bootstrap;
+mod infrastructure;
 
 use clap::Parser;
-use std::{error::Error, path::PathBuf};
+use std::error::Error;
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
@@ -18,25 +16,7 @@ struct Args {}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let _args = Args::parse();
-    let root = ene_shared::paths::runtime()?;
-    let runtime = runtime::Runtime::acquire(&root)?;
-    let state = if let Some(path) = std::env::var_os("ENE_HOST_STATE_DIR") {
-        PathBuf::from(path)
-    } else {
-        let state = ene_shared::paths::state();
-        if let Some(base) = state.parent() {
-            std::fs::create_dir_all(base)?;
-        }
-        state
-    };
-    runtime::private_directory(&state)?;
-    let database = state.join("host.sqlite3");
-    let file = runtime::private_file(&database)?;
-    drop(file);
-    let store = store::Store::open(database)
-        .await
-        .map_err(|_| "database initialization failed")?;
-    let app = app::App::new(store, runtime.token.clone());
+    let (runtime, app) = bootstrap::initialize().await?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;
     eprintln!("ene-host: loopback service ready (history and notifications; chat not yet enabled)");
