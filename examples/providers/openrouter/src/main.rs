@@ -1,4 +1,4 @@
-//! Provider protocol v1. Only the host performs HTTP and attaches credentials.
+//! OpenRouter provider protocol v1. Only the host performs HTTP and attaches credentials.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ene_protocol::{
     ipc::{Reader, Writer},

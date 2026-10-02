@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Version 1 provider example. All HTTP and authentication belong to the host.
+"""Version 1 OpenRouter provider example. All HTTP and authentication belong to the host.
 
-Change the manifest endpoint/destinations/auth for another compatible service.
-The builtin OpenRouter validation defaults are used by this example installation.
+Uses OpenRouter with the OpenAI route and no fallback.
+Other compatible services require their own provider implementation.
 """
 import base64
 import codecs

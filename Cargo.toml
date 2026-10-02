@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/*", "crates/*", "examples/providers/openai-compatible"]
+members = ["apps/*", "crates/*", "examples/providers/openrouter"]
 resolver = "3"
 
 [workspace.package]

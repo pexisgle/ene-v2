@@ -2757,7 +2757,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-provider-openai-compatible"
+name = "ene-provider-openrouter"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",

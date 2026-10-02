@@ -1,7 +1,7 @@
 {
   "protocol_version": 1,
-  "id": "openai-compatible",
-  "name": "OpenAI compatible (plugin)",
+  "id": "openrouter-plugin",
+  "name": "OpenRouter (plugin)",
   "version": "1.0.0",
   "command": [
     "/plugin/provider"

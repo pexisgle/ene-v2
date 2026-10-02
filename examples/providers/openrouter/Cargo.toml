@@ -1,6 +1,6 @@
 [package]
-name = "ene-provider-openai-compatible"
-description = "Rust provider plugin example using the host HTTP broker"
+name = "ene-provider-openrouter"
+description = "OpenRouter provider plugin example using the host HTTP broker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

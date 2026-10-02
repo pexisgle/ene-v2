@@ -10,7 +10,7 @@ struct Plugin {
 }
 impl Plugin {
     async fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ene-provider-openai-compatible"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ene-provider-openrouter"))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -125,9 +125,9 @@ async fn model_listing_cancellation_and_failure_release_request_state() {
         .await;
     // A late broker response must not produce a result after cancellation.
     plugin.response("cancelled", b"data: broken\n", true).await;
-    plugin.send(json!({"type":"list_models", "request_id":"models", "endpoint":"https://example.com/v1", "options":{}})).await;
+    plugin.send(json!({"type":"list_models", "request_id":"models", "endpoint":"https://openrouter.ai/api/v1", "options":{}})).await;
     let http = plugin.receive().await;
-    assert_eq!(http["url"], "https://example.com/v1/models");
+    assert_eq!(http["url"], "https://openrouter.ai/api/v1/models");
     assert_eq!(http["method"], "GET");
     let models = "{\"data\":[{\"id\":\"a\",\"name\":\"日本\"},{\"id\":\"b\"}]}";
     for chunk in models.as_bytes().chunks(2) {
