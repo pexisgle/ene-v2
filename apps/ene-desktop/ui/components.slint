@@ -1,8 +1,12 @@
 import { Button, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
+import { Icon } from "icons.slint";
 // Native focus and keyboard behavior, with a label that wraps at large sizes.
 export component ActionButton inherits Rectangle {
     in property <string> text;
+    in property <image> icon;
+    private property <bool> has-icon: root.icon.width > 0;
+    private property <length> icon-size: 20px * UiState.scale;
     in property <bool> enabled: true;
     in property <bool> primary;
     in property <bool> checkable;
@@ -18,7 +22,7 @@ export component ActionButton inherits Rectangle {
         }
     }
     min-width: 0px;
-    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px;
+    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
     horizontal-stretch: root.fill-width ? 1 : 0;
     measure := Text { visible: false; text: root.text; }
     min-height: max(44px, UiState.text-size * 1.8px, label-layout.min-height);
@@ -37,10 +41,19 @@ export component ActionButton inherits Rectangle {
         }
     }
     label-layout := HorizontalLayout {
+        spacing: 8px;
         padding-left: 12px;
         padding-right: 12px;
         padding-top: 10px;
         padding-bottom: 10px;
+        if root.has-icon : Icon {
+            source: root.icon;
+            width: root.icon-size;
+            height: root.icon-size;
+            y: (parent.height - self.height) / 2;
+            colorize: root.primary || root.checked ? Palette.accent-foreground : Palette.foreground;
+            opacity: root.enabled ? 1 : 0.5;
+        }
         Text {
             text: root.text;
             wrap: word-wrap;
@@ -55,6 +68,10 @@ export component ActionButton inherits Rectangle {
 // Secondary navigation keeps a full hit area without a prominent button face.
 export component QuietButton inherits Rectangle {
     in property <string> text;
+    in property <image> icon;
+    private property <bool> has-icon: root.icon.width > 0;
+    private property <length> icon-size: 20px * UiState.scale;
+    private property <length> icon-space: root.has-icon ? root.icon-size + 8px : 0px;
     in property <bool> enabled: true;
     in property <bool> checked;
     in property <bool> checkable;
@@ -65,9 +82,9 @@ export component QuietButton inherits Rectangle {
     callback clicked;
     forward-focus: keyboard;
     min-width: 0px;
-    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px;
-    preferred-width: measure.preferred-width + 24px;
-    min-height: max(44px, label.preferred-height + 16px);
+    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px + root.icon-space;
+    preferred-width: measure.preferred-width + 24px + root.icon-space;
+    min-height: max(44px, label.preferred-height + 16px, root.icon-size + 16px);
     horizontal-stretch: root.fill-width ? 1 : 0;
     vertical-stretch: 0;
     background: root.checked || (pointer.has-hover && root.enabled) ? Palette.alternate-background : transparent;
@@ -84,9 +101,17 @@ export component QuietButton inherits Rectangle {
         if root.has-focus && root.scroll-to-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); }
     }
     measure := Text { visible: false; text: root.text; font-size: max(12px, UiState.text-size * 0.875px); }
-    label := Text {
+    if root.has-icon : Icon {
         x: 12px;
-        width: max(0px, parent.width - 24px);
+        y: (parent.height - self.height) / 2;
+        width: root.icon-size;
+        height: root.icon-size;
+        source: root.icon;
+        opacity: root.enabled ? 1 : 0.5;
+    }
+    label := Text {
+        x: 12px + root.icon-space;
+        width: max(0px, parent.width - 24px - root.icon-space);
         height: parent.height;
         text: root.text;
         wrap: word-wrap;

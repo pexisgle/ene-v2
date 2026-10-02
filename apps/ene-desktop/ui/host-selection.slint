@@ -1,3 +1,4 @@
+import { Icons } from "icons.slint";
 import { ScrollView } from "std-widgets.slint";
 import { UiState } from "state.slint";
 import { ActionButton, QuietButton, BodyText, HintText, SectionTitle } from "components.slint";
@@ -27,6 +28,7 @@ export component HostSelectionView inherits Rectangle {
                     enabled: root.active && UiState.demo-mode;
                     fill-width: false;
                     primary: true;
+                    icon: Icons.chat;
                     text: UiState.session-active ? "対話を続ける" : "対話を始める";
                     clicked => { UiState.start-demo(); }
                 }
@@ -37,6 +39,7 @@ export component HostSelectionView inherits Rectangle {
             spacing: 8px;
             local-settings := QuietButton {
                 row: 0; col: 0;
+                icon: Icons.settings;
                 text: "この端末の設定";
                 enabled: root.active;
                 clicked => { UiState.category = 0; UiState.navigate(1); }
@@ -45,6 +48,7 @@ export component HostSelectionView inherits Rectangle {
             QuietButton {
                 row: root.stacked ? 1 : 0;
                 col: root.stacked ? 0 : 2;
+                icon: Icons.exit;
                 text: "クライアント終了";
                 enabled: root.active;
                 clicked => { UiState.request-quit(); }

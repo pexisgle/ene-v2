@@ -1,3 +1,4 @@
+import { Icons } from "icons.slint";
 import { ScrollView, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
 import { ActionButton, BodyText, HintText } from "components.slint";
@@ -257,6 +258,7 @@ export component ConversationView inherits Rectangle {
                     row: root.compact ? 1 : 0;
                     col: root.compact ? 0 : 1;
                     vertical-stretch: 0;
+                    icon: Icons.send;
                     text: "送信";
                     primary: true;
                     fill-width: root.compact;

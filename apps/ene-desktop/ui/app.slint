@@ -1,3 +1,4 @@
+import { Icons } from "icons.slint";
 import { Palette, ScrollView } from "std-widgets.slint";
 import { UiState } from "state.slint";
 export { UiState, Theme, SettingsDraft, ChatEntry } from "state.slint";
@@ -29,6 +30,7 @@ component QuitConfirmation inherits Rectangle {
                 text: "変更を破棄してクライアントを終了しますか？ホストは終了しません。";
             }
             return-button := ActionButton {
+                icon: Icons.reset;
                 text: "戻る";
                 enabled: root.active;
                 clicked => {
@@ -36,6 +38,7 @@ component QuitConfirmation inherits Rectangle {
                 }
             }
             ActionButton {
+                icon: Icons.exit;
                 text: "破棄して終了";
                 enabled: root.active;
                 clicked => {
@@ -109,11 +112,13 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 0;
                     vertical-stretch: 0;
                     if UiState.page == 1 && UiState.session-active : QuietButton {
+                        icon: Icons.desktop;
                         text: "ホスト選択";
                         enabled: !UiState.quit-confirmation;
                         clicked => { UiState.show-host-selection(); }
                     }
                     QuietButton {
+                        icon: UiState.page == 0 ? Icons.settings : UiState.session-active ? Icons.chat : Icons.desktop;
                         text: UiState.page == 0 ? "設定" : UiState.session-active ? "対話に戻る" : "ホスト選択に戻る";
                         enabled: !UiState.quit-confirmation;
                         clicked => { UiState.navigate(UiState.page == 0 ? 1 : 0); }
@@ -125,6 +130,7 @@ export component AppWindow inherits Window {
             }
             if UiState.avatar-failed || UiState.motion-failed || !UiState.tray-ready || UiState.apply-error != "" : QuietButton {
                 leading: true;
+                icon: Icons.settings;
                 text: UiState.apply-error != "" ? "保存・操作エラーを確認" : UiState.avatar-failed || UiState.motion-failed ? "キャラクターの状態を確認" : "トレイなし · ホスト選択";
                 enabled: !UiState.quit-confirmation;
                 clicked => {

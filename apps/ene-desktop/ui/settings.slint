@@ -1,3 +1,4 @@
+import { Icons } from "icons.slint";
 import { AboutSlint, ScrollView, ComboBox, SpinBox, LineEdit, CheckBox, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
 import { ActionButton, QuietButton, BodyText, HintText, SectionTitle, SettingField } from "components.slint";
@@ -64,6 +65,7 @@ export component SettingsView inherits Rectangle {
                 terminal-button := QuietButton {
                     leading: true;
                     fill-width: true;
+                    icon: Icons.desktop;
                     text: "この端末";
                     enabled: root.active && !root.compact;
                     checked: UiState.category == 0;
@@ -75,6 +77,7 @@ export component SettingsView inherits Rectangle {
                 QuietButton {
                     leading: true;
                     fill-width: true;
+                    icon: Icons.avatar;
                     text: "コンパニオン";
                     enabled: root.active && !root.compact;
                     checked: UiState.category == 1;
@@ -86,6 +89,7 @@ export component SettingsView inherits Rectangle {
                 QuietButton {
                     leading: true;
                     fill-width: true;
+                    icon: Icons.connection;
                     text: "ホスト・接続";
                     enabled: root.active && !root.compact;
                     checked: UiState.category == 2;
@@ -97,6 +101,7 @@ export component SettingsView inherits Rectangle {
                 QuietButton {
                     leading: true;
                     fill-width: true;
+                    icon: Icons.shield;
                     text: "権限とデータ";
                     enabled: root.active && !root.compact;
                     checked: UiState.category == 3;
@@ -218,6 +223,7 @@ export component SettingsView inherits Rectangle {
                             leading: true;
                             scroll-to-focus: true;
                             enabled: root.editing;
+                            icon: UiState.avatar-visible ? Icons.eye-off : Icons.eye;
                             text: UiState.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示";
                             clicked => {
                                 UiState.toggle-avatar();
@@ -227,6 +233,7 @@ export component SettingsView inherits Rectangle {
                             leading: true;
                             scroll-to-focus: true;
                             enabled: root.editing;
+                            icon: Icons.center;
                             text: "キャラクターを画面中央へ戻す";
                             clicked => {
                                 UiState.recenter-avatar();
@@ -236,6 +243,7 @@ export component SettingsView inherits Rectangle {
                             leading: true;
                             scroll-to-focus: true;
                             enabled: root.editing;
+                            icon: Icons.refresh;
                             text: "描画エラーから再起動";
                             clicked => {
                                 UiState.restart-avatar();
@@ -322,6 +330,7 @@ export component SettingsView inherits Rectangle {
                         QuietButton {
                             leading: true;
                             scroll-to-focus: true;
+                            icon: Icons.folder;
                             text: "VRMを選ぶ";
                             enabled: root.editing && !UiState.picker-active;
                             clicked => {
@@ -353,6 +362,7 @@ export component SettingsView inherits Rectangle {
                         QuietButton {
                             leading: true;
                             scroll-to-focus: true;
+                            icon: Icons.folder;
                             text: "VRMAを選ぶ";
                             enabled: root.editing && !UiState.picker-active;
                             clicked => {
@@ -362,6 +372,7 @@ export component SettingsView inherits Rectangle {
                         QuietButton {
                             leading: true;
                             scroll-to-focus: true;
+                            icon: Icons.reset;
                             text: "静止姿勢に戻す";
                             enabled: root.editing && UiState.settings-draft.motion != "";
                             clicked => {
@@ -415,6 +426,7 @@ export component SettingsView inherits Rectangle {
                     }
                 }
                 if UiState.apply-error != "" : ActionButton {
+                    icon: Icons.settings;
                     text: "エラーの詳細";
                     fill-width: false;
                     enabled: root.editing;
@@ -431,11 +443,13 @@ export component SettingsView inherits Rectangle {
                     vertical-stretch: 0;
                     Rectangle { horizontal-stretch: 1; }
                     QuietButton {
+                        icon: Icons.reset;
                         text: "変更を戻す";
                         enabled: root.editing && UiState.settings-dirty;
                         clicked => { UiState.reset-settings(); }
                     }
                     ActionButton {
+                        icon: Icons.save;
                         text: "保存";
                         primary: true;
                         fill-width: false;
