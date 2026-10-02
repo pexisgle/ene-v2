@@ -1,3 +1,4 @@
+import { StatusBadge, ThemePicker, SizeControl, MessageBubble } from "visual.slint";
 import { Icons, ToolButton, Icon } from "icons.slint";
 import { AboutSlint, Button, ScrollView, VerticalBox, HorizontalBox, LineEdit, SpinBox, CheckBox, ComboBox, Palette } from "std-widgets.slint";
 export { Palette } from "std-widgets.slint";
@@ -163,9 +164,10 @@ export component ChatWindow inherits Window {
                 padding: 0px;
                 spacing: 2px;
                 Text { text: "ene"; font-size: 20px; font-weight: 700; color: Palette.foreground; }
-                Text { text: root.demo-mode ? "デモモード · 仮応答" : "ホスト未接続"; color: Palette.foreground; opacity: 0.7; font-size: 13px; }
+
             }
             Rectangle { horizontal-stretch: 1; }
+            StatusBadge { icon: root.demo-mode ? Icons.demo : Icons.connection; label: root.demo-mode ? "デモ · 外部送信なし・会話は保存しません" : "ホスト未接続"; }
             ToolButton { icon: Icons.settings; label: "設定"; clicked => { root.open-settings(); } }
         }
 
@@ -187,36 +189,11 @@ export component ChatWindow inherits Window {
                 padding: 4px;
                 spacing: 12px;
                 if root.messages.length == 0 : Rectangle {
-                    background: Palette.alternate-background;
-                    border-radius: 12px;
-                    min-height: 140px;
-                    VerticalBox {
-                        padding: 20px;
-                        spacing: 10px;
-                        Text { text: "ここから、話しかけてください。"; color: Palette.foreground; font-weight: 600; wrap: word-wrap; }
-                        Text {
-                            text: root.demo-mode ? "日本語や複数行の入力を試せます。返答は固定の仮応答です。会話はクライアントを終了すると消えます。" : "ホスト接続は準備中です。入力を試すには --demo を付けて起動してください。";
-                            wrap: word-wrap; color: Palette.foreground; opacity: 0.7;
-                        }
-                    }
+                    min-height: 160px;
+                    Icon { source: Icons.avatar; width: 64px; height: 64px; x: (parent.width - self.width) / 2; y: 40px; opacity: 0.35; }
                 }
-                for entry in root.messages : Rectangle {
-                    background: entry.provisional ? Palette.alternate-background : Palette.control-background;
-                    border-width: entry.provisional ? 0px : 1px;
-                    border-color: Palette.accent-background;
-                    border-radius: 12px;
-                    vertical-stretch: 0;
-                    VerticalBox {
-                        padding: 16px;
-                        spacing: 8px;
-                        HorizontalBox {
-                            padding: 0px;
-                            Text { text: entry.author; color: Palette.foreground; font-weight: 600; font-size: 13px; }
-                            Rectangle { horizontal-stretch: 1; }
-                            if entry.provisional : Text { text: "仮応答"; color: Palette.accent-background; font-size: 12px; }
-                        }
-                        Text { text: entry.body; wrap: word-wrap; color: Palette.foreground; }
-                    }
+                for entry in root.messages : MessageBubble {
+                    author: entry.author; body: entry.body; provisional: entry.provisional;
                 }
                 Rectangle { vertical-stretch: 1; }
             }
@@ -259,10 +236,10 @@ export component ChatWindow inherits Window {
                     VerticalBox {
                         padding: 0px;
                         Rectangle { vertical-stretch: 1; }
-                        ToolButton { icon: Icons.send; label: "送信"; enabled: root.can-send; clicked => { root.submit(); } }
+                        ToolButton { icon: Icons.send; label: "送信 · Enter（改行はShift+Enter）"; enabled: root.can-send; clicked => { root.submit(); } }
                     }
                 }
-                Text { text: "Enter で送信 · Shift+Enter で改行"; color: Palette.foreground; opacity: 0.7; font-size: 11px; vertical-stretch: 0; }
+
             }
         }
 
@@ -315,9 +292,9 @@ export component SettingsWindow inherits Window {
                 HorizontalBox {
                     padding: 0px;
                     Text { text: "テーマ"; vertical-alignment: center; }
-                    ComboBox { model: ["システムに合わせる", "ライト", "ダーク"]; current-index <=> root.theme-index; }
+                    ThemePicker { current-index <=> root.theme-index; }
                 }
-                Text { text: "フォント名（インストール済みのもの）"; }
+                Text { text: "フォント"; }
                 LineEdit { text <=> root.font-family; }
                 HorizontalBox {
                     padding: 0px;
@@ -336,13 +313,10 @@ export component SettingsWindow inherits Window {
                 HorizontalBox {
                     padding: 0px;
                     Text { text: "キャラクターの大きさ"; vertical-alignment: center; }
-                    LineEdit { text <=> root.avatar-size-text; input-type: number; placeholder-text: "50〜200"; }
-                    Text { text: "%"; vertical-alignment: center; }
+                    SizeControl { text <=> root.avatar-size-text; }
                 }
-                Text { text: "100%で全身の高さが画面の約40%、200%で約80%になります。「適用して閉じる」で反映します。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 HorizontalBox { padding: 0px; ToolButton { icon: Icons.center; label: "キャラクターを画面中央へ戻す"; clicked => { root.recenter-avatar(); } } Rectangle { horizontal-stretch: 1; } }
-                Text { text: "画面の端を越えてドラッグできます。見失ったときは中央へ戻してください。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
+                if root.avatar-failed : Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; }
                 HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.motion; } Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; } }
                 Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 HorizontalBox {
@@ -355,11 +329,9 @@ export component SettingsWindow inherits Window {
                     ToolButton { icon: root.motion-playing ? Icons.pause : Icons.motion; label: root.motion-playing ? "一時停止" : "モーションを再生"; checkable: true; checked <=> root.motion-playing; enabled: root.avatar-motion != ""; }
                     ToolButton { icon: Icons.loop; label: "繰り返し再生"; checkable: true; checked <=> root.motion-loop; enabled: root.avatar-motion != ""; }
                 }
-                Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                Text { text: "モーションはその場で再生します。横移動を固定し、上下の動きと回転を保ちます。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
+                HorizontalBox { padding: 0px; StatusBadge { icon: Icons.motion; label: root.motion-status; } Rectangle { horizontal-stretch: 1; } }
                 if root.avatar-failed : HorizontalBox { padding: 0px; ToolButton { icon: Icons.refresh; label: "描画エラーから再起動"; clicked => { root.restart-avatar(); } } Rectangle { horizontal-stretch: 1; } }
-                Text { text: "表示設定とキャラクターの配置はこの端末に保存します。"; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; font-size: 12px; }
-                Text { text: root.tray-status; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; }
+                HorizontalBox { padding: 0px; StatusBadge { icon: Icons.tray; label: root.tray-status; state: root.tray-ready ? 1 : 3; } Rectangle { horizontal-stretch: 1; } }
                 if !root.tray-ready : HorizontalBox { padding: 0px; ToolButton { icon: Icons.exit; label: "クライアント終了"; clicked => { root.quit(); } } Rectangle { horizontal-stretch: 1; } }
                 AboutSlint { preferred-height: 100px; max-height: 120px; vertical-stretch: 0; }
             }

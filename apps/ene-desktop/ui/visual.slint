@@ -1,0 +1,118 @@
+import { Slider, LineEdit, Palette } from "std-widgets.slint";
+import { Icons, Icon, ToolButton } from "icons.slint";
+
+// State has a distinct symbol as well as color. Details remain on hover.
+export component StatusBadge inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    // 0: inactive, 1: ready, 2: pending, 3: failed.
+    in property <int> state;
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    accessible-role: text;
+    accessible-label: root.label;
+    Icon { x: 2px; y: 6px; source: root.icon; opacity: root.state == 0 ? 0.45 : 1; }
+    if root.state != 0 : Rectangle {
+        x: 18px; y: 0px; width: 14px; height: 14px;
+        background: Palette.background;
+        border-radius: 7px;
+        Icon {
+            x: 1px; y: 1px; width: 12px; height: 12px;
+            source: root.state == 1 ? Icons.check : root.state == 2 ? Icons.refresh : Icons.warning;
+            colorize: root.state == 1 ? Palette.accent-background : Palette.foreground;
+        }
+    }
+    Tooltip { text: @markdown("\{root.label}"); }
+}
+
+export component ThemePicker inherits Rectangle {
+    in-out property <int> current-index;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: system.has-focus || light.has-focus || dark.has-focus;
+    callback edited;
+    min-height: 44px;
+    vertical-stretch: 0;
+    forward-focus: system;
+    HorizontalLayout {
+        spacing: 8px;
+        system := ToolButton { label: "システムに合わせる"; icon: Icons.desktop; enabled: root.enabled; accessible-checkable: true; checked: root.current-index == 0; clicked => { root.current-index = 0; root.edited(); } }
+        light := ToolButton { label: "ライト"; icon: Icons.sun; enabled: root.enabled; accessible-checkable: true; checked: root.current-index == 1; clicked => { root.current-index = 1; root.edited(); } }
+        dark := ToolButton { label: "ダーク"; icon: Icons.moon; enabled: root.enabled; accessible-checkable: true; checked: root.current-index == 2; clicked => { root.current-index = 2; root.edited(); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+}
+
+export component SizeControl inherits Rectangle {
+    in-out property <string> text <=> number.text;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: number.has-focus || slider.has-focus;
+    callback edited;
+    min-height: 44px;
+    vertical-stretch: 0;
+    forward-focus: number;
+    changed text => {
+        if root.text.is-float() { slider.value = clamp(root.text.to-float(), 50, 200); }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        slider := Slider {
+            enabled: root.enabled;
+            minimum: 50; maximum: 200; step: 1;
+            min-width: 44px;
+            value: root.text.is-float() ? clamp(root.text.to-float(), 50, 200) : 100;
+            accessible-label: "キャラクターの大きさ";
+            changed => { root.text = "\{round(self.value)}"; root.edited(); }
+        }
+        number := LineEdit {
+            enabled: root.enabled;
+            input-type: InputType.number;
+            accessible-label: "キャラクターの大きさ（%）";
+            placeholder-text: "50〜200";
+            min-width: 64px; max-width: 88px;
+            min-height: 44px;
+            edited => { root.edited(); }
+        }
+        Text { text: "%"; color: Palette.foreground; vertical-alignment: center; }
+    }
+}
+
+export component MessageBubble inherits Rectangle {
+    in property <string> author;
+    in property <string> body;
+    in property <bool> provisional;
+    private property <bool> outgoing: root.author == "あなた";
+    min-height: row.min-height;
+    vertical-stretch: 0;
+    row := HorizontalLayout {
+        spacing: 8px;
+        if root.outgoing : Rectangle { min-width: 32px; max-width: 32px; }
+        Rectangle {
+            background: root.outgoing ? Palette.control-background : Palette.alternate-background;
+            border-width: root.outgoing ? 1px : 0px;
+            border-color: Palette.border;
+            border-radius: 12px;
+            min-height: content.min-height;
+            content := VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                HorizontalLayout {
+                    Rectangle {
+                        min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px;
+                        accessible-role: text;
+                        accessible-label: root.author;
+                        Icon { source: root.outgoing ? Icons.desktop : Icons.avatar; }
+                        Tooltip { text: @markdown("\{root.author}"); }
+                    }
+                    Rectangle {horizontal-stretch: 1;}
+                    if root.provisional : StatusBadge {icon: Icons.demo; label: "デモの仮応答"; state: 0;}
+                }
+                Text {text: root.body; wrap: word-wrap; color: Palette.foreground; min-width: 0px;}
+            }
+        }
+        if !root.outgoing : Rectangle { min-width: 32px; max-width: 32px; }
+    }
+}
