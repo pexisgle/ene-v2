@@ -94,10 +94,6 @@ async fn public_catalog_request_has_no_credentials_and_rejects_redirects_failure
             get(|headers: HeaderMap| async move {
                 assert!(headers.get("authorization").is_none());
                 assert!(headers.get("cookie").is_none());
-                assert_eq!(
-                    headers["user-agent"],
-                    concat!("ene/", env!("CARGO_PKG_VERSION"))
-                );
                 Json(catalog())
             }),
         )

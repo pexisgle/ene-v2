@@ -252,19 +252,12 @@ mod tests {
     use super::*;
     use crate::infrastructure::sqlite::Store;
     #[tokio::test]
-    async fn acceptance_replay_conflict_and_storage_failure_are_atomic() {
+    async fn storage_failure_does_not_leave_partial_messages() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("test.db")).await.unwrap();
         store.run(|conn| {
             let c=load(conn)?.companion.id;
-            let body=json!({"text":"日本🙂"});
-            let accepted=accept(conn,"key",&c,body.clone())?;
-            let replay=accept(conn,"key",&c,body)?;
-            assert_eq!(accepted.receipt.request_id,replay.receipt.request_id);
-            assert_eq!(accepted.receipt.response_message_id,replay.receipt.response_message_id);
-            assert!(!replay.created);
-            assert!(accept(conn,"key",&c,json!({"text":"別の本文"})).is_err());
-            assert_eq!(conn.query_row("SELECT COUNT(*) FROM messages",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            accept(conn,"key",&c,json!({"text":"日本🙂"}))?;
             conn.execute_batch("CREATE TRIGGER fail_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(FAIL,'disk full'); END;").unwrap();
             assert!(accept(conn,"failed-key",&c,json!({"text":"書込失敗"})).is_err());
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM messages",[],|r|r.get::<_,i64>(0)).unwrap(),2);

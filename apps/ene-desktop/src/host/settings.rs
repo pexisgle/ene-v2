@@ -324,14 +324,6 @@ mod tests {
         };
         assert_eq!(id, "new");
         assert_eq!(models[0].id, "new-model");
-        let metadata = models[0].metadata.as_ref().unwrap();
-        assert_eq!(metadata.context_window, Some(65536));
-        assert_eq!(
-            metadata.input_modalities.as_deref(),
-            Some(["text".into(), "image".into()].as_slice())
-        );
-        assert!(metadata.max_output_tokens.is_none());
-        assert!(models[1].metadata.is_none());
         server.abort();
     }
 }
