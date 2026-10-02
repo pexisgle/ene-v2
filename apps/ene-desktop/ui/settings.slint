@@ -3,6 +3,43 @@ import { Icons, ToolButton } from "icons.slint";
 import { AboutSlint, ScrollView, ComboBox, SpinBox, LineEdit, CheckBox, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
 import { ActionButton, QuietButton, BodyText, HintText, SectionTitle, SettingField } from "components.slint";
+
+component PermissionToggle inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled;
+    forward-focus: checkbox;
+    min-height: max(UiState.control-height, label.preferred-height + 16px);
+    vertical-stretch: 0;
+    HorizontalLayout {
+        spacing: 8px;
+        checkbox := CheckBox {
+            width: 32px;
+            enabled: root.enabled;
+            checked <=> root.checked;
+            accessible-label: root.text;
+            toggled => { root.toggled(); }
+        }
+        label := BodyText {
+            text: root.text;
+            min-width: 0px;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            opacity: root.enabled ? 1 : 0.5;
+            accessible-role: none;
+            TouchArea {
+                enabled: root.enabled;
+                clicked => {
+                    checkbox.focus();
+                    root.checked = !root.checked;
+                    root.toggled();
+                }
+            }
+        }
+    }
+}
+
 export component SettingsView inherits Rectangle {
     in property <bool> active;
     in property <bool> compact;
@@ -402,6 +439,7 @@ export component SettingsView inherits Rectangle {
                 content-width: self.visible-width;
                 horizontal-scrollbar-policy: always-off;
                 VerticalLayout {
+                    alignment: start;
                     spacing: 12px;
                     padding: 0px;
                     padding-right: 12px;
@@ -417,6 +455,8 @@ export component SettingsView inherits Rectangle {
                         Rectangle {horizontal-stretch: 1;}
                     }
                     if UiState.category == 1 : VerticalLayout {
+                        alignment: start;
+                        vertical-stretch: 0;
                         spacing: 10px;
                         SettingField {
                             label: "名前";
@@ -450,6 +490,8 @@ export component SettingsView inherits Rectangle {
                         HintText {text: "openai/gpt-6-luna";}
                     }
                     if UiState.category == 2 : VerticalLayout {
+                        alignment: start;
+                        vertical-stretch: 0;
                         spacing: 10px;
                         HorizontalLayout {
                             spacing: 8px;
@@ -477,16 +519,18 @@ export component SettingsView inherits Rectangle {
                         }
                         HorizontalLayout {
                             spacing: 8px;
-                            ActionButton {icon: Icons.connection; text: "疎通確認"; enabled: root.active && UiState.host-connected; clicked => {UiState.check-connection();}}
+                            ActionButton {icon-only: true; icon: Icons.connection; text: "疎通確認"; enabled: root.active && UiState.host-connected; clicked => {UiState.check-connection();}}
                             QuietButton {icon-only: true; icon: Icons.shield; text: "送信許可"; enabled: root.active; clicked => {UiState.category = 3;}}
                             Rectangle {horizontal-stretch: 1;}
                         }
                     }
                     if UiState.category == 3 : VerticalLayout {
+                        alignment: start;
+                        vertical-stretch: 0;
                         spacing: 10px;
                         BodyText {text: "OpenRouter → OpenAI";}
-                        CheckBox {text: "会話本文・履歴・口調を送信する"; checked <=> UiState.allow-conversation; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
-                        CheckBox {text: "疎通確認用の固定文を送信する"; checked <=> UiState.allow-check; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
+                        PermissionToggle {text: "会話本文・履歴・口調を送信する"; checked <=> UiState.allow-conversation; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
+                        PermissionToggle {text: "疎通確認用の固定文を送信する"; checked <=> UiState.allow-check; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
                         HorizontalLayout {
                             Rectangle {horizontal-stretch: 1;}
                             ActionButton {icon-only: true;icon: Icons.save; text: "送信許可を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-permissions();} }
