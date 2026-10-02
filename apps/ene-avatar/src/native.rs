@@ -4,13 +4,6 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
 };
-use smithay_client_toolkit::presentation_time::{
-    PresentTime, PresentationTimeHandler, PresentationTimeState,
-};
-use smithay_client_toolkit::reexports::protocols::wp::idle_inhibit::zv1::client::{
-    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
-};
-use smithay_client_toolkit::reexports::protocols::wp::presentation_time::client::wp_presentation_feedback;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     output::{OutputHandler, OutputState},
@@ -28,14 +21,12 @@ use smithay_client_toolkit::{
             LayerSurfaceConfigure,
         },
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use std::ptr::NonNull;
 use wayland_client::{
     Connection, QueueHandle,
-    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
 };
-use wayland_client::{Proxy, WEnum};
 
 /// Keeps the libwayland display and layer role alive for the WGPU surface.
 #[derive(Debug, Clone)]
@@ -77,17 +68,10 @@ struct Drag {
 
 pub struct State {
     connection: Connection,
-    pub metrics: crate::telemetry::SharedRecorder,
-    presentation: PresentationTimeState,
-    test_scale: Option<u32>,
-    benchmark_idle_manager: Option<ZwpIdleInhibitManagerV1>,
-    benchmark_idle_inhibitor: Option<ZwpIdleInhibitorV1>,
     pub registry: RegistryState,
     pub seat: SeatState,
     pub outputs: OutputState,
     pub compositor: CompositorState,
-    shm: Shm,
-    pool: SlotPool,
     pub shell: LayerShell,
     pub layer: LayerSurface,
     pub settings: AvatarSettings,
@@ -114,43 +98,19 @@ impl State {
         qh: &QueueHandle<Self>,
         settings: AvatarSettings,
         connection: Connection,
-        metrics: crate::telemetry::SharedRecorder,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let compositor = CompositorState::bind(globals, qh)?;
         let shell = LayerShell::bind(globals, qh).map_err(
             |_| "この環境はWayland layer-shellに対応していません（KDE/KWinなどの対応環境で起動してください）。",
         )?;
         let outputs = OutputState::new(globals, qh);
-        let shm = Shm::bind(globals, qh)?;
-        let pool = SlotPool::new(4, &shm)?;
         let surface = compositor.create_surface(qh);
         let layer = shell.create_layer_surface(qh, surface, Layer::Top, Some("ene-avatar"), None);
         let mut state = Self {
             connection,
-            metrics: metrics.clone(),
-            presentation: PresentationTimeState::bind(globals, qh),
-            // Actual presentation measurements require an awake output. No
-            // inhibitor is created in normal operation or while hidden.
-            benchmark_idle_manager: metrics
-                .lock()
-                .unwrap()
-                .enabled()
-                .then(|| {
-                    globals
-                        .bind::<ZwpIdleInhibitManagerV1, _, _>(qh, 1..=1, ())
-                        .ok()
-                })
-                .flatten(),
-            benchmark_idle_inhibitor: None,
-            test_scale: std::env::var("ENE_AVATAR_TEST_SCALE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|s| [1, 2].contains(s)),
             registry: RegistryState::new(globals),
             seat: SeatState::new(globals, qh),
             outputs,
-            shm,
-            pool,
             compositor,
             shell,
             layer,
@@ -215,23 +175,6 @@ impl State {
             (self.height * self.scale) as i32,
         );
     }
-    pub fn request_feedback(&mut self, qh: &QueueHandle<Self>, sequence: u64) {
-        if !self.metrics.lock().unwrap().enabled() {
-            return;
-        }
-        match self.presentation.feedback(self.layer.wl_surface(), qh) {
-            Ok(feedback) => self
-                .metrics
-                .lock()
-                .unwrap()
-                .presentation_requested(feedback.id().protocol_id(), sequence),
-            Err(error) => self
-                .metrics
-                .lock()
-                .unwrap()
-                .presentation_unavailable(error.to_string()),
-        }
-    }
     fn output_size(&self) -> (i32, i32) {
         if let Some(output) = &self.surface_output
             && let Some(size) = self.outputs.info(output).and_then(|info| info.logical_size)
@@ -291,10 +234,6 @@ impl State {
         self.notify_position();
     }
     pub fn recreate(&mut self, qh: &QueueHandle<Self>) {
-        self.metrics.lock().unwrap().reset_presentation();
-        if let Some(inhibitor) = self.benchmark_idle_inhibitor.take() {
-            inhibitor.destroy();
-        }
         let output = self.outputs.outputs().find(|o| {
             self.outputs.info(o).is_some_and(|i| {
                 self.settings
@@ -316,22 +255,17 @@ impl State {
             Some("ene-avatar"),
             output.as_ref(),
         );
-        if self.settings.visible
-            && let Some(manager) = &self.benchmark_idle_manager
-        {
-            self.benchmark_idle_inhibitor =
-                Some(manager.create_inhibitor(self.layer.wl_surface(), qh, ()));
-        }
         self.drag = None;
         self.drag_pending = false;
         self.requested_layer_size = (0, 0);
         self.configured = false;
         self.closed = false;
-        self.scale = self.test_scale.unwrap_or(1);
+        self.scale = 1;
         self.resized = true;
         self.surface_output = None;
         self.properties();
-        self.empty_input(qh);
+        self.set_input(&[]);
+        self.input_runs.clear();
         self.layer.commit();
     }
     pub fn apply_drag(&mut self) {
@@ -379,45 +313,6 @@ impl State {
             .wl_surface()
             .set_input_region(Some(region.wl_region()));
     }
-    pub fn present(&mut self, rgba: &[u8], runs: &[Run]) -> Result<(), Box<dyn std::error::Error>> {
-        let width = self.width * self.scale;
-        let height = self.height * self.scale;
-        if rgba.len() != (width * height * 4) as usize {
-            return Err("描画フレームの寸法が一致しません。".into());
-        }
-        let (buffer, canvas) = self.pool.create_buffer(
-            width as i32,
-            height as i32,
-            (width * 4) as i32,
-            wl_shm::Format::Argb8888,
-        )?;
-        // Convert the SRGB render target to Wayland premultiplied ARGB8888
-        // (BGRA bytes on the little-endian target), preserving source alpha.
-        for (src, dst) in rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(canvas.as_chunks_mut::<4>().0.iter_mut())
-        {
-            *dst = crate::pixels::argb(src);
-        }
-        self.set_input(runs);
-        self.input_runs = runs.to_vec();
-        self.layer.wl_surface().set_buffer_scale(self.scale as i32);
-        buffer.attach_to(self.layer.wl_surface())?;
-        self.layer
-            .wl_surface()
-            .damage_buffer(0, 0, width as i32, height as i32);
-        // Pixels and the exact alpha-derived input region enter the compositor
-        // in ONE commit. No invisible old arm can intercept a click.
-        self.layer.commit();
-        Ok(())
-    }
-    pub fn empty_input(&mut self, _qh: &QueueHandle<Self>) {
-        self.input_runs.clear();
-        self.set_input(&[]);
-        self.layer.commit();
-    }
 }
 impl CompositorHandler for State {
     fn scale_factor_changed(
@@ -428,7 +323,7 @@ impl CompositorHandler for State {
         factor: i32,
     ) {
         if surface == self.layer.wl_surface() {
-            self.scale = self.test_scale.unwrap_or(factor.max(1) as u32);
+            self.scale = factor.max(1) as u32;
             self.resized = true;
             // Apply the new scale atomically with the matching-size buffer in
             // present(), keeping the old displayed frame at its old scale.
@@ -465,47 +360,6 @@ impl CompositorHandler for State {
         _: &wl_surface::WlSurface,
         _: &wl_output::WlOutput,
     ) {
-    }
-}
-impl PresentationTimeHandler for State {
-    fn presentation_time_state(&mut self) -> &mut PresentationTimeState {
-        &mut self.presentation
-    }
-    fn presented(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        feedback: &wp_presentation_feedback::WpPresentationFeedback,
-        _: &wl_surface::WlSurface,
-        _: Vec<wl_output::WlOutput>,
-        time: PresentTime,
-        refresh: u32,
-        seq: u64,
-        flags: WEnum<wp_presentation_feedback::Kind>,
-    ) {
-        let bits = match flags {
-            WEnum::Value(kind) => kind.bits(),
-            WEnum::Unknown(bits) => bits,
-        };
-        self.metrics.lock().unwrap().presented(
-            feedback.id().protocol_id(),
-            time,
-            refresh,
-            seq,
-            bits,
-        );
-    }
-    fn discarded(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        feedback: &wp_presentation_feedback::WpPresentationFeedback,
-        _: &wl_surface::WlSurface,
-    ) {
-        self.metrics
-            .lock()
-            .unwrap()
-            .discarded(feedback.id().protocol_id());
     }
 }
 impl OutputHandler for State {
@@ -697,12 +551,6 @@ impl ProvidesRegistryState for State {
 smithay_client_toolkit::delegate_registry!(State);
 smithay_client_toolkit::delegate_dispatch2!(State);
 
-impl ShmHandler for State {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
-
 /// Combine only identical intervals on adjacent rows, preserving every hole.
 fn input_rectangles(runs: &[Run]) -> Vec<(Run, i32)> {
     let mut rectangles: Vec<(Run, i32)> = Vec::new();
@@ -721,6 +569,3 @@ fn input_rectangles(runs: &[Run]) -> Vec<(Run, i32)> {
     }
     rectangles
 }
-
-wayland_client::delegate_noop!(State: ignore ZwpIdleInhibitManagerV1);
-wayland_client::delegate_noop!(State: ignore ZwpIdleInhibitorV1);

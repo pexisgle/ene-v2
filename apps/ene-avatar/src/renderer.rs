@@ -9,7 +9,6 @@ use bevy::{
         render_asset::RenderAssets,
         settings::{RenderCreation, WgpuSettings},
         texture::GpuImage,
-        view::screenshot::{Screenshot, ScreenshotCaptured},
     },
     transform::TransformSystems,
     window::{
@@ -23,46 +22,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[derive(Resource, Default)]
-struct ProfileFrame {
-    sequence: u64,
-    token: Option<usize>,
-}
-
-fn begin_scene_profile(
-    mut timer: ResMut<crate::telemetry::SceneTimer>,
-    mut frame: ResMut<ProfileFrame>,
-    mut pending: ResMut<bevy::render::renderer::PendingCommandBuffers>,
-) {
-    frame.token = timer.begin_buffered(frame.sequence, &mut pending);
-}
-fn finish_scene_profile(
-    mut timer: ResMut<crate::telemetry::SceneTimer>,
-    frame: Res<ProfileFrame>,
-    mut pending: ResMut<bevy::render::renderer::PendingCommandBuffers>,
-) {
-    if let Some(token) = frame.token {
-        timer.finish_buffered(token, &mut pending);
-    }
-}
-fn map_scene_profile(
-    mut timer: ResMut<crate::telemetry::SceneTimer>,
-    mut frame: ResMut<ProfileFrame>,
-) {
-    if let Some(token) = frame.token.take() {
-        timer.map_after_submit(token);
-    }
-}
-
-#[derive(Default)]
-pub struct Capture {
-    pub revision: u64,
-    pub generation: u64,
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-    pub pending: u32,
-}
 #[derive(Component)]
 struct AvatarCamera;
 #[derive(Component)]
@@ -70,7 +29,6 @@ struct MotionLoaded;
 
 pub struct Renderer {
     pub app: App,
-    pub captures: Arc<Mutex<Capture>>,
     handle: Handle<VrmAsset>,
     target: Handle<Image>,
     model: Entity,
@@ -88,7 +46,6 @@ pub struct Renderer {
     body_height: f32,
     fitted: bool,
     pub generation: u64,
-    capture_sequence: u64,
 }
 impl Renderer {
     pub fn new(
@@ -190,37 +147,8 @@ impl Renderer {
         }
         app.finish();
         app.cleanup();
-        if std::env::var("ENE_AVATAR_PROFILE").as_deref() == Ok("1") {
-            let world = app.world();
-            let timer = crate::telemetry::SceneTimer::new(
-                world
-                    .resource::<bevy::render::renderer::RenderDevice>()
-                    .clone(),
-                world
-                    .resource::<bevy::render::renderer::RenderQueue>()
-                    .clone(),
-            );
-            if let Some(reason) = timer.unavailable_reason() {
-                eprintln!("avatar scene timing unavailable: {reason}");
-            }
-            use bevy::render::renderer::{RenderGraph, RenderGraphSystems};
-            app.sub_app_mut(RenderApp)
-                .insert_resource(timer)
-                .init_resource::<ProfileFrame>()
-                .add_systems(
-                    RenderGraph,
-                    (
-                        begin_scene_profile.in_set(RenderGraphSystems::Begin),
-                        finish_scene_profile
-                            .after(RenderGraphSystems::Render)
-                            .before(RenderGraphSystems::Submit),
-                        map_scene_profile.in_set(RenderGraphSystems::Finish),
-                    ),
-                );
-        }
         let mut renderer = Self {
             app,
-            captures: Arc::new(Mutex::new(Capture::default())),
             handle: Handle::default(),
             target,
             model,
@@ -238,7 +166,6 @@ impl Renderer {
             body_height: 0.,
             fitted: false,
             generation: 0,
-            capture_sequence: 0,
         };
         if let Err(message) = renderer.configure(settings) {
             crate::emit(ene_protocol::avatar::AvatarEvent::Error { message });
@@ -365,17 +292,6 @@ impl Renderer {
             }
         }
     }
-    pub fn drain_capture(&mut self) {
-        // Deliver an already submitted readback before dropping its receiver.
-        // No new captures are scheduled during this bounded shutdown drain.
-        let started = std::time::Instant::now();
-        while self.captures.lock().unwrap().pending > 0
-            && started.elapsed() < std::time::Duration::from_millis(250)
-        {
-            self.app.update();
-            std::thread::yield_now();
-        }
-    }
     pub fn resume(&mut self) {
         // Drop the wall-clock gap so hidden time never advances animation or
         // spring physics when updates start again.
@@ -408,66 +324,6 @@ impl Renderer {
             && let Projection::Perspective(p) = &mut *projection
         {
             p.aspect_ratio = width as f32 / height as f32;
-        }
-    }
-    pub fn capture(&mut self) -> Option<u64> {
-        let shared = self.captures.clone();
-        let generation = self.generation;
-        {
-            let mut s = shared.lock().unwrap();
-            if s.pending >= 4 {
-                return None;
-            }
-            s.pending += 1;
-        }
-        self.capture_sequence += 1;
-        let sequence = self.capture_sequence;
-        self.app
-            .world_mut()
-            .spawn(Screenshot::image(self.target.clone()))
-            .observe(move |event: On<ScreenshotCaptured>| {
-                let mut shared = shared.lock().unwrap();
-                shared.pending -= 1;
-                // Readbacks can complete out of order. Never present an older
-                // pose after a newer one, even across pause/resize boundaries.
-                if sequence <= shared.revision {
-                    return;
-                }
-                if let Ok(image) = event.image.clone().try_into_dynamic() {
-                    let image = image.to_rgba8();
-                    shared.width = image.width();
-                    shared.height = image.height();
-                    shared.rgba = image.into_raw();
-                    shared.generation = generation;
-                    shared.revision = sequence;
-                }
-            });
-        Some(sequence)
-    }
-    pub fn profile_frame(&mut self, sequence: u64) {
-        if let Some(mut frame) = self
-            .app
-            .sub_app_mut(RenderApp)
-            .world_mut()
-            .get_resource_mut::<ProfileFrame>()
-        {
-            frame.sequence = sequence;
-        }
-    }
-    pub fn poll_scene_timings(&mut self) -> Vec<crate::telemetry::SceneTimestampSample> {
-        if let Some(mut timer) = self
-            .app
-            .sub_app_mut(RenderApp)
-            .world_mut()
-            .get_resource_mut::<crate::telemetry::SceneTimer>()
-        {
-            let samples = timer.poll();
-            for error in timer.take_errors() {
-                eprintln!("avatar scene timing: {error}");
-            }
-            samples
-        } else {
-            Vec::new()
         }
     }
     pub fn rendered_texture(&self) -> Option<wgpu::Texture> {

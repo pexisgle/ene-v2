@@ -2,9 +2,8 @@
 //!
 //! Call `enqueue` on the main thread after `renderer.app.update()`, using the
 //! final `GpuImage` from `RenderApp`. Width/height are physical pixels; runs
-//! are logical pixels. `None` requests an exact GPU mask; `Some(runs)` supplies
-//! geometry or empty coverage without a mask dispatch/readback. Poll each tick,
-//! discard stale generations/sequences in the caller, then draw and install
+//! are logical pixels. The final image always supplies the exact GPU mask.
+//! Poll each tick, discard stale generations/sequences in the caller, then draw and install
 //! that frame's input region before presenting the returned surface texture.
 //!
 //! Keep the complete `Frame` alive while displaying/reusing its texture. Its
@@ -17,7 +16,6 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     fmt,
     sync::{Arc, mpsc},
-    time::{Duration, Instant},
 };
 use wgpu::util::DeviceExt;
 
@@ -27,7 +25,6 @@ const MASK_PIXELS_PER_WORKGROUP: u32 = 256;
 pub const DEFAULT_RUN_CAPACITY: u32 = 4096;
 const HEADER_BYTES: u64 = 16;
 const RUN_BYTES: u64 = 16;
-const TIMESTAMP_BYTES: u64 = 24;
 
 #[derive(Debug, Clone)]
 pub struct GpuError(pub String);
@@ -38,24 +35,6 @@ impl fmt::Display for GpuError {
 }
 impl std::error::Error for GpuError {}
 
-/// CPU timestamps are wall-clock instants; optional GPU durations use the
-/// device's timestamp period. Byte counts include every overflow attempt.
-#[derive(Debug, Clone)]
-pub struct FrameTimings {
-    pub enqueued_at: Instant,
-    pub submitted_at: Instant,
-    pub completed_at: Instant,
-    pub decoded_at: Instant,
-    pub cpu_submit: Duration,
-    pub cpu_decode: Duration,
-    pub gpu_copy: Option<Duration>,
-    pub gpu_copy_mask: Option<Duration>,
-    pub gpu_mask: Option<Duration>,
-    pub mask_readback_bytes: u64,
-    pub timestamp_readback_bytes: u64,
-    pub overflow_retries: u32,
-}
-
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub texture: wgpu::Texture,
@@ -65,72 +44,28 @@ pub struct Frame {
     pub generation: u64,
     pub sequence: u64,
     pub runs: Vec<Run>,
-    #[allow(
-        dead_code,
-        reason = "verification diagnostics distinguish CPU-supplied coverage from GPU mask readback"
-    )]
-    pub mask_readback: bool,
-    pub timings: FrameTimings,
     _lease: Arc<()>,
 }
 
-struct Completion {
-    result: Result<(), String>,
-    at: Instant,
-}
 struct Pending {
     width: u32,
     height: u32,
     scale: u32,
     generation: u64,
     sequence: u64,
-    cpu_runs: Option<Vec<Run>>,
-    receiver: Option<mpsc::Receiver<Completion>>,
-    timings: FrameTimings,
-    callbacks_remaining: u8,
-    completion_error: Option<String>,
-    timestamped: bool,
-    includes_copy: bool,
+    receiver: Option<mpsc::Receiver<Result<(), String>>>,
 }
 struct Slot {
     texture: Option<wgpu::Texture>,
     storage: wgpu::Buffer,
     staging: wgpu::Buffer,
     capacity: u32,
-    timestamps: Option<Timestamps>,
     pending: Option<Pending>,
     lease: Arc<()>,
-}
-struct Timestamps {
-    queries: wgpu::QuerySet,
-    resolve: wgpu::Buffer,
-    staging: wgpu::Buffer,
 }
 impl Slot {
     fn new(device: &wgpu::Device, capacity: u32) -> Self {
         let bytes = payload_bytes(capacity);
-        let timestamps = device
-            .features()
-            .contains(wgpu::Features::TIMESTAMP_QUERY)
-            .then(|| Timestamps {
-                queries: device.create_query_set(&wgpu::QuerySetDescriptor {
-                    label: Some("avatar copy/mask timestamps"),
-                    ty: wgpu::QueryType::Timestamp,
-                    count: 3,
-                }),
-                resolve: device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("avatar timestamp resolve"),
-                    size: TIMESTAMP_BYTES,
-                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                }),
-                staging: device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("avatar timestamp staging"),
-                    size: TIMESTAMP_BYTES,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
-            });
         Self {
             texture: None,
             storage: device.create_buffer(&wgpu::BufferDescriptor {
@@ -148,7 +83,6 @@ impl Slot {
                 mapped_at_creation: false,
             }),
             capacity,
-            timestamps,
             pending: None,
             lease: Arc::new(()),
         }
@@ -172,19 +106,11 @@ pub struct GpuFrames {
     pipeline: wgpu::ComputePipeline,
     slots: [Slot; RING_SIZE],
     next_slot: usize,
-    profiling: bool,
     errors: Vec<GpuError>,
 }
 impl GpuFrames {
     pub fn new(device: RenderDevice, queue: RenderQueue) -> Self {
-        Self::with_run_capacity(device, queue, DEFAULT_RUN_CAPACITY)
-    }
-    /// A smaller capacity is useful for deliberately exercising overflow.
-    pub fn with_run_capacity(device: RenderDevice, queue: RenderQueue, capacity: u32) -> Self {
-        let capacity = capacity
-            .max(1)
-            .checked_next_power_of_two()
-            .expect("run capacity overflow");
+        let capacity = DEFAULT_RUN_CAPACITY;
         assert!(payload_bytes(capacity) <= device.limits().max_storage_buffer_binding_size);
         let raw = device.wgpu_device();
         let shader = raw.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -206,25 +132,8 @@ impl GpuFrames {
             pipeline,
             slots,
             next_slot: 0,
-            profiling: false,
             errors: Vec::new(),
         }
-    }
-    /// Opt-in only: device support alone never enables production timestamp
-    /// readbacks. Existing submissions keep the setting captured at enqueue.
-    pub fn set_profiling(&mut self, enabled: bool) {
-        self.profiling = enabled;
-    }
-    /// Counts pending captures and completed frames still leased by the caller.
-    #[allow(
-        dead_code,
-        reason = "integration diagnostics can report ring occupancy"
-    )]
-    pub fn occupied(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|s| s.pending.is_some() || Arc::strong_count(&s.lease) > 1)
-            .count()
     }
     pub fn take_errors(&mut self) -> Vec<GpuError> {
         std::mem::take(&mut self.errors)
@@ -239,9 +148,7 @@ impl GpuFrames {
         scale: u32,
         generation: u64,
         sequence: u64,
-        cpu_runs: Option<Vec<Run>>,
     ) -> bool {
-        let start = Instant::now();
         if width == 0
             || height == 0
             || scale == 0
@@ -304,26 +211,7 @@ impl GpuFrames {
             scale,
             generation,
             sequence,
-            cpu_runs,
             receiver: None,
-            timings: FrameTimings {
-                enqueued_at: start,
-                submitted_at: start,
-                completed_at: start,
-                decoded_at: start,
-                cpu_submit: Duration::ZERO,
-                cpu_decode: Duration::ZERO,
-                gpu_copy: None,
-                gpu_copy_mask: None,
-                gpu_mask: None,
-                mask_readback_bytes: 0,
-                timestamp_readback_bytes: 0,
-                overflow_retries: 0,
-            },
-            callbacks_remaining: 0,
-            completion_error: None,
-            timestamped: false,
-            includes_copy: false,
         });
         submit_slot(
             self.device.wgpu_device(),
@@ -331,9 +219,7 @@ impl GpuFrames {
             &self.pipeline,
             slot,
             Some(source),
-            self.profiling,
         );
-        slot.pending.as_mut().unwrap().timings.cpu_submit += start.elapsed();
         true
     }
 
@@ -346,85 +232,34 @@ impl GpuFrames {
         }
         let mut frames = Vec::with_capacity(RING_SIZE);
         for slot in &mut self.slots {
-            let Some(mut pending) = slot.pending.take() else {
+            let Some(pending) = slot.pending.take() else {
                 continue;
             };
-            while pending.callbacks_remaining > 0 {
-                match pending.receiver.as_ref().unwrap().try_recv() {
-                    Ok(completion) => {
-                        pending.callbacks_remaining -= 1;
-                        pending.timings.completed_at = completion.at;
-                        if let Err(error) = completion.result {
-                            pending.completion_error = Some(error);
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        pending.callbacks_remaining = 0;
-                        pending.completion_error = Some("avatar GPU callback disconnected".into());
-                    }
+            match pending.receiver.as_ref().unwrap().try_recv() {
+                Err(mpsc::TryRecvError::Empty) => {
+                    slot.pending = Some(pending);
+                    continue;
                 }
-            }
-            if pending.callbacks_remaining > 0 {
-                slot.pending = Some(pending);
-                continue;
-            }
-            if let Some(error) = pending.completion_error.take() {
-                slot.staging.unmap();
-                if let Some(t) = &slot.timestamps {
-                    t.staging.unmap();
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    slot.staging.unmap();
+                    self.errors
+                        .push(GpuError("avatar GPU callback disconnected".into()));
+                    continue;
                 }
-                self.errors.push(GpuError(error));
-                continue;
-            }
-            let decode_start = Instant::now();
-            if pending.timestamped {
-                let t = slot.timestamps.as_ref().unwrap();
-                let view = t.staging.slice(..).get_mapped_range();
-                let tick =
-                    |offset| u64::from_le_bytes(view[offset..offset + 8].try_into().unwrap());
-                let duration = |first: u64, last: u64| {
-                    Duration::from_secs_f64(
-                        last.wrapping_sub(first) as f64
-                            * f64::from(self.queue.get_timestamp_period())
-                            / 1e9,
-                    )
-                };
-                let (mask_start, mask_end) = if pending.includes_copy {
-                    pending.timings.gpu_copy = Some(duration(tick(0), tick(8)));
-                    if pending.cpu_runs.is_none() {
-                        pending.timings.gpu_copy_mask = Some(duration(tick(0), tick(16)));
-                        (tick(8), tick(16))
-                    } else {
-                        (tick(8), tick(8))
-                    }
-                } else {
-                    (tick(0), tick(8))
-                };
-                if pending.cpu_runs.is_none() {
-                    let elapsed = duration(mask_start, mask_end);
-                    pending.timings.gpu_mask =
-                        Some(pending.timings.gpu_mask.unwrap_or_default() + elapsed);
-                    if !pending.includes_copy
-                        && let Some(total) = &mut pending.timings.gpu_copy_mask
-                    {
-                        *total += elapsed;
-                    }
+                Ok(Err(error)) => {
+                    slot.staging.unmap();
+                    self.errors.push(GpuError(error));
+                    continue;
                 }
-                drop(view);
-                t.staging.unmap();
+                Ok(Ok(())) => {}
             }
-            let mask_readback = pending.cpu_runs.is_none();
-            let runs = if let Some(runs) = pending.cpu_runs.take() {
-                runs
-            } else {
+            let runs = {
                 let view = slot.staging.slice(..).get_mapped_range();
                 let count = read_u32(&view, 0);
                 let overflow = read_u32(&view, 4);
                 if overflow != 0 || count > slot.capacity {
                     drop(view);
                     slot.staging.unmap();
-                    pending.timings.cpu_decode += decode_start.elapsed();
                     let capacity = count
                         .max(slot.capacity.saturating_add(1))
                         .checked_next_power_of_two();
@@ -438,10 +273,7 @@ impl GpuFrames {
                         )));
                         continue;
                     };
-                    let retry_start = Instant::now();
                     slot.grow(self.device.wgpu_device(), capacity);
-                    pending.timings.overflow_retries += 1;
-                    let pending_profiling = pending.timestamped;
                     slot.pending = Some(pending);
                     submit_slot(
                         self.device.wgpu_device(),
@@ -449,9 +281,7 @@ impl GpuFrames {
                         &self.pipeline,
                         slot,
                         None,
-                        pending_profiling,
                     );
-                    slot.pending.as_mut().unwrap().timings.cpu_submit += retry_start.elapsed();
                     continue;
                 }
                 let mut runs = Vec::with_capacity(count as usize);
@@ -482,8 +312,6 @@ impl GpuFrames {
                 runs.sort_unstable_by_key(|r| (r.y, r.x));
                 runs
             };
-            pending.timings.cpu_decode += decode_start.elapsed();
-            pending.timings.decoded_at = Instant::now();
             frames.push(Frame {
                 texture: slot.texture.as_ref().unwrap().clone(),
                 width: pending.width,
@@ -492,8 +320,6 @@ impl GpuFrames {
                 generation: pending.generation,
                 sequence: pending.sequence,
                 runs,
-                mask_readback,
-                timings: pending.timings,
                 _lease: slot.lease.clone(),
             });
         }
@@ -510,22 +336,12 @@ fn submit_slot(
     pipeline: &wgpu::ComputePipeline,
     slot: &mut Slot,
     source: Option<&wgpu::Texture>,
-    profiling: bool,
 ) {
     let pending = slot.pending.as_mut().unwrap();
     let texture = slot.texture.as_ref().unwrap();
-    let mask = pending.cpu_runs.is_none();
-    let encoder_timestamps = device
-        .features()
-        .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
-    pending.timestamped = profiling && slot.timestamps.is_some() && (mask || encoder_timestamps);
-    pending.includes_copy = encoder_timestamps && source.is_some();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("avatar frame copy/mask"),
     });
-    if pending.timestamped && pending.includes_copy {
-        encoder.write_timestamp(&slot.timestamps.as_ref().unwrap().queries, 0);
-    }
     if let Some(source) = source {
         encoder.copy_texture_to_texture(
             source.as_image_copy(),
@@ -537,7 +353,7 @@ fn submit_slot(
             },
         );
     }
-    if mask {
+    {
         encoder.clear_buffer(&slot.storage, 0, Some(HEADER_BYTES));
         let params = [pending.width, pending.height, pending.scale, slot.capacity];
         let bytes: Vec<u8> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -565,22 +381,10 @@ fn submit_slot(
                 },
             ],
         });
-        if pending.timestamped && encoder_timestamps {
-            encoder.write_timestamp(&slot.timestamps.as_ref().unwrap().queries, 1);
-        }
         {
-            let timestamp_writes = if pending.timestamped && !encoder_timestamps {
-                Some(wgpu::ComputePassTimestampWrites {
-                    query_set: &slot.timestamps.as_ref().unwrap().queries,
-                    beginning_of_pass_write_index: Some(1),
-                    end_of_pass_write_index: Some(2),
-                })
-            } else {
-                None
-            };
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("avatar scan interval starts"),
-                timestamp_writes,
+                timestamp_writes: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &group, &[]);
@@ -593,160 +397,17 @@ fn submit_slot(
                 1,
             );
         }
-        if pending.timestamped && encoder_timestamps {
-            encoder.write_timestamp(&slot.timestamps.as_ref().unwrap().queries, 2);
-        }
         let bytes = payload_bytes(slot.capacity);
         encoder.copy_buffer_to_buffer(&slot.storage, 0, &slot.staging, 0, bytes);
-        pending.timings.mask_readback_bytes += bytes;
     }
-    if pending.timestamped {
-        let t = slot.timestamps.as_ref().unwrap();
-        if !mask {
-            encoder.write_timestamp(&t.queries, 1);
-        }
-        let (range, bytes) = if pending.includes_copy && mask {
-            (0..3, 24)
-        } else if pending.includes_copy {
-            (0..2, 16)
-        } else {
-            (1..3, 16)
-        };
-        encoder.resolve_query_set(&t.queries, range, &t.resolve, 0);
-        encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.staging, 0, bytes);
-        pending.timings.timestamp_readback_bytes += bytes;
-    }
-    pending.timings.submitted_at = Instant::now();
     queue.submit([encoder.finish()]);
     let (sender, receiver) = mpsc::channel();
-    pending.callbacks_remaining = 0;
-    if pending.timestamped {
-        let sender = sender.clone();
-        pending.callbacks_remaining += 1;
-        slot.timestamps
-            .as_ref()
-            .unwrap()
-            .staging
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(Completion {
-                    result: result.map_err(|error| error.to_string()),
-                    at: Instant::now(),
-                });
-            });
-    }
-    if mask {
-        pending.callbacks_remaining += 1;
-        slot.staging
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(Completion {
-                    result: result.map_err(|error| error.to_string()),
-                    at: Instant::now(),
-                });
-            });
-    } else if !pending.timestamped {
-        pending.callbacks_remaining += 1;
-        queue.on_submitted_work_done(move || {
-            let _ = sender.send(Completion {
-                result: Ok(()),
-                at: Instant::now(),
-            });
+    slot.staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result.map_err(|error| error.to_string()));
         });
-    }
     pending.receiver = Some(receiver);
-}
-
-impl Frame {
-    /// Explicit verification only. Production capture never copies image or
-    /// alpha pixels to the CPU. This readback holds a frame lease until dropped.
-    pub fn readback_rgba(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> VerificationReadback {
-        let row_bytes = self.width * 4;
-        let stride = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("avatar optional verification pixels"),
-            size: u64::from(stride) * u64::from(self.height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("avatar optional verification copy"),
-        });
-        encoder.copy_texture_to_buffer(
-            self.texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(stride),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit([encoder.finish()]);
-        let (sender, receiver) = mpsc::channel();
-        buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result.map_err(|error| error.to_string()));
-            });
-        VerificationReadback {
-            buffer,
-            receiver,
-            frame: self.clone(),
-            stride,
-            finished: false,
-        }
-    }
-}
-pub struct VerificationReadback {
-    buffer: wgpu::Buffer,
-    receiver: mpsc::Receiver<Result<(), String>>,
-    frame: Frame,
-    stride: u32,
-    finished: bool,
-}
-impl VerificationReadback {
-    /// Returns tightly packed, unmodified RGBA target bytes, once available.
-    pub fn poll(&mut self, device: &wgpu::Device) -> Result<Option<Vec<u8>>, GpuError> {
-        if self.finished {
-            return Ok(None);
-        }
-        device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|error| GpuError(error.to_string()))?;
-        match self.receiver.try_recv() {
-            Err(mpsc::TryRecvError::Empty) => return Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(GpuError("verification callback disconnected".into()));
-            }
-            Ok(Err(error)) => {
-                self.finished = true;
-                return Err(GpuError(error));
-            }
-            Ok(Ok(())) => {}
-        }
-        let view = self.buffer.slice(..).get_mapped_range();
-        let mut rgba =
-            Vec::with_capacity(self.frame.width as usize * self.frame.height as usize * 4);
-        for row in view.chunks_exact(self.stride as usize) {
-            rgba.extend_from_slice(&row[..self.frame.width as usize * 4]);
-        }
-        drop(view);
-        self.buffer.unmap();
-        self.finished = true;
-        Ok(Some(rgba))
-    }
 }
 
 /// Presenter sharing Bevy's instance/adapter/device/queue. Creation retains
@@ -760,8 +421,6 @@ pub struct GpuSurface {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     needs_reconfigure: bool,
-    profiling: bool,
-    pass_timings: PassTimings,
 }
 trait WindowHandles: HasWindowHandle + HasDisplayHandle + Send + Sync {}
 impl<T: HasWindowHandle + HasDisplayHandle + Send + Sync> WindowHandles for T {}
@@ -806,38 +465,8 @@ impl GpuSurface {
             config,
             pipeline,
             needs_reconfigure: true,
-            profiling: false,
-            pass_timings: PassTimings::new(),
         })
     }
-    /// Timestamp only the conversion render pass; acquisition/CPU/queue idle
-    /// outside the pass are excluded. Disabled by default, even if supported.
-    pub fn set_profiling(&mut self, enabled: bool) {
-        self.profiling = enabled;
-    }
-    /// Missing samples mean disabled/unsupported timestamps or timing-ring
-    /// saturation, never a fabricated zero-duration GPU measurement.
-    pub fn poll_timings(&mut self) -> Vec<(u64, Duration)> {
-        self.pass_timings.poll(&self.device, &self.queue)
-    }
-    pub fn take_errors(&mut self) -> Vec<GpuError> {
-        std::mem::take(&mut self.pass_timings.errors)
-    }
-    #[allow(
-        dead_code,
-        reason = "native diagnostics can report the negotiated surface format"
-    )]
-    pub fn format(&self) -> wgpu::TextureFormat {
-        self.config.format
-    }
-    #[allow(
-        dead_code,
-        reason = "native diagnostics can report the negotiated alpha mode"
-    )]
-    pub fn alpha_mode(&self) -> wgpu::CompositeAlphaMode {
-        self.config.alpha_mode
-    }
-
     /// Width/height must match the physical source extent. The command is
     /// submitted before returning; the caller installs input coverage and
     /// double-buffered Wayland state, then calls `SurfaceTexture::present`.
@@ -847,29 +476,6 @@ impl GpuSurface {
         texture: &wgpu::Texture,
         width: u32,
         height: u32,
-    ) -> Result<Option<wgpu::SurfaceTexture>, GpuError> {
-        self.draw_inner(texture, width, height, None)
-    }
-    /// Same presentation behavior as `draw`, plus sequence-associated optional
-    /// render-pass timestamps. Call `set_profiling(true)` and `poll_timings`.
-    pub fn draw_timed(
-        &mut self,
-        texture: &wgpu::Texture,
-        width: u32,
-        height: u32,
-        sequence: u64,
-    ) -> Result<Option<wgpu::SurfaceTexture>, GpuError> {
-        if !self.profiling {
-            return self.draw(texture, width, height);
-        }
-        self.draw_inner(texture, width, height, Some(sequence))
-    }
-    fn draw_inner(
-        &mut self,
-        texture: &wgpu::Texture,
-        width: u32,
-        height: u32,
-        sequence: Option<u64>,
     ) -> Result<Option<wgpu::SurfaceTexture>, GpuError> {
         if width == 0 || height == 0 {
             return Ok(None);
@@ -922,17 +528,7 @@ impl GpuSurface {
             }
         };
         let target = output.texture.create_view(&Default::default());
-        let timing = sequence
-            .filter(|_| self.profiling)
-            .and_then(|sequence| self.pass_timings.reserve(&self.device, sequence));
-        draw_texture_profiled(
-            &self.device,
-            &self.queue,
-            &self.pipeline,
-            texture,
-            &target,
-            timing,
-        );
+        draw_texture(&self.device, &self.queue, &self.pipeline, texture, &target);
         Ok(Some(output))
     }
 }
@@ -991,13 +587,12 @@ fn presentation_pipeline(
         cache: None,
     })
 }
-fn draw_texture_profiled(
+fn draw_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pipeline: &wgpu::RenderPipeline,
     texture: &wgpu::Texture,
     target: &wgpu::TextureView,
-    timing: Option<&mut PassTiming>,
 ) {
     let source = texture.create_view(&Default::default());
     let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1024,136 +619,11 @@ fn draw_texture_profiled(
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("avatar fullscreen conversion"),
             color_attachments: &attachments,
-            timestamp_writes: timing
-                .as_ref()
-                .map(|timing| wgpu::RenderPassTimestampWrites {
-                    query_set: &timing.queries,
-                    beginning_of_pass_write_index: Some(0),
-                    end_of_pass_write_index: Some(1),
-                }),
             ..Default::default()
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
     }
-    if let Some(timing) = timing.as_ref() {
-        encoder.resolve_query_set(&timing.queries, 0..2, &timing.resolve, 0);
-        encoder.copy_buffer_to_buffer(&timing.resolve, 0, &timing.staging, 0, 16);
-    }
     queue.submit([encoder.finish()]);
-    if let Some(timing) = timing {
-        let (sender, receiver) = mpsc::channel();
-        timing
-            .staging
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result.map_err(|error| error.to_string()));
-            });
-        timing.receiver = Some(receiver);
-    }
-}
-
-struct PassTiming {
-    queries: wgpu::QuerySet,
-    resolve: wgpu::Buffer,
-    staging: wgpu::Buffer,
-    sequence: u64,
-    receiver: Option<mpsc::Receiver<Result<(), String>>>,
-}
-struct PassTimings {
-    slots: [Option<PassTiming>; RING_SIZE],
-    errors: Vec<GpuError>,
-}
-impl PassTimings {
-    fn new() -> Self {
-        Self {
-            slots: std::array::from_fn(|_| None),
-            errors: vec![],
-        }
-    }
-    fn reserve(&mut self, device: &wgpu::Device, sequence: u64) -> Option<&mut PassTiming> {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
-            return None;
-        }
-        let slot = self
-            .slots
-            .iter_mut()
-            .find(|slot| slot.as_ref().is_none_or(|s| s.receiver.is_none()))?;
-        let slot = slot.get_or_insert_with(|| PassTiming {
-            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("avatar presentation pass timestamps"),
-                ty: wgpu::QueryType::Timestamp,
-                count: 2,
-            }),
-            resolve: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("avatar presentation timestamp resolve"),
-                size: 16,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            }),
-            staging: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("avatar presentation timestamp staging"),
-                size: 16,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            sequence,
-            receiver: None,
-        });
-        slot.sequence = sequence;
-        Some(slot)
-    }
-    fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<(u64, Duration)> {
-        if self
-            .slots
-            .iter()
-            .all(|slot| slot.as_ref().is_none_or(|s| s.receiver.is_none()))
-        {
-            return vec![];
-        }
-        if let Err(error) = device.poll(wgpu::PollType::Poll) {
-            self.errors.push(GpuError(format!(
-                "presentation timestamp device poll: {error}"
-            )));
-        }
-        let mut samples = Vec::with_capacity(RING_SIZE);
-        for slot in self.slots.iter_mut().flatten() {
-            let Some(receiver) = &slot.receiver else {
-                continue;
-            };
-            match receiver.try_recv() {
-                Err(mpsc::TryRecvError::Empty) => continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.errors.push(GpuError(
-                        "presentation timestamp callback disconnected".into(),
-                    ));
-                }
-                Ok(Err(error)) => self.errors.push(GpuError(error)),
-                Ok(Ok(())) => {
-                    let view = slot.staging.slice(..).get_mapped_range();
-                    let first = u64::from_le_bytes(view[0..8].try_into().unwrap());
-                    let last = u64::from_le_bytes(view[8..16].try_into().unwrap());
-                    if let Some(duration) =
-                        timestamp_duration(first, last, queue.get_timestamp_period())
-                    {
-                        samples.push((slot.sequence, duration));
-                    } else {
-                        self.errors
-                            .push(GpuError("invalid presentation pass timestamp span".into()));
-                    }
-                    drop(view);
-                }
-            }
-            slot.staging.unmap();
-            slot.receiver = None;
-        }
-        samples.sort_unstable_by_key(|(sequence, _)| *sequence);
-        samples
-    }
-}
-fn timestamp_duration(first: u64, last: u64, period: f32) -> Option<Duration> {
-    let ticks = last.checked_sub(first)?;
-    (period.is_finite() && period > 0.0)
-        .then(|| Duration::from_secs_f64(ticks as f64 * f64::from(period) / 1e9))
 }

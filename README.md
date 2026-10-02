@@ -56,7 +56,6 @@ rustupと、そのOSでRustプログラムをリンクするための開発ツ�
 ```sh
 rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src
 cargo fmt --all -- --check
-cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 cargo build --workspace --all-targets --all-features --locked
@@ -77,7 +76,7 @@ justをインストールしている場合は、同じ検査を`just verify`で
 | `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
 | `just test` | ワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
-| `just verify` | 整形確認、型検査、Clippy、テスト、ビルドを順に実行 |
+| `just verify` | 整形確認、Clippy（型検査を含む）、テスト、ビルドを順に実行 |
 | `just run-host` | ホストの骨組みを起動 |
 | `just run-desktop` | Slint会話画面を明示的なデモモードで起動 |
 | `just fetch-assets` | 固定コミットの公式Seed-sanとVRMA全4本をチェックサム付きで取得（`vrm` / `vrma`で種類を選択、個別名で1本を取得） |
