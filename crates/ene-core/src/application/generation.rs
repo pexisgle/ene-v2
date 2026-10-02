@@ -242,14 +242,31 @@ impl Authorization for Authority {
                 .ok_or_else(|| Error::new(ErrorKind::PermissionRequired))?;
             let current = rules::connection(c, &self.connection.id)
                 .ok_or_else(|| Error::new(ErrorKind::PermissionRequired))?;
-            if *run.cancel.borrow()
-                || *self.app.0.shutdown.borrow()
-                || fingerprint(&current, self.app.0.providers.as_ref()) != self.fingerprint
+            if *run.cancel.borrow() || *self.app.0.shutdown.borrow() {
+                return Err(Error::new(ErrorKind::PermissionRequired));
+            }
+            // One policy lookup also verifies the plugin revision. Reuse it for
+            // fingerprint, credential and grant checks in this authorization.
+            let policy = self
+                .app
+                .0
+                .providers
+                .policy(&current)
+                .map_err(|_| Error::new(ErrorKind::PermissionRequired))?;
+            if policy.fingerprint != self.fingerprint
                 || controls.secrets.get(&current.id).map(|s| s.nonce.clone()) != self.nonce
             {
                 return Err(Error::new(ErrorKind::PermissionRequired));
             }
-            permitted_data(&self.app, c, &controls, &current, self.purpose, &self.data)?;
+            if policy.requires_credentials && !controls.secrets.contains_key(&current.id) {
+                return Err(Error {
+                    kind: ErrorKind::Unavailable,
+                    reason: Some("credential_missing"),
+                });
+            }
+            if !rules::allowed(c, &current, self.purpose, &self.data, &policy) {
+                return Err(Error::new(ErrorKind::PermissionRequired));
+            }
             Ok(())
         })
     }

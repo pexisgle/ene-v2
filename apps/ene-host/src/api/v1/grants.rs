@@ -1,5 +1,5 @@
 use crate::api::{
-    error::{ApiError, response, wire},
+    error::{ApiError, response},
     extractors::ApiQuery,
     state::App,
 };
@@ -24,11 +24,14 @@ async fn grants(
     State(app): State<App>,
     ApiQuery(query): ApiQuery<GrantQuery>,
 ) -> Result<Json<Vec<ene_api_types::DataTransferGrant>>, ApiError> {
-    Ok(Json(wire(
+    Ok(Json(
         app.application
             .grants(query.companion_id.as_deref())
-            .await?,
-    )?))
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 #[utoipa::path(post, path = "/", tag = "grants",
@@ -44,12 +47,7 @@ async fn post_grant(
     >,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     Ok(response(
-        ene_core::application::operations::post_grant(
-            app.application,
-            key,
-            crate::api::error::command(input)?,
-        )
-        .await?,
+        ene_core::application::operations::post_grant(app.application, key, input).await?,
     ))
 }
 #[utoipa::path(patch, path = "/{grant_id}", tag = "grants",
@@ -64,14 +62,9 @@ async fn patch_grant(
         ene_api_types::host::GrantPatch,
     >,
 ) -> Result<Json<ene_api_types::GrantResult>, ApiError> {
-    Ok(Json(wire(
-        ene_core::application::operations::patch_grant(
-            app.application,
-            id,
-            crate::api::error::command(input)?,
-        )
-        .await?,
-    )?))
+    Ok(Json(
+        ene_core::application::operations::patch_grant(app.application, id, input).await?,
+    ))
 }
 #[utoipa::path(delete, path = "/{grant_id}", tag = "grants",
     params(("grant_id" = String, Path)),

@@ -1,5 +1,5 @@
 use crate::api::{
-    error::{ApiError, response, wire},
+    error::{ApiError, response},
     extractors::ApiQuery,
     state::App,
 };
@@ -27,11 +27,11 @@ async fn messages(
     crate::api::extractors::ApiPath(c): crate::api::extractors::ApiPath<String>,
     ApiQuery(query): ApiQuery<HistoryQuery>,
 ) -> Result<Json<Page<Message>>, ApiError> {
-    Ok(Json(wire(
+    Ok(Json(
         app.application
             .messages(c, query.cursor, query.limit.unwrap_or(50))
             .await?,
-    )?))
+    ))
 }
 #[utoipa::path(get, path = "/{message_id}", tag = "companions",
     params(("companion_id" = String, Path), ("message_id" = String, Path)),
@@ -41,7 +41,7 @@ async fn message(
     State(app): State<App>,
     crate::api::extractors::ApiPath((c, id)): crate::api::extractors::ApiPath<(String, String)>,
 ) -> Result<Json<Message>, ApiError> {
-    Ok(Json(wire(app.application.message(c, id).await?)?))
+    Ok(Json(app.application.message(c, id).await?))
 }
 
 #[utoipa::path(post, path = "/", tag = "companions",
@@ -61,7 +61,7 @@ async fn post_message(
         app.application,
         id,
         key,
-        crate::api::error::command(input)?,
+        input,
     ))
     .await
     .map_err(|_| ApiError::unavailable())??;

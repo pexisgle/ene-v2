@@ -10,7 +10,7 @@ impl HostApplication {
         id: String,
         value: Option<String>,
         source: Option<String>,
-    ) -> Result<serde_json::Value, Error> {
+    ) -> Result<ene_api_types::CredentialResult, Error> {
         let environment = match source.as_deref() {
             None => false,
             Some("environment") if value.is_none() => true,
@@ -41,7 +41,9 @@ impl HostApplication {
             let mut p =
                 rules::connection(&c, &id).ok_or_else(|| Error::new(ErrorKind::NotFound))?;
             if controls.secrets.get(&id).is_some_and(|s| s.value == value) {
-                return Ok(serde_json::json!({"credential_state":p.credential_state}));
+                return Ok(ene_api_types::CredentialResult {
+                    credential_state: p.credential_state,
+                });
             }
             if active(&controls, &id) {
                 return Err(Error::new(ErrorKind::StateConflict));
@@ -63,7 +65,9 @@ impl HostApplication {
             self.0.credentials.forget(old);
         }
         if environment || self.0.credentials.session_only() {
-            return Ok(serde_json::json!({"credential_state":"session_only"}));
+            return Ok(ene_api_types::CredentialResult {
+                credential_state: "session_only".into(),
+            });
         }
         let saved = self
             .0
@@ -88,7 +92,9 @@ impl HostApplication {
                 return Err(e);
             }
         }
-        Ok(serde_json::json!({"credential_state":if saved{"stored"}else{"session_only"}}))
+        Ok(ene_api_types::CredentialResult {
+            credential_state: if saved { "stored" } else { "session_only" }.into(),
+        })
     }
     pub async fn revoke_credentials(&self, id: String) -> Result<(), Error> {
         let reference = {

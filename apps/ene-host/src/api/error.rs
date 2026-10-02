@@ -111,13 +111,6 @@ impl From<ene_core::domain::Error> for ApiError {
         result
     }
 }
-pub(super) fn wire<T: serde::de::DeserializeOwned>(
-    value: impl serde::Serialize,
-) -> Result<T, ApiError> {
-    serde_json::from_value(serde_json::to_value(value).map_err(|_| ApiError::unavailable())?)
-        .map_err(|_| ApiError::unavailable())
-}
-
 pub(super) fn response(
     (outcome, value): (ene_core::ports::Outcome, serde_json::Value),
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -131,11 +124,4 @@ pub(super) fn response(
         },
         Json(value),
     )
-}
-
-pub(super) fn command<T: serde::de::DeserializeOwned>(
-    input: impl serde::Serialize,
-) -> Result<T, ApiError> {
-    serde_json::from_value(serde_json::to_value(input).map_err(|_| ApiError::invalid())?)
-        .map_err(|_| ApiError::invalid())
 }

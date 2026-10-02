@@ -1,8 +1,4 @@
-use crate::api::{
-    error::{ApiError, wire},
-    extractors::ApiJson,
-    state::App,
-};
+use crate::api::{error::ApiError, extractors::ApiJson, state::App};
 use axum::{Json, extract::State, http::StatusCode};
 use utoipa_axum::{router::OpenApiRouter, routes};
 pub(super) fn router() -> OpenApiRouter<App> {
@@ -18,7 +14,7 @@ async fn register(
     crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
     ApiJson(input): ApiJson<ene_api_types::CredentialInput>,
 ) -> Result<Json<ene_api_types::CredentialResult>, ApiError> {
-    Ok(Json(wire(
+    Ok(Json(
         tokio::spawn(async move {
             app.application
                 .register_credentials(id, input.secret, input.source)
@@ -26,7 +22,7 @@ async fn register(
         })
         .await
         .map_err(|_| ApiError::unavailable())??,
-    )?))
+    ))
 }
 #[utoipa::path(delete, path = "/{connection_id}", tag = "credentials",
     params(("connection_id" = String, Path)),

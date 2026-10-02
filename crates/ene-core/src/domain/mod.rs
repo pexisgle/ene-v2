@@ -78,30 +78,29 @@ pub use crate::ports::Accepted;
 pub use Connection as ProviderConnection;
 pub use MessageAcceptance as Acceptance;
 
-    /// Only non-terminal messages can advance. Applied text remains available on failure/cancel.
-    pub fn transition(
-        message: &mut Message,
-        status: MessageStatus,
-        delta: Option<String>,
-        failure: Option<Failure>,
-    ) -> Result<(), Error> {
-        if matches!(
-            message.status,
-            MessageStatus::Completed | MessageStatus::Failed | MessageStatus::Cancelled
-        ) || matches!(
-            (&message.status, &status),
-            (MessageStatus::Streaming, MessageStatus::Queued)
-        ) {
-            return Err(Error::new(ErrorKind::StateConflict));
-        }
-        message.status = status;
-        if let Some(text) = delta {
-            message.text.push_str(&text);
-        }
-        message.failure = failure;
-        Ok(())
+/// Only non-terminal messages can advance. Applied text remains available on failure/cancel.
+pub fn transition(
+    message: &mut Message,
+    status: MessageStatus,
+    delta: Option<String>,
+    failure: Option<Failure>,
+) -> Result<(), Error> {
+    if matches!(
+        message.status,
+        MessageStatus::Completed | MessageStatus::Failed | MessageStatus::Cancelled
+    ) || matches!(
+        (&message.status, &status),
+        (MessageStatus::Streaming, MessageStatus::Queued)
+    ) {
+        return Err(Error::new(ErrorKind::StateConflict));
     }
-
+    message.status = status;
+    if let Some(text) = delta {
+        message.text.push_str(&text);
+    }
+    message.failure = failure;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -144,7 +143,8 @@ impl From<Grant> for ene_api_types::DataTransferGrant {
             status: match grant.status {
                 GrantStatus::Active => "active",
                 GrantStatus::Invalidated => "invalidated",
-            }.into(),
+            }
+            .into(),
             revision: grant.revision,
             invalidation_reason: grant.invalidation_reason,
             connection_fingerprint: grant.connection_fingerprint,

@@ -1,7 +1,4 @@
-use crate::api::{
-    error::{ApiError, wire},
-    state::App,
-};
+use crate::api::{error::ApiError, state::App};
 use axum::{Json, extract::State};
 use ene_api_types::host::Settings;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -12,7 +9,7 @@ pub(super) fn router() -> OpenApiRouter<App> {
     responses((status = 200, description = "Success", body = ene_api_types::Settings))
 )]
 async fn settings(State(app): State<App>) -> Result<Json<Settings>, ApiError> {
-    Ok(Json(wire(app.application.settings().await?)?))
+    Ok(Json(app.application.settings().await?))
 }
 
 #[utoipa::path(patch, path = "/", tag = "settings",
@@ -25,11 +22,7 @@ async fn patch_settings(
         ene_api_types::host::SettingsPatch,
     >,
 ) -> Result<Json<ene_api_types::Settings>, ApiError> {
-    Ok(Json(wire(
-        ene_core::application::operations::patch_settings(
-            app.application,
-            crate::api::error::command(input)?,
-        )
-        .await?,
-    )?))
+    Ok(Json(
+        ene_core::application::operations::patch_settings(app.application, input).await?,
+    ))
 }

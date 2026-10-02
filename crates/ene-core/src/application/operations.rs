@@ -4,26 +4,17 @@ use crate::{
     domain::{rules, *},
     ports::{Outcome, Receipt},
 };
-use serde::Deserialize;
+pub use ene_api_types::host::{
+    CheckInput, CompanionPatch, ConnectionInput, GrantInput, GrantPatch, MessageInput,
+    SettingsPatch,
+};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use uuid::Uuid;
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConnectionInput {
-    pub id: Option<String>,
-    pub kind: String,
-    pub adapter: String,
-    pub endpoint: String,
-    pub options: Value,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SettingsPatch {
-    pub revision: u64,
-    pub connections: Vec<ConnectionInput>,
-}
-pub async fn patch_settings(app: HostApplication, request: SettingsPatch) -> Result<Value, Error> {
+pub async fn patch_settings(
+    app: HostApplication,
+    request: SettingsPatch,
+) -> Result<Settings, Error> {
     let mut controls = app.0.controls.lock().await;
     let mut c = config(&app, &mut controls).await?;
     if request.revision != c.settings.revision {
@@ -126,22 +117,14 @@ pub async fn patch_settings(app: HostApplication, request: SettingsPatch) -> Res
     for reference in removed_refs {
         app.0.credentials.forget(reference);
     }
-    Ok(json!(c.settings))
+    Ok(c.settings)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompanionPatch {
-    pub revision: u64,
-    pub name: Option<String>,
-    pub mind: Option<String>,
-    pub model_assignments: Option<std::collections::BTreeMap<String, Option<ModelAssignment>>>,
-}
 pub async fn patch_companion(
     app: HostApplication,
     id: String,
     request: CompanionPatch,
-) -> Result<Value, Error> {
+) -> Result<Companion, Error> {
     let mut controls = app.0.controls.lock().await;
     let mut c = config(&app, &mut controls).await?;
     if c.companion.id != id {
@@ -185,19 +168,9 @@ pub async fn patch_companion(
     c.companion.revision += 1;
     refresh(&app, &mut c);
     commit(&app, &mut controls, c.clone()).await?;
-    Ok(json!(c.companion))
+    Ok(c.companion)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrantInput {
-    pub companion_id: String,
-    pub kind: String,
-    pub connection_id: String,
-    pub destinations: Vec<String>,
-    pub data_kinds: Vec<String>,
-    pub purpose: String,
-}
 pub async fn post_grant(
     app: HostApplication,
     key: String,
@@ -295,18 +268,11 @@ pub async fn delete_grant(app: HostApplication, id: String) -> Result<(), Error>
     Ok(())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrantPatch {
-    pub revision: u64,
-    pub destinations: Option<Vec<String>>,
-    pub data_kinds: Option<Vec<String>>,
-}
 pub async fn patch_grant(
     app: HostApplication,
     id: String,
     request: GrantPatch,
-) -> Result<Value, Error> {
+) -> Result<ene_api_types::GrantResult, Error> {
     let mut controls = app.0.controls.lock().await;
     let mut c = config(&app, &mut controls).await?;
     let connection_id = c
@@ -351,18 +317,12 @@ pub async fn patch_grant(
     g.revision += 1;
     let grant = g.clone();
     commit(&app, &mut controls, c).await?;
-    Ok(json!({"grant":grant,"questions":[]}))
+    Ok(ene_api_types::GrantResult {
+        grant: grant.into(),
+        questions: vec![],
+    })
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MessageInput {
-    pub text: String,
-    #[serde(default)]
-    pub resources: Vec<Value>,
-    pub question_id: Option<String>,
-    pub decision: Option<String>,
-}
 pub async fn accept_message(
     app: HostApplication,
     id: String,
@@ -442,13 +402,6 @@ pub async fn accept_message(
         receiver,
     ));
     Ok((Outcome::Accepted, json!(accepted.receipt)))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CheckInput {
-    pub companion_id: String,
-    pub purpose: String,
-    pub model_id: Option<String>,
 }
 pub async fn check(
     app: HostApplication,

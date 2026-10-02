@@ -1,5 +1,5 @@
 use crate::api::{
-    error::{ApiError, response, wire},
+    error::{ApiError, response},
     extractors::{ApiJson, ApiQuery, IdempotencyKey},
     state::App,
 };
@@ -27,7 +27,7 @@ async fn check(
             app.application,
             id,
             key,
-            crate::api::error::command(input)?,
+            input,
         ))
         .await
         .map_err(|_| ApiError::unavailable())??,
@@ -50,5 +50,5 @@ async fn models(
     if let Some(c) = query.companion_id {
         app.application.companion(&c).await?;
     }
-    Ok(Json(wire(app.application.models(id).await?)?))
+    Ok(Json(app.application.models(id).await?))
 }

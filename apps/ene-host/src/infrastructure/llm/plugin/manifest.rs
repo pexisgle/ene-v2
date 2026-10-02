@@ -286,23 +286,7 @@ impl Bundle {
             kind: "plugin".into(),
             endpoint: self.manifest.endpoint.clone(),
             options: self.manifest.options.clone(),
-            settings: self
-                .manifest
-                .settings
-                .iter()
-                .map(|f| Field {
-                    key: f.key.clone(),
-                    label: f.label.clone(),
-                    kind: match f.kind {
-                        SettingKind::Text => FieldKind::Text,
-                        SettingKind::Number => FieldKind::Number,
-                        SettingKind::Boolean => FieldKind::Boolean,
-                        SettingKind::Select => FieldKind::Select,
-                    },
-                    required: f.required,
-                    choices: f.choices.clone(),
-                })
-                .collect(),
+            settings: self.manifest.settings.clone(),
             requires_credentials: !matches!(self.manifest.auth, AuthProfile::None),
             environment_variable: self.manifest.environment_variable.clone(),
             destinations: self.manifest.destinations.clone(),
@@ -310,15 +294,7 @@ impl Bundle {
             error,
             revision: self.revision.clone(),
             capabilities,
-            models: self
-                .manifest
-                .models
-                .iter()
-                .map(|m| Model {
-                    id: m.id.clone(),
-                    name: m.name.clone(),
-                })
-                .collect(),
+            models: self.manifest.models.clone(),
         }
     }
     pub fn policy(&self, c: &Connection) -> Result<Policy> {

@@ -159,7 +159,7 @@ pub struct MessageAcceptance {
     pub message_id: String,
     pub response_message_id: String,
 }
-/// Mutation DTOs are converted to application commands by the host API boundary.
+/// Mutation inputs shared by the API boundary and application operations.
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
