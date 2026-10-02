@@ -50,6 +50,7 @@ component QuitConfirmation inherits Rectangle {
     }
 }
 export component AppWindow inherits Window {
+    callback host-events-available;
     title: "ene";
     preferred-width: 720px;
     preferred-height: 760px;
@@ -111,7 +112,7 @@ export component AppWindow inherits Window {
                 padding-right: 12px;
                 min-height: UiState.control-height;
                 BodyText { text: UiState.host-selection-visible ? "ホスト選択" : "ene"; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
-                StatusBadge { icon: UiState.demo-mode ? Icons.demo : Icons.connection; label: UiState.demo-mode ? "デモ · 外部送信なし・会話は保存しません" : "ホスト未接続"; }
+                StatusBadge { icon: UiState.demo-mode ? Icons.demo : Icons.connection; state: UiState.demo-mode ? 0 : !UiState.host-connected ? 0 : UiState.chat-ready ? 1 : 2; label: UiState.demo-mode ? "デモ · 外部送信なし・会話は保存しません" : UiState.status; }
                 StatusBadge { icon: UiState.avatar-visible ? Icons.avatar : Icons.eye-off; state: UiState.avatar-failed ? 3 : !UiState.avatar-visible ? 0 : UiState.avatar-ready ? 1 : 2; label: UiState.avatar-status; }
                 if UiState.avatar-failed || UiState.motion-failed || !UiState.tray-ready || UiState.apply-error != "" : QuietButton {
                     icon-only: true;

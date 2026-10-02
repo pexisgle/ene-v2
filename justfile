@@ -28,6 +28,10 @@ run-desktop:
     cargo build --release --locked -p ene-avatar
     ENE_AVATAR_BIN="${ENE_AVATAR_BIN:-{{justfile_directory()}}/target/release/ene-avatar}" cargo run --locked -p ene-desktop -- --demo
 
+connect-desktop:
+    cargo build --release --locked -p ene-avatar
+    ENE_AVATAR_BIN="{{justfile_directory()}}/target/release/ene-avatar" cargo run --locked -p ene-desktop
+
 fetch-assets asset="all":
     python3 scripts/fetch-assets.py "{{asset}}"
 

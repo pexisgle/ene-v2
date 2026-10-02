@@ -22,6 +22,10 @@ pub enum Error {
     Stopped,
     #[error("invalid_cursor")]
     InvalidCursor,
+    #[error("idempotency_conflict")]
+    IdempotencyConflict,
+    #[error("state_conflict")]
+    StateConflict,
     #[error("database schema {0} is newer than this host")]
     FutureSchema(usize),
 }
@@ -44,6 +48,14 @@ impl Store {
         };
         store.call(initialize).await?;
         Ok(store)
+    }
+
+    pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        self.call(operation).await
     }
 
     async fn call<T, F>(&self, operation: F) -> Result<T>
@@ -170,6 +182,19 @@ fn initialize(db: &mut Connection) -> Result<()> {
         tx.execute(
             "UPDATE messages SET status='failed',body=?2 WHERE id=?1",
             params![id, serde_json::to_string(&message)?],
+        )?;
+    }
+    let pending: Vec<(String, String, String)> = {
+        let mut q = tx.prepare("SELECT principal,key,response FROM receipts WHERE status=0")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    for (principal, key, body) in pending {
+        let previous: serde_json::Value = serde_json::from_str(&body)?;
+        let result = json!({"request_id":previous["request_id"],"error":{"code":"unavailable","message":"ホストが中断しました","details":{"reason":"host_interrupted"}}});
+        tx.execute(
+            "UPDATE receipts SET status=503,response=?3 WHERE principal=?1 AND key=?2",
+            params![principal, key, result.to_string()],
         )?;
     }
     tx.commit().map_err(Error::from)

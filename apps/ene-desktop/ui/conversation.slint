@@ -2,7 +2,7 @@ import { MessageBubble } from "visual.slint";
 import { Icons } from "icons.slint";
 import { ScrollView, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
-import { ActionButton, BodyText, HintText } from "components.slint";
+import { ActionButton, QuietButton, BodyText, HintText } from "components.slint";
 component MessageInput inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> font-family <=> input.font-family;
@@ -163,6 +163,8 @@ export component ConversationView inherits Rectangle {
         root.following = true;
     }
     VerticalLayout {
+        if UiState.status != "" : HintText { text: UiState.status; }
+        if UiState.has-older : QuietButton { text: "過去の会話を読み込む"; enabled: root.active && UiState.host-connected; clicked => {UiState.load-history();} }
         spacing: 8px;
         history := ScrollView {
             vertical-stretch: 1;
@@ -215,7 +217,7 @@ export component ConversationView inherits Rectangle {
                     text <=> UiState.draft;
                     font-family: UiState.font-family;
                     font-size: UiState.text-size * 1px;
-                    placeholder-text: UiState.demo-mode ? "メッセージを入力…" : "ホスト未接続";
+                    placeholder-text: UiState.demo-mode || (UiState.host-connected && UiState.chat-ready) ? "メッセージを入力…" : UiState.host-connected ? "設定で会話の準備をしてください" : "ホストに接続しています…";
                     active: root.active;
                     min-height: UiState.text-size * 1px + 16px;
                     min-width: 0px;

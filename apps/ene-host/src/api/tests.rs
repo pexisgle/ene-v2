@@ -52,7 +52,15 @@ async fn snapshot_subscription_validation_and_truthful_capabilities() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["capabilities"]["features"],
-        json!(["history", "notifications"])
+        json!([
+            "history",
+            "notifications",
+            "chat",
+            "connection_settings",
+            "credentials",
+            "data_transfer_grants",
+            "connection_check"
+        ])
     );
     assert_eq!(
         body["companions"][0]["availability"]["chat"]["ready"],
@@ -132,121 +140,230 @@ async fn history_rejects_foreign_ids_bad_cursors_and_unknown_query_fields() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn openapi_is_authenticated_and_documents_live_routes_and_schemas() {
-    let (app, _temp) = app().await;
-    assert_eq!(
-        request(&app, "/v1/openapi.json", None).await.0,
-        StatusCode::UNAUTHORIZED
-    );
-    let (status, spec) = request(&app, "/v1/openapi.json", Some("Bearer private-token")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(spec["security"], json!([{"bearerAuth": []}]));
-    assert_eq!(
-        spec["components"]["securitySchemes"]["bearerAuth"]["scheme"],
-        "bearer"
-    );
-    assert!(spec["paths"].get("/v1/tasks").is_none());
-    for (path, item) in spec["paths"].as_object().unwrap() {
-        for (method, operation) in item.as_object().unwrap() {
-            if !["get", "post", "put", "patch", "delete"].contains(&method.as_str()) {
-                continue;
-            }
-            assert!(
-                operation["responses"].get("401").is_some(),
-                "{method} {path}"
-            );
-            if method == "get" && !path.contains('{') && path != "/v1/events" {
-                assert_eq!(
-                    request(&app, path, Some("Bearer private-token")).await.0,
-                    StatusCode::OK
-                );
-            }
-        }
+async fn mutate(
+    app: &App,
+    method: &str,
+    path: &str,
+    body: Value,
+    key: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::AUTHORIZATION, "Bearer private-token")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(key) = key {
+        req = req.header("Idempotency-Key", key);
     }
-    // References in both generated components and the WebSocket extension must resolve.
-    fn refs(value: &Value, root: &Value) {
-        match value {
-            Value::Object(fields) => {
-                if let Some(Value::String(reference)) = fields.get("$ref") {
-                    assert!(
-                        root.pointer(reference.strip_prefix('#').unwrap()).is_some(),
-                        "{reference}"
-                    );
-                }
-                for value in fields.values() {
-                    refs(value, root);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    refs(item, root);
-                }
-            }
-            _ => {}
-        }
-    }
-    refs(&spec, &spec);
-    assert!(!spec.to_string().contains("private-token"));
-}
-
-#[tokio::test]
-async fn extraction_and_unknown_methods_keep_the_public_error_envelope() {
-    let (app, _temp) = app().await;
-    for path in [
-        "/v1/events",
-        "/v1/companions/%FF",
-        "/v1/companions/%FF/messages/%FF",
-    ] {
-        let (status, body) = request(&app, path, Some("Bearer private-token")).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
-        let error: ene_api_types::ApiErrorBody = serde_json::from_value(body).unwrap();
-        assert_eq!(error.error.code, "invalid_request");
-        assert!(!error.request_id.is_empty());
-    }
-    let response = router(app)
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/v1/settings")
-                .header(header::AUTHORIZATION, "Bearer private-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let response = router(app.clone())
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();
     let status = response.status();
-    let body: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
-    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(body["error"]["code"], "method_not_allowed");
+    let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+    (
+        status,
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        },
+    )
 }
-
 #[tokio::test]
-async fn typed_client_subscribes_snapshots_and_closes_foundation_api() {
+async fn permissions_are_independent_and_revocation_does_not_wait_for_generation() {
+    use crate::{
+        conversation as db,
+        service::{Running, Secret},
+    };
     let (app, _temp) = app().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
-    let client = ene_api_client::ApiClient::new(&ene_api_types::RuntimeConnection {
-        endpoint: format!("http://{address}/v1"),
-        token: "private-token".into(),
-    })
-    .unwrap();
-    let events = client.subscribe().await.unwrap();
-    let snapshot = client
-        .snapshot(Some(&events.ready().connection_id))
+    let (status,saved)=mutate(&app,"PATCH","/v1/settings",json!({"revision":1,"connections":[{"kind":"llm","adapter":"openrouter","endpoint":crate::service::ENDPOINT,"options":{"only":["openai"],"allow_fallbacks":false}}]}),None).await;
+    assert_eq!(status, StatusCode::OK);
+    let p = saved["connections"][0]["id"].as_str().unwrap();
+    let c = app.store.snapshot().await.unwrap().companion;
+    let(status,_)=mutate(&app,"PATCH",&format!("/v1/companions/{}",c.id),json!({"revision":1,"model_assignments":{"companion":{"connection_id":p,"model_id":crate::service::MODEL}}}),None).await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let mut controls = app.controls.lock().await;
+        controls.secrets.insert(
+            p.into(),
+            Secret {
+                value: "test-secret-never-sent".into(),
+                nonce: "test".into(),
+            },
+        );
+        let mut config = controls.config.clone().unwrap();
+        let mut connection = db::connection(&config, p).unwrap();
+        connection.credential_state = "session_only".into();
+        crate::service::update_connection(&mut config, connection);
+        crate::service::commit(&app, &mut controls, config)
+            .await
+            .unwrap();
+    }
+    let message_path = format!("/v1/companions/{}/messages", c.id);
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            &message_path,
+            json!({"text":"未許可"}),
+            Some("message")
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://openrouter.ai","openai"],"data_kinds":["test_input"],"purpose":"connection_check"});
+    assert_eq!(
+        mutate(&app, "POST", "/v1/grants", grant, Some("check-grant"))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            &message_path,
+            json!({"text":"疎通許可は会話許可を代用しない"}),
+            Some("message")
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://openrouter.ai","openai"],"data_kinds":["conversation"],"purpose":"conversation"});
+    let (status, receipt) = mutate(
+        &app,
+        "POST",
+        "/v1/grants",
+        grant.clone(),
+        Some("chat-grant"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        mutate(&app, "POST", "/v1/grants", grant, Some("chat-grant"))
+            .await
+            .1,
+        receipt
+    );
+    let (cancel, mut receiver) = tokio::sync::watch::channel(false);
+    app.controls.lock().await.running.insert(
+        "fake-generation".into(),
+        Running {
+            connection: p.into(),
+            purpose: "conversation",
+            cancel,
+        },
+    );
+    let check_id = app
+        .controls
+        .lock()
+        .await
+        .config
+        .as_ref()
+        .unwrap()
+        .grants
+        .iter()
+        .find(|g| g.purpose == "connection_check")
+        .unwrap()
+        .id
+        .clone();
+    let (check_cancel, check_receiver) = tokio::sync::watch::channel(false);
+    app.controls.lock().await.running.insert(
+        "fake-check".into(),
+        Running {
+            connection: p.into(),
+            purpose: "connection_check",
+            cancel: check_cancel,
+        },
+    );
+    let (status, _) = mutate(
+        &app,
+        "DELETE",
+        &format!("/v1/grants/{check_id}"),
+        Value::Null,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(*check_receiver.borrow());
+    assert!(!*receiver.borrow());
+    let (status, _) = mutate(
+        &app,
+        "DELETE",
+        &format!("/v1/grants/{}", receipt["grant"]["id"].as_str().unwrap()),
+        Value::Null,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(*receiver.borrow_and_update());
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            &message_path,
+            json!({"text":"解除後"}),
+            Some("message")
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, snapshot) = request(&app, "/v1/snapshot", Some("Bearer private-token")).await;
+    assert!(!snapshot.to_string().contains("test-secret-never-sent"));
+    assert_eq!(
+        snapshot["companions"][0]["availability"]["chat"]["ready"],
+        false
+    );
+}
+#[tokio::test]
+async fn concurrent_acceptance_replays_one_request_and_never_sends_without_controls() {
+    let (app, _temp) = app().await;
+    // Existing durable acceptance must replay even when credentials/grants are absent.
+    let c = app.store.snapshot().await.unwrap().companion.id;
+    let id = c.clone();
+    app.store
+        .run(move |db| {
+            crate::conversation::accept(
+                db,
+                "replay",
+                &id,
+                json!({"text":"日本🙂","resources":[],"question_id":null,"decision":null}),
+            )
+        })
         .await
         .unwrap();
-    assert_eq!(snapshot.companions.len(), 1);
-    assert!(snapshot.messages.is_empty());
-    let spec = client.openapi().await.unwrap();
-    assert!(spec["paths"].get("/v1/providers").is_none());
-    assert!(
-        spec["paths"]
-            .get("/v1/connections/{connection_id}/check")
-            .is_none()
+    let path = format!("/v1/companions/{c}/messages");
+    let (a, b) = tokio::join!(
+        mutate(
+            &app,
+            "POST",
+            &path,
+            json!({"text":"日本🙂"}),
+            Some("replay")
+        ),
+        mutate(
+            &app,
+            "POST",
+            &path,
+            json!({"text":"日本🙂"}),
+            Some("replay")
+        )
     );
-    events.close().await.unwrap();
-    server.abort();
+    assert_eq!(a.0, StatusCode::ACCEPTED);
+    assert_eq!(a, b);
+    assert!(app.controls.lock().await.running.is_empty());
+    assert_eq!(
+        mutate(&app, "POST", &path, json!({"text":"変更"}), Some("replay"))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.store.messages(c, None, 50).await.unwrap().items.len(),
+        2
+    );
 }

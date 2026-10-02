@@ -2,8 +2,9 @@ mod app;
 mod avatar;
 mod chat;
 mod file_picker;
-mod platform;
+mod host;
 mod settings;
+mod platform;
 mod tray;
 
 use chat::Mode;

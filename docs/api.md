@@ -145,7 +145,7 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 | --- | --- | --- | --- |
 | `GET /settings` | ホスト共通の接続設定の取得 | `revision`、Connection一覧。モデル割当はCompanionに保持 | 共通エラー |
 | `PATCH /settings` | `revision`と変更する接続設定 | 更新した設定 | `revision_conflict`、参照の不整合は`state_conflict`、未対応アダプターは`unsupported_capability` |
-| `PUT /credentials/{connection_id}` | `secret`を登録 | `credential_state` | 不明な接続は`not_found` |
+| `PUT /credentials/{connection_id}` | `secret`を登録。ローカルホストの環境変数を使う場合は代わりに`source: "environment"`（起動中のみ保持） | `credential_state` | 不明な接続は`not_found` |
 | `DELETE /credentials/{connection_id}` | 秘密情報を解除 | `204`。以後の認証付き外部要求も禁止 | 共通エラー |
 | `GET /connections/{connection_id}/models` | `companion_id`を指定し、LLM接続先のモデル一覧を取得 | モデルID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
 | `GET /connections/{connection_id}/voices` | `companion_id`を指定し、音声接続先の声一覧を取得 | 声ID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |

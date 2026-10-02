@@ -54,18 +54,35 @@ impl IntoResponse for ApiError {
     }
 }
 
-impl From<ene_core::domain::Error> for ApiError {
-    fn from(error: ene_core::domain::Error) -> Self {
-        use ene_core::domain::ErrorKind;
-        match error.kind {
-            ErrorKind::NotFound => Self::not_found(),
-            ErrorKind::InvalidRequest => Self::invalid(),
-            ErrorKind::ResyncRequired => Self::new(
-                StatusCode::CONFLICT,
-                "resync_required",
-                "通知購読からやり直してください",
-            ),
-            _ => Self::unavailable(),
+#[derive(Debug)]
+pub struct Error {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub reason: Option<&'static str>,
+}
+impl Error {
+    pub fn new(status: StatusCode, code: &'static str) -> Self {
+        Self {
+            status,
+            code,
+            reason: None,
         }
+    }
+    pub fn invalid() -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "invalid_request")
+    }
+    pub fn from_store(error: crate::infrastructure::sqlite::Error) -> Self {
+        match error {
+            crate::infrastructure::sqlite::Error::IdempotencyConflict => {
+                Self::new(StatusCode::CONFLICT, "idempotency_conflict")
+            }
+            crate::infrastructure::sqlite::Error::StateConflict => Self::new(StatusCode::CONFLICT, "state_conflict"),
+            _ => Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+        }
+    }
+}
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        (self.status,Json(json!({"error":{"code":self.code,"message":match self.code {"permission_required"=>"送信先・データ・用途への許可が必要です","credential_missing"=>"APIキーを登録してください","revision_conflict"=>"設定が更新されています。取得し直してください",_=>"要求を完了できませんでした"},"details":self.reason.map(|reason|json!({"reason":reason})).unwrap_or(json!({}))},"request_id":Uuid::new_v4().to_string()}))).into_response()
     }
 }

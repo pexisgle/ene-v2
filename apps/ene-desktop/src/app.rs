@@ -13,6 +13,7 @@ use std::{
 };
 
 pub struct Application {
+    host: RefCell<Option<crate::host::Controller>>,
     pub settings: RefCell<settings::State>,
     pub messages: Rc<VecModel<ChatEntry>>,
     path: PathBuf,
@@ -31,6 +32,7 @@ impl Application {
         tray: Option<Rc<tray::Ui>>,
     ) -> Rc<Self> {
         let app = Rc::new(Self {
+            host: RefCell::new(None),
             settings: RefCell::new(settings::State::new(initial)),
             messages: Rc::new(VecModel::default()),
             path,
@@ -46,7 +48,7 @@ impl Application {
             if mode == Mode::Demo {
                 "返答は仮応答です。"
             } else {
-                "ホストへの画面接続は準備中です。"
+                "このPCのホストを選んで接続してください。"
             }
             .into(),
         );
@@ -107,13 +109,69 @@ impl Application {
                     ui.invoke_reveal_settings_item(y, height);
                 }
             });
-        let mode = self.mode;
+        let owner = Rc::downgrade(self);
         let weak = ui.as_weak();
-        ui.global::<UiState>().on_draft_edited(move |text| {
-            if let Some(ui) = weak.upgrade() {
-                ui.global::<UiState>().set_can_send(mode.accepts(&text));
+        ui.global::<UiState>().on_draft_edited(move |_| {
+            if let Some(ui) = weak.upgrade()
+                && let Some(app) = owner.upgrade()
+            {
+                app.refresh_send(&ui);
             }
         });
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.on_host_events_available(move || {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                app.drain_host(&ui);
+            }
+        });
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.global::<UiState>().on_start_host(move || {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                app.start_host(&ui);
+            }
+        });
+        macro_rules! host_action {
+            ($on:ident,$command:expr) => {{
+                let owner = Rc::downgrade(self);
+                let view = ui.as_weak();
+                ui.global::<UiState>().$on(move || {
+                    if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                        app.host_request(&ui, ($command)(&ui));
+                    }
+                });
+            }};
+        }
+        host_action!(on_configure_host, |_| crate::host::Command::Configure);
+        host_action!(on_register_credential, |ui: &AppWindow| {
+            let state = ui.global::<UiState>();
+            let secret = state.get_api_key().to_string();
+            state.set_api_key("".into());
+            crate::host::Command::Credential(secret)
+        });
+        host_action!(on_environment_credential, |_| {
+            crate::host::Command::EnvironmentCredential
+        });
+        host_action!(on_revoke_credential, |_| {
+            crate::host::Command::RevokeCredential
+        });
+        host_action!(on_save_permissions, |ui: &AppWindow| {
+            let state = ui.global::<UiState>();
+            crate::host::Command::Permission {
+                conversation: state.get_allow_conversation(),
+                check: state.get_allow_check(),
+            }
+        });
+        host_action!(on_check_connection, |_| crate::host::Command::Check);
+        host_action!(on_save_companion, |ui: &AppWindow| {
+            let state = ui.global::<UiState>();
+            crate::host::Command::Companion {
+                name: state.get_companion_name().into(),
+                mind: state.get_companion_mind().into(),
+            }
+        });
+        host_action!(on_load_history, |_| crate::host::Command::History);
         ui.global::<UiState>().on_discard_and_quit(quit);
         let weak = ui.as_weak();
         ui.global::<UiState>().on_cancel_quit(move || {
@@ -239,6 +297,18 @@ impl Application {
             return;
         }
         let draft = view.get_draft();
+        if self.mode != Mode::Demo {
+            self.refresh_send(ui);
+            if !view.get_can_send() {
+                return;
+            }
+            if let Some(host) = self.host.borrow().as_ref() {
+                view.set_send_pending(true);
+                host.request(crate::host::Command::Send(draft.into()));
+                self.refresh_send(ui);
+            }
+            return;
+        }
         let Some(response) = self.mode.respond(&draft) else {
             return;
         };
@@ -382,6 +452,7 @@ impl Application {
             move || {
                 if let Some(ui) = view.upgrade() {
                     ui.invoke_avatar_events_available();
+                    ui.invoke_host_events_available();
                 }
             },
         );
@@ -542,5 +613,161 @@ pub fn navigate(ui: &AppWindow, page: i32) {
 fn quit() {
     if let Err(error) = slint::quit_event_loop() {
         eprintln!("クライアントを終了できません: {error}");
+    }
+}
+
+impl Application {
+    fn start_host(self: &Rc<Self>, ui: &AppWindow) {
+        if self.mode == Mode::Demo {
+            return;
+        }
+        if self.host.borrow().is_none() {
+            let view = ui.as_weak();
+            *self.host.borrow_mut() = Some(crate::host::Controller::new(move || {
+                let _ = view.upgrade_in_event_loop(|ui| ui.invoke_host_events_available());
+            }));
+        }
+        ui.global::<UiState>().set_session_active(true);
+        navigate(ui, 0);
+    }
+    fn host_request(&self, ui: &AppWindow, command: crate::host::Command) {
+        if let Some(host) = self.host.borrow().as_ref() {
+            ui.global::<UiState>()
+                .set_host_feedback("処理しています…".into());
+            host.request(command);
+        }
+    }
+    fn refresh_send(&self, ui: &AppWindow) {
+        let view = ui.global::<UiState>();
+        let ready = if self.mode == Mode::Demo {
+            true
+        } else {
+            view.get_host_connected() && view.get_chat_ready() && !view.get_send_pending()
+        };
+        view.set_can_send(ready && !view.get_draft().trim().is_empty());
+    }
+    fn drain_host(&self, ui: &AppWindow) {
+        use crate::host::Event;
+        let state = ui.global::<UiState>();
+        let host = self.host.borrow();
+        let Some(host) = host.as_ref() else {
+            return;
+        };
+        for event in host.events.try_iter() {
+            match event {
+                Event::View(snapshot, messages) => {
+                    let Some(c) = snapshot.companions.first() else {
+                        continue;
+                    };
+                    let ready = c.availability["chat"]["ready"] == true;
+                    if state.get_host_connected() && state.get_chat_ready() != ready {
+                        state.set_status(if ready {"対話できます。"}else{"対話の準備が必要です。設定で接続・資格情報・送信許可を確認してください。"}.into());
+                    }
+                    state.set_chat_ready(ready);
+                    state.set_has_older(
+                        snapshot
+                            .message_cursors
+                            .get(&c.id)
+                            .is_some_and(|c| c.is_some()),
+                    );
+                    state.set_connection_summary(
+                        snapshot
+                            .settings
+                            .connections
+                            .iter()
+                            .map(|p| {
+                                format!(
+                                    "OpenRouter · {} · 資格情報: {}",
+                                    crate::host::MODEL,
+                                    match p["credential_state"].as_str() {
+                                        Some("stored") => "保存済み",
+                                        Some("session_only") => "今回の起動中のみ",
+                                        _ => "未登録",
+                                    }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                            .into(),
+                    );
+                    if !state.get_host_dirty() {
+                        state.set_companion_name(c.name.clone().into());
+                        state.set_companion_mind(c.mind.clone().into());
+                        state.set_allow_conversation(
+                            snapshot
+                                .grants
+                                .iter()
+                                .any(|g| g["status"] == "active" && g["purpose"] == "conversation"),
+                        );
+                        state.set_allow_check(snapshot.grants.iter().any(|g| {
+                            g["status"] == "active" && g["purpose"] == "connection_check"
+                        }));
+                    }
+                    let entries = messages
+                        .into_iter()
+                        .map(|m| {
+                            use ene_protocol::host::{MessageStatus, Role};
+                            let author = if m.role == Role::User {
+                                "あなた".into()
+                            } else {
+                                format!(
+                                    "{}{}",
+                                    c.name,
+                                    match m.status {
+                                        MessageStatus::Queued => " · 待機中",
+                                        MessageStatus::Streaming => " · 生成中",
+                                        MessageStatus::Failed => " · 失敗",
+                                        MessageStatus::Cancelled => " · 中断",
+                                        _ => "",
+                                    }
+                                )
+                            };
+                            let mut body = m.text;
+                            if let Some(failure) = m.failure {
+                                body.push_str(&format!("\n{}", failure.message));
+                            }
+                            ChatEntry {
+                                author: author.into(),
+                                body: body.into(),
+                                provisional: false,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    self.messages.set_vec(entries);
+                }
+                Event::Status(text, connected) => {
+                    state.set_host_connected(connected);
+                    state.set_status(if connected && !state.get_chat_ready() {
+                        "接続しました。設定で接続・資格情報・送信許可を確認してください。".into()
+                    } else {
+                        text.into()
+                    });
+                }
+                Event::Accepted(text) => {
+                    state.set_send_pending(false);
+                    if state.get_draft() == text {
+                        state.set_draft("".into());
+                    }
+                    ui.invoke_focus_input();
+                    let weak = ui.as_weak();
+                    slint::Timer::single_shot(Duration::ZERO, move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_scroll_to_latest();
+                        }
+                    });
+                }
+                Event::SendFailed(text) => {
+                    state.set_send_pending(false);
+                    state.set_status(text.into());
+                }
+                Event::Error(text) => state.set_host_feedback(text.into()),
+                Event::Done(text) => {
+                    state.set_host_dirty(false);
+                    state.set_host_feedback(text.into());
+                }
+                Event::Older(page) => state.set_has_older(page.next_cursor.is_some()),
+            }
+        }
+        self.refresh_send(ui);
     }
 }
