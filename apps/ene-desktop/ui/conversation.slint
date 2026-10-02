@@ -164,7 +164,7 @@ export component ConversationView inherits Rectangle {
     }
     VerticalLayout {
         if UiState.status != "" : HintText { text: UiState.status; }
-        if UiState.has-older : QuietButton { text: "過去の会話を読み込む"; enabled: root.active && UiState.host-connected; clicked => {UiState.load-history();} }
+        if UiState.has-older : QuietButton { icon: Icons.history; text: "過去の会話を読み込む"; enabled: root.active && UiState.host-connected; clicked => {UiState.load-history();} }
         spacing: 8px;
         history := ScrollView {
             vertical-stretch: 1;

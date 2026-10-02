@@ -416,20 +416,20 @@ export component SettingsView inherits Rectangle {
                         LineEdit {text <=> UiState.companion-name; enabled: root.active && UiState.host-connected; edited => {UiState.host-dirty=true;} }
                         BodyText {text: "口調・人格";}
                         LineEdit {text <=> UiState.companion-mind; enabled: root.active && UiState.host-connected; edited => {UiState.host-dirty=true;} }
-                        ActionButton {text: "名前と口調を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-companion();} }
+                        ActionButton {icon: Icons.save; text: "名前と口調を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-companion();} }
                         HintText {text: "会話用・作業用モデルは openai/gpt-6-luna です。音声とファイル作業は次の段階で対応します。";}
                     }
                     if UiState.category == 2 : VerticalLayout {
                         spacing: 10px;
                         BodyText {text: UiState.connection-summary == "" ? "OpenRouterは未設定です。" : UiState.connection-summary;}
                         HintText {text: "https://openrouter.ai/api/v1 · OpenAI配信限定 · フォールバックなし";}
-                        ActionButton {text: "OpenRouterとモデルを設定"; enabled: root.active && UiState.host-connected; clicked => {UiState.configure-host();} }
+                        ActionButton {icon: Icons.connection; text: "OpenRouterとモデルを設定"; enabled: root.active && UiState.host-connected; clicked => {UiState.configure-host();} }
                         BodyText {text: "APIキー（この端末には保存しません）";}
                         LineEdit {text <=> UiState.api-key; input-type: password; enabled: root.active && UiState.host-connected; }
-                        ActionButton {text: "APIキーを登録"; enabled: root.active && UiState.host-connected && UiState.api-key != ""; clicked => {UiState.register-credential();} }
-                        QuietButton {text: "ホストのOPENROUTER_API_KEYを使う"; enabled: root.active && UiState.host-connected; clicked => {UiState.environment-credential();} }
-                        QuietButton {text: "資格情報を解除"; enabled: root.active && UiState.host-connected; clicked => {UiState.revoke-credential();} }
-                        ActionButton {text: "疎通確認"; enabled: root.active && UiState.host-connected; clicked => {UiState.check-connection();} }
+                        ActionButton {icon: Icons.key; text: "APIキーを登録"; enabled: root.active && UiState.host-connected && UiState.api-key != ""; clicked => {UiState.register-credential();} }
+                        QuietButton {icon: Icons.key; text: "ホストのOPENROUTER_API_KEYを使う"; enabled: root.active && UiState.host-connected; clicked => {UiState.environment-credential();} }
+                        QuietButton {icon: Icons.reset; text: "資格情報を解除"; enabled: root.active && UiState.host-connected; clicked => {UiState.revoke-credential();} }
+                        ActionButton {icon: Icons.connection; text: "疎通確認"; enabled: root.active && UiState.host-connected; clicked => {UiState.check-connection();} }
                         HintText {text: "接続設定だけでは外部送信しません。権限とデータで送信許可を登録してください。資格情報ストアが使えなければ今回のホスト起動中だけ保持します。";}
                     }
                     if UiState.category == 3 : VerticalLayout {
@@ -437,7 +437,7 @@ export component SettingsView inherits Rectangle {
                         BodyText {text: "送信先: OpenRouterとOpenAI。以下の用途だけを許可します。";}
                         CheckBox {text: "会話本文・履歴・口調を送信する"; checked <=> UiState.allow-conversation; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
                         CheckBox {text: "疎通確認用の固定文を送信する"; checked <=> UiState.allow-check; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
-                        ActionButton {text: "送信許可を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-permissions();} }
+                        ActionButton {icon: Icons.shield; text: "送信許可を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-permissions();} }
                         HintText {text: "チェックを外して保存すると、新しい送信を禁止し、生成中の返答を停止します。送信済みデータを取り消すものではありません。フォルダへのアクセスはまだ許可しません。";}
                     }
                     if UiState.host-feedback != "" : BodyText {text: UiState.host-feedback;}

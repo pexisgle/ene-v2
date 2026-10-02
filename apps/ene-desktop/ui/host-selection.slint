@@ -37,6 +37,7 @@ export component HostSelectionView inherits Rectangle {
                         }
                         HorizontalLayout {
                             local-start := ActionButton {
+                                icon: Icons.connection;
                                 visible: !UiState.demo-mode;
                                 enabled: root.active;
                                 icon-only: true;
