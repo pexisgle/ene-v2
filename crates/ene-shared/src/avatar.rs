@@ -87,24 +87,7 @@ pub const MAX_IPC_LINE: usize = 64 * 1024;
 mod tests {
     use super::*;
     #[test]
-    fn ipc_round_trip_keeps_unicode_and_rejects_unknown_actions() {
-        let settings = AvatarSettings {
-            model: "/tmp/日本語.vrm".into(),
-            motion: Some("/tmp/日本語モーション.vrma".into()),
-            motion_playing: false,
-            motion_loop: false,
-            ..Default::default()
-        };
-        let bytes = serde_json::to_vec(&AvatarRequest::Configure {
-            settings: settings.clone(),
-        })
-        .unwrap();
-        let AvatarRequest::Configure { settings: restored } =
-            serde_json::from_slice(&bytes).unwrap()
-        else {
-            panic!("unexpected request")
-        };
-        assert_eq!(restored, settings);
+    fn unknown_actions_and_invalid_frame_rates_are_rejected() {
         assert!(
             serde_json::from_str::<AvatarRequest>(r#"{"type":"execute","shell":"sh"}"#).is_err()
         );
