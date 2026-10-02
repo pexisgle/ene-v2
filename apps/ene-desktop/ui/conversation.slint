@@ -1,3 +1,4 @@
+import { MessageBubble } from "visual.slint";
 import { Icons } from "icons.slint";
 import { ScrollView, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
@@ -181,38 +182,12 @@ export component ConversationView inherits Rectangle {
                 spacing: 12px;
                 padding: 4px;
                 if UiState.messages.length == 0 : Rectangle {
-                    min-height: intro.min-height;
+                    min-height: 160px;
                     vertical-stretch: 0;
-                    max-height: intro.min-height;
-                    intro := VerticalLayout {
-                        alignment: start;
-                        padding: 16px;
-                        spacing: 8px;
-                        BodyText {
-                            text: "話しかけてください。";
-                            font-weight: 600;
-                        }
-                        HintText {
-                            text: UiState.demo-mode ? "会話はクライアントを終了すると消えます。" : "ホストに接続すると対話できます。";
-                        }
-                    }
+                    Image { source: Icons.avatar; width: 64px; height: 64px; x: (parent.width - self.width) / 2; y: 40px; colorize: Palette.foreground; opacity: 0.35; }
                 }
-                for entry in UiState.messages : Rectangle {
-                    background: entry.provisional ? Palette.alternate-background : Palette.control-background;
-                    border-radius: 12px;
-                    min-height: message.min-height;
-                    vertical-stretch: 0;
-                    message := VerticalLayout {
-                        padding: 12px;
-                        spacing: 8px;
-                        HintText {
-                            text: entry.author;
-                            font-weight: 600;
-                        }
-                        BodyText {
-                            text: entry.body;
-                        }
-                    }
+                for entry in UiState.messages : MessageBubble {
+                    author: entry.author; body: entry.body; provisional: entry.provisional;
                 }
             }
         }
@@ -221,7 +196,7 @@ export component ConversationView inherits Rectangle {
             border-radius: 12px;
             vertical-stretch: 0;
             min-height: compose-layout.min-height;
-            preferred-height: min(max(compose-layout.min-height, root.height / 3), max(compose-layout.min-height, measure.preferred-height + (root.compact ? 82px : 24px)));
+            preferred-height: min(max(compose-layout.min-height, root.height / 3), max(compose-layout.min-height, measure.preferred-height + 24px));
             measure := Text {
                 visible: false;
                 width: max(1px, editor.width - 20px);
@@ -255,12 +230,14 @@ export component ConversationView inherits Rectangle {
                     }
                 }
                 ActionButton {
-                    row: root.compact ? 1 : 0;
-                    col: root.compact ? 0 : 1;
+                    row: 0;
+                    col: 1;
                     vertical-stretch: 0;
                     icon-only: true;
                     icon: Icons.send;
                     text: "送信";
+                    hint: "Enterで送信 · Shift+Enterで改行";
+
                     primary: true;
                     fill-width: false;
                     enabled: root.active && UiState.can-send;
@@ -269,9 +246,6 @@ export component ConversationView inherits Rectangle {
                     }
                 }
             }
-        }
-        HintText {
-            text: "Enterで送信 · Shift+Enterで改行 · 音声機能は準備中";
         }
     }
 }

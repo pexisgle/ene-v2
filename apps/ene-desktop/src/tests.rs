@@ -371,9 +371,12 @@ fn keyboard_focus_reveals_settings_and_resize_preserves_selection() {
     ui.window().set_size(slint::LogicalSize::new(420., 480.));
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
     app::navigate(&ui, 1);
-    for _ in 0..10 {
+    for _ in 0..32 {
         type_text(&ui, Key::Tab);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+        if ui.get_settings_scroll() < -100. {
+            break;
+        }
     }
     assert!(ui.get_settings_scroll() < -100.);
     let position = ui.get_settings_scroll();

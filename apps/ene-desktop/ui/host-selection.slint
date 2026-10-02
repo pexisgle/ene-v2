@@ -1,11 +1,12 @@
+import { StatusBadge } from "visual.slint";
 import { Icons } from "icons.slint";
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
 import { ActionButton, QuietButton, BodyText, HintText, SectionTitle } from "components.slint";
 
 export component HostSelectionView inherits Rectangle {
     in property <bool> active;
-    private property <bool> stacked: root.width < 300px * UiState.scale;
+    private property <bool> stacked: false;
     public function focus-entry() {
         if UiState.demo-mode { demo-start.focus(); }
         else { local-settings.focus(); }
@@ -20,17 +21,33 @@ export component HostSelectionView inherits Rectangle {
                 alignment: start;
                 padding: 4px;
                 spacing: 12px;
-                BodyText { text: "コンパニオンが動くホストを選んで、対話を始めます。"; }
-                SectionTitle { text: "このPCのホスト"; }
-                HintText { text: "ホストへの接続機能は準備中です。"; }
-                demo-start := ActionButton {
-                    visible: UiState.demo-mode;
-                    enabled: root.active && UiState.demo-mode;
-                    fill-width: false;
-                    primary: true;
-                    icon: Icons.chat;
-                    text: UiState.session-active ? "対話を続ける" : "対話を始める";
-                    clicked => { UiState.start-demo(); }
+                Rectangle {
+                    background: Palette.alternate-background;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    min-height: card.min-height;
+                    card := VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+                        HorizontalLayout {
+                            StatusBadge { icon: Icons.desktop; label: "このPCのホスト"; }
+                            SectionTitle { text: "このPC"; vertical-alignment: center; horizontal-stretch: 1; }
+                            if UiState.demo-mode : StatusBadge {icon: Icons.demo; label: "デモ · 外部送信なし・会話は保存しません";}
+                        }
+                        HorizontalLayout {
+                            demo-start := ActionButton {
+                                visible: UiState.demo-mode;
+                                enabled: root.active && UiState.demo-mode;
+                                icon-only: true;
+                                primary: true;
+                                icon: Icons.chat;
+                                text: UiState.session-active ? "対話を続ける" : "対話を始める";
+                                clicked => { UiState.start-demo(); }
+                            }
+                            Rectangle {horizontal-stretch: 1;}
+                        }
+                    }
                 }
             }
         }
@@ -52,10 +69,10 @@ export component HostSelectionView inherits Rectangle {
                 icon-only: true;
                 icon: Icons.exit;
                 text: "クライアント終了";
+                hint: "クライアントのみを終了します。ホストは稼働を続けます。";
                 enabled: root.active;
                 clicked => { UiState.request-quit(); }
             }
         }
-        HintText { text: "クライアントを終了しても、ホストの稼働は継続します。"; }
     }
 }

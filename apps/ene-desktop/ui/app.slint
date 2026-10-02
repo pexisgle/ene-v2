@@ -1,3 +1,4 @@
+import { StatusBadge } from "visual.slint";
 import { Icons } from "icons.slint";
 import { Palette, ScrollView } from "std-widgets.slint";
 import { UiState } from "state.slint";
@@ -107,6 +108,21 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 spacing: 12px;
                 BodyText { text: UiState.host-selection-visible ? "ホスト選択" : "ene"; font-weight: 600; horizontal-stretch: 1; }
+                StatusBadge { icon: UiState.demo-mode ? Icons.demo : Icons.connection; label: UiState.demo-mode ? "デモ · 外部送信なし・会話は保存しません" : "ホスト未接続"; }
+                StatusBadge { icon: UiState.avatar-visible ? Icons.avatar : Icons.eye-off; state: UiState.avatar-failed ? 3 : !UiState.avatar-visible ? 0 : UiState.avatar-ready ? 1 : 2; label: UiState.avatar-status; }
+                if UiState.avatar-failed || UiState.motion-failed || !UiState.tray-ready || UiState.apply-error != "" : QuietButton {
+                    icon-only: true;
+                    icon: Icons.warning;
+                    text: UiState.apply-error != "" ? "保存・操作エラーを確認" : UiState.avatar-failed || UiState.motion-failed ? "キャラクターの状態を確認" : "トレイなし · ホスト選択";
+                    enabled: !UiState.quit-confirmation;
+                    clicked => {
+                        if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" {
+                            UiState.category = 0;
+                            UiState.navigate(1);
+                            if UiState.apply-error != "" { root.focus-error(); }
+                        } else { UiState.show-host-selection(); }
+                    }
+                }
                 if !UiState.host-selection-visible : HorizontalLayout {
                     spacing: 8px;
                     horizontal-stretch: 0;
@@ -125,22 +141,6 @@ export component AppWindow inherits Window {
                         enabled: !UiState.quit-confirmation;
                         clicked => { UiState.navigate(UiState.page == 0 ? 1 : 0); }
                     }
-                }
-            }
-            HintText {
-                text: (UiState.demo-mode && !UiState.host-selection-visible && UiState.page == 0 ? "デモ" : "ホスト未接続") + "  ·  " + (UiState.avatar-failed ? "描画エラー" : !UiState.avatar-ready ? "描画準備中" : !UiState.avatar-visible ? "キャラクター非表示" : "常駐表示中");
-            }
-            if UiState.avatar-failed || UiState.motion-failed || !UiState.tray-ready || UiState.apply-error != "" : QuietButton {
-                leading: true;
-                icon: Icons.settings;
-                text: UiState.apply-error != "" ? "保存・操作エラーを確認" : UiState.avatar-failed || UiState.motion-failed ? "キャラクターの状態を確認" : "トレイなし · ホスト選択";
-                enabled: !UiState.quit-confirmation;
-                clicked => {
-                    if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" {
-                        UiState.category = 0;
-                        UiState.navigate(1);
-                        if UiState.apply-error != "" { root.focus-error(); }
-                    } else { UiState.show-host-selection(); }
                 }
             }
             Rectangle {

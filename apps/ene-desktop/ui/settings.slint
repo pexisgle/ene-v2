@@ -1,4 +1,5 @@
-import { Icons } from "icons.slint";
+import { StatusBadge, ThemePicker, SizeControl } from "visual.slint";
+import { Icons, ToolButton } from "icons.slint";
 import { AboutSlint, ScrollView, ComboBox, SpinBox, LineEdit, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
 import { ActionButton, QuietButton, BodyText, HintText, SectionTitle, SettingField } from "components.slint";
@@ -30,12 +31,7 @@ export component SettingsView inherits Rectangle {
         }
     }
     public function focus-entry() {
-        if root.compact {
-            category-picker.focus();
-        }
-        else {
-            terminal-button.focus();
-        }
+        terminal-button.focus();
     }
     public function focus-error() {
         if UiState.error-field == "size" {
@@ -55,73 +51,37 @@ export component SettingsView inherits Rectangle {
         Rectangle {
             row: 0;
             col: 0;
-            min-width: root.compact ? 0px : 160px * UiState.scale;
-            max-width: root.compact ? 100000px : 160px * UiState.scale;
-            height: root.compact ? max(44px, UiState.text-size * 1.8px) : root.height;
+            min-width: root.compact ? 0px : 52px;
+            max-width: root.compact ? 100000px : 52px;
+            height: root.compact ? 44px : root.height;
             vertical-stretch: root.compact ? 0 : 1;
-            VerticalLayout {
-                visible: !root.compact;
-                spacing: 2px;
+            GridLayout {
+                spacing: 4px;
                 terminal-button := QuietButton {
-                    leading: true;
-                    fill-width: true;
-                    icon: Icons.desktop;
-                    text: "この端末";
-                    enabled: root.active && !root.compact;
-                    checked: UiState.category == 0;
-                    checkable: true;
-                    clicked => {
-                        UiState.category = 0;
-                    }
+                    row: 0; col: 0;
+                    icon-only: true; icon: Icons.desktop; text: "この端末";
+                    enabled: root.active; checked: UiState.category == 0; checkable: true;
+                    clicked => { UiState.category = 0; }
                 }
                 QuietButton {
-                    leading: true;
-                    fill-width: true;
-                    icon: Icons.avatar;
-                    text: "コンパニオン";
-                    enabled: root.active && !root.compact;
-                    checked: UiState.category == 1;
-                    checkable: true;
-                    clicked => {
-                        UiState.category = 1;
-                    }
+                    row: root.compact ? 0 : 1; col: root.compact ? 1 : 0;
+                    icon-only: true; icon: Icons.avatar; text: "コンパニオン";
+                    enabled: root.active; checked: UiState.category == 1; checkable: true;
+                    clicked => { UiState.category = 1; }
                 }
                 QuietButton {
-                    leading: true;
-                    fill-width: true;
-                    icon: Icons.connection;
-                    text: "ホスト・接続";
-                    enabled: root.active && !root.compact;
-                    checked: UiState.category == 2;
-                    checkable: true;
-                    clicked => {
-                        UiState.category = 2;
-                    }
+                    row: root.compact ? 0 : 2; col: root.compact ? 2 : 0;
+                    icon-only: true; icon: Icons.connection; text: "ホスト・接続";
+                    enabled: root.active; checked: UiState.category == 2; checkable: true;
+                    clicked => { UiState.category = 2; }
                 }
                 QuietButton {
-                    leading: true;
-                    fill-width: true;
-                    icon: Icons.shield;
-                    text: "権限とデータ";
-                    enabled: root.active && !root.compact;
-                    checked: UiState.category == 3;
-                    checkable: true;
-                    clicked => {
-                        UiState.category = 3;
-                    }
+                    row: root.compact ? 0 : 3; col: root.compact ? 3 : 0;
+                    icon-only: true; icon: Icons.shield; text: "権限とデータ";
+                    enabled: root.active; checked: UiState.category == 3; checkable: true;
+                    clicked => { UiState.category = 3; }
                 }
-                Rectangle {
-                    vertical-stretch: 1;
-                }
-            }
-            category-picker := ComboBox {
-                visible: root.compact;
-                width: parent.width;
-                min-height: max(44px, UiState.text-size * 1.8px);
-                accessible-label: "設定カテゴリ";
-                enabled: root.active && root.compact;
-                model: ["この端末", "コンパニオン", "ホスト・接続", "権限とデータ"];
-                current-index <=> UiState.category;
+                Rectangle { row: root.compact ? 0 : 4; col: root.compact ? 4 : 0; horizontal-stretch: root.compact ? 1 : 0; vertical-stretch: root.compact ? 0 : 1; }
             }
         }
         Rectangle {
@@ -140,9 +100,6 @@ export component SettingsView inherits Rectangle {
                     VerticalLayout {
                         spacing: 12px;
                         padding: 4px;
-                        HintText {
-                            text: "この端末に保存 · 他の端末には影響しません";
-                        }
                         if UiState.apply-error != "" : BodyText {
                             text: UiState.apply-error;
                             accessible-live-region: polite;
@@ -153,21 +110,12 @@ export component SettingsView inherits Rectangle {
                         SettingField {
                             label: "テーマ";
                             wide: root.form-wide;
-                            ComboBox {
-                                changed has-focus => {
-                                    if self.has-focus {
-                                        UiState.reveal-settings-item(self.absolute-position.y, self.height);
-                                    }
-                                }
-                                enabled: root.editing;
-                                accessible-label: "テーマ";
+                            ThemePicker {
                                 width: parent.control-width;
-                                height: max(44px, UiState.text-size * 1.8px);
-                                model: ["システムに合わせる", "ライト", "ダーク"];
+                                enabled: root.editing;
                                 current-index <=> UiState.settings-draft.theme-index;
-                                selected => {
-                                    UiState.settings-edited();
-                                }
+                                changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+                                edited => { UiState.settings-edited(); }
                             }
                         }
                         font-field := SettingField {
@@ -188,9 +136,6 @@ export component SettingsView inherits Rectangle {
                                     UiState.settings-edited();
                                 }
                             }
-                        }
-                        HintText {
-                            text: "この端末にインストール済みのフォントを指定します。";
                         }
                         SettingField {
                             label: "文字サイズ";
@@ -215,9 +160,6 @@ export component SettingsView inherits Rectangle {
                         }
                         SectionTitle {
                             text: "デスクトップ表示";
-                        }
-                        HintText {
-                            text: "以下の表示・復旧操作はすぐに反映されます。編集中の設定は保存しません。";
                         }
                         HorizontalLayout {
                             spacing: 8px;
@@ -253,35 +195,24 @@ export component SettingsView inherits Rectangle {
                             }
                             Rectangle { horizontal-stretch: 1; }
                         }
-                        BodyText {
-                            text: UiState.avatar-status;
-                        }
-                        HintText {
-                            text: "ドラッグで位置を変更できます。画面外へ移動した場合は中央へ戻してください。";
-                        }
+                        if UiState.avatar-failed : BodyText { text: UiState.avatar-status; }
                         size-field := SettingField {
-                            label: "大きさ（%）";
+                            label: "大きさ";
                             wide: root.form-wide;
-                            size-edit := LineEdit {
+                            size-edit := SizeControl {
                                 changed has-focus => {
                                     if self.has-focus {
                                         UiState.reveal-settings-item(self.absolute-position.y, self.height);
                                     }
                                 }
                                 enabled: root.editing;
-                                accessible-label: "キャラクターの大きさ";
                                 width: parent.control-width;
                                 height: max(44px, UiState.text-size * 1.8px);
                                 text <=> UiState.settings-draft.size-text;
-                                input-type: number;
-                                placeholder-text: "50〜200";
                                 edited => {
                                     UiState.settings-edited();
                                 }
                             }
-                        }
-                        HintText {
-                            text: "50〜200%。100%で画面の高さの約40%になります。保存すると反映されます。";
                         }
                         SettingField {
                             label: "描画速度";
@@ -306,9 +237,6 @@ export component SettingsView inherits Rectangle {
                         SectionTitle {
                             text: "ローカル素材・モーション";
                         }
-                        HintText {
-                            text: "この端末で読み込むファイルです。コンパニオンの共有設定には登録されません。";
-                        }
                         SettingField {
                             label: "VRMファイル";
                             wide: root.form-wide;
@@ -320,30 +248,24 @@ export component SettingsView inherits Rectangle {
                                 }
                                 enabled: root.editing;
                                 accessible-label: "VRMファイル";
-                                width: parent.control-width;
+                                width: max(0px, parent.control-width - 52px);
                                 height: max(44px, UiState.text-size * 1.8px);
                                 text <=> UiState.settings-draft.model;
                                 edited => {
                                     UiState.settings-edited();
                                 }
                             }
-                        }
-                        BodyText {
-                            text: UiState.settings-draft.model;
-                        }
-                        HorizontalLayout {
-                            QuietButton {
-                                icon-only: true;
-                                scroll-to-focus: true;
+                            ToolButton {
+                                x: parent.control-width - self.width;
+                                y: (parent.height - self.height) / 2;
                                 icon: Icons.folder;
-                                text: "VRMを選ぶ";
+                                label: "VRMを選ぶ";
                                 enabled: root.editing && !UiState.picker-active;
-                                clicked => {
-                                    UiState.select-model();
-                                }
+                                changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+                                clicked => { UiState.select-model(); }
                             }
-                            Rectangle { horizontal-stretch: 1; }
                         }
+
                         SettingField {
                             label: "VRMAファイル";
                             wide: root.form-wide;
@@ -355,29 +277,26 @@ export component SettingsView inherits Rectangle {
                                 }
                                 enabled: root.editing;
                                 accessible-label: "VRMAファイル";
-                                width: parent.control-width;
+                                width: max(0px, parent.control-width - 52px);
                                 height: max(44px, UiState.text-size * 1.8px);
                                 text <=> UiState.settings-draft.motion;
                                 edited => {
                                     UiState.settings-edited();
                                 }
                             }
-                        }
-                        BodyText {
-                            text: UiState.settings-draft.motion == "" ? "未選択 · 静止姿勢" : UiState.settings-draft.motion;
+                            ToolButton {
+                                x: parent.control-width - self.width;
+                                y: (parent.height - self.height) / 2;
+                                icon: Icons.folder;
+                                label: "VRMAを選ぶ";
+                                enabled: root.editing && !UiState.picker-active;
+                                changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+                                clicked => { UiState.select-motion(); }
+                            }
                         }
                         HorizontalLayout {
                             spacing: 8px;
-                            QuietButton {
-                                icon-only: true;
-                                scroll-to-focus: true;
-                                icon: Icons.folder;
-                                text: "VRMAを選ぶ";
-                                enabled: root.editing && !UiState.picker-active;
-                                clicked => {
-                                    UiState.select-motion();
-                                }
-                            }
+
                             QuietButton {
                                 icon-only: true;
                                 scroll-to-focus: true;
@@ -417,17 +336,13 @@ export component SettingsView inherits Rectangle {
                             }
                             Rectangle { horizontal-stretch: 1; }
                         }
-                        BodyText {
-                            text: UiState.motion-status;
-                        }
+                        if UiState.motion-failed : BodyText { text: UiState.motion-status; }
                         SectionTitle {
                             text: "アプリ情報";
                         }
-                        HintText {
-                            text: UiState.tray-status;
-                        }
-                        HintText {
-                            text: "接続先の変更とクライアント終了は、ホスト選択画面から行えます。";
+                        HorizontalLayout {
+                            StatusBadge { icon: Icons.tray; state: UiState.tray-ready ? 1 : 3; label: UiState.tray-status; }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                         AboutSlint {
                             vertical-stretch: 0;
@@ -447,13 +362,10 @@ export component SettingsView inherits Rectangle {
                     }
                     Rectangle { horizontal-stretch: 1; }
                 }
-                if UiState.save-status != "" : HintText {
-                    text: UiState.save-status;
-                    accessible-live-region: polite;
-                }
                 HorizontalLayout {
                     spacing: 8px;
                     vertical-stretch: 0;
+                    StatusBadge { icon: Icons.save; state: UiState.settings-dirty ? 2 : 1; label: UiState.settings-dirty ? "未保存の変更" : UiState.save-status == "" ? "保存済み" : UiState.save-status; accessible-live-region: polite; }
                     Rectangle { horizontal-stretch: 1; }
                     QuietButton {
                         icon-only: true;
@@ -482,14 +394,10 @@ export component SettingsView inherits Rectangle {
                     SectionTitle {
                         text: UiState.category == 1 ? "コンパニオン" : UiState.category == 2 ? "ホスト・接続" : "権限とデータ";
                     }
-                    BodyText {
-                        text: "ホスト未接続 · 設定機能は準備中です。";
-                    }
-                    BodyText {
-                        text: UiState.category == 1 ? "名前、姿・声・性格、会話用・作業用AIをコンパニオンごとに管理します。変更は接続先ホストに保存されます。" : UiState.category == 2 ? "ホストが利用するAI・音声サービスを管理します。接続先はホスト選択画面から選び、サービスの資格情報はホスト側に保持します。" : "コンパニオンに許可する送信先・用途、作業フォルダ、操作範囲を管理します。許可する対象と実行環境を区別します。";
-                    }
-                    HintText {
-                        text: "この端末の表示設定は、ホストに接続していなくても変更できます。";
+                    HorizontalLayout {
+                        StatusBadge { icon: Icons.connection; label: "ホスト未接続"; }
+                        QuietButton { icon-only: true; icon: Icons.desktop; text: "ホスト選択"; enabled: root.active; clicked => { UiState.show-host-selection(); } }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                 }
             }

@@ -4,6 +4,7 @@ import { Icon } from "icons.slint";
 // Native focus and keyboard behavior, with a label that wraps at large sizes.
 export component ActionButton inherits Rectangle {
     in property <string> text;
+    in property <string> hint: root.text;
     in property <image> icon;
     in property <bool> icon-only;
     private property <bool> has-icon: root.icon.width > 0;
@@ -68,11 +69,12 @@ export component ActionButton inherits Rectangle {
             accessible-role: none;
         }
     }
-    if root.icon-only : Tooltip { text: @markdown("\{root.text}"); }
+    if root.icon-only : Tooltip { text: @markdown("\{root.hint}"); }
 }
 // Secondary navigation keeps a full hit area without a prominent button face.
 export component QuietButton inherits Rectangle {
     in property <string> text;
+    in property <string> hint: root.text;
     in property <image> icon;
     in property <bool> icon-only;
     private property <bool> has-icon: root.icon.width > 0;
@@ -142,7 +144,7 @@ export component QuietButton inherits Rectangle {
             return reject;
         }
     }
-    if root.icon-only : Tooltip { text: @markdown("\{root.text}"); }
+    if root.icon-only : Tooltip { text: @markdown("\{root.hint}"); }
 }
 export component BodyText inherits Text {
     wrap: word-wrap;
