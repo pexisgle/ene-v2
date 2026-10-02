@@ -15,7 +15,7 @@ use std::{
 
 pub struct Application {
     host: RefCell<Option<crate::host::Controller>>,
-    providers: RefCell<Vec<ene_protocol::provider::ProviderInfo>>,
+    providers: RefCell<Vec<ene_api_types::provider::ProviderInfo>>,
     pub settings: RefCell<settings::State>,
     pub messages: Rc<VecModel<ChatEntry>>,
     path: PathBuf,
@@ -743,7 +743,7 @@ impl Application {
                     p.settings
                         .iter()
                         .map(|f| {
-                            use ene_protocol::provider::SettingKind;
+                            use ene_api_types::provider::SettingKind;
                             let value = p.options.get(&f.key);
                             ProviderField {
                                 key: f.key.clone().into(),
@@ -839,14 +839,14 @@ impl Application {
                             .settings
                             .connections
                             .iter()
-                            .find(|p| p["id"] == a["connection_id"])
+                            .find(|p| p.id == a.connection_id)
                     });
                     state.set_connection_matches_provider(selected.is_some_and(|p| {
-                        p["adapter"] == state.get_provider_id().as_str()
-                            && p["endpoint"] == state.get_provider_endpoint().as_str()
+                        p.adapter == state.get_provider_id().as_str()
+                            && p.endpoint == state.get_provider_endpoint().as_str()
                     }));
                     state.set_credential_state(
-                        match selected.and_then(|p| p["credential_state"].as_str()) {
+                        match selected.map(|p| p.credential_state.as_str()) {
                             Some("stored") => 1,
                             Some("session_only") => 2,
                             _ => 0,
@@ -855,27 +855,25 @@ impl Application {
                     if !state.get_host_dirty()
                         && let Some(p) = selected
                     {
-                        state.set_provider_id(p["adapter"].as_str().unwrap_or_default().into());
+                        state.set_provider_id(p.adapter.clone().into());
                         if let Some(index) = self
                             .providers
                             .borrow()
                             .iter()
-                            .position(|d| d.id == p["adapter"])
+                            .position(|d| d.id == p.adapter)
                         {
                             self.project_provider(ui, index as i32, false);
                         }
-                        state.set_provider_endpoint(
-                            p["endpoint"].as_str().unwrap_or_default().into(),
-                        );
+                        state.set_provider_endpoint(p.endpoint.clone().into());
                         state.set_model_id(
                             assignment
-                                .and_then(|a| a["model_id"].as_str())
+                                .map(|a| a.model_id.as_str())
                                 .unwrap_or_default()
                                 .into(),
                         );
                         let fields = state.get_provider_fields();
                         for (row, mut f) in fields.iter().enumerate() {
-                            if let Some(v) = p["options"].get(f.key.as_str()) {
+                            if let Some(v) = p.options.get(f.key.as_str()) {
                                 f.value = v
                                     .as_str()
                                     .map(str::to_owned)
@@ -893,22 +891,25 @@ impl Application {
                             snapshot
                                 .grants
                                 .iter()
-                                .any(|g| g["status"] == "active" && g["purpose"] == "conversation"),
+                                .any(|g| g.status == "active" && g.purpose == "conversation"),
                         );
-                        state.set_allow_check(snapshot.grants.iter().any(|g| {
-                            g["status"] == "active" && g["purpose"] == "connection_check"
-                        }));
+                        state.set_allow_check(
+                            snapshot
+                                .grants
+                                .iter()
+                                .any(|g| g.status == "active" && g.purpose == "connection_check"),
+                        );
                     }
                     if !state.get_host_dirty() {
                         state.set_connection_matches_provider(selected.is_some_and(|p| {
-                            p["adapter"] == state.get_provider_id().as_str()
-                                && p["endpoint"] == state.get_provider_endpoint().as_str()
+                            p.adapter == state.get_provider_id().as_str()
+                                && p.endpoint == state.get_provider_endpoint().as_str()
                         }));
                     }
                     let entries = messages
                         .into_iter()
                         .map(|m| {
-                            use ene_protocol::host::{MessageStatus, Role};
+                            use ene_api_types::host::{MessageStatus, Role};
                             let author = if m.role == Role::User {
                                 "あなた".to_owned()
                             } else {

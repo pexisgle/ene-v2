@@ -8,7 +8,7 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 
 ## 実装の責務
 
-`ene-protocol`はホストAPI・アバターIPC・プロバイダープラグインの通信契約と通知の同期規則を持ち、パス解決は持ちません。`ene-core`は型付き設定・モデル割当・許可、状態遷移とapplicationの処理手順、操作単位の保存・LLM・資格情報portを持ちます。Axum、SQLite、Rig、keyring、XDG、子プロセスの実装には依存しません。通信DTOと内部モデルの変換・HTTPエラーへの変換はホストの`api/`が担当します。
+`ene-api-types`はホストAPIのDTO・OpenAPIスキーマ・通知同期規則、`ene-api-client`は型付きHTTP操作と通知WebSocket、`ene-protocol`はアバターIPC・プロバイダープラグインの通信契約を持ちます。パス解決は各アプリが担当します。`ene-core`は型付き設定・モデル割当・許可、状態遷移とapplicationの処理手順、操作単位の保存・LLM・資格情報portを持ちます。Axum、SQLite、Rig、keyring、XDG、子プロセスの実装には依存しません。通信DTOと内部モデルの変換・HTTPエラーへの変換はホストの`api/`が担当します。
 
 ホストの`bootstrap.rs`でportの実装を組み立て、`infrastructure/`にSQLite・資格情報・実行領域・プロバイダー接続を配置します。APIはリソース別Routerを`nest`で組み立て、application経由で操作します。DB確定後の通知とスナップショットの境界、冪等受付と保存のトランザクション、許可解除と生成開始の競合制御は分離後も維持します。デスクトップは端末設定とXDGパス解決、HTTP、通知・再接続、設定操作、描画プロセスの監督を担当し、アバターは読込・描画・Wayland操作に限定します。
 

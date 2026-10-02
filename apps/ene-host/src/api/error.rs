@@ -41,7 +41,21 @@ impl ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status,Json(json!({"error":{"code":self.code,"message":self.message,"details":self.reason.map(|r|json!({"reason":r})).unwrap_or(json!({}))},"request_id":Uuid::new_v4().to_string()}))).into_response()
+        (
+            self.status,
+            Json(ene_api_types::ApiErrorBody {
+                error: ene_api_types::Failure {
+                    code: self.code.into(),
+                    message: self.message.into(),
+                    details: self
+                        .reason
+                        .map(|r| json!({"reason": r}))
+                        .unwrap_or(json!({})),
+                },
+                request_id: Uuid::new_v4().to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 

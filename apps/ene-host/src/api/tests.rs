@@ -505,3 +505,230 @@ impl ene_core::ports::llm::ProviderRegistry for TestRegistry {
         self.0.enable(id, enabled)
     }
 }
+
+#[tokio::test]
+async fn openapi_is_authenticated_and_documents_live_routes_and_schemas() {
+    let (app, _temp, _trace) = app().await;
+    assert_eq!(
+        request(&app, "/v1/openapi.json", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, spec) = request(&app, "/v1/openapi.json", Some("Bearer private-token")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        spec,
+        serde_json::to_value(super::openapi::specification()).unwrap()
+    );
+    assert_eq!(spec["openapi"], "3.1.0");
+    assert_eq!(spec["security"], json!([{"bearerAuth": []}]));
+    assert_eq!(
+        spec["components"]["securitySchemes"]["bearerAuth"]["scheme"],
+        "bearer"
+    );
+    assert!(spec["paths"].get("/v1/tasks").is_none());
+    assert!(
+        spec["x-ene-events"]["synchronization"]
+            .as_str()
+            .unwrap()
+            .contains("Unicode scalars")
+    );
+    for (path, item) in spec["paths"].as_object().unwrap() {
+        assert!(!path.ends_with('/'), "{path}");
+        for (method, operation) in item.as_object().unwrap() {
+            if !["get", "post", "put", "patch", "delete"].contains(&method.as_str()) {
+                continue;
+            }
+            assert!(
+                operation["responses"].get("401").is_some(),
+                "{method} {path}"
+            );
+            if method == "get" && !path.contains('{') && path != "/v1/events" {
+                assert_eq!(
+                    request(&app, path, Some("Bearer private-token")).await.0,
+                    StatusCode::OK
+                );
+            }
+        }
+    }
+    // References in both generated components and the WebSocket extension must resolve.
+    fn refs(value: &Value, root: &Value) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(Value::String(reference)) = fields.get("$ref") {
+                    assert!(
+                        root.pointer(reference.strip_prefix('#').unwrap()).is_some(),
+                        "{reference}"
+                    );
+                }
+                for value in fields.values() {
+                    refs(value, root);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    refs(item, root);
+                }
+            }
+            _ => {}
+        }
+    }
+    refs(&spec, &spec);
+    assert!(!spec.to_string().contains("private-token"));
+}
+
+#[tokio::test]
+async fn extraction_and_unknown_methods_keep_the_public_error_envelope() {
+    let (app, _temp, _trace) = app().await;
+    for path in [
+        "/v1/events",
+        "/v1/companions/%FF",
+        "/v1/companions/%FF/messages/%FF",
+    ] {
+        let (status, body) = request(&app, path, Some("Bearer private-token")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        let error: ene_api_types::ApiErrorBody = serde_json::from_value(body).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+        assert!(!error.request_id.is_empty());
+    }
+    let (status, body) = mutate(&app, "DELETE", "/v1/settings", Value::Null, None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body["error"]["code"], "method_not_allowed");
+}
+
+#[tokio::test]
+async fn typed_client_interoperates_with_actual_host_and_preserves_grants_replay_and_close() {
+    use ene_api_client::{ApiClient, Error, IdempotencyKey};
+    use ene_api_types::*;
+    let (app, _temp, _trace) = app().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let host = app.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, router(host)).await.unwrap() });
+    let client = ApiClient::new(&RuntimeConnection {
+        endpoint: format!("http://{address}/v1"),
+        token: "private-token".into(),
+    })
+    .unwrap();
+    let events = client.subscribe().await.unwrap();
+    let subscription = events.ready().connection_id.clone();
+    let snapshot = client.snapshot(Some(&subscription)).await.unwrap();
+    let c = &snapshot.companions[0].id;
+    let provider = client.providers().await.unwrap().remove(0);
+    let settings = client
+        .patch_settings(&SettingsPatch {
+            revision: 1,
+            connections: vec![ConnectionInput {
+                id: None,
+                kind: "llm".into(),
+                adapter: provider.id,
+                endpoint: provider.endpoint,
+                options: provider.options,
+            }],
+        })
+        .await
+        .unwrap();
+    let p = &settings.connections[0].id;
+    let credentials = client
+        .register_credentials(
+            p,
+            &CredentialInput {
+                secret: Some("never-exposed".into()),
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(credentials.credential_state, "session_only");
+    let grant = GrantInput {
+        companion_id: c.clone(),
+        kind: "data_transfer".into(),
+        connection_id: p.clone(),
+        destinations: provider.destinations,
+        data_kinds: vec!["conversation".into()],
+        purpose: "conversation".into(),
+    };
+    let key = IdempotencyKey::new("typed-grant").unwrap();
+    let a = client.create_grant(&grant, &key).await.unwrap();
+    let b = client.create_grant(&grant, &key).await.unwrap();
+    assert_eq!(a.grant, b.grant);
+    assert!(a.questions.is_empty());
+    let patched = client
+        .patch_grant(
+            &a.grant.id,
+            &GrantPatch {
+                revision: a.grant.revision,
+                destinations: None,
+                data_kinds: Some(vec!["conversation".into()]),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(patched.grant.revision, a.grant.revision + 1);
+    client
+        .patch_companion(
+            c,
+            &CompanionPatch {
+                revision: snapshot.companions[0].revision,
+                name: None,
+                mind: None,
+                model_assignments: Some(
+                    [(
+                        "companion".into(),
+                        Some(ModelAssignment {
+                            connection_id: p.clone(),
+                            model_id: "openai/gpt-6-luna".into(),
+                        }),
+                    )]
+                    .into(),
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    let input = MessageInput {
+        text: "日本🙂".into(),
+        resources: vec![],
+        question_id: None,
+        decision: None,
+    };
+    let key = IdempotencyKey::new("typed-message").unwrap();
+    let accepted = client.send_message(c, &input, &key).await.unwrap();
+    let replay = client.send_message(c, &input, &key).await.unwrap();
+    assert_eq!(accepted.message_id, replay.message_id);
+    assert_eq!(accepted.response_message_id, replay.response_message_id);
+    assert_eq!(
+        client.message(c, &accepted.message_id).await.unwrap().text,
+        "日本🙂"
+    );
+    assert_eq!(client.messages(c, None, None).await.unwrap().items.len(), 2);
+    let err = client
+        .patch_settings(&SettingsPatch {
+            revision: 1,
+            connections: vec![],
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Api(ref failure) if failure.status == 409 && failure.body.error.code == "revision_conflict" && !failure.body.request_id.is_empty())
+    );
+    client.revoke_grant(&a.grant.id).await.unwrap();
+    client.revoke_credentials(p).await.unwrap();
+    assert!(
+        !serde_json::to_string(&client.snapshot(None).await.unwrap())
+            .unwrap()
+            .contains("never-exposed")
+    );
+    events.close().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if client.snapshot(Some(&subscription)).await.is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    server.abort();
+    app.application.stop().await;
+}

@@ -1,10 +1,11 @@
 use super::*;
+use ene_api_types::host::*;
 pub(super) enum ActionResult {
     Done(String, bool),
     History(Page<Message>),
-    Models(Vec<ene_protocol::provider::Model>),
+    Models(Vec<ene_api_types::provider::Model>),
 }
-fn connection(snapshot: &Snapshot) -> Result<&Value, Error> {
+fn connection(snapshot: &Snapshot) -> Result<&Connection, Error> {
     snapshot
         .settings
         .connections
@@ -14,7 +15,7 @@ fn connection(snapshot: &Snapshot) -> Result<&Value, Error> {
                 .companions
                 .first()
                 .and_then(|c| c.model_assignments.companion.as_ref())
-                .is_some_and(|a| a["connection_id"] == p["id"])
+                .is_some_and(|a| a.connection_id == p.id)
         })
         .or_else(|| snapshot.settings.connections.first())
         .ok_or_else(|| Error::Api("先に接続とモデルを設定してください".into()))
@@ -41,9 +42,7 @@ pub(super) async fn action(
             model,
             options,
         } => {
-            let descriptors: Vec<ene_protocol::provider::ProviderInfo> =
-                serde_json::from_value(http.request(Method::GET, "/providers", None, None).await?)
-                    .map_err(|_| Error::Transport)?;
+            let descriptors = http.providers().await?;
             let descriptor = descriptors
                 .iter()
                 .find(|p| p.id == provider && p.state == "ready")
@@ -51,72 +50,82 @@ pub(super) async fn action(
             let mut merged = descriptor.options.as_object().cloned().unwrap_or_default();
             merged.extend(options.as_object().cloned().ok_or(Error::Transport)?);
             let options = Value::Object(merged);
-            let p = snapshot
+            let mut connections: Vec<_> = snapshot
                 .settings
                 .connections
                 .iter()
-                .find(|p| p["adapter"] == provider);
-            let mut connections = snapshot.settings.connections.clone();
-            if p.is_none() {
-                connections.push(
-                    json!({"kind":"llm","adapter":provider,"endpoint":endpoint,"options":options}),
-                );
-            } else if let Some(p) = connections.iter_mut().find(|p| p["adapter"] == provider) {
-                p["endpoint"] = json!(endpoint);
-                p["options"] = options;
+                .map(|p| ConnectionInput {
+                    id: Some(p.id.clone()),
+                    kind: p.kind.clone(),
+                    adapter: p.adapter.clone(),
+                    endpoint: p.endpoint.clone(),
+                    options: p.options.clone(),
+                })
+                .collect();
+            if let Some(p) = connections.iter_mut().find(|p| p.adapter == provider) {
+                p.endpoint = endpoint;
+                p.options = options;
+            } else {
+                connections.push(ConnectionInput {
+                    id: None,
+                    kind: "llm".into(),
+                    adapter: provider.clone(),
+                    endpoint,
+                    options,
+                });
             }
-            // Strip server-managed fields when replacing the list.
-            let connections:Vec<_>=connections.into_iter().map(|p|json!({"id":p["id"],"kind":p["kind"],"adapter":p["adapter"],"endpoint":p["endpoint"],"options":p["options"]})).collect();
             let saved = http
-                .request(
-                    Method::PATCH,
-                    "/settings",
-                    Some(json!({"revision":snapshot.settings.revision,"connections":connections})),
-                    None,
-                )
+                .patch_settings(&SettingsPatch {
+                    revision: snapshot.settings.revision,
+                    connections,
+                })
                 .await?;
-            let p = saved["connections"]
-                .as_array()
-                .and_then(|a| a.iter().find(|p| p["adapter"] == provider))
+            let p = saved
+                .connections
+                .iter()
+                .find(|p| p.adapter == provider)
                 .ok_or(Error::Transport)?;
-            http.request(Method::PATCH,&format!("/companions/{}",c.id),Some(json!({"revision":c.revision,"model_assignments":{"companion":{"connection_id":p["id"],"model_id":model},"task":{"connection_id":p["id"],"model_id":model}}})),None).await?;
-        }
-        Command::ReloadProviders => {
-            http.request(Method::POST, "/providers/reload", None, None)
-                .await?;
-        }
-        Command::EnableProvider { provider, enabled } => {
-            http.request(
-                Method::PUT,
-                &format!("/providers/{provider}/enabled"),
-                Some(json!({"enabled":enabled})),
-                None,
+            let assignment = Some(ModelAssignment {
+                connection_id: p.id.clone(),
+                model_id: model,
+            });
+            http.patch_companion(
+                &c.id,
+                &CompanionPatch {
+                    revision: c.revision,
+                    name: None,
+                    mind: None,
+                    model_assignments: Some(
+                        [
+                            ("companion".into(), assignment.clone()),
+                            ("task".into(), assignment),
+                        ]
+                        .into(),
+                    ),
+                },
             )
             .await?;
         }
+        Command::ReloadProviders => {
+            http.reload_providers().await?;
+        }
+        Command::EnableProvider { provider, enabled } => {
+            http.enable_provider(&provider, enabled).await?;
+        }
         Command::Models => {
-            let pid = connection(&snapshot)?["id"]
-                .as_str()
-                .ok_or(Error::Transport)?;
             return Ok(ActionResult::Models(
-                serde_json::from_value(
-                    http.request(
-                        Method::GET,
-                        &format!("/connections/{pid}/models"),
-                        None,
-                        None,
-                    )
-                    .await?,
-                )
-                .map_err(|_| Error::Transport)?,
+                http.models(&connection(&snapshot)?.id, None).await?,
             ));
         }
         Command::Companion { name, mind } => {
-            http.request(
-                Method::PATCH,
-                &format!("/companions/{}", c.id),
-                Some(json!({"revision":c.revision,"name":name,"mind":mind})),
-                None,
+            http.patch_companion(
+                &c.id,
+                &CompanionPatch {
+                    revision: c.revision,
+                    name: Some(name),
+                    mind: Some(mind),
+                    model_assignments: None,
+                },
             )
             .await?;
         }
@@ -125,13 +134,10 @@ pub(super) async fn action(
             check,
         } => {
             let p = connection(&snapshot)?;
-            let pid = p["id"].as_str().ok_or(Error::Transport)?;
-            let providers: Vec<ene_protocol::provider::ProviderInfo> =
-                serde_json::from_value(http.request(Method::GET, "/providers", None, None).await?)
-                    .map_err(|_| Error::Transport)?;
+            let providers = http.providers().await?;
             let destinations = &providers
                 .iter()
-                .find(|d| d.id == p["adapter"])
+                .find(|d| d.id == p.adapter)
                 .ok_or(Error::Transport)?
                 .destinations;
             for (purpose, enabled, data) in [
@@ -142,24 +148,33 @@ pub(super) async fn action(
                     .grants
                     .iter()
                     .filter(|g| {
-                        g["companion_id"] == c.id
-                            && g["connection_id"] == pid
-                            && g["purpose"] == purpose
-                            && g["status"] == "active"
+                        g.companion_id == c.id
+                            && g.connection_id == p.id
+                            && g.purpose == purpose
+                            && g.status == "active"
                     })
                     .collect();
                 if enabled && grants.is_empty() {
-                    http.request(Method::POST,"/grants",Some(json!({"companion_id":c.id,"kind":"data_transfer","connection_id":pid,"destinations":destinations,"data_kinds":if purpose=="connection_check"{vec![data,"metadata"]}else{vec![data]},"purpose":purpose})),Some(&format!("{key}-{purpose}"))).await?;
+                    http.create_grant(
+                        &GrantInput {
+                            companion_id: c.id.clone(),
+                            kind: "data_transfer".into(),
+                            connection_id: p.id.clone(),
+                            destinations: destinations.clone(),
+                            data_kinds: if purpose == "connection_check" {
+                                vec![data.into(), "metadata".into()]
+                            } else {
+                                vec![data.into()]
+                            },
+                            purpose: purpose.into(),
+                        },
+                        &IdempotencyKey::new(format!("{key}-{purpose}")).map_err(Error::from)?,
+                    )
+                    .await?;
                 }
                 if !enabled {
                     for g in grants {
-                        http.request(
-                            Method::DELETE,
-                            &format!("/grants/{}", g["id"].as_str().ok_or(Error::Transport)?),
-                            None,
-                            None,
-                        )
-                        .await?;
+                        http.revoke_grant(&g.id).await?;
                     }
                 }
             }
@@ -171,63 +186,57 @@ pub(super) async fn action(
                     false,
                 ));
             };
-            let mut url = url::Url::parse(&format!(
-                "{}{}",
-                http.connection.endpoint,
-                format_args!("/companions/{}/messages", c.id)
-            ))
-            .map_err(|_| Error::Transport)?;
-            url.query_pairs_mut().append_pair("cursor", cursor);
-            let path = url
-                .as_str()
-                .strip_prefix(&http.connection.endpoint)
-                .ok_or(Error::Transport)?;
             return Ok(ActionResult::History(
-                serde_json::from_value(http.request(Method::GET, path, None, None).await?)
-                    .map_err(|_| Error::Transport)?,
+                http.messages(&c.id, Some(cursor), None).await?,
             ));
         }
         command => {
-            let pid = connection(&snapshot)?["id"]
-                .as_str()
-                .ok_or(Error::Transport)?;
+            let pid = &connection(&snapshot)?.id;
             match command {
                 Command::Credential(secret) => {
                     let result = http
-                        .request(
-                            Method::PUT,
-                            &format!("/credentials/{pid}"),
-                            Some(json!({"secret":secret})),
-                            None,
+                        .register_credentials(
+                            pid,
+                            &CredentialInput {
+                                secret: Some(secret),
+                                source: None,
+                            },
                         )
                         .await?;
-                    feedback = if result["credential_state"] == "stored" {
+                    feedback = if result.credential_state == "stored" {
                         "APIキーを資格情報ストアに保存しました"
                     } else {
                         "APIキーは今回のホスト起動中だけ保持します"
                     };
                 }
                 Command::EnvironmentCredential => {
-                    http.request(
-                        Method::PUT,
-                        &format!("/credentials/{pid}"),
-                        Some(json!({"source":"environment"})),
-                        None,
+                    http.register_credentials(
+                        pid,
+                        &CredentialInput {
+                            secret: None,
+                            source: Some("environment".into()),
+                        },
                     )
                     .await?;
                     feedback = "ホストの環境変数からAPIキーを登録しました";
                 }
                 Command::RevokeCredential => {
-                    http.request(Method::DELETE, &format!("/credentials/{pid}"), None, None)
-                        .await?;
+                    http.revoke_credentials(pid).await?;
                     feedback = "資格情報を解除し、生成を停止しました";
                 }
                 Command::Check => {
-                    http.request(
-                        Method::POST,
-                        &format!("/connections/{pid}/check"),
-                        Some(json!({"companion_id":c.id,"purpose":"companion","model_id":c.model_assignments.companion.as_ref().and_then(|a|a.get("model_id"))})),
-                        Some(&key),
+                    http.check(
+                        pid,
+                        &CheckInput {
+                            companion_id: c.id.clone(),
+                            purpose: "companion".into(),
+                            model_id: c
+                                .model_assignments
+                                .companion
+                                .as_ref()
+                                .map(|a| a.model_id.clone()),
+                        },
+                        &IdempotencyKey::new(key).map_err(Error::from)?,
                     )
                     .await?;
                     feedback = "実モデルの逐次応答を確認しました";

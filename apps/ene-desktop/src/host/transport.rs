@@ -17,8 +17,8 @@ pub(super) fn descriptor(path: &Path) -> Result<RuntimeConnection, String> {
     {
         return Err("接続情報の所有者・権限・形式が不正です".into());
     }
-    let value: RuntimeConnection =
-        serde_json::from_reader(file).map_err(|_| "接続情報を読めません")?;
+    let value: RuntimeConnection = serde_json::from_reader(std::io::Read::take(file, 8193))
+        .map_err(|_| "接続情報を読めません")?;
     let url = url::Url::parse(&value.endpoint).map_err(|_| "接続先が不正です")?;
     if url.scheme() != "http"
         || url.host_str() != Some("127.0.0.1")
@@ -35,70 +35,18 @@ pub(super) fn descriptor(path: &Path) -> Result<RuntimeConnection, String> {
     }
     Ok(value)
 }
-#[derive(Clone)]
-pub(super) struct Http {
-    pub(super) client: Client,
-    pub(super) connection: std::sync::Arc<RuntimeConnection>,
-}
 #[derive(Debug)]
 pub(super) enum Error {
     Transport,
     Unauthorized,
     Api(String),
 }
-impl Http {
-    pub(super) async fn request(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<Value>,
-        key: Option<&str>,
-    ) -> Result<Value, Error> {
-        let mut request = self
-            .client
-            .request(method, format!("{}{}", self.connection.endpoint, path))
-            .bearer_auth(&self.connection.token)
-            .timeout(Duration::from_secs(if path.ends_with("/check") {
-                95
-            } else {
-                5
-            }));
-        if let Some(body) = body {
-            request = request.json(&body);
+impl From<ene_api_client::Error> for Error {
+    fn from(error: ene_api_client::Error) -> Self {
+        match error {
+            ene_api_client::Error::Unauthorized => Self::Unauthorized,
+            ene_api_client::Error::Api(error) => Self::Api(error.to_string()),
+            _ => Self::Transport,
         }
-        if let Some(key) = key {
-            request = request.header("Idempotency-Key", key);
-        }
-        let response = request.send().await.map_err(|_| Error::Transport)?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(Error::Unauthorized);
-        }
-        if status == reqwest::StatusCode::NO_CONTENT {
-            return Ok(Value::Null);
-        }
-        let body: Value = response.json().await.map_err(|_| Error::Transport)?;
-        if !status.is_success() {
-            return Err(Error::Api(format!(
-                "{} ({})",
-                body["error"]["message"]
-                    .as_str()
-                    .unwrap_or("要求を完了できません"),
-                body["error"]["code"].as_str().unwrap_or("unavailable")
-            )));
-        }
-        Ok(body)
-    }
-    pub(super) async fn snapshot(&self, id: &str) -> Result<Snapshot, Error> {
-        serde_json::from_value(
-            self.request(
-                Method::GET,
-                &format!("/snapshot?connection_id={id}"),
-                None,
-                None,
-            )
-            .await?,
-        )
-        .map_err(|_| Error::Transport)
     }
 }

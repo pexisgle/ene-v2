@@ -1,8 +1,9 @@
 //! Authenticated local transport. No UI object or provider credential lives here.
-use ene_protocol::host::{Message, Notification, Page, Replica, RuntimeConnection, Snapshot};
-use futures_util::{SinkExt, StreamExt};
-use reqwest::{Client, Method};
-use serde_json::{Value, json};
+use ene_api_client::{ApiClient as Http, IdempotencyKey, ServerEvent};
+use ene_api_types::host::{Message, Page, Replica, RuntimeConnection, Snapshot};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::{
     fs,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -11,10 +12,6 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc as channel;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{Message as Frame, client::IntoClientRequest},
-};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -54,8 +51,8 @@ pub enum Event {
     Error(String),
     Done(String, bool),
     Older(Page<Message>),
-    Providers(Vec<ene_protocol::provider::ProviderInfo>),
-    Models(Vec<ene_protocol::provider::Model>),
+    Providers(Vec<ene_api_types::provider::ProviderInfo>),
+    Models(Vec<ene_api_types::provider::Model>),
 }
 pub struct Controller {
     commands: channel::UnboundedSender<Command>,
@@ -112,7 +109,7 @@ use session::run;
 #[cfg(test)]
 use session::{refreshed, run_at};
 use settings::{ActionResult, action};
-use transport::{Error, Http, descriptor};
+use transport::{Error, descriptor};
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +120,7 @@ mod tests {
         response::{IntoResponse, Response},
         routing::get,
     };
+    use futures_util::SinkExt;
     use std::{
         os::unix::fs::PermissionsExt,
         sync::{
@@ -238,7 +236,7 @@ mod old_reply_tests {
         let old:Message=serde_json::from_value(json!({"id":"old","companion_id":"c","role":"companion","text":"途中","status":"streaming","sequence":1,"created_at":"2026-10-02T00:00:00Z","in_reply_to":null,"task_id":null,"question_id":null,"failure":null})).unwrap();
         let mut final_reply = old.clone();
         final_reply.text = "完了".into();
-        final_reply.status = ene_protocol::host::MessageStatus::Completed;
+        final_reply.status = ene_api_types::host::MessageStatus::Completed;
         let json_reply = serde_json::to_value(&final_reply).unwrap();
         let app = axum::Router::new().route(
             "/v1/companions/c/messages/old",
@@ -250,13 +248,11 @@ mod old_reply_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let http = Http {
-            client: Client::builder().no_proxy().build().unwrap(),
-            connection: std::sync::Arc::new(RuntimeConnection {
-                endpoint: format!("http://{address}/v1"),
-                token: "private".into(),
-            }),
-        };
+        let http = Http::new(&RuntimeConnection {
+            endpoint: format!("http://{address}/v1"),
+            token: "private".into(),
+        })
+        .unwrap();
         let mut previous = Replica::from_snapshot(&snapshot);
         previous.messages.insert(old.id.clone(), old);
         let fresh = refreshed(&http, &snapshot, previous).await.unwrap();

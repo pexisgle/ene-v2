@@ -10,8 +10,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-tokio-tungstenite = "0.29"
+ene-api-types = { path = "../../crates/ene-api-types" }
+ene-api-client = { path = "../../crates/ene-api-client" }
 uuid = { version = "1", features = ["v4"] }
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "file_chooser"] }
 ksni = "0.3"

@@ -12,7 +12,9 @@
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | VRM 1.0の透明なWayland常駐表示 |
 | [`ene-core`](crates/ene-core/) | ホストの規則・処理手順と外部処理へのインターフェース |
-| [`ene-protocol`](crates/ene-protocol/) | ホストAPI・アバターIPC・プロバイダープラグインの通信契約と通知再同期 |
+| [`ene-api-types`](crates/ene-api-types/) | REST APIの型・OpenAPIスキーマ・通知再同期 |
+| [`ene-api-client`](crates/ene-api-client/) | 型付きHTTP操作・認証付き通知WebSocket |
+| [`ene-protocol`](crates/ene-protocol/) | アバターIPC・プロバイダープラグインの通信契約 |
 
 ## 起動と検証
 
@@ -40,6 +42,25 @@ ENE_AVATAR_BIN="$PWD/target/release/ene-avatar" cargo run --locked -p ene-deskto
 `just run-host`と、別の端末で`just connect-desktop`を起動します。ホスト選択から接続し、設定の「ホスト・接続」でプロバイダーを選び、接続先とモデルIDを保存します。組込OpenRouterでは、会話用・作業用の検証モデルは`openai/gpt-6-luna`、配信先はOpenAI限定、フォールバックは禁止です。次にAPIキーを登録します。ホストの`OPENROUTER_API_KEY`を使う操作も用意しています。環境変数由来のキーはホスト起動中だけ保持し、手入力のキーはOSのSecret Serviceへ保存します。ストアが使えなければ起動中だけ保持し、その状態を画面へ表示します。キーをクライアント設定・DB・取得API・ログへ保存しません。
 
 「権限とデータ」で会話送信と疎通確認・モデル情報の送受信を別々に許可し、保存します。許可後に「疎通確認」で実モデルの逐次応答を確認できます。対話は生成途中から表示し、クライアント再起動後も履歴を取得します。「過去の会話を読み込む」でさらに遡れます。通知購読→スナップショット→連番差分の順に同期し、欠番・epoch変更・Unicodeスカラーoffset不一致では購読をやり直します。再接続は1・2・4・8・15秒、受付が不明な発言は同じIdempotency-Keyで確認します。許可・資格情報の解除は生成を待たず新規送信を禁止し、返答を中断状態で保存します。ホスト再起動時の未完了生成・疎通確認は自動再実行しません。
+
+別クライアント向けの契約は、認証付き`GET /v1/openapi.json`で取得できます。`cargo run --locked -p ene-host -- --print-openapi`でも、ホストの起動・DBの変更なしでOpenAPI 3.1 JSONを出力できます。Axumのルート登録と共通DTOから生成するため、仕様用のルート一覧を別管理しません。Rustからは`ene-api-client::ApiClient`を利用します。平文HTTPはIPリテラルのループバックだけ、その他は検証付きHTTPSを要求し、BearerをURLへ含めず、リダイレクトを追いません。現行ホストは引き続き同一PCのループバック限定です。
+
+```rust,no_run
+use ene_api_client::{ApiClient, IdempotencyKey, types::{RuntimeConnection, MessageInput}};
+# async fn example(connection: RuntimeConnection) -> Result<(), ene_api_client::Error> {
+let client = ApiClient::new(&connection)?;
+let mut events = client.subscribe().await?;
+let snapshot = client.snapshot(Some(&events.ready().connection_id)).await?;
+// スナップショット取得中の通知を保持し、Replicaで連番・Unicode offsetを検査する。
+let key = IdempotencyKey::new("one-user-intent")?;
+let input = MessageInput { text: "こんにちは".into(), resources: vec![], question_id: None, decision: None };
+let accepted = client.send_message(&snapshot.companions[0].id, &input, &key).await?;
+// 受付結果が不明なら、同じinputとkeyで再確認する。自動再送は行わない。
+events.close().await?;
+# Ok(()) }
+```
+
+HTTP応答・通知は各16MiBまでで、異常・上限超過は同期をやり直します。OpenAPIの`x-ene-events`にWebSocketのフレーム型と購読→スナップショット→差分適用の手順を記載しています。ブラウザー向けの認証・CORSやリモートホストの運用は別途対応します。
 
 systemdユーザーサービスを使う場合は、`cargo build --release --locked -p ene-host`後にバイナリを`~/.local/bin/ene-host`、既存テンプレートを`~/.config/systemd/user/ene-host.service`へ配置し、`systemctl --user daemon-reload`と`systemctl --user enable --now ene-host`を実行します。APIキーは画面から登録でき、環境変数を利用する場合はサービス側に渡す必要があります。クライアント終了でホストを停止しません。
 

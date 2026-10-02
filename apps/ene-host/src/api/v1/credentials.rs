@@ -1,27 +1,24 @@
-use crate::api::{error::ApiError, extractors::ApiJson, state::App};
-use axum::{
-    Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::put,
+use crate::api::{
+    error::{ApiError, wire},
+    extractors::ApiJson,
+    state::App,
 };
-use serde::Deserialize;
-use serde_json::Value;
-pub(super) fn router() -> Router<App> {
-    Router::new().route("/{connection_id}", put(register).delete(revoke))
+use axum::{Json, extract::State, http::StatusCode};
+use utoipa_axum::{router::OpenApiRouter, routes};
+pub(super) fn router() -> OpenApiRouter<App> {
+    OpenApiRouter::new().routes(routes!(register, revoke))
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Input {
-    secret: Option<String>,
-    source: Option<String>,
-}
+#[utoipa::path(put, path = "/{connection_id}", tag = "credentials",
+    params(("connection_id" = String, Path)),
+    request_body = ene_api_types::CredentialInput,
+    responses((status = 200, description = "Success", body = ene_api_types::CredentialResult))
+)]
 async fn register(
     State(app): State<App>,
-    Path(id): Path<String>,
-    ApiJson(input): ApiJson<Input>,
-) -> Result<Json<Value>, ApiError> {
-    Ok(Json(
+    crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
+    ApiJson(input): ApiJson<ene_api_types::CredentialInput>,
+) -> Result<Json<ene_api_types::CredentialResult>, ApiError> {
+    Ok(Json(wire(
         tokio::spawn(async move {
             app.application
                 .register_credentials(id, input.secret, input.source)
@@ -29,9 +26,16 @@ async fn register(
         })
         .await
         .map_err(|_| ApiError::unavailable())??,
-    ))
+    )?))
 }
-async fn revoke(State(app): State<App>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+#[utoipa::path(delete, path = "/{connection_id}", tag = "credentials",
+    params(("connection_id" = String, Path)),
+    responses((status = 204, description = "Success"))
+)]
+async fn revoke(
+    State(app): State<App>,
+    crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
+) -> Result<StatusCode, ApiError> {
     app.application.revoke_credentials(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

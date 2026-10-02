@@ -3,14 +3,15 @@ use crate::{
     api::extractors::ApiQuery,
     api::state::App,
 };
-use axum::{Json, Router, extract::State, routing::get};
-use ene_protocol::host::Snapshot;
+use axum::{Json, extract::State};
+use ene_api_types::host::Snapshot;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
-pub(super) fn router() -> Router<App> {
-    Router::new().route("/", get(snapshot))
+pub(super) fn router() -> OpenApiRouter<App> {
+    OpenApiRouter::new().routes(routes!(snapshot))
 }
 
 #[derive(Deserialize)]
@@ -18,6 +19,10 @@ pub(super) fn router() -> Router<App> {
 struct SnapshotQuery {
     connection_id: Option<String>,
 }
+#[utoipa::path(get, path = "/", tag = "snapshot",
+    params(("connection_id" = Option<String>, Query)),
+    responses((status = 200, description = "Success", body = ene_api_types::Snapshot))
+)]
 async fn snapshot(
     State(app): State<App>,
     ApiQuery(query): ApiQuery<SnapshotQuery>,

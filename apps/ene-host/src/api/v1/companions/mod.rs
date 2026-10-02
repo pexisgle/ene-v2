@@ -1,43 +1,52 @@
+use utoipa_axum::{router::OpenApiRouter, routes};
 mod messages;
 use crate::api::{
     error::{ApiError, wire},
     state::App,
 };
-use axum::{
-    Json, Router,
-    extract::{Path, State},
-    routing::get,
-};
-use ene_protocol::host::Companion;
-pub(super) fn router() -> Router<App> {
-    Router::new()
-        .route("/", get(companions))
-        .route("/{companion_id}", get(companion).patch(patch_companion))
+use axum::{Json, extract::State};
+use ene_api_types::host::Companion;
+pub(super) fn router() -> OpenApiRouter<App> {
+    OpenApiRouter::new()
+        .routes(routes!(companions))
+        .routes(routes!(companion, patch_companion))
         .nest("/{companion_id}/messages", messages::router())
 }
+#[utoipa::path(get, path = "/", tag = "companions",
+    responses((status = 200, description = "Success", body = [ene_api_types::Companion]))
+)]
 async fn companions(State(app): State<App>) -> Result<Json<Vec<Companion>>, ApiError> {
     Ok(Json(wire(app.application.companions().await?)?))
 }
+#[utoipa::path(get, path = "/{companion_id}", tag = "companions",
+    params(("companion_id" = String, Path)),
+    responses((status = 200, description = "Success", body = ene_api_types::Companion))
+)]
 async fn companion(
     State(app): State<App>,
-    Path(id): Path<String>,
+    crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
 ) -> Result<Json<Companion>, ApiError> {
     Ok(Json(wire(app.application.companion(&id).await?)?))
 }
 
+#[utoipa::path(patch, path = "/{companion_id}", tag = "companions",
+    params(("companion_id" = String, Path)),
+    request_body = ene_api_types::CompanionPatch,
+    responses((status = 200, description = "Success", body = ene_api_types::Companion))
+)]
 async fn patch_companion(
     State(app): State<App>,
-    Path(id): Path<String>,
+    crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
     crate::api::extractors::ApiJson(input): crate::api::extractors::ApiJson<
-        ene_protocol::host::CompanionPatch,
+        ene_api_types::host::CompanionPatch,
     >,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(
+) -> Result<Json<ene_api_types::Companion>, ApiError> {
+    Ok(Json(wire(
         ene_core::application::operations::patch_companion(
             app.application,
             id,
             crate::api::error::command(input)?,
         )
         .await?,
-    ))
+    )?))
 }
