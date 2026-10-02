@@ -4,10 +4,7 @@
   "name": "OpenAI compatible (plugin)",
   "version": "1.0.0",
   "command": [
-    "/usr/bin/python3",
-    "-I",
-    "-u",
-    "/plugin/provider.py"
+    "/plugin/provider"
   ],
   "endpoint": "https://openrouter.ai/api/v1",
   "options": {

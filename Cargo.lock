@@ -2757,6 +2757,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-provider-openai-compatible"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ene-protocol",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

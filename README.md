@@ -68,12 +68,19 @@ systemdユーザーサービスを使う場合は、`cargo build --release --loc
 
 Linuxの`bubblewrap`が必要です（Debian系では`sudo apt-get install bubblewrap`）。`$XDG_DATA_HOME/ene/providers/`（既定`~/.local/share/ene/providers/`、`ENE_PROVIDER_DIR`で変更可能）の各フォルダに`manifest.json`と実装を配置します。発見だけでは実行しません。設定のプロバイダー一覧で再走査し、選択して有効化すると隔離環境で初期化します。有効化は現在のホスト起動中に適用され、再起動後には再度有効化します。接続設定・モデル割当・許可はDBに保存します。
 
-継続利用できる[OpenAI互換APIの実装例](examples/providers/openai-compatible/)を用意しています。例だけは`python3`も必要です。ホストの実行にPythonは不要です。
+継続利用できる[OpenAI互換APIの実装例](examples/providers/openai-compatible/)を用意しています。デフォルトはRust製の実行ファイルです。プラグインはNDJSONを扱える言語で書けるため、Python版も選択できます。Rust版・ホストの実行にPythonは不要です。
 
 ```sh
-mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers"
-cp -r examples/providers/openai-compatible "${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers/"
+# x86_64 Linux向けに静的リンクし、隔離環境へ動的ライブラリを追加せずに実行する。
+rustup target add --toolchain 1.98.1 x86_64-unknown-linux-musl
+rustup run 1.98.1 cargo build --release --locked --target x86_64-unknown-linux-musl -p ene-provider-openai-compatible
+provider_dir="${ENE_PROVIDER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers}/openai-compatible"
+install -d -m 700 "$provider_dir"
+install -m 755 target/x86_64-unknown-linux-musl/release/ene-provider-openai-compatible "$provider_dir/provider"
+install -m 600 examples/providers/openai-compatible/manifest.json "$provider_dir/manifest.json"
 ```
+
+Python版を選ぶ場合は、同じフォルダへ`provider.py`を置き、manifestの`command`をPython起動に変更します。隔離環境の`/usr/bin/python3`が必要です。切替・他のCPU向けの配置は[実装例のREADME](examples/providers/openai-compatible/README.md)を参照してください。
 
 有効化後に接続・モデル・資格情報を登録し、表示された送信先と用途を許可してください。例はOpenRouter経由・OpenAI限定・フォールバックなしです。別の送信先ではmanifestの接続先・送信先・認証方式を変更し、API形式に合わせて実装します。モデル一覧がない場合もモデルIDを直接入力できます。宣言した設定項目だけをUIで扱い、任意のUIコードは実行しません。
 
