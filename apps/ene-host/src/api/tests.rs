@@ -209,7 +209,7 @@ async fn permissions_are_independent_and_revocation_does_not_wait_for_generation
         .0,
         StatusCode::FORBIDDEN
     );
-    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://api.openai.com"],"data_kinds":["test_input"],"purpose":"connection_check"});
+    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["test_input"],"purpose":"connection_check"});
     assert_eq!(
         mutate(&app, "POST", "/v1/grants", grant, Some("check-grant"))
             .await
@@ -228,7 +228,7 @@ async fn permissions_are_independent_and_revocation_does_not_wait_for_generation
         .0,
         StatusCode::FORBIDDEN
     );
-    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"});
+    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"});
     let (status, receipt) = mutate(
         &app,
         "POST",

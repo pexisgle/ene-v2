@@ -247,10 +247,17 @@ pub async fn models(
     supervisor: Supervisor,
 ) -> Result<Vec<Model>> {
     input.authorization.check().await?;
+    let catalog = bundle.manifest.model_catalog.clone();
+    let authorization = input.authorization.clone();
     let (tx, mut rx) = mpsc::channel(1);
     supervisor.spawn(run(bundle, Arc::new(input), true, tx))?;
     match rx.recv().await.ok_or_else(broken)?? {
-        Output::Models(m) => Ok(m),
+        Output::Models(mut m) => {
+            if let Some(ene_protocol::provider::ModelCatalog::ModelsDev { provider }) = catalog {
+                super::super::catalog::enrich(&mut m, &provider, authorization.as_ref()).await?;
+            }
+            Ok(m)
+        }
         _ => Err(broken()),
     }
 }

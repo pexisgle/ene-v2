@@ -29,9 +29,18 @@ pub struct Manifest {
     pub headers: BTreeMap<String, String>,
     pub environment_variable: Option<String>,
     pub destinations: Vec<String>,
+    /// Optional host-owned catalog fallback. The provider chooses the catalog namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_catalog: Option<ModelCatalog>,
     /// Optional offline hints; ListModels results are authoritative when supported.
     #[serde(default)]
     pub models: Vec<Model>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelCatalog {
+    ModelsDev { provider: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

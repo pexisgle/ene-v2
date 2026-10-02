@@ -24,7 +24,10 @@ fn connection() -> Connection {
 fn builtin_policy_keeps_credentials_on_the_official_endpoint() {
     let c = connection();
     let allowed = policy(&c).unwrap();
-    assert_eq!(allowed.destinations, ["https://api.openai.com"]);
+    assert_eq!(
+        allowed.destinations,
+        ["https://api.openai.com", "https://models.dev"]
+    );
     assert_eq!(
         allowed.environment_variable.as_deref(),
         Some("OPENAI_API_KEY")

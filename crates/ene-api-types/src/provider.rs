@@ -44,6 +44,8 @@ pub struct ModelMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_modalities: Option<Vec<String>>,
@@ -51,6 +53,9 @@ pub struct ModelMetadata {
     pub output_modalities: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_parameters: Option<Vec<String>>,
+    /// Per-field provenance when missing API values were filled from a catalog.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub field_sources: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

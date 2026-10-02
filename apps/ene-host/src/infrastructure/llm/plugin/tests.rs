@@ -86,6 +86,28 @@ fn contracts_configuration_and_implementation_changes_are_rejected() {
     value["id"] = json!("openrouter");
     std::fs::write(&path, value.to_string()).unwrap();
     assert!(manifest::load(dir.path()).is_ok());
+    value["model_catalog"] = json!({"type":"models_dev","provider":"openai"});
+    std::fs::write(&path, value.to_string()).unwrap();
+    assert!(
+        manifest::load(dir.path()).is_err(),
+        "catalog origin must be declared"
+    );
+    value["destinations"] = json!(["https://example.com", "https://models.dev"]);
+    std::fs::write(&path, value.to_string()).unwrap();
+    assert!(manifest::load(dir.path()).is_ok());
+    value["model_catalog"]["provider"] = json!("https://unapproved.example");
+    std::fs::write(&path, value.to_string()).unwrap();
+    assert!(
+        manifest::load(dir.path()).is_err(),
+        "catalog namespace cannot be a URL"
+    );
+    // The shipped OpenRouter routing policy also accepts the separate catalog origin.
+    std::fs::write(
+        &path,
+        include_bytes!("../../../../../../examples/providers/openrouter/manifest.json"),
+    )
+    .unwrap();
+    assert!(manifest::load(dir.path()).is_ok());
     std::os::unix::fs::symlink("/etc/passwd", dir.path().join("link")).unwrap();
     assert!(manifest::load(dir.path()).is_err());
 }

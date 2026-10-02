@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 pub const ID: &str = "openai";
 pub const MODEL: &str = "gpt-6-luna";
 pub const ENDPOINT: &str = "https://api.openai.com/v1";
+const REVISION: &str = "builtin-openai-v2-model-catalog";
 
 pub fn descriptor() -> Descriptor {
     Descriptor {
@@ -21,10 +22,13 @@ pub fn descriptor() -> Descriptor {
         settings: vec![],
         requires_credentials: true,
         environment_variable: Some("OPENAI_API_KEY".into()),
-        destinations: vec!["https://api.openai.com".into()],
+        destinations: vec![
+            "https://api.openai.com".into(),
+            super::catalog::ORIGIN.into(),
+        ],
         state: "ready".into(),
         error: None,
-        revision: "builtin-openai-v1".into(),
+        revision: REVISION.into(),
         models: vec![Model {
             id: MODEL.into(),
             name: MODEL.into(),
@@ -42,7 +46,7 @@ pub fn policy(c: &Connection) -> Result<Policy> {
         return Err(Error::new(ErrorKind::UnsupportedCapability));
     }
     Ok(Policy {
-        fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":c.options}),
+        fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":c.options,"implementation":REVISION}),
         destinations: descriptor().destinations,
         requires_credentials: true,
         environment_variable: Some("OPENAI_API_KEY".into()),
@@ -112,7 +116,9 @@ pub async fn models(input: Invocation) -> Result<Vec<Model>> {
     let secret = input
         .secret
         .ok_or_else(|| Error::new(ErrorKind::CredentialMissing))?;
-    fetch_models(secret.value, ENDPOINT).await
+    let mut models = fetch_models(secret.value, ENDPOINT).await?;
+    super::catalog::enrich(&mut models, ID, input.authorization.as_ref()).await?;
+    Ok(models)
 }
 
 async fn fetch_models(secret: String, endpoint: &str) -> Result<Vec<Model>> {

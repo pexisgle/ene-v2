@@ -34,12 +34,17 @@
   "environment_variable": "OPENROUTER_API_KEY",
   "destinations": [
     "https://openrouter.ai",
-    "openai"
+    "openai",
+    "https://models.dev"
   ],
   "routing": {
     "type": "open_router",
     "only": [
       "openai"
     ]
+  },
+  "model_catalog": {
+    "type": "models_dev",
+    "provider": "openrouter"
   }
 }

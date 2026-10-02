@@ -832,13 +832,16 @@ impl Application {
                 ene_api_types::provider::MetadataScope::Route => "接続先の値",
             };
             format!(
-                "コンテキスト: {} / 出力上限: {}\n入力: {} / 出力: {}\n{} · {}",
+                "コンテキスト: {} / 入力上限: {} / 出力上限: {}\n入力: {} / 出力: {}\n{}\nコンテキストの取得元: {}",
                 tokens(info.context_window),
+                tokens(info.max_input_tokens),
                 tokens(info.max_output_tokens),
                 formats(&info.input_modalities),
                 formats(&info.output_modalities),
                 scope,
-                info.source
+                info.field_sources
+                    .get("context_window")
+                    .unwrap_or(&info.source)
             )
         } else {
             "モデル情報は未取得、または提供元が公開していません".into()

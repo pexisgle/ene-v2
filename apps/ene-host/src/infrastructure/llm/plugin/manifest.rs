@@ -114,6 +114,20 @@ pub fn load(root: &Path) -> Result<Bundle> {
     }
     let endpoint = url::Url::parse(&manifest.endpoint).map_err(|_| invalid())?;
     valid_endpoint(&endpoint)?;
+    if let Some(ene_protocol::provider::ModelCatalog::ModelsDev { provider }) =
+        &manifest.model_catalog
+        && (provider.is_empty()
+            || provider.len() > 80
+            || !provider
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            || !manifest
+                .destinations
+                .iter()
+                .any(|d| d == super::super::catalog::ORIGIN))
+    {
+        return Err(invalid());
+    }
     if manifest.destinations.is_empty()
         || !manifest
             .destinations
@@ -150,6 +164,12 @@ pub fn load(root: &Path) -> Result<Bundle> {
                 || manifest.destinations
                     != std::iter::once("https://openrouter.ai".to_owned())
                         .chain(only.iter().cloned())
+                        .chain(
+                            manifest
+                                .model_catalog
+                                .as_ref()
+                                .map(|_| super::super::catalog::ORIGIN.to_owned()),
+                        )
                         .collect::<Vec<_>>()
             {
                 return Err(invalid());
