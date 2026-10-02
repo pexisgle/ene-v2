@@ -39,14 +39,16 @@ export component IconButton inherits Button {
 // The name remains available to assistive technology and on hover.
 export component ToolButton inherits Button {
     in property <string> label;
+    in property <float> ui-scale: 1;
+    private property <length> tool-size: max(44px, 20px * root.ui-scale + 20px);
     text: "";
     accessible-label: root.label;
     colorize-icon: true;
-    icon-size: 20px;
-    min-width: 44px;
-    max-width: 44px;
-    min-height: 44px;
-    max-height: 44px;
+    icon-size: 20px * root.ui-scale;
+    min-width: root.tool-size;
+    max-width: root.tool-size;
+    min-height: root.tool-size;
+    max-height: root.tool-size;
     Tooltip { text: @markdown("\{root.label}"); }
 }
 

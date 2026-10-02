@@ -286,14 +286,12 @@ export component SettingsWindow inherits Window {
             vertical-stretch: 1;
             content-width: self.visible-width;
             VerticalBox {
-                padding: 8px;
-                spacing: 14px;
+                padding: 0px;
+                padding-right: 12px;
+                spacing: 12px;
                 Text { text: "会話画面の表示"; font-size: 20px; font-weight: 600; }
-                HorizontalBox {
-                    padding: 0px;
-                    Text { text: "テーマ"; vertical-alignment: center; }
-                    ThemePicker { current-index <=> root.theme-index; }
-                }
+                Text { text: "テーマ"; }
+                ThemePicker { current-index <=> root.theme-index; }
                 Text { text: "フォント"; }
                 LineEdit { text <=> root.font-family; }
                 HorizontalBox {
@@ -304,17 +302,11 @@ export component SettingsWindow inherits Window {
                 HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.avatar; } Text { text: "キャラクター"; font-size: 18px; font-weight: 600; } }
                 CheckBox { text: "キャラクターを表示"; checked <=> root.avatar-visible; }
                 Text { text: root.avatar-model; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                HorizontalBox {
-                    padding: 0px;
-                    ToolButton { icon: Icons.folder; label: "VRMを選ぶ"; clicked => { root.select-model(); } }
-                    Text { text: "描画速度"; font-size: 13px; vertical-alignment: center; }
-                    ComboBox { model: ["30 fps", "60 fps"]; current-index <=> root.avatar-fps-index; }
-                }
-                HorizontalBox {
-                    padding: 0px;
-                    Text { text: "キャラクターの大きさ"; vertical-alignment: center; }
-                    SizeControl { text <=> root.avatar-size-text; }
-                }
+                HorizontalBox { padding: 0px; ToolButton { icon: Icons.folder; label: "VRMを選ぶ"; clicked => { root.select-model(); } } Rectangle { horizontal-stretch: 1; } }
+                Text { text: "描画速度"; }
+                ComboBox { model: ["30 fps", "60 fps"]; current-index <=> root.avatar-fps-index; }
+                Text { text: "キャラクターの大きさ"; }
+                SizeControl { text <=> root.avatar-size-text; }
                 HorizontalBox { padding: 0px; ToolButton { icon: Icons.center; label: "キャラクターを画面中央へ戻す"; clicked => { root.recenter-avatar(); } } Rectangle { horizontal-stretch: 1; } }
                 if root.avatar-failed : Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; }
                 HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.motion; } Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; } }
