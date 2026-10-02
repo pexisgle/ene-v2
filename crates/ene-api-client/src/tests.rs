@@ -154,3 +154,31 @@ async fn opaque_ids_and_cursors_cannot_inject_paths_queries_or_credentials() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn server_normal_close_is_terminal_and_explicit_cleanup_is_idempotent() {
+    let router = Router::new().route(
+        "/v1/events",
+        get(|ws: axum::extract::WebSocketUpgrade| async {
+            ws.on_upgrade(|mut socket| async move {
+                use axum::extract::ws::Message;
+                socket
+                    .send(Message::Text(
+                        json!({"type":"ready","connection_id":"s","cursor":{"epoch":"e","seq":0}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                socket.send(Message::Close(None)).await.unwrap();
+                let _ = socket.recv().await;
+            })
+        }),
+    );
+    let (client, server) = serve(router).await;
+    let mut events = client.subscribe().await.unwrap();
+    assert!(events.next().await.unwrap().is_none());
+    assert!(events.next().await.unwrap().is_none());
+    events.close().await.unwrap();
+    server.abort();
+}

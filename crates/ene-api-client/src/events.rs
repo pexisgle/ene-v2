@@ -14,6 +14,7 @@ pub enum ServerEvent {
 pub struct EventStream {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     ready: EventReady,
+    closed: bool,
 }
 impl ApiClient {
     pub async fn subscribe(&self) -> Result<EventStream, Error> {
@@ -61,7 +62,11 @@ impl ApiClient {
         })
         .await
         .map_err(|_| Error::Transport)??;
-        Ok(EventStream { socket, ready })
+        Ok(EventStream {
+            socket,
+            ready,
+            closed: false,
+        })
     }
 }
 impl EventStream {
@@ -69,6 +74,9 @@ impl EventStream {
         &self.ready
     }
     pub async fn next(&mut self) -> Result<Option<ServerEvent>, Error> {
+        if self.closed {
+            return Ok(None);
+        }
         loop {
             match self.socket.next().await {
                 Some(Ok(Frame::Text(text))) => {
@@ -89,16 +97,23 @@ impl EventStream {
                 }
                 Some(Ok(Frame::Pong(_))) => {}
                 Some(Ok(Frame::Close(_))) => {
+                    self.closed = true;
                     let _ = timeout(Duration::from_secs(1), self.socket.flush()).await;
                     return Ok(None);
                 }
-                None => return Ok(None),
+                None => {
+                    self.closed = true;
+                    return Ok(None);
+                }
                 _ => return Err(Error::Transport),
             }
         }
     }
     /// Send Close and complete the peer handshake within a bounded deadline.
     pub async fn close(mut self) -> Result<(), Error> {
+        if self.closed {
+            return Ok(());
+        }
         timeout(Duration::from_secs(1), async {
             self.socket
                 .close(None)
