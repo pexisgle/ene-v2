@@ -497,7 +497,7 @@ export component SettingsView inherits Rectangle {
                             spacing: 8px;
                             StatusBadge {icon: Icons.connection; state: UiState.connection-matches-provider ? 1 : 0; label: UiState.connection-matches-provider ? "接続 · 設定済み" : "接続 · 未設定";}
                             SectionTitle {text: "プロバイダー"; horizontal-stretch: 1; vertical-alignment: center;}
-                            ActionButton {icon-only: true; icon: Icons.settings; text: "接続とモデルを保存"; enabled: root.active && UiState.host-connected && UiState.provider-ready && UiState.model-id != ""; clicked => {UiState.configure-host();}}
+                            ActionButton {icon-only: true; icon: Icons.settings; text: "接続・モデルを保存"; enabled: root.active && UiState.host-connected && UiState.provider-ready; clicked => {UiState.configure-host();}}
                         }
                         HintText {text: UiState.model-id;}
                         HorizontalLayout {
@@ -518,10 +518,12 @@ export component SettingsView inherits Rectangle {
                         }
                         BodyText {text: "モデルID";}
                         HorizontalLayout {
-                            LineEdit {text <=> UiState.model-id; accessible-label: "モデルID"; placeholder-text: "モデルIDを直接入力"; enabled: root.active && UiState.provider-ready; horizontal-stretch: 1; edited => {UiState.host-dirty=true; UiState.connection-matches-provider=false;}}
+                            LineEdit {text <=> UiState.model-id; accessible-label: "モデルID"; placeholder-text: "モデルIDを直接入力"; enabled: root.active && UiState.provider-ready; horizontal-stretch: 1; edited => {UiState.host-dirty=true; UiState.model-changed();}}
                             if UiState.model-list-supported : QuietButton {icon-only: true; icon: Icons.reset; text: "モデル一覧を取得"; hint: "送信許可の疎通確認・モデル情報を有効にしてください"; enabled: root.active && UiState.connection-matches-provider; clicked => {UiState.fetch-models();}}
                         }
-                        if UiState.model-ids.length > 0 : ComboBox {model: UiState.model-ids; current-value <=> UiState.model-id; enabled: root.active && UiState.provider-ready; selected(value) => {UiState.host-dirty=true; UiState.connection-matches-provider=false;}}
+                        if UiState.model-ids.length > 0 : ComboBox {model: UiState.model-ids; current-value <=> UiState.model-id; enabled: root.active && UiState.provider-ready; selected(value) => {UiState.host-dirty=true; UiState.model-changed();}}
+                        HintText {text: UiState.model-info;}
+                        HintText {text: "モデル未選択でも接続を保存できます。資格情報・送信許可を登録してから一覧を取得してください。";}
                         if UiState.requires-credentials : HorizontalLayout {
                             spacing: 8px;
                             StatusBadge {icon: Icons.key; state: UiState.credential-state == 0 ? 0 : 1; label: UiState.credential-state == 1 ? "APIキー · 保存済み" : UiState.credential-state == 2 ? "APIキー · 今回のホスト起動中のみ保持" : "APIキー · 未登録";}

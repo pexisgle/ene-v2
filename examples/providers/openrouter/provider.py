@@ -29,6 +29,25 @@ def http(request_id, endpoint, path, body=None):
     emit(message)
 
 
+def model(entry, source):
+    metadata = {"source": source, "scope": "catalog"}
+    for key, value in (
+        ("context_window", entry.get("context_length")),
+        ("max_output_tokens", (entry.get("top_provider") or {}).get("max_completion_tokens")),
+    ):
+        if type(value) is int and 0 < value <= 2**64 - 1:
+            metadata[key] = value
+    architecture = entry.get("architecture") or {}
+    for key, value in (
+        ("input_modalities", architecture.get("input_modalities")),
+        ("output_modalities", architecture.get("output_modalities")),
+        ("supported_parameters", entry.get("supported_parameters")),
+    ):
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            metadata[key] = value
+    return {"id": entry["id"], "name": entry.get("name") or entry["id"], "metadata": metadata}
+
+
 active = None
 for line in sys.stdin.buffer:
     if len(line) > LIMIT or not line.endswith(b"\n"):
@@ -51,6 +70,7 @@ for line in sys.stdin.buffer:
                 raise ValueError("busy")
             request = message.get("request", message)
             active = {"id": message["request_id"], "kind": kind, "text": "",
+                      "source": request["endpoint"].rstrip("/") + "/models",
                       "decoder": codecs.getincrementaldecoder("utf-8")(), "reason": None}
             if kind == "list_models":
                 http(active["id"], request["endpoint"], "/models")
@@ -92,7 +112,7 @@ for line in sys.stdin.buffer:
                 if active["kind"] == "list_models":
                     data = json.loads(active["text"])["data"]
                     emit({"type": "models", "request_id": active["id"],
-                          "models": [{"id": m["id"], "name": m.get("name", m["id"])} for m in data]})
+                          "models": [model(m, active["source"]) for m in data]})
                 else:
                     emit({"type": "finished", "request_id": active["id"], "reason": active["reason"] or "incomplete"})
                 active = None

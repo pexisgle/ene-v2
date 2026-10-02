@@ -134,6 +134,10 @@ async fn official_responses_and_model_list_use_bearer_and_native_model_ids() {
     assert_eq!(models[0].id, MODEL);
     assert_eq!(models[0].name, MODEL);
     assert!(
+        models[0].metadata.is_none(),
+        "official /models does not expose limits or modalities"
+    );
+    assert!(
         fetch_models("fixture-key".into(), &format!("{base}/redirect"))
             .await
             .is_err()

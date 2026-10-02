@@ -129,14 +129,38 @@ async fn model_listing_cancellation_and_failure_release_request_state() {
     let http = plugin.receive().await;
     assert_eq!(http["url"], "https://openrouter.ai/api/v1/models");
     assert_eq!(http["method"], "GET");
-    let models = "{\"data\":[{\"id\":\"a\",\"name\":\"日本\"},{\"id\":\"b\"}]}";
+    let models = json!({"data":[{"id":"a", "name":"日本", "context_length":131072,
+        "top_provider":{"max_completion_tokens":8192},
+        "architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},
+        "supported_parameters":["tools","max_tokens"]}, {"id":"b"}]})
+    .to_string();
     for chunk in models.as_bytes().chunks(2) {
         plugin.response("models", chunk, false).await;
     }
     plugin.response("models", &[], true).await;
     assert_eq!(
         plugin.receive().await,
-        json!({"type":"models", "request_id":"models", "models":[{"id":"a","name":"日本"},{"id":"b","name":"b"}]})
+        json!({"type":"models", "request_id":"models", "models":[
+            {"id":"a","name":"日本","metadata":{"source":"https://openrouter.ai/api/v1/models", "scope":"catalog",
+                "context_window":131072,"max_output_tokens":8192,"input_modalities":["text","image"],
+                "output_modalities":["text"],"supported_parameters":["tools","max_tokens"]}},
+            {"id":"b","name":"b","metadata":{"source":"https://openrouter.ai/api/v1/models", "scope":"catalog"}}]})
+    );
+    // A later refresh discovers additions without changing the manifest.
+    plugin.send(json!({"type":"list_models", "request_id":"refresh", "endpoint":"https://openrouter.ai/api/v1", "options":{}})).await;
+    assert_eq!(plugin.receive().await["method"], "GET");
+    plugin.response("refresh", br#"{"data":[{"id":"new-model","context_length":null,"architecture":{"input_modalities":null}}]}"#, true).await;
+    let refreshed = plugin.receive().await;
+    assert_eq!(refreshed["models"][0]["id"], "new-model");
+    assert!(
+        refreshed["models"][0]["metadata"]
+            .get("context_window")
+            .is_none()
+    );
+    assert!(
+        refreshed["models"][0]["metadata"]
+            .get("input_modalities")
+            .is_none()
     );
     plugin.send(generation("bad")).await;
     assert_eq!(plugin.receive().await["type"], "http_request");

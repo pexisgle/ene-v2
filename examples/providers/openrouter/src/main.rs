@@ -2,7 +2,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ene_protocol::{
     ipc::{Reader, Writer},
-    provider::{Capabilities, HostMessage, MAX_LINE, Model, PluginMessage, VERSION},
+    provider::{Capabilities, HostMessage, MAX_LINE, Model, ModelMetadata, PluginMessage, VERSION},
 };
 use serde_json::{Value, json};
 
@@ -13,6 +13,7 @@ const MAX_MODELS: usize = 16 * 1024 * 1024;
 struct Active {
     id: String,
     models: bool,
+    source: String,
     pending: Vec<u8>,
     reason: Option<String>,
 }
@@ -36,6 +37,17 @@ impl Active {
                         Ok(Model {
                             id: id.into(),
                             name: m["name"].as_str().unwrap_or(id).into(),
+                            metadata: Some(ModelMetadata {
+                                source: self.source.clone(),
+                                context_window: m["context_length"].as_u64().filter(|v| *v > 0),
+                                max_output_tokens: m["top_provider"]["max_completion_tokens"]
+                                    .as_u64()
+                                    .filter(|v| *v > 0),
+                                input_modalities: strings(&m["architecture"]["input_modalities"]),
+                                output_modalities: strings(&m["architecture"]["output_modalities"]),
+                                supported_parameters: strings(&m["supported_parameters"]),
+                                ..Default::default()
+                            }),
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -228,11 +240,20 @@ impl Provider {
         self.active = Some(Active {
             id,
             models,
+            source: format!("{}{path}", endpoint.trim_end_matches('/')),
             pending: Vec::new(),
             reason: None,
         });
         Ok(vec![output])
     }
+}
+
+fn strings(value: &Value) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned))
+        .collect()
 }
 
 #[tokio::main(flavor = "current_thread")]

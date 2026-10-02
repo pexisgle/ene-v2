@@ -28,6 +28,7 @@ pub fn descriptor() -> Descriptor {
         models: vec![Model {
             id: MODEL.into(),
             name: MODEL.into(),
+            metadata: None,
         }],
         capabilities: Capabilities {
             streaming_text: true,
@@ -138,6 +139,7 @@ async fn fetch_models(secret: String, endpoint: &str) -> Result<Vec<Model>> {
             Ok(Model {
                 id: id.into(),
                 name: id.into(),
+                metadata: None,
             })
         })
         .collect()

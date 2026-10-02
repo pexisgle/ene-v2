@@ -28,15 +28,16 @@ pub enum Command {
         provider: String,
         enabled: bool,
     },
-    Models,
-    Credential(String),
-    EnvironmentCredential,
-    RevokeCredential,
+    Models(String),
+    Credential(String, String),
+    EnvironmentCredential(String),
+    RevokeCredential(String),
     Permission {
+        connection: String,
         conversation: bool,
         check: bool,
     },
-    Check,
+    Check(String),
     Companion {
         name: String,
         mind: String,
@@ -52,7 +53,7 @@ pub enum Event {
     Done(String, bool),
     Older(Page<Message>),
     Providers(Vec<ene_api_types::provider::ProviderInfo>),
-    Models(Vec<ene_api_types::provider::Model>),
+    Models(String, Vec<ene_api_types::provider::Model>),
 }
 pub struct Controller {
     commands: channel::UnboundedSender<Command>,

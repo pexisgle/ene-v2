@@ -33,6 +33,7 @@ export global UiState {
     in-out property <string> host-feedback;
     in-out property <bool> host-feedback-error;
     in-out property <bool> connection-configured;
+    in-out property <string> selected-connection-id;
     in-out property <bool> connection-matches-provider;
     in-out property <int> credential-state;
     in-out property <string> conversation-error;
@@ -53,6 +54,8 @@ export global UiState {
     in-out property <string> provider-endpoint;
     in-out property <string> model-id;
     in-out property <[string]> model-ids;
+    in-out property <string> model-info;
+    callback model-changed;
     in-out property <[ProviderField]> provider-fields;
     in-out property <string> environment-variable;
     in-out property <bool> requires-credentials;

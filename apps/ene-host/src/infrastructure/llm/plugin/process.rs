@@ -177,19 +177,9 @@ async fn run(
             return Err(broken());
         }
         if models && !capabilities.model_list {
-            out.send(Ok(Output::Models(
-                bundle
-                    .manifest
-                    .models
-                    .iter()
-                    .map(|m| Model {
-                        id: m.id.clone(),
-                        name: m.name.clone(),
-                    })
-                    .collect(),
-            )))
-            .await
-            .map_err(|_| broken())?;
+            out.send(Ok(Output::Models(bundle.manifest.models.clone())))
+                .await
+                .map_err(|_| broken())?;
             return Ok(());
         }
         process.write(&request).await?;
@@ -215,7 +205,7 @@ async fn run(
               match message{
                PluginMessage::Delta{request_id,text} if !models&&request_id==input.id=>{if text.len()>128_000{return Err(broken());}out.send(Ok(Output::Event(Event::Delta(text)))).await.map_err(|_|broken())?;},
                PluginMessage::Finished{request_id,reason} if !models&&request_id==input.id=>{out.send(Ok(Output::Event(Event::Finished(reason)))).await.map_err(|_|broken())?;return Ok(());},
-               PluginMessage::Models{request_id,models:list} if models&&request_id==input.id=>{if list.len()>4096||list.iter().any(|m|m.id.is_empty()||m.id.len()>512||m.name.len()>512){return Err(broken());}out.send(Ok(Output::Models(list.into_iter().map(|m|Model{id:m.id,name:m.name}).collect()))).await.map_err(|_|broken())?;return Ok(());},
+               PluginMessage::Models{request_id,models:list} if models&&request_id==input.id=>{if list.len()>4096||list.iter().any(|m|m.id.is_empty()||m.id.len()>512||m.name.len()>512){return Err(broken());}out.send(Ok(Output::Models(list))).await.map_err(|_|broken())?;return Ok(());},
                request@PluginMessage::HttpRequest{..}=>{
                 let PluginMessage::HttpRequest{ref http_id,..}=request else{unreachable!()};
                 if http||http_ids.len()>=8||!http_ids.insert(http_id.clone()){return Err(broken());}

@@ -14,7 +14,7 @@
   "settings": [
     {
       "key": "upstream",
-      "label": "実処理プロバイダー",
+      "label": "\u5b9f\u51e6\u7406\u30d7\u30ed\u30d0\u30a4\u30c0\u30fc",
       "kind": "select",
       "required": true,
       "choices": [
@@ -23,7 +23,7 @@
     },
     {
       "key": "allow_fallbacks",
-      "label": "フォールバック",
+      "label": "\u30d5\u30a9\u30fc\u30eb\u30d0\u30c3\u30af",
       "kind": "boolean",
       "required": true
     }
@@ -35,12 +35,6 @@
   "destinations": [
     "https://openrouter.ai",
     "openai"
-  ],
-  "models": [
-    {
-      "id": "openai/gpt-6-luna",
-      "name": "openai/gpt-6-luna"
-    }
   ],
   "routing": {
     "type": "open_router",

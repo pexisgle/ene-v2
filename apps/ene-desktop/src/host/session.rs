@@ -163,7 +163,7 @@ async fn session(
                             replica = refreshed(&http, &snapshot, replica).await.map_err(|_| "履歴を再同期できません")?;
                             emit(projection(&snapshot, &replica));
                         }
-                        Some(Ok(Job::Action(Ok(ActionResult::Models(list)))))=>emit(Event::Models(list)),
+                        Some(Ok(Job::Action(Ok(ActionResult::Models(id,list)))))=>emit(Event::Models(id,list)),
                         Some(Ok(Job::Action(Ok(ActionResult::History(page))))) => {
                             for m in &page.items {
                                 replica.messages.entry(m.id.clone()).or_insert_with(|| m.clone());

@@ -573,6 +573,11 @@ async fn openapi_is_authenticated_and_documents_live_routes_and_schemas() {
         }
     }
     refs(&spec, &spec);
+    assert!(
+        spec["components"]["schemas"]["ModelMetadata"]["properties"]
+            .get("context_window")
+            .is_some()
+    );
     assert!(!spec.to_string().contains("private-token"));
 }
 

@@ -150,7 +150,7 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 | `PATCH /settings` | `revision`と変更する接続設定 | 更新した設定 | `revision_conflict`、参照の不整合は`state_conflict`、未対応アダプターは`unsupported_capability` |
 | `PUT /credentials/{connection_id}` | `secret`を登録。ローカルホストの環境変数を使う場合は代わりに`source: "environment"`（起動中のみ保持） | `credential_state` | 不明な接続は`not_found` |
 | `DELETE /credentials/{connection_id}` | 秘密情報を解除 | `204`。以後の認証付き外部要求も禁止 | 共通エラー |
-| `GET /connections/{connection_id}/models` | 任意の`companion_id`を確認し、LLM接続先のモデル一覧を取得 | モデルID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
+| `GET /connections/{connection_id}/models` | 任意の`companion_id`を確認し、LLM接続先のモデル一覧を取得 | モデルID・表示名・任意のメタデータ（上限・形式・取得元）の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
 | `GET /connections/{connection_id}/voices` | `companion_id`を指定し、音声接続先の声一覧を取得 | 声ID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
 | `POST /connections/{connection_id}/check` | `companion_id`、`purpose`（`companion` / `task` / `speech`）、必要なモデルID・声IDで疎通確認 | 対応能力・確認結果。成功なら`last_check`を更新 | `permission_required`、`unsupported_capability`、外部障害 |
 | `GET /grants` | 現在の許可一覧。任意の`companion_id`で絞り込み | Grantの一覧 | 共通エラー |
@@ -179,6 +179,47 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 Grantの`companion_id`・操作対象・所在環境は変更せず、別の対象への許可は新規登録します。古い許可を別の対象へ読み替えません。許可を縮小した場合も、禁止された操作に依存するTaskは停止処理へ移します。参照できる部分だけを根拠に、許可不足の変更を続けません。
 
 LLMプロバイダーの`options`は各実装が検証する非秘密JSONです。設定項目は文字列・数値・選択・真偽値だけを宣言し、UIコードは受け取りません。プラグインmanifest・初期化・モデル一覧・生成差分・終了・取消・broker HTTPの型は`ene-protocol::provider`に定義します。初期認証方式は認証なし・Bearer・固定ヘッダー・クエリで、OAuth・署名方式は未対応です。brokerはホスト側の接続・生成・用途の文脈で現在の許可を検査し、キー自体はプラグインへ渡しません。未許可の送信先・転送・リダイレクトを拒否し、OpenRouterの配信先・フォールバック禁止もホストが強制します。プラグイン実装のrevisionも送信許可のfingerprintに含めます。
+
+### モデル一覧とメタデータ
+
+モデル一覧は`GET /v1/connections/{connection_id}/models`で取得します。組込アダプターまたはプラグインが、その接続先の`/models`などを呼び出して現在の一覧を返します。manifestの`models`は任意です。`capabilities.model_list: true`のプラグインでは、取得結果を正本とし、manifestの列挙で絞り込んだり合成したりしません。`false`の場合だけ、任意の静的一覧を代替として使います。モデル追加のためにmanifestやホストを更新する必要はありません。IDの直接入力も利用できます。
+
+プラグインは既存の`list_models {request_id, endpoint, options}`を受け、HTTP broker経由で一覧や必要な詳細APIを取得し、`models {request_id, models}`を1回返します。詳細APIが別にあるサービスでは、同じ取得処理内で必要な情報を正規化できます。HTTPは直列・最大8要求、全体は30秒、返信は改行込み1MiB・最大4096モデルです。件数が多い場合も全モデルへ個別要求を出さず、情報が不足する項目は省略します。新しいメッセージ種別や定期取得は追加しません。外部カタログを使う実装もbrokerの送信先宣言・現在の許可に従い、取得元を`source`へ記載します。ホストが別サービスへ自動問い合わせすることはありません。
+
+モデルの共通応答は次の形です。Rustでは`ene_api_types::provider::Model`と`ModelMetadata`を使い、プラグイン向けには`ene_protocol::provider`から再公開します。REST、Rustクライアント、OpenAPIも同じ型です。
+
+```json
+{
+  "id": "example/model",
+  "name": "Example Model",
+  "metadata": {
+    "source": "https://provider.example/api/v1/models",
+    "scope": "catalog",
+    "context_window": 131072,
+    "max_output_tokens": 8192,
+    "input_modalities": ["text", "image"],
+    "output_modalities": ["text"],
+    "supported_parameters": ["tools", "max_tokens"]
+  }
+}
+```
+
+| 項目 | 意味 |
+| --- | --- |
+| `id` / `name` | APIへ送るモデルID / 表示名。表示名がなければIDを使う |
+| `metadata` | 任意。未取得なら省略または`null`。古いv1プラグインのID・名前だけの応答も受け入れる |
+| `source` | 情報を取得したAPIまたは一次カタログのURL。資格情報を含めない |
+| `scope` | `catalog`はモデルカタログの公表値、`route`は現在の接続・ルーティング条件で取得した値 |
+| `context_window` | 公表されたコンテキスト上限（tokens）。入力と出力の扱いは提供元の定義に従う |
+| `max_output_tokens` | 公表された出力上限（tokens） |
+| `input_modalities` / `output_modalities` | `text`、`image`、`audio`など、提供元が報告した形式。未知の文字列も保持する |
+| `supported_parameters` | `tools`など、提供元が報告したパラメーター名 |
+
+取得できない項目は省略または`null`とし、「不明」と表示します。空配列は提供元が明示した対応項目なしを表します。未知の上限を0や無制限に置き換えたり、モデルIDの文字列から能力を推測したりしません。カタログ値は利用可能な配信先・アカウント・リクエスト条件によって変わり、モデルの存在だけでは生成APIや現在のルートでの利用成功を保証しません。メタデータは選択時の情報であり、eneの入力対応やトークン消費の実測を表すものではありません。現在の対話入力はテキストです。
+
+組込OpenAIは[公式`/models`](https://developers.openai.com/api/reference/resources/models/methods/list)から一覧を取得します。このAPIにはコンテキスト上限や入力形式がないため、`metadata`は未取得とします。公式モデル資料などの別情報源を扱う実装を追加する場合も、取得元・対象モデル・ルートの適用範囲を確認して同じ任意項目へ返します。OpenRouterのRust/Python例は[`/models`のプロパティ](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties)から`context_length`、`top_provider.max_completion_tokens`、`architecture`の入出力形式、`supported_parameters`を読み取ります。`top_provider`は例のOpenAI固定ルートと一致する保証がないため、全項目を`scope: catalog`として返します。
+
+デスクトップでは、モデル未選択のまま接続を保存し、資格情報と「疎通確認・モデル情報」の送信許可を登録してから一覧を取得できます。モデル選択後に保存するとCompanionのモデル割当を更新します。モデルが空の場合は既存の割当を変更しません。取得結果は選択中の接続にだけ反映し、選択モデルの上限・入出力形式・情報源を表示します。一覧は画面の取得操作ごとに更新し、取得失敗を空一覧の成功として扱いません。
 
 ## リアルタイム通信
 

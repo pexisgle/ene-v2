@@ -29,6 +29,7 @@ pub struct Manifest {
     pub headers: BTreeMap<String, String>,
     pub environment_variable: Option<String>,
     pub destinations: Vec<String>,
+    /// Optional offline hints; ListModels results are authoritative when supported.
     #[serde(default)]
     pub models: Vec<Model>,
 }
@@ -42,7 +43,9 @@ pub enum AuthProfile {
     Query { name: String },
 }
 
-pub use ene_api_types::provider::{Capabilities, Model, ProviderInfo, SettingField, SettingKind};
+pub use ene_api_types::provider::{
+    Capabilities, MetadataScope, Model, ModelMetadata, ProviderInfo, SettingField, SettingKind,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenerationRequest {
@@ -67,6 +70,8 @@ pub enum HostMessage {
         request_id: String,
         protocol_version: u32,
     },
+    /// Discover current models and optional metadata through the host HTTP broker.
+    /// Unknown limits/modalities must be omitted; never infer them from model IDs.
     ListModels {
         request_id: String,
         endpoint: String,

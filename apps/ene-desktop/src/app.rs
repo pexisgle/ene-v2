@@ -16,6 +16,7 @@ use std::{
 pub struct Application {
     host: RefCell<Option<crate::host::Controller>>,
     providers: RefCell<Vec<ene_api_types::provider::ProviderInfo>>,
+    models: RefCell<Vec<ene_api_types::provider::Model>>,
     pub settings: RefCell<settings::State>,
     pub messages: Rc<VecModel<ChatEntry>>,
     path: PathBuf,
@@ -36,6 +37,7 @@ impl Application {
         let app = Rc::new(Self {
             host: RefCell::new(None),
             providers: RefCell::new(vec![]),
+            models: RefCell::new(vec![]),
             settings: RefCell::new(settings::State::new(initial)),
             messages: Rc::new(VecModel::default()),
             path,
@@ -153,7 +155,12 @@ impl Application {
                 app.project_provider(&ui, index, true);
                 ui.global::<UiState>()
                     .set_connection_matches_provider(false);
-                ui.global::<UiState>().set_host_dirty(true);
+                let state = ui.global::<UiState>();
+                state.set_selected_connection_id("".into());
+                state.set_credential_state(0);
+                state.set_allow_conversation(false);
+                state.set_allow_check(false);
+                state.set_host_dirty(true);
             }
         });
         host_action!(on_configure_host, |ui: &AppWindow| {
@@ -191,27 +198,43 @@ impl Application {
                 enabled: !s.get_provider_ready(),
             }
         });
-        host_action!(on_fetch_models, |_| crate::host::Command::Models);
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.global::<UiState>().on_model_changed(move || {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                app.project_model_info(&ui);
+            }
+        });
+        host_action!(on_fetch_models, |ui: &AppWindow| {
+            crate::host::Command::Models(ui.global::<UiState>().get_selected_connection_id().into())
+        });
         host_action!(on_register_credential, |ui: &AppWindow| {
             let state = ui.global::<UiState>();
             let secret = state.get_api_key().to_string();
             state.set_api_key("".into());
-            crate::host::Command::Credential(secret)
+            crate::host::Command::Credential(state.get_selected_connection_id().into(), secret)
         });
-        host_action!(on_environment_credential, |_| {
-            crate::host::Command::EnvironmentCredential
+        host_action!(on_environment_credential, |ui: &AppWindow| {
+            crate::host::Command::EnvironmentCredential(
+                ui.global::<UiState>().get_selected_connection_id().into(),
+            )
         });
-        host_action!(on_revoke_credential, |_| {
-            crate::host::Command::RevokeCredential
+        host_action!(on_revoke_credential, |ui: &AppWindow| {
+            crate::host::Command::RevokeCredential(
+                ui.global::<UiState>().get_selected_connection_id().into(),
+            )
         });
         host_action!(on_save_permissions, |ui: &AppWindow| {
             let state = ui.global::<UiState>();
             crate::host::Command::Permission {
+                connection: state.get_selected_connection_id().into(),
                 conversation: state.get_allow_conversation(),
                 check: state.get_allow_check(),
             }
         });
-        host_action!(on_check_connection, |_| crate::host::Command::Check);
+        host_action!(on_check_connection, |ui: &AppWindow| {
+            crate::host::Command::Check(ui.global::<UiState>().get_selected_connection_id().into())
+        });
         host_action!(on_save_companion, |ui: &AppWindow| {
             let state = ui.global::<UiState>();
             crate::host::Command::Companion {
@@ -705,6 +728,10 @@ impl Application {
         };
         let state = ui.global::<UiState>();
         let changed = state.get_provider_id() != p.id;
+        if changed || reset {
+            self.models.replace(p.models.clone());
+            state.set_model_info("モデル情報は未取得です".into());
+        }
         state.set_provider_index(index);
         state.set_provider_id(p.id.clone().into());
         state.set_provider_name(p.name.clone().into());
@@ -716,7 +743,10 @@ impl Application {
         state.set_environment_variable(p.environment_variable.clone().unwrap_or_default().into());
         state.set_model_list_supported(p.capabilities.model_list && p.state == "ready");
         state.set_destinations(p.destinations.join(" → ").into());
-        if changed || reset || state.get_provider_fields().row_count() == 0 {
+        if changed
+            || reset
+            || (!p.settings.is_empty() && state.get_provider_fields().row_count() == 0)
+        {
             if changed || reset || state.get_provider_endpoint().is_empty() {
                 state.set_provider_endpoint(p.endpoint.clone().into());
             }
@@ -778,6 +808,43 @@ impl Application {
             );
         }
     }
+    fn project_model_info(&self, ui: &AppWindow) {
+        let state = ui.global::<UiState>();
+        let models = self.models.borrow();
+        let info = models
+            .iter()
+            .find(|m| m.id == state.get_model_id().as_str())
+            .and_then(|m| m.metadata.as_ref());
+        let text = if let Some(info) = info {
+            let tokens = |v: Option<u64>| {
+                v.map(|v| format!("{v} tokens"))
+                    .unwrap_or_else(|| "不明".into())
+            };
+            let formats = |v: &Option<Vec<String>>| {
+                v.as_ref()
+                    .map(|v| v.join(", "))
+                    .unwrap_or_else(|| "不明".into())
+            };
+            let scope = match info.scope {
+                ene_api_types::provider::MetadataScope::Catalog => {
+                    "カタログ値（接続先ごとに異なる場合があります）"
+                }
+                ene_api_types::provider::MetadataScope::Route => "接続先の値",
+            };
+            format!(
+                "コンテキスト: {} / 出力上限: {}\n入力: {} / 出力: {}\n{} · {}",
+                tokens(info.context_window),
+                tokens(info.max_output_tokens),
+                formats(&info.input_modalities),
+                formats(&info.output_modalities),
+                scope,
+                info.source
+            )
+        } else {
+            "モデル情報は未取得、または提供元が公開していません".into()
+        };
+        state.set_model_info(text.into());
+    }
     fn drain_host(&self, ui: &AppWindow) {
         use crate::host::Event;
         let state = ui.global::<UiState>();
@@ -807,15 +874,23 @@ impl Application {
                     drop(providers);
                     self.project_provider(ui, index, !state.get_host_dirty() && current.is_empty());
                 }
-                Event::Models(list) => {
+                Event::Models(id, list) => {
+                    if id != state.get_selected_connection_id().as_str()
+                        || !state.get_connection_matches_provider()
+                    {
+                        continue;
+                    }
                     state.set_model_ids(
                         Rc::new(VecModel::from(
-                            list.into_iter()
-                                .map(|m| m.id.into())
+                            list.iter()
+                                .map(|m| m.id.clone().into())
                                 .collect::<Vec<slint::SharedString>>(),
                         ))
                         .into(),
                     );
+                    self.models.replace(list);
+                    self.project_model_info(ui);
+                    state.set_host_feedback("モデル一覧・情報を取得しました".into());
                 }
                 Event::View(snapshot, messages) => {
                     let Some(c) = snapshot.companions.first() else {
@@ -834,13 +909,24 @@ impl Application {
                     );
                     state.set_connection_configured(!snapshot.settings.connections.is_empty());
                     let assignment = c.model_assignments.companion.as_ref();
-                    let selected = assignment.and_then(|a| {
-                        snapshot
-                            .settings
-                            .connections
-                            .iter()
-                            .find(|p| p.id == a.connection_id)
-                    });
+                    let selected = snapshot
+                        .settings
+                        .connections
+                        .iter()
+                        .find(|p| p.adapter == state.get_provider_id().as_str())
+                        .or_else(|| {
+                            assignment.and_then(|a| {
+                                snapshot
+                                    .settings
+                                    .connections
+                                    .iter()
+                                    .find(|p| p.id == a.connection_id)
+                            })
+                        })
+                        .or_else(|| snapshot.settings.connections.first());
+                    state.set_selected_connection_id(
+                        selected.map(|p| p.id.clone()).unwrap_or_default().into(),
+                    );
                     state.set_connection_matches_provider(selected.is_some_and(|p| {
                         p.adapter == state.get_provider_id().as_str()
                             && p.endpoint == state.get_provider_endpoint().as_str()
@@ -867,6 +953,7 @@ impl Application {
                         state.set_provider_endpoint(p.endpoint.clone().into());
                         state.set_model_id(
                             assignment
+                                .filter(|a| a.connection_id == p.id)
                                 .map(|a| a.model_id.as_str())
                                 .unwrap_or_default()
                                 .into(),
@@ -887,18 +974,16 @@ impl Application {
                     if !state.get_host_dirty() {
                         state.set_companion_name(c.name.clone().into());
                         state.set_companion_mind(c.mind.clone().into());
-                        state.set_allow_conversation(
-                            snapshot
-                                .grants
-                                .iter()
-                                .any(|g| g.status == "active" && g.purpose == "conversation"),
-                        );
-                        state.set_allow_check(
-                            snapshot
-                                .grants
-                                .iter()
-                                .any(|g| g.status == "active" && g.purpose == "connection_check"),
-                        );
+                        state.set_allow_conversation(snapshot.grants.iter().any(|g| {
+                            g.status == "active"
+                                && g.purpose == "conversation"
+                                && selected.is_some_and(|p| p.id == g.connection_id)
+                        }));
+                        state.set_allow_check(snapshot.grants.iter().any(|g| {
+                            g.status == "active"
+                                && g.purpose == "connection_check"
+                                && selected.is_some_and(|p| p.id == g.connection_id)
+                        }));
                     }
                     if !state.get_host_dirty() {
                         state.set_connection_matches_provider(selected.is_some_and(|p| {
@@ -906,6 +991,7 @@ impl Application {
                                 && p.endpoint == state.get_provider_endpoint().as_str()
                         }));
                     }
+                    self.project_model_info(ui);
                     let entries = messages
                         .into_iter()
                         .map(|m| {
