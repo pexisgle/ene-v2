@@ -17,7 +17,7 @@ use bevy::{
     },
 };
 use bevy_vrm1::prelude::*;
-use ene_shared::avatar::{AvatarSettings, MotionState};
+use ene_protocol::avatar::{AvatarSettings, MotionState};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -241,7 +241,7 @@ impl Renderer {
             capture_sequence: 0,
         };
         if let Err(message) = renderer.configure(settings) {
-            crate::emit(ene_shared::avatar::AvatarEvent::Error { message });
+            crate::emit(ene_protocol::avatar::AvatarEvent::Error { message });
         }
         Ok(renderer)
     }
@@ -359,7 +359,7 @@ impl Renderer {
             }
             Err(error) => {
                 self.motion_failed = true;
-                crate::emit(ene_shared::avatar::AvatarEvent::MotionError {
+                crate::emit(ene_protocol::avatar::AvatarEvent::MotionError {
                     message: format!("モーションを読めません: {error}"),
                 });
             }
@@ -561,7 +561,7 @@ impl Renderer {
             if let Some(LoadState::Failed(error)) =
                 world.resource::<AssetServer>().get_load_state(handle.id())
             {
-                crate::emit(ene_shared::avatar::AvatarEvent::MotionError {
+                crate::emit(ene_protocol::avatar::AvatarEvent::MotionError {
                     message: format!("VRMAを読めません: {error}"),
                 });
                 self.motion_failed = true;
@@ -569,7 +569,7 @@ impl Renderer {
                 return;
             }
             if self.motion_started_at.elapsed() > std::time::Duration::from_secs(90) {
-                crate::emit(ene_shared::avatar::AvatarEvent::MotionError {
+                crate::emit(ene_protocol::avatar::AvatarEvent::MotionError {
                     message: "モーションの読み込みが90秒以内に完了しませんでした。".into(),
                 });
                 self.motion_failed = true;
@@ -580,7 +580,7 @@ impl Renderer {
                 let Some((hips, axes)) =
                     crate::motion::MotionAxes::from_world(world, self.model, *entity)
                 else {
-                    crate::emit(ene_shared::avatar::AvatarEvent::MotionError {
+                    crate::emit(ene_protocol::avatar::AvatarEvent::MotionError {
                         message: "モーションの骨格の基準を取得できません。".into(),
                     });
                     self.motion_failed = true;

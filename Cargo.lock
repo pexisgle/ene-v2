@@ -2321,7 +2321,7 @@ dependencies = [
  "bevy_vrm1",
  "binrw",
  "clap",
- "ene-shared",
+ "ene-protocol",
  "futures-util",
  "gltf-json",
  "raw-window-handle",
@@ -2343,7 +2343,7 @@ dependencies = [
  "ashpd",
  "atomic-write-file",
  "clap",
- "ene-shared",
+ "ene-protocol",
  "futures-util",
  "ksni",
  "rustix 1.1.5",
@@ -2354,6 +2354,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "xdg",
  "zbus",
 ]
 
@@ -2362,7 +2363,7 @@ name = "ene-host"
 version = "0.1.0"
 
 [[package]]
-name = "ene-shared"
+name = "ene-protocol"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -2372,7 +2373,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
- "xdg",
 ]
 
 [[package]]

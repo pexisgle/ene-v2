@@ -1,5 +1,5 @@
 //! Nonblocking owned standard-stream FDs; no Tokio blocking-stdin thread.
-use ene_shared::{
+use ene_protocol::{
     avatar::{AvatarEvent, AvatarRequest},
     ipc::{Reader, Writer},
 };
@@ -105,7 +105,7 @@ impl Ipc {
                         while let Some(event) = outgoing.recv().await {
                             output.send(&event).await?;
                         }
-                        Ok::<_, ene_shared::ipc::Error>(())
+                        Ok::<_, ene_protocol::ipc::Error>(())
                     });
                     let input = async {
                         if standalone {

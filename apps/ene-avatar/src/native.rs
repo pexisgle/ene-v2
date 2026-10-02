@@ -1,5 +1,5 @@
 use crate::mask::Run;
-use ene_shared::avatar::{AvatarEvent, AvatarSettings};
+use ene_protocol::avatar::{AvatarEvent, AvatarSettings};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,

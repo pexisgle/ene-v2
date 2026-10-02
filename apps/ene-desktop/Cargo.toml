@@ -20,7 +20,8 @@ futures-util.workspace = true
 rustix.workspace = true
 
 atomic-write-file = { version = "0.3", features = ["unnamed-tmpfile"] }
-ene-shared = { path = "../../crates/ene-shared" }
+ene-protocol = { path = "../../crates/ene-protocol", features = ["ipc"] }
+xdg = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit-wayland", "renderer-femtovg-wgpu"] }

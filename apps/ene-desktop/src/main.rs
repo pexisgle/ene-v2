@@ -1,6 +1,7 @@
 mod avatar;
 mod chat;
 mod file_picker;
+mod platform;
 mod tray;
 
 use std::cell::RefCell;
@@ -317,7 +318,7 @@ fn bind_avatar(
     settings: &SettingsWindow,
     tray: &Rc<tray::Ui>,
 ) -> (Rc<avatar::Controller>, slint::Timer) {
-    use ene_shared::avatar::AvatarEvent;
+    use ene_protocol::avatar::AvatarEvent;
     let path = avatar::config_path();
     let initial = avatar::ClientSettings::load(&path).unwrap_or_else(|error| {
         eprintln!("{error}");
@@ -457,7 +458,7 @@ fn bind_avatar(
                     ui.set_motion_status(message.into());
                 }
                 AvatarEvent::MotionState { state } => {
-                    use ene_shared::avatar::MotionState;
+                    use ene_protocol::avatar::MotionState;
                     let status = match state {
                         MotionState::None if saved.borrow().avatar.motion.is_some() => None,
                         MotionState::None => Some("静止姿勢です。"),

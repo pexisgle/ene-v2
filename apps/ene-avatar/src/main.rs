@@ -9,7 +9,7 @@ mod pixels;
 mod renderer;
 mod telemetry;
 
-use ene_shared::avatar::{AvatarEvent, AvatarRequest, AvatarSettings, MotionState};
+use ene_protocol::avatar::{AvatarEvent, AvatarRequest, AvatarSettings, MotionState};
 use smithay_client_toolkit::{
     reexports::{calloop::EventLoop, calloop_wayland_source::WaylandSource},
     shell::WaylandSurface,

@@ -11,7 +11,7 @@
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | VRM 1.0の透明なWayland常駐表示 |
-| [`ene-shared`](crates/ene-shared/) | クライアントと描画プロセスの共通設定・IPC型 |
+| [`ene-protocol`](crates/ene-protocol/) | クライアントと描画プロセスの共通設定・IPC型 |
 
 ## 第1段階：Slint会話画面を試す
 

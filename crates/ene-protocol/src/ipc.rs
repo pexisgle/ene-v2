@@ -11,13 +11,15 @@ pub enum Error {
     Frame(#[from] tokio_util::codec::LinesCodecError),
     #[error("IPC JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("IPC line exceeds 64 KiB including newline")]
+    #[error("IPC line exceeds its size limit")]
     TooLong,
     #[error("IPC line is not terminated")]
     Unterminated,
 }
-#[derive(Default)]
-struct Codec(LinesCodec);
+struct Codec {
+    lines: LinesCodec,
+    max: usize,
+}
 impl Decoder for Codec {
     type Item = String;
     type Error = Error;
@@ -26,11 +28,11 @@ impl Decoder for Codec {
             .iter()
             .position(|b| *b == b'\n')
             .unwrap_or(bytes.len())
-            >= MAX_IPC_LINE
+            >= self.max
         {
             return Err(Error::TooLong);
         }
-        Ok(self.0.decode(bytes)?)
+        Ok(self.lines.decode(bytes)?)
     }
     fn decode_eof(&mut self, bytes: &mut bytes::BytesMut) -> Result<Option<String>, Error> {
         if let Some(line) = self.decode(bytes)? {
@@ -51,18 +53,25 @@ impl From<std::io::Error> for Error {
 impl Encoder<String> for Codec {
     type Error = Error;
     fn encode(&mut self, line: String, bytes: &mut bytes::BytesMut) -> Result<(), Error> {
-        if line.len() >= MAX_IPC_LINE {
+        if line.len() >= self.max {
             return Err(Error::TooLong);
         }
-        Ok(self.0.encode(line, bytes)?)
+        Ok(self.lines.encode(line, bytes)?)
     }
 }
 pub struct Reader<R>(FramedRead<R, Codec>);
 impl<R: AsyncRead + Unpin> Reader<R> {
     pub fn new(input: R) -> Self {
+        Self::with_limit(input, MAX_IPC_LINE)
+    }
+    pub fn with_limit(input: R, max: usize) -> Self {
+        assert!(max > 1);
         Self(FramedRead::new(
             input,
-            Codec(LinesCodec::new_with_max_length(MAX_IPC_LINE - 1)),
+            Codec {
+                lines: LinesCodec::new_with_max_length(max - 1),
+                max,
+            },
         ))
     }
     pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<Option<T>, Error> {
@@ -75,14 +84,21 @@ impl<R: AsyncRead + Unpin> Reader<R> {
 pub struct Writer<W>(FramedWrite<W, Codec>);
 impl<W: AsyncWrite + Unpin> Writer<W> {
     pub fn new(output: W) -> Self {
+        Self::with_limit(output, MAX_IPC_LINE)
+    }
+    pub fn with_limit(output: W, max: usize) -> Self {
+        assert!(max > 1);
         Self(FramedWrite::new(
             output,
-            Codec(LinesCodec::new_with_max_length(MAX_IPC_LINE - 1)),
+            Codec {
+                lines: LinesCodec::new_with_max_length(max - 1),
+                max,
+            },
         ))
     }
     pub async fn send<T: Serialize>(&mut self, message: &T) -> Result<(), Error> {
         let line = serde_json::to_string(message)?;
-        if line.len() >= MAX_IPC_LINE {
+        if line.len() >= self.0.encoder().max {
             return Err(Error::TooLong);
         }
         self.0.send(line).await?;
