@@ -5,10 +5,10 @@ mod settings;
 mod snapshot;
 
 use crate::api::state::App;
-use axum::Router;
+use utoipa_axum::router::OpenApiRouter;
 
-pub(super) fn router() -> Router<App> {
-    Router::new()
+pub(super) fn router() -> OpenApiRouter<App> {
+    OpenApiRouter::new()
         .nest("/companions", companions::router())
         .nest("/events", events::router())
         .nest("/grants", grants::router())

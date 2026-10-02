@@ -12,7 +12,9 @@
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | VRM 1.0の透明なWayland常駐表示 |
 | [`ene-core`](crates/ene-core/) | ホストの規則・処理手順と外部処理へのインターフェース |
-| [`ene-protocol`](crates/ene-protocol/) | クライアント・描画のIPC型、ホストAPI型と通知再同期 |
+| [`ene-api-types`](crates/ene-api-types/) | REST APIのDTO・OpenAPIスキーマ・通知同期規則 |
+| [`ene-api-client`](crates/ene-api-client/) | 型付きHTTP操作・認証付き通知WebSocket |
+| [`ene-protocol`](crates/ene-protocol/) | アバターIPC・プロバイダープラグインの通信型 |
 
 ## 第1段階：Slint会話画面を試す
 
@@ -131,3 +133,5 @@ Slintは[Royalty-free License 2.0](https://slint.dev/terms-and-conditions#slint-
 cargo run --release --locked -p ene-avatar -- --standalone --model /path/to/avatar.vrm --motion /path/to/motion.vrma
 # 一度だけ再生する場合は --no-loop を追加
 ```
+
+ホストの実装済みAPIは、認証付き`GET /v1/openapi.json`で取得できます。`cargo run --locked -p ene-host -- --print-openapi`はDBを開かずOpenAPI 3.1 JSONを出力します。Axumのルート登録と`ene-api-types`から生成し、型付きHTTP・通知WebSocketは`ene-api-client`で利用できます。

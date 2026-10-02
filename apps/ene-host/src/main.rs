@@ -11,11 +11,22 @@ use tokio::net::TcpListener;
     about = "ene local host",
     long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. Chat is not enabled yet."
 )]
-struct Args {}
+struct Args {
+    /// Export the generated OpenAPI contract without starting a host or opening its database.
+    #[arg(long)]
+    print_openapi: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let _args = Args::parse();
+    let args = Args::parse();
+    if args.print_openapi {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&api::openapi::specification())?
+        );
+        return Ok(());
+    }
     let (runtime, app) = bootstrap::initialize().await?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;

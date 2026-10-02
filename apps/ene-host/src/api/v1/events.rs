@@ -1,24 +1,33 @@
 use crate::api::state::App;
 use axum::{
-    Router,
     extract::{
         State, WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
     },
     response::Response,
-    routing::get,
 };
 use futures_util::SinkExt;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::broadcast;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
-pub(super) fn router() -> Router<App> {
-    Router::new().route("/", get(events))
+pub(super) fn router() -> OpenApiRouter<App> {
+    OpenApiRouter::new().routes(routes!(events))
 }
 
-async fn events(State(app): State<App>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| stream(app, socket))
+#[utoipa::path(get, path = "/", tag = "events",
+    responses((status = 101, description = "WebSocket upgrade; ready → snapshot → ordered notifications. See x-ene-events."))
+)]
+async fn events(
+    State(app): State<App>,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Result<Response, crate::api::error::ApiError> {
+    let ws = ws.map_err(|_| crate::api::error::ApiError::invalid())?;
+    Ok(ws
+        .max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .on_upgrade(move |socket| stream(app, socket)))
 }
 async fn send(socket: &mut WebSocket, value: Value) -> bool {
     let Ok(text) = serde_json::to_string(&value) else {
@@ -41,7 +50,7 @@ async fn stream(app: App, mut socket: WebSocket) {
     let subscription = app.application.subscribe().await;
     let id = subscription.id;
     let mut notifications = subscription.receiver;
-    let cursor = ene_protocol::host::Cursor {
+    let cursor = ene_api_types::host::Cursor {
         epoch: subscription.cursor.epoch,
         seq: subscription.cursor.seq,
     };

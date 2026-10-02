@@ -10,6 +10,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+utoipa = { version = "5.4", features = ["axum_extras"] }
+utoipa-axum = "0.2"
+ene-api-types = { path = "../../crates/ene-api-types", features = ["openapi"] }
 ene-core = { path = "../../crates/ene-core" }
 xdg = "3"
 clap.workspace = true
@@ -28,5 +31,6 @@ tokio-rusqlite = { version = "0.8", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ene-api-client = { path = "../../crates/ene-api-client" }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

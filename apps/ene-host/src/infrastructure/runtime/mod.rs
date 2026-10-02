@@ -1,6 +1,6 @@
 pub mod paths;
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
-use ene_protocol::host::RuntimeConnection;
+use ene_api_types::host::RuntimeConnection;
 use rustix::fs::{AtFlags, Mode, OFlags};
 use std::{
     fs::{self, File, Metadata},
