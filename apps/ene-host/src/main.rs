@@ -1,52 +1,27 @@
 mod api;
 mod bootstrap;
 mod infrastructure;
-mod conversation;
-
-
-mod service;
-
 
 use clap::Parser;
-use std::{error::Error, path::PathBuf};
+use std::error::Error;
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
 #[command(
     about = "ene local host",
-    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. Configure OpenRouter through the authenticated local API."
+    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. ENE_PROVIDER_DIR overrides the runtime-installable provider plugin directory."
 )]
 struct Args {}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let _args = Args::parse();
-    let root = infrastructure::runtime::paths::runtime()?;
-    let runtime = runtime::Runtime::acquire(&root)?;
-    let state = if let Some(path) = std::env::var_os("ENE_HOST_STATE_DIR") {
-        PathBuf::from(path)
-    } else {
-        let state = infrastructure::runtime::paths::state();
-        if let Some(base) = state.parent() {
-            std::fs::create_dir_all(base)?;
-        }
-        state
-    };
-    runtime::private_directory(&state)?;
-    let database = state.join("host.sqlite3");
-    let file = runtime::private_file(&database)?;
-    drop(file);
-    let store = store::Store::open(database)
-        .await
-        .map_err(|_| "database initialization failed")?;
-    let app = app::App::new(store, runtime.token.clone());
-    service::initialize(&app)
-        .await
-        .map_err(|_| "credential initialization failed")?;
+    let (runtime, app) = bootstrap::initialize().await?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;
-    eprintln!("ene-host: loopback service ready (authenticated conversation host)");
+    eprintln!("ene-host: authenticated loopback service ready");
     let shutdown = app.shutdown.clone();
+    let application = app.application.clone();
     axum::serve(listener, api::router(app))
         .with_graceful_shutdown(async move {
             #[cfg(unix)]
@@ -63,6 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             shutdown.send_replace(true);
         })
         .await?;
+    application.stop().await;
     drop(runtime);
     Ok(())
 }

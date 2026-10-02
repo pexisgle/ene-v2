@@ -143,11 +143,14 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 
 | 操作 | 用途・主な要求 | 主な応答 | 固有の拒否条件 |
 | --- | --- | --- | --- |
+| `GET /providers` | 組込・発見済みプラグインの一覧 | ID・表示名・状態・宣言的な設定項目・認証入力方式・送信先・能力・実装revision | 秘密情報は返さない |
+| `POST /providers/reload` | ユーザーディレクトリを再走査 | Provider一覧。発見だけでは実行しない | 契約不一致・重複ID・不正設定を拒否 |
+| `PUT /providers/{provider_id}/enabled` | `{enabled: bool}`で起動中の有効化・無効化 | Provider一覧 | 隔離・初期化失敗時は利用可能にしない |
 | `GET /settings` | ホスト共通の接続設定の取得 | `revision`、Connection一覧。モデル割当はCompanionに保持 | 共通エラー |
 | `PATCH /settings` | `revision`と変更する接続設定 | 更新した設定 | `revision_conflict`、参照の不整合は`state_conflict`、未対応アダプターは`unsupported_capability` |
 | `PUT /credentials/{connection_id}` | `secret`を登録。ローカルホストの環境変数を使う場合は代わりに`source: "environment"`（起動中のみ保持） | `credential_state` | 不明な接続は`not_found` |
 | `DELETE /credentials/{connection_id}` | 秘密情報を解除 | `204`。以後の認証付き外部要求も禁止 | 共通エラー |
-| `GET /connections/{connection_id}/models` | `companion_id`を指定し、LLM接続先のモデル一覧を取得 | モデルID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
+| `GET /connections/{connection_id}/models` | 任意の`companion_id`を確認し、LLM接続先のモデル一覧を取得 | モデルID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
 | `GET /connections/{connection_id}/voices` | `companion_id`を指定し、音声接続先の声一覧を取得 | 声ID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
 | `POST /connections/{connection_id}/check` | `companion_id`、`purpose`（`companion` / `task` / `speech`）、必要なモデルID・声IDで疎通確認 | 対応能力・確認結果。成功なら`last_check`を更新 | `permission_required`、`unsupported_capability`、外部障害 |
 | `GET /grants` | 現在の許可一覧。任意の`companion_id`で絞り込み | Grantの一覧 | 共通エラー |
@@ -174,6 +177,8 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 設定画面から`question_id`なしで許可を変更した場合も、影響する未解決相談を同じ規則で再評価します。コンパニオンはホストが確定した許可成立を所属Taskへ伝えます。モデルの文章判断で相談を解決せず、クライアントからTaskへ再開命令を送りません。再開時にも現在の許可・Task状態を検証し、停止と競合した許可操作でTaskを再開しません。
 
 Grantの`companion_id`・操作対象・所在環境は変更せず、別の対象への許可は新規登録します。古い許可を別の対象へ読み替えません。許可を縮小した場合も、禁止された操作に依存するTaskは停止処理へ移します。参照できる部分だけを根拠に、許可不足の変更を続けません。
+
+LLMプロバイダーの`options`は各実装が検証する非秘密JSONです。設定項目は文字列・数値・選択・真偽値だけを宣言し、UIコードは受け取りません。プラグインmanifest・初期化・モデル一覧・生成差分・終了・取消・broker HTTPの型は`ene-protocol::provider`に定義します。初期認証方式は認証なし・Bearer・固定ヘッダー・クエリで、OAuth・署名方式は未対応です。brokerはホスト側の接続・生成・用途の文脈で現在の許可を検査し、キー自体はプラグインへ渡しません。未許可の送信先・転送・リダイレクトを拒否し、OpenRouterの配信先・フォールバック禁止もホストが強制します。プラグイン実装のrevisionも送信許可のfingerprintに含めます。
 
 ## リアルタイム通信
 

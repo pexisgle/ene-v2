@@ -1,4 +1,4 @@
-use crate::api::error::{ApiError, Error};
+use crate::api::error::ApiError;
 use axum::{
     extract::{FromRequest, FromRequestParts, Request},
     http::request::Parts,
@@ -31,13 +31,13 @@ where
     S: Send + Sync,
     T: DeserializeOwned,
 {
-    type Rejection = Error;
+    type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         axum::Json::<T>::from_request(request, state)
             .await
             .map(|body| Self(body.0))
-            .map_err(|_| Error::invalid())
+            .map_err(|_| ApiError::invalid())
     }
 }
 
@@ -45,7 +45,7 @@ where
 pub(super) struct IdempotencyKey(pub String);
 
 impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
-    type Rejection = Error;
+    type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let key = parts
@@ -53,7 +53,7 @@ impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
             .get("Idempotency-Key")
             .and_then(|value| value.to_str().ok())
             .filter(|value| !value.is_empty() && value.len() <= 200)
-            .ok_or_else(Error::invalid)?;
+            .ok_or_else(ApiError::invalid)?;
         Ok(Self(key.to_owned()))
     }
 }

@@ -21,12 +21,20 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
         .await
         .map_err(|_| "database initialization failed")?;
     let app = application(store, runtime.token.clone());
+    app.application
+        .initialize()
+        .await
+        .map_err(|_| "credential initialization failed")?;
     Ok((runtime, app))
 }
 
 pub fn application(store: Store, token: String) -> App {
     let shutdown = tokio::sync::watch::channel(false).0;
-    let application =
-        ene_core::application::HostApplication::new(std::sync::Arc::new(store), shutdown.clone());
+    let application = ene_core::application::HostApplication::new(
+        std::sync::Arc::new(store),
+        std::sync::Arc::new(super::infrastructure::llm::registry::Registry::discover()),
+        std::sync::Arc::new(super::infrastructure::credentials::Store),
+        shutdown.clone(),
+    );
     App::new(application, token, shutdown)
 }

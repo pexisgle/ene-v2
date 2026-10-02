@@ -12,9 +12,7 @@
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | VRM 1.0の透明なWayland常駐表示 |
 | [`ene-core`](crates/ene-core/) | ホストの規則・処理手順と外部処理へのインターフェース |
-| [`ene-api-types`](crates/ene-api-types/) | REST APIのDTO・OpenAPIスキーマ・通知同期規則 |
-| [`ene-api-client`](crates/ene-api-client/) | 型付きHTTP操作・認証付き通知WebSocket |
-| [`ene-protocol`](crates/ene-protocol/) | アバターIPC・プロバイダープラグインの通信型 |
+| [`ene-protocol`](crates/ene-protocol/) | ホストAPI・アバターIPC・プロバイダープラグインの通信契約と通知再同期 |
 
 ## 起動と検証
 
@@ -39,11 +37,28 @@ ENE_AVATAR_BIN="$PWD/target/release/ene-avatar" cargo run --locked -p ene-deskto
 
 ## ホストとのテキスト対話
 
-`just run-host`と、別の端末で`just connect-desktop`を起動します。ホスト選択から接続し、設定の「ホスト・接続」でOpenRouterとモデルを設定します。会話用・作業用の検証モデルは`openai/gpt-6-luna`、配信先はOpenAI限定、フォールバックは禁止です。次にAPIキーを登録します。ホストの`OPENROUTER_API_KEY`を使う操作も用意しています。環境変数由来のキーはホスト起動中だけ保持し、手入力のキーはOSのSecret Serviceへ保存します。ストアが使えなければ起動中だけ保持し、その状態を画面へ表示します。キーをクライアント設定・DB・取得API・ログへ保存しません。
+`just run-host`と、別の端末で`just connect-desktop`を起動します。ホスト選択から接続し、設定の「ホスト・接続」でプロバイダーを選び、接続先とモデルIDを保存します。組込OpenRouterでは、会話用・作業用の検証モデルは`openai/gpt-6-luna`、配信先はOpenAI限定、フォールバックは禁止です。次にAPIキーを登録します。ホストの`OPENROUTER_API_KEY`を使う操作も用意しています。環境変数由来のキーはホスト起動中だけ保持し、手入力のキーはOSのSecret Serviceへ保存します。ストアが使えなければ起動中だけ保持し、その状態を画面へ表示します。キーをクライアント設定・DB・取得API・ログへ保存しません。
 
-「権限とデータ」で会話送信と疎通確認の固定文送信を別々に許可し、保存します。許可後に「疎通確認」で実モデルの逐次応答を確認できます。対話は生成途中から表示し、クライアント再起動後も履歴を取得します。「過去の会話を読み込む」でさらに遡れます。通知購読→スナップショット→連番差分の順に同期し、欠番・epoch変更・Unicodeスカラーoffset不一致では購読をやり直します。再接続は1・2・4・8・15秒、受付が不明な発言は同じIdempotency-Keyで確認します。許可・資格情報の解除は生成を待たず新規送信を禁止し、返答を中断状態で保存します。ホスト再起動時の未完了生成・疎通確認は自動再実行しません。
+「権限とデータ」で会話送信と疎通確認・モデル情報の送受信を別々に許可し、保存します。許可後に「疎通確認」で実モデルの逐次応答を確認できます。対話は生成途中から表示し、クライアント再起動後も履歴を取得します。「過去の会話を読み込む」でさらに遡れます。通知購読→スナップショット→連番差分の順に同期し、欠番・epoch変更・Unicodeスカラーoffset不一致では購読をやり直します。再接続は1・2・4・8・15秒、受付が不明な発言は同じIdempotency-Keyで確認します。許可・資格情報の解除は生成を待たず新規送信を禁止し、返答を中断状態で保存します。ホスト再起動時の未完了生成・疎通確認は自動再実行しません。
 
 systemdユーザーサービスを使う場合は、`cargo build --release --locked -p ene-host`後にバイナリを`~/.local/bin/ene-host`、既存テンプレートを`~/.config/systemd/user/ene-host.service`へ配置し、`systemctl --user daemon-reload`と`systemctl --user enable --now ene-host`を実行します。APIキーは画面から登録でき、環境変数を利用する場合はサービス側に渡す必要があります。クライアント終了でホストを停止しません。
+
+## プロバイダープラグイン
+
+Linuxの`bubblewrap`が必要です（Debian系では`sudo apt-get install bubblewrap`）。`$XDG_DATA_HOME/ene/providers/`（既定`~/.local/share/ene/providers/`、`ENE_PROVIDER_DIR`で変更可能）の各フォルダに`manifest.json`と実装を配置します。発見だけでは実行しません。設定のプロバイダー一覧で再走査し、選択して有効化すると隔離環境で初期化します。有効化は現在のホスト起動中に適用され、再起動後には再度有効化します。接続設定・モデル割当・許可はDBに保存します。
+
+継続利用できる[OpenAI互換APIの実装例](examples/providers/openai-compatible/)を用意しています。例だけは`python3`も必要です。ホストの実行にPythonは不要です。
+
+```sh
+mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers"
+cp -r examples/providers/openai-compatible "${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers/"
+```
+
+有効化後に接続・モデル・資格情報を登録し、表示された送信先と用途を許可してください。例はOpenRouter経由・OpenAI限定・フォールバックなしです。別の送信先ではmanifestの接続先・送信先・認証方式を変更し、API形式に合わせて実装します。モデル一覧がない場合もモデルIDを直接入力できます。宣言した設定項目だけをUIで扱い、任意のUIコードは実行しません。
+
+プラグインは隔離した別プロセスで起動し、直接のネットワーク・ホストDB・資格情報・ホームへのアクセスを公開しません。資格情報はホストがHTTP brokerで付与します。初期認証方式は認証なし・Bearer・固定ヘッダー・クエリです。OAuth・署名方式は未対応です。APIバージョンなどの非秘密の固定ヘッダーはmanifestの`headers`で宣言します。外部通信は宣言したHTTPS送信先、または明示許可したHTTPループバックに限定し、リダイレクトを拒否します。OpenRouter仲介時の実処理先とフォールバック禁止はbrokerも強制します。隔離失敗時の無制限起動、別実装への自動切替、生成の自動再送はありません。
+
+通信はversion 1のNDJSON（改行込み1MiB、待ち行列16件、1生成あたりHTTPは直列・最大8要求）です。アバターIPCの64KiB制限とは分離しています。生成・モデル取得ごとにプロセスを起動し、終了時には停止を要求して3秒後に強制終了・回収します。取消・許可や資格情報の解除では通信を中断し、遅着応答を破棄します。実装・manifest・接続条件が変わった場合には再走査・有効化・送信許可の再設定が必要です。通信型とmanifestの契約は[`ene-protocol::provider`](crates/ene-protocol/src/provider.rs)に定義しています。
 
 ## Nixで開発する
 
@@ -100,7 +115,7 @@ justをインストールしている場合は、同じ検査を`just verify`で
 
 設定の「この端末」では外観、デスクトップ表示、ローカルVRM・VRMAを変更できます。「保存」で永続化してから反映し、設定画面に留まります。「変更を戻す」で最新の保存済み値へ戻ります。表示切替・中央へ戻す・描画の再起動は即時操作で、フォームの編集中の変更を保存しません。未保存の設定を残したまま終了する場合は、破棄するか画面へ戻るか選択します。
 
-「コンパニオン」で名前と口調、「ホスト・接続」でOpenRouter・モデル・資格情報、「権限とデータ」で用途ごとの送信許可を管理します。音声・フォルダ作業はまだ利用できません。設定の所有者と将来の音声操作については[デスクトップUI設計](docs/desktop-ui.md)を参照してください。
+「コンパニオン」で名前と口調、「ホスト・接続」でプロバイダー・モデル・資格情報、「権限とデータ」で用途ごとの送信許可を管理します。音声・フォルダ作業はまだ利用できません。設定の所有者と将来の音声操作については[デスクトップUI設計](docs/desktop-ui.md)を参照してください。
 
 ## VRMキャラクターの常駐表示
 
@@ -142,5 +157,3 @@ Slintは[Royalty-free License 2.0](https://slint.dev/terms-and-conditions#slint-
 cargo run --release --locked -p ene-avatar -- --standalone --model /path/to/avatar.vrm --motion /path/to/motion.vrma
 # 一度だけ再生する場合は --no-loop を追加
 ```
-
-ホストの実装済みAPIは、認証付き`GET /v1/openapi.json`で取得できます。`cargo run --locked -p ene-host -- --print-openapi`はDBを開かずOpenAPI 3.1 JSONを出力します。Axumのルート登録と`ene-api-types`から生成し、型付きHTTP・通知WebSocketは`ene-api-client`で利用できます。

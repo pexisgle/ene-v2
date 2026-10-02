@@ -487,7 +487,7 @@ export component SettingsView inherits Rectangle {
                             ActionButton {icon-only: true;icon: Icons.save; text: "名前と口調を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-companion();} }
                         }
                         BodyText {text: "モデル";}
-                        HintText {text: "openai/gpt-6-luna";}
+                        HintText {text: UiState.model-id;}
                     }
                     if UiState.category == 2 : VerticalLayout {
                         alignment: start;
@@ -495,26 +495,47 @@ export component SettingsView inherits Rectangle {
                         spacing: 10px;
                         HorizontalLayout {
                             spacing: 8px;
-                            StatusBadge {icon: Icons.connection; state: UiState.connection-configured ? 1 : 0; label: UiState.connection-configured ? "OpenRouter · 設定済み" : "OpenRouter · 未設定";}
-                            SectionTitle {text: "OpenRouter"; horizontal-stretch: 1; vertical-alignment: center;}
-                            ActionButton {icon-only: true; icon: Icons.settings; text: "OpenRouterとモデルを設定"; enabled: root.active && UiState.host-connected; clicked => {UiState.configure-host();}}
+                            StatusBadge {icon: Icons.connection; state: UiState.connection-matches-provider ? 1 : 0; label: UiState.connection-matches-provider ? "接続 · 設定済み" : "接続 · 未設定";}
+                            SectionTitle {text: "プロバイダー"; horizontal-stretch: 1; vertical-alignment: center;}
+                            ActionButton {icon-only: true; icon: Icons.settings; text: "接続とモデルを保存"; enabled: root.active && UiState.host-connected && UiState.provider-ready && UiState.model-id != ""; clicked => {UiState.configure-host();}}
                         }
-                        HintText {text: "openai/gpt-6-luna";}
-                        HintText {text: "OpenAI配信限定 · フォールバックなし";}
+                        HintText {text: UiState.model-id;}
                         HorizontalLayout {
+                            ComboBox {model: UiState.provider-names; current-index <=> UiState.provider-index; enabled: root.active && UiState.host-connected; horizontal-stretch: 1; selected(value) => {UiState.choose-provider(self.current-index);}}
+                            QuietButton {icon-only: true; icon: Icons.reset; text: "プラグインを再走査"; enabled: root.active && UiState.host-connected; clicked => {UiState.reload-providers();}}
+                            if UiState.provider-plugin : QuietButton {icon: Icons.connection; text: UiState.provider-ready ? "無効化" : "有効化"; enabled: root.active && UiState.host-connected; clicked => {UiState.toggle-provider();}}
+                        }
+                        StatusBadge {icon: Icons.connection; state: UiState.provider-ready ? 1 : 0; label: UiState.provider-state;}
+                        if UiState.provider-error != "" : HintText {text: UiState.provider-error;}
+                        BodyText {text: "接続先";}
+                        LineEdit {text <=> UiState.provider-endpoint; accessible-label: "接続先URL"; enabled: root.active && UiState.provider-ready; edited => {UiState.host-dirty=true; UiState.connection-matches-provider=false;}}
+                        for field in UiState.provider-fields : VerticalLayout {
+                            spacing: 4px;
+                            BodyText {text: field.label;}
+                            if field.kind < 2 : LineEdit {text <=> field.value; accessible-label: field.label; input-type: field.kind == 1 ? number : text; enabled: root.active && UiState.provider-ready; edited => {UiState.host-dirty=true; UiState.connection-matches-provider=false;}}
+                            if field.kind == 2 : CheckBox {text: field.label; checked <=> field.checked; enabled: root.active && UiState.provider-ready; toggled => {UiState.host-dirty=true;}}
+                            if field.kind == 3 : ComboBox {model: field.choices; current-value <=> field.value; enabled: root.active && UiState.provider-ready; selected(value) => {UiState.host-dirty=true; UiState.connection-matches-provider=false;}}
+                        }
+                        BodyText {text: "モデルID";}
+                        HorizontalLayout {
+                            LineEdit {text <=> UiState.model-id; accessible-label: "モデルID"; placeholder-text: "モデルIDを直接入力"; enabled: root.active && UiState.provider-ready; horizontal-stretch: 1; edited => {UiState.host-dirty=true; UiState.connection-matches-provider=false;}}
+                            if UiState.model-list-supported : QuietButton {icon-only: true; icon: Icons.reset; text: "モデル一覧を取得"; hint: "送信許可の疎通確認・モデル情報を有効にしてください"; enabled: root.active && UiState.connection-matches-provider; clicked => {UiState.fetch-models();}}
+                        }
+                        if UiState.model-ids.length > 0 : ComboBox {model: UiState.model-ids; current-value <=> UiState.model-id; enabled: root.active && UiState.provider-ready; selected(value) => {UiState.host-dirty=true; UiState.connection-matches-provider=false;}}
+                        if UiState.requires-credentials : HorizontalLayout {
                             spacing: 8px;
                             StatusBadge {icon: Icons.key; state: UiState.credential-state == 0 ? 0 : 1; label: UiState.credential-state == 1 ? "APIキー · 保存済み" : UiState.credential-state == 2 ? "APIキー · 今回のホスト起動中のみ保持" : "APIキー · 未登録";}
                             SectionTitle {text: "APIキー"; horizontal-stretch: 1; vertical-alignment: center;}
                         }
-                        HorizontalLayout {
+                        if UiState.requires-credentials : HorizontalLayout {
                             spacing: 8px;
                             LineEdit {text <=> UiState.api-key; accessible-label: "APIキー"; placeholder-text: "APIキー"; input-type: password; enabled: root.active && UiState.host-connected; min-width: 0px; min-height: UiState.control-height; max-height: UiState.control-height; horizontal-stretch: 1;}
-                            ActionButton {icon-only: true; icon: Icons.save; text: "APIキーを登録"; hint: "ホストへ登録（この端末には保存しません）"; enabled: root.active && UiState.host-connected && UiState.api-key != ""; clicked => {UiState.register-credential();}}
+                            ActionButton {icon-only: true; icon: Icons.save; text: "APIキーを登録"; hint: "ホストへ登録（この端末には保存しません）"; enabled: root.active && UiState.host-connected && UiState.connection-matches-provider && UiState.api-key != ""; clicked => {UiState.register-credential();}}
                         }
-                        HorizontalLayout {
+                        if UiState.requires-credentials : HorizontalLayout {
                             spacing: 8px;
-                            QuietButton {icon: Icons.key; text: "環境変数から"; hint: "ホストのOPENROUTER_API_KEYを使う"; enabled: root.active && UiState.host-connected; clicked => {UiState.environment-credential();}}
-                            QuietButton {icon-only: true; icon: Icons.reset; text: "資格情報を解除"; enabled: root.active && UiState.host-connected && UiState.credential-state != 0; clicked => {UiState.revoke-credential();}}
+                            QuietButton {icon: Icons.key; text: "環境変数から"; hint: "ホストの" + UiState.environment-variable + "を使う"; enabled: root.active && UiState.host-connected && UiState.connection-matches-provider && UiState.environment-variable != ""; clicked => {UiState.environment-credential();}}
+                            QuietButton {icon-only: true; icon: Icons.reset; text: "資格情報を解除"; enabled: root.active && UiState.host-connected && UiState.connection-matches-provider && UiState.credential-state != 0; clicked => {UiState.revoke-credential();}}
                             Rectangle {horizontal-stretch: 1;}
                         }
                         HorizontalLayout {
@@ -528,12 +549,12 @@ export component SettingsView inherits Rectangle {
                         alignment: start;
                         vertical-stretch: 0;
                         spacing: 10px;
-                        BodyText {text: "OpenRouter → OpenAI";}
-                        PermissionToggle {text: "会話本文・履歴・口調を送信する"; checked <=> UiState.allow-conversation; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
-                        PermissionToggle {text: "疎通確認用の固定文を送信する"; checked <=> UiState.allow-check; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
+                        BodyText {text: UiState.destinations;}
+                        PermissionToggle {text: "会話本文・履歴・口調を送信する"; checked <=> UiState.allow-conversation; enabled: root.active && UiState.host-connected && UiState.connection-matches-provider; toggled => {UiState.host-dirty=true;} }
+                        PermissionToggle {text: "疎通確認・モデル情報を送受信する"; checked <=> UiState.allow-check; enabled: root.active && UiState.host-connected && UiState.connection-matches-provider; toggled => {UiState.host-dirty=true;} }
                         HorizontalLayout {
                             Rectangle {horizontal-stretch: 1;}
-                            ActionButton {icon-only: true;icon: Icons.save; text: "送信許可を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-permissions();} }
+                            ActionButton {icon-only: true;icon: Icons.save; text: "送信許可を保存"; enabled: root.active && UiState.host-connected && UiState.connection-matches-provider; clicked => {UiState.save-permissions();} }
                         }
                         HintText {text: "許可解除は生成中の返答も停止します。送信済みデータは取り消せません。";}
                     }

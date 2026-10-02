@@ -3,6 +3,7 @@ mod connections;
 mod credentials;
 mod events;
 mod grants;
+mod providers;
 mod settings;
 mod snapshot;
 
@@ -18,4 +19,5 @@ pub(super) fn router() -> OpenApiRouter<App> {
         .nest("/grants", grants::router())
         .nest("/settings", settings::router())
         .nest("/snapshot", snapshot::router())
+        .nest("/providers", providers::router())
 }

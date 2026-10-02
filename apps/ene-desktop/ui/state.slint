@@ -8,6 +8,7 @@ export global Theme {
 export struct ChatEntry {
     author: string, body: string, provisional: bool, state: int, outgoing: bool
 }
+export struct ProviderField {key:string,label:string,kind:int,value:string,checked:bool,choices:[string]}
 export struct SettingsDraft {
     font-family: string, text-size: int, theme-index: int,
     model: string, motion: string, motion-playing: bool, motion-loop: bool,
@@ -32,6 +33,7 @@ export global UiState {
     in-out property <string> host-feedback;
     in-out property <bool> host-feedback-error;
     in-out property <bool> connection-configured;
+    in-out property <bool> connection-matches-provider;
     in-out property <int> credential-state;
     in-out property <string> conversation-error;
     in-out property <string> api-key;
@@ -40,6 +42,26 @@ export global UiState {
     in-out property <bool> allow-conversation;
     in-out property <bool> allow-check;
     callback start-host;
+    in-out property <[string]> provider-names;
+    in-out property <int> provider-index: -1;
+    in-out property <string> provider-id;
+    in-out property <string> provider-name;
+    in-out property <bool> provider-ready;
+    in-out property <bool> provider-plugin;
+    in-out property <string> provider-state;
+    in-out property <string> provider-error;
+    in-out property <string> provider-endpoint;
+    in-out property <string> model-id;
+    in-out property <[string]> model-ids;
+    in-out property <[ProviderField]> provider-fields;
+    in-out property <string> environment-variable;
+    in-out property <bool> requires-credentials;
+    in-out property <bool> model-list-supported;
+    in-out property <string> destinations;
+    callback choose-provider(int);
+    callback reload-providers;
+    callback toggle-provider;
+    callback fetch-models;
     callback configure-host;
     callback register-credential;
     callback environment-credential;

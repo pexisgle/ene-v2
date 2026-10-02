@@ -1,4 +1,9 @@
+mod credentials;
+mod generation;
+pub mod operations;
+use crate::ports::{Credentials, llm::ProviderRegistry};
 use crate::{domain::*, ports::Repository};
+use generation::{Controls, config};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{Mutex, broadcast, watch};
 use uuid::Uuid;
@@ -16,15 +21,19 @@ pub struct Subscription {
     pub receiver: broadcast::Receiver<Notification>,
 }
 pub struct SnapshotView {
+    pub grants: Vec<Grant>,
     pub stored: StoredSnapshot,
     pub cursor: Cursor,
 }
-struct Boundary {
+pub(super) struct Boundary {
     cursor: Cursor,
     connections: HashSet<String>,
 }
 struct Inner {
     repository: Arc<dyn Repository>,
+    providers: Arc<dyn ProviderRegistry>,
+    credentials: Arc<dyn Credentials>,
+    controls: Mutex<Controls>,
     boundary: Mutex<Boundary>,
     events: broadcast::Sender<Notification>,
     shutdown: watch::Sender<bool>,
@@ -32,9 +41,17 @@ struct Inner {
 #[derive(Clone)]
 pub struct HostApplication(Arc<Inner>);
 impl HostApplication {
-    pub fn new(repository: Arc<dyn Repository>, shutdown: watch::Sender<bool>) -> Self {
+    pub fn new(
+        repository: Arc<dyn Repository>,
+        providers: Arc<dyn ProviderRegistry>,
+        credentials: Arc<dyn Credentials>,
+        shutdown: watch::Sender<bool>,
+    ) -> Self {
         Self(Arc::new(Inner {
             repository,
+            providers,
+            credentials,
+            controls: Mutex::new(Controls::default()),
             shutdown,
             events: broadcast::channel(256).0,
             boundary: Mutex::new(Boundary {
@@ -45,6 +62,16 @@ impl HostApplication {
                 connections: HashSet::new(),
             }),
         }))
+    }
+    pub async fn stop(&self) {
+        self.0.shutdown.send_replace(true);
+        {
+            let controls = self.0.controls.lock().await;
+            for run in controls.running.values() {
+                run.cancel.send_replace(true);
+            }
+        }
+        self.0.providers.shutdown().await;
     }
     pub fn shutdown(&self) -> watch::Receiver<bool> {
         self.0.shutdown.subscribe()
@@ -68,21 +95,26 @@ impl HostApplication {
         if subscription.is_some_and(|id| !boundary.connections.contains(id)) {
             return Err(Error::new(ErrorKind::ResyncRequired));
         }
-        let stored = self.0.repository.snapshot().await?;
+        let mut stored = self.0.repository.snapshot().await?;
+        let mut config = self.0.repository.configuration().await?;
+        generation::refresh(self, &mut config);
+        stored.companion.availability = config.companion.availability;
+        let grants = config.grants;
         Ok(SnapshotView {
+            grants,
             stored,
             cursor: boundary.cursor.clone(),
         })
     }
     pub async fn companion(&self, id: &str) -> Result<Companion, Error> {
-        let companion = self.0.repository.snapshot().await?.companion;
+        let companion = self.snapshot(None).await?.stored.companion;
         if companion.id != id {
             return Err(Error::new(ErrorKind::NotFound));
         }
         Ok(companion)
     }
     pub async fn companions(&self) -> Result<Vec<Companion>, Error> {
-        Ok(vec![self.0.repository.snapshot().await?.companion])
+        Ok(vec![self.snapshot(None).await?.stored.companion])
     }
     pub async fn settings(&self) -> Result<Settings, Error> {
         Ok(self.0.repository.snapshot().await?.settings)
@@ -91,7 +123,8 @@ impl HostApplication {
         if let Some(id) = companion {
             self.companion(id).await?;
         }
-        Ok(vec![])
+        let mut controls = self.0.controls.lock().await;
+        Ok(config(self, &mut controls).await?.grants)
     }
     pub async fn messages(
         &self,

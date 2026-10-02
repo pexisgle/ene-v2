@@ -1,9 +1,10 @@
 //! Application lifetime, navigation and event coordination, independent of pages.
 use crate::{
-    AppWindow, ChatEntry, SettingsDraft, Theme, UiState, avatar, chat::Mode, settings, tray,
+    AppWindow, ChatEntry, ProviderField, SettingsDraft, Theme, UiState, avatar, chat::Mode,
+    settings, tray,
 };
 use ene_protocol::avatar::{AvatarEvent, MotionState};
-use slint::{ComponentHandle, VecModel};
+use slint::{ComponentHandle, Model, VecModel};
 use std::{
     cell::RefCell,
     path::PathBuf,
@@ -14,6 +15,7 @@ use std::{
 
 pub struct Application {
     host: RefCell<Option<crate::host::Controller>>,
+    providers: RefCell<Vec<ene_protocol::provider::ProviderInfo>>,
     pub settings: RefCell<settings::State>,
     pub messages: Rc<VecModel<ChatEntry>>,
     path: PathBuf,
@@ -33,6 +35,7 @@ impl Application {
     ) -> Rc<Self> {
         let app = Rc::new(Self {
             host: RefCell::new(None),
+            providers: RefCell::new(vec![]),
             settings: RefCell::new(settings::State::new(initial)),
             messages: Rc::new(VecModel::default()),
             path,
@@ -143,7 +146,52 @@ impl Application {
                 });
             }};
         }
-        host_action!(on_configure_host, |_| crate::host::Command::Configure);
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.global::<UiState>().on_choose_provider(move |index| {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                app.project_provider(&ui, index, true);
+                ui.global::<UiState>()
+                    .set_connection_matches_provider(false);
+                ui.global::<UiState>().set_host_dirty(true);
+            }
+        });
+        host_action!(on_configure_host, |ui: &AppWindow| {
+            let state = ui.global::<UiState>();
+            let mut options = serde_json::Map::new();
+            for f in state.get_provider_fields().iter() {
+                let v = match f.kind {
+                    1 => f
+                        .value
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null),
+                    2 => serde_json::json!(f.checked),
+                    _ => serde_json::json!(f.value.as_str()),
+                };
+                options.insert(f.key.to_string(), v);
+            }
+            // Provider-owned opaque defaults (e.g. builtin routing constraints) are retained.
+            crate::host::Command::Configure {
+                provider: state.get_provider_id().into(),
+                endpoint: state.get_provider_endpoint().into(),
+                model: state.get_model_id().into(),
+                options: serde_json::Value::Object(options),
+            }
+        });
+        host_action!(on_reload_providers, |_| {
+            crate::host::Command::ReloadProviders
+        });
+        host_action!(on_toggle_provider, |ui: &AppWindow| {
+            let s = ui.global::<UiState>();
+            crate::host::Command::EnableProvider {
+                provider: s.get_provider_id().into(),
+                enabled: !s.get_provider_ready(),
+            }
+        });
+        host_action!(on_fetch_models, |_| crate::host::Command::Models);
         host_action!(on_register_credential, |ui: &AppWindow| {
             let state = ui.global::<UiState>();
             let secret = state.get_api_key().to_string();
@@ -650,6 +698,86 @@ impl Application {
         };
         view.set_can_send(ready && !view.get_draft().trim().is_empty());
     }
+    fn project_provider(&self, ui: &AppWindow, index: i32, reset: bool) {
+        let providers = self.providers.borrow();
+        let Some(p) = providers.get(index.max(0) as usize) else {
+            return;
+        };
+        let state = ui.global::<UiState>();
+        let changed = state.get_provider_id() != p.id;
+        state.set_provider_index(index);
+        state.set_provider_id(p.id.clone().into());
+        state.set_provider_name(p.name.clone().into());
+        state.set_provider_plugin(p.kind == "plugin");
+        state.set_provider_ready(p.state == "ready");
+        state.set_provider_state(p.state.clone().into());
+        state.set_provider_error(p.error.clone().unwrap_or_default().into());
+        state.set_requires_credentials(p.requires_credentials);
+        state.set_environment_variable(p.environment_variable.clone().unwrap_or_default().into());
+        state.set_model_list_supported(p.capabilities.model_list && p.state == "ready");
+        state.set_destinations(p.destinations.join(" → ").into());
+        if changed || reset || state.get_provider_fields().row_count() == 0 {
+            if changed || reset || state.get_provider_endpoint().is_empty() {
+                state.set_provider_endpoint(p.endpoint.clone().into());
+            }
+            if changed || reset || state.get_model_id().is_empty() {
+                state.set_model_id(
+                    p.models
+                        .first()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_default()
+                        .into(),
+                );
+            }
+            state.set_model_ids(
+                Rc::new(VecModel::from(
+                    p.models
+                        .iter()
+                        .map(|m| m.id.clone().into())
+                        .collect::<Vec<slint::SharedString>>(),
+                ))
+                .into(),
+            );
+            state.set_provider_fields(
+                Rc::new(VecModel::from(
+                    p.settings
+                        .iter()
+                        .map(|f| {
+                            use ene_protocol::provider::SettingKind;
+                            let value = p.options.get(&f.key);
+                            ProviderField {
+                                key: f.key.clone().into(),
+                                label: f.label.clone().into(),
+                                kind: match f.kind {
+                                    SettingKind::Text => 0,
+                                    SettingKind::Number => 1,
+                                    SettingKind::Boolean => 2,
+                                    SettingKind::Select => 3,
+                                },
+                                value: value
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(str::to_owned)
+                                            .unwrap_or_else(|| v.to_string())
+                                    })
+                                    .unwrap_or_default()
+                                    .into(),
+                                checked: value.and_then(|v| v.as_bool()).unwrap_or(false),
+                                choices: Rc::new(VecModel::from(
+                                    f.choices
+                                        .iter()
+                                        .map(|s| s.clone().into())
+                                        .collect::<Vec<slint::SharedString>>(),
+                                ))
+                                .into(),
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                ))
+                .into(),
+            );
+        }
+    }
     fn drain_host(&self, ui: &AppWindow) {
         use crate::host::Event;
         let state = ui.global::<UiState>();
@@ -659,6 +787,36 @@ impl Application {
         };
         for event in host.events.try_iter() {
             match event {
+                Event::Providers(list) => {
+                    let current = state.get_provider_id();
+                    self.providers.replace(list);
+                    let providers = self.providers.borrow();
+                    let index = providers
+                        .iter()
+                        .position(|p| p.id == current.as_str())
+                        .unwrap_or(0) as i32;
+                    state.set_provider_names(
+                        Rc::new(VecModel::from(
+                            providers
+                                .iter()
+                                .map(|p| p.name.clone().into())
+                                .collect::<Vec<slint::SharedString>>(),
+                        ))
+                        .into(),
+                    );
+                    drop(providers);
+                    self.project_provider(ui, index, !state.get_host_dirty() && current.is_empty());
+                }
+                Event::Models(list) => {
+                    state.set_model_ids(
+                        Rc::new(VecModel::from(
+                            list.into_iter()
+                                .map(|m| m.id.into())
+                                .collect::<Vec<slint::SharedString>>(),
+                        ))
+                        .into(),
+                    );
+                }
                 Event::View(snapshot, messages) => {
                     let Some(c) = snapshot.companions.first() else {
                         continue;
@@ -675,18 +833,59 @@ impl Application {
                             .is_some_and(|c| c.is_some()),
                     );
                     state.set_connection_configured(!snapshot.settings.connections.is_empty());
-                    state.set_credential_state(
-                        match snapshot
+                    let assignment = c.model_assignments.companion.as_ref();
+                    let selected = assignment.and_then(|a| {
+                        snapshot
                             .settings
                             .connections
-                            .first()
-                            .and_then(|p| p["credential_state"].as_str())
-                        {
+                            .iter()
+                            .find(|p| p["id"] == a["connection_id"])
+                    });
+                    state.set_connection_matches_provider(selected.is_some_and(|p| {
+                        p["adapter"] == state.get_provider_id().as_str()
+                            && p["endpoint"] == state.get_provider_endpoint().as_str()
+                    }));
+                    state.set_credential_state(
+                        match selected.and_then(|p| p["credential_state"].as_str()) {
                             Some("stored") => 1,
                             Some("session_only") => 2,
                             _ => 0,
                         },
                     );
+                    if !state.get_host_dirty()
+                        && let Some(p) = selected
+                    {
+                        state.set_provider_id(p["adapter"].as_str().unwrap_or_default().into());
+                        if let Some(index) = self
+                            .providers
+                            .borrow()
+                            .iter()
+                            .position(|d| d.id == p["adapter"])
+                        {
+                            self.project_provider(ui, index as i32, false);
+                        }
+                        state.set_provider_endpoint(
+                            p["endpoint"].as_str().unwrap_or_default().into(),
+                        );
+                        state.set_model_id(
+                            assignment
+                                .and_then(|a| a["model_id"].as_str())
+                                .unwrap_or_default()
+                                .into(),
+                        );
+                        let fields = state.get_provider_fields();
+                        for (row, mut f) in fields.iter().enumerate() {
+                            if let Some(v) = p["options"].get(f.key.as_str()) {
+                                f.value = v
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| v.to_string())
+                                    .into();
+                                f.checked = v.as_bool().unwrap_or(false);
+                                fields.set_row_data(row, f);
+                            }
+                        }
+                    }
                     if !state.get_host_dirty() {
                         state.set_companion_name(c.name.clone().into());
                         state.set_companion_mind(c.mind.clone().into());
@@ -698,6 +897,12 @@ impl Application {
                         );
                         state.set_allow_check(snapshot.grants.iter().any(|g| {
                             g["status"] == "active" && g["purpose"] == "connection_check"
+                        }));
+                    }
+                    if !state.get_host_dirty() {
+                        state.set_connection_matches_provider(selected.is_some_and(|p| {
+                            p["adapter"] == state.get_provider_id().as_str()
+                                && p["endpoint"] == state.get_provider_endpoint().as_str()
                         }));
                     }
                     let entries = messages
@@ -761,9 +966,11 @@ impl Application {
                     state.set_host_feedback_error(true);
                     state.set_host_feedback(text.into());
                 }
-                Event::Done(text) => {
+                Event::Done(text, committed) => {
                     state.set_host_feedback_error(false);
-                    state.set_host_dirty(false);
+                    if committed {
+                        state.set_host_dirty(false);
+                    }
                     state.set_host_feedback(text.into());
                 }
                 Event::Older(page) => state.set_has_older(page.next_cursor.is_some()),

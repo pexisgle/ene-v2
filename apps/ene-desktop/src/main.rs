@@ -3,8 +3,8 @@ mod avatar;
 mod chat;
 mod file_picker;
 mod host;
-mod settings;
 mod platform;
+mod settings;
 mod tray;
 
 use chat::Mode;
