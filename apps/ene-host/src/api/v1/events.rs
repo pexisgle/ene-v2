@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 pub(super) fn router() -> Router<App> {
-    Router::new().route("/events", get(events))
+    Router::new().route("/", get(events))
 }
 
 async fn events(State(app): State<App>, ws: WebSocketUpgrade) -> Response {

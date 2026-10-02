@@ -1,9 +1,9 @@
-use super::companions::companion;
+use crate::api::extractors::ApiQuery;
 use crate::store;
 use crate::{app::App, error::ApiError};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     routing::get,
 };
 use ene_shared::host::{Message, Page};
@@ -11,11 +11,8 @@ use serde::Deserialize;
 
 pub(super) fn router() -> Router<App> {
     Router::new()
-        .route("/companions/{companion_id}/messages", get(messages))
-        .route(
-            "/companions/{companion_id}/messages/{message_id}",
-            get(message),
-        )
+        .route("/", get(messages))
+        .route("/{message_id}", get(message))
 }
 
 #[derive(Deserialize)]
@@ -27,10 +24,13 @@ struct HistoryQuery {
 async fn messages(
     State(app): State<App>,
     Path(c): Path<String>,
-    query: Result<Query<HistoryQuery>, axum::extract::rejection::QueryRejection>,
+    ApiQuery(query): ApiQuery<HistoryQuery>,
 ) -> Result<Json<Page<Message>>, ApiError> {
-    let Query(query) = query.map_err(|_| ApiError::invalid())?;
-    let _ = companion(State(app.clone()), Path(c.clone())).await?;
+    app.store
+        .companion(&c)
+        .await
+        .map_err(|_| ApiError::unavailable())?
+        .ok_or_else(ApiError::not_found)?;
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit)
         || query

@@ -1,17 +1,12 @@
-use crate::{app::App, error::ApiError};
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::{api::extractors::ApiQuery, app::App, error::ApiError};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use ene_shared::host::Snapshot;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 
 pub(super) fn router() -> Router<App> {
-    Router::new().route("/snapshot", get(snapshot))
+    Router::new().route("/", get(snapshot))
 }
 
 #[derive(Deserialize)]
@@ -21,9 +16,8 @@ struct SnapshotQuery {
 }
 async fn snapshot(
     State(app): State<App>,
-    query: Result<Query<SnapshotQuery>, axum::extract::rejection::QueryRejection>,
+    ApiQuery(query): ApiQuery<SnapshotQuery>,
 ) -> Result<Json<Snapshot>, ApiError> {
-    let Query(query) = query.map_err(|_| ApiError::invalid())?;
     let boundary = app.boundary.lock().await;
     if query
         .connection_id

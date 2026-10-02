@@ -1,15 +1,11 @@
-use super::companions::companion;
+use crate::api::extractors::ApiQuery;
 use crate::{app::App, error::ApiError};
-use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
-    routing::get,
-};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::Deserialize;
 use serde_json::Value;
 
 pub(super) fn router() -> Router<App> {
-    Router::new().route("/grants", get(grants))
+    Router::new().route("/", get(grants))
 }
 
 #[derive(Deserialize)]
@@ -19,11 +15,14 @@ struct GrantQuery {
 }
 async fn grants(
     State(app): State<App>,
-    query: Result<Query<GrantQuery>, axum::extract::rejection::QueryRejection>,
+    ApiQuery(query): ApiQuery<GrantQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    let Query(query) = query.map_err(|_| ApiError::invalid())?;
     if let Some(c) = query.companion_id {
-        let _ = companion(State(app), Path(c)).await?;
+        app.store
+            .companion(&c)
+            .await
+            .map_err(|_| ApiError::unavailable())?
+            .ok_or_else(ApiError::not_found)?;
     }
     Ok(Json(vec![]))
 }

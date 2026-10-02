@@ -3,7 +3,7 @@ use axum::{Json, Router, extract::State, routing::get};
 use ene_shared::host::Settings;
 
 pub(super) fn router() -> Router<App> {
-    Router::new().route("/settings", get(settings))
+    Router::new().route("/", get(settings))
 }
 
 async fn settings(State(app): State<App>) -> Result<Json<Settings>, ApiError> {

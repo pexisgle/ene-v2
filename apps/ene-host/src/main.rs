@@ -1,7 +1,6 @@
+mod api;
 mod app;
-mod auth;
 mod error;
-mod routes;
 mod runtime;
 mod store;
 
@@ -42,7 +41,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;
     eprintln!("ene-host: loopback service ready (history and notifications; chat not yet enabled)");
     let shutdown = app.shutdown.clone();
-    axum::serve(listener, routes::router(app))
+    axum::serve(listener, api::router(app))
         .with_graceful_shutdown(async move {
             #[cfg(unix)]
             {

@@ -82,6 +82,11 @@ impl Store {
         self.call(snapshot).await
     }
 
+    pub async fn companion(&self, id: &str) -> Result<Option<Companion>> {
+        let companion = self.snapshot().await?.companion;
+        Ok((companion.id == id).then_some(companion))
+    }
+
     pub async fn messages(
         &self,
         c: String,
