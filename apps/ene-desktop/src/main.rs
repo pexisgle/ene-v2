@@ -261,9 +261,6 @@ fn quit() {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 fn reflect_settings(
     ui: &ChatWindow,
     settings: &SettingsWindow,

@@ -29,6 +29,3 @@ wgpu = { version = "=29.0.4", default-features = false, features = ["vulkan", "w
 raw-window-handle = "0.6.2"
 
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[dev-dependencies]
-tempfile.workspace = true

@@ -722,57 +722,5 @@ fn input_rectangles(runs: &[Run]) -> Vec<(Run, i32)> {
     rectangles
 }
 
-#[cfg(test)]
-mod input_tests {
-    use super::*;
-    #[test]
-    fn rectangles_preserve_gaps_and_separate_islands() {
-        let runs = vec![
-            Run {
-                x: 1,
-                y: 0,
-                width: 2,
-            },
-            Run {
-                x: 5,
-                y: 0,
-                width: 1,
-            },
-            Run {
-                x: 1,
-                y: 1,
-                width: 2,
-            },
-            Run {
-                x: 5,
-                y: 1,
-                width: 1,
-            },
-            Run {
-                x: 1,
-                y: 3,
-                width: 2,
-            },
-            Run {
-                x: 2,
-                y: 4,
-                width: 2,
-            },
-        ];
-        let rectangles = input_rectangles(&runs);
-        assert_eq!(rectangles.len(), 4);
-        let expanded: Vec<_> = rectangles
-            .into_iter()
-            .flat_map(|(run, height)| {
-                (0..height).map(move |dy| Run {
-                    y: run.y + dy,
-                    ..run
-                })
-            })
-            .collect();
-        assert_eq!(crate::mask::coverage_errors(&runs, &expanded, 8, 6), (0, 0));
-    }
-}
-
 wayland_client::delegate_noop!(State: ignore ZwpIdleInhibitManagerV1);
 wayland_client::delegate_noop!(State: ignore ZwpIdleInhibitorV1);

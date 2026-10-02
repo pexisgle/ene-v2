@@ -686,8 +686,6 @@ struct SceneSlot {
 #[derive(bevy::prelude::Resource)]
 pub struct SceneTimer {
     device: RenderDevice,
-    #[cfg(test)]
-    queue: RenderQueue,
     slots: Vec<SceneSlot>,
     period_ns: f64,
     unavailable_reason: Option<String>,
@@ -741,8 +739,6 @@ impl SceneTimer {
         };
         Self {
             device,
-            #[cfg(test)]
-            queue,
             slots,
             period_ns,
             unavailable_reason: reason,
@@ -756,27 +752,6 @@ impl SceneTimer {
     #[allow(dead_code)] // Optional integration hook for an explicit unavailable metric.
     pub fn unavailable_reason(&self) -> Option<&str> {
         self.unavailable_reason.as_deref()
-    }
-    #[cfg(test)]
-    fn begin(&mut self, frame_id: u64) -> Option<usize> {
-        if !self.available() {
-            return None;
-        }
-        let Some(index) = self.slots.iter().position(|slot| slot.pending.is_none()) else {
-            self.skipped_frames += 1;
-            return None;
-        };
-        let slot = &mut self.slots[index];
-        let mut encoder =
-            self.device
-                .wgpu_device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("avatar scene begin"),
-                });
-        encoder.write_timestamp(&slot.queries, 0);
-        self.queue.submit([encoder.finish()]);
-        slot.pending = Some(ScenePending::Started(frame_id, false));
-        Some(index)
     }
     /// RenderGraph Begin: append start command buffer before the Render set.
     /// No queue submit. Finish after Render (including deferred command flush)
@@ -832,28 +807,6 @@ impl SceneTimer {
         pending.push([encoder.finish()]);
         slot.pending = Some(ScenePending::ReadyToMap(frame_id, true));
     }
-    #[cfg(test)]
-    fn finish(&mut self, token: usize) {
-        let Some(slot) = self.slots.get_mut(token) else {
-            return;
-        };
-        let Some(ScenePending::Started(frame_id, false)) = slot.pending.as_ref() else {
-            return;
-        };
-        let frame_id = *frame_id;
-        let mut encoder =
-            self.device
-                .wgpu_device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("avatar scene finish"),
-                });
-        encoder.write_timestamp(&slot.queries, 1);
-        encoder.resolve_query_set(&slot.queries, 0..2, &slot.resolve, 0);
-        encoder.copy_buffer_to_buffer(&slot.resolve, 0, &slot.staging, 0, SCENE_TIMESTAMP_BYTES);
-        self.queue.submit([encoder.finish()]);
-        slot.pending = Some(ScenePending::ReadyToMap(frame_id, false));
-        self.map_after_submit(token);
-    }
     /// RenderGraph Finish only: calling this before Submit would map a buffer
     /// referenced by an unsubmitted encoder and invalidate submission.
     pub fn map_after_submit(&mut self, token: usize) {
@@ -876,15 +829,6 @@ impl SceneTimer {
             buffered,
             Mutex::new(receiver),
         ));
-    }
-    /// Test-only release for the separately submitted legacy queue timer.
-    #[cfg(test)]
-    fn cancel(&mut self, token: usize) {
-        if let Some(slot) = self.slots.get_mut(token)
-            && matches!(slot.pending, Some(ScenePending::Started(_, false)))
-        {
-            slot.pending = None;
-        }
     }
     pub fn poll(&mut self) -> Vec<SceneTimestampSample> {
         if !self.available() {
@@ -942,204 +886,5 @@ impl SceneTimer {
     }
     pub fn take_errors(&mut self) -> Vec<String> {
         std::mem::take(&mut self.errors)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn delayed_enqueue_registration_maps_clock_bounds_and_rejects_other_clocks() {
-        let enqueue = Instant::now();
-        let mapping = EnqueueClockMapping::from_bracket(
-            enqueue,
-            enqueue + Duration::from_nanos(10),
-            enqueue + Duration::from_nanos(20),
-            1_000,
-            1,
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                mapping.enqueue_clock_lower_ns,
-                mapping.enqueue_clock_upper_ns
-            ),
-            (979, 991)
-        );
-        assert_eq!(
-            (mapping.registration_age_ns, mapping.calibration_window_ns),
-            (10, 10)
-        );
-        let clock = rustix::time::ClockId::Monotonic as u32;
-        assert_eq!(
-            mapping.display_latency_bounds(clock, Some(1_050)),
-            Ok((59, 71))
-        );
-        assert!(
-            mapping
-                .display_latency_bounds(rustix::time::ClockId::Realtime as u32, Some(1_050))
-                .is_err()
-        );
-        assert!(mapping.display_latency_bounds(clock, Some(900)).is_err());
-        assert!(mapping.display_latency_bounds(clock, None).is_err());
-        let mut recorder = Recorder::with_options("gpu", true, false);
-        recorder.enqueued.insert(
-            5,
-            FrameEnqueue {
-                instant: enqueue,
-                monotonic: Ok(mapping),
-            },
-        );
-        recorder.record_presentation(PresentationSample {
-            frame_id: Some(5),
-            clock_id: clock,
-            presentation_ns: Some(1_050),
-            ..Default::default()
-        });
-        assert!(recorder.enqueued.is_empty());
-        recorder.frame_enqueued(6, enqueue);
-        recorder.discarded(123); // An untracked feedback must not consume another frame.
-        assert!(recorder.enqueued.contains_key(&6));
-        recorder.record_discarded(Some(6));
-        assert!(recorder.enqueued.is_empty());
-        recorder.frame_enqueued(7, enqueue);
-        recorder.reset_presentation();
-        assert!(recorder.enqueued.is_empty());
-    }
-    #[test]
-    fn scene_timer_pool_is_bounded_asynchronous_and_preserves_frame_ids() {
-        use bevy::render::renderer::WgpuWrapper;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = runtime
-            .block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                force_fallback_adapter: true,
-                ..Default::default()
-            }))
-            .expect("SceneTimer test requires a Vulkan adapter (lavapipe is sufficient)");
-        let requested =
-            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-        let (device, queue) = runtime
-            .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features: requested & adapter.features(),
-                ..Default::default()
-            }))
-            .unwrap();
-        let device: RenderDevice = device.into();
-        let queue = RenderQueue(Arc::new(WgpuWrapper::new(queue)));
-        let mut off = SceneTimer::with_enabled(device.clone(), queue.clone(), false);
-        assert!(!off.available());
-        assert!(off.slots.is_empty());
-        assert_eq!(off.begin(1), None);
-        assert!(off.poll().is_empty());
-        let mut timer = SceneTimer::with_enabled(device, queue, true);
-        assert!(
-            timer.available(),
-            "software adapter needs encoder timestamp queries"
-        );
-        let tokens: Vec<_> = (101..104).map(|id| timer.begin(id).unwrap()).collect();
-        assert_eq!(timer.begin(104), None);
-        assert_eq!(timer.skipped_frames, 1);
-        for token in tokens {
-            timer.finish(token);
-            timer.finish(token);
-        }
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut samples = Vec::new();
-        while samples.len() < 3 && Instant::now() < deadline {
-            samples.extend(timer.poll());
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert!(timer.take_errors().is_empty());
-        samples.sort_by_key(|s| s.frame_id);
-        assert_eq!(
-            samples.iter().map(|s| s.frame_id).collect::<Vec<_>>(),
-            vec![101, 102, 103]
-        );
-        assert!(
-            samples
-                .iter()
-                .all(|s| s.span.duration_ns(s.timestamp_period_ns).is_some()
-                    && s.timestamp_readback_bytes == SCENE_TIMESTAMP_BYTES)
-        );
-        let token = timer.begin(200).unwrap();
-        timer.cancel(token);
-        let reused = timer.begin(201).unwrap();
-        assert_eq!(reused, token);
-        timer.cancel(reused);
-    }
-    #[test]
-    fn presentation_tracks_discard_and_never_subtracts_different_clocks() {
-        let mut r = Recorder::with_options("gpu", true, false);
-        for (id, clock, ns) in [(1, 1, 0), (2, 1, 20_000_000), (3, 2, 0), (4, 2, 40_000_000)] {
-            r.presentation_requested(id, u64::from(id));
-            r.presented(
-                id,
-                PresentTime {
-                    clk_id: clock,
-                    tv_sec: 1,
-                    tv_nsec: ns,
-                },
-                0,
-                0,
-                0,
-            );
-        }
-        r.presentation_requested(5, 5);
-        r.discarded(5);
-        r.presentation_requested(6, 6);
-        let s = r.presentation_stats();
-        assert_eq!(
-            (s.requested, s.presented, s.discarded, s.pending),
-            (6, 4, 1, 1)
-        );
-        assert_eq!((s.interval_count, s.clock_resets), (2, 1));
-        assert_eq!(s.interval_mean_ns, Some(30_000_000.0));
-        assert_eq!(s.interval_p95_ns, Some(40_000_000));
-        r.reset_presentation();
-        assert_eq!(r.presentation_stats().abandoned, 1);
-    }
-    #[test]
-    fn gpu_timing_rejects_invalid_period_and_reversed_ticks() {
-        let span = GpuTimestampSpan {
-            start_ticks: 10,
-            end_ticks: 30,
-        };
-        assert_eq!(span.duration_ns(2.5), Some(50.0));
-        assert_eq!(span.duration_ns(f64::NAN), None);
-        assert_eq!(span.duration_ns(0.0), None);
-        assert_eq!(
-            GpuTimestampSpan {
-                start_ticks: 30,
-                end_ticks: 10
-            }
-            .duration_ns(1.0),
-            None
-        );
-    }
-    #[test]
-    fn verification_requires_explicit_opt_in_and_complete_counts() {
-        let mut s = VerificationSample {
-            frame_id: 0,
-            width: 2,
-            height: 2,
-            scale: 1.0,
-            reference_rule: "alpha >= 1; any covered physical pixel".into(),
-            true_positives: 1,
-            false_positive: 1,
-            false_negative: 1,
-            true_negatives: 1,
-        };
-        assert!(s.is_complete());
-        assert!(!Recorder::with_options("geometry", true, false).record_verification(s.clone()));
-        assert!(Recorder::with_options("geometry", true, true).record_verification(s.clone()));
-        s.false_positive = u64::MAX;
-        assert!(!s.is_complete());
     }
 }

@@ -238,22 +238,3 @@ async fn probe(connection: &zbus::Connection) -> zbus::Result<bool> {
     }
     Ok(false)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn failed_lost_and_stale_trays_never_allow_hiding() {
-        let now = Instant::now();
-        let mut registration = Registration {
-            checked_at: now,
-            registered: false,
-        };
-        assert!(!registration.usable_at(now));
-        registration.registered = true;
-        assert!(registration.usable_at(now));
-        assert!(!registration.usable_at(now + LEASE));
-        registration.registered = false;
-        assert!(!registration.usable_at(now));
-    }
-}

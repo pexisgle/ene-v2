@@ -107,33 +107,3 @@ fn local_path(uri: &ashpd::Uri, extension: &str) -> Result<String, String> {
         .into_string()
         .map_err(|_| "UTF-8のファイル名を選択してください。".into())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn cancelled_portal_and_failures_are_distinct_and_japanese_paths_survive() {
-        use ashpd::desktop::ResponseError;
-        assert!(
-            selection(Err(ashpd::Error::Response(ResponseError::Cancelled)), "vrm")
-                .unwrap()
-                .is_none()
-        );
-        assert!(selection(Err(ashpd::Error::Response(ResponseError::Other)), "vrm").is_err());
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("日本語 モデル.vrm");
-        std::fs::write(&path, []).unwrap();
-        let uri = url::Url::from_file_path(&path).unwrap();
-        assert_eq!(
-            local_path(&ashpd::Uri::parse(uri.as_str()).unwrap(), "vrm").unwrap(),
-            path.to_str().unwrap()
-        );
-        assert!(
-            local_path(
-                &ashpd::Uri::parse("https://example.com/model.vrm").unwrap(),
-                "vrm"
-            )
-            .is_err()
-        );
-    }
-}

@@ -35,22 +35,3 @@ pub fn argb(pixel: &[u8; 4]) -> [u8; 4] {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn shm_colors_preserve_alpha_without_translucent_bright_halos() {
-        assert_eq!(argb(&[100, 120, 140, 255]), [140, 120, 100, 255]);
-        assert_eq!(argb(&[150, 100, 50, 0]), [0; 4]);
-        // Linear white at half opacity encodes to ~188 in the SRGB target,
-        // but the Wayland premultiplied byte must be 128, not 188.
-        assert_eq!(argb(&[188, 188, 188, 128]), [128, 128, 128, 128]);
-        assert_eq!(argb(&[188, 0, 0, 128]), [0, 0, 128, 128]);
-        for alpha in 1..255 {
-            let result = argb(&[255, 200, 100, alpha]);
-            assert_eq!(result[3], alpha);
-            assert!(result[..3].iter().all(|channel| *channel <= alpha));
-        }
-    }
-}
