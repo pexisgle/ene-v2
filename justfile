@@ -19,7 +19,7 @@ test:
 build:
     cargo build --workspace --all-targets --all-features --locked
 
-verify: fmt-check check clippy test build
+verify: fmt-check clippy test build
 
 run-host:
     cargo run --locked -p ene-host
