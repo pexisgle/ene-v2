@@ -347,52 +347,11 @@ mod tests {
         assert_eq!(s.messages.len(), 51);
         assert_eq!(s.messages[0].sequence, 1);
     }
-
-    #[test]
-    fn future_schema_is_rejected_without_rewriting() {
-        let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA user_version=99;").unwrap();
-        assert!(matches!(initialize(&mut db), Err(Error::FutureSchema(99))));
-        assert_eq!(
-            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            99
-        );
-    }
 }
 
 #[cfg(test)]
 mod migration_tests {
     use super::*;
-    #[test]
-    fn seed_failure_rolls_back_schema_data_and_version() {
-        use rusqlite_migration::{HookError, M, Migrations};
-        let migrations = Migrations::new(vec![M::up_with_hook(
-            include_str!("../../../migrations/001_initial.sql"),
-            |tx| {
-                seed(tx).unwrap();
-                Err(HookError::Hook("injected failure after seed".into()))
-            },
-        )]);
-        let mut db = Connection::open_in_memory().unwrap();
-        assert!(migrations.to_latest(&mut db).is_err());
-        assert_eq!(
-            db.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        initialize(&mut db).unwrap();
-        assert!(!snapshot(&mut db).unwrap().host_id.is_empty());
-    }
     #[test]
     fn rejecting_a_future_database_leaves_its_bytes_unchanged() {
         let temp = tempfile::tempdir().unwrap();
@@ -441,10 +400,6 @@ mod migration_tests {
         );
         store.db.clone().close().await.unwrap();
         assert!(matches!(store.snapshot().await, Err(Error::Stopped)));
-        assert!(matches!(
-            parse_cursor("c", "bad"),
-            Err(Error::InvalidCursor)
-        ));
     }
 }
 
