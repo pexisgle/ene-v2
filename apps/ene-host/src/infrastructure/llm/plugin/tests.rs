@@ -90,18 +90,9 @@ fn contracts_configuration_and_implementation_changes_are_rejected() {
     std::fs::write(&path, value.to_string()).unwrap();
     assert!(
         manifest::load(dir.path()).is_err(),
-        "catalog origin must be declared"
+        "catalog configuration is not part of the manifest"
     );
-    value["destinations"] = json!(["https://example.com", "https://models.dev"]);
-    std::fs::write(&path, value.to_string()).unwrap();
-    assert!(manifest::load(dir.path()).is_ok());
-    value["model_catalog"]["provider"] = json!("https://unapproved.example");
-    std::fs::write(&path, value.to_string()).unwrap();
-    assert!(
-        manifest::load(dir.path()).is_err(),
-        "catalog namespace cannot be a URL"
-    );
-    // The shipped OpenRouter routing policy also accepts the separate catalog origin.
+    // The shipped OpenRouter policy needs no catalog configuration.
     std::fs::write(
         &path,
         include_bytes!("../../../../../../examples/providers/openrouter/manifest.json"),
@@ -127,7 +118,7 @@ async fn broker_rejects_revoked_context_redirect_origins_and_credential_headers(
         body_base64: None,
     };
     assert_eq!(
-        broker::send(b.clone(), input.clone(), request.clone(), tx.clone())
+        broker::send(b.clone(), input.clone(), false, request.clone(), tx.clone())
             .await
             .unwrap_err()
             .kind,
@@ -155,6 +146,7 @@ async fn broker_rejects_revoked_context_redirect_origins_and_credential_headers(
             broker::send(
                 b.clone(),
                 input.clone(),
+                false,
                 PluginMessage::HttpRequest {
                     request_id,
                     http_id,
@@ -171,6 +163,97 @@ async fn broker_rejects_revoked_context_redirect_origins_and_credential_headers(
             ErrorKind::PermissionRequired
         );
     }
+}
+#[tokio::test]
+async fn public_model_metadata_get_is_scoped_and_does_not_forward_credentials() {
+    use axum::{Router, http::HeaderMap, routing::get};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use ene_protocol::provider::{AuthProfile, HostMessage};
+
+    let app = Router::new().route(
+        "/catalog",
+        get(|headers: HeaderMap| async move {
+            assert!(headers.get("authorization").is_none());
+            assert!(headers.get("x-api-version").is_none());
+            assert!(headers.get("cookie").is_none());
+            r#"{"models":[{"id":"local-model","context_window":4096}]}"#
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (_dir, mut b) = bundle("");
+    b.manifest.auth = AuthProfile::Bearer;
+    b.manifest
+        .headers
+        .insert("x-api-version".into(), "example".into());
+    b.manifest.destinations.push(origin.clone());
+    let (_cancel, mut input) = invocation(Arc::new(Permit(AtomicBool::new(true))));
+    input.secret = Some(ene_core::ports::Secret {
+        value: "fixture-secret".into(),
+        nonce: "fixture".into(),
+    });
+    // Public metadata requests must not forward the API secret.
+    let input = Arc::new(input);
+    let request = PluginMessage::HttpRequest {
+        request_id: input.id.clone(),
+        http_id: "catalog".into(),
+        method: "GET".into(),
+        url: format!("{origin}/catalog"),
+        headers: Default::default(),
+        body_base64: None,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    assert_eq!(
+        broker::send(b.clone(), input.clone(), false, request.clone(), tx.clone())
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::PermissionRequired
+    );
+    let mut undeclared = b.clone();
+    undeclared.manifest.destinations.pop();
+    assert_eq!(
+        broker::send(undeclared, input.clone(), true, request.clone(), tx.clone())
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::PermissionRequired
+    );
+    let mut post = request.clone();
+    if let PluginMessage::HttpRequest { method, .. } = &mut post {
+        *method = "POST".into();
+    }
+    assert_eq!(
+        broker::send(b.clone(), input.clone(), true, post, tx.clone())
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::PermissionRequired
+    );
+    broker::send(b, input, true, request, tx).await.unwrap();
+    let mut bytes = Vec::new();
+    while let Some(response) = rx.recv().await {
+        let HostMessage::HttpResponse {
+            data_base64,
+            done,
+            status,
+            ..
+        } = response.unwrap()
+        else {
+            panic!("unexpected response")
+        };
+        assert_eq!(status, 200);
+        bytes.extend(STANDARD.decode(data_base64).unwrap());
+        if done {
+            break;
+        }
+    }
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["models"][0]["context_window"],
+        4096
+    );
+    server.abort();
 }
 #[tokio::test]
 async fn isolated_plugin_streams_cancels_and_malformed_ipc_is_not_reused() {

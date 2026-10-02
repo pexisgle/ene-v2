@@ -136,9 +136,15 @@ async fn official_responses_and_model_list_use_bearer_and_native_model_ids() {
         .unwrap();
     assert_eq!(models[0].id, MODEL);
     assert_eq!(models[0].name, MODEL);
+    let info = models[0].metadata.as_ref().unwrap();
+    assert_eq!(info.source, format!("{base}/v1/models"));
     assert!(
-        models[0].metadata.is_none(),
-        "official /models does not expose limits or modalities"
+        info.context_window.is_none(),
+        "official /models does not expose limits"
+    );
+    assert_eq!(
+        serde_json::to_value(&models[0]).unwrap()["metadata"]["context_window"],
+        Value::Null
     );
     assert!(
         fetch_models("fixture-key".into(), &format!("{base}/redirect"))

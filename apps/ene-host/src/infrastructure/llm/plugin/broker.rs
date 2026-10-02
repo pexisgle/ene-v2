@@ -14,6 +14,7 @@ fn denied() -> Error {
 pub async fn send(
     bundle: Bundle,
     input: std::sync::Arc<Invocation>,
+    models: bool,
     request: PluginMessage,
     out: mpsc::Sender<Result<HostMessage>>,
 ) -> Result<()> {
@@ -38,20 +39,23 @@ pub async fn send(
     input.authorization.check().await?;
     let base = url::Url::parse(&input.connection.endpoint).map_err(|_| denied())?;
     let mut target = url::Url::parse(&url).map_err(|_| denied())?;
-    if target.scheme() != base.scheme()
-        || !target.username().is_empty()
+    let public = target.origin() != base.origin();
+    if !target.username().is_empty()
         || target.password().is_some()
         || target.fragment().is_some()
-        || target.origin() != base.origin()
         || !bundle
             .manifest
             .destinations
             .contains(&target.origin().ascii_serialization())
-        || !(target.path() == base.path().trim_end_matches('/')
-            || target
-                .path()
-                .starts_with(&format!("{}/", base.path().trim_end_matches('/'))))
+        || !public
+            && !(target.path() == base.path().trim_end_matches('/')
+                || target
+                    .path()
+                    .starts_with(&format!("{}/", base.path().trim_end_matches('/'))))
     {
+        return Err(denied());
+    }
+    if public && (!models || method != "GET" || body_base64.is_some()) {
         return Err(denied());
     }
     if !["POST", "GET"].contains(&method.as_str()) || method == "GET" && body_base64.is_some() {
@@ -68,37 +72,40 @@ pub async fn send(
             reqwest::header::HeaderValue::from_str(&value).map_err(|_| denied())?,
         );
     }
-    for (name, value) in &bundle.manifest.headers {
-        map.insert(
-            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| denied())?,
-            reqwest::header::HeaderValue::from_str(value).map_err(|_| denied())?,
-        );
-    }
-    let secret = input.secret.as_ref();
-    match &bundle.manifest.auth {
-        AuthProfile::None => {}
-        AuthProfile::Bearer => {
-            let value = secret.ok_or_else(denied)?;
-            map.insert(
-                reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", value.value))
-                    .map_err(|_| denied())?,
-            );
-        }
-        AuthProfile::Header { name } => {
+    if !public {
+        for (name, value) in &bundle.manifest.headers {
             map.insert(
                 reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| denied())?,
-                reqwest::header::HeaderValue::from_str(&secret.ok_or_else(denied)?.value)
-                    .map_err(|_| denied())?,
+                reqwest::header::HeaderValue::from_str(value).map_err(|_| denied())?,
             );
         }
-        AuthProfile::Query { name } => {
-            if target.query_pairs().any(|(k, _)| k == name.as_str()) {
-                return Err(denied());
+        let secret = input.secret.as_ref();
+        match &bundle.manifest.auth {
+            AuthProfile::None => {}
+            AuthProfile::Bearer => {
+                let value = secret.ok_or_else(denied)?;
+                map.insert(
+                    reqwest::header::AUTHORIZATION,
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {}", value.value))
+                        .map_err(|_| denied())?,
+                );
             }
-            target
-                .query_pairs_mut()
-                .append_pair(name, &secret.ok_or_else(denied)?.value);
+            AuthProfile::Header { name } => {
+                map.insert(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|_| denied())?,
+                    reqwest::header::HeaderValue::from_str(&secret.ok_or_else(denied)?.value)
+                        .map_err(|_| denied())?,
+                );
+            }
+            AuthProfile::Query { name } => {
+                if target.query_pairs().any(|(k, _)| k == name.as_str()) {
+                    return Err(denied());
+                }
+                target
+                    .query_pairs_mut()
+                    .append_pair(name, &secret.ok_or_else(denied)?.value);
+            }
         }
     }
     let mut body = body_base64
@@ -108,7 +115,7 @@ pub async fn send(
     if body.len() > 512 * 1024 {
         return Err(denied());
     }
-    if let BrokerRouting::OpenRouter { only } = &bundle.manifest.routing {
+    if !public && let BrokerRouting::OpenRouter { only } = &bundle.manifest.routing {
         if method == "POST" && target.path() == "/api/v1/chat/completions" {
             let mut request: serde_json::Value =
                 serde_json::from_slice(&body).map_err(|_| denied())?;
@@ -124,6 +131,7 @@ pub async fn send(
     }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("ene/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(150))
         .build()
         .map_err(|_| Error::unavailable())?;

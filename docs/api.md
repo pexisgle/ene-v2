@@ -184,7 +184,9 @@ LLMプロバイダーの`options`は各実装が検証する非秘密JSONです�
 
 モデル一覧は`GET /v1/connections/{connection_id}/models`で取得します。組込アダプターまたはプラグインが、その接続先の`/models`などを呼び出して現在の一覧を返します。manifestの`models`は任意です。`capabilities.model_list: true`のプラグインでは、取得結果を正本とし、manifestの列挙で絞り込んだり合成したりしません。`false`の場合だけ、任意の静的一覧を代替として使います。モデル追加のためにmanifestやホストを更新する必要はありません。IDの直接入力も利用できます。
 
-プラグインは既存の`list_models {request_id, endpoint, options}`を受け、HTTP broker経由で一覧や必要な詳細APIを取得し、`models {request_id, models}`を1回返します。詳細APIが別にあるサービスでは、同じ取得処理内で必要な情報を正規化できます。HTTPは直列・最大8要求、全体は30秒、返信は改行込み1MiB・最大4096モデルです。件数が多い場合も全モデルへ個別要求を出さず、情報が不足する項目は省略します。新しいメッセージ種別や定期取得は追加しません。接続先の詳細APIは同じorigin・ベースパス配下のbroker要求で取得します。外部カタログの補完は、後述の`model_catalog`を指定した実装だけがホストの共通処理を利用します。
+プラグインは`list_models {request_id, endpoint, options}`を受け、`models {request_id, models}`を1回返します。これはOpenAIやAnthropicのAPI形式から独立した契約です。各モデルの`metadata.context_window`にコンテキスト上限（tokens）を含め、入力／出力上限・形式なども共通の型へ正規化します。取得元のAPI・詳細API・カタログ、IDの対応関係と補完は各プラグインの実装が担当します。ホストは返された情報を保持し、取得元を選んだり自動補完したりしません。manifestにモデル列挙やカタログの指定は不要です。
+
+HTTP brokerは直列・最大8要求、モデル取得全体は30秒、返信は改行込み1MiB・最大4096モデルです。モデル数分の問い合わせをせず、一覧や一括取得APIを使います。認証付きのAPI要求は接続先と同じorigin・ベースパス配下です。別originの公開情報は、既存の`http_request`で取得できます。これは一覧取得中だけのGET・本文なしに限定し、manifestの`destinations`で宣言済みかつ現在のメタデータ送信許可に含まれる送信先だけを認めます。外部には資格情報やmanifestの固定ヘッダーを付与しません。HTTPSを使用し、ローカル開発用のloopback HTTPも利用できます。リダイレクトは禁止、応答は最大8MiBです。生成中の外部カタログ要求は拒否します。
 
 モデルの共通応答は次の形です。Rustでは`ene_api_types::provider::Model`と`ModelMetadata`を使い、プラグイン向けには`ene_protocol::provider`から再公開します。REST、Rustクライアント、OpenAPIも同じ型です。
 
@@ -212,27 +214,21 @@ LLMプロバイダーの`options`は各実装が検証する非秘密JSONです�
 | `source` | 主な情報源のAPI・カタログURL。資格情報を含めない |
 | `field_sources` | 補完した項目名と取得元URLの対応。未指定の項目は`source`の値。例：`{"context_window":"https://models.dev/api.json"}` |
 | `scope` | `catalog`はカタログ値を含む情報、`route`は全項目が現在の接続・ルーティング条件で取得された情報 |
-| `context_window` | 公表されたコンテキスト上限（tokens）。入力と出力の扱いは提供元の定義に従う |
+| `context_window` | 正の整数のコンテキスト上限（tokens）、取得できなければ`null`。入力と出力の扱いは提供元の定義に従う |
 | `max_input_tokens` | 公表された入力上限（tokens）。コンテキスト上限とは別に制限がある場合に使用 |
 | `max_output_tokens` | 公表された出力上限（tokens） |
 | `input_modalities` / `output_modalities` | `text`、`image`、`audio`など、提供元が報告した形式。未知の文字列も保持する |
 | `supported_parameters` | `tools`など、提供元が報告したパラメーター名 |
 
-取得できない項目は省略または`null`とし、「不明」と表示します。空配列は提供元が明示した対応項目なしを表します。未知の上限を0や無制限に置き換えたり、モデルIDの文字列から能力を推測したりしません。カタログ値は利用可能な配信先・アカウント・リクエスト条件によって変わり、モデルの存在だけでは生成APIや現在のルートでの利用成功を保証しません。メタデータは選択時の情報であり、eneの入力対応やトークン消費の実測を表すものではありません。現在の対話入力はテキストです。
+`context_window`は取得できなければ`null`、他の取得できない項目は省略または`null`とし、「不明」と表示します。空配列は提供元が明示した対応項目なしを表します。未知の上限を0や無制限に置き換えたり、モデルIDの文字列から能力を推測したりしません。カタログ値は利用可能な配信先・アカウント・リクエスト条件によって変わり、モデルの存在だけでは生成APIや現在のルートでの利用成功を保証しません。メタデータは選択時の情報であり、eneの入力対応やトークン消費の実測を表すものではありません。現在の対話入力はテキストです。
 
 取得方法はプロバイダー実装が選びます。**接続先APIの値を優先し、欠落項目だけをカタログで補完**します。公式APIがコンテキスト上限を返すならその値を使い、モデル名から能力を推測しません。プラグインが独自の詳細APIを使う場合は、結果を共通の`ModelMetadata`へ正規化します。
 
-models.devを使うプラグインは、manifestへ次の指定を追加し、`destinations`へ`https://models.dev`を含めます。`provider`は[models.devのプロバイダーID](https://github.com/anomalyco/models.dev#api)で、プラグインIDとは独立です。任意のカタログURLを受け取る仕組みは設けません。
+たとえばmodels.devを使うプラグインは、`destinations`へ`https://models.dev`を追加し、一覧取得中に`https://models.dev/api.json`をGETします。JSONの読み取り・プロバイダー名前空間の選択・モデルIDの対応・不足項目の補完はプラグイン内で行い、結果を共通の`ModelMetadata`へ正規化して返します。これは公開情報の取得例であり、プロトコルにmodels.dev固有の設定やAPI形式はありません。接続先の値を優先し、補完元が異なる項目は`field_sources`へ記録します。モデル名による推測や、カタログだけにあるモデルの一覧への追加はしません。
 
-```json
-"model_catalog": {"type": "models_dev", "provider": "openai"}
-```
+組込OpenAIも同じ`Model`を返します。[公式`/models`](https://developers.openai.com/api/reference/resources/models/methods/list)から一覧を取得し、OpenAI実装内でmodels.devの`openai`から不足情報を補完します。固定URLの公開JSONを1回取得し、プロバイダーとモデルIDの完全一致で参照します。キー・会話・接続URL・モデルIDはこの公開要求へ付与せず、現在の許可を取得中も検査します。リダイレクト禁止・最大10秒／16MiBで、取得失敗はエラーにします。カタログにもない情報は不明のままです。OpenAIの[個別モデル取得](https://developers.openai.com/api/reference/resources/models/methods/retrieve)にもコンテキスト上限・入力形式はないため、同じ不足情報のためにモデル数分の要求は出しません。
 
-ホストは一覧取得時にコンテキスト上限・出力上限・入出力形式のいずれかが欠けていれば、固定URL`https://models.dev/api.json`を1回取得します。会話・キー・接続URL・モデルIDをこの要求へ付与せず、JSON内の`provider.models[model_id]`を完全一致で参照します。他社の同名モデル、似た名前、日付付きIDからの推測やカタログだけに載るモデルの一覧への追加は行いません。`limit.context`・`limit.input`・`limit.output`・`modalities.input/output`を不足項目へ補い、APIが明示した値や空配列を上書きしません。補完元が異なる項目は`field_sources`へ記録し、カタログを混ぜた応答は`scope: catalog`とします。`supported_parameters`はカタログの真偽値から推測しません。
-
-この補完はプラグインの最大8要求とは別のホスト側1要求です。公開カタログ要求も現在の送信許可を検査し、リダイレクトは禁止、取得は最大10秒・16MiBです。モデル一覧全体の30秒の上限も維持します。必要なカタログの取得失敗・壊れた応答はモデル取得のエラーとして返し、不明情報で正常取得したようには表示しません。カタログにないモデルやカタログ自体が公開していない項目は、不明のまま保持します。定期取得・ディスクキャッシュ・モデルごとの個別取得は追加せず、画面の再取得操作で新しい値を取り込みます。コンテキスト上限が不明なモデルを「無制限」と扱うことはありません。
-
-組込OpenAIは[公式`/models`](https://developers.openai.com/api/reference/resources/models/methods/list)から利用可能な一覧を取得し、models.devの`openai`から不足情報を補完します。OpenAIの[個別モデル取得](https://developers.openai.com/api/reference/resources/models/methods/retrieve)にもコンテキスト上限・入力形式はないため、同じ不足情報のためにモデル数分の要求は出しません。送信先へカタログ取得用の`https://models.dev`を追加したので、既存の許可は設定し直します。OpenRouterのRust/Python例は[`/models`のプロパティ](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties)を優先し、不足時だけmodels.devの`openrouter`を使います。`top_provider`の公表値はOpenAI固定ルートと一致する保証がないため、`scope: catalog`を維持します。
+OpenRouterのRust/Python例は[`/models`のプロパティ](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties)からコンテキスト上限などを正規化し、外部カタログは使いません。`top_provider`の公表値はOpenAI固定ルートと一致する保証がないため、`scope: catalog`とします。モデル情報の取得や補完の方法を変えても、クライアントは同じ共通応答を扱います。定期取得やディスクキャッシュは追加しません。
 
 デスクトップでは、モデル未選択のまま接続を保存し、資格情報と「疎通確認・モデル情報」の送信許可を登録してから一覧を取得できます。モデル選択後に保存するとCompanionのモデル割当を更新します。モデルが空の場合は既存の割当を変更しません。取得結果は選択中の接続にだけ反映し、選択モデルのコンテキスト上限・入力／出力上限・入出力形式・コンテキスト情報の取得元を表示します。一覧は画面の取得操作ごとに更新し、取得失敗を空一覧の成功として扱いません。
 

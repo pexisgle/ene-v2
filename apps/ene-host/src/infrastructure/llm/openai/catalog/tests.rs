@@ -43,7 +43,7 @@ fn catalog_fills_missing_fields_without_overriding_api_or_guessing_model_ids() {
         supported_parameters: Some(vec!["tools".into()]),
         ..Default::default()
     });
-    apply(&mut models, "openai", &catalog(), URL).unwrap();
+    apply(&mut models, &catalog(), URL).unwrap();
     let info = models[0].metadata.as_ref().unwrap();
     assert_eq!(info.context_window, Some(100000));
     assert_eq!(info.max_input_tokens, Some(90000));
@@ -65,7 +65,7 @@ fn catalog_fills_missing_fields_without_overriding_api_or_guessing_model_ids() {
         context_window: Some(4096),
         ..Default::default()
     });
-    apply(&mut reported, "openai", &catalog(), URL).unwrap();
+    apply(&mut reported, &catalog(), URL).unwrap();
     let info = reported[0].metadata.as_ref().unwrap();
     assert_eq!(info.context_window, Some(4096));
     assert!(!info.field_sources.contains_key("context_window"));
@@ -125,14 +125,9 @@ async fn public_catalog_request_has_no_credentials_and_rejects_redirects_failure
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let authorization = AuthorizationState(allowed);
     let mut models = vec![model("known"), model("new-model")];
-    enrich_from(
-        &mut models,
-        "openai",
-        &authorization,
-        &format!("{base}/api.json"),
-    )
-    .await
-    .unwrap();
+    enrich_from(&mut models, &authorization, &format!("{base}/api.json"))
+        .await
+        .unwrap();
     assert_eq!(
         models[0].metadata.as_ref().unwrap().context_window,
         Some(100000)
@@ -141,26 +136,16 @@ async fn public_catalog_request_has_no_credentials_and_rejects_redirects_failure
     for path in ["redirect", "failure", "invalid"] {
         let mut models = vec![model("known")];
         assert!(
-            enrich_from(
-                &mut models,
-                "openai",
-                &authorization,
-                &format!("{base}/{path}")
-            )
-            .await
-            .is_err()
+            enrich_from(&mut models, &authorization, &format!("{base}/{path}"))
+                .await
+                .is_err()
         );
         assert!(models[0].metadata.is_none());
     }
     let mut models = vec![model("known")];
-    let error = enrich_from(
-        &mut models,
-        "openai",
-        &authorization,
-        &format!("{base}/revoked"),
-    )
-    .await
-    .unwrap_err();
+    let error = enrich_from(&mut models, &authorization, &format!("{base}/revoked"))
+        .await
+        .unwrap_err();
     assert_eq!(error.kind, ErrorKind::PermissionRequired);
     assert!(models[0].metadata.is_none());
     server.abort();

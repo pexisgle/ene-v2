@@ -114,20 +114,6 @@ pub fn load(root: &Path) -> Result<Bundle> {
     }
     let endpoint = url::Url::parse(&manifest.endpoint).map_err(|_| invalid())?;
     valid_endpoint(&endpoint)?;
-    if let Some(ene_protocol::provider::ModelCatalog::ModelsDev { provider }) =
-        &manifest.model_catalog
-        && (provider.is_empty()
-            || provider.len() > 80
-            || !provider
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            || !manifest
-                .destinations
-                .iter()
-                .any(|d| d == super::super::catalog::ORIGIN))
-    {
-        return Err(invalid());
-    }
     if manifest.destinations.is_empty()
         || !manifest
             .destinations
@@ -161,16 +147,15 @@ pub fn load(root: &Path) -> Result<Bundle> {
         BrokerRouting::OpenRouter { only } => {
             if endpoint.as_str().trim_end_matches('/') != "https://openrouter.ai/api/v1"
                 || only.is_empty()
-                || manifest.destinations
-                    != std::iter::once("https://openrouter.ai".to_owned())
-                        .chain(only.iter().cloned())
-                        .chain(
-                            manifest
-                                .model_catalog
-                                .as_ref()
-                                .map(|_| super::super::catalog::ORIGIN.to_owned()),
-                        )
-                        .collect::<Vec<_>>()
+                || !manifest
+                    .destinations
+                    .contains(&"https://openrouter.ai".to_owned())
+                || only
+                    .iter()
+                    .any(|d| d.starts_with("http") || !manifest.destinations.contains(d))
+                || manifest.destinations.iter().any(|d| {
+                    d != "https://openrouter.ai" && !only.contains(d) && !d.starts_with("https://")
+                })
             {
                 return Err(invalid());
             }

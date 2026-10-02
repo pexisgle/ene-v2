@@ -30,7 +30,7 @@ def http(request_id, endpoint, path, body=None):
 
 
 def model(entry, source):
-    metadata = {"source": source, "scope": "catalog"}
+    metadata = {"source": source, "scope": "catalog", "context_window": None}
     for key, value in (
         ("context_window", entry.get("context_length")),
         ("max_output_tokens", (entry.get("top_provider") or {}).get("max_completion_tokens")),

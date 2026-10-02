@@ -210,7 +210,7 @@ async fn run(
                 let PluginMessage::HttpRequest{ref http_id,..}=request else{unreachable!()};
                 if http||http_ids.len()>=8||!http_ids.insert(http_id.clone()){return Err(broken());}
                 let b=bundle.clone();let i=input.clone();let channel=tx.clone();
-                let job=tokio::spawn(async move{if let Err(e)=broker::send(b,i,request,channel.clone()).await{let _=channel.send(Err(e)).await;}});
+                let job=tokio::spawn(async move{if let Err(e)=broker::send(b,i,models,request,channel.clone()).await{let _=channel.send(Err(e)).await;}});
                 http=true;broker_job.0=Some(job);
                },_=>return Err(broken()),
               }
@@ -247,17 +247,10 @@ pub async fn models(
     supervisor: Supervisor,
 ) -> Result<Vec<Model>> {
     input.authorization.check().await?;
-    let catalog = bundle.manifest.model_catalog.clone();
-    let authorization = input.authorization.clone();
     let (tx, mut rx) = mpsc::channel(1);
     supervisor.spawn(run(bundle, Arc::new(input), true, tx))?;
     match rx.recv().await.ok_or_else(broken)?? {
-        Output::Models(mut m) => {
-            if let Some(ene_protocol::provider::ModelCatalog::ModelsDev { provider }) = catalog {
-                super::super::catalog::enrich(&mut m, &provider, authorization.as_ref()).await?;
-            }
-            Ok(m)
-        }
+        Output::Models(m) => Ok(m),
         _ => Err(broken()),
     }
 }

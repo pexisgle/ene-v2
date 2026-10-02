@@ -1,4 +1,6 @@
 //! Builtin adapter for the official OpenAI Responses API.
+mod catalog;
+
 use ene_core::{
     domain::{Connection, Error, ErrorKind},
     ports::{Result, llm::*},
@@ -22,10 +24,7 @@ pub fn descriptor() -> Descriptor {
         settings: vec![],
         requires_credentials: true,
         environment_variable: Some("OPENAI_API_KEY".into()),
-        destinations: vec![
-            "https://api.openai.com".into(),
-            super::catalog::ORIGIN.into(),
-        ],
+        destinations: vec!["https://api.openai.com".into(), catalog::ORIGIN.into()],
         state: "ready".into(),
         error: None,
         revision: REVISION.into(),
@@ -117,7 +116,7 @@ pub async fn models(input: Invocation) -> Result<Vec<Model>> {
         .secret
         .ok_or_else(|| Error::new(ErrorKind::CredentialMissing))?;
     let mut models = fetch_models(secret.value, ENDPOINT).await?;
-    super::catalog::enrich(&mut models, ID, input.authorization.as_ref()).await?;
+    catalog::enrich(&mut models, input.authorization.as_ref()).await?;
     Ok(models)
 }
 
@@ -145,7 +144,11 @@ async fn fetch_models(secret: String, endpoint: &str) -> Result<Vec<Model>> {
             Ok(Model {
                 id: id.into(),
                 name: id.into(),
-                metadata: None,
+                metadata: Some(ene_api_types::provider::ModelMetadata {
+                    source: format!("{endpoint}/models"),
+                    scope: ene_api_types::provider::MetadataScope::Route,
+                    ..Default::default()
+                }),
             })
         })
         .collect()

@@ -41,7 +41,8 @@ pub struct ModelMetadata {
     pub source: String,
     /// Catalog values may differ from the endpoint selected for generation.
     pub scope: MetadataScope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Published context capacity in tokens. Null means unknown, never unlimited.
+    #[serde(default)]
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<u64>,

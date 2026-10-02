@@ -10,17 +10,12 @@ pub const ORIGIN: &str = "https://models.dev";
 pub const URL: &str = "https://models.dev/api.json";
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 
-pub async fn enrich(
-    models: &mut [Model],
-    provider: &str,
-    authorization: &dyn Authorization,
-) -> Result<()> {
-    enrich_from(models, provider, authorization, URL).await
+pub async fn enrich(models: &mut [Model], authorization: &dyn Authorization) -> Result<()> {
+    enrich_from(models, authorization, URL).await
 }
 
 async fn enrich_from(
     models: &mut [Model],
-    provider: &str,
     authorization: &dyn Authorization,
     source: &str,
 ) -> Result<()> {
@@ -64,11 +59,11 @@ async fn enrich_from(
     }
     authorization.check().await?;
     let catalog: Value = serde_json::from_slice(&bytes).map_err(|_| failure())?;
-    apply(models, provider, &catalog, source)
+    apply(models, &catalog, source)
 }
 
-fn apply(models: &mut [Model], provider: &str, catalog: &Value, source: &str) -> Result<()> {
-    let entries = catalog[provider]["models"]
+fn apply(models: &mut [Model], catalog: &Value, source: &str) -> Result<()> {
+    let entries = catalog[super::ID]["models"]
         .as_object()
         .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
     for model in models {

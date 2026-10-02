@@ -29,18 +29,9 @@ pub struct Manifest {
     pub headers: BTreeMap<String, String>,
     pub environment_variable: Option<String>,
     pub destinations: Vec<String>,
-    /// Optional host-owned catalog fallback. The provider chooses the catalog namespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_catalog: Option<ModelCatalog>,
     /// Optional offline hints; ListModels results are authoritative when supported.
     #[serde(default)]
     pub models: Vec<Model>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ModelCatalog {
-    ModelsDev { provider: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,8 +70,9 @@ pub enum HostMessage {
         request_id: String,
         protocol_version: u32,
     },
-    /// Discover current models and optional metadata through the host HTTP broker.
-    /// Unknown limits/modalities must be omitted; never infer them from model IDs.
+    /// Return provider-neutral Model metadata, including context_window in tokens.
+    /// The plugin obtains and normalizes facts from its API or catalog. Unknown
+    /// context_window is null; legacy omitted metadata remains unknown.
     ListModels {
         request_id: String,
         endpoint: String,
@@ -112,6 +104,7 @@ pub enum PluginMessage {
         protocol_version: u32,
         capabilities: Capabilities,
     },
+    /// Model facts use the shared schema, independent of any upstream API.
     Models {
         request_id: String,
         models: Vec<Model>,
@@ -129,6 +122,8 @@ pub enum PluginMessage {
         code: String,
         message: String,
     },
+    /// API-origin requests use host credentials. Other declared origins allow
+    /// public GET only during ListModels; no credentials or manifest headers.
     HttpRequest {
         request_id: String,
         http_id: String,

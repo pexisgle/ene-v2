@@ -144,7 +144,7 @@ async fn model_listing_cancellation_and_failure_release_request_state() {
             {"id":"a","name":"日本","metadata":{"source":"https://openrouter.ai/api/v1/models", "scope":"catalog",
                 "context_window":131072,"max_output_tokens":8192,"input_modalities":["text","image"],
                 "output_modalities":["text"],"supported_parameters":["tools","max_tokens"]}},
-            {"id":"b","name":"b","metadata":{"source":"https://openrouter.ai/api/v1/models", "scope":"catalog"}}]})
+            {"id":"b","name":"b","metadata":{"source":"https://openrouter.ai/api/v1/models", "scope":"catalog", "context_window":null}}]})
     );
     // A later refresh discovers additions without changing the manifest.
     plugin.send(json!({"type":"list_models", "request_id":"refresh", "endpoint":"https://openrouter.ai/api/v1", "options":{}})).await;
@@ -152,10 +152,9 @@ async fn model_listing_cancellation_and_failure_release_request_state() {
     plugin.response("refresh", br#"{"data":[{"id":"new-model","context_length":null,"architecture":{"input_modalities":null}}]}"#, true).await;
     let refreshed = plugin.receive().await;
     assert_eq!(refreshed["models"][0]["id"], "new-model");
-    assert!(
-        refreshed["models"][0]["metadata"]
-            .get("context_window")
-            .is_none()
+    assert_eq!(
+        refreshed["models"][0]["metadata"]["context_window"],
+        serde_json::Value::Null
     );
     assert!(
         refreshed["models"][0]["metadata"]
