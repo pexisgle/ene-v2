@@ -163,9 +163,13 @@ export component ConversationView inherits Rectangle {
         root.following = true;
     }
     VerticalLayout {
-        if UiState.status != "" : HintText { text: UiState.status; }
+        if UiState.conversation-error != "" : BodyText { text: UiState.conversation-error; accessible-live-region: polite; }
         if UiState.has-older : HorizontalLayout {
             QuietButton { icon-only: true; icon: Icons.history; text: "過去の会話を読み込む"; enabled: root.active && UiState.host-connected; clicked => {UiState.load-history();} }
+            Rectangle {horizontal-stretch: 1;}
+        }
+        if !UiState.demo-mode && UiState.host-connected && !UiState.chat-ready : HorizontalLayout {
+            QuietButton { icon-only: true; icon: Icons.settings; text: "接続設定"; enabled: root.active; clicked => {UiState.category = 2; UiState.navigate(1);} }
             Rectangle {horizontal-stretch: 1;}
         }
         spacing: 8px;
@@ -193,7 +197,7 @@ export component ConversationView inherits Rectangle {
                     Image { source: Icons.avatar; width: 64px; height: 64px; x: (parent.width - self.width) / 2; y: 40px; colorize: Palette.foreground; opacity: 0.35; }
                 }
                 for entry in UiState.messages : MessageBubble {
-                    author: entry.author; body: entry.body; provisional: entry.provisional;
+                    author: entry.author; body: entry.body; provisional: entry.provisional; state: entry.state; outgoing: entry.outgoing;
                 }
             }
         }
@@ -220,7 +224,7 @@ export component ConversationView inherits Rectangle {
                     text <=> UiState.draft;
                     font-family: UiState.font-family;
                     font-size: UiState.text-size * 1px;
-                    placeholder-text: UiState.demo-mode || (UiState.host-connected && UiState.chat-ready) ? "メッセージを入力…" : UiState.host-connected ? "設定で会話の準備をしてください" : "ホストに接続しています…";
+                    placeholder-text: UiState.demo-mode || (UiState.host-connected && UiState.chat-ready) ? "メッセージを入力…" : UiState.host-connected ? "接続設定" : "接続中…";
                     active: root.active;
                     min-height: UiState.text-size * 1px + 16px;
                     min-width: 0px;

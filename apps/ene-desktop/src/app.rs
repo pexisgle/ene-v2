@@ -316,11 +316,15 @@ impl Application {
             author: "あなた".into(),
             body: draft,
             provisional: false,
+            state: 0,
+            outgoing: true,
         });
         self.messages.push(ChatEntry {
             author: "ene".into(),
             body: response.into(),
             provisional: true,
+            state: 0,
+            outgoing: false,
         });
         view.set_draft("".into());
         view.set_can_send(false);
@@ -670,25 +674,18 @@ impl Application {
                             .get(&c.id)
                             .is_some_and(|c| c.is_some()),
                     );
-                    state.set_connection_summary(
-                        snapshot
+                    state.set_connection_configured(!snapshot.settings.connections.is_empty());
+                    state.set_credential_state(
+                        match snapshot
                             .settings
                             .connections
-                            .iter()
-                            .map(|p| {
-                                format!(
-                                    "OpenRouter · {} · 資格情報: {}",
-                                    crate::host::MODEL,
-                                    match p["credential_state"].as_str() {
-                                        Some("stored") => "保存済み",
-                                        Some("session_only") => "今回の起動中のみ",
-                                        _ => "未登録",
-                                    }
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            .into(),
+                            .first()
+                            .and_then(|p| p["credential_state"].as_str())
+                        {
+                            Some("stored") => 1,
+                            Some("session_only") => 2,
+                            _ => 0,
+                        },
                     );
                     if !state.get_host_dirty() {
                         state.set_companion_name(c.name.clone().into());
@@ -708,19 +705,15 @@ impl Application {
                         .map(|m| {
                             use ene_protocol::host::{MessageStatus, Role};
                             let author = if m.role == Role::User {
-                                "あなた".into()
+                                "あなた".to_owned()
                             } else {
-                                format!(
-                                    "{}{}",
-                                    c.name,
-                                    match m.status {
-                                        MessageStatus::Queued => " · 待機中",
-                                        MessageStatus::Streaming => " · 生成中",
-                                        MessageStatus::Failed => " · 失敗",
-                                        MessageStatus::Cancelled => " · 中断",
-                                        _ => "",
-                                    }
-                                )
+                                c.name.clone()
+                            };
+                            let message_state = match m.status {
+                                MessageStatus::Queued | MessageStatus::Streaming => 1,
+                                MessageStatus::Failed => 2,
+                                MessageStatus::Cancelled => 3,
+                                _ => 0,
                             };
                             let mut body = m.text;
                             if let Some(failure) = m.failure {
@@ -730,6 +723,8 @@ impl Application {
                                 author: author.into(),
                                 body: body.into(),
                                 provisional: false,
+                                state: message_state,
+                                outgoing: m.role == Role::User,
                             }
                         })
                         .collect::<Vec<_>>();
@@ -744,6 +739,7 @@ impl Application {
                     });
                 }
                 Event::Accepted(text) => {
+                    state.set_conversation_error("".into());
                     state.set_send_pending(false);
                     if state.get_draft() == text {
                         state.set_draft("".into());
@@ -757,11 +753,16 @@ impl Application {
                     });
                 }
                 Event::SendFailed(text) => {
+                    state.set_conversation_error(text.clone().into());
                     state.set_send_pending(false);
                     state.set_status(text.into());
                 }
-                Event::Error(text) => state.set_host_feedback(text.into()),
+                Event::Error(text) => {
+                    state.set_host_feedback_error(true);
+                    state.set_host_feedback(text.into());
+                }
                 Event::Done(text) => {
+                    state.set_host_feedback_error(false);
                     state.set_host_dirty(false);
                     state.set_host_feedback(text.into());
                 }

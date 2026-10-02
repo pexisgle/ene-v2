@@ -1,4 +1,4 @@
-import { Slider, LineEdit, Palette } from "std-widgets.slint";
+import { Slider, LineEdit, Palette, ProgressIndicator } from "std-widgets.slint";
 import { Icons, Icon, ToolButton } from "icons.slint";
 
 // State has a distinct symbol as well as color. Details remain on hover.
@@ -89,8 +89,10 @@ export component MessageBubble inherits Rectangle {
     in property <string> author;
     in property <string> body;
     in property <bool> provisional;
-    private property <bool> outgoing: root.author == "あなた";
-    private property <string> author-label: root.author + (root.provisional ? " · デモの仮応答" : "");
+    in property <bool> outgoing: root.author == "あなた";
+    // 0: complete, 1: queued/streaming, 2: failed, 3: cancelled.
+    in property <int> state;
+    private property <string> author-label: root.author + (root.state == 1 ? " · 生成中" : root.state == 2 ? " · 失敗" : root.state == 3 ? " · 中断" : "") + (root.provisional ? " · デモの仮応答" : "");
     private property <brush> bubble-color: root.outgoing ? (Palette.color-scheme == ColorScheme.dark ? #285b40 : #c7efad) : Palette.control-background;
     private property <length> bubble-width: min(max(56px, measure.preferred-width + 28px), max(0px, min(root.width * 0.82, root.width - 48px)));
     min-height: content.min-height;
@@ -105,7 +107,7 @@ export component MessageBubble inherits Rectangle {
         border-radius: 16px;
         accessible-role: text;
         accessible-label: root.author-label;
-        Icon { x: 4px; y: 4px; width: 24px; height: 24px; source: Icons.avatar; }
+        Icon { x: 4px; y: 4px; width: 24px; height: 24px; source: root.state == 2 || root.state == 3 ? Icons.warning : Icons.avatar; }
         if root.provisional : Icon { x: 22px; y: 22px; width: 12px; height: 12px; source: Icons.demo; }
         Tooltip { text: @markdown("\{root.author-label}"); }
     }
@@ -131,6 +133,7 @@ export component MessageBubble inherits Rectangle {
             padding-top: 10px;
             padding-bottom: 10px;
             spacing: 6px;
+            if root.state == 1 : ProgressIndicator { indeterminate: true; }
             Text { text: root.body; wrap: word-wrap; color: Palette.foreground; min-width: 0px; }
         }
     }

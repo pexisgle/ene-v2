@@ -316,6 +316,8 @@ fn incoming_messages_do_not_move_history_while_reading() {
             author: "ene".into(),
             body: format!("長い日本語の発言記録 {n}。\n二行目を表示します。").into(),
             provisional: true,
+            state: 0,
+            outgoing: false,
         });
     }
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
@@ -333,6 +335,8 @@ fn incoming_messages_do_not_move_history_while_reading() {
         author: "ene".into(),
         body: "新しい発言が届いても閲覧位置を動かしません。".into(),
         provisional: true,
+        state: 0,
+        outgoing: false,
     });
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
     assert_eq!(ui.get_history_scroll(), reading);

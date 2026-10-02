@@ -6,7 +6,7 @@ export global Theme {
     }
 }
 export struct ChatEntry {
-    author: string, body: string, provisional: bool
+    author: string, body: string, provisional: bool, state: int, outgoing: bool
 }
 export struct SettingsDraft {
     font-family: string, text-size: int, theme-index: int,
@@ -30,7 +30,10 @@ export global UiState {
     in-out property <bool> has-older;
     in-out property <bool> host-dirty;
     in-out property <string> host-feedback;
-    in-out property <string> connection-summary;
+    in-out property <bool> host-feedback-error;
+    in-out property <bool> connection-configured;
+    in-out property <int> credential-state;
+    in-out property <string> conversation-error;
     in-out property <string> api-key;
     in-out property <string> companion-name;
     in-out property <string> companion-mind;

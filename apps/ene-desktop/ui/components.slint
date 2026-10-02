@@ -69,7 +69,7 @@ export component ActionButton inherits Rectangle {
             accessible-role: none;
         }
     }
-    if root.icon-only : Tooltip { text: @markdown("\{root.hint}"); }
+    if root.icon-only || root.hint != root.text : Tooltip { text: @markdown("\{root.hint}"); }
 }
 // Secondary navigation keeps a full hit area without a prominent button face.
 export component QuietButton inherits Rectangle {
@@ -144,7 +144,7 @@ export component QuietButton inherits Rectangle {
             return reject;
         }
     }
-    if root.icon-only : Tooltip { text: @markdown("\{root.hint}"); }
+    if root.icon-only || root.hint != root.text : Tooltip { text: @markdown("\{root.hint}"); }
 }
 export component BodyText inherits Text {
     wrap: word-wrap;
