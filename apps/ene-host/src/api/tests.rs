@@ -172,7 +172,7 @@ async fn mutate(
 #[tokio::test]
 async fn permissions_are_independent_and_revocation_does_not_wait_for_generation() {
     let (app, _temp, trace) = app().await;
-    let (status,saved)=mutate(&app,"PATCH","/v1/settings",json!({"revision":1,"connections":[{"kind":"llm","adapter":"openrouter","endpoint":"https://openrouter.ai/api/v1","options":{"only":["openai"],"allow_fallbacks":false}}]}),None).await;
+    let (status,saved)=mutate(&app,"PATCH","/v1/settings",json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),None).await;
     assert_eq!(status, StatusCode::OK);
     let p = saved["connections"][0]["id"].as_str().unwrap();
     let c = app
@@ -182,7 +182,7 @@ async fn permissions_are_independent_and_revocation_does_not_wait_for_generation
         .unwrap()
         .stored
         .companion;
-    let(status,_)=mutate(&app,"PATCH",&format!("/v1/companions/{}",c.id),json!({"revision":1,"model_assignments":{"companion":{"connection_id":p,"model_id":"openai/gpt-6-luna"}}}),None).await;
+    let(status,_)=mutate(&app,"PATCH",&format!("/v1/companions/{}",c.id),json!({"revision":1,"model_assignments":{"companion":{"connection_id":p,"model_id":"gpt-6-luna"}}}),None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         mutate(
@@ -209,7 +209,7 @@ async fn permissions_are_independent_and_revocation_does_not_wait_for_generation
         .0,
         StatusCode::FORBIDDEN
     );
-    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://openrouter.ai","openai"],"data_kinds":["test_input"],"purpose":"connection_check"});
+    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://api.openai.com"],"data_kinds":["test_input"],"purpose":"connection_check"});
     assert_eq!(
         mutate(&app, "POST", "/v1/grants", grant, Some("check-grant"))
             .await
@@ -228,7 +228,7 @@ async fn permissions_are_independent_and_revocation_does_not_wait_for_generation
         .0,
         StatusCode::FORBIDDEN
     );
-    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://openrouter.ai","openai"],"data_kinds":["conversation"],"purpose":"conversation"});
+    let grant = json!({"companion_id":c.id,"connection_id":p,"kind":"data_transfer","destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"});
     let (status, receipt) = mutate(
         &app,
         "POST",
@@ -274,7 +274,7 @@ async fn permissions_are_independent_and_revocation_does_not_wait_for_generation
             &check_app,
             "POST",
             &check_path,
-            json!({"companion_id":cid,"purpose":"companion","model_id":"openai/gpt-6-luna"}),
+            json!({"companion_id":cid,"purpose":"companion","model_id":"gpt-6-luna"}),
             Some("running-check"),
         )
         .await
@@ -676,7 +676,7 @@ async fn typed_client_interoperates_with_actual_host_and_preserves_grants_replay
                         "companion".into(),
                         Some(ModelAssignment {
                             connection_id: p.clone(),
-                            model_id: "openai/gpt-6-luna".into(),
+                            model_id: "gpt-6-luna".into(),
                         }),
                     )]
                     .into(),

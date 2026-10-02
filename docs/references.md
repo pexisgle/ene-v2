@@ -346,9 +346,9 @@ eneでは通常のSlint画面とキャラクターの常駐ウィンドウを分
 
 ### AIと音声の確認用構成
 
-OpenRouterの[GPT-6 Lunaモデルページ](https://openrouter.ai/openai/gpt-6-luna)で、モデルID`openai/gpt-6-luna`の掲載とツール呼び出し対応を確認しました。eneの会話用・作業用の確認構成はこのモデルとします。価格やベンチマークを採用条件として固定せず、実際の会話、ストリーミング、ファイル操作に必要なツール呼び出しを接続テストで確認します。[出典：Tool calling](https://openrouter.ai/docs/guides/features/tool-calling)
+OpenRouterの[GPT-6 Lunaモデルページ](https://openrouter.ai/openai/gpt-6-luna)で、モデルID`openai/gpt-6-luna`の掲載とツール呼び出し対応を確認しました。OpenRouterプラグインの確認構成はこのモデルとします。組込OpenAI公式APIでは、[公式モデル仕様](https://developers.openai.com/api/docs/models/gpt-6-luna)に従って`gpt-6-luna`を指定し、[Responses APIの逐次応答](https://developers.openai.com/api/docs/guides/streaming-responses)を利用します。価格やベンチマークを採用条件として固定せず、実際の会話、ストリーミング、ファイル操作に必要なツール呼び出しを接続テストで確認します。[出典：Tool calling](https://openrouter.ai/docs/guides/features/tool-calling)
 
-モデルIDだけでは配信先は限定されません。[Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)の`only`と`allow_fallbacks`を用い、確認用構成は`provider.only: ["openai"]`、`provider.allow_fallbacks: false`とする方針です。送信先としてOpenRouterとOpenAIの双方を提示し、条件を満たす接続先が利用できなければエラーを報告します。指定モデル・配信先の実API呼び出しは本調査では行っていません。
+モデルIDだけでは配信先は限定されません。[Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)の`only`と`allow_fallbacks`を用い、確認用構成は`provider.only: ["openai"]`、`provider.allow_fallbacks: false`とする方針です。OpenRouterプラグインでは送信先としてOpenRouterとOpenAIの双方を提示し、条件を満たす接続先が利用できなければエラーを報告します。指定モデル・配信先の実API呼び出しは本調査では行っていません。
 
 音声の参考候補として同一PC上の外部VOICEVOX Engineを調査しましたが、MVPの接続先をこれに限定しません。音声APIはエンジンから独立したストリーミング契約とし、合成・配信・再生の開始遅延、発話の自然さ、中断性能を検証して構成を1系統選定します。資料で確認できるAPIと、eneからの合成・再生が動作したことは区別し、後者を実装後の検証条件にします。
 

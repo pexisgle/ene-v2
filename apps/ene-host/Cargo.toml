@@ -15,6 +15,7 @@ utoipa-axum = "0.2"
 ene-api-types = { path = "../../crates/ene-api-types", features = ["openapi"] }
 ene-core = { path = "../../crates/ene-core" }
 xdg = "3"
+rig-reqwest = { version = "0.43", default-features = false, features = ["rustls"] }
 rig-core = { version = "0.43", default-features = false, features = ["reqwest", "rustls"] }
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 time = { version = "0.3", features = ["formatting"] }

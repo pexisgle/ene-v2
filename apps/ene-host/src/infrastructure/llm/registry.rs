@@ -1,6 +1,6 @@
 //! Manifest discovery never starts a process. Enabling probes the isolated runtime.
 use super::{
-    openrouter,
+    openai,
     plugin::{
         manifest::{self, Bundle},
         process,
@@ -87,8 +87,8 @@ impl Registry {
         Ok(())
     }
     fn provider(&self, id: &str) -> Result<std::sync::Arc<dyn LlmProvider>> {
-        if id == "openrouter" {
-            Ok(std::sync::Arc::new(openrouter::Provider))
+        if id == openai::ID {
+            Ok(std::sync::Arc::new(openai::Provider))
         } else {
             Ok(std::sync::Arc::new(super::plugin::Provider {
                 bundle: self.ready(id)?,
@@ -112,7 +112,7 @@ impl Registry {
 }
 impl ProviderRegistry for Registry {
     fn descriptors(&self) -> Vec<Descriptor> {
-        let mut v = vec![openrouter::descriptor()];
+        let mut v = vec![openai::descriptor()];
         if let Ok(entries) = self.entries.read() {
             v.extend(entries.values().map(|e| {
                 if manifest::load(&e.bundle.root)
@@ -141,8 +141,8 @@ impl ProviderRegistry for Registry {
         v
     }
     fn policy(&self, c: &Connection) -> Result<Policy> {
-        if c.adapter == "openrouter" {
-            openrouter::policy(c)
+        if c.adapter == openai::ID {
+            openai::policy(c)
         } else {
             self.ready(&c.adapter)?.policy(c)
         }
@@ -196,7 +196,7 @@ impl ProviderRegistry for Registry {
     }
     fn enable(&self, id: String, enabled: bool) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            if id == "openrouter" {
+            if id == openai::ID {
                 return if enabled {
                     Ok(())
                 } else {

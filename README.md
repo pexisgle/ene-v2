@@ -18,7 +18,7 @@
 
 ## 起動と検証
 
-現在の実装はSlint 1.18.1の単一ウィンドウです。「対話」と「設定」を切り替えて利用します。日本語の複数行入力、Enter／ボタン送信、固定の日本語仮応答、表示設定、ksniのシステムトレイを備えています。デモの会話は起動中のみ保持し、ホスト接続時の会話はSQLiteへ保存します。表示設定・VRM・配置は端末側に保存します。別プロセスのVRM常駐表示とVRMAモーション再生も実装しています。ホストの認証・初期化・履歴・通知購読も実装しています。OpenRouterとの逐次テキスト対話・再接続・設定・送信許可も利用できます。ファイル作業と音声は未実装です。
+現在の実装はSlint 1.18.1の単一ウィンドウです。「対話」と「設定」を切り替えて利用します。日本語の複数行入力、Enter／ボタン送信、固定の日本語仮応答、表示設定、ksniのシステムトレイを備えています。デモの会話は起動中のみ保持し、ホスト接続時の会話はSQLiteへ保存します。表示設定・VRM・配置は端末側に保存します。別プロセスのVRM常駐表示とVRMAモーション再生も実装しています。ホストの認証・初期化・履歴・通知購読も実装しています。OpenAI公式APIとの逐次テキスト対話・再接続・設定・送信許可も利用できます。ファイル作業と音声は未実装です。
 
 LinuxのWaylandセッションで起動してください。Nixを使わないDebian系の環境では、Rustに加えて次の依存が必要です（ほかのOSの対応は今回の対象外です）。
 
@@ -39,7 +39,7 @@ ENE_AVATAR_BIN="$PWD/target/release/ene-avatar" cargo run --locked -p ene-deskto
 
 ## ホストとのテキスト対話
 
-`just run-host`と、別の端末で`just connect-desktop`を起動します。ホスト選択から接続し、設定の「ホスト・接続」でプロバイダーを選び、接続先とモデルIDを保存します。組込OpenRouterでは、会話用・作業用の検証モデルは`openai/gpt-6-luna`、配信先はOpenAI限定、フォールバックは禁止です。次にAPIキーを登録します。ホストの`OPENROUTER_API_KEY`を使う操作も用意しています。環境変数由来のキーはホスト起動中だけ保持し、手入力のキーはOSのSecret Serviceへ保存します。ストアが使えなければ起動中だけ保持し、その状態を画面へ表示します。キーをクライアント設定・DB・取得API・ログへ保存しません。
+`just run-host`と、別の端末で`just connect-desktop`を起動します。ホスト選択から接続し、設定の「ホスト・接続」でプロバイダーを選び、接続先とモデルIDを保存します。組込OpenAIは公式の`https://api.openai.com/v1`へ接続し、Responses APIで逐次応答を取得します。会話用・作業用の確認モデルは`gpt-6-luna`です。次にOpenAIのAPIキーを登録します。ホストの`OPENAI_API_KEY`を使う操作も用意しています。環境変数由来のキーはホスト起動中だけ保持し、手入力のキーはOSのSecret Serviceへ保存します。ストアが使えなければ起動中だけ保持し、その状態を画面へ表示します。キーをクライアント設定・DB・取得API・ログへ保存しません。
 
 「権限とデータ」で会話送信と疎通確認・モデル情報の送受信を別々に許可し、保存します。許可後に「疎通確認」で実モデルの逐次応答を確認できます。対話は生成途中から表示し、クライアント再起動後も履歴を取得します。「過去の会話を読み込む」でさらに遡れます。通知購読→スナップショット→連番差分の順に同期し、欠番・epoch変更・Unicodeスカラーoffset不一致では購読をやり直します。再接続は1・2・4・8・15秒、受付が不明な発言は同じIdempotency-Keyで確認します。許可・資格情報の解除は生成を待たず新規送信を禁止し、返答を中断状態で保存します。ホスト再起動時の未完了生成・疎通確認は自動再実行しません。
 
@@ -64,6 +64,8 @@ HTTP応答・通知は各16MiBまでで、異常・上限超過は同期をや�
 
 systemdユーザーサービスを使う場合は、`cargo build --release --locked -p ene-host`後にバイナリを`~/.local/bin/ene-host`、既存テンプレートを`~/.config/systemd/user/ene-host.service`へ配置し、`systemctl --user daemon-reload`と`systemctl --user enable --now ene-host`を実行します。APIキーは画面から登録でき、環境変数を利用する場合はサービス側に渡す必要があります。クライアント終了でホストを停止しません。
 
+以前の組込OpenRouter接続は自動変換しません。OpenAI用の接続・モデル割当・APIキー・送信許可を登録し直してください。OpenRouterを継続する場合は、以下の追加プラグインを有効化して接続設定と送信許可を登録し直します。
+
 ## プロバイダープラグイン
 
 Linuxの`bubblewrap`が必要です（Debian系では`sudo apt-get install bubblewrap`）。`$XDG_DATA_HOME/ene/providers/`（既定`~/.local/share/ene/providers/`、`ENE_PROVIDER_DIR`で変更可能）の各フォルダに`manifest.json`と実装を配置します。発見だけでは実行しません。設定のプロバイダー一覧で再走査し、選択して有効化すると隔離環境で初期化します。有効化は現在のホスト起動中に適用され、再起動後には再度有効化します。接続設定・モデル割当・許可はDBに保存します。
@@ -74,7 +76,7 @@ Linuxの`bubblewrap`が必要です（Debian系では`sudo apt-get install bubbl
 # x86_64 Linux向けに静的リンクし、隔離環境へ動的ライブラリを追加せずに実行する。
 rustup target add --toolchain 1.98.1 x86_64-unknown-linux-musl
 rustup run 1.98.1 cargo build --release --locked --target x86_64-unknown-linux-musl -p ene-provider-openrouter
-provider_dir="${ENE_PROVIDER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers}/openrouter-plugin"
+provider_dir="${ENE_PROVIDER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers}/openrouter"
 install -d -m 700 "$provider_dir"
 install -m 755 target/x86_64-unknown-linux-musl/release/ene-provider-openrouter "$provider_dir/provider"
 install -m 600 examples/providers/openrouter/manifest.json "$provider_dir/manifest.json"
@@ -82,7 +84,7 @@ install -m 600 examples/providers/openrouter/manifest.json "$provider_dir/manife
 
 Python版を選ぶ場合は、同じフォルダへ`provider.py`を置き、manifestの`command`をPython起動に変更します。隔離環境の`/usr/bin/python3`が必要です。切替・他のCPU向けの配置は[実装例のREADME](examples/providers/openrouter/README.md)を参照してください。
 
-有効化後に接続・モデル・資格情報を登録し、表示された送信先と用途を許可してください。この例はOpenRouter専用で、OpenAI限定・フォールバックなしです。組込の`openrouter`とは別の`openrouter-plugin`として登録されます。他サービスには、そのAPI形式と送信条件に合わせた別の実装を用意します。モデル一覧がない場合もモデルIDを直接入力できます。宣言した設定項目だけをUIで扱い、任意のUIコードは実行しません。
+有効化後に接続・モデル・資格情報を登録し、表示された送信先と用途を許可してください。この例はOpenRouter専用で、OpenAI限定・フォールバックなしです。組込のOpenAI公式APIとは別の`openrouter`として登録されます。他サービスには、そのAPI形式と送信条件に合わせた別の実装を用意します。モデル一覧がない場合もモデルIDを直接入力できます。宣言した設定項目だけをUIで扱い、任意のUIコードは実行しません。
 
 プラグインは隔離した別プロセスで起動し、直接のネットワーク・ホストDB・資格情報・ホームへのアクセスを公開しません。資格情報はホストがHTTP brokerで付与します。初期認証方式は認証なし・Bearer・固定ヘッダー・クエリです。OAuth・署名方式は未対応です。APIバージョンなどの非秘密の固定ヘッダーはmanifestの`headers`で宣言します。外部通信は宣言したHTTPS送信先、または明示許可したHTTPループバックに限定し、リダイレクトを拒否します。OpenRouter仲介時の実処理先とフォールバック禁止はbrokerも強制します。隔離失敗時の無制限起動、別実装への自動切替、生成の自動再送はありません。
 

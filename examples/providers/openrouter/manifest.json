@@ -1,6 +1,6 @@
 {
   "protocol_version": 1,
-  "id": "openrouter-plugin",
+  "id": "openrouter",
   "name": "OpenRouter (plugin)",
   "version": "1.0.0",
   "command": [

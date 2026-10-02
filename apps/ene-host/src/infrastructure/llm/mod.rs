@@ -1,3 +1,3 @@
-mod openrouter;
+mod openai;
 mod plugin;
 pub mod registry;

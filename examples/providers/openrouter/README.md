@@ -2,7 +2,7 @@
 
 `manifest.json`はRust版の`/plugin/provider`を起動します。Rustの通信型とNDJSON処理は`ene-protocol`を共有します。Python版の`provider.py`も同じ契約を実装しています。APIキーとHTTP通信はどちらもホストが扱います。
 
-OpenRouter専用の実装例です。実処理プロバイダーはOpenAI限定、フォールバックは禁止です。生成、逐次テキスト、モデル一覧、取消、終了を扱います。組込の`openrouter`と区別し、プラグインIDは`openrouter-plugin`としています。ベースURL変更による他サービスへの接続には対応していません。
+OpenRouter専用の実装例です。実処理プロバイダーはOpenAI限定、フォールバックは禁止です。生成、逐次テキスト、モデル一覧、取消、終了を扱います。プラグインIDは`openrouter`です。ベースURL変更による他サービスへの接続には対応していません。
 
 ## Rust版（デフォルト）
 
@@ -17,7 +17,7 @@ OpenRouter専用の実装例です。実処理プロバイダーはOpenAI限定�
 Rust版と同じプロバイダーIDを使う代替実装です。隔離環境の`/usr/bin/python3`が必要です。
 
 ```sh
-provider_dir="${ENE_PROVIDER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers}/openrouter-plugin"
+provider_dir="${ENE_PROVIDER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ene/providers}/openrouter"
 install -d -m 700 "$provider_dir"
 install -m 600 examples/providers/openrouter/provider.py "$provider_dir/provider.py"
 install -m 600 examples/providers/openrouter/manifest.json "$provider_dir/manifest.json"
@@ -31,4 +31,4 @@ install -m 600 examples/providers/openrouter/manifest.json "$provider_dir/manife
 
 配置後はホストの設定画面で再走査し、有効化してください。Rust版とPython版の切り替えも実装変更になるため、送信許可を設定し直します。
 
-旧IDの`openai-compatible`で導入済みの場合は、新しい`openrouter-plugin`で接続・モデル割当・送信許可を登録し直してください。
+旧IDの`openai-compatible`で導入済みの場合は、新しい`openrouter`で接続・モデル割当・送信許可を登録し直してください。

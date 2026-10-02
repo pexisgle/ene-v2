@@ -90,7 +90,7 @@ pub fn load(root: &Path) -> Result<Bundle> {
     let manifest: Manifest = serde_json::from_slice(&read(&root.join("manifest.json"), 65536)?)
         .map_err(|_| invalid())?;
     if manifest.protocol_version != VERSION
-        || manifest.id == "openrouter"
+        || manifest.id == super::super::openai::ID
         || manifest.id.is_empty()
         || manifest.id.len() > 80
         || !manifest

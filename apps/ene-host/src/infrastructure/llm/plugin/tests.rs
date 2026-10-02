@@ -18,7 +18,7 @@ fn bundle(program: &str) -> (tempfile::TempDir, manifest::Bundle) {
     let b = manifest::load(dir.path()).unwrap();
     (dir, b)
 }
-const INIT: &str = "import sys,json,os,socket\nassert not os.path.exists('/workspace')\nassert 'OPENROUTER_API_KEY' not in os.environ\nassert 'DBUS_SESSION_BUS_ADDRESS' not in os.environ\nm=json.loads(sys.stdin.readline())\nprint(json.dumps({'type':'initialized','request_id':m['request_id'],'protocol_version':1,'capabilities':{'streaming_text':True,'model_list':False}}),flush=True)\n";
+const INIT: &str = "import sys,json,os,socket\nassert not os.path.exists('/workspace')\nassert 'OPENAI_API_KEY' not in os.environ\nassert 'OPENROUTER_API_KEY' not in os.environ\nassert 'DBUS_SESSION_BUS_ADDRESS' not in os.environ\nm=json.loads(sys.stdin.readline())\nprint(json.dumps({'type':'initialized','request_id':m['request_id'],'protocol_version':1,'capabilities':{'streaming_text':True,'model_list':False}}),flush=True)\n";
 struct Permit(AtomicBool);
 impl Authorization for Permit {
     fn check(&self) -> BoxFuture<'_, Result<()>> {
@@ -80,7 +80,12 @@ fn contracts_configuration_and_implementation_changes_are_rejected() {
     std::fs::write(&path, value.to_string()).unwrap();
     assert!(manifest::load(dir.path()).is_err());
     value["options"] = json!({});
+    value["id"] = json!("openai");
     std::fs::write(&path, value.to_string()).unwrap();
+    assert!(manifest::load(dir.path()).is_err());
+    value["id"] = json!("openrouter");
+    std::fs::write(&path, value.to_string()).unwrap();
+    assert!(manifest::load(dir.path()).is_ok());
     std::os::unix::fs::symlink("/etc/passwd", dir.path().join("link")).unwrap();
     assert!(manifest::load(dir.path()).is_err());
 }
