@@ -90,34 +90,48 @@ export component MessageBubble inherits Rectangle {
     in property <string> body;
     in property <bool> provisional;
     private property <bool> outgoing: root.author == "あなた";
-    min-height: row.min-height;
+    private property <string> author-label: root.author + (root.provisional ? " · デモの仮応答" : "");
+    private property <brush> bubble-color: root.outgoing ? (Palette.color-scheme == ColorScheme.dark ? #285b40 : #c7efad) : Palette.control-background;
+    private property <length> bubble-width: min(max(56px, measure.preferred-width + 28px), max(0px, min(root.width * 0.82, root.width - 48px)));
+    min-height: content.min-height;
     vertical-stretch: 0;
-    row := HorizontalLayout {
-        spacing: 8px;
-        if root.outgoing : Rectangle { min-width: 32px; max-width: 32px; }
-        Rectangle {
-            background: root.outgoing ? Palette.control-background : Palette.alternate-background;
-            border-width: root.outgoing ? 1px : 0px;
-            border-color: Palette.border;
-            border-radius: 12px;
-            min-height: content.min-height;
-            content := VerticalLayout {
-                padding: 12px;
-                spacing: 8px;
-                HorizontalLayout {
-                    Rectangle {
-                        min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px;
-                        accessible-role: text;
-                        accessible-label: root.author;
-                        Icon { x: 2px; y: 2px; source: root.outgoing ? Icons.desktop : Icons.avatar; }
-                        Tooltip { text: @markdown("\{root.author}"); }
-                    }
-                    Rectangle {horizontal-stretch: 1;}
-                    if root.provisional : StatusBadge {compact: true; icon: Icons.demo; label: "デモの仮応答"; state: 0;}
-                }
-                Text {text: root.body; wrap: word-wrap; color: Palette.foreground; min-width: 0px;}
-            }
+    measure := Text { visible: false; text: root.body; }
+    if !root.outgoing : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 32px;
+        height: 32px;
+        background: Palette.alternate-background;
+        border-radius: 16px;
+        accessible-role: text;
+        accessible-label: root.author-label;
+        Icon { x: 4px; y: 4px; width: 24px; height: 24px; source: Icons.avatar; }
+        if root.provisional : Icon { x: 22px; y: 22px; width: 12px; height: 12px; source: Icons.demo; }
+        Tooltip { text: @markdown("\{root.author-label}"); }
+    }
+    bubble := Rectangle {
+        x: root.outgoing ? parent.width - self.width - 8px : 40px;
+        width: root.bubble-width;
+        height: content.min-height;
+        background: root.bubble-color;
+        border-radius: 16px;
+        accessible-role: text;
+        accessible-label: root.author-label + ": " + root.body;
+        Path {
+            x: root.outgoing ? parent.width - 1px : -7px;
+            y: 10px;
+            width: 8px;
+            height: 10px;
+            commands: root.outgoing ? "M 0 0 L 8 0 L 0 10 Z" : "M 8 0 L 0 0 L 8 10 Z";
+            fill: root.bubble-color;
         }
-        if !root.outgoing : Rectangle { min-width: 32px; max-width: 32px; }
+        content := VerticalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 6px;
+            Text { text: root.body; wrap: word-wrap; color: Palette.foreground; min-width: 0px; }
+        }
     }
 }
