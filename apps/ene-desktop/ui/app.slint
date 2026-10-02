@@ -100,14 +100,17 @@ export component AppWindow inherits Window {
         settings.focus-error();
     }
     Rectangle {
-        min-width: 0px;
+        width: min(root.width, (UiState.host-selection-visible ? 600px * UiState.scale : UiState.page == 0 ? 800px * UiState.scale : 960px * UiState.scale + 12px) + 2 * root.layout-padding);
+        x: (root.width - self.width) / 2;
         min-height: 0px;
         shell := VerticalLayout {
             padding: root.layout-padding;
             spacing: 8px;
             HorizontalLayout {
-                spacing: 12px;
-                BodyText { text: UiState.host-selection-visible ? "ホスト選択" : "ene"; font-weight: 600; horizontal-stretch: 1; }
+                spacing: 8px;
+                padding-right: 12px;
+                min-height: UiState.control-height;
+                BodyText { text: UiState.host-selection-visible ? "ホスト選択" : "ene"; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
                 StatusBadge { icon: UiState.demo-mode ? Icons.demo : Icons.connection; label: UiState.demo-mode ? "デモ · 外部送信なし・会話は保存しません" : "ホスト未接続"; }
                 StatusBadge { icon: UiState.avatar-visible ? Icons.avatar : Icons.eye-off; state: UiState.avatar-failed ? 3 : !UiState.avatar-visible ? 0 : UiState.avatar-ready ? 1 : 2; label: UiState.avatar-status; }
                 if UiState.avatar-failed || UiState.motion-failed || !UiState.tray-ready || UiState.apply-error != "" : QuietButton {
@@ -146,21 +149,21 @@ export component AppWindow inherits Window {
             Rectangle {
                 vertical-stretch: 1;
                 host-selection := HostSelectionView {
-                    width: min(parent.width, 600px * UiState.scale);
-                    x: (parent.width - self.width) / 2;
+                    width: parent.width;
+                    x: 0px;
                     visible: UiState.host-selection-visible;
                     active: UiState.host-selection-visible && !UiState.quit-confirmation;
                 }
                 conversation := ConversationView {
-                    width: min(parent.width, 800px * UiState.scale);
-                    x: (parent.width - self.width) / 2;
+                    width: parent.width;
+                    x: 0px;
                     visible: !UiState.host-selection-visible && UiState.page == 0;
                     active: !UiState.host-selection-visible && UiState.page == 0 && !UiState.quit-confirmation;
                     compact: root.compact;
                 }
                 settings := SettingsView {
-                    width: min(parent.width, root.compact ? 800px * UiState.scale : 960px * UiState.scale + 12px);
-                    x: (parent.width - self.width) / 2;
+                    width: parent.width;
+                    x: 0px;
                     visible: !UiState.host-selection-visible && UiState.page == 1;
                     active: !UiState.host-selection-visible && UiState.page == 1 && !UiState.quit-confirmation;
                     compact: root.compact;

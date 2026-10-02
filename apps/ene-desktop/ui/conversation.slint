@@ -180,7 +180,8 @@ export component ConversationView inherits Rectangle {
             VerticalLayout {
                 alignment: start;
                 spacing: 12px;
-                padding: 4px;
+                padding: 0px;
+                padding-right: 12px;
                 if UiState.messages.length == 0 : Rectangle {
                     min-height: 160px;
                     vertical-stretch: 0;
@@ -229,20 +230,29 @@ export component ConversationView inherits Rectangle {
                         }
                     }
                 }
-                ActionButton {
+                Rectangle {
                     row: 0;
                     col: 1;
-                    vertical-stretch: 0;
-                    icon-only: true;
-                    icon: Icons.send;
-                    text: "送信";
-                    hint: "Enterで送信 · Shift+Enterで改行";
+                    min-width: UiState.control-height;
+                    max-width: UiState.control-height;
+                    min-height: UiState.control-height;
+                    VerticalLayout {
+                        spacing: 0px;
+                        Rectangle { min-height: 0px; vertical-stretch: 1; }
+                        ActionButton {
+                            vertical-stretch: 0;
+                            icon-only: true;
+                            icon: Icons.send;
+                            text: "送信";
+                            hint: "Enterで送信 · Shift+Enterで改行";
 
-                    primary: true;
-                    fill-width: false;
-                    enabled: root.active && UiState.can-send;
-                    clicked => {
-                        UiState.submit();
+                            primary: true;
+                            fill-width: false;
+                            enabled: root.active && UiState.can-send;
+                            clicked => {
+                                UiState.submit();
+                            }
+                        }
                     }
                 }
             }

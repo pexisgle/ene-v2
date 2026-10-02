@@ -6,7 +6,7 @@ import { ActionButton, QuietButton, BodyText, HintText, SectionTitle, SettingFie
 export component SettingsView inherits Rectangle {
     in property <bool> active;
     in property <bool> compact;
-    out property <length> form-width: max(0px, body.visible-width - 8px);
+    out property <length> form-width: max(0px, body.visible-width - 12px);
     out property <bool> form-wide: root.form-width >= 560px * UiState.scale;
     in-out property <length> scroll-position <=> body.content-y;
     private property <length> retained-scroll;
@@ -47,16 +47,16 @@ export component SettingsView inherits Rectangle {
         }
     }
     GridLayout {
-        spacing: 12px;
+        spacing: 16px;
         Rectangle {
             row: 0;
             col: 0;
-            min-width: root.compact ? 0px : 52px;
-            max-width: root.compact ? 100000px : 52px;
-            height: root.compact ? 44px : root.height;
+            min-width: root.compact ? 0px : UiState.control-height;
+            max-width: root.compact ? 100000px : UiState.control-height;
+            height: root.compact ? UiState.control-height : root.height;
             vertical-stretch: root.compact ? 0 : 1;
             GridLayout {
-                spacing: 4px;
+                spacing: 8px;
                 terminal-button := QuietButton {
                     row: 0; col: 0;
                     icon-only: true; icon: Icons.desktop; text: "この端末";
@@ -99,18 +99,23 @@ export component SettingsView inherits Rectangle {
                     horizontal-scrollbar-policy: always-off;
                     VerticalLayout {
                         spacing: 12px;
-                        padding: 4px;
+                        padding: 0px;
+                        padding-right: 12px;
                         if UiState.apply-error != "" : BodyText {
                             text: UiState.apply-error;
                             accessible-live-region: polite;
                         }
                         SectionTitle {
+                            min-height: UiState.control-height;
+                            vertical-alignment: center;
                             text: "外観";
                         }
                         SettingField {
                             label: "テーマ";
                             wide: root.form-wide;
                             ThemePicker {
+                                ui-scale: UiState.scale;
+                                height: UiState.control-height;
                                 width: parent.control-width;
                                 enabled: root.editing;
                                 current-index <=> UiState.settings-draft.theme-index;
@@ -130,7 +135,7 @@ export component SettingsView inherits Rectangle {
                                 enabled: root.editing;
                                 accessible-label: "フォント名";
                                 width: parent.control-width;
-                                height: max(44px, UiState.text-size * 1.8px);
+                                height: UiState.control-height;
                                 text <=> UiState.settings-draft.font-family;
                                 edited => {
                                     UiState.settings-edited();
@@ -149,7 +154,7 @@ export component SettingsView inherits Rectangle {
                                 enabled: root.editing;
                                 accessible-label: "文字サイズ";
                                 width: parent.control-width;
-                                height: max(44px, UiState.text-size * 1.8px);
+                                height: UiState.control-height;
                                 minimum: 12;
                                 maximum: 28;
                                 value <=> UiState.settings-draft.text-size;
@@ -163,6 +168,7 @@ export component SettingsView inherits Rectangle {
                         }
                         HorizontalLayout {
                             spacing: 8px;
+                            padding-left: root.form-wide ? 144px * UiState.scale + 12px : 0px;
                             QuietButton {
                                 icon-only: true;
                                 scroll-to-focus: true;
@@ -200,6 +206,7 @@ export component SettingsView inherits Rectangle {
                             label: "大きさ";
                             wide: root.form-wide;
                             size-edit := SizeControl {
+                                ui-scale: UiState.scale;
                                 changed has-focus => {
                                     if self.has-focus {
                                         UiState.reveal-settings-item(self.absolute-position.y, self.height);
@@ -207,7 +214,7 @@ export component SettingsView inherits Rectangle {
                                 }
                                 enabled: root.editing;
                                 width: parent.control-width;
-                                height: max(44px, UiState.text-size * 1.8px);
+                                height: UiState.control-height;
                                 text <=> UiState.settings-draft.size-text;
                                 edited => {
                                     UiState.settings-edited();
@@ -226,7 +233,7 @@ export component SettingsView inherits Rectangle {
                                 enabled: root.editing;
                                 accessible-label: "描画速度";
                                 width: parent.control-width;
-                                height: max(44px, UiState.text-size * 1.8px);
+                                height: UiState.control-height;
                                 model: ["30 fps", "60 fps"];
                                 current-index <=> UiState.settings-draft.fps-index;
                                 selected => {
@@ -248,14 +255,16 @@ export component SettingsView inherits Rectangle {
                                 }
                                 enabled: root.editing;
                                 accessible-label: "VRMファイル";
-                                width: max(0px, parent.control-width - 52px);
-                                height: max(44px, UiState.text-size * 1.8px);
+                                x: 0px;
+                                width: max(0px, parent.control-width - UiState.control-height - 8px);
+                                height: UiState.control-height;
                                 text <=> UiState.settings-draft.model;
                                 edited => {
                                     UiState.settings-edited();
                                 }
                             }
                             ToolButton {
+                                ui-scale: UiState.scale;
                                 x: parent.control-width - self.width;
                                 y: (parent.height - self.height) / 2;
                                 icon: Icons.folder;
@@ -277,14 +286,16 @@ export component SettingsView inherits Rectangle {
                                 }
                                 enabled: root.editing;
                                 accessible-label: "VRMAファイル";
-                                width: max(0px, parent.control-width - 52px);
-                                height: max(44px, UiState.text-size * 1.8px);
+                                x: 0px;
+                                width: max(0px, parent.control-width - UiState.control-height - 8px);
+                                height: UiState.control-height;
                                 text <=> UiState.settings-draft.motion;
                                 edited => {
                                     UiState.settings-edited();
                                 }
                             }
                             ToolButton {
+                                ui-scale: UiState.scale;
                                 x: parent.control-width - self.width;
                                 y: (parent.height - self.height) / 2;
                                 icon: Icons.folder;
@@ -296,7 +307,7 @@ export component SettingsView inherits Rectangle {
                         }
                         HorizontalLayout {
                             spacing: 8px;
-
+                            padding-left: root.form-wide ? 144px * UiState.scale + 12px : 0px;
                             QuietButton {
                                 icon-only: true;
                                 scroll-to-focus: true;
@@ -364,6 +375,7 @@ export component SettingsView inherits Rectangle {
                 }
                 HorizontalLayout {
                     spacing: 8px;
+                    padding-right: 12px;
                     vertical-stretch: 0;
                     StatusBadge { icon: Icons.save; state: UiState.settings-dirty ? 2 : 1; label: UiState.settings-dirty ? "未保存の変更" : UiState.save-status == "" ? "保存済み" : UiState.save-status; accessible-live-region: polite; }
                     Rectangle { horizontal-stretch: 1; }
@@ -390,8 +402,11 @@ export component SettingsView inherits Rectangle {
                 horizontal-scrollbar-policy: always-off;
                 VerticalLayout {
                     spacing: 12px;
-                    padding: 4px;
+                    padding: 0px;
+                    padding-right: 12px;
                     SectionTitle {
+                        min-height: UiState.control-height;
+                        vertical-alignment: center;
                         text: UiState.category == 1 ? "コンパニオン" : UiState.category == 2 ? "ホスト・接続" : "権限とデータ";
                     }
                     HorizontalLayout {

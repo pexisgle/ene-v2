@@ -22,6 +22,7 @@ export global UiState {
     in-out property <string> font-family: "Noto Sans CJK JP";
     in-out property <int> text-size: 16;
     out property <float> scale: max(1, self.text-size / 16);
+    out property <length> control-height: max(44px, 20px * self.scale + 20px);
     in-out property <bool> demo-mode;
     in-out property <[ChatEntry]> messages;
     in-out property <string> draft;

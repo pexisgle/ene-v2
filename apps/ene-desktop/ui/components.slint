@@ -9,7 +9,7 @@ export component ActionButton inherits Rectangle {
     in property <bool> icon-only;
     private property <bool> has-icon: root.icon.width > 0;
     private property <length> icon-size: 20px * UiState.scale;
-    private property <length> tool-size: max(44px, root.icon-size + 20px);
+    private property <length> tool-size: UiState.control-height;
     in property <bool> enabled: true;
     in property <bool> primary;
     in property <bool> checkable;
@@ -29,7 +29,7 @@ export component ActionButton inherits Rectangle {
     preferred-width: root.icon-only ? root.tool-size : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
     horizontal-stretch: !root.icon-only && root.fill-width ? 1 : 0;
     measure := Text { visible: false; text: root.text; }
-    min-height: root.icon-only ? root.tool-size : max(44px, UiState.text-size * 1.8px, label-layout.min-height);
+    min-height: root.icon-only ? root.tool-size : max(UiState.control-height, label-layout.min-height);
     max-height: root.icon-only ? root.tool-size : 100000px;
     vertical-stretch: 0;
     control := Button {
@@ -79,7 +79,7 @@ export component QuietButton inherits Rectangle {
     in property <bool> icon-only;
     private property <bool> has-icon: root.icon.width > 0;
     private property <length> icon-size: (root.icon-only ? 20px : 16px) * UiState.scale;
-    private property <length> tool-size: max(44px, root.icon-size + 16px);
+    private property <length> tool-size: UiState.control-height;
     private property <length> icon-space: root.has-icon ? root.icon-size + 6px : 0px;
     in property <bool> enabled: true;
     in property <bool> checked;
@@ -93,7 +93,7 @@ export component QuietButton inherits Rectangle {
     min-width: root.icon-only ? root.tool-size : 0px;
     max-width: root.icon-only ? root.tool-size : root.fill-width ? 100000px : measure.preferred-width + 16px + root.icon-space;
     preferred-width: root.icon-only ? root.tool-size : measure.preferred-width + 16px + root.icon-space;
-    min-height: root.icon-only ? root.tool-size : max(44px, label.preferred-height + 16px, root.icon-size + 16px);
+    min-height: root.icon-only ? root.tool-size : max(UiState.control-height, label.preferred-height + 16px);
     max-height: root.icon-only ? root.tool-size : 100000px;
     horizontal-stretch: !root.icon-only && root.fill-width ? 1 : 0;
     vertical-stretch: 0;
@@ -162,23 +162,25 @@ export component SectionTitle inherits BodyText {
 export component SettingField inherits Rectangle {
     in property <string> label;
     in property <bool> wide;
+    in property <length> label-width: 144px * UiState.scale;
     out property <length> control-width: control-slot.width;
     min-height: field-layout.min-height;
     vertical-stretch: 0;
     field-layout := GridLayout {
-        spacing: 8px;
+        spacing: 12px;
         BodyText {
             row: 0;
             col: 0;
-            max-width: root.wide ? 160px * UiState.scale : 100000px;
-            min-width: 0px;
+            min-width: root.wide ? root.label-width : 0px;
+            max-width: root.wide ? root.label-width : 100000px;
+            vertical-alignment: root.wide ? center : top;
             horizontal-stretch: root.wide ? 0 : 1;
             text: root.label;
         }
         control-slot := Rectangle {
             row: root.wide ? 0 : 1;
             col: root.wide ? 1 : 0;
-            min-height: max(44px, UiState.text-size * 1.8px);
+            min-height: UiState.control-height;
             min-width: 0px;
             horizontal-stretch: 1;
             @children

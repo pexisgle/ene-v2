@@ -6,7 +6,6 @@ import { ActionButton, QuietButton, BodyText, HintText, SectionTitle } from "com
 
 export component HostSelectionView inherits Rectangle {
     in property <bool> active;
-    private property <bool> stacked: false;
     public function focus-entry() {
         if UiState.demo-mode { demo-start.focus(); }
         else { local-settings.focus(); }
@@ -19,7 +18,8 @@ export component HostSelectionView inherits Rectangle {
             horizontal-scrollbar-policy: always-off;
             VerticalLayout {
                 alignment: start;
-                padding: 4px;
+                padding: 0px;
+                padding-right: 12px;
                 spacing: 12px;
                 Rectangle {
                     background: Palette.alternate-background;
@@ -52,6 +52,7 @@ export component HostSelectionView inherits Rectangle {
             }
         }
         GridLayout {
+            padding-right: 12px;
             vertical-stretch: 0;
             spacing: 8px;
             local-settings := QuietButton {
@@ -64,8 +65,8 @@ export component HostSelectionView inherits Rectangle {
             }
             Rectangle { row: 0; col: 1; horizontal-stretch: 1; }
             QuietButton {
-                row: root.stacked ? 1 : 0;
-                col: root.stacked ? 0 : 2;
+                row: 0;
+                col: 2;
                 icon-only: true;
                 icon: Icons.exit;
                 text: "クライアント終了";
