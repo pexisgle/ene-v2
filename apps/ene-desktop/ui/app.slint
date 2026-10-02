@@ -1,4 +1,4 @@
-import { Icons, IconButton, Icon } from "icons.slint";
+import { Icons, ToolButton, Icon } from "icons.slint";
 import { AboutSlint, Button, ScrollView, VerticalBox, HorizontalBox, LineEdit, SpinBox, CheckBox, ComboBox, Palette } from "std-widgets.slint";
 export { Palette } from "std-widgets.slint";
 export global Theme {
@@ -166,19 +166,19 @@ export component ChatWindow inherits Window {
                 Text { text: root.demo-mode ? "デモモード · 仮応答" : "ホスト未接続"; color: Palette.foreground; opacity: 0.7; font-size: 13px; }
             }
             Rectangle { horizontal-stretch: 1; }
-            IconButton { icon: Icons.settings; text: "設定"; clicked => { root.open-settings(); } }
+            ToolButton { icon: Icons.settings; label: "設定"; clicked => { root.open-settings(); } }
         }
 
         if root.avatar-failed : HorizontalBox {
             padding: 4px;
             Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; horizontal-stretch: 1; }
-            IconButton { icon: Icons.settings; text: "設定"; clicked => { root.open-settings(); } }
-            IconButton { icon: Icons.refresh; text: "再起動"; clicked => { root.restart-avatar(); } }
+            ToolButton { icon: Icons.settings; label: "設定"; clicked => { root.open-settings(); } }
+            ToolButton { icon: Icons.refresh; label: "再起動"; clicked => { root.restart-avatar(); } }
         }
         if root.motion-failed : HorizontalBox {
             padding: 4px;
             Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; horizontal-stretch: 1; }
-            IconButton { icon: Icons.settings; text: "設定"; clicked => { root.open-settings(); } }
+            ToolButton { icon: Icons.settings; label: "設定"; clicked => { root.open-settings(); } }
         }
         history := ScrollView {
             vertical-stretch: 1;
@@ -259,7 +259,7 @@ export component ChatWindow inherits Window {
                     VerticalBox {
                         padding: 0px;
                         Rectangle { vertical-stretch: 1; }
-                        IconButton { icon: Icons.send; height: 40px; text: "送信"; enabled: root.can-send; clicked => { root.submit(); } }
+                        ToolButton { icon: Icons.send; label: "送信"; enabled: root.can-send; clicked => { root.submit(); } }
                     }
                 }
                 Text { text: "Enter で送信 · Shift+Enter で改行"; color: Palette.foreground; opacity: 0.7; font-size: 11px; vertical-stretch: 0; }
@@ -329,7 +329,7 @@ export component SettingsWindow inherits Window {
                 Text { text: root.avatar-model; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 HorizontalBox {
                     padding: 0px;
-                    IconButton { icon: Icons.folder; text: "VRMを選ぶ"; clicked => { root.select-model(); } }
+                    ToolButton { icon: Icons.folder; label: "VRMを選ぶ"; clicked => { root.select-model(); } }
                     Text { text: "描画速度"; font-size: 13px; vertical-alignment: center; }
                     ComboBox { model: ["30 fps", "60 fps"]; current-index <=> root.avatar-fps-index; }
                 }
@@ -340,31 +340,31 @@ export component SettingsWindow inherits Window {
                     Text { text: "%"; vertical-alignment: center; }
                 }
                 Text { text: "100%で全身の高さが画面の約40%、200%で約80%になります。「適用して閉じる」で反映します。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                IconButton { icon: Icons.center; text: "キャラクターを画面中央へ戻す"; clicked => { root.recenter-avatar(); } }
+                HorizontalBox { padding: 0px; ToolButton { icon: Icons.center; label: "キャラクターを画面中央へ戻す"; clicked => { root.recenter-avatar(); } } Rectangle { horizontal-stretch: 1; } }
                 Text { text: "画面の端を越えてドラッグできます。見失ったときは中央へ戻してください。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.motion; } Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; } }
                 Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 HorizontalBox {
                     padding: 0px;
-                    IconButton { icon: Icons.folder; text: "VRMAを選ぶ"; clicked => { root.select-motion(); } }
-                    IconButton { icon: Icons.reset; text: "静止姿勢に戻す"; enabled: root.avatar-motion != ""; clicked => { root.avatar-motion = ""; } }
+                    ToolButton { icon: Icons.folder; label: "VRMAを選ぶ"; clicked => { root.select-motion(); } }
+                    ToolButton { icon: Icons.reset; label: "静止姿勢に戻す"; enabled: root.avatar-motion != ""; clicked => { root.avatar-motion = ""; } }
                 }
                 HorizontalBox {
                     padding: 0px;
-                    CheckBox { text: "再生"; checked <=> root.motion-playing; enabled: root.avatar-motion != ""; }
-                    CheckBox { text: "繰り返す"; checked <=> root.motion-loop; enabled: root.avatar-motion != ""; }
+                    ToolButton { icon: root.motion-playing ? Icons.pause : Icons.motion; label: root.motion-playing ? "一時停止" : "モーションを再生"; checkable: true; checked <=> root.motion-playing; enabled: root.avatar-motion != ""; }
+                    ToolButton { icon: Icons.loop; label: "繰り返し再生"; checkable: true; checked <=> root.motion-loop; enabled: root.avatar-motion != ""; }
                 }
                 Text { text: root.motion-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
                 Text { text: "モーションはその場で再生します。横移動を固定し、上下の動きと回転を保ちます。"; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
-                if root.avatar-failed : IconButton { icon: Icons.refresh; text: "描画エラーから再起動"; clicked => { root.restart-avatar(); } }
+                if root.avatar-failed : HorizontalBox { padding: 0px; ToolButton { icon: Icons.refresh; label: "描画エラーから再起動"; clicked => { root.restart-avatar(); } } Rectangle { horizontal-stretch: 1; } }
                 Text { text: "表示設定とキャラクターの配置はこの端末に保存します。"; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; font-size: 12px; }
                 Text { text: root.tray-status; wrap: word-wrap; color: Palette.foreground; opacity: 0.7; }
-                if !root.tray-ready : IconButton { icon: Icons.exit; text: "クライアント終了"; clicked => { root.quit(); } }
+                if !root.tray-ready : HorizontalBox { padding: 0px; ToolButton { icon: Icons.exit; label: "クライアント終了"; clicked => { root.quit(); } } Rectangle { horizontal-stretch: 1; } }
                 AboutSlint { preferred-height: 100px; max-height: 120px; vertical-stretch: 0; }
             }
         }
         if root.apply-error != "" : Text { text: root.apply-error; wrap: word-wrap; color: Palette.foreground; font-size: 12px; }
-        IconButton { icon: Icons.save; text: "適用して閉じる"; clicked => { root.apply-settings(); } }
+        HorizontalBox { Rectangle { horizontal-stretch: 1; } ToolButton { icon: Icons.save; label: "適用して閉じる"; clicked => { root.apply-settings(); } } }
     }
 }

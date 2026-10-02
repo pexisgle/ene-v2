@@ -20,11 +20,28 @@ export global Icons {
     out property <image> eye-off: @image-url("../assets/icons/eye-off.svg");
     out property <image> history: @image-url("../assets/icons/history.svg");
     out property <image> key: @image-url("../assets/icons/key.svg");
+    out property <image> back: @image-url("../assets/icons/back.svg");
+    out property <image> pause: @image-url("../assets/icons/pause.svg");
+    out property <image> loop: @image-url("../assets/icons/loop.svg");
 }
 
 export component IconButton inherits Button {
     colorize-icon: true;
     icon-size: 20px;
+}
+
+// The name remains available to assistive technology and on hover.
+export component ToolButton inherits Button {
+    in property <string> label;
+    text: "";
+    accessible-label: root.label;
+    colorize-icon: true;
+    icon-size: 20px;
+    min-width: 44px;
+    max-width: 44px;
+    min-height: 44px;
+    max-height: 44px;
+    Tooltip { text: @markdown("\{root.label}"); }
 }
 
 export component Icon inherits Image {
