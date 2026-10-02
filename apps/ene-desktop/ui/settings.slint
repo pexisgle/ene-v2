@@ -425,14 +425,18 @@ export component SettingsView inherits Rectangle {
                         }
                     }
                 }
-                if UiState.apply-error != "" : ActionButton {
-                    icon: Icons.settings;
-                    text: "エラーの詳細";
-                    fill-width: false;
-                    enabled: root.editing;
-                    clicked => {
-                        root.focus-error();
+                if UiState.apply-error != "" : HorizontalLayout {
+                    vertical-stretch: 0;
+                    ActionButton {
+                        icon: Icons.settings;
+                        text: "エラーの詳細";
+                        fill-width: false;
+                        enabled: root.editing;
+                        clicked => {
+                            root.focus-error();
+                        }
                     }
+                    Rectangle { horizontal-stretch: 1; }
                 }
                 if UiState.save-status != "" : HintText {
                     text: UiState.save-status;

@@ -23,6 +23,7 @@ export component ActionButton inherits Rectangle {
     }
     min-width: 0px;
     max-width: root.fill-width ? 100000px : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
+    preferred-width: measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
     horizontal-stretch: root.fill-width ? 1 : 0;
     measure := Text { visible: false; text: root.text; }
     min-height: max(44px, UiState.text-size * 1.8px, label-layout.min-height);
@@ -70,8 +71,8 @@ export component QuietButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
     private property <bool> has-icon: root.icon.width > 0;
-    private property <length> icon-size: 20px * UiState.scale;
-    private property <length> icon-space: root.has-icon ? root.icon-size + 8px : 0px;
+    private property <length> icon-size: 16px * UiState.scale;
+    private property <length> icon-space: root.has-icon ? root.icon-size + 6px : 0px;
     in property <bool> enabled: true;
     in property <bool> checked;
     in property <bool> checkable;
@@ -82,8 +83,8 @@ export component QuietButton inherits Rectangle {
     callback clicked;
     forward-focus: keyboard;
     min-width: 0px;
-    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px + root.icon-space;
-    preferred-width: measure.preferred-width + 24px + root.icon-space;
+    max-width: root.fill-width ? 100000px : measure.preferred-width + 16px + root.icon-space;
+    preferred-width: measure.preferred-width + 16px + root.icon-space;
     min-height: max(44px, label.preferred-height + 16px, root.icon-size + 16px);
     horizontal-stretch: root.fill-width ? 1 : 0;
     vertical-stretch: 0;
@@ -102,7 +103,7 @@ export component QuietButton inherits Rectangle {
     }
     measure := Text { visible: false; text: root.text; font-size: max(12px, UiState.text-size * 0.875px); }
     if root.has-icon : Icon {
-        x: 12px;
+        x: 8px;
         y: (parent.height - self.height) / 2;
         width: root.icon-size;
         height: root.icon-size;
@@ -110,8 +111,8 @@ export component QuietButton inherits Rectangle {
         opacity: root.enabled ? 1 : 0.5;
     }
     label := Text {
-        x: 12px + root.icon-space;
-        width: max(0px, parent.width - 24px - root.icon-space);
+        x: 8px + root.icon-space;
+        width: max(0px, parent.width - 16px - root.icon-space);
         height: parent.height;
         text: root.text;
         wrap: word-wrap;
