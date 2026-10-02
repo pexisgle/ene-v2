@@ -416,7 +416,10 @@ export component SettingsView inherits Rectangle {
                         LineEdit {text <=> UiState.companion-name; enabled: root.active && UiState.host-connected; edited => {UiState.host-dirty=true;} }
                         BodyText {text: "口調・人格";}
                         LineEdit {text <=> UiState.companion-mind; enabled: root.active && UiState.host-connected; edited => {UiState.host-dirty=true;} }
-                        ActionButton {icon: Icons.save; text: "名前と口調を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-companion();} }
+                        HorizontalLayout {
+                            ActionButton {icon-only: true;icon: Icons.save; text: "名前と口調を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-companion();} }
+                            Rectangle {horizontal-stretch: 1;}
+                        }
                         HintText {text: "会話用・作業用モデルは openai/gpt-6-luna です。音声とファイル作業は次の段階で対応します。";}
                     }
                     if UiState.category == 2 : VerticalLayout {
@@ -437,7 +440,10 @@ export component SettingsView inherits Rectangle {
                         BodyText {text: "送信先: OpenRouterとOpenAI。以下の用途だけを許可します。";}
                         CheckBox {text: "会話本文・履歴・口調を送信する"; checked <=> UiState.allow-conversation; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
                         CheckBox {text: "疎通確認用の固定文を送信する"; checked <=> UiState.allow-check; enabled: root.active && UiState.host-connected; toggled => {UiState.host-dirty=true;} }
-                        ActionButton {icon: Icons.shield; text: "送信許可を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-permissions();} }
+                        HorizontalLayout {
+                            ActionButton {icon-only: true;icon: Icons.save; text: "送信許可を保存"; enabled: root.active && UiState.host-connected; clicked => {UiState.save-permissions();} }
+                            Rectangle {horizontal-stretch: 1;}
+                        }
                         HintText {text: "チェックを外して保存すると、新しい送信を禁止し、生成中の返答を停止します。送信済みデータを取り消すものではありません。フォルダへのアクセスはまだ許可しません。";}
                     }
                     if UiState.host-feedback != "" : BodyText {text: UiState.host-feedback;}
