@@ -17,11 +17,16 @@ pub struct Manifest {
     pub version: String,
     pub command: Vec<String>,
     pub endpoint: String,
-    #[serde(default)]
+    #[serde(default = "empty_options")]
     pub options: Value,
     #[serde(default)]
     pub settings: Vec<SettingField>,
     pub auth: AuthProfile,
+    #[serde(default)]
+    pub routing: BrokerRouting,
+    /// Non-secret, host-owned headers (for example an API version).
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
     pub environment_variable: Option<String>,
     pub destinations: Vec<String>,
     #[serde(default)]
@@ -86,6 +91,8 @@ pub struct ProviderInfo {
     pub error: Option<String>,
     pub revision: String,
     pub capabilities: Capabilities,
+    #[serde(default)]
+    pub models: Vec<Model>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,5 +173,19 @@ pub enum PluginMessage {
         url: String,
         headers: BTreeMap<String, String>,
         body_base64: Option<String>,
+    },
+}
+
+fn empty_options() -> Value {
+    serde_json::json!({})
+}
+/// Host-enforced intermediary routing; plugin-supplied HTTP bodies cannot override it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrokerRouting {
+    #[default]
+    Direct,
+    OpenRouter {
+        only: Vec<String>,
     },
 }

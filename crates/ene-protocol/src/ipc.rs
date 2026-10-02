@@ -105,3 +105,57 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
         Ok(())
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    #[tokio::test]
+    async fn split_unicode_and_incomplete_or_invalid_frames() {
+        let (writer, reader) = tokio::io::duplex(8);
+        let mut input = Reader::with_limit(reader, 128);
+        let sending = tokio::spawn(async move {
+            let mut writer = writer;
+            for part in "{\"text\":\"日本🙂\"}\n".as_bytes().chunks(2) {
+                writer.write_all(part).await.unwrap();
+            }
+            writer.shutdown().await.unwrap();
+        });
+        assert_eq!(
+            input.receive::<serde_json::Value>().await.unwrap().unwrap()["text"],
+            "日本🙂"
+        );
+        assert!(
+            input
+                .receive::<serde_json::Value>()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sending.await.unwrap();
+        for bytes in [b"{\"text\":1}".as_slice(), b"invalid\n".as_slice()] {
+            let mut input = Reader::with_limit(bytes, 128);
+            assert!(input.receive::<serde_json::Value>().await.is_err());
+        }
+    }
+    #[tokio::test]
+    async fn newline_counts_toward_limit_and_plugin_requests_have_a_separate_limit() {
+        let mut exact = Writer::with_limit(tokio::io::sink(), 4);
+        exact.send(&serde_json::json!(12)).await.unwrap();
+        assert!(matches!(
+            exact.send(&serde_json::json!(1234)).await,
+            Err(Error::TooLong)
+        ));
+        let large = serde_json::json!({"history":"a".repeat(70*1024)});
+        let mut avatar = Writer::new(tokio::io::sink());
+        assert!(matches!(avatar.send(&large).await, Err(Error::TooLong)));
+        let mut plugin = Writer::with_limit(tokio::io::sink(), crate::provider::MAX_LINE);
+        plugin.send(&large).await.unwrap();
+        let mut at_boundary = Reader::with_limit(b"123\n".as_slice(), 4);
+        assert_eq!(at_boundary.receive::<u32>().await.unwrap(), Some(123));
+        let mut overflow = Reader::with_limit(b"1234\n".as_slice(), 4);
+        assert!(matches!(
+            overflow.receive::<u32>().await,
+            Err(Error::TooLong)
+        ));
+    }
+}
