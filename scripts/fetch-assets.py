@@ -12,41 +12,40 @@ ASSETS = {
         "url": "https://raw.githubusercontent.com/vrm-c/vrm-specification/821c11b250d8c70d5804ee13431e42bee56ea9c0/samples/Seed-san/vrm/Seed-san.vrm",
         "sha256": "624d0d554bc205bbdc33e22a68a2c3c20edebb3e573011ead8878a65e5329b23",
         "path": "models/Seed-san.vrm",
-        "license": "Seed-san.md",
-        "notice": "Seed-san.LICENSE.md",
+        "source": "https://github.com/vrm-c/vrm-specification/tree/821c11b250d8c70d5804ee13431e42bee56ea9c0/samples/Seed-san",
+        "license_url": "https://vrm.dev/licenses/1.0/",
         "credit": "Seed-san model by VirtualCast, Inc. / VRM Public License 1.0; credit required",
     },
     "vrma-sample": {
         "url": "https://raw.githubusercontent.com/pixiv/three-vrm/1b4fc0cc7ef39a49d62bb7a66dcfeca8f65316f7/packages/three-vrm-animation/examples/models/test.vrma",
         "sha256": "38d0fd12d61e896f1a970b5e358ebb41a96c8d5ee8e284496ea18f0ba1f04e7b",
         "path": "motions/three-vrm-sample.vrma",
-        "license": "three-vrm-animation.txt",
-        "notice": "three-vrm-sample.LICENSE.txt",
+        "license_url": "https://github.com/pixiv/three-vrm/blob/1b4fc0cc7ef39a49d62bb7a66dcfeca8f65316f7/LICENSE",
         "credit": "three-vrm animation sample / Copyright (c) 2019-2026 pixiv Inc. / MIT License",
     },
     "vrma-dance": {
         "url": "https://raw.githubusercontent.com/3dkit-online/3d-motion-avatar-viewer-cases/01b3f24cbf2a19103e0808973fac4c4c47233d06/cases/vrma-needs-avatar/motion.vrma",
         "sha256": "878e8a7776a90b2a48ab5d2f5c57d83f11b9e537ab02eaeb66bd6dab27a2ed74",
         "path": "motions/quaternius-dance.vrma",
-        "license": "vrma-cc0.md",
-        "notice": "quaternius-dance.LICENSE.md",
-        "credit": "Dance by Quaternius / VRMA conversion by 3D Retarget Online / CC0 1.0",
+        "source": "https://quaternius.com/packs/universalanimationlibrary.html",
+        "license_url": "https://github.com/3dkit-online/3d-motion-avatar-viewer-cases/blob/01b3f24cbf2a19103e0808973fac4c4c47233d06/LICENSE",
+        "credit": "Dance by Quaternius / VRMA conversion by 3D Retarget Online / CC0-1.0",
     },
     "vrma-walk": {
         "url": "https://raw.githubusercontent.com/SanHsien/voxavatar/86f9ef8c67c21c9fa5e332843d76da877e9162f0/public/assets/animations/walk.vrma",
         "sha256": "51c4158488a86a6bb99b978fb4d269e1798f9749bceaf0420473bae413fc3271",
         "path": "motions/josie-walk.vrma",
-        "license": "vrma-cc0.md",
-        "notice": "josie-walk.LICENSE.md",
-        "credit": "Josie Walk by Jen Jell / VRMA retarget by sashii / CC0 1.0",
+        "source": "https://booth.pm/ja/items/7861818",
+        "license_url": "https://github.com/SanHsien/voxavatar/blob/86f9ef8c67c21c9fa5e332843d76da877e9162f0/public/assets/manifest.json",
+        "credit": "Josie Walk by Jen Jell / VRMA retarget by sashii / CC0-1.0",
     },
     "vrma-slow-run": {
         "url": "https://raw.githubusercontent.com/SanHsien/voxavatar/86f9ef8c67c21c9fa5e332843d76da877e9162f0/public/assets/animations/run-slow.vrma",
         "sha256": "54fff21bbbbbe6364dc812f39dd849eadb61de3888b556580143d386592d17e5",
         "path": "motions/josie-slow-run.vrma",
-        "license": "vrma-cc0.md",
-        "notice": "josie-slow-run.LICENSE.md",
-        "credit": "Josie SlowRun by Jen Jell / VRMA retarget by sashii / CC0 1.0",
+        "source": "https://booth.pm/ja/items/7861818",
+        "license_url": "https://github.com/SanHsien/voxavatar/blob/86f9ef8c67c21c9fa5e332843d76da877e9162f0/public/assets/manifest.json",
+        "credit": "Josie SlowRun by Jen Jell / VRMA retarget by sashii / CC0-1.0",
     },
 }
 GROUPS = {
@@ -71,7 +70,6 @@ def write_atomic(destination, content):
 def fetch(asset):
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ene"
     path = cache / asset["path"]
-    license_text = (Path(__file__).resolve().parents[1] / "licenses" / asset["license"]).read_bytes()
     cached = path.exists()
     if cached:
         data = path.read_bytes()
@@ -81,7 +79,6 @@ def fetch(asset):
     if len(data) > MAX_BYTES or hashlib.sha256(data).hexdigest() != asset["sha256"]:
         raise ValueError(f"{path.name}: checksum mismatch; existing file was not overwritten")
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(path.parent / asset["notice"], license_text)
     if not cached:
         write_atomic(path, data)
     print(path)

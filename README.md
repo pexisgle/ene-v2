@@ -91,7 +91,7 @@ just fetch-assets  # 固定コミット・SHA-256を検証して開発用VRM・V
 just run-desktop  # ene-avatarもビルドし、会話画面とキャラクターを起動
 ```
 
-Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](licenses/Seed-san.md)。モデルはGitへ含めず、`$XDG_CACHE_HOME/ene/models/Seed-san.vrm`（既定`~/.cache/ene/models/Seed-san.vrm`）に置きます。設定の「VRMを選ぶ」で手持ちの埋め込み形式のVRM 1.0を選択できます。ファイル選択はOS標準ダイアログを使います。Linuxでは`xdg-desktop-portal`とデスクトップ用バックエンド（KDEでは`xdg-desktop-portal-kde`）が必要です。キャンセル時は設定を変更せず、ポータルの失敗は設定画面に表示します。パス欄への直接入力も利用できます。
+Seed-san model by VirtualCast, Inc. — [取得元](https://github.com/vrm-c/vrm-specification/tree/821c11b250d8c70d5804ee13431e42bee56ea9c0/samples/Seed-san)／[VRM Public License 1.0](https://vrm.dev/licenses/1.0/)。モデル内のライセンス設定に従い、クレジットを表示します。モデルはGitへ含めず、`$XDG_CACHE_HOME/ene/models/Seed-san.vrm`（既定`~/.cache/ene/models/Seed-san.vrm`）に置きます。設定の「VRMを選ぶ」で手持ちの埋め込み形式のVRM 1.0を選択できます。ファイル選択はOS標準ダイアログを使います。Linuxでは`xdg-desktop-portal`とデスクトップ用バックエンド（KDEでは`xdg-desktop-portal-kde`）が必要です。キャンセル時は設定を変更せず、ポータルの失敗は設定画面に表示します。パス欄への直接入力も利用できます。
 
 輪郭内のクリックは会話表示、ドラッグは配置変更です。透明部分はクリック透過し、キーボードフォーカスと作業領域を占有しません。初期値30fps、設定で60fpsへ変更できます。大きさは静止時の全身を基準に、100%で画面の高さの約40%、200%で約80%とします。設定で50〜200%を直接入力し、「適用して閉じる」で反映・保存できます。ドラッグは画面の端を越えて移動でき、負の配置も保存します。見失ったときは設定またはトレイの「キャラクターを画面中央へ戻す」で再表示・配置できます。モデル・モーション・サイズ・fps・配置の変更とトレイでの表示切替は再起動不要です。非表示中は描画・アニメーション更新を止め、GPUとモデルをメモリに保持して再表示時に再開します。出力変更では必要なWaylandウィンドウだけを更新します。モデルの読込失敗も設定から選び直せます。「再起動」は描画エラー時の復旧操作です。
 
@@ -114,7 +114,9 @@ Seed-san model by VirtualCast, Inc. — [モデルの利用条件・取得元](l
 
 取得後、設定の「VRMAを選ぶ」で保存先を開き、確認したいファイルを選択してください。短い動作は「繰り返す」を有効にすると確認しやすくなります。ダンス・歩行・スローランを取得しても、初期モーションや保存済みの設定は変更しません。
 
-three-vrmのサンプルはCopyright (c) 2019-2026 pixiv Inc.／[MIT License](licenses/three-vrm-animation.txt)です。追加3本はCC0 1.0で、作者・原配布元・固定コミットの取得元は[ライセンスと出典](licenses/vrma-cc0.md)に記録しています。ライセンス通知は各モーションの隣にも保存します。
+three-vrmのサンプルはCopyright (c) 2019-2026 pixiv Inc.／[MIT License](https://github.com/pixiv/three-vrm/blob/1b4fc0cc7ef39a49d62bb7a66dcfeca8f65316f7/LICENSE)です。追加3本はCC0-1.0です。作者・出典・ライセンスへのリンク・固定URL・SHA-256は[scripts/fetch-assets.py](scripts/fetch-assets.py)に記録しています。開発用サンプルは上流から直接キャッシュへ取得し、リポジトリや配布物には含めません。将来同梱する場合は、その時点で各アセットの再配布条件に合わせて通知を整えます。
+
+Slintは[Royalty-free License 2.0](https://slint.dev/terms-and-conditions#slint-royalty-free-license-2-0)を利用し、設定画面のアプリ情報に`AboutSlint`を表示しています。
 
 ```sh
 cargo run --release --locked -p ene-avatar -- --standalone --model /path/to/avatar.vrm --motion /path/to/motion.vrma
