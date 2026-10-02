@@ -36,8 +36,10 @@ pub fn validate(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Rest-parent bases, with application placement stripped from both rigs.
 /// bevy_vrm1's baked hips delta is source-local, scaled by model-space height.
-/// Convert it to model axes before locking horizontal motion, then back to the
-/// target parent. This also handles exporter parents with rotation/unit scale.
+/// Convert the complete delta through model axes into the target parent.
+/// Horizontal hips motion is part of the pose: discarding it makes planted
+/// feet slide as the animated legs counteract a translation that never happens.
+/// Application placement and the camera anchor remain independent of the pose.
 #[derive(Component)]
 pub struct MotionAxes {
     pub source_parent_to_model: Mat3,
@@ -70,17 +72,18 @@ impl MotionAxes {
     }
 }
 
-pub fn keep_stationary(
+pub fn apply_hips_translation(
     models: Query<&HipsBoneEntity, With<Vrm>>,
-    mut bones: Query<(&RestTransform, &mut Transform, Option<&MotionAxes>), Changed<Transform>>,
+    mut bones: Query<(&RestTransform, &mut Transform, &MotionAxes), Changed<Transform>>,
 ) {
     for hips in &models {
         if let Ok((rest, mut pose, axes)) = bones.get_mut(**hips) {
             let delta = pose.translation - rest.translation;
-            let model_delta = axes.map_or(delta, |a| a.source_parent_to_model * delta);
-            let stationary = Vec3::new(0., model_delta.y, 0.);
-            pose.translation = rest.translation
-                + axes.map_or(stationary, |a| a.model_to_target_parent * stationary);
+            let model_delta = axes.source_parent_to_model * delta;
+            // Animation already marked this Transform as changed. Avoid marking
+            // it again here, which would reapply the basis on a paused pose.
+            pose.bypass_change_detection().translation =
+                rest.translation + axes.model_to_target_parent * model_delta;
         }
     }
 }

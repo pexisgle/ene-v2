@@ -135,7 +135,7 @@ impl Renderer {
         });
         app.add_systems(
             PostUpdate,
-            crate::motion::keep_stationary
+            crate::motion::apply_hips_translation
                 .after(AnimationSystems)
                 .before(TransformSystems::Propagate)
                 .before(VrmSystemSets::Constraints),
