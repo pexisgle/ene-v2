@@ -258,10 +258,11 @@ export component ConversationView inherits Rectangle {
                     row: root.compact ? 1 : 0;
                     col: root.compact ? 0 : 1;
                     vertical-stretch: 0;
+                    icon-only: true;
                     icon: Icons.send;
                     text: "送信";
                     primary: true;
-                    fill-width: root.compact;
+                    fill-width: false;
                     enabled: root.active && UiState.can-send;
                     clicked => {
                         UiState.submit();

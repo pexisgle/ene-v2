@@ -112,13 +112,15 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 0;
                     vertical-stretch: 0;
                     if UiState.page == 1 && UiState.session-active : QuietButton {
+                        icon-only: true;
                         icon: Icons.desktop;
                         text: "ホスト選択";
                         enabled: !UiState.quit-confirmation;
                         clicked => { UiState.show-host-selection(); }
                     }
                     QuietButton {
-                        icon: UiState.page == 0 ? Icons.settings : UiState.session-active ? Icons.chat : Icons.desktop;
+                        icon-only: true;
+                        icon: UiState.page == 0 ? Icons.settings : Icons.back;
                         text: UiState.page == 0 ? "設定" : UiState.session-active ? "対話に戻る" : "ホスト選択に戻る";
                         enabled: !UiState.quit-confirmation;
                         clicked => { UiState.navigate(UiState.page == 0 ? 1 : 0); }

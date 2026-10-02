@@ -39,6 +39,7 @@ export component HostSelectionView inherits Rectangle {
             spacing: 8px;
             local-settings := QuietButton {
                 row: 0; col: 0;
+                icon-only: true;
                 icon: Icons.settings;
                 text: "この端末の設定";
                 enabled: root.active;
@@ -48,6 +49,7 @@ export component HostSelectionView inherits Rectangle {
             QuietButton {
                 row: root.stacked ? 1 : 0;
                 col: root.stacked ? 0 : 2;
+                icon-only: true;
                 icon: Icons.exit;
                 text: "クライアント終了";
                 enabled: root.active;

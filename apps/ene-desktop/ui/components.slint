@@ -5,8 +5,10 @@ import { Icon } from "icons.slint";
 export component ActionButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
+    in property <bool> icon-only;
     private property <bool> has-icon: root.icon.width > 0;
     private property <length> icon-size: 20px * UiState.scale;
+    private property <length> tool-size: max(44px, root.icon-size + 20px);
     in property <bool> enabled: true;
     in property <bool> primary;
     in property <bool> checkable;
@@ -21,12 +23,13 @@ export component ActionButton inherits Rectangle {
             UiState.reveal-settings-item(self.absolute-position.y, self.height);
         }
     }
-    min-width: 0px;
-    max-width: root.fill-width ? 100000px : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
-    preferred-width: measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
-    horizontal-stretch: root.fill-width ? 1 : 0;
+    min-width: root.icon-only ? root.tool-size : 0px;
+    max-width: root.icon-only ? root.tool-size : root.fill-width ? 100000px : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
+    preferred-width: root.icon-only ? root.tool-size : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
+    horizontal-stretch: !root.icon-only && root.fill-width ? 1 : 0;
     measure := Text { visible: false; text: root.text; }
-    min-height: max(44px, UiState.text-size * 1.8px, label-layout.min-height);
+    min-height: root.icon-only ? root.tool-size : max(44px, UiState.text-size * 1.8px, label-layout.min-height);
+    max-height: root.icon-only ? root.tool-size : 100000px;
     vertical-stretch: 0;
     control := Button {
         width: parent.width;
@@ -43,10 +46,10 @@ export component ActionButton inherits Rectangle {
     }
     label-layout := HorizontalLayout {
         spacing: 8px;
-        padding-left: 12px;
-        padding-right: 12px;
-        padding-top: 10px;
-        padding-bottom: 10px;
+        padding-left: root.icon-only ? (root.tool-size - root.icon-size) / 2 : 12px;
+        padding-right: self.padding-left;
+        padding-top: root.icon-only ? (root.tool-size - root.icon-size) / 2 : 10px;
+        padding-bottom: self.padding-top;
         if root.has-icon : Icon {
             source: root.icon;
             width: root.icon-size;
@@ -55,7 +58,7 @@ export component ActionButton inherits Rectangle {
             colorize: root.primary || root.checked ? Palette.accent-foreground : Palette.foreground;
             opacity: root.enabled ? 1 : 0.5;
         }
-        Text {
+        if !root.icon-only : Text {
             text: root.text;
             wrap: word-wrap;
             horizontal-alignment: center;
@@ -65,13 +68,16 @@ export component ActionButton inherits Rectangle {
             accessible-role: none;
         }
     }
+    if root.icon-only : Tooltip { text: @markdown("\{root.text}"); }
 }
 // Secondary navigation keeps a full hit area without a prominent button face.
 export component QuietButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
+    in property <bool> icon-only;
     private property <bool> has-icon: root.icon.width > 0;
-    private property <length> icon-size: 16px * UiState.scale;
+    private property <length> icon-size: (root.icon-only ? 20px : 16px) * UiState.scale;
+    private property <length> tool-size: max(44px, root.icon-size + 16px);
     private property <length> icon-space: root.has-icon ? root.icon-size + 6px : 0px;
     in property <bool> enabled: true;
     in property <bool> checked;
@@ -82,11 +88,12 @@ export component QuietButton inherits Rectangle {
     out property <bool> has-focus: keyboard.has-focus;
     callback clicked;
     forward-focus: keyboard;
-    min-width: 0px;
-    max-width: root.fill-width ? 100000px : measure.preferred-width + 16px + root.icon-space;
-    preferred-width: measure.preferred-width + 16px + root.icon-space;
-    min-height: max(44px, label.preferred-height + 16px, root.icon-size + 16px);
-    horizontal-stretch: root.fill-width ? 1 : 0;
+    min-width: root.icon-only ? root.tool-size : 0px;
+    max-width: root.icon-only ? root.tool-size : root.fill-width ? 100000px : measure.preferred-width + 16px + root.icon-space;
+    preferred-width: root.icon-only ? root.tool-size : measure.preferred-width + 16px + root.icon-space;
+    min-height: root.icon-only ? root.tool-size : max(44px, label.preferred-height + 16px, root.icon-size + 16px);
+    max-height: root.icon-only ? root.tool-size : 100000px;
+    horizontal-stretch: !root.icon-only && root.fill-width ? 1 : 0;
     vertical-stretch: 0;
     background: root.checked || (pointer.has-hover && root.enabled) ? Palette.alternate-background : transparent;
     border-radius: 4px;
@@ -103,7 +110,7 @@ export component QuietButton inherits Rectangle {
     }
     measure := Text { visible: false; text: root.text; font-size: max(12px, UiState.text-size * 0.875px); }
     if root.has-icon : Icon {
-        x: 8px;
+        x: root.icon-only ? (parent.width - self.width) / 2 : 8px;
         y: (parent.height - self.height) / 2;
         width: root.icon-size;
         height: root.icon-size;
@@ -111,10 +118,11 @@ export component QuietButton inherits Rectangle {
         opacity: root.enabled ? 1 : 0.5;
     }
     label := Text {
+        visible: !root.icon-only;
         x: 8px + root.icon-space;
         width: max(0px, parent.width - 16px - root.icon-space);
         height: parent.height;
-        text: root.text;
+        text: root.icon-only ? "" : root.text;
         wrap: word-wrap;
         font-size: max(12px, UiState.text-size * 0.875px);
         font-weight: root.checked ? 600 : 400;
@@ -134,6 +142,7 @@ export component QuietButton inherits Rectangle {
             return reject;
         }
     }
+    if root.icon-only : Tooltip { text: @markdown("\{root.text}"); }
 }
 export component BodyText inherits Text {
     wrap: word-wrap;

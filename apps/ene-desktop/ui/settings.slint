@@ -1,5 +1,5 @@
 import { Icons } from "icons.slint";
-import { AboutSlint, ScrollView, ComboBox, SpinBox, LineEdit, CheckBox, Palette } from "std-widgets.slint";
+import { AboutSlint, ScrollView, ComboBox, SpinBox, LineEdit, Palette } from "std-widgets.slint";
 import { UiState } from "state.slint";
 import { ActionButton, QuietButton, BodyText, HintText, SectionTitle, SettingField } from "components.slint";
 export component SettingsView inherits Rectangle {
@@ -219,35 +219,39 @@ export component SettingsView inherits Rectangle {
                         HintText {
                             text: "以下の表示・復旧操作はすぐに反映されます。編集中の設定は保存しません。";
                         }
-                        QuietButton {
-                            leading: true;
-                            scroll-to-focus: true;
-                            enabled: root.editing;
-                            icon: UiState.avatar-visible ? Icons.eye-off : Icons.eye;
-                            text: UiState.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示";
-                            clicked => {
-                                UiState.toggle-avatar();
+                        HorizontalLayout {
+                            spacing: 8px;
+                            QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                enabled: root.editing;
+                                icon: UiState.avatar-visible ? Icons.eye-off : Icons.eye;
+                                text: UiState.avatar-visible ? "キャラクターを隠す" : "キャラクターを表示";
+                                clicked => {
+                                    UiState.toggle-avatar();
+                                }
                             }
-                        }
-                        QuietButton {
-                            leading: true;
-                            scroll-to-focus: true;
-                            enabled: root.editing;
-                            icon: Icons.center;
-                            text: "キャラクターを画面中央へ戻す";
-                            clicked => {
-                                UiState.recenter-avatar();
+                            QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                enabled: root.editing;
+                                icon: Icons.center;
+                                text: "キャラクターを画面中央へ戻す";
+                                clicked => {
+                                    UiState.recenter-avatar();
+                                }
                             }
-                        }
-                        if UiState.avatar-failed : QuietButton {
-                            leading: true;
-                            scroll-to-focus: true;
-                            enabled: root.editing;
-                            icon: Icons.refresh;
-                            text: "描画エラーから再起動";
-                            clicked => {
-                                UiState.restart-avatar();
+                            if UiState.avatar-failed : QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                enabled: root.editing;
+                                icon: Icons.refresh;
+                                text: "描画エラーから再起動";
+                                clicked => {
+                                    UiState.restart-avatar();
+                                }
                             }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                         BodyText {
                             text: UiState.avatar-status;
@@ -327,15 +331,18 @@ export component SettingsView inherits Rectangle {
                         BodyText {
                             text: UiState.settings-draft.model;
                         }
-                        QuietButton {
-                            leading: true;
-                            scroll-to-focus: true;
-                            icon: Icons.folder;
-                            text: "VRMを選ぶ";
-                            enabled: root.editing && !UiState.picker-active;
-                            clicked => {
-                                UiState.select-model();
+                        HorizontalLayout {
+                            QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                icon: Icons.folder;
+                                text: "VRMを選ぶ";
+                                enabled: root.editing && !UiState.picker-active;
+                                clicked => {
+                                    UiState.select-model();
+                                }
                             }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                         SettingField {
                             label: "VRMAファイル";
@@ -359,54 +366,56 @@ export component SettingsView inherits Rectangle {
                         BodyText {
                             text: UiState.settings-draft.motion == "" ? "未選択 · 静止姿勢" : UiState.settings-draft.motion;
                         }
-                        QuietButton {
-                            leading: true;
-                            scroll-to-focus: true;
-                            icon: Icons.folder;
-                            text: "VRMAを選ぶ";
-                            enabled: root.editing && !UiState.picker-active;
-                            clicked => {
-                                UiState.select-motion();
-                            }
-                        }
-                        QuietButton {
-                            leading: true;
-                            scroll-to-focus: true;
-                            icon: Icons.reset;
-                            text: "静止姿勢に戻す";
-                            enabled: root.editing && UiState.settings-draft.motion != "";
-                            clicked => {
-                                UiState.settings-draft.motion = "";
-                                UiState.settings-edited();
-                            }
-                        }
-                        CheckBox {
-                            changed has-focus => {
-                                if self.has-focus {
-                                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                        HorizontalLayout {
+                            spacing: 8px;
+                            QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                icon: Icons.folder;
+                                text: "VRMAを選ぶ";
+                                enabled: root.editing && !UiState.picker-active;
+                                clicked => {
+                                    UiState.select-motion();
                                 }
                             }
-                            text: "モーションを再生";
-                            min-height: max(44px, UiState.text-size * 1.8px);
-                            enabled: root.editing && UiState.settings-draft.motion != "";
-                            checked <=> UiState.settings-draft.motion-playing;
-                            toggled => {
-                                UiState.settings-edited();
-                            }
-                        }
-                        CheckBox {
-                            changed has-focus => {
-                                if self.has-focus {
-                                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                            QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                icon: Icons.reset;
+                                text: "静止姿勢に戻す";
+                                enabled: root.editing && UiState.settings-draft.motion != "";
+                                clicked => {
+                                    UiState.settings-draft.motion = "";
+                                    UiState.settings-edited();
                                 }
                             }
-                            text: "繰り返す";
-                            min-height: max(44px, UiState.text-size * 1.8px);
-                            enabled: root.editing && UiState.settings-draft.motion != "";
-                            checked <=> UiState.settings-draft.motion-loop;
-                            toggled => {
-                                UiState.settings-edited();
+                            QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                icon: UiState.settings-draft.motion-playing ? Icons.pause : Icons.motion;
+                                text: UiState.settings-draft.motion-playing ? "一時停止" : "モーションを再生";
+                                enabled: root.editing && UiState.settings-draft.motion != "";
+                                checkable: true;
+                                checked: UiState.settings-draft.motion-playing;
+                                clicked => {
+                                    UiState.settings-draft.motion-playing = !UiState.settings-draft.motion-playing;
+                                    UiState.settings-edited();
+                                }
                             }
+                            QuietButton {
+                                icon-only: true;
+                                scroll-to-focus: true;
+                                icon: Icons.loop;
+                                text: "繰り返し再生";
+                                enabled: root.editing && UiState.settings-draft.motion != "";
+                                checkable: true;
+                                checked: UiState.settings-draft.motion-loop;
+                                clicked => {
+                                    UiState.settings-draft.motion-loop = !UiState.settings-draft.motion-loop;
+                                    UiState.settings-edited();
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                         BodyText {
                             text: UiState.motion-status;
@@ -447,12 +456,14 @@ export component SettingsView inherits Rectangle {
                     vertical-stretch: 0;
                     Rectangle { horizontal-stretch: 1; }
                     QuietButton {
+                        icon-only: true;
                         icon: Icons.reset;
                         text: "変更を戻す";
                         enabled: root.editing && UiState.settings-dirty;
                         clicked => { UiState.reset-settings(); }
                     }
                     ActionButton {
+                        icon-only: true;
                         icon: Icons.save;
                         text: "保存";
                         primary: true;
