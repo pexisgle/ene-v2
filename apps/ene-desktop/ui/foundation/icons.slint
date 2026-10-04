@@ -1,0 +1,85 @@
+import { Icon as IconData, IconDisplay, IconSet } from "@lucide";
+import { Button, Palette } from "std-widgets.slint";
+export { IconData }
+
+export global Icons {
+    out property <IconData> sun: IconSet.Sun;
+    out property <IconData> moon: IconSet.Moon;
+    out property <IconData> check: IconSet.Check;
+    out property <IconData> warning: IconSet.TriangleAlert;
+    out property <IconData> demo: IconSet.FlaskConical;
+    out property <IconData> tray: IconSet.Inbox;
+    out property <IconData> settings: IconSet.Settings;
+    out property <IconData> send: IconSet.Send;
+    out property <IconData> folder: IconSet.Folder;
+    out property <IconData> avatar: IconSet.UserRound;
+    out property <IconData> motion: IconSet.Play;
+    out property <IconData> reset: IconSet.RotateCcw;
+    out property <IconData> center: IconSet.Crosshair;
+    out property <IconData> refresh: IconSet.RefreshCw;
+    out property <IconData> exit: IconSet.LogOut;
+    out property <IconData> save: IconSet.Save;
+    out property <IconData> chat: IconSet.MessageCircle;
+    out property <IconData> desktop: IconSet.Monitor;
+    out property <IconData> shield: IconSet.Shield;
+    out property <IconData> connection: IconSet.Link;
+    out property <IconData> eye: IconSet.Eye;
+    out property <IconData> eye-off: IconSet.EyeOff;
+    out property <IconData> history: IconSet.History;
+    out property <IconData> key: IconSet.KeyRound;
+    out property <IconData> back: IconSet.ArrowLeft;
+    out property <IconData> pause: IconSet.Pause;
+    out property <IconData> loop: IconSet.Repeat;
+}
+
+export component Icon inherits IconDisplay {
+    in property <IconData> source;
+    in property <brush> colorize: Palette.foreground;
+    width: 20px;
+    height: 20px;
+    size: min(root.width, root.height);
+    icon: root.source;
+    stroke: root.colorize;
+    stroke-width: 1.8;
+    accessible-role: none;
+}
+
+export component ToolButton inherits Rectangle {
+    in property <IconData> icon;
+    in property <string> label;
+    in property <float> ui-scale: 1;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+    in property <bool> checkable;
+    in-out property <bool> checked;
+    out property <bool> has-focus: control.has-focus;
+    callback clicked;
+    forward-focus: control;
+    accessible-role: none;
+    private property <length> tool-size: max(44px, 20px * root.ui-scale + 20px);
+    min-width: root.tool-size;
+    max-width: root.tool-size;
+    min-height: root.tool-size;
+    max-height: root.tool-size;
+    control := Button {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.enabled;
+        primary: root.primary;
+        checkable: root.checkable;
+        checked <=> root.checked;
+        accessible-label: root.label;
+        accessible-checkable: root.checkable || root.accessible-checkable;
+        clicked => { root.clicked(); }
+    }
+    Icon {
+        source: root.icon;
+        width: 20px * root.ui-scale;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        colorize: root.primary || root.checked ? Palette.accent-foreground : Palette.foreground;
+        opacity: root.enabled ? 1 : 0.5;
+    }
+    Tooltip { text: @markdown("\{root.label}"); }
+}

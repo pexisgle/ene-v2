@@ -8,3 +8,25 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "file_chooser"] }
+ksni = "0.3"
+url = "2"
+clap.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+rustix.workspace = true
+
+atomic-write-file = { version = "0.3", features = ["unnamed-tmpfile"] }
+ene-protocol = { path = "../../crates/ene-protocol", features = ["ipc"] }
+xdg = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit-wayland", "renderer-femtovg-wgpu"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[build-dependencies]
+lucide-slint = "=1.49.1"
+slint-build = { version = "=1.18.1", default-features = false, features = ["compat-1-18"] }

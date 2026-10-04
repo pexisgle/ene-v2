@@ -17,4 +17,4 @@
 - 端末内の機能の提供には、対応クライアントの稼働と端末ごとの明示的な許可が必要です。Webブラウザやスマートフォンから任意のローカルツールを無制限に実行できることは前提とせず、端末が利用できない場合は[ホストとクライアント](../hosting/README.md)の継続条件に従って処理を保留します。
 - ホスト側で利用する外部サービスのAPIキーなどの秘密情報はホスト上で厳重に管理し、各クライアントへの不用意な配布は行いません。
 
-参考：[nanobot](../../references.md#nanobot) のMCP連携とツール制限、および [OpenClaw](../../references.md#openclaw) の実行エンジン交換設計。
+参考：[nanobot](../../research/references.md#nanobot) のMCP連携とツール制限、および [OpenClaw](../../research/references.md#openclaw) の実行エンジン交換設計。

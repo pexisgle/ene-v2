@@ -1,0 +1,53 @@
+import { Icon, Icons } from "../../foundation/icons.slint";
+import { Palette } from "std-widgets.slint";
+
+export component MessageBubble inherits Rectangle {
+    in property <string> author;
+    in property <string> body;
+    in property <bool> provisional;
+    private property <bool> outgoing: root.author == "あなた";
+    private property <string> author-label: root.author + (root.provisional ? " · デモの仮応答" : "");
+    private property <brush> bubble-color: root.outgoing ? (Palette.color-scheme == ColorScheme.dark ? #285b40 : #c7efad) : Palette.control-background;
+    private property <length> bubble-width: min(max(56px, measure.preferred-width + 28px), max(0px, min(root.width * 0.82, root.width - 48px)));
+    min-height: content.min-height;
+    vertical-stretch: 0;
+    measure := Text { visible: false; text: root.body; }
+    if !root.outgoing : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 32px;
+        height: 32px;
+        background: Palette.alternate-background;
+        border-radius: 16px;
+        accessible-role: text;
+        accessible-label: root.author-label;
+        Icon { x: 4px; y: 4px; width: 24px; height: 24px; source: Icons.avatar; }
+        if root.provisional : Icon { x: 22px; y: 22px; width: 12px; height: 12px; source: Icons.demo; }
+        Tooltip { text: @markdown("\{root.author-label}"); }
+    }
+    bubble := Rectangle {
+        x: root.outgoing ? parent.width - self.width - 8px : 40px;
+        width: root.bubble-width;
+        height: content.min-height;
+        background: root.bubble-color;
+        border-radius: 16px;
+        accessible-role: text;
+        accessible-label: root.author-label + ": " + root.body;
+        Path {
+            x: root.outgoing ? parent.width - 1px : -7px;
+            y: 10px;
+            width: 8px;
+            height: 10px;
+            commands: root.outgoing ? "M 0 0 L 8 0 L 0 10 Z" : "M 8 0 L 0 0 L 8 10 Z";
+            fill: root.bubble-color;
+        }
+        content := VerticalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 6px;
+            Text { text: root.body; wrap: word-wrap; color: Palette.foreground; min-width: 0px; }
+        }
+    }
+}

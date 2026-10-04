@@ -23,4 +23,4 @@
 
 - 実行結果の成否が不確実な操作を独断で完了と見なして報告することや、エラーの原因を精査しないまま無作為に再試行を繰り返すことはありません。
 
-参考：[Grok Bot](../../references.md#grok-bot) の対話的な作業指示体験、[Claude Cowork](../../references.md#claude-cowork) の資料整理・文書作成ワークフロー、[ChatGPT Work](../../references.md#chatgpt-work) の進捗可視化と成果物管理。
+参考：[Grok Bot](../../research/references.md#grok-bot) の対話的な作業指示体験、[Claude Cowork](../../research/references.md#claude-cowork) の資料整理・文書作成ワークフロー、[ChatGPT Work](../../research/references.md#chatgpt-work) の進捗可視化と成果物管理。
