@@ -1,0 +1,100 @@
+import { Icons } from "../../../foundation/icons.slint";
+import { UiState } from "../../../state/ui-state.slint";
+import { SettingField } from "../../../widgets/settings/field.slint";
+import { SettingsActions, SettingsPage, SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
+import { BodyText, HintText } from "../../../widgets/typography.slint";
+import { AiServiceSettings } from "ai-service.slint";
+import { CompanionSettings } from "companion.slint";
+import { HostAction } from "controls.slint";
+import { PermissionsSettings } from "permissions.slint";
+import { ComboBox } from "std-widgets.slint";
+
+export component HostSettingsView inherits Rectangle {
+    in property <bool> active;
+    in property <bool> compact;
+    private property <bool> connection-details;
+    private property <bool> model-details;
+    private property <bool> manual-model;
+    private property <bool> model-input: root.manual-model || UiState.model-ids.length == 0;
+    private property <string> provider-id: UiState.provider-id;
+    changed provider-id => { root.manual-model = false; root.model-details = false; }
+    private property <bool> editing: root.active && UiState.host-connected && UiState.companion-index >= 0 && !UiState.host-busy;
+    private property <bool> connected-provider: root.editing && UiState.connection-matches-provider;
+    private property <bool> credential-dirty: UiState.api-key != "" || UiState.credential-edit != 0;
+    private property <bool> ai-dirty: UiState.connection-dirty || root.credential-dirty || (UiState.provider-ready && !UiState.connection-matches-provider);
+    private property <bool> page-dirty: UiState.category == 1 ? UiState.companion-dirty : UiState.category == 2 ? root.ai-dirty : UiState.permissions-dirty;
+    private property <bool> save-feedback: UiState.host-save-category == UiState.category;
+    private property <bool> wide: page.form-wide;
+    private property <int> category: UiState.category;
+    changed category => { page.content-y = 0px; }
+    public function reveal-item(y: length, h: length) { page.reveal-item(y, h); }
+    page := SettingsPage {
+        width: parent.width; height: parent.height;
+        title: UiState.category == 1 ? "コンパニオン" : UiState.category == 2 ? "AIサービス" : "送信許可";
+        active: root.active; compact: root.compact;
+        dirty: root.page-dirty;
+        busy: root.save-feedback && UiState.host-busy;
+        error: root.save-feedback && UiState.host-feedback-error;
+        feedback: root.save-feedback ? UiState.host-feedback-error ? "保存できませんでした" : UiState.host-feedback : "";
+        notice: ((root.save-feedback && UiState.host-feedback-error) || (UiState.host-save-category < 0 && UiState.category == 2)) ? UiState.host-feedback : "";
+        notice-error: UiState.host-feedback-error;
+        can-reset: root.editing && root.page-dirty;
+        can-save: root.editing && root.page-dirty && (UiState.category == 1 ? UiState.companion-name != "" : UiState.category == 2 ? UiState.provider-ready : UiState.connection-matches-provider);
+        reset => { UiState.reset-host-page(); }
+        save => {
+            if UiState.category == 1 { UiState.save-companion(); }
+            else if UiState.category == 2 { UiState.configure-host(); }
+            else { UiState.save-permissions(); }
+        }
+        if UiState.host-connected && (UiState.companion-names.length > 1 || UiState.companion-index < 0) : SettingsSection {
+            SettingField {
+                label: "対象"; wide: root.wide;
+                ComboBox {
+                    width: parent.control-width; height: UiState.control-height;
+                    model: UiState.companion-names; current-index <=> UiState.companion-index;
+                    accessible-label: "設定するコンパニオン";
+                    enabled: root.active && UiState.can-switch-companion;
+                    changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+                    selected => { UiState.choose-companion(self.current-index); }
+                }
+            }
+            if !UiState.can-switch-companion : SettingsSupplement {
+                wide: root.wide;
+                HintText { text: UiState.send-pending || UiState.host-busy ? "処理が終わると相手を切り替えられます。" : !UiState.host-connected ? "接続が戻ると相手を切り替えられます。" : "設定の編集を保存するか、設定画面で元に戻すと切り替えられます。"; }
+            }
+        }
+        if UiState.demo-mode : SettingsSection {
+            BodyText { text: "デモを利用中です。"; }
+            SettingsActions {
+                HostAction { text: "実際のAIを設定"; primary: true; enabled: root.active; clicked => { UiState.leave-demo(); } }
+            }
+            HintText { text: "デモの履歴は引き継ぎません。入力中の文章は残ります。"; }
+        }
+        if !UiState.host-connected && !UiState.demo-mode : SettingsSection {
+            HintText { text: "接続すると設定を変更できます。"; }
+            SettingsActions {
+                HostAction { icon: Icons.connection; text: "ホスト管理を開く"; enabled: root.active; clicked => { UiState.show-host-selection(); } }
+            }
+        }
+        if UiState.host-connected && UiState.category == 1 : CompanionSettings {
+            editing : root.editing;
+            wide : root.wide;
+        }
+        if UiState.host-connected && UiState.category == 2 : AiServiceSettings {
+            active : root.active;
+            connected-provider : root.connected-provider;
+            connection-details <=> root.connection-details;
+            credential-dirty : root.credential-dirty;
+            editing : root.editing;
+            manual-model <=> root.manual-model;
+            model-details <=> root.model-details;
+            model-input : root.model-input;
+            wide : root.wide;
+        }
+        if UiState.host-connected && UiState.category == 3 : PermissionsSettings {
+            active: root.active;
+            connected-provider : root.connected-provider;
+            wide : root.wide;
+        }
+    }
+}

@@ -312,6 +312,22 @@ SlintはLinuxでQtがインストールされている場合、既定構成でQt
 
 SlintのRoyalty-free LicenseにはSlintの利用表示が必要です。eneはこの方式を採り、アプリ内に表示を設ける方針です。テーマ・配色・配置のカスタマイズと、任意コードのスキン実行は別に扱います。[出典：Slintのライセンス選択](https://github.com/slint-ui/slint/blob/master/LICENSE.md)
 
+<a id="host-management-ui"></a>
+
+### ホスト管理UIの比較と採否
+
+2026年10月3日に、常駐サービスとクライアントの状態を扱う製品の公式資料を確認しました。eneのホスト管理では、サービスの稼働、アプリの接続、AIとの会話準備を分け、各状態から次の操作へ進める構成を採用します。
+
+| 参考製品 | 公式資料で確認した仕組み | eneに採用する点 |
+| --- | --- | --- |
+| Docker Desktop | ダッシュボードに管理を集約し、設定やトラブルシュートから診断・再起動へ進める | ホストごとのカードに状態と操作をまとめ、診断情報は詳細に収める |
+| VS Code Remote-SSH | 接続中のホストをステータスバーに表示し、そこから接続操作を開ける。接続時には進捗と詳細ログを提供する | 一覧と追加操作を分ける。会話画面に管理への入口を置き、進捗と失敗理由を必要な時に表示する |
+| Tailscale | `tailscale status`で相手ごとの通信状態と接続経路を確認できる。ネットワーク接続と、接続先で動くサービスは別に必要 | ホストが応答することと、このアプリの会話購読がつながることを別々に確認する |
+
+出典：[Docker Desktopの対象ごとの操作](https://docs.docker.com/desktop/use-desktop/container/)、[Docker Desktopの管理画面](https://docs.docker.com/desktop/use-desktop/)、[VS Code Remote-SSHの接続・状態表示](https://code.visualstudio.com/docs/remote/ssh)、[Tailscaleの接続状態](https://tailscale.com/docs/reference/tailscale-cli?tab=macos)、[Tailscaleのデバイスへの接続](https://tailscale.com/docs/how-to/connect-to-devices)。
+
+これらの資料をもとに、eneでは接続解除後も読み取り専用の状態確認を続けます。ローカルホストの起動、アプリの接続・解除、再試行を今回の管理操作とし、ホスト停止・再起動やリモートホスト選択は追加していません。具体的な表示と遷移は[デスクトップUI設計](../design/desktop-ui.md#接続とai設定)にまとめます。
+
 <a id="mvp-runtime"></a>
 
 ### Rust実行基盤とVRM描画
@@ -346,9 +362,9 @@ eneでは通常のSlint画面とキャラクターの常駐ウィンドウを分
 
 ### AIと音声の確認用構成
 
-OpenRouterの[GPT-6 Lunaモデルページ](https://openrouter.ai/openai/gpt-6-luna)で、モデルID`openai/gpt-6-luna`の掲載とツール呼び出し対応を確認しました。eneの会話用・作業用の確認構成はこのモデルとします。価格やベンチマークを採用条件として固定せず、実際の会話、ストリーミング、ファイル操作に必要なツール呼び出しを接続テストで確認します。[出典：Tool calling](https://openrouter.ai/docs/guides/features/tool-calling)
+OpenRouterの[GPT-6 Lunaモデルページ](https://openrouter.ai/openai/gpt-6-luna)で、モデルID`openai/gpt-6-luna`の掲載とツール呼び出し対応を確認しました。OpenRouterプラグインの確認構成はこのモデルとします。組込OpenAI公式APIでは、[公式モデル仕様](https://developers.openai.com/api/docs/models/gpt-6-luna)に従って`gpt-6-luna`を指定し、[Responses APIの逐次応答](https://developers.openai.com/api/docs/guides/streaming-responses)を利用します。価格やベンチマークを採用条件として固定せず、実際の会話、ストリーミング、ファイル操作に必要なツール呼び出しを接続テストで確認します。[出典：Tool calling](https://openrouter.ai/docs/guides/features/tool-calling)
 
-モデルIDだけでは配信先は限定されません。[Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)の`only`と`allow_fallbacks`を用い、確認用構成は`provider.only: ["openai"]`、`provider.allow_fallbacks: false`とする方針です。送信先としてOpenRouterとOpenAIの双方を提示し、条件を満たす接続先が利用できなければエラーを報告します。指定モデル・配信先の実API呼び出しは本調査では行っていません。
+モデルIDだけでは配信先は限定されません。[Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)の`only`と`allow_fallbacks`を用い、確認用構成は`provider.only: ["openai"]`、`provider.allow_fallbacks: false`とする方針です。OpenRouterプラグインでは送信先としてOpenRouterとOpenAIの双方を提示し、条件を満たす接続先が利用できなければエラーを報告します。指定モデル・配信先の実API呼び出しは本調査では行っていません。
 
 音声の参考候補として同一PC上の外部VOICEVOX Engineを調査しましたが、MVPの接続先をこれに限定しません。音声APIはエンジンから独立したストリーミング契約とし、合成・配信・再生の開始遅延、発話の自然さ、中断性能を検証して構成を1系統選定します。資料で確認できるAPIと、eneからの合成・再生が動作したことは区別し、後者を実装後の検証条件にします。
 

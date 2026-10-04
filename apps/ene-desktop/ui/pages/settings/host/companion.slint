@@ -1,0 +1,19 @@
+import { UiState } from "../../../state/ui-state.slint";
+import { SettingField } from "../../../widgets/settings/field.slint";
+import { SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
+import { HintText } from "../../../widgets/typography.slint";
+import { HostInput } from "controls.slint";
+
+export component CompanionSettings inherits SettingsSection {
+    in property <bool> editing;
+    in property <bool> wide;
+    SettingField {
+        label: "名前"; wide: root.wide;
+        HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.companion-name; accessible-label: "名前"; enabled: root.editing; edited => { UiState.companion-dirty = true; UiState.host-edit-revision += 1; } }
+    }
+    SettingField {
+        label: "口調・人格"; wide: root.wide;
+        HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.companion-mind; accessible-label: "口調・人格"; enabled: root.editing; edited => { UiState.companion-dirty = true; UiState.host-edit-revision += 1; } }
+    }
+    SettingsSupplement { wide: root.wide; HintText { text: "口調・人格は、会話の送信許可に含まれます。"; } }
+}

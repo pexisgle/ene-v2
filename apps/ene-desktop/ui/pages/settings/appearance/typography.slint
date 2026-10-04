@@ -14,6 +14,7 @@ export component AppearanceTypography inherits SettingsSection {
         root.reveal-error(font-field.absolute-position.y);
         font-edit.focus();
     }
+    if UiState.companion-names.length > 1 : HintText { text: "このPCの表示設定です。会話相手を切り替えても共通です。"; }
     SettingField {
         label: "テーマ";
         wide: root.form-wide;

@@ -1,6 +1,12 @@
+mod credentials;
+mod generation;
+pub mod operations;
+use crate::ports::{Credentials, llm::ProviderRegistry};
 use crate::{domain::*, ports::Repository};
+use generation::{Controls, config};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{Mutex, broadcast, watch};
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub struct Notification {
@@ -16,26 +22,40 @@ pub struct Subscription {
     pub receiver: broadcast::Receiver<Notification>,
 }
 pub struct SnapshotView {
+    pub grants: Vec<Grant>,
     pub stored: StoredSnapshot,
     pub cursor: Cursor,
 }
-struct Boundary {
+pub(super) struct Boundary {
     cursor: Cursor,
     connections: HashSet<String>,
 }
 struct Inner {
     repository: Arc<dyn Repository>,
+    providers: Arc<dyn ProviderRegistry>,
+    credentials: Arc<dyn Credentials>,
+    controls: Mutex<Controls>,
     boundary: Mutex<Boundary>,
     events: broadcast::Sender<Notification>,
     shutdown: watch::Sender<bool>,
+    generations: TaskTracker,
 }
 #[derive(Clone)]
 pub struct HostApplication(Arc<Inner>);
 impl HostApplication {
-    pub fn new(repository: Arc<dyn Repository>, shutdown: watch::Sender<bool>) -> Self {
+    pub fn new(
+        repository: Arc<dyn Repository>,
+        providers: Arc<dyn ProviderRegistry>,
+        credentials: Arc<dyn Credentials>,
+        shutdown: watch::Sender<bool>,
+    ) -> Self {
         Self(Arc::new(Inner {
             repository,
+            providers,
+            credentials,
+            controls: Mutex::new(Controls::default()),
             shutdown,
+            generations: TaskTracker::new(),
             events: broadcast::channel(256).0,
             boundary: Mutex::new(Boundary {
                 cursor: Cursor {
@@ -45,6 +65,32 @@ impl HostApplication {
                 connections: HashSet::new(),
             }),
         }))
+    }
+    pub async fn stop(&self) -> Result<(), Error> {
+        self.0.shutdown.send_replace(true);
+        {
+            let controls = self.0.controls.lock().await;
+            self.0.generations.close();
+            for run in controls.running.values() {
+                run.cancel.send_replace(true);
+            }
+        }
+        self.0.providers.shutdown().await;
+        // Cancellation only signals generation. Its terminal database write
+        // and persistence-failure handling must finish before the runtime exits.
+        self.0.generations.wait().await;
+        if self
+            .0
+            .controls
+            .lock()
+            .await
+            .running
+            .values()
+            .any(|run| run.terminal_error.is_some())
+        {
+            return Err(Error::new(ErrorKind::StorageFailure));
+        }
+        Ok(())
     }
     pub fn shutdown(&self) -> watch::Receiver<bool> {
         self.0.shutdown.subscribe()
@@ -64,25 +110,45 @@ impl HostApplication {
         self.0.boundary.lock().await.connections.remove(id);
     }
     pub async fn snapshot(&self, subscription: Option<&str>) -> Result<SnapshotView, Error> {
+        let persistence_failed = self
+            .0
+            .controls
+            .lock()
+            .await
+            .running
+            .values()
+            .any(|run| run.terminal_error.is_some());
         let boundary = self.0.boundary.lock().await;
         if subscription.is_some_and(|id| !boundary.connections.contains(id)) {
             return Err(Error::new(ErrorKind::ResyncRequired));
         }
-        let stored = self.0.repository.snapshot().await?;
+        let mut stored = self.0.repository.snapshot().await?;
+        let mut config = self.0.repository.configuration().await?;
+        generation::refresh(self, &mut config);
+        stored.companions = config.companions.into_values().collect();
+        if persistence_failed {
+            for companion in &mut stored.companions {
+                companion.availability["chat"] = serde_json::json!({"ready":false,"reasons":[{"code":"storage_error","message":"生成の終了状態を保存できません"}]});
+            }
+        }
+        let grants = config.grants;
         Ok(SnapshotView {
+            grants,
             stored,
             cursor: boundary.cursor.clone(),
         })
     }
     pub async fn companion(&self, id: &str) -> Result<Companion, Error> {
-        let companion = self.0.repository.snapshot().await?.companion;
-        if companion.id != id {
-            return Err(Error::new(ErrorKind::NotFound));
-        }
-        Ok(companion)
+        self.snapshot(None)
+            .await?
+            .stored
+            .companions
+            .into_iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound))
     }
     pub async fn companions(&self) -> Result<Vec<Companion>, Error> {
-        Ok(vec![self.0.repository.snapshot().await?.companion])
+        Ok(self.snapshot(None).await?.stored.companions)
     }
     pub async fn settings(&self) -> Result<Settings, Error> {
         Ok(self.0.repository.snapshot().await?.settings)
@@ -91,7 +157,13 @@ impl HostApplication {
         if let Some(id) = companion {
             self.companion(id).await?;
         }
-        Ok(vec![])
+        let mut controls = self.0.controls.lock().await;
+        Ok(config(self, &mut controls)
+            .await?
+            .grants
+            .into_iter()
+            .filter(|g| companion.is_none_or(|id| g.companion_id == id))
+            .collect())
     }
     pub async fn messages(
         &self,

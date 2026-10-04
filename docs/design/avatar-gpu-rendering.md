@@ -16,4 +16,4 @@ Waylandの入力領域はcommitで画像とともに反映される。[Wayland�
 
 ## 開発時の起動
 
-`just run-avatar`・`just run-desktop`はdebugビルドで起動する。開発中のコードは未最適化とし、Bevyなどの外部依存ライブラリだけdevプロファイルで最適化する。
+`just run-avatar`・`just run-desktop`・`just run-demo`はdebugビルドで起動する。開発中のコードは未最適化とし、Bevyなどの外部依存ライブラリだけdevプロファイルで最適化する。

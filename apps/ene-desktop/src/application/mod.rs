@@ -1,14 +1,15 @@
 //! Application lifetime, navigation and event coordination, independent of pages.
 use crate::{
-    AppWindow, ChatEntry, SettingsDraft, Theme, UiState,
+    AppWindow, ChatEntry, ProviderField, SettingsDraft, Theme, UiState,
     application::demo::Mode,
     infrastructure::{avatar, tray},
     settings,
 };
 use ene_protocol::avatar::{AvatarEvent, MotionState};
-use slint::{ComponentHandle, VecModel};
+use slint::{ComponentHandle, Model, VecModel};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    collections::HashMap,
     path::PathBuf,
     rc::Rc,
     sync::mpsc::Receiver,
@@ -16,10 +17,17 @@ use std::{
 };
 
 pub struct Application {
+    host: RefCell<Option<crate::infrastructure::host::Controller>>,
+    monitor: RefCell<Option<crate::infrastructure::host::Controller>>,
+    providers: RefCell<Vec<ene_api_types::provider::ProviderInfo>>,
+    models: RefCell<Vec<ene_api_types::provider::Model>>,
     pub settings: RefCell<settings::State>,
     pub messages: Rc<VecModel<ChatEntry>>,
     path: PathBuf,
-    mode: Mode,
+    mode: Cell<Mode>,
+    snapshot: RefCell<Option<ene_api_types::host::Snapshot>>,
+    history: RefCell<Vec<ene_api_types::host::Message>>,
+    conversation_drafts: RefCell<HashMap<String, String>>,
     avatar: Option<Rc<avatar::Controller>>,
     tray: Option<Rc<tray::Ui>>,
     registration: RefCell<Option<tray::Registration>>,
@@ -28,6 +36,7 @@ mod avatar_actions;
 mod bindings;
 mod conversation;
 pub mod demo;
+mod host;
 mod lifecycle;
 mod navigation;
 mod settings_actions;
@@ -46,10 +55,17 @@ impl Application {
         tray: Option<Rc<tray::Ui>>,
     ) -> Rc<Self> {
         let app = Rc::new(Self {
+            host: RefCell::new(None),
+            monitor: RefCell::new(None),
+            providers: RefCell::new(vec![]),
+            models: RefCell::new(vec![]),
             settings: RefCell::new(settings::State::new(initial)),
             messages: Rc::new(VecModel::default()),
             path,
-            mode,
+            mode: Cell::new(mode),
+            snapshot: RefCell::new(None),
+            history: RefCell::new(vec![]),
+            conversation_drafts: RefCell::new(HashMap::new()),
             avatar,
             tray,
             registration: RefCell::new(None),
@@ -63,7 +79,7 @@ impl Application {
             if mode == Mode::Demo {
                 "返答は仮応答です。"
             } else {
-                "ホストへの画面接続は準備中です。"
+                "このPCに会話を保存します。"
             }
             .into(),
         );
@@ -87,9 +103,17 @@ impl Application {
             ))
             .into(),
         );
-        crate::presentation::selectors::bind(ui);
+        if mode == Mode::Demo
+            && let Some(tray) = &app.tray
+        {
+            tray.set_connection_status("デモ · 外部送信なし");
+        }
         app.publish_settings(ui);
+        crate::presentation::selectors::bind(ui);
         app.bind_actions(ui);
+        if mode != Mode::Demo {
+            app.start_monitor(ui);
+        }
         app
     }
 }

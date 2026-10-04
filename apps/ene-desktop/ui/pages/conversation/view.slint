@@ -1,8 +1,11 @@
 import { Icons } from "../../foundation/icons.slint";
+import { Theme } from "../../foundation/theme.slint";
 import { UiState } from "../../state/ui-state.slint";
 import { ActionButton } from "../../widgets/action-button.slint";
 import { QuietButton } from "../../widgets/quiet-button.slint";
 import { BodyText, HintText } from "../../widgets/typography.slint";
+import { CompanionSelector, CompanionSidebar } from "companion-selector.slint";
+import { HostControl } from "host-control.slint";
 import { MessageBubble } from "message-bubble.slint";
 import { MessageInput } from "message-input.slint";
 import { Palette, ScrollView } from "std-widgets.slint";
@@ -10,13 +13,17 @@ import { Palette, ScrollView } from "std-widgets.slint";
 export component ConversationView inherits Rectangle {
     in property <bool> active;
     in property <bool> compact;
-    out property <bool> editor-focused: editor.has-focus;
-    out property <length> composer-height: composer.height;
-    out property <length> reading-width: history.width;
-    out property <length> conversation-height: history.visible-height;
-    out property <length> history-position: history.content-y;
-    in-out property <length> scroll-position <=> history.content-y;
+    out property <bool> companion-sidebar: UiState.companion-names.length > 1 && root.width >= 1044px * UiState.scale;
     private property <bool> following: true;
+    private property <bool> prepending;
+    private property <length> prepend-height;
+    private property <length> prepend-position;
+    public function prepare-history-prepend() {
+        root.following = false;
+        root.prepend-height = history.content-height;
+        root.prepend-position = history.content-y;
+        root.prepending = true;
+    }
     private property <length> retained-scroll;
     changed active => {
         if root.active {
@@ -38,7 +45,54 @@ export component ConversationView inherits Rectangle {
         history.content-y = min(0px, history.visible-height - history.content-height);
         root.following = true;
     }
+    CompanionSidebar {
+        x: 0px; y: 0px;
+        visible: root.companion-sidebar;
+        active: root.active && root.companion-sidebar;
+        width: 220px * UiState.scale; height: parent.height;
+    }
     VerticalLayout {
+        x: root.companion-sidebar ? 244px * UiState.scale : 0px;
+        width: parent.width - self.x; height: parent.height;
+        HorizontalLayout {
+            spacing: 8px;
+            if UiState.send-pending || UiState.demo-mode : HintText {
+                text: UiState.send-pending ? "受付確認中…" : "デモ · 外部送信なし";
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            host-control := HostControl {
+                visible: !UiState.demo-mode;
+                available-width: root.width;
+                available-left: root.absolute-position.x;
+                enabled: root.active && !UiState.demo-mode;
+            }
+            QuietButton {
+                icon: Icons.settings; text: "設定"; icon-only: true;
+                hint: !UiState.demo-mode && UiState.host-connected && !UiState.chat-ready ? UiState.setup-hint : UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" ? "キャラクターの表示設定を確認" : "設定";
+                enabled: root.active;
+                clicked => {
+                    if !UiState.demo-mode && UiState.host-connected && !UiState.chat-ready { UiState.category = UiState.setup-category; }
+                    else if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" { UiState.category = 0; }
+                    UiState.navigate(1);
+                }
+                if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" : Rectangle {
+                    x: parent.width - self.width - 2px;
+                    y: parent.height - self.height - 2px;
+                    width: 8px * UiState.scale; height: self.width;
+                    border-radius: self.width / 2;
+                    border-width: 1px; border-color: Palette.background;
+                    background: Theme.danger;
+                    accessible-role: none;
+                }
+            }
+        }
+        if !root.companion-sidebar && (UiState.companion-names.length > 1 || (UiState.companion-index < 0 && UiState.companion-names.length > 0)) : CompanionSelector { active: root.active; }
+        if UiState.has-older : QuietButton {
+            icon: Icons.history; text: UiState.host-operation == 4 ? "読み込み中…" : "過去の会話を読み込む";
+            enabled: root.active && UiState.host-connected && !UiState.host-busy;
+            clicked => { UiState.load-history(); }
+        }
         spacing: 8px;
         history := ScrollView {
             vertical-stretch: 1;
@@ -46,7 +100,10 @@ export component ConversationView inherits Rectangle {
             content-width: self.visible-width;
             horizontal-scrollbar-policy: always-off;
             changed content-height => {
-                if root.following && UiState.messages.length > 0 {
+                if root.prepending {
+                    history.content-y = root.prepend-position - (history.content-height - root.prepend-height);
+                    root.prepending = false;
+                } else if root.following && UiState.messages.length > 0 {
                     root.scroll-to-latest();
                 }
             }
@@ -65,7 +122,8 @@ export component ConversationView inherits Rectangle {
                     BodyText { text: "何から話しましょう？"; font-size: max(24px, UiState.text-size * 1.125px); font-weight: 600; horizontal-alignment: center; }
                 }
                 for entry in UiState.messages : MessageBubble {
-                    author: entry.author; body: entry.body; provisional: entry.provisional;
+                    active: root.active;
+                    author: entry.author; body: entry.body; provisional: entry.provisional; state: entry.state; outgoing: entry.outgoing;
                 }
             }
         }
@@ -74,6 +132,7 @@ export component ConversationView inherits Rectangle {
             enabled: root.active;
             clicked => { root.scroll-to-latest(); }
         }
+        if UiState.conversation-error != "" : HintText { text: UiState.conversation-error; accessible-live-region: polite; }
         composer := Rectangle {
             background: Palette.control-background;
             border-radius: 16px;
@@ -128,6 +187,7 @@ export component ConversationView inherits Rectangle {
                             icon-only: true;
                             icon: Icons.send;
                             text: "送信";
+                            hint: !UiState.demo-mode && !UiState.host-connected ? "ホストに接続してください" : !UiState.demo-mode && !UiState.chat-ready ? UiState.setup-hint : "送信";
 
                             primary: true;
                             fill-width: false;
@@ -138,24 +198,6 @@ export component ConversationView inherits Rectangle {
                         }
                     }
                 }
-            }
-        }
-        if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" : QuietButton {
-            icon: Icons.warning; text: "キャラクターの表示を確認";
-            enabled: root.active;
-            clicked => { UiState.category = 0; UiState.navigate(1); }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            if UiState.demo-mode : HintText {
-                text: "デモ · 外部送信なし";
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
-            QuietButton {
-                icon: Icons.settings; text: "設定";
-                enabled: root.active;
-                clicked => { UiState.navigate(1); }
             }
         }
     }

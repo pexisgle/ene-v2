@@ -1,4 +1,4 @@
-/// The first-stage demo deliberately has no network, persistence, or host API.
+/// Offline demo responses; normal conversations use the host API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     Demo,

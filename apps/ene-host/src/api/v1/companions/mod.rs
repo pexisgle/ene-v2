@@ -6,7 +6,7 @@ use ene_api_types::host::Companion;
 pub(super) fn router() -> OpenApiRouter<App> {
     OpenApiRouter::new()
         .routes(routes!(companions))
-        .routes(routes!(companion))
+        .routes(routes!(companion, patch_companion))
         .nest("/{companion_id}/messages", messages::router())
 }
 #[utoipa::path(get, path = "/", tag = "companions",
@@ -24,4 +24,26 @@ async fn companion(
     crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
 ) -> Result<Json<Companion>, ApiError> {
     Ok(Json(app.application.companion(&id).await?))
+}
+
+#[utoipa::path(patch, path = "/{companion_id}", tag = "companions",
+    params(("companion_id" = String, Path)),
+    request_body = ene_api_types::CompanionPatch,
+    responses((status = 200, description = "Success", body = ene_api_types::Companion))
+)]
+async fn patch_companion(
+    State(app): State<App>,
+    crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
+    crate::api::extractors::ApiJson(input): crate::api::extractors::ApiJson<
+        ene_api_types::host::CompanionPatch,
+    >,
+) -> Result<Json<ene_api_types::Companion>, ApiError> {
+    Ok(Json(
+        app.mutate(ene_core::application::operations::patch_companion(
+            app.application.clone(),
+            id,
+            input,
+        ))
+        .await?,
+    ))
 }

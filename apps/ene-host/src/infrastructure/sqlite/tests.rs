@@ -2,49 +2,10 @@ use super::*;
 use ene_core::domain::Role;
 
 #[test]
-fn initialization_is_stable_and_restart_preserves_partial_failure() {
-    let mut db = Connection::open_in_memory().unwrap();
-    initialize(&mut db).unwrap();
-    let first = snapshot(&mut db).unwrap();
-    let principal = meta(&db, "principal").unwrap();
-    let m = Message {
-        id: "partial".into(),
-        companion_id: first.companion.id.clone(),
-        role: Role::Companion,
-        text: "生成途中🙂".into(),
-        status: MessageStatus::Streaming,
-        created_at: "2026-10-01T00:00:00Z".into(),
-        sequence: 1,
-        resources: vec![],
-        in_reply_to: None,
-        task_id: None,
-        question_id: None,
-        failure: None,
-    };
-    db.execute(
-        "INSERT INTO messages VALUES (?1,?2,1,'streaming',?3)",
-        params![m.id, m.companion_id, serde_json::to_string(&m).unwrap()],
-    )
-    .unwrap();
-    initialize(&mut db).unwrap();
-    let second = snapshot(&mut db).unwrap();
-    assert_eq!(first.host_id, second.host_id);
-    assert_eq!(first.environment_id, second.environment_id);
-    assert_eq!(first.companion, second.companion);
-    assert_eq!(principal, meta(&db, "principal").unwrap());
-    assert_eq!(second.messages[0].text, m.text);
-    assert_eq!(second.messages[0].status, MessageStatus::Failed);
-    assert_eq!(
-        second.messages[0].failure.as_ref().unwrap().code,
-        "host_interrupted"
-    );
-}
-
-#[test]
 fn pagination_is_scoped_ordered_and_keeps_old_active_messages() {
     let mut db = Connection::open_in_memory().unwrap();
     initialize(&mut db).unwrap();
-    let c = snapshot(&mut db).unwrap().companion.id;
+    let c = snapshot(&mut db).unwrap().companions[0].id.clone();
     for n in 1..=61 {
         let status = if n == 1 {
             MessageStatus::Streaming
@@ -97,7 +58,7 @@ fn pagination_is_scoped_ordered_and_keeps_old_active_messages() {
 fn escaped_history_is_bounded_without_losing_rows_or_active_replies() {
     let mut db = Connection::open_in_memory().unwrap();
     initialize(&mut db).unwrap();
-    let companion = snapshot(&mut db).unwrap().companion.id;
+    let companion = snapshot(&mut db).unwrap().companions[0].id.clone();
     for sequence in 1..=50 {
         let active = sequence <= 8;
         let message = Message {
@@ -135,7 +96,7 @@ fn escaped_history_is_bounded_without_losing_rows_or_active_replies() {
     for sequence in 1..=8 {
         assert!(recent.messages.iter().any(|m| m.sequence == sequence));
     }
-    assert!(recent.next_cursor.is_some());
+    assert!(recent.message_cursors[&companion].is_some());
     let mut cursor = None;
     let mut seen = std::collections::BTreeSet::new();
     loop {

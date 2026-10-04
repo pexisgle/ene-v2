@@ -15,22 +15,34 @@ utoipa-axum = "0.2"
 ene-api-types = { path = "../../crates/ene-api-types", features = ["openapi"] }
 ene-core = { path = "../../crates/ene-core" }
 xdg = "3"
+rig-reqwest = { version = "0.43", default-features = false, features = ["rustls"] }
+rig-core = { version = "0.43", default-features = false, features = ["reqwest", "rustls"] }
+keyring = { version = "4.2", default-features = false, features = ["v1"] }
+time = { version = "0.3", features = ["formatting"] }
 clap.workspace = true
 rustix.workspace = true
 thiserror.workspace = true
 rusqlite_migration = "2.6"
 atomic-write-file = { version = "0.3", features = ["unnamed-tmpfile"] }
 axum = { version = "0.8", features = ["ws"] }
-ene-protocol = { path = "../../crates/ene-protocol" }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+ene-protocol = { path = "../../crates/ene-protocol", features = ["ipc"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std", "async-await"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 subtle = "2.6"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }
 tokio-rusqlite = { version = "0.8", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+url = "2"
+async-stream = "0.3"
+base64 = "0.22"
+sha2 = "0.10"
+tokio-util = { version = "0.7", features = ["rt"] }
+
+tempfile = "3"
+
 [dev-dependencies]
 ene-api-client = { path = "../../crates/ene-api-client" }
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

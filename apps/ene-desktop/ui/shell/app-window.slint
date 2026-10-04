@@ -9,19 +9,28 @@ import { QuitConfirmation } from "quit-confirmation.slint";
 import { Palette } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
+    callback host-events-available;
     title: "ene";
     preferred-width: 900px;
     preferred-height: 760px;
     min-width: 420px;
     min-height: 480px;
+    init => { UiState.window-height = root.height; }
+    changed height => { UiState.window-height = root.height; }
     background: Palette.background;
     default-font-family: UiState.font-family;
     default-font-size: UiState.text-size * 1px;
-    init => { UiState.window-height = root.height; }
-    changed height => { UiState.window-height = root.height; }
     callback tray-action(int);
     callback file-selection-ready(string, bool, string, bool, bool);
     callback avatar-events-available;
+    Timer {
+        interval: 1s;
+        running: !UiState.demo-mode;
+        triggered => {
+            if UiState.connection-phase == 3 { UiState.retry-seconds = max(0, UiState.retry-seconds - 1); }
+            UiState.runtime-age = min(86400, UiState.runtime-age + 1);
+        }
+    }
     private property <length> measured-width: 900px;
     changed width => {
         root.measured-width = self.width;
@@ -37,6 +46,7 @@ export component AppWindow inherits Window {
     public function focus-input() {
         conversation.focus-input();
     }
+    public function prepare-history-prepend() { conversation.prepare-history-prepend(); }
     public function scroll-to-latest() {
         conversation.scroll-to-latest();
     }
@@ -67,7 +77,7 @@ export component AppWindow inherits Window {
                     enabled: !UiState.quit-confirmation;
                     clicked => { UiState.navigate(0); }
                 }
-                BodyText { text: "設定"; font-weight: 600; vertical-alignment: center; }
+                if UiState.category != 4 : BodyText { text: "設定"; font-weight: 600; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; }
             }
             Rectangle {
@@ -79,7 +89,7 @@ export component AppWindow inherits Window {
                     active: UiState.host-selection-visible && !UiState.quit-confirmation;
                 }
                 conversation := ConversationView {
-                    width: min(parent.width, 800px * UiState.scale);
+                    width: min(parent.width, (UiState.companion-names.length > 1 && parent.width >= 1120px * UiState.scale ? 1044px : 800px) * UiState.scale);
                     x: (parent.width - self.width) / 2;
                     visible: !UiState.host-selection-visible && UiState.page == 0;
                     active: !UiState.host-selection-visible && UiState.page == 0 && !UiState.quit-confirmation;

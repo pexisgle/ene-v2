@@ -1,7 +1,6 @@
 use super::*;
 
-// Leave room in the client's 16 MiB response limit for snapshot metadata and
-// active replies retained outside the recent history page.
+// Reserve response space for snapshot metadata and active replies outside the page.
 const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) fn meta(db: &Connection, key: &str) -> Result<String> {
@@ -10,7 +9,6 @@ pub(super) fn meta(db: &Connection, key: &str) -> Result<String> {
     })
     .map_err(Error::from)
 }
-
 pub fn parse_cursor(companion: &str, cursor: &str) -> Result<u64> {
     let (sequence, id) = cursor.split_once(':').ok_or(Error::InvalidCursor)?;
     let sequence: u64 = sequence.parse().map_err(|_| Error::InvalidCursor)?;
@@ -19,7 +17,6 @@ pub fn parse_cursor(companion: &str, cursor: &str) -> Result<u64> {
     }
     Ok(sequence)
 }
-
 pub(super) fn page(
     db: &Connection,
     companion: &str,
@@ -65,26 +62,30 @@ pub(super) fn page(
 
 pub(super) fn snapshot(db: &mut Connection) -> Result<StoredSnapshot> {
     let tx = db.transaction()?;
-    let companion: Companion = serde_json::from_str(&meta(&tx, "companion")?)?;
-    let recent = page(&tx, &companion.id, None, 50)?;
-    let mut messages: BTreeMap<u64, Message> =
-        recent.items.into_iter().map(|m| (m.sequence, m)).collect();
-    {
+    let config = conversation::load(&tx)?;
+    let mut messages = Vec::new();
+    let mut message_cursors = BTreeMap::new();
+    for companion in config.companions.values() {
+        let recent = page(&tx, &companion.id, None, 50)?;
+        let mut rows: BTreeMap<u64, Message> =
+            recent.items.into_iter().map(|m| (m.sequence, m)).collect();
         let mut query = tx.prepare(
             "SELECT body FROM messages WHERE companion_id=?1 AND status IN ('queued','streaming')",
         )?;
         for body in query.query_map([&companion.id], |r| r.get::<_, String>(0))? {
             let m: Message = serde_json::from_str(&body?)?;
-            messages.insert(m.sequence, m);
+            rows.insert(m.sequence, m);
         }
+        messages.extend(rows.into_values());
+        message_cursors.insert(companion.id.clone(), recent.next_cursor);
     }
     let result = StoredSnapshot {
         host_id: meta(&tx, "host_id")?,
         environment_id: meta(&tx, "environment_id")?,
-        companion,
-        settings: serde_json::from_str(&meta(&tx, "settings")?)?,
-        messages: messages.into_values().collect(),
-        next_cursor: recent.next_cursor,
+        companions: config.companions.into_values().collect(),
+        settings: config.settings,
+        messages,
+        message_cursors,
     };
     tx.commit()?;
     Ok(result)

@@ -1,0 +1,95 @@
+import { Icons } from "../../../foundation/icons.slint";
+import { Theme } from "../../../foundation/theme.slint";
+import { UiState } from "../../../state/ui-state.slint";
+import { QuietButton } from "../../../widgets/quiet-button.slint";
+import { SearchSelect } from "../../../widgets/search-select.slint";
+import { SettingField } from "../../../widgets/settings/field.slint";
+import { SettingsActions, SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
+import { StatusBadge } from "../../../widgets/status-badge.slint";
+import { BodyText, HintText } from "../../../widgets/typography.slint";
+import { HostAction, HostInput } from "controls.slint";
+import { CheckBox, ComboBox } from "std-widgets.slint";
+
+export component AiServiceSettings inherits VerticalLayout {
+    in property <bool> active;
+    in property <bool> connected-provider;
+    in-out property <bool> connection-details;
+    in property <bool> credential-dirty;
+    in property <bool> editing;
+    in-out property <bool> manual-model;
+    in-out property <bool> model-details;
+    in property <bool> model-input;
+    in property <bool> wide;
+    alignment: start; spacing: 24px;
+    SettingsSection {
+        SettingField {
+            label: "プロバイダー"; wide: root.wide;
+            ComboBox {
+                width: parent.control-width; height: UiState.control-height;
+                model: UiState.provider-names; current-index <=> UiState.provider-index;
+                accessible-label: "AIプロバイダー";
+                enabled: root.editing && !UiState.permissions-dirty;
+                changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+                selected(value) => { UiState.choose-provider(self.current-index); }
+            }
+        }
+        if UiState.permissions-dirty : SettingsSupplement { wide: root.wide; HintText { text: "送信許可の変更を保存してから、AIサービスを切り替えてください。"; } }
+        SettingsActions {
+            wide: root.wide;
+            QuietButton { text: root.connection-details ? "接続の詳細を閉じる" : "接続の詳細"; icon: Icons.settings; scroll-to-focus: true; enabled: root.active; clicked => { root.connection-details = !root.connection-details; } }
+        }
+        if root.connection-details : SettingsSection {
+            SettingField {
+                label: "接続先URL"; wide: root.wide;
+                HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.provider-endpoint; accessible-label: "接続先URL"; enabled: root.editing && UiState.provider-ready && root.connection-details; edited => { UiState.connection-dirty = true; UiState.host-edit-revision += 1; UiState.connection-matches-provider = false; } }
+            }
+            SettingsActions {
+                wide: root.wide;
+                QuietButton { text: "プラグインを再走査"; icon: Icons.refresh; scroll-to-focus: true; enabled: root.editing; clicked => { UiState.reload-providers(); } }
+            }
+        }
+        if UiState.provider-plugin : SettingsActions { wide: root.wide; QuietButton { text: UiState.provider-ready ? "無効にする" : "有効にする"; icon: Icons.connection; scroll-to-focus: true; enabled: root.editing; clicked => { UiState.toggle-provider(); } } }
+        if UiState.provider-error != "" : SettingsSupplement { wide: root.wide; BodyText { text: UiState.provider-error; color: Theme.danger; } }
+        for field in UiState.provider-fields : SettingField {
+            label: field.label; wide: root.wide;
+            if field.kind < 2 : HostInput { width: parent.control-width; height: UiState.control-height; text <=> field.value; accessible-label: field.label; input-type: field.kind == 1 ? number : text; enabled: root.editing && UiState.provider-ready; edited => { UiState.connection-dirty = true; UiState.host-edit-revision += 1; UiState.connection-matches-provider = false; } }
+            if field.kind == 2 : CheckBox { width: parent.control-width; height: UiState.control-height; text: "有効"; accessible-label: field.label; checked <=> field.checked; enabled: root.editing && UiState.provider-ready; toggled => { UiState.connection-dirty = true; UiState.host-edit-revision += 1; UiState.connection-matches-provider = false; } }
+            if field.kind == 3 : ComboBox { width: parent.control-width; height: UiState.control-height; model: field.choices; current-value <=> field.value; accessible-label: field.label; enabled: root.editing && UiState.provider-ready; selected(value) => { UiState.connection-dirty = true; UiState.host-edit-revision += 1; UiState.connection-matches-provider = false; } }
+        }
+    }
+    SettingsSection {
+        title: "認証";
+        SettingField {
+            label: "APIキー"; wide: root.wide;
+            if UiState.requires-credentials : HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.api-key; accessible-label: "APIキー"; input-type: password; enabled: root.editing && UiState.provider-ready; edited => { UiState.credential-edit = 0; UiState.host-edit-revision += 1; } }
+            if !UiState.requires-credentials : BodyText { width: parent.control-width; height: UiState.control-height; text: "不要"; vertical-alignment: center; }
+        }
+        if UiState.requires-credentials : SettingsSupplement {
+            wide: root.wide;
+            StatusBadge { icon: Icons.key; state: root.credential-dirty ? 2 : UiState.credential-state == 0 ? 0 : 1; label: UiState.credential-edit == 1 ? "環境変数を使用（未保存）" : UiState.credential-edit == 2 ? "解除する（未保存）" : UiState.api-key != "" ? "変更あり（未保存）" : UiState.credential-state == 1 ? "登録済み" : UiState.credential-state == 2 ? "今回のホスト起動中のみ有効" : "未登録"; }
+        }
+        if UiState.requires-credentials && UiState.environment-variable != "" : SettingsActions { wide: root.wide; QuietButton { text: "ホストの環境変数を使う"; hint: UiState.environment-variable; icon: Icons.key; checkable: true; checked: UiState.credential-edit == 1; scroll-to-focus: true; enabled: root.editing && UiState.provider-ready; clicked => { UiState.api-key = ""; UiState.credential-edit = UiState.credential-edit == 1 ? 0 : 1; UiState.host-edit-revision += 1; } } }
+        if UiState.requires-credentials && UiState.credential-state != 0 : SettingsActions { wide: root.wide; QuietButton { text: "APIキーを解除"; icon: Icons.reset; scroll-to-focus: true; enabled: root.active && UiState.host-connected && UiState.selected-connection-id != ""; clicked => { UiState.revoke-credential(); } } }
+    }
+    SettingsSection {
+        title: "モデル";
+        if UiState.companion-names.length > 1 : SettingsSupplement { wide: root.wide; HintText { text: "モデルは「" + UiState.selected-companion-name + "」に設定します。サービスとAPIキーは共通です。"; } }
+        SettingField {
+            label: "モデルID"; wide: root.wide;
+            if !root.model-input : SearchSelect { width: parent.control-width; height: UiState.control-height; model: UiState.model-choices; current-value <=> UiState.model-id; label: "モデル一覧"; enabled: root.editing && UiState.provider-ready; opening => { UiState.reveal-settings-item(self.absolute-position.y, self.height); } changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } } selected(value) => { UiState.connection-dirty = true; UiState.host-edit-revision += 1; UiState.model-changed(); } }
+            if root.model-input : HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.model-id; accessible-label: "モデルID"; placeholder-text: "モデルID"; enabled: root.editing && UiState.provider-ready; edited => { UiState.connection-dirty = true; UiState.host-edit-revision += 1; UiState.model-changed(); } }
+        }
+        if UiState.model-list-supported : SettingsActions { wide: root.wide; HostAction { text: "モデル一覧を取得"; icon: Icons.refresh; enabled: root.connected-provider && !root.credential-dirty && UiState.allow-check && !UiState.permissions-dirty && (!UiState.requires-credentials || UiState.credential-state != 0); clicked => { UiState.fetch-models(); } } }
+        if UiState.model-ids.length > 0 : SettingsActions { wide: root.wide; QuietButton { text: root.model-input ? "一覧から選ぶ" : "モデルIDを入力"; scroll-to-focus: true; enabled: root.active; clicked => { root.manual-model = !root.manual-model; } } }
+        if UiState.model-list-supported && UiState.connection-matches-provider && (root.credential-dirty || (UiState.requires-credentials && UiState.credential-state == 0) || !UiState.allow-check || UiState.permissions-dirty) : SettingsSupplement {
+            wide: root.wide;
+            HintText { text: root.credential-dirty ? "APIキーの変更を保存すると一覧を取得できます。" : UiState.requires-credentials && UiState.credential-state == 0 ? "一覧の取得にはAPIキーの登録が必要です。" : UiState.permissions-dirty ? "送信許可の変更を保存すると一覧を取得できます。" : "一覧の取得には「接続テスト・モデル情報」の送信許可が必要です。"; }
+        }
+        SettingsActions { wide: root.wide; QuietButton { text: root.model-details ? "モデルの詳細を閉じる" : "モデルの詳細"; scroll-to-focus: true; enabled: root.active; clicked => { root.model-details = !root.model-details; } } }
+        if root.model-details : SettingsSection {
+            SettingsSupplement { wide: root.wide; HintText { text: UiState.model-info; } }
+            SettingsActions { wide: root.wide; HostAction { text: "接続テスト"; icon: Icons.connection; enabled: root.connected-provider && !root.credential-dirty && !UiState.connection-dirty && UiState.saved-model && UiState.allow-check && !UiState.permissions-dirty && (!UiState.requires-credentials || UiState.credential-state != 0); clicked => { UiState.check-connection(); } } }
+            SettingsSupplement { wide: root.wide; HintText { text: "AIにテストメッセージを送信します。"; } }
+        }
+    }
+}

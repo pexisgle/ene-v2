@@ -7,6 +7,7 @@ export global Theme {
     out property <color> message: self.dark ? #244e49 : #dceee9;
     out property <color> message-text: self.dark ? #effaf6 : #163e37;
     out property <color> danger: self.dark ? #ffb4ab : #a52a26;
+    out property <color> success: self.dark ? #93d8b1 : #21643e;
 
     public function apply(index: int) {
         Palette.color-scheme = index == 2 ? ColorScheme.dark : index == 1 ? ColorScheme.light : ColorScheme.unknown;
