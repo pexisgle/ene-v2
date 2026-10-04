@@ -1,0 +1,16 @@
+[package]
+name = "ene-api-types"
+description = "Versioned ene REST API DTOs and event synchronization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[features]
+default = []
+openapi = ["dep:utoipa"]
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+utoipa = { version = "5.4", optional = true }

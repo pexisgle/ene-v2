@@ -11,4 +11,4 @@
 
 デスクトップ画面上への常駐表示やクリック透過は、デスクトップクライアント固有の機能です。Webブラウザやスマートフォンアプリでは、[それぞれのアプリ画面内へ適切に表示](README.md)されます。
 
-参考：[Desktop Mate](../../references.md#desktop-mate) のデスクトップ常駐と自由な配置、および [AIRI](../../references.md#airi) のモデル描画とアニメーション表現。
+参考：[Desktop Mate](../../research/references.md#desktop-mate) のデスクトップ常駐と自由な配置、および [AIRI](../../research/references.md#airi) のモデル描画とアニメーション表現。

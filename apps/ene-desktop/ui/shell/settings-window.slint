@@ -1,0 +1,91 @@
+import { Icon, Icons, ToolButton } from "../foundation/icons.slint";
+import { SizeControl, ThemePicker } from "../pages/settings/appearance-controls.slint";
+import { StatusBadge } from "../widgets/status-badge.slint";
+import { AboutSlint, CheckBox, ComboBox, HorizontalBox, LineEdit, Palette, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
+
+export component SettingsWindow inherits Window {
+    title: "ene — 設定";
+    preferred-width: 440px;
+    preferred-height: 680px;
+    min-width: 360px;
+    default-font-family: "Noto Sans CJK JP";
+    in-out property <string> font-family;
+    in-out property <int> text-size;
+    in-out property <int> theme-index;
+    callback apply-settings;
+    in-out property <string> apply-error;
+    callback commit-avatar-settings() -> bool;
+    commit-avatar-settings => { true }
+    in-out property <string> avatar-model;
+    in-out property <string> avatar-motion;
+    in-out property <bool> motion-playing;
+    in-out property <bool> motion-loop;
+    in property <string> motion-status;
+    callback select-motion;
+    in-out property <bool> avatar-visible;
+    in-out property <int> avatar-fps-index;
+    in-out property <int> avatar-size-percent: 100;
+    in-out property <string> avatar-size-text: root.avatar-size-percent;
+    in property <string> avatar-status;
+    in property <bool> avatar-failed;
+    callback select-model;
+    callback restart-avatar;
+    callback recenter-avatar;
+    in property <bool> tray-ready;
+    in property <string> tray-status;
+    callback quit;
+
+    min-height: 360px;
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+        ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            VerticalBox {
+                padding: 0px;
+                padding-right: 12px;
+                spacing: 12px;
+                Text { text: "会話画面の表示"; font-size: 20px; font-weight: 600; }
+                Text { text: "テーマ"; }
+                ThemePicker { current-index <=> root.theme-index; }
+                Text { text: "フォント"; }
+                LineEdit { text <=> root.font-family; }
+                HorizontalBox {
+                    padding: 0px;
+                    Text { text: "文字サイズ"; vertical-alignment: center; }
+                    SpinBox { value <=> root.text-size; minimum: 12; maximum: 28; }
+                }
+                HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.avatar; } Text { text: "キャラクター"; font-size: 18px; font-weight: 600; } }
+                CheckBox { text: "キャラクターを表示"; checked <=> root.avatar-visible; }
+                Text { text: root.avatar-model; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
+                HorizontalBox { padding: 0px; ToolButton { icon: Icons.folder; label: "VRMを選ぶ"; clicked => { root.select-model(); } } Rectangle { horizontal-stretch: 1; } }
+                Text { text: "描画速度"; }
+                ComboBox { model: ["30 fps", "60 fps"]; current-index <=> root.avatar-fps-index; }
+                Text { text: "キャラクターの大きさ"; }
+                SizeControl { text <=> root.avatar-size-text; }
+                HorizontalBox { padding: 0px; ToolButton { icon: Icons.center; label: "キャラクターを画面中央へ戻す"; clicked => { root.recenter-avatar(); } } Rectangle { horizontal-stretch: 1; } }
+                if root.avatar-failed : Text { text: root.avatar-status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; }
+                HorizontalBox { padding: 0px; spacing: 8px; Icon { source: Icons.motion; } Text { text: "モーション（VRMA 1.0）"; font-size: 16px; font-weight: 600; } }
+                Text { text: root.avatar-motion == "" ? "未選択 · 静止姿勢" : root.avatar-motion; wrap: word-wrap; font-size: 12px; color: Palette.foreground; opacity: 0.7; }
+                HorizontalBox {
+                    padding: 0px;
+                    ToolButton { icon: Icons.folder; label: "VRMAを選ぶ"; clicked => { root.select-motion(); } }
+                    ToolButton { icon: Icons.reset; label: "静止姿勢に戻す"; enabled: root.avatar-motion != ""; clicked => { root.avatar-motion = ""; } }
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    ToolButton { icon: root.motion-playing ? Icons.pause : Icons.motion; label: root.motion-playing ? "一時停止" : "モーションを再生"; checkable: true; checked <=> root.motion-playing; enabled: root.avatar-motion != ""; }
+                    ToolButton { icon: Icons.loop; label: "繰り返し再生"; checkable: true; checked <=> root.motion-loop; enabled: root.avatar-motion != ""; }
+                }
+                HorizontalBox { padding: 0px; StatusBadge { icon: Icons.motion; label: root.motion-status; } Rectangle { horizontal-stretch: 1; } }
+                if root.avatar-failed : HorizontalBox { padding: 0px; ToolButton { icon: Icons.refresh; label: "描画エラーから再起動"; clicked => { root.restart-avatar(); } } Rectangle { horizontal-stretch: 1; } }
+                HorizontalBox { padding: 0px; StatusBadge { icon: Icons.tray; label: root.tray-status; state: root.tray-ready ? 1 : 3; } Rectangle { horizontal-stretch: 1; } }
+                if !root.tray-ready : HorizontalBox { padding: 0px; ToolButton { icon: Icons.exit; label: "クライアント終了"; clicked => { root.quit(); } } Rectangle { horizontal-stretch: 1; } }
+                AboutSlint { preferred-height: 100px; max-height: 120px; vertical-stretch: 0; }
+            }
+        }
+        if root.apply-error != "" : Text { text: root.apply-error; wrap: word-wrap; color: Palette.foreground; font-size: 12px; }
+        HorizontalBox { Rectangle { horizontal-stretch: 1; } ToolButton { icon: Icons.save; label: "適用して閉じる"; clicked => { root.apply-settings(); } } }
+    }
+}
