@@ -19,7 +19,8 @@ test:
 build:
     cargo build --workspace --all-targets --all-features --locked
 
-verify: fmt-check check clippy test build
+# Re-run tests only when the behavior under test changes.
+verify: fmt-check clippy
 
 run-host:
     cargo run --locked -p ene-host

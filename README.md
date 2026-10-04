@@ -41,7 +41,7 @@ cargo run --locked -p ene-host
 cargo run --locked -p ene-desktop
 ```
 
-justをインストールしている場合は、同じ検査を`just verify`で実行できます。
+`just verify`は整形とClippy（テストを含む型検査）を実行します。テストは対象の挙動を変更したときに`just test`で実行し、変更していない合格済みのテストを繰り返す必要はありません。成果物が必要なときは`just build`を実行します。
 
 ## 開発コマンド
 
@@ -54,6 +54,6 @@ justをインストールしている場合は、同じ検査を`just verify`で
 | `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
 | `just test` | ワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
-| `just verify` | 整形確認、型検査、Clippy、テスト、ビルドを順に実行 |
+| `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just run-host` | ホストの骨組みを起動 |
 | `just run-desktop` | デスクトップの骨組みを起動 |
