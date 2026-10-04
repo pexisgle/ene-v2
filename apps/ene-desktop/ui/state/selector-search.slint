@@ -1,0 +1,8 @@
+
+
+export global SelectorSearch {
+    pure callback filter-options([string], string) -> [string];
+    pure callback find-option([string], string) -> int;
+    pure callback is-search-text(string) -> bool;
+    pure callback byte-count(string) -> int;
+}

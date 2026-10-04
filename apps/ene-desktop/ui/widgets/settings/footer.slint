@@ -1,0 +1,48 @@
+import { Icons } from "../../foundation/icons.slint";
+import { ActionButton } from "../action-button.slint";
+import { QuietButton } from "../quiet-button.slint";
+import { StatusBadge } from "../status-badge.slint";
+
+export component SettingsFooter inherits Rectangle {
+    in property <bool> compact;
+    in property <bool> dirty;
+    in property <bool> busy;
+    in property <bool> error;
+    in property <string> feedback;
+    in property <bool> can-save;
+    in property <bool> can-reset;
+    callback save;
+    callback reset;
+    private property <bool> has-feedback: root.dirty || root.busy || root.feedback != "";
+    private property <bool> stacked: root.compact && root.has-feedback;
+    min-height: actions.min-height;
+    vertical-stretch: 0;
+    actions := GridLayout {
+        spacing: 8px;
+        padding-right: 12px;
+        if root.has-feedback : StatusBadge {
+            row: 0; col: 0; colspan: root.compact ? 3 : 1;
+            compact: false; icon: Icons.save;
+            state: root.error ? 3 : root.dirty || root.busy ? 2 : 1;
+            label: root.error ? root.feedback : root.busy ? "保存しています…" : root.dirty ? "未保存の変更" : root.feedback;
+            accessible-live-region: polite;
+        }
+        if root.compact || !root.has-feedback : Rectangle {
+            row: root.stacked ? 1 : 0; col: 0;
+            horizontal-stretch: 1;
+        }
+        QuietButton {
+            row: root.stacked ? 1 : 0; col: 1;
+            icon: Icons.reset; text: "元に戻す";
+            enabled: root.can-reset;
+            clicked => { root.reset(); }
+        }
+        ActionButton {
+            row: root.stacked ? 1 : 0; col: 2;
+            icon: Icons.save; text: "保存"; primary: true;
+            fill-width: false;
+            enabled: root.can-save;
+            clicked => { root.save(); }
+        }
+    }
+}

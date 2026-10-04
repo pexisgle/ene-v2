@@ -12,8 +12,7 @@ impl Mode {
     }
 
     pub fn respond(self, text: &str) -> Option<&'static str> {
-        self.accepts(text).then_some(
-            "こんにちは、eneです。メッセージを受け取りました。\nこれは日本語入力と画面の動作を確認するための固定の仮応答です。",
-        )
+        self.accepts(text)
+            .then_some("こんにちは、eneです。メッセージを受け取りました。")
     }
 }

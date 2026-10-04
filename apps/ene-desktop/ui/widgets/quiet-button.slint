@@ -1,0 +1,85 @@
+import { IconData } from "../foundation/icons.slint";
+import { Icon } from "../foundation/icons.slint";
+import { UiState } from "../state/ui-state.slint";
+import { Palette } from "std-widgets.slint";
+
+export component QuietButton inherits Rectangle {
+    in property <string> text;
+    in property <string> hint: root.text;
+    in property <bool> tooltip-enabled: true;
+    in property <IconData> icon;
+    in property <bool> icon-only;
+    private property <bool> has-icon: root.icon.paths.length > 0;
+    private property <length> icon-size: 16px * UiState.scale;
+    private property <length> tool-size: UiState.control-height;
+    private property <length> icon-space: root.has-icon ? root.icon-size + 6px : 0px;
+    in property <bool> enabled: true;
+    in property <bool> checked;
+    in property <bool> checkable;
+    in property <bool> leading;
+    in property <bool> fill-width;
+    in property <bool> scroll-to-focus;
+    out property <bool> has-focus: keyboard.has-focus;
+    callback clicked;
+    callback escape-pressed;
+    forward-focus: keyboard;
+    min-width: root.icon-only ? root.tool-size : 0px;
+    max-width: root.icon-only ? root.tool-size : root.fill-width ? 100000px : measure.preferred-width + 16px + root.icon-space;
+    preferred-width: root.icon-only ? root.tool-size : measure.preferred-width + 16px + root.icon-space;
+    min-height: root.icon-only ? root.tool-size : max(UiState.control-height, label.preferred-height + 8px);
+    max-height: self.min-height;
+    horizontal-stretch: !root.icon-only && root.fill-width ? 1 : 0;
+    vertical-stretch: 0;
+    background: root.enabled && pointer.pressed ? Palette.control-background : root.checked || (pointer.has-hover && root.enabled) ? Palette.alternate-background : transparent;
+    border-radius: 4px;
+    border-width: keyboard.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checkable: root.checkable;
+    accessible-checked: root.checked;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    changed has-focus => {
+        if root.has-focus && root.scroll-to-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); }
+    }
+    measure := Text { visible: false; text: root.text; font-size: max(12px, UiState.text-size * 0.875px); }
+    if root.has-icon : Icon {
+        x: root.icon-only ? (parent.width - self.width) / 2 : 8px;
+        y: (parent.height - self.height) / 2;
+        width: root.icon-size;
+        height: root.icon-size;
+        source: root.icon;
+        opacity: root.enabled ? 1 : 0.5;
+    }
+    label := Text {
+        visible: !root.icon-only;
+        x: 8px + root.icon-space;
+        width: max(0px, parent.width - 16px - root.icon-space);
+        height: parent.height;
+        text: root.icon-only ? "" : root.text;
+        wrap: word-wrap;
+        font-size: max(12px, UiState.text-size * 0.875px);
+        font-weight: root.checked ? 600 : 400;
+        horizontal-alignment: root.leading ? left : center;
+        vertical-alignment: center;
+        color: Palette.foreground;
+        opacity: root.enabled ? 1 : 0.5;
+        accessible-role: none;
+    }
+    if root.checked : Rectangle { x: 0px; y: 12px; width: 2px; height: max(0px, parent.height - 24px); background: Palette.accent-background; }
+    pointer := TouchArea { enabled: root.enabled; clicked => { keyboard.focus(); root.clicked(); } }
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.escape-pressed(); return reject; }
+            if event.text == Key.Return || event.text == Key.Space {
+                if !event.repeat { root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    if root.tooltip-enabled && (root.icon-only || root.hint != root.text) : Tooltip { text: @markdown("\{root.hint}"); }
+}

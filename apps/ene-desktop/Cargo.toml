@@ -24,9 +24,12 @@ ene-protocol = { path = "../../crates/ene-protocol", features = ["ipc"] }
 xdg = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit-wayland", "renderer-femtovg-wgpu"] }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit-wayland", "renderer-femtovg-wgpu", "unstable-fontique-011"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [build-dependencies]
 lucide-slint = "=1.49.1"
 slint-build = { version = "=1.18.1", default-features = false, features = ["compat-1-18"] }
+
+[dev-dependencies]
+tempfile = "3"

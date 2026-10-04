@@ -1,4 +1,5 @@
 import { Icon, Icons } from "../../foundation/icons.slint";
+import { Theme } from "../../foundation/theme.slint";
 import { Palette } from "std-widgets.slint";
 
 export component MessageBubble inherits Rectangle {
@@ -7,7 +8,7 @@ export component MessageBubble inherits Rectangle {
     in property <bool> provisional;
     private property <bool> outgoing: root.author == "あなた";
     private property <string> author-label: root.author + (root.provisional ? " · デモの仮応答" : "");
-    private property <brush> bubble-color: root.outgoing ? (Palette.color-scheme == ColorScheme.dark ? #285b40 : #c7efad) : Palette.control-background;
+    private property <brush> bubble-color: root.outgoing ? Theme.message : Palette.control-background;
     private property <length> bubble-width: min(max(56px, measure.preferred-width + 28px), max(0px, min(root.width * 0.82, root.width - 48px)));
     min-height: content.min-height;
     vertical-stretch: 0;
@@ -47,7 +48,7 @@ export component MessageBubble inherits Rectangle {
             padding-top: 10px;
             padding-bottom: 10px;
             spacing: 6px;
-            Text { text: root.body; wrap: word-wrap; color: Palette.foreground; min-width: 0px; }
+            Text { text: root.body; wrap: word-wrap; color: root.outgoing ? Theme.message-text : Palette.foreground; min-width: 0px; }
         }
     }
 }

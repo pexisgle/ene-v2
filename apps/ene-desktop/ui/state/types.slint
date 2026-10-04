@@ -1,7 +1,11 @@
 
 
 export struct ChatEntry {
-    author: string,
-    body: string,
-    provisional: bool,
+    author: string, body: string, provisional: bool
+}
+
+export struct SettingsDraft {
+    font-family: string, text-size: int, theme-index: int,
+    model: string, motion: string, motion-playing: bool, motion-loop: bool,
+    fps-index: int, size-text: string,
 }

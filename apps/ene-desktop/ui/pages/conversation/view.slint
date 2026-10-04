@@ -1,0 +1,162 @@
+import { Icons } from "../../foundation/icons.slint";
+import { UiState } from "../../state/ui-state.slint";
+import { ActionButton } from "../../widgets/action-button.slint";
+import { QuietButton } from "../../widgets/quiet-button.slint";
+import { BodyText, HintText } from "../../widgets/typography.slint";
+import { MessageBubble } from "message-bubble.slint";
+import { MessageInput } from "message-input.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
+
+export component ConversationView inherits Rectangle {
+    in property <bool> active;
+    in property <bool> compact;
+    out property <bool> editor-focused: editor.has-focus;
+    out property <length> composer-height: composer.height;
+    out property <length> reading-width: history.width;
+    out property <length> conversation-height: history.visible-height;
+    out property <length> history-position: history.content-y;
+    in-out property <length> scroll-position <=> history.content-y;
+    private property <bool> following: true;
+    private property <length> retained-scroll;
+    changed active => {
+        if root.active {
+            if root.following && UiState.messages.length > 0 {
+                root.scroll-to-latest();
+            }
+            else {
+                history.content-y = max(min(0px, history.visible-height - history.content-height), root.retained-scroll);
+            }
+        }
+        else {
+            root.retained-scroll = history.content-y;
+        }
+    }
+    public function focus-input() {
+        editor.focus();
+    }
+    public function scroll-to-latest() {
+        history.content-y = min(0px, history.visible-height - history.content-height);
+        root.following = true;
+    }
+    VerticalLayout {
+        spacing: 8px;
+        history := ScrollView {
+            vertical-stretch: 1;
+            min-height: 40px;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            changed content-height => {
+                if root.following && UiState.messages.length > 0 {
+                    root.scroll-to-latest();
+                }
+            }
+            scrolled => {
+                root.following = self.content-y <= self.visible-height - self.content-height + 24px;
+            }
+            VerticalLayout {
+                alignment: start;
+                spacing: 12px;
+                padding: 0px;
+                padding-right: 12px;
+                if UiState.messages.length == 0 : VerticalLayout {
+                    min-height: max(180px, history.visible-height - 24px);
+                    alignment: center;
+                    spacing: 12px;
+                    BodyText { text: "何から話しましょう？"; font-size: max(24px, UiState.text-size * 1.125px); font-weight: 600; horizontal-alignment: center; }
+                }
+                for entry in UiState.messages : MessageBubble {
+                    author: entry.author; body: entry.body; provisional: entry.provisional;
+                }
+            }
+        }
+        if !root.following && UiState.messages.length > 0 : QuietButton {
+            text: "最新のメッセージへ"; icon: Icons.chat;
+            enabled: root.active;
+            clicked => { root.scroll-to-latest(); }
+        }
+        composer := Rectangle {
+            background: Palette.control-background;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: editor.has-focus ? Palette.accent-background : Palette.border;
+            vertical-stretch: 0;
+            min-height: compose-layout.min-height;
+            preferred-height: min(max(compose-layout.min-height, min(240px * UiState.scale, root.height / 3)), max(compose-layout.min-height, measure.preferred-height + 24px));
+            measure := Text {
+                visible: false;
+                width: max(1px, editor.width - 20px);
+                text: UiState.draft;
+                font-family: UiState.font-family;
+                font-size: UiState.text-size * 1px;
+                wrap: word-wrap;
+            }
+            compose-layout := GridLayout {
+                padding: 12px;
+                spacing: 8px;
+                editor := MessageInput {
+                    row: 0;
+                    col: 0;
+                    text <=> UiState.draft;
+                    font-family: UiState.font-family;
+                    font-size: UiState.text-size * 1px;
+                    placeholder-text: "メッセージを入力…";
+                    active: root.active;
+                    min-height: UiState.text-size * 1px + 16px;
+                    min-width: 0px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    edited(text) => {
+                        UiState.draft-edited(text);
+                    }
+                    submit => {
+                        if root.active && UiState.can-send {
+                            UiState.submit();
+                        }
+                    }
+                }
+                Rectangle {
+                    row: 0;
+                    col: 1;
+                    min-width: UiState.control-height;
+                    max-width: UiState.control-height;
+                    min-height: UiState.control-height;
+                    VerticalLayout {
+                        spacing: 0px;
+                        Rectangle { min-height: 0px; vertical-stretch: 1; }
+                        ActionButton {
+                            vertical-stretch: 0;
+                            icon-only: true;
+                            icon: Icons.send;
+                            text: "送信";
+
+                            primary: true;
+                            fill-width: false;
+                            enabled: root.active && UiState.can-send;
+                            clicked => {
+                                UiState.submit();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" : QuietButton {
+            icon: Icons.warning; text: "キャラクターの表示を確認";
+            enabled: root.active;
+            clicked => { UiState.category = 0; UiState.navigate(1); }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if UiState.demo-mode : HintText {
+                text: "デモ · 外部送信なし";
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            QuietButton {
+                icon: Icons.settings; text: "設定";
+                enabled: root.active;
+                clicked => { UiState.navigate(1); }
+            }
+        }
+    }
+}

@@ -7,7 +7,7 @@ export component ThemePicker inherits Rectangle {
     in property <bool> enabled: true;
     out property <bool> has-focus: system.has-focus || light.has-focus || dark.has-focus;
     callback edited;
-    min-height: max(44px, 20px * root.ui-scale + 20px);
+    min-height: max(32px, 16px * root.ui-scale + 12px);
     vertical-stretch: 0;
     forward-focus: system;
     HorizontalLayout {
@@ -22,7 +22,7 @@ export component ThemePicker inherits Rectangle {
 export component SizeControl inherits Rectangle {
     in-out property <string> text <=> number.text;
     in property <float> ui-scale: 1;
-    private property <length> control-height: max(44px, 20px * root.ui-scale + 20px);
+    private property <length> control-height: max(32px, 16px * root.ui-scale + 12px);
     in property <bool> enabled: true;
     out property <bool> has-focus: number.has-focus || slider.has-focus;
     callback edited;
