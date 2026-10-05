@@ -205,6 +205,15 @@ pub struct GrantInput {
     pub destinations: Vec<String>,
     pub data_kinds: Vec<String>,
     pub purpose: String,
+    pub consent: GrantConsent,
+}
+/// Versions of the configuration and implementation presented for consent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GrantConsent {
+    pub settings_revision: u64,
+    pub provider_revision: String,
 }
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

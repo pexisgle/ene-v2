@@ -77,6 +77,7 @@ mod tests {
             last_check: None,
         };
         let mut policy = Policy {
+            revision: "v1".into(),
             fingerprint: json!({"implementation":"v1"}),
             destinations: vec!["https://gateway.test".into(), "processor".into()],
             requires_credentials: true,

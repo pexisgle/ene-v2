@@ -85,6 +85,7 @@ impl Application {
                     index,
                     !state.get_connection_dirty() && current.is_empty(),
                 );
+                self.project_permission_scope(ui);
             }
             Event::Models(id, list) => {
                 state.set_host_operation(0);

@@ -49,6 +49,9 @@ impl From<ene_api_client::Error> for Error {
     fn from(error: ene_api_client::Error) -> Self {
         match error {
             ene_api_client::Error::Unauthorized => Self::Unauthorized,
+            ene_api_client::Error::Api(error) if error.body.error.code == "revision_conflict" => {
+                Self::Api("設定が変わったため保存を完了できませんでした。「元に戻す」で最新の設定と送信先を確認し、編集・許可をやり直してください。".into())
+            }
             ene_api_client::Error::Api(error) => Self::Api(error.to_string()),
             _ => Self::Transport,
         }

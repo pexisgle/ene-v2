@@ -180,13 +180,15 @@ Grantの`companion_id`・操作対象・所在環境は変更せず、別の対�
 
 LLMプロバイダーの`options`は各実装が検証する非秘密JSONです。設定項目は文字列・数値・選択・真偽値だけを宣言し、UIコードは受け取りません。プラグインmanifest・初期化・モデル一覧・生成差分・終了・取消・broker HTTPの型は`ene-protocol::provider`に定義します。初期認証方式は認証なし・Bearer・固定ヘッダー・クエリで、OAuth・署名方式は未対応です。brokerはホスト側の接続・生成・用途の文脈で現在の許可を検査し、キー自体はプラグインへ渡しません。未許可の送信先・転送・リダイレクトを拒否し、OpenRouterの配信先・フォールバック禁止もホストが強制します。プラグイン実装のrevisionも送信許可のfingerprintに含めます。
 
+送信許可の新規登録には、表示時点の `settings.revision` とプロバイダー記述子の `revision` を `consent: {settings_revision, provider_revision}` として必須で送ります。`destinations` も表示した値を送ります。ホストは保存前に両revisionを検証し、接続設定または実装が変更されていれば `revision_conflict` で拒否します。デスクトップは同意の下書き中に送信先やrevisionを更新しません。コンパニオン・接続・モデル割当の編集も表示時のrevisionを保持し、競合時は下書きを残して再確認を求めます。
+
 ### モデル一覧とメタデータ
 
 モデル一覧は`GET /v1/connections/{connection_id}/models`で取得します。組込アダプターまたはプラグインが、その接続先の`/models`などを呼び出して現在の一覧を返します。manifestの`models`は任意です。`capabilities.model_list: true`のプラグインでは、取得結果を正本とし、manifestの列挙で絞り込んだり合成したりしません。`false`の場合だけ、任意の静的一覧を代替として使います。モデル追加のためにmanifestやホストを更新する必要はありません。IDの直接入力も利用できます。
 
 プラグインは`list_models {request_id, endpoint, options}`を受け、`models {request_id, models}`を1回返します。これはOpenAIやAnthropicのAPI形式から独立した契約です。各モデルの`metadata.context_window`にコンテキスト上限（tokens）を含め、入力／出力上限・形式なども共通の型へ正規化します。取得元のAPI・詳細API・カタログ、IDの対応関係と補完は各プラグインの実装が担当します。ホストは返された情報を保持し、取得元を選んだり自動補完したりしません。manifestにモデル列挙やカタログの指定は不要です。
 
-HTTP brokerは直列・最大8要求、モデル取得全体は30秒、返信は改行込み1MiB・最大4096モデルです。モデル数分の問い合わせをせず、一覧や一括取得APIを使います。認証付きのAPI要求は接続先と同じorigin・ベースパス配下です。別originの公開情報は、既存の`http_request`で取得できます。これは一覧取得中だけのGET・本文なしに限定し、manifestの`destinations`で宣言済みかつ現在のメタデータ送信許可に含まれる送信先だけを認めます。外部には資格情報やmanifestの固定ヘッダーを付与しません。HTTPSを使用し、ローカル開発用のloopback HTTPも利用できます。リダイレクトは禁止、応答は最大8MiBです。生成中の外部カタログ要求は拒否します。
+HTTP brokerは直列・最大8要求、モデル取得全体は30秒、返信は改行込み1MiB・最大4096モデルです。モデル数分の問い合わせをせず、一覧や一括取得APIを使います。認証付きのAPI要求は接続先と同じorigin・ベースパス配下です。別originの公開情報は、既存の`http_request`で取得できます。一覧取得中のbroker要求は、同じoriginの認証付き要求も含めてGET・本文なしに限定し、manifestの`destinations`で宣言済みかつ現在のメタデータ送信許可に含まれる送信先だけを認めます。外部には資格情報やmanifestの固定ヘッダーを付与しません。HTTPSを使用し、ローカル開発用のloopback HTTPも利用できます。リダイレクトは禁止、応答は最大8MiBです。生成中の外部カタログ要求は拒否します。
 
 モデルの共通応答は次の形です。Rustでは`ene_api_types::provider::Model`と`ModelMetadata`を使い、プラグイン向けには`ene_protocol::provider`から再公開します。REST、Rustクライアント、OpenAPIも同じ型です。
 

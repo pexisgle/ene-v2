@@ -29,6 +29,209 @@ async fn serve(router: Router) -> (Http, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
+async fn companion_draft_keeps_its_revision_when_the_queue_refreshes() {
+    let mut current = snapshot();
+    current.companions[0].revision = 2;
+    current.companions[0].mind = "remote mind".into();
+    let saved = Arc::new(std::sync::Mutex::new(current.companions[0].clone()));
+    let changed = saved.clone();
+    let router = Router::new()
+        .route("/v1/snapshot", get(move || { let current = current.clone(); async move { Json(current) } }))
+        .route("/v1/companions/c", patch(move |Json(input): Json<ene_api_types::CompanionPatch>| {
+            let changed = changed.clone();
+            async move {
+                let mut saved = changed.lock().unwrap();
+                if input.revision != saved.revision {
+                    return (axum::http::StatusCode::CONFLICT, Json(json!({"error":{"code":"revision_conflict","message":"changed","details":{}}})));
+                }
+                saved.name = input.name.unwrap(); saved.mind = input.mind.unwrap(); saved.revision += 1;
+                (axum::http::StatusCode::OK, Json(serde_json::to_value(&*saved).unwrap()))
+            }
+        }));
+    let (http, server) = serve(router).await;
+    let result = MutationQueue::new()
+        .submit(
+            http,
+            "c".into(),
+            Command::Companion {
+                revision: 1,
+                name: "draft name".into(),
+                mind: "old mind".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.is_err());
+    let saved = saved.lock().unwrap();
+    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.name, "ene");
+    assert_eq!(saved.mind, "remote mind");
+    server.abort();
+}
+
+#[tokio::test]
+async fn connection_draft_keeps_its_revision_when_the_queue_refreshes() {
+    let mut current = snapshot();
+    current.settings.revision = 2;
+    current.settings.connections[0].options = json!({"remote":true});
+    let saved = Arc::new(std::sync::Mutex::new(current.settings.clone()));
+    let changed = saved.clone();
+    let router = Router::new()
+        .route("/v1/snapshot", get(move || { let current = current.clone(); async move { Json(current) } }))
+        .route("/v1/providers", get(|| async { Json(json!([{"id":"openai","name":"OpenAI","kind":"builtin","endpoint":"https://api.openai.com/v1","options":{},"settings":[],"requires_credentials":true,"environment_variable":null,"destinations":["https://api.openai.com"],"state":"ready","error":null,"revision":"1","capabilities":{"streaming_text":true,"model_list":true}}])) }))
+        .route("/v1/settings", patch(move |Json(input): Json<ene_api_types::SettingsPatch>| {
+            let changed = changed.clone();
+            async move {
+                let mut saved = changed.lock().unwrap();
+                if input.revision != saved.revision {
+                    return (axum::http::StatusCode::CONFLICT, Json(json!({"error":{"code":"revision_conflict","message":"changed","details":{}}})));
+                }
+                saved.connections[0].options = input.connections[0].options.clone(); saved.revision += 1;
+                (axum::http::StatusCode::OK, Json(serde_json::to_value(&*saved).unwrap()))
+            }
+        }));
+    let (http, server) = serve(router).await;
+    let result = MutationQueue::new()
+        .submit(
+            http,
+            "c".into(),
+            Command::Configure {
+                settings_revision: 1,
+                companion_revision: 1,
+                connection_id: Some("p".into()),
+                creation_id: None,
+                provider: "openai".into(),
+                endpoint: "https://api.openai.com/v1".into(),
+                model: String::new(),
+                options: json!({}),
+                update_connection: true,
+                credential: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        saved.lock().unwrap().connections[0].options,
+        json!({"remote":true})
+    );
+    assert_eq!(saved.lock().unwrap().revision, 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn permission_save_sends_only_the_scope_presented_to_the_user() {
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let observed = captured.clone();
+    let current = snapshot();
+    let router = Router::new()
+        .route("/v1/snapshot", get(move || { let current = current.clone(); async move { Json(current) } }))
+        .route("/v1/providers", get(|| async { Json(json!([{"id":"openai","name":"OpenAI","kind":"builtin","endpoint":"https://api.openai.com/v1","options":{},"settings":[],"requires_credentials":true,"environment_variable":null,"destinations":["https://api.openai.com","https://undisplayed.test"],"state":"ready","error":null,"revision":"new","capabilities":{"streaming_text":true,"model_list":true}}])) }))
+        .route("/v1/grants", axum::routing::post(move |Json(input): Json<ene_api_types::GrantInput>| {
+            let observed = observed.clone(); async move {
+                *observed.lock().unwrap() = Some(input);
+                (axum::http::StatusCode::CONFLICT, Json(json!({"error":{"code":"revision_conflict","message":"changed","details":{}}})))
+            }
+        }));
+    let (http, server) = serve(router).await;
+    let result = MutationQueue::new()
+        .submit(
+            http,
+            "c".into(),
+            Command::Permission {
+                consent: ene_api_types::GrantConsent {
+                    settings_revision: 1,
+                    provider_revision: "old".into(),
+                },
+                destinations: vec!["https://api.openai.com".into()],
+                connection: "p".into(),
+                conversation: true,
+                check: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.is_err());
+    let captured = captured.lock().unwrap();
+    let grant = captured.as_ref().unwrap();
+    assert_eq!(grant.destinations, vec!["https://api.openai.com"]);
+    assert_eq!(grant.consent.provider_revision, "old");
+    assert_eq!(grant.consent.settings_revision, 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn model_assignment_conflicts_preserve_remote_changes_and_applied_retries_skip_rewrites() {
+    for already_applied in [false, true] {
+        let mut current = snapshot();
+        current.settings.revision = 2;
+        current.companions[0].revision = 2;
+        current.companions[0].model_assignments.companion = Some(ene_api_types::ModelAssignment {
+            connection_id: "p".into(),
+            model_id: if already_applied { "draft" } else { "remote" }.into(),
+        });
+        let saved = Arc::new(std::sync::Mutex::new(current.companions[0].clone()));
+        let changed = saved.clone();
+        let settings = current.settings.clone();
+        let router = Router::new()
+            .route("/v1/snapshot", get(move || { let current = current.clone(); async move { Json(current) } }))
+            .route("/v1/providers", get(|| async { Json(json!([{"id":"openai","name":"OpenAI","kind":"builtin","endpoint":"https://api.openai.com/v1","options":{},"settings":[],"requires_credentials":true,"environment_variable":null,"destinations":["https://api.openai.com"],"state":"ready","error":null,"revision":"1","capabilities":{"streaming_text":true,"model_list":true}}])) }))
+            .route("/v1/settings", patch(move |Json(input): Json<ene_api_types::SettingsPatch>| {
+                let settings = settings.clone(); async move {
+                    // Simulate a replay of the first, already-applied step.
+                    assert_eq!(input.revision, 1); Json(settings)
+                }
+            }))
+            .route("/v1/companions/c", patch(move |Json(input): Json<ene_api_types::CompanionPatch>| {
+                let changed = changed.clone(); async move {
+                    assert!(!already_applied, "already-applied assignment must not be rewritten");
+                    let mut saved = changed.lock().unwrap();
+                    if input.revision != saved.revision {
+                        return (axum::http::StatusCode::CONFLICT, Json(json!({"error":{"code":"revision_conflict","message":"changed","details":{}}})));
+                    }
+                    saved.model_assignments.companion = input.model_assignments.unwrap()["companion"].clone();
+                    saved.revision += 1;
+                    (axum::http::StatusCode::OK, Json(serde_json::to_value(&*saved).unwrap()))
+                }
+            }));
+        let (http, server) = serve(router).await;
+        let result = MutationQueue::new()
+            .submit(
+                http,
+                "c".into(),
+                Command::Configure {
+                    settings_revision: 1,
+                    companion_revision: 1,
+                    connection_id: Some("p".into()),
+                    creation_id: None,
+                    provider: "openai".into(),
+                    endpoint: "https://api.openai.com/v1".into(),
+                    model: "draft".into(),
+                    options: json!({}),
+                    update_connection: true,
+                    credential: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.is_ok(), already_applied);
+        assert_eq!(saved.lock().unwrap().revision, 2);
+        assert_eq!(
+            saved
+                .lock()
+                .unwrap()
+                .model_assignments
+                .companion
+                .as_ref()
+                .unwrap()
+                .model_id,
+            if already_applied { "draft" } else { "remote" }
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn credential_revoke_completes_while_a_model_check_is_still_running() {
     let snapshot = snapshot();
     let saved = snapshot.clone();
@@ -135,6 +338,8 @@ async fn credential_revoke_follows_admitted_save_even_when_its_waiter_is_dropped
         http.clone(),
         "c".into(),
         Command::Configure {
+            settings_revision: 1,
+            companion_revision: 1,
             connection_id: Some("p".into()),
             creation_id: None,
             provider: "openai".into(),
@@ -184,27 +389,61 @@ async fn permission_revoke_observes_grant_created_by_an_earlier_pending_save() {
     let deleted = stored.clone();
     let grant = json!({"id":"g","companion_id":"c","kind":"data_transfer","connection_id":"p","destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation","status":"active","revision":1,"invalidation_reason":null,"connection_fingerprint":{}});
     let created = grant.clone();
-    let router=Router::new()
-        .route("/v1/snapshot", get(move || {let snapshot=snapshot.clone(); async move {Json(snapshot)}}))
-        .route("/v1/providers",get(move || {let arrived=arrived.clone();let gate=gate.clone();async move {
-            arrived.add_permits(1);gate.acquire().await.unwrap().forget();
-            Json(json!([{"id":"openai","name":"OpenAI","kind":"builtin","endpoint":"https://api.openai.com/v1","options":{},"settings":[],"requires_credentials":true,"environment_variable":null,"destinations":["https://api.openai.com"],"state":"ready","error":null,"revision":"1","capabilities":{"streaming_text":true,"model_list":true}}]))
-        }}))
-        .route("/v1/grants",get(move || {let queried=queried.clone();let grant=grant.clone();async move {
-            Json(if queried.load(Ordering::SeqCst) {json!([grant])} else {json!([])})
-        }}).post(move || {let changed=changed.clone();let created=created.clone();async move {
-            changed.store(true,Ordering::SeqCst);
-            Json(json!({"grant":created,"questions":[]}))
-        }}))
-        .route("/v1/grants/g", axum::routing::delete(move || {let deleted=deleted.clone();async move {
-            deleted.store(false,Ordering::SeqCst); axum::http::StatusCode::NO_CONTENT
-        }}));
+    let router = Router::new()
+        .route(
+            "/v1/snapshot",
+            get(move || {
+                let snapshot = snapshot.clone();
+                async move { Json(snapshot) }
+            }),
+        )
+        .route(
+            "/v1/grants",
+            get(move || {
+                let queried = queried.clone();
+                let grant = grant.clone();
+                async move {
+                    Json(if queried.load(Ordering::SeqCst) {
+                        json!([grant])
+                    } else {
+                        json!([])
+                    })
+                }
+            })
+            .post(move || {
+                let arrived = arrived.clone();
+                let gate = gate.clone();
+                let changed = changed.clone();
+                let created = created.clone();
+                async move {
+                    arrived.add_permits(1);
+                    gate.acquire().await.unwrap().forget();
+                    changed.store(true, Ordering::SeqCst);
+                    Json(json!({"grant":created,"questions":[]}))
+                }
+            }),
+        )
+        .route(
+            "/v1/grants/g",
+            axum::routing::delete(move || {
+                let deleted = deleted.clone();
+                async move {
+                    deleted.store(false, Ordering::SeqCst);
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
     let (http, server) = serve(router).await;
     let queue = MutationQueue::new();
     let saving = queue.submit(
         http.clone(),
         "c".into(),
         Command::Permission {
+            consent: ene_api_types::GrantConsent {
+                settings_revision: 1,
+                provider_revision: "1".into(),
+            },
+            destinations: vec!["https://api.openai.com".into()],
             connection: "p".into(),
             conversation: true,
             check: false,
@@ -319,6 +558,8 @@ async fn new_draft_does_not_overwrite_a_partially_saved_connection() {
         thread: None,
     };
     let configure = |provider: &str| Command::Configure {
+        settings_revision: 1,
+        companion_revision: 1,
         connection_id: None,
         creation_id: None,
         provider: provider.into(),

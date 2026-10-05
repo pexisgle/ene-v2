@@ -55,7 +55,9 @@ pub async fn send(
     {
         return Err(denied());
     }
-    if public && (!models || method != "GET" || body_base64.is_some()) {
+    // Metadata authorization never admits a generation POST, even to the
+    // credential-bearing origin. Keep this boundary common to all adapters.
+    if models && (method != "GET" || body_base64.is_some()) || public && !models {
         return Err(denied());
     }
     if !["POST", "GET"].contains(&method.as_str()) || method == "GET" && body_base64.is_some() {
@@ -118,7 +120,7 @@ pub async fn send(
         return Err(error);
     }
     if !public && let BrokerRouting::OpenRouter { only } = &bundle.manifest.routing {
-        if method == "POST" && target.path() == "/api/v1/chat/completions" {
+        if !models && method == "POST" && target.path() == "/api/v1/chat/completions" {
             let mut request: serde_json::Value =
                 serde_json::from_slice(&body).map_err(|_| denied())?;
             let object = request.as_object_mut().ok_or_else(denied)?;

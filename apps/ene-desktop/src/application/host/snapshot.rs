@@ -152,11 +152,19 @@ impl Application {
             }));
         }
         if !state.get_connection_dirty() {
+            let mut drafts = self.host_drafts.borrow_mut();
+            drafts.settings_revision = snapshot.settings.revision;
+            drafts.assignment_revision = c.revision;
+            drop(drafts);
             state.set_connection_matches_provider(selected.is_some_and(|p| {
                 p.adapter == state.get_provider_id().as_str()
                     && p.endpoint == state.get_provider_endpoint().as_str()
             }));
         }
+        if !state.get_companion_dirty() {
+            self.host_drafts.borrow_mut().companion_revision = c.revision;
+        }
+        self.project_permission_scope(ui);
         self.project_model_info(ui);
         let entries = messages
             .into_iter()

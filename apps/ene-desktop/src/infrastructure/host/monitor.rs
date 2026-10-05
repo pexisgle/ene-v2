@@ -20,36 +20,19 @@ impl RuntimeStatus {
 }
 
 async fn inspect(path: &Path) -> RuntimeStatus {
-    match super::launch::listening(path).await {
-        Ok(false) => RuntimeStatus {
+    use super::launch::Probe;
+    match super::launch::probe(path).await {
+        Ok(Probe::Stopped) => RuntimeStatus {
             state: 1,
             endpoint: String::new(),
             detail: String::new(),
         },
-        Err(reason) => RuntimeStatus::unavailable(reason),
-        Ok(true) => {
-            let result = async {
-                let connection = descriptor(path)?;
-                let http = Http::new(&connection).map_err(|_| "接続情報が不正です".to_owned())?;
-                // A listening port alone does not establish service health or
-                // authentication. Settings is a bounded, local read operation.
-                http.settings().await.map_err(|_| {
-                    "ホストに接続できません。接続情報やホストの状態を確認してください。".to_owned()
-                })?;
-                Ok::<_, String>(connection.endpoint)
-            };
-            match tokio::time::timeout(Duration::from_secs(2), result).await {
-                Ok(Ok(endpoint)) => RuntimeStatus {
-                    state: 2,
-                    endpoint,
-                    detail: String::new(),
-                },
-                Ok(Err(reason)) => RuntimeStatus::unavailable(reason),
-                Err(_) => RuntimeStatus::unavailable(
-                    "ホストの応答がありません。状態を再確認してください。".into(),
-                ),
-            }
-        }
+        Err(reason) | Ok(Probe::Unverified(reason)) => RuntimeStatus::unavailable(reason),
+        Ok(Probe::Ready(connection)) => RuntimeStatus {
+            state: 2,
+            endpoint: connection.endpoint,
+            detail: String::new(),
+        },
     }
 }
 

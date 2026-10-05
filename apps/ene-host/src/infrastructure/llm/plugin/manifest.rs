@@ -364,6 +364,7 @@ impl Bundle {
         }
         validate_options(&self.manifest, &c.options)?;
         Ok(Policy {
+            revision: self.revision.clone(),
             fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":c.options,"implementation":self.revision,"destinations":self.manifest.destinations,"auth":self.manifest.auth}),
             destinations: self.manifest.destinations.clone(),
             requires_credentials: !matches!(self.manifest.auth, AuthProfile::None),

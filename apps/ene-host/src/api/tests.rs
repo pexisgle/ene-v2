@@ -304,7 +304,7 @@ impl ConversationFixture {
             .0,
             StatusCode::OK
         );
-        let (status, grant) = mutate(&app,"POST","/v1/grants",json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),Some("grant")).await;
+        let (status, grant) = mutate(&app,"POST","/v1/grants",json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),Some("grant")).await;
         assert_eq!(status, StatusCode::CREATED);
         Self {
             app,
@@ -523,6 +523,186 @@ async fn mutate(
 
 struct TestCredentials;
 
+mod grant_consent_tests {
+    use super::*;
+    use ene_core::{
+        domain::Connection,
+        ports::{Result, llm::*},
+    };
+    use futures_util::{future::BoxFuture, stream::BoxStream};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    struct ReloadableRegistry {
+        revision: AtomicU64,
+    }
+    impl ProviderRegistry for ReloadableRegistry {
+        fn descriptors(&self) -> Vec<Descriptor> {
+            vec![]
+        }
+        fn policy(&self, c: &Connection) -> Result<Policy> {
+            let revision = self.revision.load(Ordering::SeqCst).to_string();
+            let mut destinations = vec!["https://old.test".into()];
+            if revision != "1" {
+                destinations.push("https://undisplayed.test".into());
+            }
+            Ok(Policy {
+                fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":c.options,"implementation":revision}),
+                revision,
+                destinations,
+                requires_credentials: false,
+                environment_variable: None,
+            })
+        }
+        fn generate(
+            &self,
+            _: Invocation,
+        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>> {
+            Box::pin(async { Err(ene_core::domain::Error::unavailable()) })
+        }
+        fn models(&self, _: Invocation) -> BoxFuture<'_, Result<Vec<Model>>> {
+            Box::pin(async { Err(ene_core::domain::Error::unavailable()) })
+        }
+        fn reload(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async {
+                self.revision.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+        fn enable(&self, _: String, _: bool) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_implementation_or_connection_cannot_acquire_undisplayed_consent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("host.db")).await.unwrap();
+        let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+        let shutdown = tokio::sync::watch::channel(false).0;
+        let app = App::new(
+            ene_core::application::HostApplication::new(
+                Arc::new(store),
+                Arc::new(ReloadableRegistry {
+                    revision: AtomicU64::new(1),
+                }),
+                Arc::new(TestCredentials),
+                shutdown.clone(),
+            ),
+            "private-token".into(),
+            shutdown,
+        );
+        let (status, settings) = mutate(
+            &app,
+            "PATCH",
+            "/v1/settings",
+            json!({"revision":1,"connections":[
+                {"kind":"llm","adapter":"fixture","endpoint":"https://old.test/v1","options":{}}
+            ]}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let connection = settings["connections"][0]["id"].as_str().unwrap();
+        let mut input = json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer",
+            "destinations":["https://old.test"],"data_kinds":["conversation"],"purpose":"conversation",
+            "consent":{"settings_revision":2,"provider_revision":"1"}});
+        let mut missing = input.clone();
+        missing.as_object_mut().unwrap().remove("consent");
+        assert_eq!(
+            mutate(&app, "POST", "/v1/grants", missing, Some("missing"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        // Reload changes executable identity and adds a recipient after the
+        // user saw the old scope. Neither old nor expanded destinations grant it.
+        app.application.reload_providers().await.unwrap();
+        for destinations in [
+            json!(["https://old.test"]),
+            json!(["https://old.test", "https://undisplayed.test"]),
+        ] {
+            input["destinations"] = destinations;
+            let (status, error) = mutate(
+                &app,
+                "POST",
+                "/v1/grants",
+                input.clone(),
+                Some("stale-provider"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(error["error"]["code"], "revision_conflict");
+        }
+        assert!(app.application.grants(None).await.unwrap().is_empty());
+
+        input["consent"]["provider_revision"] = json!("2");
+        let (status, saved) =
+            mutate(&app, "POST", "/v1/grants", input.clone(), Some("confirmed")).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            saved["grant"]["connection_fingerprint"]["implementation"],
+            "2"
+        );
+        let mut changed_consent = input.clone();
+        changed_consent["consent"]["provider_revision"] = json!("1");
+        assert_eq!(
+            mutate(
+                &app,
+                "POST",
+                "/v1/grants",
+                changed_consent,
+                Some("confirmed")
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+
+        // Same adapter and destinations, but connection configuration changed.
+        assert_eq!(mutate(&app, "PATCH", "/v1/settings", json!({"revision":2,"connections":[
+            {"id":connection,"kind":"llm","adapter":"fixture","endpoint":"https://old.test/v1","options":{"changed":true}}
+        ]}), None).await.0, StatusCode::OK);
+        let (status, error) = mutate(
+            &app,
+            "POST",
+            "/v1/grants",
+            input.clone(),
+            Some("stale-settings"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error["error"]["code"], "revision_conflict");
+        // Receipt replay returns the original result; it must not reauthorize
+        // the modified connection with a new policy fingerprint.
+        assert_eq!(
+            mutate(&app, "POST", "/v1/grants", input.clone(), Some("confirmed"))
+                .await
+                .1,
+            saved
+        );
+        assert!(
+            app.application
+                .grants(None)
+                .await
+                .unwrap()
+                .iter()
+                .all(|g| g.status != ene_core::domain::GrantStatus::Active)
+        );
+        input["consent"]["settings_revision"] = json!(3);
+        assert_eq!(
+            mutate(&app, "POST", "/v1/grants", input, Some("reconfirmed"))
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+        app.application.stop().await.unwrap();
+    }
+}
+
 struct RoutedRegistry(tokio::sync::mpsc::UnboundedSender<(String, String)>);
 impl ene_core::ports::llm::ProviderRegistry for RoutedRegistry {
     fn descriptors(&self) -> Vec<ene_core::ports::llm::Descriptor> {
@@ -533,6 +713,7 @@ impl ene_core::ports::llm::ProviderRegistry for RoutedRegistry {
         c: &ene_core::domain::Connection,
     ) -> ene_core::ports::Result<ene_core::ports::llm::Policy> {
         Ok(ene_core::ports::llm::Policy {
+            revision: "routed-v1".into(),
             fingerprint: json!({"endpoint":c.endpoint,"adapter":c.adapter}),
             destinations: vec![
                 url::Url::parse(&c.endpoint)
@@ -703,7 +884,7 @@ async fn changing_service_clears_credentials_before_new_authorization() {
                 "POST",
                 "/v1/grants",
                 json!({"companion_id":c,"connection_id":p,"kind":"data_transfer",
-        "destinations":[destination],"data_kinds":["conversation"],"purpose":"conversation"}),
+        "consent":{"settings_revision":3,"provider_revision":"routed-v1"},"destinations":[destination],"data_kinds":["conversation"],"purpose":"conversation"}),
                 Some("new-grant")
             )
             .await
@@ -930,6 +1111,7 @@ async fn revoking_credentials_cancels_a_running_connection_check_without_waiting
                 "companion_id": f.companion,
                 "connection_id": f.connection,
                 "kind": "data_transfer",
+                "consent": {"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},
                 "destinations": ["https://api.openai.com", "https://models.dev"],
                 "data_kinds": ["test_input", "metadata"],
                 "purpose": "connection_check"
@@ -1079,7 +1261,7 @@ async fn cancelled_unsent_prompt_is_excluded_from_future_history() {
         f.started.try_recv().is_err(),
         "queued text was never sent to a provider"
     );
-    assert_eq!(mutate(&f.app,"POST","/v1/grants",json!({"companion_id":f.companion,"connection_id":f.connection,"kind":"data_transfer","destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),Some("restored-grant")).await.0,StatusCode::CREATED);
+    assert_eq!(mutate(&f.app,"POST","/v1/grants",json!({"companion_id":f.companion,"connection_id":f.connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),Some("restored-grant")).await.0,StatusCode::CREATED);
     let third = f.send("new-input").await;
     let generation = f.started().await;
     let leaked = generation
@@ -1102,7 +1284,7 @@ async fn regrant_does_not_revive_queued_requests() {
     f.started().await;
     let second = f.send("queued-before-revoke").await;
     let revoke_path = format!("/v1/grants/{}", f.grant);
-    let grant = json!({"companion_id":f.companion,"connection_id":f.connection,"kind":"data_transfer","destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"});
+    let grant = json!({"companion_id":f.companion,"connection_id":f.connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"});
     let revoked = mutate(&f.app, "DELETE", &revoke_path, Value::Null, None).await;
     let restored = mutate(
         &f.app,

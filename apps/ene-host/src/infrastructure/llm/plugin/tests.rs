@@ -19,6 +19,117 @@ fn bundle() -> (tempfile::TempDir, manifest::Bundle) {
     (dir, b)
 }
 struct Permit(AtomicBool);
+
+#[tokio::test]
+async fn metadata_authorization_cannot_generate_on_the_credential_origin() {
+    use axum::{Json, Router, http::HeaderMap, routing::get};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use ene_protocol::provider::{AuthProfile, BrokerRouting};
+    use std::sync::atomic::AtomicUsize;
+
+    for routed in [false, true] {
+        let posts = Arc::new(AtomicUsize::new(0));
+        let observed = posts.clone();
+        let router = Router::new()
+            .route(
+                "/api/v1/models",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer fixture-secret");
+                    Json(json!({"data":[]}))
+                }),
+            )
+            .route(
+                "/api/v1/chat/completions",
+                axum::routing::post(
+                    move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                        let observed = observed.clone();
+                        async move {
+                            assert_eq!(headers["authorization"], "Bearer fixture-secret");
+                            if routed {
+                                assert_eq!(
+                                    body["provider"],
+                                    json!({"only":["openai"],"allow_fallbacks":false})
+                                );
+                            }
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"ok":true}))
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (_dir, mut bundle) = bundle();
+        bundle.manifest.destinations = vec![origin.clone()];
+        bundle.manifest.auth = AuthProfile::Bearer;
+        if routed {
+            bundle.manifest.routing = BrokerRouting::OpenRouter {
+                only: vec!["openai".into()],
+            };
+        }
+        let (_cancel, mut input) = invocation(Arc::new(Permit(AtomicBool::new(true))));
+        input.connection.endpoint = format!("{origin}/api/v1");
+        input.request.model.clear();
+        input.request.max_tokens = 0;
+        input.secret = Some(ene_core::ports::Secret {
+            value: "fixture-secret".into(),
+            nonce: "n".into(),
+        });
+        let input = Arc::new(input);
+        let request = PluginMessage::HttpRequest {
+            request_id: input.id.clone(),
+            http_id: "h".into(),
+            method: "POST".into(),
+            url: format!("{origin}/api/v1/chat/completions"),
+            headers: [("content-type".into(), "application/json".into())].into(),
+            body_base64: Some(
+                STANDARD.encode(br#"{"messages":[{"role":"user","content":"unapproved"}]}"#),
+            ),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        for body in [
+            None,
+            match &request {
+                PluginMessage::HttpRequest { body_base64, .. } => body_base64.clone(),
+                _ => unreachable!(),
+            },
+        ] {
+            let mut post = request.clone();
+            if let PluginMessage::HttpRequest { body_base64, .. } = &mut post {
+                *body_base64 = body;
+            }
+            assert_eq!(
+                broker::send(bundle.clone(), input.clone(), true, post, tx.clone())
+                    .await
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::PermissionRequired
+            );
+        }
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+        let mut catalog = request.clone();
+        if let PluginMessage::HttpRequest {
+            method,
+            url,
+            body_base64,
+            ..
+        } = &mut catalog
+        {
+            *method = "GET".into();
+            *url = format!("{origin}/api/v1/models?providers=openai");
+            *body_base64 = None;
+        }
+        broker::send(bundle.clone(), input.clone(), true, catalog, tx.clone())
+            .await
+            .unwrap();
+        broker::send(bundle, input, false, request, tx)
+            .await
+            .unwrap();
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+}
 #[test]
 fn bundle_revision_distinguishes_file_boundaries_and_executable_content() {
     let (dir, _) = bundle();

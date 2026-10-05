@@ -45,6 +45,7 @@ pub fn policy(c: &Connection) -> Result<Policy> {
         return Err(Error::new(ErrorKind::UnsupportedCapability));
     }
     Ok(Policy {
+        revision: REVISION.into(),
         fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":c.options,"implementation":REVISION}),
         destinations: descriptor().destinations,
         requires_credentials: true,

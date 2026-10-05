@@ -4,7 +4,7 @@ pub async fn post_grant(
     key: String,
     request: GrantInput,
 ) -> Result<(Outcome, Value), Error> {
-    let body = json!({"companion_id":request.companion_id,"kind":request.kind,"connection_id":request.connection_id,"destinations":request.destinations,"data_kinds":request.data_kinds,"purpose":request.purpose});
+    let body = serde_json::to_value(&request).map_err(|_| Error::invalid())?;
     let key_lookup = key.clone();
     let lookup = body.clone();
     let mut controls = app.0.controls.lock().await;
@@ -23,6 +23,11 @@ pub async fn post_grant(
     let connection = rules::connection(&c, &request.connection_id)
         .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
     let policy = app.0.providers.policy(&connection)?;
+    if request.consent.settings_revision != c.settings.revision
+        || request.consent.provider_revision != policy.revision
+    {
+        return Err(Error::new(ErrorKind::RevisionConflict));
+    }
     if request.kind != "data_transfer"
         || !["conversation", "connection_check"].contains(&request.purpose.as_str())
         || request
@@ -49,7 +54,9 @@ pub async fn post_grant(
         status: GrantStatus::Active,
         revision: 1,
         invalidation_reason: None,
-        connection_fingerprint: fingerprint(&connection, app.0.providers.as_ref()),
+        // Bind the exact policy whose revision was confirmed above. A reload
+        // after this point must not attach a newer implementation to consent.
+        connection_fingerprint: policy.fingerprint,
     };
     c.grants.push(grant.clone());
     refresh(&app, &mut c);

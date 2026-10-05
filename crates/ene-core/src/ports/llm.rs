@@ -13,6 +13,8 @@ use tokio::sync::watch;
 
 #[derive(Clone)]
 pub struct Policy {
+    /// Same implementation revision as the public provider descriptor.
+    pub revision: String,
     pub fingerprint: Value,
     pub destinations: Vec<String>,
     pub requires_credentials: bool,

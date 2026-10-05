@@ -29,6 +29,23 @@ pub struct Controller {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Controller {
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, channel::UnboundedReceiver<Request>) {
+        let (commands, receiver) = channel::unbounded_channel();
+        let (_, events) = mpsc::channel();
+        (
+            Self {
+                commands,
+                events,
+                latest_requests: Default::default(),
+                latest_view: Default::default(),
+                creation_ids: Default::default(),
+                stop: CancellationToken::new(),
+                thread: None,
+            },
+            receiver,
+        )
+    }
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
         Self::spawn(wake, false)
     }

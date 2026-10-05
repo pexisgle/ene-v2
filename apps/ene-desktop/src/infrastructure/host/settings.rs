@@ -43,6 +43,8 @@ pub(super) async fn action(
     let mut selected_connection = None;
     match command {
         Command::Configure {
+            settings_revision,
+            companion_revision,
             connection_id,
             creation_id,
             provider,
@@ -99,7 +101,7 @@ pub(super) async fn action(
                 }
                 let saved = http
                     .patch_settings(&SettingsPatch {
-                        revision: snapshot.settings.revision,
+                        revision: settings_revision,
                         connections,
                     })
                     .await?;
@@ -116,11 +118,19 @@ pub(super) async fn action(
             selected_connection = Some(connection_id.clone());
             // Preserve the confirmed ID even when a later save step fails.
             let remaining = async {
-                if update_connection && !model.trim().is_empty() {
+                // A previous partial/uncertain save may already have installed
+                // this assignment. Do not rewrite it with a newer revision.
+                if update_connection
+                    && !model.trim().is_empty()
+                    && c.model_assignments
+                        .companion
+                        .as_ref()
+                        .is_none_or(|a| a.connection_id != connection_id || a.model_id != model)
+                {
                     http.patch_companion(
                         &c.id,
                         &CompanionPatch {
-                            revision: c.revision,
+                            revision: companion_revision,
                             name: None,
                             mind: None,
                             model_assignments: Some(
@@ -190,11 +200,15 @@ pub(super) async fn action(
                     .await?,
             ));
         }
-        Command::Companion { name, mind } => {
+        Command::Companion {
+            revision,
+            name,
+            mind,
+        } => {
             http.patch_companion(
                 &c.id,
                 &CompanionPatch {
-                    revision: c.revision,
+                    revision,
                     name: Some(name),
                     mind: Some(mind),
                     model_assignments: None,
@@ -215,6 +229,8 @@ pub(super) async fn action(
             feedback = "送信許可を解除しました";
         }
         Command::Permission {
+            consent,
+            destinations,
             connection: id,
             conversation,
             check,
@@ -236,13 +252,6 @@ pub(super) async fn action(
                     })
                     .collect();
                 if enabled && grants.is_empty() {
-                    let destinations = http
-                        .providers()
-                        .await?
-                        .into_iter()
-                        .find(|d| d.id == p.adapter)
-                        .ok_or(Error::Transport)?
-                        .destinations;
                     http.create_grant(
                         &GrantInput {
                             companion_id: c.id.clone(),
@@ -255,6 +264,7 @@ pub(super) async fn action(
                                 vec![data.into()]
                             },
                             purpose: purpose.into(),
+                            consent: consent.clone(),
                         },
                         &IdempotencyKey::new(format!("{key}-{purpose}")).map_err(Error::from)?,
                     )
@@ -400,6 +410,8 @@ mod identity_tests {
             snapshot,
             "c".into(),
             Command::Configure {
+                settings_revision: 1,
+                companion_revision: 1,
                 connection_id: Some("selected".into()),
                 creation_id: None,
                 provider: "dynamic".into(),
@@ -478,6 +490,8 @@ mod identity_tests {
                     snapshot.clone(),
                     "c".into(),
                     Command::Configure {
+                        settings_revision: 1,
+                        companion_revision: 1,
                         connection_id: selected.clone(),
                         creation_id: Some(creation.clone()),
                         provider: "dynamic".into(),

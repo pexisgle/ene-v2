@@ -17,7 +17,8 @@ impl MutationQueue {
         tokio::spawn(async move {
             while let Some(mutation) = receiver.recv().await {
                 let result = async {
-                    // Earlier writes may have changed revisions and grants.
+                    // Refresh revocation targets and current collections, but
+                    // never replace the draft revisions carried by the command.
                     let snapshot = mutation.http.snapshot(None).await?;
                     action(
                         mutation.http,

@@ -1,6 +1,39 @@
 use super::super::*;
 
 impl Application {
+    pub(in crate::application) fn project_permission_scope(&self, ui: &AppWindow) {
+        let state = ui.global::<UiState>();
+        // Preserve both the displayed destinations and their versions for the
+        // whole consent draft, including provider reload notifications.
+        if state.get_permissions_dirty() {
+            return;
+        }
+        let snapshot = self.snapshot.borrow();
+        let providers = self.providers.borrow();
+        let scope = snapshot.as_ref().and_then(|snapshot| {
+            let connection = snapshot.settings.connections.iter().find(|p| {
+                p.id == state.get_selected_connection_id().as_str()
+                    && p.adapter == state.get_provider_id().as_str()
+            })?;
+            let provider = providers.iter().find(|p| p.id == connection.adapter)?;
+            Some(super::PermissionDraft {
+                connection: connection.id.clone(),
+                consent: ene_api_types::GrantConsent {
+                    settings_revision: snapshot.settings.revision,
+                    provider_revision: provider.revision.clone(),
+                },
+                destinations: provider.destinations.clone(),
+            })
+        });
+        state.set_destinations(
+            scope
+                .as_ref()
+                .map(|s| s.destinations.join(" → "))
+                .unwrap_or_default()
+                .into(),
+        );
+        self.host_drafts.borrow_mut().permission = scope;
+    }
     pub(in crate::application) fn reset_host_page(&self, ui: &AppWindow) {
         let state = ui.global::<UiState>();
         if !state.get_host_connected() || state.get_host_busy() {
@@ -45,6 +78,20 @@ impl Application {
                 | crate::infrastructure::host::Command::RevokePermissions(_)
         );
         if !state.get_host_connected() || (state.get_host_busy() && !revoke) {
+            return;
+        }
+        if let crate::infrastructure::host::Command::Permission { connection, .. } = &command
+            && self
+                .host_drafts
+                .borrow()
+                .permission
+                .as_ref()
+                .is_none_or(|p| &p.connection != connection)
+        {
+            state.set_host_feedback_error(true);
+            state.set_host_feedback(
+                "接続設定が変わりました。元に戻して送信先を再確認してください。".into(),
+            );
             return;
         }
         if let Some(host) = self.host.borrow().as_ref() {
@@ -107,7 +154,9 @@ impl Application {
         state.set_requires_credentials(p.requires_credentials);
         state.set_environment_variable(p.environment_variable.clone().unwrap_or_default().into());
         state.set_model_list_supported(p.capabilities.model_list && p.state == "ready");
-        state.set_destinations(p.destinations.join(" → ").into());
+        if !state.get_permissions_dirty() {
+            state.set_destinations(p.destinations.join(" → ").into());
+        }
         if changed
             || reset
             || (!p.settings.is_empty() && state.get_provider_fields().row_count() == 0)

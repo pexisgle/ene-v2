@@ -33,6 +33,8 @@ pub enum Command {
     Reconnect,
     Send(String),
     Configure {
+        settings_revision: u64,
+        companion_revision: u64,
         connection_id: Option<String>,
         creation_id: Option<String>,
         provider: String,
@@ -53,12 +55,15 @@ pub enum Command {
     RevokeCredential(String),
     RevokePermissions(String),
     Permission {
+        consent: ene_api_types::GrantConsent,
+        destinations: Vec<String>,
         connection: String,
         conversation: bool,
         check: bool,
     },
     Check(String),
     Companion {
+        revision: u64,
         name: String,
         mind: String,
     },

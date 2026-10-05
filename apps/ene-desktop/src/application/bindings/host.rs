@@ -41,7 +41,7 @@ impl Application {
                         if ui.global::<UiState>().get_host_connected()
                             && ui.global::<UiState>().get_companion_index() >= 0
                         {
-                            app.host_request(&ui, ($command)(&ui));
+                            app.host_request(&ui, ($command)(&app, &ui));
                         }
                     }
                 });
@@ -74,7 +74,7 @@ impl Application {
                 state.set_credential_edit(0);
             }
         });
-        host_action!(on_configure_host, |ui: &AppWindow| {
+        host_action!(on_configure_host, |app: &Application, ui: &AppWindow| {
             let state = ui.global::<UiState>();
             let mut options = serde_json::Map::new();
             for f in state.get_provider_fields().iter() {
@@ -93,6 +93,8 @@ impl Application {
             }
             // Provider-owned opaque defaults (e.g. builtin routing constraints) are retained.
             crate::infrastructure::host::Command::Configure {
+                settings_revision: app.host_drafts.borrow().settings_revision,
+                companion_revision: app.host_drafts.borrow().assignment_revision,
                 creation_id: None,
                 connection_id: (!state.get_selected_connection_id().is_empty())
                     .then(|| state.get_selected_connection_id().to_string()),
@@ -118,10 +120,10 @@ impl Application {
                 },
             }
         });
-        host_action!(on_reload_providers, |_| {
+        host_action!(on_reload_providers, |_: &Application, _: &AppWindow| {
             crate::infrastructure::host::Command::ReloadProviders
         });
-        host_action!(on_toggle_provider, |ui: &AppWindow| {
+        host_action!(on_toggle_provider, |_app: &Application, ui: &AppWindow| {
             let s = ui.global::<UiState>();
             crate::infrastructure::host::Command::EnableProvider {
                 provider: s.get_provider_id().into(),
@@ -135,56 +137,86 @@ impl Application {
                 app.project_model_info(&ui);
             }
         });
-        host_action!(on_fetch_models, |ui: &AppWindow| {
+        host_action!(on_fetch_models, |_app: &Application, ui: &AppWindow| {
             crate::infrastructure::host::Command::Models(
                 ui.global::<UiState>().get_selected_connection_id().into(),
             )
         });
-        host_action!(on_register_credential, |ui: &AppWindow| {
-            let state = ui.global::<UiState>();
-            let secret = state.get_api_key().to_string();
-            state.set_api_key("".into());
-            crate::infrastructure::host::Command::Credential(
-                state.get_selected_connection_id().into(),
-                secret,
-            )
-        });
-        host_action!(on_environment_credential, |ui: &AppWindow| {
-            crate::infrastructure::host::Command::EnvironmentCredential(
-                ui.global::<UiState>().get_selected_connection_id().into(),
-            )
-        });
-        host_action!(on_revoke_credential, |ui: &AppWindow| {
-            crate::infrastructure::host::Command::RevokeCredential(
-                ui.global::<UiState>().get_selected_connection_id().into(),
-            )
-        });
-        host_action!(on_revoke_permissions, |ui: &AppWindow| {
-            crate::infrastructure::host::Command::RevokePermissions(
-                ui.global::<UiState>().get_selected_connection_id().into(),
-            )
-        });
-        host_action!(on_save_permissions, |ui: &AppWindow| {
+        host_action!(
+            on_register_credential,
+            |_app: &Application, ui: &AppWindow| {
+                let state = ui.global::<UiState>();
+                let secret = state.get_api_key().to_string();
+                state.set_api_key("".into());
+                crate::infrastructure::host::Command::Credential(
+                    state.get_selected_connection_id().into(),
+                    secret,
+                )
+            }
+        );
+        host_action!(
+            on_environment_credential,
+            |_app: &Application, ui: &AppWindow| {
+                crate::infrastructure::host::Command::EnvironmentCredential(
+                    ui.global::<UiState>().get_selected_connection_id().into(),
+                )
+            }
+        );
+        host_action!(
+            on_revoke_credential,
+            |_app: &Application, ui: &AppWindow| {
+                crate::infrastructure::host::Command::RevokeCredential(
+                    ui.global::<UiState>().get_selected_connection_id().into(),
+                )
+            }
+        );
+        host_action!(
+            on_revoke_permissions,
+            |_app: &Application, ui: &AppWindow| {
+                crate::infrastructure::host::Command::RevokePermissions(
+                    ui.global::<UiState>().get_selected_connection_id().into(),
+                )
+            }
+        );
+        host_action!(on_save_permissions, |app: &Application, ui: &AppWindow| {
             let state = ui.global::<UiState>();
             crate::infrastructure::host::Command::Permission {
+                consent: app
+                    .host_drafts
+                    .borrow()
+                    .permission
+                    .as_ref()
+                    .map(|p| p.consent.clone())
+                    .unwrap_or(ene_api_types::GrantConsent {
+                        settings_revision: 0,
+                        provider_revision: String::new(),
+                    }),
+                destinations: app
+                    .host_drafts
+                    .borrow()
+                    .permission
+                    .as_ref()
+                    .map(|p| p.destinations.clone())
+                    .unwrap_or_default(),
                 connection: state.get_selected_connection_id().into(),
                 conversation: state.get_allow_conversation(),
                 check: state.get_allow_check(),
             }
         });
-        host_action!(on_check_connection, |ui: &AppWindow| {
+        host_action!(on_check_connection, |_app: &Application, ui: &AppWindow| {
             crate::infrastructure::host::Command::Check(
                 ui.global::<UiState>().get_selected_connection_id().into(),
             )
         });
-        host_action!(on_save_companion, |ui: &AppWindow| {
+        host_action!(on_save_companion, |app: &Application, ui: &AppWindow| {
             let state = ui.global::<UiState>();
             crate::infrastructure::host::Command::Companion {
+                revision: app.host_drafts.borrow().companion_revision,
                 name: state.get_companion_name().into(),
                 mind: state.get_companion_mind().into(),
             }
         });
-        host_action!(on_load_history, |_| {
+        host_action!(on_load_history, |_: &Application, _: &AppWindow| {
             crate::infrastructure::host::Command::History
         });
     }
