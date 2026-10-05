@@ -1,0 +1,6 @@
+use super::*;
+impl ApiClient {
+    pub async fn __NAME__(&self, companion: &str, input: &types::__TYPE__Input) -> Result<Companion, Error> {
+        self.mutate(Method::PATCH, &["companions", companion, "__PATH__"], Some(input), None).await
+    }
+}

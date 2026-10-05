@@ -23,10 +23,6 @@ async fn patch_settings(
     >,
 ) -> Result<Json<ene_api_types::Settings>, ApiError> {
     Ok(Json(
-        app.mutate(ene_core::application::operations::patch_settings(
-            app.application.clone(),
-            input,
-        ))
-        .await?,
+        ene_core::application::operations::patch_settings(app.application.clone(), input).await?,
     ))
 }

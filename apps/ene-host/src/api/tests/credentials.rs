@@ -46,16 +46,13 @@ async fn same_key_retries_storage_and_honors_environment_lifetime() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let credentials = Arc::new(RecoveringCredentials::default());
-    let shutdown = tokio::sync::watch::channel(false).0;
     let app = App::new(
         ene_core::application::HostApplication::new(
             Arc::new(store.clone()),
             Arc::new(crate::infrastructure::llm::registry::Registry::discover()),
             credentials.clone(),
-            shutdown.clone(),
         ),
         "private-token".into(),
-        shutdown,
     );
     let (status, settings) = mutate(&app, "PATCH", "/v1/settings", serde_json::json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -112,7 +109,6 @@ async fn same_key_retries_storage_and_honors_environment_lifetime() {
         Arc::new(store),
         Arc::new(crate::infrastructure::llm::registry::Registry::discover()),
         credentials,
-        tokio::sync::watch::channel(false).0,
     );
     restarted.initialize().await.unwrap();
     assert_eq!(

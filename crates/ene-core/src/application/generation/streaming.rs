@@ -7,14 +7,10 @@ async fn update(
     error: Option<Failure>,
 ) -> Result<(), Error> {
     let controls = app.0.controls.lock().await;
-    if status == MessageStatus::Streaming
-        && controls.running.get(id).is_none_or(|r| *r.cancel.borrow())
-    {
+    if status == MessageStatus::Streaming && is_cancelled(app, &controls, id) {
         return Err(Error::new(ErrorKind::PermissionRequired));
     }
-    let status = if status == MessageStatus::Completed
-        && controls.running.get(id).is_none_or(|r| *r.cancel.borrow())
-    {
+    let status = if status == MessageStatus::Completed && is_cancelled(app, &controls, id) {
         MessageStatus::Cancelled
     } else {
         status
@@ -28,27 +24,15 @@ async fn update(
         .repository
         .update_message(saved_id, saved_status, saved_delta, error)
         .await?;
-    if let Some(delta) = delta {
-        publish(
-            &mut boundary,
-            app,
-            "message.delta",
-            Some(&message.companion_id),
-            json!({"message_id":id,"offset":message.text.chars().count()-delta.chars().count(),"delta":delta}),
-        );
-    } else {
-        publish(
-            &mut boundary,
-            app,
-            if status == MessageStatus::Streaming {
-                "message.started"
-            } else {
-                "message.updated"
-            },
-            Some(&message.companion_id),
-            json!(message),
-        );
-    }
+    publish(
+        &mut boundary,
+        app,
+        match delta {
+            Some(delta) => Change::MessageDelta { message, delta },
+            None if status == MessageStatus::Streaming => Change::MessageStarted(message),
+            None => Change::MessageUpdated(message),
+        },
+    );
     Ok(())
 }
 pub async fn generate(
@@ -107,9 +91,9 @@ pub async fn generate(
                 .as_ref()
                 .ok_or("model_unset")?;
             let p = rules::connection(&c, &assignment.connection_id).ok_or("model_unset")?;
-            let secret = permitted(&app, &c, &controls, &companion, &p, "conversation")
-                .map_err(|_| "permission_required")?;
-            let policy = app.0.providers.policy(&p).map_err(|_| "upstream_error")?;
+            let (policy, secret) =
+                authorize(&app, &c, &controls, &companion, &p, Operation::Conversation)
+                    .map_err(|_| "permission_required")?;
             let run = controls.running.get_mut(&id).ok_or("cancelled")?;
             run.connection = p.id.clone();
             run.policy = policy;
@@ -153,15 +137,7 @@ pub async fn generate(
             max_tokens: 2048,
         };
         request.bound_history().map_err(|_| "input_limit")?;
-        let input = invocation(
-            &app,
-            p,
-            secret,
-            id.clone(),
-            request,
-            Operation::Conversation,
-            provider_cancel,
-        );
+        let input = invocation(&app, p, secret, id.clone(), request, provider_cancel);
         let mut stream = app.0.providers.generate(input).await.map_err(|e| {
             if e.reason == Some("input_limit") {
                 "input_limit"
@@ -202,16 +178,14 @@ pub async fn generate(
         }
         Ok::<_, &'static str>(())
     };
-    let result = if *cancelled.borrow() || *shutdown.borrow() {
-        Err("cancelled")
-    } else {
-        tokio::select! {biased;_=cancelled.changed()=>Err("cancelled"),_=shutdown.changed()=>Err("cancelled"),r=tokio::time::timeout(Duration::from_secs(180),work)=>r.unwrap_or(Err("upstream_timeout"))}
-    };
-    let result = if *cancelled.borrow() || *shutdown.borrow() {
-        Err("cancelled")
-    } else {
-        result
-    };
+    let result = Operation::Conversation
+        .wait(&mut cancelled, &mut shutdown, work)
+        .await
+        .map_err(|failure| match failure {
+            RunFailure::Cancelled => "cancelled",
+            RunFailure::TimedOut => "upstream_timeout",
+            RunFailure::Failed(code) => code,
+        });
     let (status, error) = match result {
         Ok(()) => (MessageStatus::Completed, None),
         Err("cancelled") => (MessageStatus::Cancelled, Some(failure("cancelled"))),
@@ -227,21 +201,9 @@ pub async fn generate(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    if let Err(error) = persisted {
-        let mut controls = app.0.controls.lock().await;
-        if let Some(run) = controls.running.get_mut(&id) {
-            run.terminal_error = Some(error.clone());
-        }
-        // Preserve the unresolved run and fail its dependent turns visibly.
+    let mut controls = app.0.controls.lock().await;
+    if let Err(error) = settle(&app, &mut controls, &id, persisted).await {
         done.send_replace(Some(Err(error)));
-        let mut boundary = app.0.boundary.lock().await;
-        publish(
-            &mut boundary,
-            &app,
-            "generation.persistence_failed",
-            Some(&companion),
-            json!({"message_id":id,"code":"storage_error"}),
-        );
         return;
     }
     done.send_replace(Some(if predecessor_failed {
@@ -249,8 +211,6 @@ pub async fn generate(
     } else {
         Ok(())
     }));
-    let mut controls = app.0.controls.lock().await;
-    controls.running.remove(&id);
     if status == MessageStatus::Failed
         && let Some(c) = controls.config.clone()
     {

@@ -1,9 +1,20 @@
 use super::*;
 impl HostApplication {
+    pub async fn reload_providers(&self) -> Result<(), Error> {
+        let app = self.clone();
+        self.execute(async move { app.apply_reload_providers().await })
+            .await
+    }
+    pub async fn enable_provider(&self, id: String, enabled: bool) -> Result<(), Error> {
+        let app = self.clone();
+        self.execute(async move { app.apply_enable_provider(id, enabled).await })
+            .await
+    }
+
     pub fn providers(&self) -> Vec<crate::ports::llm::Descriptor> {
         self.0.providers.descriptors()
     }
-    pub async fn reload_providers(&self) -> Result<(), Error> {
+    async fn apply_reload_providers(&self) -> Result<(), Error> {
         {
             let controls = self.0.controls.lock().await;
             for run in controls.running.values() {
@@ -30,7 +41,7 @@ impl HostApplication {
         }
         commit(self, &mut controls, c).await
     }
-    pub async fn enable_provider(&self, id: String, enabled: bool) -> Result<(), Error> {
+    async fn apply_enable_provider(&self, id: String, enabled: bool) -> Result<(), Error> {
         // Cancel before changing availability; control paths never wait for inference.
         {
             let controls = self.0.controls.lock().await;
@@ -63,43 +74,11 @@ impl HostApplication {
         if !c.companions.contains_key(&companion_id) {
             return Err(Error::new(ErrorKind::NotFound));
         }
-        let secret = permitted_data(
-            self,
-            &c,
-            &controls,
-            &companion_id,
-            &p,
-            "connection_check",
-            &["metadata"],
-        )?;
-        if !allowed(
-            self,
-            &c,
-            &companion_id,
-            &p,
-            "connection_check",
-            &["metadata"],
-        ) {
-            return Err(Error::new(ErrorKind::PermissionRequired));
-        }
-        if controls.running.len() >= 8 {
-            return Err(Error::new(ErrorKind::StateConflict));
-        }
+        let prepared = prepare(self, &c, &controls, &companion_id, &p, Operation::ModelList)?;
         let job = Uuid::new_v4().to_string();
-        let (cancel, mut cancelled) = watch::channel(false);
-        controls.running.insert(
-            job.clone(),
-            Running {
-                companion: companion_id,
-                connection: id,
-                data: vec!["metadata"],
-                policy: self.0.providers.policy(&p)?,
-                terminal_error: None,
-                purpose: "connection_check",
-                cancel,
-            },
-        );
-        drop(controls);
+        let mut cancelled = prepared.cancelled;
+        let secret = prepared.secret;
+        controls.running.insert(job.clone(), prepared.running);
         let request = crate::ports::llm::Generation {
             endpoint: p.endpoint.clone(),
             options: p.options.clone(),
@@ -108,38 +87,37 @@ impl HostApplication {
             messages: vec![],
             max_tokens: 0,
         };
-        let input = invocation(
-            self,
-            p,
-            secret,
-            job.clone(),
-            request,
-            Operation::ModelList,
-            cancelled.clone(),
-        );
+        let input = invocation(self, p, secret, job.clone(), request, cancelled.clone());
         let app = self.clone();
         let (mut reply, response) = oneshot::channel();
         // Own cleanup outside the caller: dropping an HTTP request cancels the work,
         // but cannot skip releasing its execution slot.
-        tokio::spawn(async move {
+        self.0.generations.spawn(async move {
             let mut shutdown = app.shutdown();
-            let result = if *cancelled.borrow() || *shutdown.borrow() {
-                Err(Error::unavailable())
-            } else {
+            let work = async {
                 tokio::select! {
                     biased;
                     _ = reply.closed() => Err(Error::unavailable()),
-                    _ = shutdown.changed() => Err(Error::unavailable()),
-                    _ = cancelled.changed() => Err(Error::unavailable()),
-                    r = tokio::time::timeout(std::time::Duration::from_secs(30), app.0.providers.models(input)) => r.unwrap_or_else(|_| Err(Error::unavailable())),
+                    result = app.0.providers.models(input) => result,
                 }
             };
+            let mut result = Operation::ModelList
+                .wait(&mut cancelled, &mut shutdown, work)
+                .await
+                .map_err(|failure| match failure {
+                    RunFailure::Failed(error) => error,
+                    _ => Error::unavailable(),
+                });
             let mut controls = app.0.controls.lock().await;
+            if is_cancelled(&app, &controls, &job) {
+                result = Err(Error::unavailable());
+            }
             if let Some(run) = controls.running.remove(&job) {
                 run.cancel.send_replace(true);
             }
             let _ = reply.send(result);
         });
+        drop(controls);
         response.await.unwrap_or_else(|_| Err(Error::unavailable()))
     }
 }

@@ -29,12 +29,10 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
 }
 
 pub fn application(store: Store, token: String) -> App {
-    let shutdown = tokio::sync::watch::channel(false).0;
     let application = ene_core::application::HostApplication::new(
         std::sync::Arc::new(store),
         std::sync::Arc::new(super::infrastructure::llm::registry::Registry::discover()),
         std::sync::Arc::new(super::infrastructure::credentials::Store),
-        shutdown.clone(),
     );
-    App::new(application, token, shutdown)
+    App::new(application, token)
 }

@@ -7,7 +7,8 @@ use axum::{
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
-async fn app() -> (App, tempfile::TempDir) {
+mod framework;
+pub(super) async fn app() -> (App, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.sqlite3")).await.unwrap();
     (
@@ -270,7 +271,6 @@ impl ConversationFixture {
         let companion = store.snapshot().await.unwrap().companions[0].id.clone();
         let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
         let finish = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let shutdown = tokio::sync::watch::channel(false).0;
         let app = App::new(
             ene_core::application::HostApplication::new(
                 std::sync::Arc::new(store.clone()),
@@ -280,10 +280,8 @@ impl ConversationFixture {
                     finish: finish.clone(),
                 }),
                 std::sync::Arc::new(TestCredentials),
-                shutdown.clone(),
             ),
             "private-token".into(),
-            shutdown,
         );
         let (status, settings) = mutate(&app, "PATCH", "/v1/settings", json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -490,7 +488,7 @@ async fn terminal_storage_failure_remains_visible_and_blocks_dependent_generatio
     );
 }
 
-async fn mutate(
+pub(super) async fn mutate(
     app: &App,
     method: &str,
     path: &str,
@@ -581,7 +579,6 @@ mod grant_consent_tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("host.db")).await.unwrap();
         let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-        let shutdown = tokio::sync::watch::channel(false).0;
         let app = App::new(
             ene_core::application::HostApplication::new(
                 Arc::new(store),
@@ -589,10 +586,8 @@ mod grant_consent_tests {
                     revision: AtomicU64::new(1),
                 }),
                 Arc::new(TestCredentials),
-                shutdown.clone(),
             ),
             "private-token".into(),
-            shutdown,
         );
         let (status, settings) = mutate(
             &app,
@@ -815,17 +810,14 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         let store = Store::open(temp.path().join("host.db")).await.unwrap();
         let c = store.snapshot().await.unwrap().companions[0].id.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let shutdown = tokio::sync::watch::channel(false).0;
         let credentials = std::sync::Arc::new(StoredCredentials::default());
         let app = App::new(
             ene_core::application::HostApplication::new(
                 std::sync::Arc::new(store.clone()),
                 std::sync::Arc::new(RoutedRegistry(tx)),
                 credentials.clone(),
-                shutdown.clone(),
             ),
             "private-token".into(),
-            shutdown,
         );
         let (status, saved) = mutate(
             &app,
@@ -1017,7 +1009,7 @@ async fn disconnected_revocation_finishes_disk_authority_and_notifications() {
     .await
     .unwrap();
     assert_eq!(notification.data[0]["status"], "invalidated");
-    f.app.finish_mutations().await;
+    f.app.application.finish_commands().await;
 }
 
 #[tokio::test]

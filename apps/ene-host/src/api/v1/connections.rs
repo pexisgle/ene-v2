@@ -23,13 +23,7 @@ async fn check(
     ApiJson(input): ApiJson<ene_api_types::host::CheckInput>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     Ok(response(
-        app.mutate(ene_core::application::operations::check(
-            app.application.clone(),
-            id,
-            key,
-            input,
-        ))
-        .await?,
+        ene_core::application::operations::check(app.application.clone(), id, key, input).await?,
     ))
 }
 #[derive(serde::Deserialize)]

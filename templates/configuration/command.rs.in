@@ -1,0 +1,34 @@
+//! A complete configuration slice. Replace field validation and assignment for your feature.
+use crate::{
+    application::{ConfigurationCommand, ConfigurationTarget, HostApplication},
+    domain::{Companion, Configuration, Error, ErrorKind},
+    ports::llm::ProviderRegistry,
+};
+use ene_api_types::__TYPE__Input;
+
+struct __TYPE__ {
+    companion: String,
+    input: __TYPE__Input,
+}
+impl ConfigurationCommand for __TYPE__ {
+    type Output = Companion;
+    fn target(&self) -> ConfigurationTarget {
+        ConfigurationTarget::Companion { id: self.companion.clone(), revision: self.input.revision }
+    }
+    fn apply(&self, configuration: &mut Configuration, _: &dyn ProviderRegistry) -> Result<(), Error> {
+        if self.input.value.trim().is_empty() || self.input.value.len() > __MAX_BYTES__ {
+            return Err(Error::invalid());
+        }
+        let companion = configuration.companions.get_mut(&self.companion)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
+        companion.__FIELD__ = self.input.value.clone();
+        Ok(())
+    }
+    fn output(&self, configuration: &Configuration) -> Result<Companion, Error> {
+        configuration.companions.get(&self.companion).cloned()
+            .ok_or_else(|| Error::new(ErrorKind::NotFound))
+    }
+}
+pub async fn update(app: HostApplication, companion: String, input: __TYPE__Input) -> Result<Companion, Error> {
+    app.configure(__TYPE__ { companion, input }).await
+}

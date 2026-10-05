@@ -34,21 +34,29 @@ impl ene_core::ports::Repository for Store {
     fn save_configuration(
         &self,
         c: ene_core::domain::Configuration,
-        receipt: Option<ene_core::ports::Receipt>,
+        receipt: Option<ene_core::ports::ReceiptWrite>,
     ) -> futures_util::future::BoxFuture<'_, ene_core::ports::Result<()>> {
         Box::pin(async move {
             self.call(move |db| {
                 let tx = db.transaction()?;
                 conversation::write_configuration(&tx, &c)?;
-                if let Some(r) = receipt {
-                    conversation::save_receipt(
-                        &tx,
-                        &r.key,
-                        &r.target,
-                        &r.request,
-                        stored_outcome(r.outcome),
-                        &r.response,
-                    )?;
+                match receipt {
+                    Some(ene_core::ports::ReceiptWrite::Create(r)) => {
+                        conversation::save_receipt(&tx, &r.key, &r.target, &r.request,
+                            stored_outcome(r.outcome), &r.response)?;
+                    }
+                    Some(ene_core::ports::ReceiptWrite::Complete(r)) => {
+                        if !conversation::receipt(&tx, &r.key, &r.target, &r.request)?
+                            .is_some_and(|(status, _)| status == 0) {
+                            return Err(Error::StateConflict);
+                        }
+                        let changed = tx.execute(
+                            "UPDATE receipts SET status=?1,response=?2 WHERE principal=(SELECT value FROM metadata WHERE key='principal') AND key=?3 AND target=?4 AND status=0",
+                            params![stored_outcome(r.outcome),r.response.to_string(),r.key,r.target],
+                        )?;
+                        if changed != 1 { return Err(Error::StateConflict); }
+                    }
+                    None => {}
                 }
                 tx.commit()?;
                 Ok(())
@@ -88,31 +96,6 @@ impl ene_core::ports::Repository for Store {
                     stored_outcome(r.outcome),
                     &r.response,
                 )
-            })
-            .await
-            .map_err(core_error)
-        })
-    }
-    fn complete_check(
-        &self,
-        c: ene_core::domain::Configuration,
-        r: ene_core::ports::Receipt,
-    ) -> futures_util::future::BoxFuture<'_, ene_core::ports::Result<()>> {
-        Box::pin(async move {
-            self.call(move |db| {
-                let tx = db.transaction()?;
-                conversation::write_configuration(&tx, &c)?;
-                tx.execute(
-                    "UPDATE receipts SET status=?1,response=?2 WHERE key=?3 AND target=?4",
-                    params![
-                        stored_outcome(r.outcome),
-                        r.response.to_string(),
-                        r.key,
-                        r.target
-                    ],
-                )?;
-                tx.commit()?;
-                Ok(())
             })
             .await
             .map_err(core_error)

@@ -31,9 +31,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;
     eprintln!("ene-host: authenticated loopback service ready");
-    let shutdown = app.shutdown.clone();
+    let shutdown = app.application.clone();
     let application = app.application.clone();
-    let mutations = app.clone();
     axum::serve(listener, api::router(app))
         .with_graceful_shutdown(async move {
             #[cfg(unix)]
@@ -42,15 +41,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 {
                     tokio::select! {_=tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{}}
-                    shutdown.send_replace(true);
+                    shutdown.request_shutdown();
                     return;
                 }
             }
             let _ = tokio::signal::ctrl_c().await;
-            shutdown.send_replace(true);
+            shutdown.request_shutdown();
         })
         .await?;
-    mutations.finish_mutations().await;
+    application.finish_commands().await;
     application.stop().await?;
     drop(runtime);
     Ok(())

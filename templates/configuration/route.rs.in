@@ -1,0 +1,50 @@
+use crate::api::{error::ApiError, extractors::{ApiJson, ApiPath}, state::App};
+use axum::{Json, extract::State};
+use utoipa_axum::{router::OpenApiRouter, routes};
+
+pub(super) fn router() -> OpenApiRouter<App> {
+    OpenApiRouter::new().routes(routes!(update))
+}
+#[utoipa::path(patch, path = "/{companion_id}/__PATH__", tag = "companions",
+    params(("companion_id" = String, Path)),
+    request_body = ene_api_types::__TYPE__Input,
+    responses((status = 200, description = "Success", body = ene_api_types::Companion))
+)]
+async fn update(State(app): State<App>, ApiPath(id): ApiPath<String>, ApiJson(input): ApiJson<ene_api_types::__TYPE__Input>) -> Result<Json<ene_api_types::Companion>, ApiError> {
+    Ok(Json(ene_core::application::operations::__NAME__::update(app.application, id, input).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::tests::{app, mutate};
+    use axum::http::StatusCode;
+    use serde_json::json;
+    #[tokio::test]
+    async fn saves_once_and_rejects_a_stale_draft() {
+        let (app, _temp) = app().await;
+        let c = app.application.companions().await.unwrap().remove(0);
+        let path = format!("/v1/companions/{}/__PATH__", c.id);
+        let (status, saved) = mutate(&app, "PATCH", &path, json!({"revision":c.revision,"value":"updated"}), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["__FIELD__"], "updated");
+        assert_eq!(saved["revision"], c.revision + 1);
+        let (status, _) = mutate(&app, "PATCH", &path, json!({"revision":c.revision,"value":"stale"}), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(app.application.companion(&c.id).await.unwrap().__FIELD__, "updated");
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let service = crate::api::router(app.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, service).await.unwrap(); });
+        let client = ene_api_client::ApiClient::new(&ene_api_types::RuntimeConnection {
+            endpoint, token: "private-token".into(),
+        }).unwrap();
+        let saved = client.__NAME__(&c.id, &ene_api_types::__TYPE__Input {
+            revision: c.revision + 1, value: "via typed client".into(),
+        }).await.unwrap();
+        assert_eq!(saved.__FIELD__, "via typed client");
+        assert_eq!(saved.revision, c.revision + 2);
+        server.abort();
+        let spec = crate::api::openapi::specification();
+        assert!(serde_json::to_value(spec).unwrap()["paths"].get(path.replace(&c.id, "{companion_id}")).is_some());
+    }
+}

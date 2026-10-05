@@ -59,35 +59,20 @@ pub async fn post_grant(
         connection_fingerprint: policy.fingerprint,
     };
     c.grants.push(grant.clone());
-    refresh(&app, &mut c);
     let response = json!({"grant":grant,"questions":[]});
-    let saved = c.clone();
-    let saved_response = response.clone();
-    let mut boundary = app.0.boundary.lock().await;
-    app.0
-        .repository
-        .save_configuration(
-            saved,
-            Some(Receipt {
-                key,
-                target: "/v1/grants".into(),
-                request: body,
-                outcome: Outcome::Created,
-                response: saved_response,
-            }),
-        )
-        .await?;
-    controls.config = Some(c.clone());
-    publish(&mut boundary, &app, "grants.updated", None, json!(c.grants));
-    for companion in c.companions.values() {
-        publish(
-            &mut boundary,
-            &app,
-            "companion.updated",
-            Some(&companion.id),
-            json!(companion),
-        );
-    }
+    crate::application::configuration::commit(
+        &app,
+        &mut controls,
+        c,
+        Some(crate::ports::ReceiptWrite::Create(Receipt {
+            key,
+            target: "/v1/grants".into(),
+            request: body,
+            outcome: Outcome::Created,
+            response: response.clone(),
+        })),
+    )
+    .await?;
     Ok((Outcome::Created, response))
 }
 pub async fn delete_grant(app: HostApplication, id: String) -> Result<(), Error> {
@@ -100,7 +85,6 @@ pub async fn delete_grant(app: HostApplication, id: String) -> Result<(), Error>
         g.revision += 1;
         g.invalidation_reason = Some("revoked".into());
         commit(&app, &mut controls, c.clone()).await?;
-        cancel_unpermitted(&controls, &c);
     }
     Ok(())
 }
@@ -153,7 +137,6 @@ pub async fn patch_grant(
     g.revision += 1;
     let grant = g.clone();
     commit(&app, &mut controls, c.clone()).await?;
-    cancel_unpermitted(&controls, &c);
     Ok(ene_api_types::GrantResult {
         grant: grant.into(),
         questions: vec![],

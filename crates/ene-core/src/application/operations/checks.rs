@@ -7,7 +7,6 @@ pub async fn check(
 ) -> Result<(Outcome, Value), Error> {
     use crate::ports::llm::{ChatMessage, Event, Generation};
     use futures_util::StreamExt;
-    use std::time::Duration;
     if !["companion", "task"].contains(&request.purpose.as_str()) {
         return Err(Error::new(ErrorKind::UnsupportedCapability));
     }
@@ -30,17 +29,14 @@ pub async fn check(
         return Err(Error::new(ErrorKind::NotFound));
     }
     let p = rules::connection(&c, &id).ok_or_else(|| Error::new(ErrorKind::NotFound))?;
-    let secret = permitted(
+    let prepared = prepare(
         &app,
         &c,
         &controls,
         &request.companion_id,
         &p,
-        "connection_check",
+        Operation::ConnectionCheck,
     )?;
-    if controls.running.len() >= 8 {
-        return Err(Error::new(ErrorKind::StateConflict));
-    }
     let companion = c
         .companions
         .get(&request.companion_id)
@@ -79,19 +75,11 @@ pub async fn check(
             response: json!({"request_id":request_id}),
         })
         .await?;
-    let (cancel, mut cancelled) = watch::channel(false);
-    controls.running.insert(
-        request_id.clone(),
-        Running {
-            companion: request.companion_id.clone(),
-            connection: id.clone(),
-            data: vec!["test_input"],
-            policy: app.0.providers.policy(&p)?,
-            terminal_error: None,
-            purpose: "connection_check",
-            cancel,
-        },
-    );
+    let mut cancelled = prepared.cancelled;
+    let secret = prepared.secret;
+    controls
+        .running
+        .insert(request_id.clone(), prepared.running);
     drop(controls);
     let generation = Generation {
         endpoint: p.endpoint.clone(),
@@ -110,7 +98,6 @@ pub async fn check(
         secret,
         request_id.clone(),
         generation,
-        Operation::ConnectionCheck,
         cancelled.clone(),
     );
     let work = async {
@@ -139,18 +126,16 @@ pub async fn check(
         Ok((chunks, text.chars().count()))
     };
     let mut shutdown = app.0.shutdown.subscribe();
-    let result = if *cancelled.borrow() || *shutdown.borrow() {
-        Err(Error::unavailable())
-    } else {
-        tokio::select! {biased;_=cancelled.changed()=>Err(Error::unavailable()),_=shutdown.changed()=>Err(Error::unavailable()),r=tokio::time::timeout(Duration::from_secs(90),work)=>r.unwrap_or_else(|_|Err(Error::unavailable()))}
-    };
+    let result = Operation::ConnectionCheck
+        .wait(&mut cancelled, &mut shutdown, work)
+        .await
+        .map_err(|failure| match failure {
+            RunFailure::Failed(error) => error,
+            _ => Error::unavailable(),
+        });
     let mut controls = app.0.controls.lock().await;
     let mut c = config(&app, &mut controls).await?;
-    let cancelled_now = controls
-        .running
-        .get(&request_id)
-        .is_none_or(|r| *r.cancel.borrow());
-    controls.running.remove(&request_id);
+    let cancelled_now = is_cancelled(&app, &controls, &request_id);
     let (outcome, response) = match result {
         Ok((chunks, scalars)) if !cancelled_now => {
             if let Some(mut p) = rules::connection(&c, &id) {
@@ -170,28 +155,19 @@ pub async fn check(
             json!({"request_id":request_id,"error":{"code":"unavailable","message":"接続確認を完了できませんでした","details":{}}}),
         ),
     };
-    refresh(&app, &mut c);
-    let mut boundary = app.0.boundary.lock().await;
-    app.0
-        .repository
-        .complete_check(
-            c.clone(),
-            Receipt {
-                key,
-                target,
-                request: body,
-                outcome,
-                response: response.clone(),
-            },
-        )
-        .await?;
-    publish(
-        &mut boundary,
+    let persisted = crate::application::configuration::commit(
         &app,
-        "settings.updated",
-        None,
-        json!(c.settings),
-    );
-    controls.config = Some(c);
+        &mut controls,
+        c,
+        Some(crate::ports::ReceiptWrite::Complete(Receipt {
+            key,
+            target,
+            request: body,
+            outcome,
+            response: response.clone(),
+        })),
+    )
+    .await;
+    settle(&app, &mut controls, &request_id, persisted).await?;
     Ok((outcome, response))
 }

@@ -57,13 +57,8 @@ async fn post_message(
         ene_api_types::host::MessageInput,
     >,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
-    let value = app
-        .mutate(ene_core::application::operations::accept_message(
-            app.application.clone(),
-            id,
-            key,
-            input,
-        ))
-        .await?;
+    let value =
+        ene_core::application::operations::accept_message(app.application.clone(), id, key, input)
+            .await?;
     Ok(response(value))
 }

@@ -1,4 +1,7 @@
-use super::{Boundary, HostApplication, Notification};
+use super::{
+    HostApplication,
+    changes::{Change, publish},
+};
 use crate::{
     domain::{rules, *},
     ports::{Secret, llm::*},
@@ -8,17 +11,16 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
 use tokio::sync::watch;
 use uuid::Uuid;
-pub struct Running {
+pub(super) struct Running {
     pub companion: String,
     pub connection: String,
-    pub data: Vec<&'static str>,
     pub policy: Policy,
     pub terminal_error: Option<Error>,
-    pub purpose: &'static str,
+    pub operation: Operation,
     pub cancel: watch::Sender<bool>,
 }
 #[derive(Default)]
-pub struct Controls {
+pub(super) struct Controls {
     pub config: Option<Configuration>,
     pub secrets: BTreeMap<String, Secret>,
     pub running: BTreeMap<String, Running>,
@@ -37,23 +39,6 @@ fn failure(code: &'static str) -> Failure {
         details: json!({}),
     }
 }
-pub fn publish(
-    boundary: &mut Boundary,
-    app: &HostApplication,
-    kind: &str,
-    c: Option<&str>,
-    data: Value,
-) {
-    boundary.cursor.seq += 1;
-    let _ = app.0.events.send(Notification {
-        epoch: boundary.cursor.epoch.clone(),
-        seq: boundary.cursor.seq,
-        kind: kind.into(),
-        companion_id: c.map(str::to_string),
-        data,
-    });
-}
-
 pub(crate) async fn config(
     app: &HostApplication,
     controls: &mut Controls,
@@ -67,31 +52,9 @@ pub(crate) async fn config(
 pub(crate) async fn commit(
     app: &HostApplication,
     controls: &mut Controls,
-    mut c: Configuration,
+    c: Configuration,
 ) -> Result<(), Error> {
-    refresh(app, &mut c);
-    let saved = c.clone();
-    let mut boundary = app.0.boundary.lock().await;
-    app.0.repository.save_configuration(saved, None).await?;
-    for companion in c.companions.values() {
-        publish(
-            &mut boundary,
-            app,
-            "companion.updated",
-            Some(&companion.id),
-            json!(companion),
-        );
-    }
-    publish(
-        &mut boundary,
-        app,
-        "settings.updated",
-        None,
-        json!(c.settings),
-    );
-    publish(&mut boundary, app, "grants.updated", None, json!(c.grants));
-    controls.config = Some(c);
-    Ok(())
+    super::configuration::commit(app, controls, c, None).await
 }
 
 pub(crate) fn update_connection(c: &mut Configuration, p: ProviderConnection) {
@@ -102,16 +65,32 @@ pub(crate) fn update_connection(c: &mut Configuration, p: ProviderConnection) {
 pub(crate) fn active(controls: &Controls, id: &str) -> bool {
     controls.running.values().any(|r| r.connection == id)
 }
+pub(super) fn is_cancelled(app: &HostApplication, controls: &Controls, id: &str) -> bool {
+    *app.0.shutdown.borrow()
+        || controls
+            .running
+            .get(id)
+            .is_none_or(|run| *run.cancel.borrow())
+}
 pub(crate) fn cancel_connection(controls: &Controls, id: &str) {
     for run in controls.running.values().filter(|r| r.connection == id) {
         run.cancel.send_replace(true);
     }
 }
 
-pub(crate) fn cancel_unpermitted(controls: &Controls, c: &Configuration) {
+pub(crate) fn cancel_unpermitted(app: &HostApplication, controls: &Controls, c: &Configuration) {
     for run in controls.running.values() {
         if let Some(p) = rules::connection(c, &run.connection)
-            && rules::allowed(c, &run.companion, &p, run.purpose, &run.data, &run.policy)
+            && let Ok(policy) = app.0.providers.policy(&p)
+            && policy.fingerprint == run.policy.fingerprint
+            && rules::allowed(
+                c,
+                &run.companion,
+                &p,
+                run.operation.purpose(),
+                run.operation.data(),
+                &policy,
+            )
         {
             continue;
         }
@@ -124,18 +103,42 @@ pub(crate) fn fingerprint(c: &ProviderConnection, providers: &dyn ProviderRegist
         .map(|p| p.fingerprint)
         .unwrap_or(Value::Null)
 }
-pub(crate) fn allowed(
+
+/// Release the slot after a successful terminal write; retain and publish storage faults.
+pub(super) async fn settle(
     app: &HostApplication,
-    c: &Configuration,
-    companion_id: &str,
-    p: &ProviderConnection,
-    purpose: &str,
-    data: &[&str],
-) -> bool {
-    app.0
-        .providers
-        .policy(p)
-        .is_ok_and(|policy| rules::allowed(c, companion_id, p, purpose, data, &policy))
+    controls: &mut Controls,
+    id: &str,
+    persisted: Result<(), Error>,
+) -> Result<(), Error> {
+    match persisted {
+        Ok(()) => {
+            if let Some(run) = controls.running.remove(id) {
+                run.cancel.send_replace(true);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(run) = controls.running.get_mut(id) {
+                run.terminal_error = Some(error.clone());
+                run.cancel.send_replace(true);
+                let change = if run.operation == Operation::Conversation {
+                    Change::PersistenceFailed {
+                        companion: run.companion.clone(),
+                        message: id.into(),
+                    }
+                } else {
+                    Change::RequestPersistenceFailed {
+                        companion: run.companion.clone(),
+                        request: id.into(),
+                    }
+                };
+                let mut boundary = app.0.boundary.lock().await;
+                publish(&mut boundary, app, change);
+            }
+            Err(error)
+        }
+    }
 }
 pub(crate) fn refresh(app: &HostApplication, c: &mut Configuration) {
     for mut companion in c.companions.values().cloned().collect::<Vec<_>>() {
@@ -151,8 +154,9 @@ pub(crate) fn refresh(app: &HostApplication, c: &mut Configuration) {
 }
 
 mod authorization;
+mod execution;
+pub(super) use execution::RunFailure;
 mod initialization;
 mod streaming;
-pub(super) use authorization::{Operation, invocation};
-pub(crate) use authorization::{permitted, permitted_data};
+pub(super) use authorization::{Operation, authorize, invocation, prepare};
 pub use streaming::generate;

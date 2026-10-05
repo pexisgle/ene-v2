@@ -246,7 +246,7 @@ OpenRouterプラグインは`/models?providers=openai`で配信元をOpenAIに�
 | `message.started` | `queued`から`streaming`へ移ったコンパニオン側のMessage。受付時の`response_message_id`と同じID |
 | `message.delta` | `message_id`、`offset`、追加する`delta`。`offset`は追加前の本文のUnicodeスカラー値数 |
 | `message.updated` | 保存された本文・状態・失敗理由。生成前の失敗も含む終了時の正本 |
-| `generation.persistence_failed` | 終了状態を保存できなかった実行の`message_id`と`code: storage_error`。完了通知として扱わず、保存障害として表示する |
+| `generation.persistence_failed` | 終了状態を保存できなかった実行の`message_id`、または疎通確認の`request_id`と`code: storage_error`。完了通知として扱わず、保存障害として表示する |
 | `task.updated` | 親コンパニオンに属するTaskの公開状態・進捗・結果 |
 | `question.updated` | Questionの作成・解決・取り消し。対話に表示する本文は対応するMessageにも保持 |
 | `companion.updated` / `settings.updated` / `grants.updated` | 設定・許可の変更。秘密情報を含めない |

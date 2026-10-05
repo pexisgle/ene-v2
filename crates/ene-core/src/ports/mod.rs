@@ -21,6 +21,11 @@ pub struct Receipt {
     pub outcome: Outcome,
     pub response: Value,
 }
+/// Configuration and its receipt are persisted in the same transaction.
+pub enum ReceiptWrite {
+    Create(Receipt),
+    Complete(Receipt),
+}
 #[derive(Serialize, Deserialize)]
 pub struct Accepted {
     pub receipt: MessageAcceptance,
@@ -41,7 +46,7 @@ pub trait Repository: Send + Sync {
     fn save_configuration(
         &self,
         c: Configuration,
-        receipt: Option<Receipt>,
+        receipt: Option<ReceiptWrite>,
     ) -> BoxFuture<'_, Result<()>>;
     fn receipt(
         &self,
@@ -50,7 +55,6 @@ pub trait Repository: Send + Sync {
         request: Value,
     ) -> BoxFuture<'_, Result<Option<(Outcome, Value)>>>;
     fn reserve(&self, receipt: Receipt) -> BoxFuture<'_, Result<()>>;
-    fn complete_check(&self, c: Configuration, receipt: Receipt) -> BoxFuture<'_, Result<()>>;
     fn accept(
         &self,
         key: String,

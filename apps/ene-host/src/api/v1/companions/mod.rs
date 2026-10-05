@@ -39,11 +39,7 @@ async fn patch_companion(
     >,
 ) -> Result<Json<ene_api_types::Companion>, ApiError> {
     Ok(Json(
-        app.mutate(ene_core::application::operations::patch_companion(
-            app.application.clone(),
-            id,
-            input,
-        ))
-        .await?,
+        ene_core::application::operations::patch_companion(app.application.clone(), id, input)
+            .await?,
     ))
 }

@@ -12,6 +12,37 @@ pub enum OperationTarget {
     Companion,
     History,
 }
+
+/// Transport ordering and UI projection are declared once for every action target.
+pub struct ActionPolicy {
+    pub target: OperationTarget,
+    pub mutation: bool,
+    pub commits_draft: bool,
+    pub operation: i32,
+    pub save_category: i32,
+    pub urgent: bool,
+}
+
+impl OperationTarget {
+    fn policy(self, urgent: bool) -> ActionPolicy {
+        let (mutation, commits_draft, operation, save_category) = match &self {
+            Self::Configuration(_) => (true, true, 1, 2),
+            Self::Companion => (true, true, 2, 1),
+            Self::Permission(_) => (true, true, 3, 3),
+            Self::History => (false, false, 4, -1),
+            Self::Provider(_) | Self::Providers | Self::Credential(_) => (true, false, 5, -1),
+            Self::Models(_) | Self::Check(_) => (false, false, 5, -1),
+        };
+        ActionPolicy {
+            target: self,
+            mutation,
+            commits_draft,
+            operation,
+            save_category,
+            urgent,
+        }
+    }
+}
 #[derive(Clone)]
 pub struct RequestContext {
     pub companion: String,
@@ -70,6 +101,14 @@ pub enum Command {
     History,
 }
 impl Command {
+    pub fn policy(&self) -> Option<ActionPolicy> {
+        self.target().map(|target| {
+            target.policy(matches!(
+                self,
+                Self::RevokeCredential(_) | Self::RevokePermissions(_)
+            ))
+        })
+    }
     pub(super) fn target(&self) -> Option<OperationTarget> {
         Some(match self {
             Self::InspectHost | Self::Reconnect | Self::Send(_) => return None,

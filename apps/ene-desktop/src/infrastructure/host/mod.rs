@@ -142,7 +142,8 @@ impl Controller {
             *creation_id = Some(draft.1.clone());
         }
         let id = Uuid::new_v4().to_string();
-        if let Some(target) = request.command.target() {
+        if let Some(policy) = request.command.policy() {
+            let target = policy.target;
             self.latest_requests
                 .borrow_mut()
                 .insert((companion.into(), target.clone()), id.clone());

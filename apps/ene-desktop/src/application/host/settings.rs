@@ -72,12 +72,10 @@ impl Application {
         command: crate::infrastructure::host::Command,
     ) {
         let state = ui.global::<UiState>();
-        let revoke = matches!(
-            &command,
-            crate::infrastructure::host::Command::RevokeCredential(_)
-                | crate::infrastructure::host::Command::RevokePermissions(_)
-        );
-        if !state.get_host_connected() || (state.get_host_busy() && !revoke) {
+        let Some(policy) = command.policy() else {
+            return;
+        };
+        if !state.get_host_connected() || (state.get_host_busy() && !policy.urgent) {
             return;
         }
         if let crate::infrastructure::host::Command::Permission { connection, .. } = &command
@@ -95,20 +93,7 @@ impl Application {
             return;
         }
         if let Some(host) = self.host.borrow().as_ref() {
-            let operation = match &command {
-                crate::infrastructure::host::Command::Configure { .. } => 1,
-                crate::infrastructure::host::Command::Companion { .. } => 2,
-                crate::infrastructure::host::Command::Permission { .. }
-                | crate::infrastructure::host::Command::RevokePermissions(_) => 3,
-                crate::infrastructure::host::Command::History => 4,
-                _ => 5,
-            };
-            state.set_host_save_category(match operation {
-                1 => 2,
-                2 => 1,
-                3 => 3,
-                _ => -1,
-            });
+            state.set_host_save_category(policy.save_category);
             state.set_host_feedback_error(false);
             state.set_host_feedback("処理しています…".into());
             if let Some(id) = host.request_at(
@@ -117,7 +102,7 @@ impl Application {
                 state.get_host_edit_revision(),
             ) {
                 state.set_host_request_id(id.into());
-                state.set_host_operation(operation);
+                state.set_host_operation(policy.operation);
             } else {
                 state.set_host_feedback_error(true);
                 state.set_host_feedback(

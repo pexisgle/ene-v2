@@ -47,12 +47,7 @@ async fn post_grant(
     >,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     Ok(response(
-        app.mutate(ene_core::application::operations::post_grant(
-            app.application.clone(),
-            key,
-            input,
-        ))
-        .await?,
+        ene_core::application::operations::post_grant(app.application.clone(), key, input).await?,
     ))
 }
 #[utoipa::path(patch, path = "/{grant_id}", tag = "grants",
@@ -68,12 +63,7 @@ async fn patch_grant(
     >,
 ) -> Result<Json<ene_api_types::GrantResult>, ApiError> {
     Ok(Json(
-        app.mutate(ene_core::application::operations::patch_grant(
-            app.application.clone(),
-            id,
-            input,
-        ))
-        .await?,
+        ene_core::application::operations::patch_grant(app.application.clone(), id, input).await?,
     ))
 }
 #[utoipa::path(delete, path = "/{grant_id}", tag = "grants",
@@ -84,10 +74,6 @@ async fn delete_grant(
     State(app): State<App>,
     crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    app.mutate(ene_core::application::operations::delete_grant(
-        app.application.clone(),
-        id,
-    ))
-    .await?;
+    ene_core::application::operations::delete_grant(app.application.clone(), id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

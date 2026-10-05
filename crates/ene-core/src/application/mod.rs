@@ -1,3 +1,7 @@
+mod changes;
+mod commands;
+mod configuration;
+pub use configuration::{ConfigurationCommand, ConfigurationTarget};
 mod credentials;
 mod generation;
 pub mod operations;
@@ -39,6 +43,7 @@ struct Inner {
     events: broadcast::Sender<Notification>,
     shutdown: watch::Sender<bool>,
     generations: TaskTracker,
+    commands: TaskTracker,
 }
 #[derive(Clone)]
 pub struct HostApplication(Arc<Inner>);
@@ -47,15 +52,15 @@ impl HostApplication {
         repository: Arc<dyn Repository>,
         providers: Arc<dyn ProviderRegistry>,
         credentials: Arc<dyn Credentials>,
-        shutdown: watch::Sender<bool>,
     ) -> Self {
         Self(Arc::new(Inner {
             repository,
             providers,
             credentials,
             controls: Mutex::new(Controls::default()),
-            shutdown,
+            shutdown: watch::channel(false).0,
             generations: TaskTracker::new(),
+            commands: TaskTracker::new(),
             events: broadcast::channel(256).0,
             boundary: Mutex::new(Boundary {
                 cursor: Cursor {
@@ -67,14 +72,16 @@ impl HostApplication {
         }))
     }
     pub async fn stop(&self) -> Result<(), Error> {
-        self.0.shutdown.send_replace(true);
+        self.request_shutdown();
         {
             let controls = self.0.controls.lock().await;
+            self.0.commands.close();
             self.0.generations.close();
             for run in controls.running.values() {
                 run.cancel.send_replace(true);
             }
         }
+        self.0.commands.wait().await;
         self.0.providers.shutdown().await;
         // Cancellation only signals generation. Its terminal database write
         // and persistence-failure handling must finish before the runtime exits.
@@ -94,6 +101,10 @@ impl HostApplication {
     }
     pub fn shutdown(&self) -> watch::Receiver<bool> {
         self.0.shutdown.subscribe()
+    }
+    /// Signal promptly, then call `stop` to drain admitted work and final writes.
+    pub fn request_shutdown(&self) {
+        self.0.shutdown.send_replace(true);
     }
     pub async fn subscribe(&self) -> Subscription {
         let mut boundary = self.0.boundary.lock().await;

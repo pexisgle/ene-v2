@@ -11,6 +11,22 @@ impl HostApplication {
         value: Option<String>,
         source: Option<String>,
     ) -> Result<ene_api_types::CredentialResult, Error> {
+        let app = self.clone();
+        self.execute(async move { app.apply_register_credentials(id, value, source).await })
+            .await
+    }
+    pub async fn revoke_credentials(&self, id: String) -> Result<(), Error> {
+        let app = self.clone();
+        self.execute(async move { app.apply_revoke_credentials(id).await })
+            .await
+    }
+
+    async fn apply_register_credentials(
+        &self,
+        id: String,
+        value: Option<String>,
+        source: Option<String>,
+    ) -> Result<ene_api_types::CredentialResult, Error> {
         let environment = match source.as_deref() {
             None => false,
             Some("environment") if value.is_none() => true,
@@ -114,7 +130,7 @@ impl HostApplication {
             credential_state: if saved { "stored" } else { "session_only" }.into(),
         })
     }
-    pub async fn revoke_credentials(&self, id: String) -> Result<(), Error> {
+    async fn apply_revoke_credentials(&self, id: String) -> Result<(), Error> {
         let reference = {
             let mut controls = self.0.controls.lock().await;
             let mut c = config(self, &mut controls).await?;

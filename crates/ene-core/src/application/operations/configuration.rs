@@ -145,56 +145,69 @@ pub async fn patch_settings(
     Ok(c.settings)
 }
 
-pub async fn patch_companion(
-    app: HostApplication,
-    id: String,
-    request: CompanionPatch,
-) -> Result<Companion, Error> {
-    let mut controls = app.0.controls.lock().await;
-    let mut c = config(&app, &mut controls).await?;
-    let mut companion = c
-        .companions
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
-    if companion.revision != request.revision {
-        return Err(Error::new(ErrorKind::RevisionConflict));
-    }
-    if let Some(name) = request.name {
-        if name.trim().is_empty() || name.len() > 200 {
-            return Err(Error::invalid());
+pub(super) struct PatchCompanion {
+    pub id: String,
+    pub request: CompanionPatch,
+}
+impl crate::application::ConfigurationCommand for PatchCompanion {
+    type Output = Companion;
+    fn target(&self) -> crate::application::ConfigurationTarget {
+        crate::application::ConfigurationTarget::Companion {
+            id: self.id.clone(),
+            revision: self.request.revision,
         }
-        companion.name = name;
     }
-    if let Some(mind) = request.mind {
-        if mind.len() > 16_000 {
-            return Err(Error::invalid());
-        }
-        companion.mind = mind;
-    }
-    if let Some(assignments) = request.model_assignments {
-        for (key, assignment) in assignments {
-            if !["companion", "task"].contains(&key.as_str()) {
+    fn apply(
+        &self,
+        c: &mut Configuration,
+        providers: &dyn crate::ports::llm::ProviderRegistry,
+    ) -> Result<(), Error> {
+        let id = &self.id;
+        let request = &self.request;
+        let mut companion = c
+            .companions
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
+        if let Some(name) = &request.name {
+            if name.trim().is_empty() || name.len() > 200 {
                 return Err(Error::invalid());
             }
-            if let Some(a) = &assignment {
-                let p = rules::connection(&c, &a.connection_id)
-                    .ok_or_else(|| Error::new(ErrorKind::StateConflict))?;
-                app.0.providers.policy(&p)?;
-                if a.model_id.trim().is_empty() || a.model_id.len() > 512 {
+            companion.name = name.clone();
+        }
+        if let Some(mind) = &request.mind {
+            if mind.len() > 16_000 {
+                return Err(Error::invalid());
+            }
+            companion.mind = mind.clone();
+        }
+        if let Some(assignments) = &request.model_assignments {
+            for (key, assignment) in assignments {
+                if !["companion", "task"].contains(&key.as_str()) {
                     return Err(Error::invalid());
                 }
-            }
-            if key == "companion" {
-                companion.model_assignments.companion = assignment;
-            } else {
-                companion.model_assignments.task = assignment;
+                if let Some(a) = assignment {
+                    let p = rules::connection(c, &a.connection_id)
+                        .ok_or_else(|| Error::new(ErrorKind::StateConflict))?;
+                    providers.policy(&p)?;
+                    if a.model_id.trim().is_empty() || a.model_id.len() > 512 {
+                        return Err(Error::invalid());
+                    }
+                }
+                if key == "companion" {
+                    companion.model_assignments.companion = assignment.clone();
+                } else {
+                    companion.model_assignments.task = assignment.clone();
+                }
             }
         }
+        c.companions.insert(id.clone(), companion);
+        Ok(())
     }
-    companion.revision += 1;
-    c.companions.insert(id.clone(), companion);
-    refresh(&app, &mut c);
-    commit(&app, &mut controls, c.clone()).await?;
-    Ok(c.companions.remove(&id).expect("validated companion"))
+    fn output(&self, c: &Configuration) -> Result<Companion, Error> {
+        c.companions
+            .get(&self.id)
+            .cloned()
+            .ok_or_else(|| Error::new(ErrorKind::NotFound))
+    }
 }

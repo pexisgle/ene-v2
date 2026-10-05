@@ -51,18 +51,3 @@ impl MutationQueue {
         receiver
     }
 }
-
-pub(super) fn is_mutation(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Configure { .. }
-            | Command::EnableProvider { .. }
-            | Command::ReloadProviders
-            | Command::Credential(..)
-            | Command::EnvironmentCredential(_)
-            | Command::RevokeCredential(_)
-            | Command::RevokePermissions(_)
-            | Command::Permission { .. }
-            | Command::Companion { .. }
-    )
-}

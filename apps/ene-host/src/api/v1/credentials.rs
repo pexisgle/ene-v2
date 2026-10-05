@@ -14,14 +14,10 @@ async fn register(
     crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
     ApiJson(input): ApiJson<ene_api_types::CredentialInput>,
 ) -> Result<Json<ene_api_types::CredentialResult>, ApiError> {
-    let application = app.application.clone();
     Ok(Json(
-        app.mutate(async move {
-            application
-                .register_credentials(id, input.secret, input.source)
-                .await
-        })
-        .await?,
+        app.application
+            .register_credentials(id, input.secret, input.source)
+            .await?,
     ))
 }
 #[utoipa::path(delete, path = "/{connection_id}", tag = "credentials",
@@ -32,8 +28,6 @@ async fn revoke(
     State(app): State<App>,
     crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    let application = app.application.clone();
-    app.mutate(async move { application.revoke_credentials(id).await })
-        .await?;
+    app.application.revoke_credentials(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

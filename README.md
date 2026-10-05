@@ -4,6 +4,8 @@
 
 ## ワークスペース
 
+機能追加は[共通基盤とコード生成テンプレート](docs/design/feature-framework.md)を入口にします。`just new-feature <名前> <name|mind>` で動作する設定変更のDTO・コア処理・認証付きAPI・型付きクライアント・回帰テストを生成できます。保存・通知・取消し・終了待ちはホストの共通基盤を利用します。
+
 実行プロセスのパッケージは`apps/`、内部ライブラリは`crates/`に配置します。ホストのAPIは`apps/ene-host/src/api/v1/`にリソース別で配置し、親子のRouterを`nest`で組み立てます。`api/`に認証と共通の入力処理を集約し、対話処理・DB処理を分離します。共有状態は最上位のRouterで渡します。規則と処理手順は`ene-core`、SQL・OS依存の実装はホストの`infrastructure/`へ配置し、APIからapplicationを呼びます。
 
 | パッケージ | 役割 |

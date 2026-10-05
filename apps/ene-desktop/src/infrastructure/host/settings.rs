@@ -32,13 +32,7 @@ pub(super) async fn action(
         .find(|c| c.id == companion)
         .ok_or_else(|| Error::Api("コンパニオンがありません".into()))?;
     let key = Uuid::new_v4().to_string();
-    let committed = matches!(
-        &command,
-        Command::Configure { .. }
-            | Command::Companion { .. }
-            | Command::Permission { .. }
-            | Command::RevokePermissions(_)
-    );
+    let committed = command.policy().is_some_and(|p| p.commits_draft);
     let mut feedback = "保存しました。";
     let mut selected_connection = None;
     match command {

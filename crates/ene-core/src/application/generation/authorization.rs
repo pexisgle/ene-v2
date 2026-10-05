@@ -1,28 +1,55 @@
 use super::*;
-pub(crate) fn permitted(
-    app: &HostApplication,
-    c: &Configuration,
-    controls: &Controls,
-    companion_id: &str,
-    p: &ProviderConnection,
-    purpose: &str,
-) -> Result<Option<Secret>, Error> {
-    let data = if purpose == "conversation" {
-        vec!["conversation"]
-    } else {
-        vec!["test_input"]
-    };
-    permitted_data(app, c, controls, companion_id, p, purpose, &data)
+/// Prepare admission, authority and cancellation from the same operation definition.
+pub(in crate::application) struct PreparedRun {
+    pub running: Running,
+    pub secret: Option<Secret>,
+    pub cancelled: watch::Receiver<bool>,
 }
-pub(crate) fn permitted_data(
+pub(in crate::application) fn prepare(
     app: &HostApplication,
     c: &Configuration,
     controls: &Controls,
-    companion_id: &str,
+    companion: &str,
     p: &ProviderConnection,
-    purpose: &str,
-    data: &[&str],
-) -> Result<Option<Secret>, Error> {
+    operation: Operation,
+) -> Result<PreparedRun, Error> {
+    if *app.0.shutdown.borrow() || app.0.generations.is_closed() {
+        return Err(Error::unavailable());
+    }
+    if controls
+        .running
+        .values()
+        .any(|r| r.terminal_error.is_some())
+    {
+        return Err(Error::new(ErrorKind::StorageFailure));
+    }
+    if controls.running.len() >= 8 {
+        return Err(Error::new(ErrorKind::StateConflict));
+    }
+    let (policy, secret) = authorize(app, c, controls, companion, p, operation)?;
+    let (cancel, cancelled) = watch::channel(false);
+    Ok(PreparedRun {
+        running: Running {
+            companion: companion.into(),
+            connection: p.id.clone(),
+            policy,
+            terminal_error: None,
+            operation,
+            cancel,
+        },
+        secret,
+        cancelled,
+    })
+}
+
+pub(in crate::application) fn authorize(
+    app: &HostApplication,
+    c: &Configuration,
+    controls: &Controls,
+    companion: &str,
+    p: &ProviderConnection,
+    operation: Operation,
+) -> Result<(Policy, Option<Secret>), Error> {
     let policy = app.0.providers.policy(p)?;
     let secret = controls.secrets.get(&p.id).cloned();
     if policy.requires_credentials && secret.is_none() {
@@ -31,20 +58,25 @@ pub(crate) fn permitted_data(
             reason: Some("credential_missing"),
         });
     }
-    if !rules::allowed(c, companion_id, p, purpose, data, &policy) {
+    if !rules::allowed(
+        c,
+        companion,
+        p,
+        operation.purpose(),
+        operation.data(),
+        &policy,
+    ) {
         return Err(Error::new(ErrorKind::PermissionRequired));
     }
-    Ok(secret)
+    Ok((policy, secret))
 }
+
 /// Rechecks the host-selected context at every external send. Plugins cannot supply purpose.
 struct Authority {
     app: HostApplication,
     id: String,
     connection: ProviderConnection,
-    purpose: &'static str,
     nonce: Option<String>,
-    fingerprint: Value,
-    data: Vec<&'static str>,
 }
 impl Authorization for Authority {
     fn check(&self) -> BoxFuture<'_, crate::ports::Result<()>> {
@@ -67,7 +99,7 @@ impl Authorization for Authority {
                 .providers
                 .policy(&current)
                 .map_err(|_| Error::new(ErrorKind::PermissionRequired))?;
-            if policy.fingerprint != self.fingerprint
+            if policy.fingerprint != run.policy.fingerprint
                 || controls.secrets.get(&current.id).map(|s| s.nonce.clone()) != self.nonce
             {
                 return Err(Error::new(ErrorKind::PermissionRequired));
@@ -82,8 +114,8 @@ impl Authorization for Authority {
                 c,
                 &run.companion,
                 &current,
-                self.purpose,
-                &self.data,
+                run.operation.purpose(),
+                run.operation.data(),
                 &policy,
             ) {
                 return Err(Error::new(ErrorKind::PermissionRequired));
@@ -99,18 +131,25 @@ pub(in crate::application) enum Operation {
     ModelList,
 }
 impl Operation {
-    fn purpose(self) -> &'static str {
+    pub(in crate::application) fn purpose(self) -> &'static str {
         match self {
             Self::Conversation => "conversation",
             Self::ConnectionCheck | Self::ModelList => "connection_check",
         }
     }
-    fn data(self) -> Vec<&'static str> {
-        vec![match self {
-            Self::Conversation => "conversation",
-            Self::ConnectionCheck => "test_input",
-            Self::ModelList => "metadata",
-        }]
+    pub(in crate::application) fn data(self) -> &'static [&'static str] {
+        match self {
+            Self::Conversation => &["conversation"],
+            Self::ConnectionCheck => &["test_input"],
+            Self::ModelList => &["metadata"],
+        }
+    }
+    pub(in crate::application) fn timeout(self) -> Duration {
+        Duration::from_secs(match self {
+            Self::Conversation => 180,
+            Self::ConnectionCheck => 90,
+            Self::ModelList => 30,
+        })
     }
 }
 
@@ -120,17 +159,13 @@ pub(in crate::application) fn invocation(
     secret: Option<Secret>,
     id: String,
     request: Generation,
-    operation: Operation,
     cancel: watch::Receiver<bool>,
 ) -> Invocation {
     let authorization = std::sync::Arc::new(Authority {
         app: app.clone(),
         id: id.clone(),
         connection: p.clone(),
-        purpose: operation.purpose(),
         nonce: secret.as_ref().map(|s| s.nonce.clone()),
-        fingerprint: fingerprint(&p, app.0.providers.as_ref()),
-        data: operation.data(),
     });
     Invocation {
         id,

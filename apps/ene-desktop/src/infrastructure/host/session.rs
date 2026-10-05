@@ -1,4 +1,4 @@
-use super::mutations::{MutationQueue, is_mutation};
+use super::mutations::MutationQueue;
 use super::*;
 use std::collections::BTreeMap;
 fn projection(snapshot: &Snapshot, replica: &Replica) -> Event {
@@ -327,7 +327,7 @@ pub(super) fn spawn_action(
     command: Command,
     context: Option<RequestContext>,
 ) {
-    if is_mutation(&command) {
+    if command.policy().is_some_and(|p| p.mutation) {
         let result = mutations.submit(http, companion, command);
         jobs.spawn(
             async move { Job::Action(context, result.await.unwrap_or(Err(Error::Transport))) },

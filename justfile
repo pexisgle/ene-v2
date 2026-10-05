@@ -10,6 +10,13 @@ fmt-check:
 check:
     cargo check --workspace --all-targets --all-features --locked
 
+# A working configuration command, DTO, authenticated route, typed client and regression test.
+new-feature name field="name":
+    python3 scripts/new-feature.py "{{ name }}" --field "{{ field }}"
+
+template-check:
+    python3 scripts/check-feature-template.py
+
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
