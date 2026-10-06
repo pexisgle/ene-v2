@@ -1,7 +1,7 @@
 use super::*;
 
 impl Application {
-    pub(super) fn publish_settings(&self, ui: &AppWindow) {
+    pub(in crate::application) fn publish_settings(&self, ui: &AppWindow) {
         let state = self.settings.borrow();
         let view = ui.global::<UiState>();
         view.set_font_family(state.saved.font_family.clone().into());
@@ -57,7 +57,11 @@ impl Application {
         view.set_error_field("".into());
         view.set_save_status("変更を戻しました。".into());
     }
-    pub(super) fn persist_live(&self, ui: &AppWindow, updated: settings::ClientSettings) -> bool {
+    pub(in crate::application) fn persist_live(
+        &self,
+        ui: &AppWindow,
+        updated: settings::ClientSettings,
+    ) -> bool {
         if let Err(error) = updated.save(&self.path) {
             ui.global::<UiState>().set_apply_error(error.into());
             ui.global::<UiState>().set_error_field("".into());

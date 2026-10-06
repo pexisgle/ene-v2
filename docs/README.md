@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `product/` | 何を作るかを定める構想、実装範囲、共通用語。技術的な実現方法と分けて管理する | [構想](product/vision.md)、[MVP](product/mvp.md)、[用語集](product/terms.md) |
 | `features/` | 利用者の体験と機能要件。既存の領域別フォルダにまとめる | [機能一覧](features/README.md) |
-| `design/` | 実現方法、責務の境界、通信・描画の契約。機能要件から参照する技術設計をまとめる | [アーキテクチャ](design/architecture.md)、[ホストAPI](design/api.md)、[GPU描画](design/avatar-gpu-rendering.md)、[デスクトップUI](design/desktop-ui.md) |
+| `design/` | 実現方法、責務の境界、通信・描画の契約。機能要件から参照する技術設計をまとめる | [アーキテクチャ](design/architecture.md)、[安全性を引き継ぐ共通境界](design/framework-boundaries.md)、[ホストAPI](design/api.md)、[GPU描画](design/avatar-gpu-rendering.md)、[デスクトップUI](design/desktop-ui.md) |
 | `research/` | 外部製品・公式資料の調査と採用理由。ene自身の仕様と出典を区別する | [参考元](research/references.md) |
 
 `product/`と`features/`には将来の構想も含まれます。今回の実装範囲はMVP、現在の利用方法はリポジトリのREADMEで確認してください。設計上の方針や検証予定を、実装済み・検証済みの機能として扱いません。

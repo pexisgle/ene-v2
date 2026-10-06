@@ -15,7 +15,7 @@ impl Application {
             avatar.recenter();
         }
     }
-    pub(super) fn restart_avatar(&self, ui: &AppWindow) {
+    pub(in crate::application) fn restart_avatar(&self, ui: &AppWindow) {
         if ui.global::<UiState>().get_avatar_failed()
             && let Some(avatar) = &self.avatar
         {
@@ -25,7 +25,7 @@ impl Application {
             avatar.restart(self.settings.borrow().saved.avatar.clone());
         }
     }
-    pub(super) fn drain_avatar(&self, ui: &AppWindow) {
+    pub(in crate::application) fn drain_avatar(&self, ui: &AppWindow) {
         let Some(avatar) = &self.avatar else {
             return;
         };

@@ -22,7 +22,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
         ene_api_types::EventReady,
         ene_api_types::Notification,
         ene_api_types::MessageDelta,
-        ene_api_types::ModelAssignment
+        ene_api_types::ModelAssignment,
+        ene_api_types::ModelAssignmentInput
     ))
 )]
 struct Contract;

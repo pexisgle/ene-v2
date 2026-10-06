@@ -29,6 +29,7 @@ pub struct Manifest {
     pub headers: BTreeMap<String, String>,
     pub environment_variable: Option<String>,
     pub destinations: Vec<String>,
+    /// Optional offline hints; ListModels results are authoritative when supported.
     #[serde(default)]
     pub models: Vec<Model>,
 }
@@ -42,7 +43,9 @@ pub enum AuthProfile {
     Query { name: String },
 }
 
-pub use ene_api_types::provider::{Capabilities, Model, ProviderInfo, SettingField, SettingKind};
+pub use ene_api_types::provider::{
+    Capabilities, MetadataScope, Model, ModelMetadata, ProviderInfo, SettingField, SettingKind,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenerationRequest {
@@ -67,6 +70,9 @@ pub enum HostMessage {
         request_id: String,
         protocol_version: u32,
     },
+    /// Return provider-neutral Model metadata, including context_window in tokens.
+    /// The plugin obtains and normalizes facts from its API or catalog. Unknown
+    /// context_window is null; legacy omitted metadata remains unknown.
     ListModels {
         request_id: String,
         endpoint: String,
@@ -98,6 +104,7 @@ pub enum PluginMessage {
         protocol_version: u32,
         capabilities: Capabilities,
     },
+    /// Model facts use the shared schema, independent of any upstream API.
     Models {
         request_id: String,
         models: Vec<Model>,
@@ -115,6 +122,8 @@ pub enum PluginMessage {
         code: String,
         message: String,
     },
+    /// API-origin requests use host credentials. Other declared origins allow
+    /// public GET only during ListModels; no credentials or manifest headers.
     HttpRequest {
         request_id: String,
         http_id: String,

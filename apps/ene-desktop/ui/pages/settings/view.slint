@@ -1,20 +1,18 @@
 import { Icons } from "../../foundation/icons.slint";
 import { UiState } from "../../state/ui-state.slint";
 import { QuietButton } from "../../widgets/quiet-button.slint";
-import { StatusBadge } from "../../widgets/status-badge.slint";
-import { SectionTitle } from "../../widgets/typography.slint";
 import { AboutView } from "../about.slint";
 import { HostSelectionView } from "../host-selection.slint";
 import { AppearanceView } from "appearance.slint";
-import { ComboBox, ScrollView } from "std-widgets.slint";
+import { HostSettingsView } from "host/view.slint";
+import { ComboBox } from "std-widgets.slint";
 
 export component SettingsView inherits Rectangle {
     in property <bool> active;
     in property <bool> compact;
-    out property <length> form-width: appearance.form-width;
-    out property <bool> form-wide: appearance.form-wide;
-    in-out property <length> scroll-position <=> appearance.scroll-position;
     public function reveal-item(y: length, item-height: length) {
+        if UiState.category == 4 { host-connection.reveal-item(y, item-height); return; }
+        if UiState.category != 0 { host-settings.reveal-item(y, item-height); return; }
         appearance.reveal-item(y, item-height);
     }
     public function focus-entry() {
@@ -39,7 +37,7 @@ export component SettingsView inherits Rectangle {
             categories := ComboBox {
                 visible: root.compact;
                 width: parent.width; height: UiState.control-height;
-                model: ["外観", "コンパニオン", "AIサービス", "送信許可", "接続先", "eneについて"];
+                model: ["外観", "コンパニオン", "AIサービス", "送信許可", "ホスト管理", "eneについて"];
                 current-index <=> UiState.category;
                 accessible-label: "設定カテゴリ";
                 enabled: root.active && root.compact;
@@ -69,7 +67,7 @@ export component SettingsView inherits Rectangle {
                 }
                 Rectangle { vertical-stretch: 1; }
                 connection-button := QuietButton {
-                    icon: Icons.desktop; text: "接続先"; leading: true; fill-width: true;
+                    icon: Icons.desktop; text: "ホスト管理"; leading: true; fill-width: true;
                     enabled: root.active && !root.compact; checked: UiState.category == 4; checkable: true;
                     clicked => { UiState.category = 4; }
                 }
@@ -105,24 +103,12 @@ export component SettingsView inherits Rectangle {
                 height: parent.height;
                 active: root.active;
             }
-            if UiState.category > 0 && UiState.category < 4 : ScrollView {
-                content-width: self.visible-width;
-                horizontal-scrollbar-policy: always-off;
-                VerticalLayout {
-                    spacing: 12px;
-                    padding: 0px;
-                    padding-right: 12px;
-                    SectionTitle {
-                        min-height: UiState.control-height;
-                        vertical-alignment: center;
-                        text: UiState.category == 1 ? "コンパニオン" : UiState.category == 2 ? "AIサービス" : "送信許可";
-                    }
-                    HorizontalLayout {
-                        StatusBadge { icon: Icons.connection; label: "ホスト未接続"; }
-                        QuietButton { icon-only: false; icon: Icons.desktop; text: "ホスト選択"; enabled: root.active; clicked => { UiState.show-host-selection(); } }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-                }
+            host-settings := HostSettingsView {
+                compact: root.compact;
+                width: min(parent.width, 840px * UiState.scale);
+                height: parent.height;
+                visible: UiState.category > 0 && UiState.category < 4;
+                active: root.active && UiState.category > 0 && UiState.category < 4;
             }
         }
     }

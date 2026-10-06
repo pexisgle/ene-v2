@@ -1,61 +1,200 @@
-import { Icons } from "../foundation/icons.slint";
+import { Icon, Icons } from "../foundation/icons.slint";
+import { Theme } from "../foundation/theme.slint";
 import { UiState } from "../state/ui-state.slint";
 import { ActionButton } from "../widgets/action-button.slint";
 import { QuietButton } from "../widgets/quiet-button.slint";
 import { BodyText, HintText, SectionTitle } from "../widgets/typography.slint";
-import { Palette, ScrollView } from "std-widgets.slint";
+import { Palette, ProgressIndicator, ScrollView } from "std-widgets.slint";
 
 export component HostSelectionView inherits Rectangle {
+    min-width: 0px;
+    preferred-width: 600px * UiState.scale;
+    max-width: 100000px;
+    horizontal-stretch: 1;
     in property <bool> active;
     in property <bool> embedded;
+    private property <bool> details;
+    private property <bool> wide: root.width >= 480px * UiState.scale;
+    // This release can add one local host. A running host is discovered automatically.
+    private property <bool> has-host: UiState.runtime-state >= 2 || UiState.connection-phase != 0 || UiState.connection-failed || UiState.session-active;
+    changed has-host => { if !root.has-host { root.details = false; } }
+    private property <bool> needs-connect: !UiState.host-connected && !UiState.connection-pending;
     public function focus-entry() {
-        if UiState.demo-mode { demo-start.focus(); }
-        else if !root.embedded { local-settings.focus(); }
+        if UiState.demo-mode { demo-action.focus(); }
+        else if !root.has-host { add-action.focus(); }
+        else if UiState.connection-pending || (UiState.host-connected && UiState.chat-ready) { disconnect-action.focus(); }
+        else { start-action.focus(); }
+    }
+    public function reveal-item(y: length, h: length) {
+        if y < content.absolute-position.y { content.content-y = min(0px, content.content-y + content.absolute-position.y - y); }
+        else if y + h > content.absolute-position.y + content.visible-height {
+            content.content-y = max(min(0px, content.visible-height - content.content-height), content.content-y - (y + h - content.absolute-position.y - content.visible-height));
+        }
     }
     VerticalLayout {
-        spacing: 12px;
+        spacing: 16px;
+        if !root.embedded && UiState.session-active : QuietButton {
+            text: "会話に戻る"; icon: Icons.back; enabled: root.active;
+            clicked => { UiState.navigate(0); }
+        }
+        if !root.embedded || root.wide : SectionTitle { text: UiState.demo-mode ? "eneを試す" : "ホスト"; font-size: max(24px, UiState.text-size * 1.25px); }
         content := ScrollView {
             min-height: 0px;
             content-width: self.visible-width;
             horizontal-scrollbar-policy: always-off;
             VerticalLayout {
                 alignment: start;
-                padding-top: root.embedded ? 0px : max(16px, (content.visible-height - 320px * UiState.scale) / 3);
                 padding-right: 12px;
-                spacing: 20px;
-                SectionTitle { text: root.embedded ? "接続先" : "会話を始める"; font-size: max(24px, UiState.text-size * 1.125px); }
-                BodyText { text: UiState.demo-mode ? "外部に送信せず、会話やキャラクターの表示を試せます。" : "会話を保存する場所を選びます。接続先はあとから設定で変更できます。"; }
+                spacing: 16px;
                 Rectangle {
+                    visible: !UiState.demo-mode && root.has-host;
                     background: Palette.alternate-background;
+                    border-width: 1px;
+                    border-color: Palette.border;
                     border-radius: 12px;
-                    min-height: card.min-height;
+                    min-height: self.visible ? card.min-height : 0px;
+                    max-height: self.visible ? 100000px : 0px;
+                    runtime-measure := Text { visible: false; text: UiState.runtime-label; font-size: max(12px, UiState.text-size * 0.8px); }
+                    connection-measure := Text { visible: false; text: UiState.connection-label; font-weight: 600; }
+                    start-measure := Text { visible: false; text: start-action.text; }
+                    disconnect-measure := Text { visible: false; text: disconnect-action.text; font-size: max(12px, UiState.text-size * 0.875px); }
                     card := VerticalLayout {
-                        padding: 20px; spacing: 12px;
-                        SectionTitle { text: UiState.demo-mode ? "デモ" : "このPC"; }
-                        HintText { text: UiState.demo-mode ? "会話は保存されません。" : "この段階のクライアントはホスト接続に未対応です。"; }
-                        demo-start := ActionButton {
-                            visible: UiState.demo-mode;
-                            enabled: root.active && UiState.demo-mode;
-                            primary: true;
-                            text: UiState.session-active ? "会話に戻る" : "試してみる";
-                            clicked => { UiState.start-demo(); }
+                        padding: root.wide ? 20px : 16px;
+                        spacing: 12px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Icon { source: Icons.desktop; width: 24px * UiState.scale; height: self.width; }
+                            SectionTitle { text: "このPC"; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            HintText {
+                                text: UiState.runtime-label;
+                                max-width: runtime-measure.preferred-width;
+                                accessible-label: "ホスト: " + UiState.runtime-label;
+                                vertical-alignment: center;
+                            }
+                            BodyText {
+                                text: UiState.connection-label;
+                                max-width: connection-measure.preferred-width;
+                                font-weight: 600;
+                                color: UiState.connection-failed ? Theme.danger : UiState.host-connected ? Theme.success : Palette.foreground;
+                                accessible-label: "このアプリの接続: " + UiState.connection-label;
+                                accessible-live-region: polite;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        if UiState.connection-pending : ProgressIndicator { indeterminate: true; }
+                        if UiState.connection-phase == 3 : HintText {
+                            text: UiState.retry-seconds > 0 ? "再接続まで \{UiState.retry-seconds}秒" : "再接続中…";
+                        }
+                        if UiState.host-connected && !UiState.chat-ready : HintText { text: "AI設定が必要"; }
+                        GridLayout {
+                            spacing: 8px;
+                            details-action := QuietButton {
+                                row: 0; col: 0;
+                                text: "ホストの詳細"; icon: Icons.info; icon-only: true;
+                                enabled: root.active; checkable: true; checked: root.details;
+                                changed has-focus => { if self.has-focus { root.reveal-item(self.absolute-position.y, self.height); } }
+                                clicked => { root.details = !root.details; }
+                            }
+                            Rectangle { row: 0; col: 1; horizontal-stretch: 1; }
+                            start-action := ActionButton {
+                                row: root.wide ? 0 : 1; col: root.wide ? 2 : 0;
+                                colspan: root.wide ? 1 : 4;
+                                visible: root.needs-connect || (UiState.host-connected && !UiState.chat-ready);
+                                enabled: root.active && !UiState.connection-pending;
+                                primary: true; fill-width: !root.wide;
+                                max-width: !self.visible ? 100000px : root.wide ? start-measure.preferred-width + 24px : 100000px;
+                                preferred-width: self.visible ? start-measure.preferred-width + 24px : 0px;
+                                max-height: self.visible ? self.min-height : 0px;
+                                min-height: self.visible ? max(UiState.control-height, 36px * UiState.scale) : 0px;
+                                text: UiState.host-connected ? "AI設定" : UiState.connection-phase == 3 || UiState.connection-failed ? "再試行" : UiState.runtime-state == 1 ? "起動して接続" : "接続";
+                                changed has-focus => { if self.has-focus { root.reveal-item(self.absolute-position.y, self.height); } }
+                                clicked => {
+                                    if UiState.host-connected { UiState.category = UiState.setup-category; UiState.navigate(1); }
+                                    else { UiState.reconnect-host(); }
+                                }
+                            }
+                            disconnect-action := QuietButton {
+                                row: 0; col: 3;
+                                visible: UiState.connection-phase != 0;
+                                min-height: self.visible ? UiState.control-height : 0px;
+                                max-height: self.min-height;
+                                enabled: root.active && !UiState.send-pending && !UiState.host-busy;
+                                max-width: self.visible ? disconnect-measure.preferred-width + 16px : 0px;
+                                preferred-width: self.visible ? disconnect-measure.preferred-width + 16px : 0px;
+                                text: UiState.host-connected ? "接続を解除" : "接続を中止";
+                                hint: UiState.send-pending || UiState.host-busy ? "処理が完了すると接続を解除できます" : "ホストは稼働を続けます";
+                                changed has-focus => { if self.has-focus { root.reveal-item(self.absolute-position.y, self.height); } }
+                                clicked => { UiState.disconnect-host(); }
+                            }
+                        }
+                        if UiState.connection-failed && UiState.connection-detail != "" : BodyText {
+                            text: UiState.connection-detail; color: Theme.danger;
+                        }
+                        if UiState.runtime-state == 3 && !UiState.connection-failed && UiState.runtime-detail != "" : BodyText {
+                            text: UiState.runtime-detail; color: Theme.danger;
+                        }
+                        if root.details : VerticalLayout {
+                            spacing: 8px;
+                            Rectangle { height: 1px; background: Palette.border; }
+                            HintText {
+                                text: "会話の準備: " + (!UiState.host-connected ? "接続後に確認" : UiState.chat-ready ? "完了" : "設定が必要");
+                            }
+                            if UiState.host-connected && !UiState.chat-ready : BodyText { text: UiState.setup-hint; }
+                            if UiState.runtime-endpoint != "" : BodyText { text: "接続先: " + UiState.runtime-endpoint; }
+                            HintText { text: UiState.runtime-checking ? "状態を確認中…" : "最終確認: \{UiState.runtime-age}秒前"; }
+                            if UiState.connection-detail != "" && !UiState.connection-failed : BodyText { text: UiState.connection-detail; }
+                            QuietButton {
+                                text: "状態を再確認"; icon: Icons.refresh;
+                                enabled: root.active && !UiState.runtime-checking;
+                                changed has-focus => { if self.has-focus { root.reveal-item(self.absolute-position.y, self.height); } }
+                                clicked => { UiState.inspect-host(); }
+                            }
+                            HintText { text: "接続解除とアプリの終了では、ホストは停止しません。"; }
                         }
                     }
+                }
+                if !UiState.demo-mode && !root.has-host : HintText {
+                    text: UiState.runtime-state == 0 ? "ホストを確認中…" : "ホストなし";
+                    accessible-live-region: polite;
+                }
+                VerticalLayout {
+                    visible: UiState.demo-mode;
+                    min-height: UiState.demo-mode ? self.preferred-height : 0px;
+                    max-height: UiState.demo-mode ? 100000px : 0px;
+                    spacing: 12px;
+                    SectionTitle { text: "デモ"; }
+                    HintText { text: "外部への送信や会話の保存は行いません。"; }
+                    demo-action := ActionButton {
+                        text: UiState.session-active ? "デモを開く" : "試してみる";
+                        enabled: root.active; primary: true;
+                        clicked => { UiState.start-demo(); }
+                    }
+                    QuietButton { text: "実際のAIと話す"; enabled: root.active; clicked => { UiState.leave-demo(); } }
                 }
             }
         }
         HorizontalLayout {
-            visible: !root.embedded;
-            spacing: 8px;
-            local-settings := QuietButton {
-                icon: Icons.settings; text: "設定";
-                enabled: root.active && !root.embedded;
+            padding-right: 12px;
+            if !root.embedded : QuietButton {
+                icon: Icons.settings; text: "設定"; enabled: root.active;
                 clicked => { UiState.category = 0; UiState.navigate(1); }
             }
             Rectangle { horizontal-stretch: 1; }
-            QuietButton {
-                text: "終了"; enabled: root.active && !root.embedded;
-                clicked => { UiState.request-quit(); }
+            add-action := ActionButton {
+                visible: !UiState.demo-mode && !root.has-host;
+                min-width: 0px;
+                max-width: self.visible ? UiState.control-height : 0px;
+                min-height: self.visible ? UiState.control-height : 0px;
+                max-height: self.min-height;
+                text: "ホストを追加"; hint: "このPCのホストを追加して接続";
+                icon: Icons.add; icon-only: true; primary: true;
+                enabled: root.active && UiState.runtime-state == 1;
+                clicked => { UiState.reconnect-host(); disconnect-action.focus(); }
             }
         }
     }

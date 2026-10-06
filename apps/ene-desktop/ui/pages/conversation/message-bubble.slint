@@ -1,18 +1,50 @@
 import { Icon, Icons } from "../../foundation/icons.slint";
 import { Theme } from "../../foundation/theme.slint";
+import { UiState } from "../../state/ui-state.slint";
 import { Palette } from "std-widgets.slint";
 
+export component ReplyIndicator inherits Rectangle {
+    in property <bool> active;
+    private property <int> phase;
+    width: 36px * UiState.scale;
+    min-height: 24px * UiState.scale;
+    vertical-stretch: 0;
+    accessible-role: none;
+    Timer {
+        interval: 280ms;
+        running: root.active;
+        triggered => { root.phase = mod(root.phase + 1, 4); }
+    }
+    for index in 3 : Rectangle {
+        x: (3px + index * 12px) * UiState.scale;
+        y: (parent.height - self.height) / 2;
+        width: 6px * UiState.scale;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: Palette.foreground;
+        opacity: root.phase == index ? 0.9 : 0.3;
+        animate opacity { duration: 180ms; easing: ease-in-out; }
+        accessible-role: none;
+    }
+}
+
 export component MessageBubble inherits Rectangle {
+    in property <bool> active: true;
     in property <string> author;
     in property <string> body;
     in property <bool> provisional;
-    private property <bool> outgoing: root.author == "あなた";
-    private property <string> author-label: root.author + (root.provisional ? " · デモの仮応答" : "");
+    in property <bool> outgoing: root.author == "あなた";
+    // 0: complete, 1: queued/streaming, 2: failed, 3: cancelled.
+    in property <int> state;
+    private property <bool> waiting: !root.outgoing && root.state == 1 && root.body == "";
+    private property <string> status: root.state == 2 ? "返答を完了できませんでした" : root.state == 3 ? "返答を中断しました" : "";
+    private property <string> author-label: root.author + (root.state == 1 ? " · 生成中" : root.state == 2 ? " · 失敗" : root.state == 3 ? " · 中断" : "") + (root.provisional ? " · デモの仮応答" : "");
     private property <brush> bubble-color: root.outgoing ? Theme.message : Palette.control-background;
-    private property <length> bubble-width: min(max(56px, measure.preferred-width + 28px), max(0px, min(root.width * 0.82, root.width - 48px)));
+    private property <length> bubble-width: min(max(56px, (root.waiting ? 36px * UiState.scale : max(measure.preferred-width, status-measure.preferred-width)) + 28px), max(0px, min(root.width * 0.82, root.width - 48px)));
     min-height: content.min-height;
     vertical-stretch: 0;
     measure := Text { visible: false; text: root.body; }
+    status-measure := Text { visible: false; text: root.status; font-size: 14px * UiState.scale; }
     if !root.outgoing : Rectangle {
         x: 0px;
         y: 0px;
@@ -22,7 +54,7 @@ export component MessageBubble inherits Rectangle {
         border-radius: 16px;
         accessible-role: text;
         accessible-label: root.author-label;
-        Icon { x: 4px; y: 4px; width: 24px; height: 24px; source: Icons.avatar; }
+        Icon { x: 4px; y: 4px; width: 24px; height: 24px; source: root.state == 2 || root.state == 3 ? Icons.warning : Icons.avatar; }
         if root.provisional : Icon { x: 22px; y: 22px; width: 12px; height: 12px; source: Icons.demo; }
         Tooltip { text: @markdown("\{root.author-label}"); }
     }
@@ -33,7 +65,8 @@ export component MessageBubble inherits Rectangle {
         background: root.bubble-color;
         border-radius: 16px;
         accessible-role: text;
-        accessible-label: root.author-label + ": " + root.body;
+        accessible-label: root.author-label + ": " + (root.waiting ? "回答を作成中" : root.status + (root.status != "" && root.body != "" ? "。" : "") + root.body);
+        accessible-live-region: root.waiting ? polite : off;
         Path {
             x: root.outgoing ? parent.width - 1px : -7px;
             y: 10px;
@@ -48,7 +81,18 @@ export component MessageBubble inherits Rectangle {
             padding-top: 10px;
             padding-bottom: 10px;
             spacing: 6px;
-            Text { text: root.body; wrap: word-wrap; color: root.outgoing ? Theme.message-text : Palette.foreground; min-width: 0px; }
+            if root.waiting : ReplyIndicator { active: root.active; }
+            if root.status != "" : Text {
+                text: root.status;
+                color: Theme.muted; wrap: word-wrap; font-size: 14px * UiState.scale;
+            }
+            if root.body != "" : TextInput {
+                text: root.body; read-only: true; single-line: false; enabled: root.active;
+                wrap: word-wrap; color: root.outgoing ? Theme.message-text : Palette.foreground; min-width: 0px;
+                selection-background-color: Palette.selection-background;
+                selection-foreground-color: Palette.selection-foreground;
+                accessible-label: root.author-label;
+            }
         }
     }
 }

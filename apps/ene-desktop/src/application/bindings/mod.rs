@@ -1,7 +1,8 @@
+mod host;
 use super::*;
 
 impl Application {
-    pub(super) fn bind_actions(self: &Rc<Self>, ui: &AppWindow) {
+    pub(in crate::application) fn bind_actions(self: &Rc<Self>, ui: &AppWindow) {
         macro_rules! bind {
             ($on:ident, $method:ident) => {{
                 let weak = Rc::downgrade(self);
@@ -16,12 +17,22 @@ impl Application {
         bind!(on_settings_edited, edit_settings);
         bind!(on_save_settings, save_settings);
         bind!(on_reset_settings, reset_settings);
+        bind!(on_reset_host_page, reset_host_page);
+        bind!(on_retry_availability, retry_availability);
         bind!(on_submit, submit);
         bind!(on_toggle_avatar, toggle_avatar);
         bind!(on_recenter_avatar, recenter_avatar);
         bind!(on_restart_avatar, restart_avatar);
         bind!(on_request_quit, request_quit);
         bind!(on_start_demo, start_demo);
+        bind!(on_leave_demo, leave_demo);
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.global::<UiState>().on_choose_companion(move |index| {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                app.choose_companion(&ui, index);
+            }
+        });
         let owner = Rc::downgrade(self);
         let view = ui.as_weak();
         ui.global::<UiState>()
@@ -41,6 +52,9 @@ impl Application {
                 app.persist_live(&ui, updated);
             }
         });
+        bind!(on_reconnect_host, reconnect_host);
+        bind!(on_disconnect_host, disconnect_host);
+        bind!(on_inspect_host, inspect_host);
         let view = ui.as_weak();
         ui.global::<UiState>().on_show_host_selection(move || {
             if let Some(ui) = view.upgrade() {
@@ -60,13 +74,30 @@ impl Application {
                     ui.invoke_reveal_settings_item(y, height);
                 }
             });
-        let mode = self.mode;
+        let owner = Rc::downgrade(self);
         let weak = ui.as_weak();
-        ui.global::<UiState>().on_draft_edited(move |text| {
-            if let Some(ui) = weak.upgrade() {
-                ui.global::<UiState>().set_can_send(mode.accepts(&text));
+        ui.global::<UiState>().on_draft_edited(move |_| {
+            if let Some(ui) = weak.upgrade()
+                && let Some(app) = owner.upgrade()
+            {
+                app.refresh_send(&ui);
             }
         });
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.on_host_events_available(move || {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                app.drain_host(&ui);
+            }
+        });
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.global::<UiState>().on_start_host(move || {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                app.start_host(&ui);
+            }
+        });
+        self.bind_host_settings(ui);
         ui.global::<UiState>().on_discard_and_quit(quit);
         let weak = ui.as_weak();
         ui.global::<UiState>().on_cancel_quit(move || {

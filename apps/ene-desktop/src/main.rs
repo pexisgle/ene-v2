@@ -1,4 +1,5 @@
 mod application;
+mod host_model;
 mod infrastructure;
 mod presentation;
 mod settings;

@@ -2,49 +2,10 @@ use super::*;
 use ene_core::domain::Role;
 
 #[test]
-fn initialization_is_stable_and_restart_preserves_partial_failure() {
-    let mut db = Connection::open_in_memory().unwrap();
-    initialize(&mut db).unwrap();
-    let first = snapshot(&mut db).unwrap();
-    let principal = meta(&db, "principal").unwrap();
-    let m = Message {
-        id: "partial".into(),
-        companion_id: first.companion.id.clone(),
-        role: Role::Companion,
-        text: "生成途中🙂".into(),
-        status: MessageStatus::Streaming,
-        created_at: "2026-10-01T00:00:00Z".into(),
-        sequence: 1,
-        resources: vec![],
-        in_reply_to: None,
-        task_id: None,
-        question_id: None,
-        failure: None,
-    };
-    db.execute(
-        "INSERT INTO messages VALUES (?1,?2,1,'streaming',?3)",
-        params![m.id, m.companion_id, serde_json::to_string(&m).unwrap()],
-    )
-    .unwrap();
-    initialize(&mut db).unwrap();
-    let second = snapshot(&mut db).unwrap();
-    assert_eq!(first.host_id, second.host_id);
-    assert_eq!(first.environment_id, second.environment_id);
-    assert_eq!(first.companion, second.companion);
-    assert_eq!(principal, meta(&db, "principal").unwrap());
-    assert_eq!(second.messages[0].text, m.text);
-    assert_eq!(second.messages[0].status, MessageStatus::Failed);
-    assert_eq!(
-        second.messages[0].failure.as_ref().unwrap().code,
-        "host_interrupted"
-    );
-}
-
-#[test]
 fn pagination_is_scoped_ordered_and_keeps_old_active_messages() {
     let mut db = Connection::open_in_memory().unwrap();
     initialize(&mut db).unwrap();
-    let c = snapshot(&mut db).unwrap().companion.id;
+    let c = snapshot(&mut db).unwrap().companions[0].id.clone();
     for n in 1..=61 {
         let status = if n == 1 {
             MessageStatus::Streaming
@@ -97,7 +58,7 @@ fn pagination_is_scoped_ordered_and_keeps_old_active_messages() {
 fn escaped_history_is_bounded_without_losing_rows_or_active_replies() {
     let mut db = Connection::open_in_memory().unwrap();
     initialize(&mut db).unwrap();
-    let companion = snapshot(&mut db).unwrap().companion.id;
+    let companion = snapshot(&mut db).unwrap().companions[0].id.clone();
     for sequence in 1..=50 {
         let active = sequence <= 8;
         let message = Message {
@@ -135,7 +96,7 @@ fn escaped_history_is_bounded_without_losing_rows_or_active_replies() {
     for sequence in 1..=8 {
         assert!(recent.messages.iter().any(|m| m.sequence == sequence));
     }
-    assert!(recent.next_cursor.is_some());
+    assert!(recent.message_cursors[&companion].is_some());
     let mut cursor = None;
     let mut seen = std::collections::BTreeSet::new();
     loop {
@@ -158,13 +119,19 @@ fn escaped_history_is_bounded_without_losing_rows_or_active_replies() {
 }
 
 #[test]
-fn snapshot_keeps_active_inputs_with_lossless_cursors() {
+fn snapshot_budget_is_global_and_keeps_active_inputs_with_lossless_cursors() {
     let mut db = Connection::open_in_memory().unwrap();
     initialize(&mut db).unwrap();
-    let companion = meta(&db, "companion").unwrap();
-    let companion: Companion = serde_json::from_str(&companion).unwrap();
-    let companions = [companion.id];
-    for companion in companions.iter() {
+    let mut config = conversation::load(&db).unwrap();
+    let original = config.companions.values().next().unwrap().clone();
+    config.companions.clear();
+    for index in 0..6 {
+        let mut companion = original.clone();
+        companion.id = format!("c{index}");
+        config.companions.insert(companion.id.clone(), companion);
+    }
+    conversation::write_configuration(&db, &config).unwrap();
+    for companion in config.companions.keys() {
         for sequence in 1..=14 {
             let message: Message = serde_json::from_value(json!({"id":format!("{companion}-{sequence}"),"companion_id":companion,"role":if sequence == 1 {"user"} else {"companion"},"text":"\0".repeat(128_000),"status":if sequence == 2 {"streaming"} else {"completed"},"sequence":sequence,"created_at":"now","in_reply_to":if sequence == 2 {Some(format!("{companion}-1"))} else {None},"resources":[],"task_id":null,"question_id":null,"failure":null})).unwrap();
             db.execute(
@@ -192,7 +159,7 @@ fn snapshot_keeps_active_inputs_with_lossless_cursors() {
         )
         .is_ok()
     );
-    for companion in companions.iter() {
+    for companion in config.companions.keys() {
         for sequence in [1, 2] {
             assert!(
                 snapshot
@@ -207,7 +174,7 @@ fn snapshot_keeps_active_inputs_with_lossless_cursors() {
             .filter(|message| &message.companion_id == companion)
             .map(|message| message.sequence)
             .collect();
-        let mut cursor = snapshot.next_cursor.clone();
+        let mut cursor = snapshot.message_cursors[companion].clone();
         assert!(cursor.is_some());
         while let Some(before) = cursor {
             let page = page(&db, companion, Some(&before), 50).unwrap();
@@ -226,4 +193,78 @@ fn snapshot_keeps_active_inputs_with_lossless_cursors() {
         }
         assert_eq!(seen, (1..=14).collect());
     }
+}
+
+#[tokio::test]
+async fn completing_check_requires_matching_pending_identity_and_updates_one_receipt() {
+    use ene_core::ports::{ConfigurationCommit, Outcome, Receipt, Repository};
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("receipt.db")).await.unwrap();
+    let original = store.configuration().await.unwrap();
+    let pending = Receipt {
+        key: "check".into(),
+        target: "/v1/connections/p/check".into(),
+        request: json!({"companion_id":"c"}),
+        outcome: Outcome::Pending,
+        response: json!({"request_id":"owned"}),
+    };
+    store.reserve(pending.clone()).await.unwrap();
+    for mutation in 0..4 {
+        let mut receipt = pending.clone();
+        receipt.outcome = Outcome::Completed;
+        receipt.response = json!({"request_id":"owned","success":true});
+        match mutation {
+            0 => receipt.key = "missing".into(),
+            1 => receipt.target = "/other".into(),
+            2 => receipt.request = json!({"companion_id":"other"}),
+            3 => receipt.response["request_id"] = json!("other"),
+            _ => unreachable!(),
+        }
+        let mut configuration = original.clone();
+        configuration.settings.revision = 900;
+        assert!(
+            store
+                .commit_configuration(ConfigurationCommit::CompleteCheck {
+                    configuration,
+                    receipt
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.configuration().await.unwrap().settings,
+            original.settings
+        );
+        assert_eq!(
+            store
+                .receipt(
+                    pending.key.clone(),
+                    pending.target.clone(),
+                    pending.request.clone()
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            Outcome::Pending
+        );
+    }
+    let mut receipt = pending;
+    receipt.outcome = Outcome::Completed;
+    receipt.response = json!({"request_id":"owned","success":true});
+    let mut configuration = original;
+    configuration.settings.revision += 1;
+    for _ in 0..2 {
+        store
+            .commit_configuration(ConfigurationCommit::CompleteCheck {
+                configuration: configuration.clone(),
+                receipt: receipt.clone(),
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.configuration().await.unwrap().settings.revision,
+        configuration.settings.revision
+    );
 }

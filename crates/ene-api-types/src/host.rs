@@ -24,6 +24,8 @@ pub struct Failure {
 pub enum Role {
     User,
     Companion,
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +37,8 @@ pub enum MessageStatus {
     Completed,
     Failed,
     Cancelled,
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -164,6 +168,57 @@ pub struct HostHealth {
     pub credential_cleanup_pending: usize,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationState {
+    Granted,
+    Missing,
+    Partial,
+    Invalidated,
+    Unavailable,
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyState {
+    Ready,
+    ModelUnset,
+    CredentialMissing,
+    ProviderUnavailable,
+    RecoveryRequired,
+    Stopping,
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct OperationAvailability {
+    pub operation: String,
+    pub purpose: String,
+    pub data_kinds: Vec<String>,
+    pub authorization: AuthorizationState,
+    pub dependency: DependencyState,
+    pub busy: bool,
+    pub runnable: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ConnectionAvailability {
+    pub companion_id: String,
+    pub connection_id: String,
+    pub settings_revision: u64,
+    pub provider_revision: Option<String>,
+    pub destinations: Vec<String>,
+    pub connection_fingerprint: Value,
+    pub operations: Vec<OperationAvailability>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Notification {
@@ -218,12 +273,15 @@ pub struct MessageAcceptance {
     pub message_id: String,
     pub response_message_id: String,
 }
-/// Mutation DTOs are converted to application commands by the host API boundary.
+/// Mutation inputs shared by the API boundary and application operations.
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionInput {
     pub id: Option<String>,
+    /// Explicitly create a caller-selected UUID, retained across uncertain retries.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create: bool,
     pub kind: String,
     pub adapter: String,
     pub endpoint: String,
@@ -244,6 +302,7 @@ pub struct CompanionPatch {
     pub name: Option<String>,
     pub mind: Option<String>,
     #[cfg_attr(feature = "openapi", schema(schema_with = assignment_patch_schema))]
+    #[serde(default, deserialize_with = "assignment_input")]
     pub model_assignments: Option<BTreeMap<String, Option<ModelAssignment>>>,
 }
 #[derive(Serialize, Deserialize)]
@@ -256,6 +315,15 @@ pub struct GrantInput {
     pub destinations: Vec<String>,
     pub data_kinds: Vec<String>,
     pub purpose: String,
+    pub consent: GrantConsent,
+}
+/// Versions of the configuration and implementation presented for consent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GrantConsent {
+    pub settings_revision: u64,
+    pub provider_revision: String,
 }
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -284,10 +352,39 @@ pub struct CheckInput {
     pub model_id: Option<String>,
 }
 
+/// Strict mutation reference; response model references permit additive fields.
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ModelAssignmentInput {
+    pub connection_id: String,
+    pub model_id: String,
+}
+
+// Requests remain strict even though model references in responses are extensible.
+fn assignment_input<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<BTreeMap<String, Option<ModelAssignment>>>, D::Error> {
+    let values = Option::<BTreeMap<String, Option<ModelAssignmentInput>>>::deserialize(d)?;
+    Ok(values.map(|values| {
+        values
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    value.map(|a| ModelAssignment {
+                        connection_id: a.connection_id,
+                        model_id: a.model_id,
+                    }),
+                )
+            })
+            .collect()
+    }))
+}
+
 /// Provider-independent model reference. IDs are opaque and must be URL-encoded.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
 pub struct ModelAssignment {
     pub connection_id: String,
     pub model_id: String,
@@ -349,7 +446,7 @@ fn assignment_patch_schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::
         .schema_type(SchemaType::from_iter([Type::Object, Type::Null]))
         .additional_properties(Some(Schema::OneOf(
             OneOfBuilder::new()
-                .item(Ref::from_schema_name("ModelAssignment"))
+                .item(Ref::from_schema_name("ModelAssignmentInput"))
                 .item(ObjectBuilder::new().schema_type(Type::Null))
                 .build(),
         )))
@@ -369,4 +466,47 @@ pub struct MessageDelta {
     pub message_id: String,
     pub offset: u64,
     pub delta: String,
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use crate::provider::{Capabilities, MetadataScope, SettingField, SettingKind};
+    use serde_json::json;
+    #[test]
+    fn additive_response_fields_and_unknown_kinds_preserve_known_data() {
+        let assignment: ModelAssignment = serde_json::from_value(
+            json!({"connection_id":"c","model_id":"m","future_option":true}),
+        )
+        .unwrap();
+        assert_eq!(assignment.model_id, "m");
+        let capabilities: Capabilities = serde_json::from_value(
+            json!({"streaming_text":true,"model_list":false,"future_capability":true}),
+        )
+        .unwrap();
+        assert!(capabilities.streaming_text);
+        let field: SettingField = serde_json::from_value(
+            json!({"key":"new","label":"New","kind":"future_kind","future_setting":true}),
+        )
+        .unwrap();
+        assert!(matches!(field.kind,SettingKind::Unknown(ref kind) if kind=="future_kind"));
+        assert_eq!(serde_json::to_value(field).unwrap()["kind"], "future_kind");
+        let status: MessageStatus = serde_json::from_value(json!("future_status")).unwrap();
+        assert!(matches!(status, MessageStatus::Unknown(_)));
+        assert_eq!(serde_json::to_value(status).unwrap(), "future_status");
+        assert!(matches!(
+            serde_json::from_value::<MetadataScope>(json!("future_scope")).unwrap(),
+            MetadataScope::Unknown(_)
+        ));
+    }
+    #[test]
+    fn model_assignment_request_stays_strict_and_omission_keeps_patch_semantics() {
+        assert!(serde_json::from_value::<CompanionPatch>(json!({"revision":1,"model_assignments":{"companion":{"connection_id":"c","model_id":"m","future_option":true}}})).is_err());
+        let omitted: CompanionPatch = serde_json::from_value(json!({"revision":1})).unwrap();
+        assert!(omitted.model_assignments.is_none());
+        let cleared: CompanionPatch =
+            serde_json::from_value(json!({"revision":1,"model_assignments":{"companion":null}}))
+                .unwrap();
+        assert_eq!(cleared.model_assignments.unwrap()["companion"], None);
+    }
 }

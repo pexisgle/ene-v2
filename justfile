@@ -26,7 +26,11 @@ run-host:
     cargo run --locked -p ene-host
 
 run-desktop:
-    cargo build --locked -p ene-avatar
+    cargo build --locked -p ene-avatar -p ene-host
+    cargo run --locked -p ene-desktop
+
+run-demo:
+    cargo build --locked -p ene-avatar -p ene-host
     cargo run --locked -p ene-desktop -- --demo
 
 fetch-assets asset="all":

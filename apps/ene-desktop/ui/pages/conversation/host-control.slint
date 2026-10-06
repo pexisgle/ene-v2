@@ -1,0 +1,94 @@
+import { Icons } from "../../foundation/icons.slint";
+import { Theme } from "../../foundation/theme.slint";
+import { UiState } from "../../state/ui-state.slint";
+import { QuietButton } from "../../widgets/quiet-button.slint";
+import { BodyText, HintText, SectionTitle } from "../../widgets/typography.slint";
+import { Palette } from "std-widgets.slint";
+
+export component HostDetails inherits Rectangle {
+    in property <length> available-width: 360px * UiState.scale;
+    in property <bool> enabled: true;
+    callback close;
+    callback manage;
+    forward-focus: close-action;
+    preferred-width: min(360px * UiState.scale, root.available-width);
+    width: self.preferred-width;
+    height: layout.min-height;
+    background: Palette.alternate-background;
+    border-width: 1px;
+    border-color: Palette.border;
+    border-radius: 8px;
+    layout := VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            SectionTitle { text: "このPC"; vertical-alignment: center; horizontal-stretch: 1; }
+            close-action := QuietButton {
+                text: "閉じる"; icon: Icons.close; icon-only: true;
+                enabled: root.enabled;
+                clicked => { root.close(); }
+                escape-pressed => { root.close(); }
+            }
+        }
+        BodyText {
+            text: "ホスト: " + UiState.runtime-label;
+            color: UiState.runtime-state == 3 ? Theme.danger : UiState.runtime-state == 2 && UiState.connection-phase != 4 ? Theme.success : Theme.muted;
+        }
+        BodyText {
+            text: "接続: " + UiState.connection-label;
+            color: UiState.connection-failed || UiState.connection-phase == 3 ? Theme.danger : UiState.host-connected ? Theme.success : Theme.muted;
+        }
+        if UiState.host-connected && !UiState.chat-ready : HintText { text: "AI設定が必要"; }
+        QuietButton {
+            text: "ホスト管理"; icon: Icons.settings; leading: true; fill-width: true;
+            enabled: root.enabled;
+            clicked => { root.manage(); }
+            escape-pressed => { root.close(); }
+        }
+    }
+}
+
+export component HostControl inherits QuietButton {
+    in property <length> available-width;
+    in property <length> available-left;
+    text: "ホストの状態";
+    icon: Icons.desktop;
+    icon-only: true;
+    tooltip-enabled: !popup.is-open;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-expand => { root.clicked(); }
+    accessible-description: "このPC。ホスト: " + UiState.runtime-label + "。接続: " + UiState.connection-label;
+    clicked => {
+        if popup.is-open { popup.close(); }
+        else { root.focus(); popup.show(); }
+    }
+    escape-pressed => { popup.close(); }
+    changed enabled => { if !root.enabled { popup.close(); } }
+    Rectangle {
+        x: parent.width - self.width - 2px;
+        y: parent.height - self.height - 2px;
+        width: 8px * UiState.scale;
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: Palette.background;
+        background: UiState.connection-failed || UiState.runtime-state == 3 || UiState.connection-phase == 3 ? Theme.danger : UiState.connection-pending || (UiState.host-connected && !UiState.chat-ready) ? Palette.accent-background : UiState.host-connected ? Theme.success : Theme.muted;
+        accessible-role: none;
+    }
+    popup := PopupWindow {
+        x: max(root.available-left - root.absolute-position.x, root.width - self.width);
+        y: root.height + 8px;
+        width: min(360px * UiState.scale, root.available-width);
+        height: details.height;
+        close-policy: close-on-click-outside;
+        forward-focus: details;
+        details := HostDetails {
+            available-width: root.available-width;
+            enabled: root.enabled;
+            close => { popup.close(); }
+            manage => { popup.close(); UiState.show-host-selection(); }
+        }
+    }
+}

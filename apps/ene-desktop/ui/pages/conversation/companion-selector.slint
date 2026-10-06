@@ -1,0 +1,56 @@
+import { UiState } from "../../state/ui-state.slint";
+import { QuietButton } from "../../widgets/quiet-button.slint";
+import { BodyText, HintText } from "../../widgets/typography.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
+
+export component CompanionSelector inherits VerticalLayout {
+    in property <bool> active;
+    in property <bool> settings-context;
+    spacing: 6px;
+    if root.settings-context : BodyText { text: "設定するコンパニオン"; }
+    ComboBox {
+        model: UiState.companion-names;
+        current-index <=> UiState.companion-index;
+        accessible-label: root.settings-context ? "設定するコンパニオン" : "会話の相手";
+        min-height: UiState.control-height;
+        enabled: root.active && UiState.can-switch-companion;
+        selected => { UiState.choose-companion(self.current-index); }
+    }
+    if !UiState.can-switch-companion && (root.settings-context || (UiState.host-connected && !UiState.send-pending && !UiState.host-busy)) : HintText {
+        text: UiState.send-pending || UiState.host-busy ? "処理が終わると相手を切り替えられます。" : !UiState.host-connected ? "接続が戻ると相手を切り替えられます。" : "設定の編集を保存するか、設定画面で元に戻すと切り替えられます。";
+    }
+}
+
+export component CompanionSidebar inherits Rectangle {
+    in property <bool> active;
+    function reveal-item(y: length, h: length) {
+        if y < companions.absolute-position.y { companions.content-y = min(0px, companions.content-y + companions.absolute-position.y - y); }
+        else if y + h > companions.absolute-position.y + companions.visible-height {
+            companions.content-y = max(min(0px, companions.visible-height - companions.content-height), companions.content-y - (y + h - companions.absolute-position.y - companions.visible-height));
+        }
+    }
+    VerticalLayout {
+        spacing: 12px;
+        BodyText { text: "会話の相手"; font-weight: 600; }
+        companions := ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start; spacing: 4px; padding-right: 8px;
+                for name[index] in UiState.companion-names : QuietButton {
+                    text: name; leading: true; fill-width: true; checkable: true;
+                    checked: UiState.companion-index == index;
+                    enabled: root.active && UiState.can-switch-companion;
+                    private property <bool> reveal-selected: root.active && self.checked;
+                    changed reveal-selected => { if self.reveal-selected { root.reveal-item(self.absolute-position.y, self.height); } }
+                    changed has-focus => { if self.has-focus { root.reveal-item(self.absolute-position.y, self.height); } }
+                    clicked => { UiState.choose-companion(index); }
+                }
+            }
+        }
+        if !UiState.can-switch-companion : HintText {
+            text: UiState.send-pending || UiState.host-busy ? "処理が終わると相手を切り替えられます。" : !UiState.host-connected ? "接続が戻ると相手を切り替えられます。" : "設定の編集を保存するか、設定画面で元に戻すと切り替えられます。";
+        }
+    }
+}

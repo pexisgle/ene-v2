@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 #[derive(Parser)]
 #[command(
     about = "ene local host",
-    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. Chat is not enabled yet."
+    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. ENE_PROVIDER_DIR overrides the runtime-installable provider plugin directory."
 )]
 struct Args {
     /// Export the generated OpenAPI contract without starting a host or opening its database.
@@ -17,8 +17,18 @@ struct Args {
     print_openapi: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // Secret Service calls run on bounded blocking slots. A timed-out call
+    // cannot be aborted by Tokio and must not keep process shutdown waiting forever.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+    result
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     if args.print_openapi {
         println!(
@@ -30,8 +40,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (runtime, app) = bootstrap::initialize().await?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;
-    eprintln!("ene-host: loopback service ready (history and notifications; chat not yet enabled)");
+    eprintln!("ene-host: authenticated loopback service ready");
     let shutdown = app.shutdown.clone();
+    let application = app.application.clone();
     axum::serve(listener, api::router(app))
         .with_graceful_shutdown(async move {
             #[cfg(unix)]
@@ -48,6 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             shutdown.send_replace(true);
         })
         .await?;
+    application.stop().await?;
     drop(runtime);
     Ok(())
 }

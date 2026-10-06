@@ -4,12 +4,12 @@ mod repository;
 mod schema;
 #[cfg(test)]
 mod tests;
-
 #[cfg(test)]
 use queries::meta;
 use queries::{page, snapshot};
 use schema::initialize;
 
+pub(crate) mod conversation;
 use ene_core::domain::{
     Companion, Failure, Message, MessageStatus, ModelAssignments, Page, Settings,
 };
@@ -38,6 +38,12 @@ pub enum Error {
     OversizedMessage,
     #[error("snapshot exceeds response budget")]
     ResourceLimit,
+    #[error("invalid stored receipt")]
+    CorruptReceipt,
+    #[error("idempotency_conflict")]
+    IdempotencyConflict,
+    #[error("state_conflict")]
+    StateConflict,
     #[error("database schema {0} is newer than this host")]
     FutureSchema(usize),
 }
@@ -60,6 +66,15 @@ impl Store {
         };
         store.call(initialize).await?;
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        self.call(operation).await
     }
 
     async fn call<T, F>(&self, operation: F) -> Result<T>

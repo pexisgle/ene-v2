@@ -62,7 +62,7 @@ HTTPの基点は`/v1`とし、要求・応答はJSONです。ホストはルー�
 
 設定・秘密情報の登録と、アクセス・送信の許可は独立しています。接続先を登録しても会話や資料を送信できるようにはなりません。[権限とデータの管理](../features/settings/permissions.md)に従い、送信先、データの種類、用途を許可に結びつけます。送信先には仲介サービスと実際の処理先の双方を含め、許可がなければ別の接続先へ切り替えません。
 
-設定やGrantの更新には取得済みの`revision`を要求し、古ければ`409 revision_conflict`を返します。接続先や送信条件を変更した場合は、従来の許可を新しい範囲へ流用しません。許可を縮小・解除する応答は、保存と実行側の制限反映が済んでから返します。以後の関連操作・送信を禁止し、実行中の処理は成否を確認して記録します。完了済みの変更や送信済みデータの取り消しを意味しません。
+設定やGrantの更新には取得済みの`revision`を要求し、古ければ`409 revision_conflict`を返します。ただし接続設定の再送で、IDと入力可能な全項目が現在の一覧と一致する場合は、現在の設定を変更せず返します。接続先や送信条件を変更した場合は、従来の許可を新しい範囲へ流用しません。許可を縮小・解除する応答は、保存と実行側の制限反映が済んでから返します。更新を受け付けた後はHTTP接続が切れても保存・実行側への反映・通知を完了し、通常のホスト終了ではこれらの処理を待ちます。以後の関連操作・送信を禁止し、実行中の処理は成否を確認して記録します。完了済みの変更や送信済みデータの取り消しを意味しません。
 
 外部サービスの秘密情報はOSの資格情報ストアに保存します。利用できない場合はセッション中だけ保持し、`credential_state`を`session_only`として返します。他の値は`missing`、`stored`です。取得APIで秘密情報自体を返すことはありません。
 
@@ -78,7 +78,7 @@ HTTPのPOSTには`Idempotency-Key`を必須にします。ホストは認証主�
 
 PATCHの`revision`は更新の二重適用を防ぎ、DELETEは解除済み対象への再送でも`204`とします。秘密情報のPUTは同じ値の再登録で追加の処理を起動せず、その値を再送記録へ保存しません。
 
-メッセージ、Task履歴、モデル・声一覧は`cursor`と`limit`でページ分割し、`items`と`next_cursor`を返します。既定は50件、上限は200件です。メッセージはカーソルなしなら最新のページを返し、`next_cursor`でそれ以前を遡ります。ページ内は`sequence`の昇順に表示し、日時が同じでも順序を変えません。 メッセージの最新ページと履歴ページは、JSONエスケープ後の本文を含む4MiBの予算でも区切ります。`limit`未満でも`next_cursor`があれば続きがあり、保存済み本文は切り詰めません。snapshotには直近ページに加え、それ以前の未終了メッセージと対応する入力も含めます。応答全体を16MiB以内に収め、必須データが上限を超えた場合は`resource_limit`を返します。Taskは新しい実行順とし、カーソルは取得対象と順序に結びつけます。通知の`{epoch, seq}`、履歴のページカーソル、Messageの`sequence`はそれぞれ独立しています。
+メッセージ、Task履歴、モデル・声一覧は`cursor`と`limit`でページ分割し、`items`と`next_cursor`を返します。既定は50件、上限は200件です。メッセージはカーソルなしなら最新のページを返し、`next_cursor`でそれ以前を遡ります。ページ内は`sequence`の昇順に表示し、日時が同じでも順序を変えません。 メッセージの最新ページと履歴ページは、JSONエスケープ後の本文を含む4MiBの予算でも区切ります。`limit`未満でも`next_cursor`があれば続きがあり、保存済み本文は切り詰めません。snapshotには直近ページに加え、それ以前の未終了メッセージも含めます。Taskは新しい実行順とし、カーソルは取得対象と順序に結びつけます。通知の`{epoch, seq}`、履歴のページカーソル、Messageの`sequence`はそれぞれ独立しています。
 
 応答への項目追加は`/v1`内で行い、クライアントは未知の応答項目を無視できます。要求の未知の項目は拒否します。PATCHでは項目の省略は変更なし、明示的な`null`は解除可能な設定だけを解除するものとします。`model_assignments`は用途ごとに同じ規則で更新し、他の用途を暗黙に解除しません。未知の状態・種類は未対応として表示し、成功・終了・許可済みと推測しません。新機能を必要とする要求は対応能力を確認してから送り、既存項目の意味や必須条件を変える変更は新バージョンで扱います。
 
@@ -93,7 +93,7 @@ PATCHの`revision`は更新の二重適用を防ぎ、DELETEは解除済み対�
 | `403` | `permission_required`：アクセス・送信の許可不足 |
 | `404` | `not_found`：不存在、または指定コンパニオンに属さない対象 |
 | `409` | `revision_conflict`、`idempotency_conflict`、`request_in_progress`、`state_conflict`、`question_closed`、`task_busy`、`resync_required`：状態の競合 |
-| `422` | `unsupported_capability`：未対応の接続種別・機能・音声形式、`resource_limit`：応答・設定の容量超過 |
+| `422` | `unsupported_capability`：未対応の接続種別・機能・音声形式 |
 | `502` / `503` | `upstream_error` / `unavailable`：外部接続やホストの障害 |
 
 保存前の拒否はHTTPエラー、`202`で受け付けた後の失敗はMessageやTaskの状態・通知として伝えます。エラー理由と適用済み範囲を保持し、成否不明の処理を成功としません。
@@ -131,7 +131,7 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 
 通常メッセージはコンパニオンの対話へ渡します。コンパニオンが依頼を整理してTaskを起動し、以後の質問・結果も同じコンパニオンのMessageとして表示します。Taskの内部プロンプト、内部会話、ツール要求を通常の対話履歴へ流しません。Task実行中に受け付けた新しい作業依頼は自動で予約せず、コンパニオンが受付時の実行枠の使用中を説明します。返答の順番待ち中に枠が空いても、その依頼を自動起動へ切り替えません。開始直前にもホストが枠を検証し、内部起動の競合は`task_busy`として扱います。
 
-対話の生成はコンパニオンごとに受付順で扱い、Taskの実行ループから独立させます。相談・報告のMessageも同じ対話の列に入り、別のTask用チャットをユーザーに操作させません。会話文脈はホストが保持する当該コンパニオンの履歴から組み立て、表示用のページ境界を文脈の切れ目にしません。Taskの起動後に返答生成が失敗しても、Taskの状態は独立して取得・停止でき、再生成を理由にTaskを起動し直しません。
+対話の生成はコンパニオンごとに受付順で扱い、Taskの実行ループから独立させます。相談・報告のMessageも同じ対話の列に入り、別のTask用チャットをユーザーに操作させません。会話文脈はホストが保持する当該コンパニオンの履歴から組み立て、表示用のページ境界を文脈の切れ目にしません。現在の実装では、完了したユーザー入力と対応する完了返答のペアだけを会話文脈へ含めます。失敗・取消・返答未完了の入力は後続要求に自動で含めません。待機中も受付時の接続と送信範囲を取消対象として保持し、許可・資格情報の削除で取り消した要求は再許可しても復活しません。実行に使う設定・資格情報・許可は開始時に再取得します。生成要求のJSON全体を256KiB以内に収め、超える場合は古い会話ターン単位で文脈から除きます。保存済みの履歴、口調、今回の入力は切り詰めません。今回の入力と固定項目だけで超える場合は、返答を`failed`、`failure.code: input_limit`として終了し、プラグイン自体の障害にはしません。Taskの起動後に返答生成が失敗しても、Taskの状態は独立して取得・停止でき、再生成を理由にTaskを起動し直しません。
 
 `question_id`付きの回答は保存時に対象の未解決Questionへ結びつけ、コンパニオンを通じて所属Taskへ伝えます。本文の意味だけで通常の雑談を相談回答にしません。権限に関する「はい」という文章だけではGrantを作成しません。UIに対象・範囲を提示し、許可APIに同意した内容を渡します。拒否は上記の`decision`を使い、許可不足の工程を実行しません。
 
@@ -143,11 +143,14 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 
 | 操作 | 用途・主な要求 | 主な応答 | 固有の拒否条件 |
 | --- | --- | --- | --- |
+| `GET /providers` | 組込・発見済みプラグインの一覧 | ID・表示名・状態・宣言的な設定項目・認証入力方式・送信先・能力・実装revision | 秘密情報は返さない |
+| `POST /providers/reload` | ユーザーディレクトリを再走査 | Provider一覧。発見だけでは実行しない | 契約不一致・重複ID・不正設定を拒否 |
+| `PUT /providers/{provider_id}/enabled` | `{enabled: bool}`で起動中の有効化・無効化 | Provider一覧 | 隔離・初期化失敗時は利用可能にしない |
 | `GET /settings` | ホスト共通の接続設定の取得 | `revision`、Connection一覧。モデル割当はCompanionに保持 | 共通エラー |
 | `PATCH /settings` | `revision`と変更する接続設定 | 更新した設定 | `revision_conflict`、参照の不整合は`state_conflict`、未対応アダプターは`unsupported_capability` |
-| `PUT /credentials/{connection_id}` | `secret`を登録 | `credential_state` | 不明な接続は`not_found` |
+| `PUT /credentials/{connection_id}` | `secret`を登録。ローカルホストの環境変数を使う場合は代わりに`source: "environment"`（起動中のみ保持） | `credential_state` | 不明な接続は`not_found` |
 | `DELETE /credentials/{connection_id}` | 秘密情報を解除 | `204`。以後の認証付き外部要求も禁止 | 共通エラー |
-| `GET /connections/{connection_id}/models` | `companion_id`を指定し、LLM接続先のモデル一覧を取得 | モデルID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
+| `GET /connections/{connection_id}/models` | 任意の`companion_id`を確認し、LLM接続先のモデル一覧を取得 | モデルID・表示名・任意のメタデータ（上限・形式・取得元）の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
 | `GET /connections/{connection_id}/voices` | `companion_id`を指定し、音声接続先の声一覧を取得 | 声ID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
 | `POST /connections/{connection_id}/check` | `companion_id`、`purpose`（`companion` / `task` / `speech`）、必要なモデルID・声IDで疎通確認 | 対応能力・確認結果。成功なら`last_check`を更新 | `permission_required`、`unsupported_capability`、外部障害 |
 | `GET /grants` | 現在の許可一覧。任意の`companion_id`で絞り込み | Grantの一覧 | 共通エラー |
@@ -159,9 +162,9 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 
 送信Grantの`purpose`は`conversation`・`task`・`speech`・`connection_check`を区別します。モデル・声一覧は指定コンパニオンの`connection_check`とメタデータ送信範囲で検証し、モデル・声の割当前にも利用できます。疎通確認要求の`purpose`は検証する機能を選ぶもので、通常の会話・資料送信の許可を代用しません。仲介先の一覧取得と実処理先への試験入力で送信先が異なる場合も、それぞれの範囲を明示します。
 
-`PATCH /settings`で`connections`を指定した場合は、その一覧で接続設定を置き換えます。既存接続は`id`を指定して更新し、IDのない新規接続にはホストがIDを発行して応答に含めます。モデル・声の割当は返されたIDを使って`PATCH /companions/{companion_id}`で設定します。参照中の接続を削除する場合は先にCompanionの割当を解除・変更し、削除時にも参照を検証します。Grantが参照する接続の削除も、そのGrantの解除後に限ります。対応能力・確認結果・資格情報の状態はホストが管理し、設定要求から上書きできません。
+`PATCH /settings`で`connections`を指定した場合は、その一覧で接続設定を置き換えます。既存接続は`id`を指定して更新し、IDのない新規接続にはホストがIDを発行して応答に含めます。応答が失われても同じ接続へ再試行するクライアントは、生成したUUIDの`id`と`create: true`を新規接続に指定できます。通常の既存ID更新では`create`を省略し、未登録IDは`not_found`にします。デスクトップは接続作成・モデル割当・資格情報登録の途中で失敗しても接続IDと未保存の入力を保持し、保存済み範囲を同期して再試行します。モデル・声の割当は返されたIDを使って`PATCH /companions/{companion_id}`で設定します。参照中の接続を削除する場合は先にCompanionの割当を解除・変更し、削除時にも参照を検証します。Grantが参照する接続の削除も、そのGrantの解除後に限ります。対応能力・確認結果・資格情報の状態はホストが管理し、設定要求から上書きできません。
 
-モデル割当・口調の変更は次に開始する生成、声の変更は次のSpeechに適用し、実行中のTask・生成・発話へ途中から混ぜません。Taskには起動時のモデル割当を記録します。外部接続の`adapter`・`endpoint`・送信条件を変えると、旧条件の許可と疎通結果を無効にして、新条件の確認・許可を必要とします。実行中処理が参照する接続を変更・削除する要求は`state_conflict`で拒否し、UIは終了を待つかTask停止・許可解除へ誘導します。実行中でも許可と資格情報の解除は受け付け、各送信・操作時に現在の制限を適用します。
+モデル割当・口調の変更は次に開始する生成、声の変更は次のSpeechに適用し、実行中のTask・生成・発話へ途中から混ぜません。Taskには起動時のモデル割当を記録します。外部接続の`adapter`・`endpoint`・送信条件を変えると、旧条件の許可と疎通結果を無効にして、新条件の確認・許可を必要とします。`adapter`または`endpoint`が変わる場合は資格情報と保存先参照も解除し、旧サービスのキーを新しい接続先に流用しません。実行中処理が参照する接続を変更・削除する要求は`state_conflict`で拒否し、UIは終了を待つかTask停止・許可解除へ誘導します。実行中でも許可と資格情報の解除は受け付け、各送信・操作時に現在の制限を適用します。
 
 送信Grantは登録時の接続先・送信条件に結びつけます。接続変更による無効化は設定保存と同時に確定し、`status: invalidated`と理由を取得API・通知へ反映します。新しい条件への同意は新規Grantで登録し、無効な許可を自動復活させません。`status`はホストが管理し、要求から上書きできません。
 
@@ -175,6 +178,68 @@ Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`re
 
 Grantの`companion_id`・操作対象・所在環境は変更せず、別の対象への許可は新規登録します。古い許可を別の対象へ読み替えません。許可を縮小した場合も、禁止された操作に依存するTaskは停止処理へ移します。参照できる部分だけを根拠に、許可不足の変更を続けません。
 
+LLMプロバイダーの`options`は各実装が検証する非秘密JSONです。設定項目は文字列・数値・選択・真偽値だけを宣言し、UIコードは受け取りません。プラグインmanifest・初期化・モデル一覧・生成差分・終了・取消・broker HTTPの型は`ene-protocol::provider`に定義します。初期認証方式は認証なし・Bearer・固定ヘッダー・クエリで、OAuth・署名方式は未対応です。brokerはホスト側の接続・生成・用途の文脈で現在の許可を検査し、キー自体はプラグインへ渡しません。未許可の送信先・転送・リダイレクトを拒否し、OpenRouterの配信先・フォールバック禁止もホストが強制します。プラグイン実装のrevisionも送信許可のfingerprintに含めます。
+
+送信許可の新規登録には、表示時点の `settings.revision` とプロバイダー記述子の `revision` を `consent: {settings_revision, provider_revision}` として必須で送ります。`destinations` も表示した値を送ります。ホストは保存前に両revisionを検証し、接続設定または実装が変更されていれば `revision_conflict` で拒否します。デスクトップは同意の下書き中に送信先やrevisionを更新しません。コンパニオン・接続・モデル割当の編集も表示時のrevisionを保持し、競合時は下書きを残して再確認を求めます。
+
+### 操作ごとの実行可否
+
+`GET /v1/connections/{connection_id}/availability?companion_id={companion_id}` は、会話・接続チェック・モデル一覧に対する現在の評価を返します。`settings_revision`、`provider_revision`、`destinations`、`connection_fingerprint`に加え、各操作の`authorization`、`dependency`、`busy`、`runnable`を取得します。許可の判定は`granted`、`missing`、`partial`、`invalidated`、`unavailable`、依存状態は`ready`、`model_unset`、`credential_missing`、`provider_unavailable`、`recovery_required`、`stopping`です。実行入口と同じ純粋な評価を使い、activeなgrantがあるだけでは実行可能としません。
+
+snapshotには`health`を付け、保存失敗で復旧が必要か、停止中か、資格情報の削除が未完了かを表します。応答全体は16MiB、履歴ページと設定は各4MiB以内とし、履歴本文を切らずにcursorで省略します。必須の実行中データも収まらない場合は`resource_limit`を返します。詳細な所有権と同期の契約は[共通境界](framework-boundaries.md)を参照してください。
+
+### モデル一覧とメタデータ
+
+モデル一覧は`GET /v1/connections/{connection_id}/models`で取得します。組込アダプターまたはプラグインが、その接続先の`/models`などを呼び出して現在の一覧を返します。manifestの`models`は任意です。`capabilities.model_list: true`のプラグインでは、取得結果を正本とし、manifestの列挙で絞り込んだり合成したりしません。`false`の場合だけ、任意の静的一覧を代替として使います。モデル追加のためにmanifestやホストを更新する必要はありません。IDの直接入力も利用できます。
+
+プラグインは`list_models {request_id, endpoint, options}`を受け、`models {request_id, models}`を1回返します。これはOpenAIやAnthropicのAPI形式から独立した契約です。各モデルの`metadata.context_window`にコンテキスト上限（tokens）を含め、入力／出力上限・形式なども共通の型へ正規化します。取得元のAPI・詳細API・カタログ、IDの対応関係と補完は各プラグインの実装が担当します。ホストは返された情報を保持し、取得元を選んだり自動補完したりしません。manifestにモデル列挙やカタログの指定は不要です。
+
+HTTP brokerは直列・最大8要求、モデル取得全体は30秒、返信は改行込み1MiB・最大4096モデルです。モデル数分の問い合わせをせず、一覧や一括取得APIを使います。認証付きのAPI要求は接続先と同じorigin・ベースパス配下です。別originの公開情報は、既存の`http_request`で取得できます。一覧取得中のbroker要求は、同じoriginの認証付き要求も含めてGET・本文なしに限定し、manifestの`destinations`で宣言済みかつ現在のメタデータ送信許可に含まれる送信先だけを認めます。外部には資格情報やmanifestの固定ヘッダーを付与しません。HTTPSを使用し、ローカル開発用のloopback HTTPも利用できます。リダイレクトは禁止、応答は最大8MiBです。生成中の外部カタログ要求は拒否します。
+
+モデルの共通応答は次の形です。Rustでは`ene_api_types::provider::Model`と`ModelMetadata`を使い、プラグイン向けには`ene_protocol::provider`から再公開します。REST、Rustクライアント、OpenAPIも同じ型です。
+
+```json
+{
+  "id": "example/model",
+  "name": "Example Model",
+  "metadata": {
+    "source": "https://provider.example/api/v1/models",
+    "scope": "catalog",
+    "context_window": 131072,
+    "max_input_tokens": 122880,
+    "max_output_tokens": 8192,
+    "input_modalities": ["text", "image"],
+    "output_modalities": ["text"],
+    "supported_parameters": ["tools", "max_tokens"]
+  }
+}
+```
+
+| 項目 | 意味 |
+| --- | --- |
+| `id` / `name` | APIへ送るモデルID / 表示名。表示名がなければIDを使う |
+| `metadata` | 任意。未取得なら省略または`null`。古いv1プラグインのID・名前だけの応答も受け入れる |
+| `source` | 主な情報源のAPI・カタログURL。資格情報を含めない |
+| `field_sources` | 補完した項目名と取得元URLの対応。未指定の項目は`source`の値。例：`{"context_window":"https://models.dev/api.json"}` |
+| `scope` | `catalog`はカタログ値を含む情報、`route`は全項目が現在の接続・ルーティング条件で取得された情報 |
+| `context_window` | 正の整数のコンテキスト上限（tokens）、取得できなければ`null`。入力と出力の扱いは提供元の定義に従う |
+| `max_input_tokens` | 公表された入力上限（tokens）。コンテキスト上限とは別に制限がある場合に使用 |
+| `max_output_tokens` | 公表された出力上限（tokens） |
+| `input_modalities` / `output_modalities` | `text`、`image`、`audio`など、提供元が報告した形式。未知の文字列も保持する |
+| `supported_parameters` | `tools`など、提供元が報告したパラメーター名 |
+
+`context_window`は取得できなければ`null`、他の取得できない項目は省略または`null`とし、「不明」と表示します。空配列は提供元が明示した対応項目なしを表します。未知の上限を0や無制限に置き換えたり、モデルIDの文字列から能力を推測したりしません。カタログ値は利用可能な配信先・アカウント・リクエスト条件によって変わり、モデルの存在だけでは生成APIや現在のルートでの利用成功を保証しません。メタデータは選択時の情報であり、eneの入力対応やトークン消費の実測を表すものではありません。現在の対話入力はテキストです。
+
+取得方法はプロバイダー実装が選びます。**接続先APIの値を優先し、欠落項目だけをカタログで補完**します。公式APIがコンテキスト上限を返すならその値を使い、モデル名から能力を推測しません。プラグインが独自の詳細APIを使う場合は、結果を共通の`ModelMetadata`へ正規化します。
+
+たとえばmodels.devを使うプラグインは、`destinations`へ`https://models.dev`を追加し、一覧取得中に`https://models.dev/api.json`をGETします。JSONの読み取り・プロバイダー名前空間の選択・モデルIDの対応・不足項目の補完はプラグイン内で行い、結果を共通の`ModelMetadata`へ正規化して返します。これは公開情報の取得例であり、プロトコルにmodels.dev固有の設定やAPI形式はありません。接続先の値を優先し、補完元が異なる項目は`field_sources`へ記録します。モデル名による推測や、カタログだけにあるモデルの一覧への追加はしません。
+
+組込OpenAIも同じ`Model`を返します。[公式`/models`](https://developers.openai.com/api/reference/resources/models/methods/list)から一覧を取得し、OpenAI実装内でmodels.devの`openai`から不足情報を補完します。固定URLの公開JSONを1回取得し、プロバイダーとモデルIDの完全一致で参照します。キー・会話・接続URL・モデルIDはこの公開要求へ付与せず、現在の許可を取得中も検査します。リダイレクト禁止・最大10秒／16MiBです。公開カタログの通信・形式エラーでは補完を省き、取得済みの公式モデル一覧を返します。許可の失効は取得を中止するエラーとして扱います。カタログにもない情報は不明のままです。OpenAIの[個別モデル取得](https://developers.openai.com/api/reference/resources/models/methods/retrieve)にもコンテキスト上限・入力形式はないため、同じ不足情報のためにモデル数分の要求は出しません。
+
+OpenRouterプラグインは`/models?providers=openai`で配信元をOpenAIに絞り、[`/models`のプロパティ](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties)からコンテキスト上限などを正規化し、外部カタログは使いません。`top_provider`の公表値はOpenAI固定ルートと一致する保証がないため、`scope: catalog`とします。モデル情報の取得や補完の方法を変えても、クライアントは同じ共通応答を扱います。定期取得やディスクキャッシュは追加しません。
+
+デスクトップでは、モデル未選択のまま接続を保存し、資格情報と「疎通確認・モデル情報」の送信許可を登録してから一覧を取得できます。モデル選択後に保存するとCompanionのモデル割当を更新します。モデルが空の場合は既存の割当を変更しません。取得結果は選択中の接続にだけ反映し、選択モデルのコンテキスト上限・入力／出力上限・入出力形式・コンテキスト情報の取得元を表示します。一覧は画面の取得操作ごとに更新し、取得失敗を空一覧の成功として扱いません。
+
 ## リアルタイム通信
 
 ### テキスト・進捗通知
@@ -187,6 +252,8 @@ Grantの`companion_id`・操作対象・所在環境は変更せず、別の対�
 | `message.started` | `queued`から`streaming`へ移ったコンパニオン側のMessage。受付時の`response_message_id`と同じID |
 | `message.delta` | `message_id`、`offset`、追加する`delta`。`offset`は追加前の本文のUnicodeスカラー値数 |
 | `message.updated` | 保存された本文・状態・失敗理由。生成前の失敗も含む終了時の正本 |
+| `host.storage_failed` | 設定・生成などの保存障害によりホストが実行不可へ遷移した通知。`code: storage_error`。全体のhealthを`ready: false, recovery_required: true`へ更新し、各コンパニオンのchat readinessも無効化する。未保存の設定は更新通知に含めない |
+| `generation.persistence_failed` | 終了状態を保存できなかった実行の`message_id`と`code: storage_error`。完了通知として扱わず、保存障害として表示する |
 | `task.updated` | 親コンパニオンに属するTaskの公開状態・進捗・結果 |
 | `question.updated` | Questionの作成・解決・取り消し。対話に表示する本文は対応するMessageにも保持 |
 | `companion.updated` / `settings.updated` / `grants.updated` | 設定・許可の変更。秘密情報を含めない |
@@ -390,7 +457,3 @@ message.deltaで本文が増える間に、文・句ごとの合成を開始
 | 互換性 | 未知の応答項目・通知・状態・種類を受けても正常な既知機能を維持し、未知の権限を許可済みと扱わない。ホスト未対応機能やクライアント未対応の制御をUIで有効化しない |
 
 音声エンジン、アダプター、コーデック、バイナリヘッダー、チャンク長、バッファ上限、遅延の数値基準は、上記の測定と接続検証で確定します。対応能力の記載や公式APIの存在を、eneでの合成・配信・再生の動作確認と同一視しません。MVPの[機能完成条件と実利用による検証](../product/mvp.md#6-完了条件)は別に満たす必要があります。
-
-### Rust SDKの通知同期
-
-`ApiClient::synced_session`は購読・snapshot・通知適用・再取得を所有します。待ち手の中断で通知を失わず、適用済みの状態とcursorを公開してから通知します。通知の欠番・epoch変更・バッファ超過では新しい購読を要求します。履歴はIDで重複を除き、snapshotの再取得後も読み込み済み本文を保持します。入力と通知は各256件・16MiB、履歴を含む状態は64MiB以内で扱います。

@@ -27,7 +27,7 @@ impl Registration {
 type Callback = RefCell<Box<dyn Fn()>>;
 pub struct Ui {
     actions: [Callback; 7],
-    state: watch::Sender<(bool, bool)>,
+    state: watch::Sender<(bool, bool, String)>,
     stop: CancellationToken,
     worker: RefCell<Option<std::thread::JoinHandle<()>>>,
 }
@@ -46,6 +46,15 @@ impl Ui {
     callback!(on_restart_avatar, 4);
     callback!(on_quit, 5);
     callback!(on_open_about, 6);
+    pub fn set_connection_status(&self, status: &str) {
+        self.state.send_if_modified(|state| {
+            if state.2 == status {
+                return false;
+            }
+            state.2 = status.to_owned();
+            true
+        });
+    }
     pub fn set_avatar_visible(&self, visible: bool) {
         self.state.send_if_modified(|state| {
             let changed = state.0 != visible;
@@ -61,7 +70,7 @@ impl Ui {
         });
     }
     pub fn new(chat: slint::Weak<AppWindow>) -> (Rc<Self>, Receiver<Registration>) {
-        let (state, updates) = watch::channel((true, false));
+        let (state, updates) = watch::channel((true, false, "ホスト未接続".to_owned()));
         let (sender, receiver) = mpsc::sync_channel(1);
         let stop = CancellationToken::new();
         let cancel = stop.clone();
@@ -104,6 +113,7 @@ struct Item {
     chat: slint::Weak<AppWindow>,
     visible: bool,
     failed: bool,
+    connection_status: String,
     online: Arc<AtomicBool>,
 }
 impl Item {
@@ -135,7 +145,7 @@ impl ksni::Tray for Item {
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "ene".into(),
+            title: format!("ene · {}", self.connection_status),
             description: if self.failed {
                 "キャラクターの表示を再開できます。メニューから再起動してください。"
             } else {
@@ -160,6 +170,13 @@ impl ksni::Tray for Item {
             .into()
         };
         vec![
+            StandardItem {
+                label: self.connection_status.clone(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
             action("会話を開く", 0, true),
             action("設定を開く", 1, true),
             MenuItem::Separator,
@@ -187,7 +204,7 @@ impl ksni::Tray for Item {
 }
 async fn serve(
     chat: slint::Weak<AppWindow>,
-    mut updates: watch::Receiver<(bool, bool)>,
+    mut updates: watch::Receiver<(bool, bool, String)>,
     sender: mpsc::SyncSender<Registration>,
     stop: CancellationToken,
 ) {
@@ -196,6 +213,7 @@ async fn serve(
         chat,
         visible: true,
         failed: false,
+        connection_status: "ホスト未接続".into(),
         online: online.clone(),
     };
     // Starting may wait for D-Bus; it never blocks the UI or shutdown.
@@ -208,8 +226,8 @@ async fn serve(
             _ = stop.cancelled() => break,
             changed = updates.changed() => {
                 if changed.is_err() { break; }
-                let (visible, failed) = *updates.borrow_and_update();
-                handle.update(|item| { item.visible = visible; item.failed = failed; }).await;
+                let (visible, failed, status) = updates.borrow_and_update().clone();
+                handle.update(|item| { item.visible = visible; item.failed = failed; item.connection_status = status; }).await;
             }
             _ = interval.tick() => {
                 let checked_at = Instant::now();

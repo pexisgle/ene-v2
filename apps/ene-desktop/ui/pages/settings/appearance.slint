@@ -9,9 +9,7 @@ import { AppearanceTypography } from "appearance/typography.slint";
 export component AppearanceView inherits VerticalLayout {
     in property <bool> active;
     in property <bool> compact;
-    out property <length> form-width: body.form-width;
     out property <bool> form-wide: body.form-wide;
-    in-out property <length> scroll-position <=> body.content-y;
     private property <length> retained-scroll;
     changed active => {
         if root.active {

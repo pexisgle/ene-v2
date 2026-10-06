@@ -1,11 +1,15 @@
-use crate::api::{error::ApiError, extractors::ApiQuery, state::App};
+use crate::api::{
+    error::{ApiError, response},
+    extractors::ApiQuery,
+    state::App,
+};
 use axum::{Json, extract::State};
 use ene_api_types::host::{Message, Page};
 use serde::Deserialize;
 use utoipa_axum::{router::OpenApiRouter, routes};
 pub(super) fn router() -> OpenApiRouter<App> {
     OpenApiRouter::new()
-        .routes(routes!(messages))
+        .routes(routes!(messages, post_message))
         .routes(routes!(message))
 }
 #[derive(Deserialize)]
@@ -38,4 +42,21 @@ async fn message(
     crate::api::extractors::ApiPath((c, id)): crate::api::extractors::ApiPath<(String, String)>,
 ) -> Result<Json<Message>, ApiError> {
     Ok(Json(app.application.message(c, id).await?))
+}
+
+#[utoipa::path(post, path = "/", tag = "companions",
+    params(("companion_id" = String, Path), ("Idempotency-Key" = String, Header, min_length = 1, max_length = 200)),
+    request_body = ene_api_types::MessageInput,
+    responses((status = 202, description = "Success", body = ene_api_types::MessageAcceptance))
+)]
+async fn post_message(
+    State(app): State<App>,
+    crate::api::extractors::ApiPath(id): crate::api::extractors::ApiPath<String>,
+    crate::api::extractors::IdempotencyKey(key): crate::api::extractors::IdempotencyKey,
+    crate::api::extractors::ApiJson(input): crate::api::extractors::ApiJson<
+        ene_api_types::host::MessageInput,
+    >,
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+    let value = app.application.accept_message(id, key, input).await?;
+    Ok(response(value))
 }

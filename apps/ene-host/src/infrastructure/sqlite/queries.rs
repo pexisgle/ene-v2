@@ -89,56 +89,84 @@ fn page_budget(
 
 pub(super) fn snapshot(db: &mut Connection) -> Result<StoredSnapshot> {
     let tx = db.transaction()?;
-    let companion: Companion = serde_json::from_str(&meta(&tx, "companion")?)?;
-    let settings: Settings = serde_json::from_str(&meta(&tx, "settings")?)?;
-    let mut messages: BTreeMap<u64, Message> = BTreeMap::new();
-    {
-        let mut query = tx.prepare(
-            "SELECT body FROM messages WHERE companion_id=?1 AND status IN ('queued','streaming')",
-        )?;
-        for body in query.query_map([&companion.id], |r| r.get::<_, String>(0))? {
-            let m: Message = serde_json::from_str(&body?)?;
-            if let Some(user_id) = m.in_reply_to.as_ref() {
-                let body: Option<String> = tx
-                    .query_row(
-                        "SELECT body FROM messages WHERE id=?1 AND companion_id=?2",
-                        params![user_id, companion.id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if let Some(body) = body {
-                    let user: Message = serde_json::from_str(&body)?;
-                    messages.insert(user.sequence, user);
-                }
+    let config = conversation::load(&tx)?;
+    let mut rows: BTreeMap<(String, u64), Message> = BTreeMap::new();
+    // Reserve all active replies and their user inputs before allocating any history.
+    let mut query =
+        tx.prepare("SELECT body FROM messages WHERE status IN ('queued','streaming')")?;
+    for body in query.query_map([], |r| r.get::<_, String>(0))? {
+        let message: Message = serde_json::from_str(&body?)?;
+        if let Some(user) = message.in_reply_to.as_ref() {
+            let body: Option<String> = tx
+                .query_row(
+                    "SELECT body FROM messages WHERE id=?1 AND companion_id=?2",
+                    params![user, message.companion_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(body) = body {
+                let user: Message = serde_json::from_str(&body)?;
+                rows.insert((user.companion_id.clone(), user.sequence), user);
             }
-            messages.insert(m.sequence, m);
         }
+        rows.insert((message.companion_id.clone(), message.sequence), message);
     }
-    let reserved = ene_api_types::budget::encoded_len(
-        &(&companion, &settings, &messages),
+    drop(query);
+    let mut message_cursors = BTreeMap::new();
+
+    // Include worst-case cursor lengths; leave space for runtime capabilities and health.
+    let cursors: BTreeMap<_, _> = config
+        .companions
+        .keys()
+        .map(|id| (id, format!("{}:{id}", i64::MAX)))
+        .collect();
+    let metadata = ene_api_types::budget::encoded_len(
+        &(&config, cursors),
         ene_api_types::budget::MAX_RESPONSE_BYTES,
     )
     .map_err(|_| Error::ResourceLimit)?;
-    let remaining = ene_api_types::budget::MAX_RESPONSE_BYTES
-        .checked_sub(reserved.saturating_add(1024 * 1024))
+    let active = rows
+        .values()
+        .map(|row| {
+            ene_api_types::budget::encoded_len(row, ene_api_types::budget::MAX_RESPONSE_BYTES)
+                .map_err(|_| Error::ResourceLimit)
+                .map(|n| n + 1)
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .sum::<usize>();
+    let mut remaining = ene_api_types::budget::MAX_RESPONSE_BYTES
+        .checked_sub(metadata.saturating_add(active).saturating_add(1024 * 1024))
         .ok_or(Error::ResourceLimit)?;
-    let recent = page_budget(
-        &tx,
-        &companion.id,
-        None,
-        50,
-        remaining.min(MAX_HISTORY_BYTES),
-    )?;
-    for message in recent.items {
-        messages.entry(message.sequence).or_insert(message);
+    let mut companions_left = config.companions.len();
+    for companion in config.companions.values() {
+        let share = (remaining / companions_left.max(1)).min(MAX_HISTORY_BYTES);
+        let recent = page_budget(&tx, &companion.id, None, 50, share)?;
+        for message in recent.items {
+            let key = (message.companion_id.clone(), message.sequence);
+            if let std::collections::btree_map::Entry::Vacant(entry) = rows.entry(key) {
+                remaining = remaining.saturating_sub(
+                    ene_api_types::budget::encoded_len(
+                        &message,
+                        ene_api_types::budget::MAX_RESPONSE_BYTES,
+                    )
+                    .map_err(|_| Error::ResourceLimit)?
+                        + 1,
+                );
+                entry.insert(message);
+            }
+        }
+        message_cursors.insert(companion.id.clone(), recent.next_cursor);
+        companions_left -= 1;
     }
+    let messages = rows.into_values().collect();
     let result = StoredSnapshot {
         host_id: meta(&tx, "host_id")?,
         environment_id: meta(&tx, "environment_id")?,
-        companion,
-        settings,
-        messages: messages.into_values().collect(),
-        next_cursor: recent.next_cursor,
+        companions: config.companions.into_values().collect(),
+        settings: config.settings,
+        messages,
+        message_cursors,
     };
     tx.commit()?;
     Ok(result)

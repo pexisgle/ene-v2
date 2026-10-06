@@ -4,7 +4,18 @@ impl Application {
     pub fn request_quit(&self, ui: &AppWindow) {
         // Capture any edit even if the event-loop's edit notification is pending.
         self.edit_settings(ui);
-        if self.settings.borrow().dirty() || !ui.global::<UiState>().get_draft().trim().is_empty() {
+        if self.settings.borrow().dirty()
+            || ui.global::<UiState>().get_host_dirty()
+            || ui.global::<UiState>().get_host_busy()
+            || !ui.global::<UiState>().get_api_key().is_empty()
+            || ui.global::<UiState>().get_send_pending()
+            || !ui.global::<UiState>().get_draft().trim().is_empty()
+            || self
+                .conversation_drafts
+                .borrow()
+                .values()
+                .any(|text| !text.trim().is_empty())
+        {
             ui.global::<UiState>().set_quit_confirmation(true);
             show(ui);
             ui.invoke_focus_quit();
@@ -12,7 +23,7 @@ impl Application {
             quit();
         }
     }
-    pub(super) fn tray_ready(&self) -> bool {
+    pub(in crate::application) fn tray_ready(&self) -> bool {
         self.registration
             .borrow()
             .as_ref()
@@ -59,6 +70,7 @@ impl Application {
             move || {
                 if let Some(ui) = view.upgrade() {
                     ui.invoke_avatar_events_available();
+                    ui.invoke_host_events_available();
                 }
             },
         );
