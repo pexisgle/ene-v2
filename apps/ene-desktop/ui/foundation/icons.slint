@@ -3,6 +3,9 @@ import { Button, Palette } from "std-widgets.slint";
 export { IconData }
 
 export global Icons {
+    out property <IconData> add: IconSet.Plus;
+    out property <IconData> dropdown: IconSet.ChevronDown;
+    out property <IconData> close: IconSet.X;
     out property <IconData> sun: IconSet.Sun;
     out property <IconData> moon: IconSet.Moon;
     out property <IconData> check: IconSet.Check;
@@ -30,6 +33,7 @@ export global Icons {
     out property <IconData> back: IconSet.ArrowLeft;
     out property <IconData> pause: IconSet.Pause;
     out property <IconData> loop: IconSet.Repeat;
+    out property <IconData> info: IconSet.Info;
 }
 
 export component Icon inherits IconDisplay {
@@ -56,7 +60,7 @@ export component ToolButton inherits Rectangle {
     callback clicked;
     forward-focus: control;
     accessible-role: none;
-    private property <length> tool-size: max(44px, 20px * root.ui-scale + 20px);
+    private property <length> tool-size: max(32px, 16px * root.ui-scale + 12px);
     min-width: root.tool-size;
     max-width: root.tool-size;
     min-height: root.tool-size;
@@ -74,7 +78,7 @@ export component ToolButton inherits Rectangle {
     }
     Icon {
         source: root.icon;
-        width: 20px * root.ui-scale;
+        width: 16px * root.ui-scale;
         height: self.width;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;

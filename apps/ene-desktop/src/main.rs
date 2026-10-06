@@ -1,34 +1,55 @@
 mod application;
-mod chat;
 mod infrastructure;
+mod presentation;
+mod settings;
 
-use application::{Args, bind_avatar, bind_chat, bind_settings, bind_tray};
-use infrastructure::file_picker;
+use application::demo::Mode;
+use infrastructure::{avatar, file_picker, tray};
 use slint::ComponentHandle;
-use std::error::Error;
+use std::{error::Error, rc::Rc};
 slint::include_modules!();
 
 fn main() -> Result<(), Box<dyn Error>> {
     use clap::Parser;
     let mode = Args::parse().mode();
-    let ui = ChatWindow::new()?;
-    let settings = SettingsWindow::new()?;
-    bind_chat(&ui, mode);
-    bind_settings(&ui, &settings);
-    file_picker::bind(&settings);
-
-    let (tray, monitor_timer) = bind_tray(&ui, &settings)?;
-    let (avatar, avatar_timer) = bind_avatar(&ui, &settings, &tray);
+    let ui = AppWindow::new()?;
+    let (tray, registration) = tray::Ui::new(ui.as_weak());
+    let signal = ui.as_weak();
+    let avatar = Rc::new(avatar::Controller::new(move || {
+        let _ = signal.upgrade_in_event_loop(|ui| ui.invoke_avatar_events_available());
+    }));
+    let path = settings::config_path();
+    let initial = settings::ClientSettings::load(&path).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        settings::ClientSettings::default()
+    });
+    let app =
+        application::Application::bind(&ui, mode, path, initial, Some(avatar.clone()), Some(tray));
+    let timers = app.start_services(&ui, registration);
+    file_picker::bind(&ui, &app);
     let run_result = ui.show().and_then(|_| {
-        ui.invoke_focus_input();
-        // Hiding the last window must not stop the client event loop.
+        ui.invoke_focus_entry();
         slint::run_event_loop_until_quit()
     });
-    // Slint can retain timer callback captures after its loop stops. Explicitly
-    // join the supervisor while the UI is still alive, rather than relying on
-    // the last Rc being dropped during process teardown.
     avatar.shutdown();
-    drop((avatar_timer, avatar, monitor_timer, tray, settings));
+    drop((timers, app, avatar));
     run_result?;
     Ok(())
+}
+
+#[derive(Debug, clap::Parser)]
+#[command(about = "ene 会話クライアント")]
+struct Args {
+    /// 固定の仮応答を利用する（外部送信なし）
+    #[arg(long)]
+    demo: bool,
+}
+impl Args {
+    fn mode(self) -> Mode {
+        if self.demo {
+            Mode::Demo
+        } else {
+            Mode::Disconnected
+        }
+    }
 }

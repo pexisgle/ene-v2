@@ -1,9 +1,9 @@
 //! ksni owns registration/reconnection. A separate bounded probe leases hiding.
-use crate::ChatWindow;
+use crate::AppWindow;
 use ksni::TrayMethods;
 use std::{
     cell::RefCell,
-    rc::{Rc, Weak},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -26,7 +26,7 @@ impl Registration {
 }
 type Callback = RefCell<Box<dyn Fn()>>;
 pub struct Ui {
-    actions: [Callback; 6],
+    actions: [Callback; 7],
     state: watch::Sender<(bool, bool)>,
     stop: CancellationToken,
     worker: RefCell<Option<std::thread::JoinHandle<()>>>,
@@ -45,9 +45,7 @@ impl Ui {
     callback!(on_recenter_avatar, 3);
     callback!(on_restart_avatar, 4);
     callback!(on_quit, 5);
-    pub fn as_weak(self: &Rc<Self>) -> Weak<Self> {
-        Rc::downgrade(self)
-    }
+    callback!(on_open_about, 6);
     pub fn set_avatar_visible(&self, visible: bool) {
         self.state.send_if_modified(|state| {
             let changed = state.0 != visible;
@@ -62,7 +60,7 @@ impl Ui {
             changed
         });
     }
-    pub fn new(chat: slint::Weak<ChatWindow>) -> (Rc<Self>, Receiver<Registration>) {
+    pub fn new(chat: slint::Weak<AppWindow>) -> (Rc<Self>, Receiver<Registration>) {
         let (state, updates) = watch::channel((true, false));
         let (sender, receiver) = mpsc::sync_channel(1);
         let stop = CancellationToken::new();
@@ -103,7 +101,7 @@ impl Drop for Ui {
     }
 }
 struct Item {
-    chat: slint::Weak<ChatWindow>,
+    chat: slint::Weak<AppWindow>,
     visible: bool,
     failed: bool,
     online: Arc<AtomicBool>,
@@ -182,12 +180,13 @@ impl ksni::Tray for Item {
             }
             .into(),
             MenuItem::Separator,
+            action("eneについて", 6, true),
             action("eneを終了", 5, true),
         ]
     }
 }
 async fn serve(
-    chat: slint::Weak<ChatWindow>,
+    chat: slint::Weak<AppWindow>,
     mut updates: watch::Receiver<(bool, bool)>,
     sender: mpsc::SyncSender<Registration>,
     stop: CancellationToken,

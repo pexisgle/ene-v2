@@ -1,0 +1,12 @@
+[Unit]
+Description=ene loopback host
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ene-host
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+[Install]
+WantedBy=default.target

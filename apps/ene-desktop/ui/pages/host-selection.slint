@@ -1,0 +1,62 @@
+import { Icons } from "../foundation/icons.slint";
+import { UiState } from "../state/ui-state.slint";
+import { ActionButton } from "../widgets/action-button.slint";
+import { QuietButton } from "../widgets/quiet-button.slint";
+import { BodyText, HintText, SectionTitle } from "../widgets/typography.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
+
+export component HostSelectionView inherits Rectangle {
+    in property <bool> active;
+    in property <bool> embedded;
+    public function focus-entry() {
+        if UiState.demo-mode { demo-start.focus(); }
+        else if !root.embedded { local-settings.focus(); }
+    }
+    VerticalLayout {
+        spacing: 12px;
+        content := ScrollView {
+            min-height: 0px;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding-top: root.embedded ? 0px : max(16px, (content.visible-height - 320px * UiState.scale) / 3);
+                padding-right: 12px;
+                spacing: 20px;
+                SectionTitle { text: root.embedded ? "接続先" : "会話を始める"; font-size: max(24px, UiState.text-size * 1.125px); }
+                BodyText { text: UiState.demo-mode ? "外部に送信せず、会話やキャラクターの表示を試せます。" : "会話を保存する場所を選びます。接続先はあとから設定で変更できます。"; }
+                Rectangle {
+                    background: Palette.alternate-background;
+                    border-radius: 12px;
+                    min-height: card.min-height;
+                    card := VerticalLayout {
+                        padding: 20px; spacing: 12px;
+                        SectionTitle { text: UiState.demo-mode ? "デモ" : "このPC"; }
+                        HintText { text: UiState.demo-mode ? "会話は保存されません。" : "この段階のクライアントはホスト接続に未対応です。"; }
+                        demo-start := ActionButton {
+                            visible: UiState.demo-mode;
+                            enabled: root.active && UiState.demo-mode;
+                            primary: true;
+                            text: UiState.session-active ? "会話に戻る" : "試してみる";
+                            clicked => { UiState.start-demo(); }
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            visible: !root.embedded;
+            spacing: 8px;
+            local-settings := QuietButton {
+                icon: Icons.settings; text: "設定";
+                enabled: root.active && !root.embedded;
+                clicked => { UiState.category = 0; UiState.navigate(1); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            QuietButton {
+                text: "終了"; enabled: root.active && !root.embedded;
+                clicked => { UiState.request-quit(); }
+            }
+        }
+    }
+}

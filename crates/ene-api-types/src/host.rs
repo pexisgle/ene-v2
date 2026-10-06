@@ -103,6 +103,65 @@ pub struct Snapshot {
     pub questions: Vec<Value>,
     pub settings: Settings,
     pub grants: Vec<DataTransferGrant>,
+    #[serde(default)]
+    pub health: HostHealth,
+}
+
+impl Snapshot {
+    /// Preserve active replies and complete text; trim history only through cursors.
+    pub fn bound_response(&mut self) -> Result<(), serde_json::Error> {
+        use crate::budget::{MAX_RESPONSE_BYTES, encoded_len};
+        let essential: std::collections::HashSet<_> = self
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::Queued | MessageStatus::Streaming))
+            .flat_map(|m| std::iter::once(m.id.clone()).chain(m.in_reply_to.clone()))
+            .collect();
+        while encoded_len(self, MAX_RESPONSE_BYTES).is_err() {
+            let Some((index, _)) = self
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| !essential.contains(&m.id))
+                .min_by_key(|(_, m)| m.sequence)
+            else {
+                return encoded_len(self, MAX_RESPONSE_BYTES).map(|_| ());
+            };
+            let removed = self.messages.remove(index);
+            let sequence = removed
+                .sequence
+                .checked_add(1)
+                .filter(|sequence| *sequence <= i64::MAX as u64)
+                .ok_or_else(|| serde_json::Error::io(std::io::Error::other("resource_limit")))?;
+            let cursor = format!("{}:{}", sequence, removed.companion_id);
+            let current = self
+                .message_cursors
+                .entry(removed.companion_id)
+                .or_default();
+            let old = current
+                .as_deref()
+                .and_then(|cursor| cursor.split_once(':'))
+                .and_then(|(seq, _)| seq.parse::<u64>().ok());
+            if old.is_none_or(|seq| seq <= removed.sequence) {
+                *current = Some(cursor);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct HostHealth {
+    /// Missing on older hosts. Clients must not infer health from grants.
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub recovery_required: bool,
+    #[serde(default)]
+    pub stopping: bool,
+    #[serde(default)]
+    pub credential_cleanup_pending: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -228,6 +287,7 @@ pub struct CheckInput {
 /// Provider-independent model reference. IDs are opaque and must be URL-encoded.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ModelAssignment {
     pub connection_id: String,
     pub model_id: String,

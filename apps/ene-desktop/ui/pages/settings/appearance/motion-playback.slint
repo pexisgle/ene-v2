@@ -1,0 +1,46 @@
+import { Icons } from "../../../foundation/icons.slint";
+import { UiState } from "../../../state/ui-state.slint";
+import { ActionButton } from "../../../widgets/action-button.slint";
+import { SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
+import { BodyText, HintText } from "../../../widgets/typography.slint";
+import { CheckBox } from "std-widgets.slint";
+
+export component MotionPlayback inherits SettingsSection {
+    in property <bool> editing;
+    in property <bool> form-wide;
+    in property <bool> playback-enabled;
+    playback-label-measure := Text { visible: false; text: "一時停止"; }
+    title: "モーションの再生";
+    SettingsSupplement {
+        wide: root.form-wide;
+        spacing: 12px;
+        BodyText {
+            text: UiState.motion-failed ? UiState.motion-status : !UiState.avatar-visible ? "非表示のため休止中" : UiState.motion-status == "" ? "状態を確認中…" : UiState.motion-status;
+            accessible-live-region: polite;
+        }
+        HorizontalLayout {
+            spacing: 12px; vertical-stretch: 0;
+            ActionButton {
+                text: UiState.motion-playing ? "一時停止" : "再生";
+                icon: UiState.motion-playing ? Icons.pause : Icons.motion;
+                // Keep the controls still when the action changes.
+                min-width: playback-label-measure.preferred-width + 24px + 16px * UiState.scale + 8px;
+                max-width: self.min-width;
+                enabled: root.playback-enabled;
+                scroll-to-focus: true;
+                clicked => { UiState.set-motion-playing(!UiState.motion-playing); }
+            }
+            CheckBox {
+                text: "繰り返し";
+                min-height: UiState.control-height;
+                horizontal-stretch: 0;
+                checked: UiState.motion-loop;
+                enabled: root.playback-enabled;
+                changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+                toggled => { UiState.set-motion-loop(self.checked); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if UiState.settings-draft.motion != UiState.motion-saved : HintText { text: "モーションの変更を保存すると再生できます。"; }
+    }
+}

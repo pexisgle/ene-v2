@@ -1,0 +1,92 @@
+import { Icons } from "../../../foundation/icons.slint";
+import { UiState } from "../../../state/ui-state.slint";
+import { QuietButton } from "../../../widgets/quiet-button.slint";
+import { SettingField } from "../../../widgets/settings/field.slint";
+import { SettingsActions, SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
+import { BodyText } from "../../../widgets/typography.slint";
+import { SizeControl } from "../appearance-controls.slint";
+import { ComboBox } from "std-widgets.slint";
+
+export component AvatarDisplay inherits SettingsSection {
+    in property <bool> editing;
+    in property <bool> form-wide;
+    callback reveal-error(length);
+    public function focus-invalid() {
+        root.reveal-error(size-field.absolute-position.y);
+        size-edit.focus();
+    }
+    title: "デスクトップ表示";
+    SettingsActions {
+        wide: root.form-wide;
+        QuietButton {
+            icon-only: false;
+            scroll-to-focus: true;
+            enabled: root.editing;
+            icon: UiState.avatar-visible ? Icons.eye-off : Icons.eye;
+            text: UiState.avatar-visible ? "非表示" : "表示する";
+            clicked => {
+                UiState.toggle-avatar();
+            }
+        }
+        QuietButton {
+            icon-only: false;
+            scroll-to-focus: true;
+            enabled: root.editing;
+            icon: Icons.center;
+            text: "中央に戻す";
+            clicked => {
+                UiState.recenter-avatar();
+            }
+        }
+        if UiState.avatar-failed : QuietButton {
+            icon-only: false;
+            scroll-to-focus: true;
+            enabled: root.editing;
+            icon: Icons.refresh;
+            text: "再起動";
+            clicked => {
+                UiState.restart-avatar();
+            }
+        }
+    }
+    if UiState.avatar-failed : SettingsSupplement { wide: root.form-wide; BodyText { text: UiState.avatar-status; } }
+    size-field := SettingField {
+        label: "大きさ";
+        wide: root.form-wide;
+        size-edit := SizeControl {
+            ui-scale: UiState.scale;
+            changed has-focus => {
+                if self.has-focus {
+                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                }
+            }
+            enabled: root.editing;
+            width: parent.control-width;
+            height: UiState.control-height;
+            text <=> UiState.settings-draft.size-text;
+            edited => {
+                UiState.settings-edited();
+            }
+        }
+    }
+    SettingField {
+        label: "描画速度";
+        wide: root.form-wide;
+        ComboBox {
+            changed has-focus => {
+                if self.has-focus {
+                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                }
+            }
+            enabled: root.editing;
+            accessible-label: "描画速度";
+            width: parent.control-width;
+            height: UiState.control-height;
+            model: ["30 fps", "60 fps"];
+            current-index <=> UiState.settings-draft.fps-index;
+            selected => {
+                UiState.settings-edited();
+            }
+        }
+    }
+}

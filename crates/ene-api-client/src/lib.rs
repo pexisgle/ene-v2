@@ -1,9 +1,13 @@
 //! Typed REST API v1 client with authenticated, bounded event subscriptions.
-//! No implicit mutation retries: retain the same `IdempotencyKey` and input when
-//! an acceptance is uncertain. Subscribe, fetch a snapshot, then apply buffered
-//! notifications with `ene_api_types::sync::Replica`.
+//! SyncedSession owns bounded snapshots, notification application and history
+//! reconciliation even when callers cancel a wait. Mutations require explicit retries.
 mod events;
+pub mod session;
+pub use session::{SessionIdentity, SyncedSession};
+#[cfg(test)]
+mod session_tests;
 pub use ene_api_types as types;
+use ene_api_types::sync::Replica;
 use ene_api_types::{
     host::*,
     provider::{Model, ProviderInfo},
@@ -19,7 +23,7 @@ use url::Url;
 
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid API endpoint or Bearer token")]
     InvalidConnection,
@@ -33,8 +37,14 @@ pub enum Error {
     Api(ApiFailure),
     #[error("invalid or oversized API response")]
     Protocol,
+    #[error("subscription must be resynchronized")]
+    ResyncRequired,
+    #[error("loaded conversation exceeds the client memory limit")]
+    ResourceLimit,
+    #[error("client command queue is full")]
+    Busy,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ApiFailure {
     pub status: u16,
     pub body: ApiErrorBody,

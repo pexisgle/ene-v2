@@ -1,3 +1,53 @@
-fn main() {
-    println!("ene-host: development scaffold (host functionality is not implemented yet).");
+mod api;
+mod bootstrap;
+mod infrastructure;
+
+use clap::Parser;
+use std::error::Error;
+use tokio::net::TcpListener;
+
+#[derive(Parser)]
+#[command(
+    about = "ene local host",
+    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. Chat is not enabled yet."
+)]
+struct Args {
+    /// Export the generated OpenAPI contract without starting a host or opening its database.
+    #[arg(long)]
+    print_openapi: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    if args.print_openapi {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&api::openapi::specification())?
+        );
+        return Ok(());
+    }
+    let (runtime, app) = bootstrap::initialize().await?;
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    runtime.publish(format!("http://{}/v1", listener.local_addr()?))?;
+    eprintln!("ene-host: loopback service ready (history and notifications; chat not yet enabled)");
+    let shutdown = app.shutdown.clone();
+    axum::serve(listener, api::router(app))
+        .with_graceful_shutdown(async move {
+            #[cfg(unix)]
+            {
+                if let Ok(mut terminate) =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                {
+                    tokio::select! {_=tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{}}
+                    shutdown.send_replace(true);
+                    return;
+                }
+            }
+            let _ = tokio::signal::ctrl_c().await;
+            shutdown.send_replace(true);
+        })
+        .await?;
+    drop(runtime);
+    Ok(())
 }
