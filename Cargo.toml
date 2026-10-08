@@ -10,3 +10,9 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

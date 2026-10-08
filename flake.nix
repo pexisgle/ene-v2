@@ -2,13 +2,19 @@
   description = "ene Rust development environment";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs.rust-overlay = {
+    url = "github:oxalica/rust-overlay";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
-  outputs = { nixpkgs, ... }:
+  outputs = { nixpkgs, rust-overlay, ... }:
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs { inherit system; };
-      toolchain = (fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain;
-      rustComponents = with pkgs; [ rustc cargo rustfmt clippy ];
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ rust-overlay.overlays.default ];
+      };
+      rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       desktopLibraries = with pkgs; [
         fontconfig
         libxkbcommon
@@ -19,12 +25,10 @@
     in
     {
       devShells.${system}.default =
-        assert pkgs.lib.assertMsg
-          (builtins.all (component: component.version == toolchain.channel) rustComponents)
-          "Nix Rust, Cargo, rustfmt and Clippy must match rust-toolchain.toml";
         pkgs.mkShell {
-          packages = rustComponents ++ (with pkgs; [
-            rust-analyzer
+          packages = [ rustToolchain ] ++ (with pkgs; [
+            clang
+            lld
             pkg-config
             python3
             git
@@ -33,7 +37,7 @@
 
           buildInputs = desktopLibraries;
 
-          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
 
           # Winit and WGPU load some libraries dynamically; use the host GPU driver.
           shellHook = ''
