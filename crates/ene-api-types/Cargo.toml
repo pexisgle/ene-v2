@@ -1,0 +1,21 @@
+[package]
+name = "ene-api-types"
+description = "Generated ene Connect contract, storage compatibility types, and synchronization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[features]
+default = []
+rpc = ["dep:buffa", "dep:connectrpc", "dep:connectrpc-build", "dep:protoc-bin-vendored"]
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+buffa = { workspace = true, optional = true }
+connectrpc = { workspace = true, optional = true }
+
+[build-dependencies]
+connectrpc-build = { version = "0.9", optional = true }
+protoc-bin-vendored = { version = "3", optional = true }
