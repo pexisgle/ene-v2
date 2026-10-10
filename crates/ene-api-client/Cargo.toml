@@ -1,0 +1,27 @@
+[package]
+name = "ene-api-client"
+description = "Authenticated Connect RPC v1 client and audio WebSocket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[dependencies]
+ene-api-types = { workspace = true, features = ["rpc"] }
+connectrpc = { workspace = true, features = ["client-tls"] }
+buffa.workspace = true
+base64.workspace = true
+http.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+tokio = { workspace = true, default-features = true, features = ["rt", "rt-multi-thread", "io-util", "net", "process"] }
+futures-util = { workspace = true, features = ["sink"] }
+thiserror.workspace = true
+serde_json.workspace = true
+url.workspace = true
+[dev-dependencies]
+serde.workspace = true
+async-stream.workspace = true
+axum.workspace = true
