@@ -1,0 +1,122 @@
+import { Icons } from "../../foundation/icons.slint";
+import { Theme } from "../../foundation/theme.slint";
+import { UiState } from "../../state/ui-state.slint";
+import { ActionButton } from "../action-button.slint";
+import { BodyText, SectionTitle } from "../typography.slint";
+import { SettingsFooter } from "footer.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
+
+export component SettingsHeading inherits SectionTitle {
+    min-height: max(UiState.control-height, UiState.text-size * 1.5px);
+    vertical-alignment: center;
+}
+
+export component SettingsPage inherits Rectangle {
+    in property <string> title;
+    in property <bool> active;
+    in property <bool> compact;
+    in property <bool> dirty;
+    in property <bool> busy;
+    in property <bool> error;
+    in property <string> feedback;
+    in property <string> notice;
+    in property <bool> notice-error;
+    in property <bool> error-action;
+    in property <bool> can-save;
+    in property <bool> live;
+    in property <bool> can-reset;
+    in-out property <length> content-y <=> body.content-y;
+    out property <length> content-height: body.content-height;
+    out property <length> visible-height: body.visible-height;
+    out property <length> visible-width: body.visible-width;
+    out property <length> form-width: max(0px, body.visible-width - 12px);
+    out property <bool> form-wide: root.form-width >= 560px * UiState.scale;
+    callback save;
+    callback reset;
+    callback show-error;
+    public function reveal-item(y: length, h: length) {
+        if y < body.absolute-position.y {
+            body.content-y = min(0px, body.content-y + body.absolute-position.y - y);
+        } else if y + h > body.absolute-position.y + body.visible-height {
+            body.content-y = max(min(0px, body.visible-height - body.content-height), body.content-y - (y + h - body.absolute-position.y - body.visible-height));
+        }
+    }
+    VerticalLayout {
+        spacing: 8px;
+        body := ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start; spacing: 12px;
+                padding: 0px; padding-right: 12px;
+                if root.title != "" : SettingsHeading {
+                    text: root.title;
+                }
+                VerticalLayout {
+                    alignment: start; spacing: 24px;
+                    @children
+                }
+            }
+        }
+        if root.notice != "" : Rectangle {
+            height: min(96px * UiState.scale, max(40px, notice-content.min-height));
+            vertical-stretch: 0;
+            background: Palette.alternate-background;
+            ScrollView {
+                content-width: self.visible-width;
+                horizontal-scrollbar-policy: always-off;
+                notice-content := VerticalLayout {
+                    padding: 12px;
+                    BodyText { text: root.notice; color: root.notice-error ? Theme.danger : Palette.foreground; accessible-live-region: polite; }
+                }
+            }
+        }
+        if root.error-action : HorizontalLayout {
+            vertical-stretch: 0;
+            ActionButton { text: "エラーの詳細"; icon: Icons.settings; enabled: root.active; clicked => { root.show-error(); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        SettingsFooter {
+            compact: root.compact; dirty: root.dirty; busy: root.busy;
+            error: root.error; feedback: root.feedback;
+            can-save: root.can-save; can-reset: root.can-reset; live: root.live;
+            save => { root.save(); }
+            reset => { root.reset(); }
+        }
+    }
+}
+
+export component SettingsSection inherits Rectangle {
+    in property <string> title;
+    min-height: section.min-height;
+    vertical-stretch: 0;
+    section := VerticalLayout {
+        alignment: start; spacing: 12px;
+        if root.title != "" : SettingsHeading {
+            text: root.title;
+        }
+        @children
+    }
+}
+
+export component SettingsSupplement inherits Rectangle {
+    in property <bool> wide;
+    in property <length> spacing: 8px;
+    min-height: content.min-height;
+    vertical-stretch: 0;
+    content := VerticalLayout {
+        alignment: start; spacing: root.spacing;
+        padding-left: root.wide ? UiState.settings-label-width + UiState.settings-field-gap : 0px;
+        @children
+    }
+}
+
+export component SettingsActions inherits HorizontalLayout {
+    in property <bool> wide;
+    spacing: 8px;
+    padding-left: root.wide ? UiState.settings-label-width + UiState.settings-field-gap : 0px;
+    vertical-stretch: 0;
+    @children
+    Rectangle { horizontal-stretch: 1; }
+}

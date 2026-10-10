@@ -1,0 +1,131 @@
+import { Palette, ScrollView } from "std-widgets.slint";
+
+export component MessageInput inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> font-family <=> input.font-family;
+    in property <length> font-size <=> input.font-size;
+    in property <string> placeholder-text;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback submit;
+    private property <bool> composing;
+    private property <bool> ime-settling;
+    Timer {
+        interval: 150ms;
+        running: root.ime-settling;
+        triggered => {
+            root.ime-settling = false;
+        }
+    }
+    in property <bool> active: true;
+    forward-focus: input;
+    background: transparent;
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "切り取り";
+                activated => {
+                    input.cut();
+                }
+            }
+            MenuItem {
+                title: "コピー";
+                activated => {
+                    input.copy();
+                }
+            }
+            MenuItem {
+                title: "貼り付け";
+                activated => {
+                    input.paste();
+                }
+            }
+            MenuItem {
+                title: "すべて選択";
+                activated => {
+                    input.select-all();
+                }
+            }
+        }
+        scroll := ScrollView {
+            x: 10px;
+            y: 0px;
+            width: parent.width - 20px;
+            height: parent.height;
+            content-width: self.visible-width;
+            content-height: max(self.visible-height, input.preferred-height);
+            input := TextInput {
+                width: scroll.visible-width;
+                height: max(scroll.visible-height, self.preferred-height);
+                single-line: false;
+                enabled: root.active;
+                accessible-label: "メッセージ";
+                wrap: word-wrap;
+                vertical-alignment: center;
+                color: Palette.foreground;
+                selection-background-color: Palette.selection-background;
+                selection-foreground-color: Palette.selection-foreground;
+                page-height: scroll.visible-height;
+                edited => {
+                    root.edited(self.text);
+                }
+                changed preedit-text => {
+                    if self.preedit-text != "" {
+                        root.composing = true;
+                        root.ime-settling = false;
+                    }
+                    else if root.composing {
+                        root.composing = false;
+                        // Some IMEs finish composition before forwarding Enter.
+                        // Key release clears this; a short fallback also covers
+                        // confirmation by mouse or IMEs consuming the release.
+                        root.ime-settling = true;
+                    }
+                }
+                key-released(event) => {
+                    if event.text == Key.Return {
+                        root.ime-settling = false;
+                    }
+                    return reject;
+                }
+                key-pressed(event) => {
+                    if event.text == Key.Return {
+                        // An IME confirmation is never a send or a newline.
+                        if self.preedit-text != "" || root.ime-settling {
+                            return accept;
+                        }
+                        if !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
+                            if !event.repeat {
+                                root.submit();
+                            }
+                            return accept;
+                        }
+                    }
+                    return reject;
+                }
+                cursor-position-changed(pos) => {
+                    if pos.y + scroll.content-y < 0px {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, -pos.y));
+                    }
+                    else if pos.y + scroll.content-y > scroll.visible-height - root.font-size {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, scroll.visible-height - pos.y - root.font-size));
+                    }
+                }
+            }
+        }
+    }
+    Text {
+        x: scroll.x;
+        y: scroll.y;
+        width: scroll.width;
+        height: scroll.height;
+        vertical-alignment: center;
+        text: root.text == "" && input.preedit-text == "" ? root.placeholder-text : "";
+        font-family: root.font-family;
+        font-size: root.font-size;
+        color: Palette.foreground;
+        opacity: 0.6;
+        overflow: elide;
+        accessible-role: none;
+    }
+}

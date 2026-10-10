@@ -10,8 +10,14 @@ fmt-check:
 check:
     cargo check --workspace --all-targets --all-features --locked
 
+check-package package:
+    cargo check -p "{{ package }}" --all-targets --all-features --locked
+
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+clippy-package package:
+    cargo clippy -p "{{ package }}" --all-targets --all-features --locked -- -D warnings
 
 test:
     cargo test --workspace --all-features --locked
@@ -26,4 +32,15 @@ run-host:
     cargo run --locked -p ene-host
 
 run-desktop:
+    cargo build --locked -p ene-avatar -p ene-host
     cargo run --locked -p ene-desktop
+
+run-demo:
+    cargo build --locked -p ene-avatar -p ene-host
+    cargo run --locked -p ene-desktop -- --demo
+
+fetch-assets asset="all":
+    python3 scripts/fetch-assets.py "{{ asset }}"
+
+run-avatar:
+    cargo run --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm"

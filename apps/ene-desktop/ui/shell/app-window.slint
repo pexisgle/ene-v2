@@ -1,0 +1,112 @@
+import { Icons } from "../foundation/icons.slint";
+import { ConversationView } from "../pages/conversation/view.slint";
+import { HostSelectionView } from "../pages/host-selection.slint";
+import { SettingsView } from "../pages/settings/view.slint";
+import { UiState } from "../state/ui-state.slint";
+import { QuietButton } from "../widgets/quiet-button.slint";
+import { BodyText } from "../widgets/typography.slint";
+import { QuitConfirmation } from "quit-confirmation.slint";
+import { Palette } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    callback host-events-available;
+    title: "ene";
+    preferred-width: 900px;
+    preferred-height: 760px;
+    min-width: 420px;
+    min-height: 480px;
+    init => { UiState.window-height = root.height; }
+    changed height => { UiState.window-height = root.height; }
+    background: Palette.background;
+    default-font-family: UiState.font-family;
+    default-font-size: UiState.text-size * 1px;
+    callback tray-action(int);
+    callback file-selection-ready(string, bool, string, bool, bool);
+    callback avatar-events-available;
+    Timer {
+        interval: 1s;
+        running: !UiState.demo-mode;
+        triggered => {
+            if UiState.connection-phase == 3 { UiState.retry-seconds = max(0, UiState.retry-seconds - 1); }
+            UiState.runtime-age = min(86400, UiState.runtime-age + 1);
+        }
+    }
+    private property <length> measured-width: 900px;
+    changed width => {
+        root.measured-width = self.width;
+    }
+    out property <length> layout-padding: root.measured-width < 680px * UiState.scale ? 12px : root.measured-width < 1280px * UiState.scale ? 20px : 32px;
+    out property <bool> compact: root.measured-width - 2 * root.layout-padding < 640px * UiState.scale;
+    public function focus-entry() {
+        if UiState.quit-confirmation { quit-panel.focus-return(); }
+        else if UiState.host-selection-visible { host-selection.focus-entry(); }
+        else if UiState.page == 0 { conversation.focus-input(); }
+        else { settings.focus-entry(); }
+    }
+    public function focus-input() {
+        conversation.focus-input();
+    }
+    public function prepare-history-prepend() { conversation.prepare-history-prepend(); }
+    public function scroll-to-latest() {
+        conversation.scroll-to-latest();
+    }
+    public function focus-settings() {
+        settings.focus-entry();
+    }
+    public function reveal-settings-item(y: length, h: length) {
+        settings.reveal-item(y, h);
+    }
+    public function focus-quit() {
+        quit-panel.focus-return();
+    }
+    public function focus-error() {
+        settings.focus-error();
+    }
+    Rectangle {
+        width: min(root.width, (UiState.page == 1 ? 1024px : 1680px) * UiState.scale + 2 * root.layout-padding);
+        x: (root.width - self.width) / 2;
+        min-height: 0px;
+        shell := VerticalLayout {
+            padding: root.layout-padding;
+            spacing: 8px;
+            if !UiState.host-selection-visible && UiState.page == 1 : HorizontalLayout {
+                spacing: 12px;
+                QuietButton {
+                    text: UiState.session-active ? "会話に戻る" : "戻る";
+                    icon: Icons.back;
+                    enabled: !UiState.quit-confirmation;
+                    clicked => { UiState.navigate(0); }
+                }
+                if UiState.category != 4 : BodyText { text: "設定"; font-weight: 600; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                host-selection := HostSelectionView {
+                    width: min(parent.width, 600px * UiState.scale);
+                    x: (parent.width - self.width) / 2;
+                    visible: UiState.host-selection-visible;
+                    active: UiState.host-selection-visible && !UiState.quit-confirmation;
+                }
+                conversation := ConversationView {
+                    width: min(parent.width, (UiState.companion-names.length > 1 && parent.width >= 1120px * UiState.scale ? 1044px : 800px) * UiState.scale);
+                    x: (parent.width - self.width) / 2;
+                    visible: !UiState.host-selection-visible && UiState.page == 0;
+                    active: !UiState.host-selection-visible && UiState.page == 0 && !UiState.quit-confirmation;
+                    compact: root.compact;
+                }
+                settings := SettingsView {
+                    width: parent.width;
+                    x: 0px;
+                    visible: !UiState.host-selection-visible && UiState.page == 1;
+                    active: !UiState.host-selection-visible && UiState.page == 1 && !UiState.quit-confirmation;
+                    compact: root.compact;
+                }
+            }
+        }
+    }
+    quit-panel := QuitConfirmation {
+        visible: UiState.quit-confirmation;
+        active: UiState.quit-confirmation;
+    }
+}

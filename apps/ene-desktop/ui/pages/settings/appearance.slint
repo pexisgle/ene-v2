@@ -1,0 +1,83 @@
+import { UiState } from "../../state/ui-state.slint";
+import { SettingsPage } from "../../widgets/settings/page.slint";
+import { ActionButton } from "../../widgets/action-button.slint";
+import { BodyText } from "../../widgets/typography.slint";
+import { AvatarAssets } from "appearance/avatar-assets.slint";
+import { AvatarDisplay } from "appearance/avatar-display.slint";
+import { MotionPlayback } from "appearance/motion-playback.slint";
+import { AppearanceTypography } from "appearance/typography.slint";
+
+export component AppearanceView inherits VerticalLayout {
+    in property <bool> active;
+    in property <bool> compact;
+    out property <bool> form-wide: body.form-wide;
+    private property <length> retained-scroll;
+    changed active => {
+        if root.active {
+            body.content-y = max(min(0px, body.visible-height - body.content-height), root.retained-scroll);
+        }
+        else {
+            root.retained-scroll = body.content-y;
+        }
+    }
+    private property <bool> editing: root.active && UiState.category == 0;
+    private property <bool> playback-enabled: root.editing && UiState.motion-configured && UiState.settings-draft.motion == UiState.motion-saved;
+    public function reveal-item(y: length, item-height: length) {
+        if !root.editing { return; }
+        body.reveal-item(y, item-height);
+    }
+    function reveal-error(y: length) {
+        body.content-y = min(0px, max(body.visible-height - body.content-height, body.content-y - (y - body.absolute-position.y)));
+    }
+    public function focus-error() {
+        if UiState.error-field == "size" { avatar-display.focus-invalid(); }
+        else if UiState.error-field == "font" { typography.focus-invalid(); }
+        else { body.content-y = 0px; }
+    }
+
+    spacing: 8px;
+    body := SettingsPage {
+        title: "外観";
+        live: true;
+        active: root.editing;
+        compact: root.compact;
+        dirty: UiState.settings-dirty;
+        feedback: UiState.save-status;
+        error-action: UiState.apply-error != "";
+        can-reset: false;
+        can-save: false;
+        reset => { UiState.reset-settings(); }
+        save => { UiState.save-settings(); }
+        show-error => { root.focus-error(); }
+        VerticalLayout {
+            alignment: start; spacing: 12px;
+            if UiState.save-failed : ActionButton {
+                text: "保存を再試行"; enabled: root.editing;
+                clicked => { UiState.save-settings(); }
+            }
+            padding: 0px;
+            if UiState.apply-error != "" : BodyText {
+                text: UiState.apply-error;
+                accessible-live-region: polite;
+            }
+            VerticalLayout {
+                alignment: start; spacing: 24px;
+                typography := AppearanceTypography {
+                    editing: root.editing; form-wide: root.form-wide;
+                    reveal-error(y) => { root.reveal-error(y); }
+                }
+                avatar-display := AvatarDisplay {
+                    editing: root.editing; form-wide: root.form-wide;
+                    reveal-error(y) => { root.reveal-error(y); }
+                }
+                avatar-assets := AvatarAssets {
+                    editing: root.editing; form-wide: root.form-wide;
+                }
+                motion-playback := MotionPlayback {
+                    editing: root.editing; form-wide: root.form-wide;
+                    playback-enabled: root.playback-enabled;
+                }
+            }
+        }
+    }
+}

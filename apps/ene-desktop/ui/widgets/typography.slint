@@ -1,0 +1,19 @@
+import { Theme } from "../foundation/theme.slint";
+import { UiState } from "../state/ui-state.slint";
+import { Palette } from "std-widgets.slint";
+
+export component BodyText inherits Text {
+    wrap: word-wrap;
+    color: Palette.foreground;
+    font-size: UiState.text-size * 1px;
+    vertical-stretch: 0;
+}
+
+export component HintText inherits BodyText {
+    color: Theme.muted;
+    font-size: max(12px, UiState.text-size * 0.8px);
+}
+
+export component SectionTitle inherits BodyText {
+    font-weight: 600;
+}

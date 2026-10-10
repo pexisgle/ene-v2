@@ -1,0 +1,89 @@
+import { UiState } from "../../../state/ui-state.slint";
+import { SearchSelect } from "../../../widgets/search-select.slint";
+import { SettingField } from "../../../widgets/settings/field.slint";
+import { SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
+import { BodyText, HintText } from "../../../widgets/typography.slint";
+import { ThemePicker } from "../appearance-controls.slint";
+import { SpinBox } from "std-widgets.slint";
+
+export component AppearanceTypography inherits SettingsSection {
+    in property <bool> editing;
+    in property <bool> form-wide;
+    callback reveal-error(length);
+    public function focus-invalid() {
+        root.reveal-error(font-field.absolute-position.y);
+        font-edit.focus();
+    }
+    if UiState.companion-names.length > 1 : HintText { text: "このPCの表示設定です。会話相手を切り替えても共通です。"; }
+    SettingField {
+        label: "テーマ";
+        wide: root.form-wide;
+        ThemePicker {
+            ui-scale: UiState.scale;
+            height: UiState.control-height;
+            width: parent.control-width;
+            enabled: root.editing;
+            current-index <=> UiState.settings-draft.theme-index;
+            changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+            edited => { UiState.settings-edited(); }
+        }
+    }
+    font-field := SettingField {
+        label: "フォント";
+        wide: root.form-wide;
+        font-edit := SearchSelect {
+            opening => { UiState.reveal-settings-item(self.absolute-position.y, self.height); }
+            changed has-focus => {
+                if self.has-focus {
+                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                }
+            }
+            enabled: root.editing;
+            label: "フォント";
+            width: parent.control-width;
+            height: UiState.control-height;
+            model: UiState.font-families;
+            current-value <=> UiState.settings-draft.font-family;
+            selected => {
+                UiState.settings-edited();
+            }
+        }
+    }
+    if UiState.font-error != "" : SettingsSupplement { wide: root.form-wide; BodyText { text: UiState.font-error; accessible-live-region: polite; } }
+    if UiState.missing-font != "" && UiState.settings-draft.font-family == UiState.missing-font : SettingsSupplement { wide: root.form-wide; HintText { text: "保存済みのフォントが見つかりません。代替フォントで表示します。"; } }
+    SettingField {
+        label: "文字サイズ";
+        wide: root.form-wide;
+        SpinBox {
+            changed has-focus => {
+                if self.has-focus {
+                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                }
+            }
+            enabled: root.editing;
+            accessible-label: "文字サイズ";
+            width: parent.control-width;
+            height: UiState.control-height;
+            minimum: 12;
+            maximum: 28;
+            value <=> UiState.settings-draft.text-size;
+            edited => {
+                UiState.settings-edited();
+            }
+        }
+    }
+    SettingField {
+        label: "プレビュー";
+        wide: root.form-wide;
+        content-height: max(UiState.control-height, font-preview.preferred-height);
+        font-preview := BodyText {
+            width: parent.control-width;
+            height: max(UiState.control-height, self.preferred-height);
+            vertical-alignment: center;
+            text: "あいうえお · Aa 0123";
+            font-family: UiState.settings-draft.font-family;
+            font-size: UiState.settings-draft.text-size * 1px;
+            accessible-label: "フォントのプレビュー";
+        }
+    }
+}

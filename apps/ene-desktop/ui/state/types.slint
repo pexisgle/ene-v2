@@ -1,0 +1,13 @@
+
+
+export struct ChatEntry {
+    author: string, body: string, provisional: bool, state: int, outgoing: bool
+}
+
+export struct ProviderField {key:string,label:string,kind:int,value:string,checked:bool,choices:[string]}
+
+export struct SettingsDraft {
+    font-family: string, text-size: int, theme-index: int,
+    model: string, motion: string, motion-playing: bool, motion-loop: bool,
+    fps-index: int, size-text: string,
+}
