@@ -1,0 +1,22 @@
+[package]
+name = "ene-provider-openrouter"
+description = "OpenRouter provider plugin using the host HTTP broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ene-ipc = { workspace = true, features = ["provider-plugin"] }
+tokio = { workspace = true, default-features = true, features = ["rt", "rt-multi-thread", "io-util", "net", "process", "io-std"] }
+serde_json.workspace = true
+
+eventsource-stream = "0.2"
+futures-util.workspace = true
+futures-channel = "0.3"
+
+[dev-dependencies]
+tokio-util.workspace = true
