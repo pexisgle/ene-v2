@@ -12,10 +12,13 @@ publish = false
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.dependencies]
+ene-api-client = { path = "crates/ene-api-client" }
 ene-api-types = { path = "crates/ene-api-types" }
 ene-core = { path = "crates/ene-core" }
+ene-outbound = { path = "crates/ene-outbound" }
 ene-ipc = { path = "crates/ene-ipc" }
 async-stream = "0.3"
+atomic-write-file = { version = "0.3", features = ["unnamed-tmpfile"] }
 axum = "0.8"
 base64 = "0.23"
 bytes = "1"
@@ -35,6 +38,7 @@ tokio = { version = "1", default-features = false, features = ["macros", "sync",
 tokio-util = { version = "0.7", features = ["rt"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+xdg = "3"
 
 [profile.dev]
 opt-level = 1
