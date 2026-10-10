@@ -13,20 +13,26 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.dependencies]
 ene-api-types = { path = "crates/ene-api-types" }
+ene-core = { path = "crates/ene-core" }
 async-stream = "0.3"
 axum = "0.8"
 base64 = "0.23"
+bytes = "1"
 buffa = { version = "0.9", features = ["json"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 http = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", default-features = false, features = ["macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [profile.dev]
 opt-level = 1
