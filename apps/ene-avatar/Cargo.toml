@@ -1,0 +1,37 @@
+[package]
+name = "ene-avatar"
+description = "VRM 1.0 Wayland companion renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+dev-dynamic-linking = ["bevy/dynamic_linking"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+binrw = "0.15"
+gltf-json = { version = "1", features = ["extensions"] }
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+futures-util.workspace = true
+rustix.workspace = true
+
+ene-ipc = { path = "../../crates/ene-ipc", default-features = false, features = ["renderer", "transport"] }
+# bevy_vrm1 0.10 uses Bevy 0.19; direct WGPU types must match Bevy's WGPU 29.
+bevy = { version = "0.19", default-features = false, features = ["reflect_auto_register", "bevy_world_serialization", "bevy_log", "std", "async_executor", "multi_threaded", "bevy_asset", "bevy_scene", "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_gltf", "bevy_animation", "bevy_camera", "bevy_light", "bevy_image", "bevy_mesh", "bevy_window", "png", "morph", "morph_animation"] }
+bevy_vrm1 = { version = "0.10", default-features = false }
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
+wayland-client = { version = "0.31", features = ["system"] }
+serde_json = "1"
+wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+raw-window-handle = "0.6"
+
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["process"] }
