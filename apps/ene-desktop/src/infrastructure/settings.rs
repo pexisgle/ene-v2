@@ -10,6 +10,11 @@ use std::{
     thread::JoinHandle,
     time::Duration,
 };
+#[cfg(unix)]
+use std::{
+    io::Write,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 /// Local display preferences; only `config` is sent as an avatar contract.
@@ -388,9 +393,3 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 }
-
-#[cfg(unix)]
-use std::{
-    io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
-};
