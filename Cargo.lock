@@ -177,6 +177,7 @@ dependencies = [
  "connectrpc-build",
  "protoc-bin-vendored",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

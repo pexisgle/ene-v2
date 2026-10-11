@@ -15,3 +15,6 @@ connectrpc.workspace = true
 [build-dependencies]
 connectrpc-build = "0.9"
 protoc-bin-vendored = "3"
+
+[dev-dependencies]
+serde_json = "1"

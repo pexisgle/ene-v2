@@ -51,12 +51,23 @@ message ConnectionInput {
   optional string id = 1; bool create = 2; string kind = 3; string adapter = 4;
   string endpoint = 5; JsonDocument options = 6;
 }
-message UpdateSettingsRequest { uint64 revision = 1; repeated ConnectionInput connections = 2; }
+message ConnectionInputs { repeated ConnectionInput items = 1; }
+message UpdateSettingsRequest {
+  uint64 revision = 1;
+  // The former repeated field cannot represent omission; never reuse its tag.
+  reserved 2;
+  // Absent keeps the list; a present empty message removes all unreferenced connections.
+  ConnectionInputs connections = 3;
+}
 // Absent fields keep their value. Assignment changes explicitly set or clear a slot.
 message AssignmentPatch { oneof change { ModelAssignment set = 1; Empty clear = 2; } }
+// An absent patch keeps the document. A present patch must select set or clear.
+// JSON null is omission, not clear; set requires a non-null JSON object.
+message JsonDocumentPatch { oneof change { JsonDocument set = 1; Empty clear = 2; } }
 message UpdateCompanionRequest {
   string id = 1; uint64 revision = 2; optional string name = 3; optional string mind = 4;
   AssignmentPatch companion_assignment = 5; AssignmentPatch task_assignment = 6;
+  JsonDocumentPatch body = 7; JsonDocumentPatch voice = 8;
 }
 message HistoryRequest {
   string companion_id = 1; optional string cursor = 2; optional uint32 limit = 3;
