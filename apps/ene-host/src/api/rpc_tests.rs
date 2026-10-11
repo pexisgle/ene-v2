@@ -1,7 +1,9 @@
 use super::*;
 use crate::infrastructure::sqlite::Store;
 use ene_api_client::{ApiClient, Error};
+use ene_core::ports::{ConfigurationCommit, Repository};
 use ene_rpc as w;
+use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 struct Host {
@@ -444,6 +446,296 @@ async fn browser_sessions_enforce_origin_and_logout_ends_streams() {
 }
 fn reqwest_client() -> reqwest::Client {
     reqwest::Client::builder().no_proxy().build().unwrap()
+}
+
+fn document(value: serde_json::Value) -> w::JsonDocument {
+    w::JsonDocument {
+        json: value.to_string(),
+        ..Default::default()
+    }
+}
+fn set_document(value: serde_json::Value) -> w::JsonDocumentPatch {
+    w::JsonDocumentPatch {
+        change: Some(w::json_document_patch::Change::Set(Box::new(document(
+            value,
+        )))),
+        ..Default::default()
+    }
+}
+fn clear_document() -> w::JsonDocumentPatch {
+    w::JsonDocumentPatch {
+        change: Some(w::json_document_patch::Change::Clear(Box::default())),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn omitted_settings_preserve_connections_credentials_grants_and_notifications() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let mut config = store.configuration().await.unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    config.settings.connections = vec![w::Connection {
+        id: id.clone(),
+        kind: "llm".into(),
+        adapter: "openai".into(),
+        endpoint: "https://api.openai.com/v1".into(),
+        options: document(json!({})).into(),
+        credential_state: "available".into(),
+        ..Default::default()
+    }];
+    config
+        .credential_refs
+        .insert(id.clone(), "fixture-reference".into());
+    let companion = config.companions.values_mut().next().unwrap();
+    companion
+        .model_assignments
+        .get_or_insert_default()
+        .companion = w::ModelAssignment {
+        connection_id: id.clone(),
+        model_id: "model".into(),
+        ..Default::default()
+    }
+    .into();
+    config.grants.push(ene_core::domain::Grant {
+        id: uuid::Uuid::new_v4().to_string(),
+        companion_id: companion.id.clone(),
+        kind: "llm".into(),
+        connection_id: id,
+        destinations: vec!["https://api.openai.com".into()],
+        data_kinds: vec!["messages".into()],
+        purpose: ene_core::domain::GrantPurpose::Conversation,
+        status: ene_core::domain::GrantStatus::Active,
+        revision: 1,
+        invalidation_reason: None,
+        connection_fingerprint: json!({}),
+    });
+    store
+        .commit_configuration(ConfigurationCommit::Update(config.clone()))
+        .await
+        .unwrap();
+    let host = Host::serve(
+        crate::bootstrap::application(store.clone(), "private-token".into()),
+        temp,
+    )
+    .await;
+    let mut events = host.client.subscribe().await.unwrap();
+    let before = host.client.snapshot(None).await.unwrap();
+    let unchanged = host
+        .client
+        .patch_settings(&w::UpdateSettingsRequest {
+            revision: before.settings.revision,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(unchanged, *before.settings);
+    assert_eq!(
+        serde_json::to_value(store.configuration().await.unwrap()).unwrap(),
+        serde_json::to_value(config).unwrap()
+    );
+    assert_eq!(
+        host.client.snapshot(None).await.unwrap().cursor,
+        before.cursor
+    );
+    assert!(
+        timeout(Duration::from_millis(50), events.next())
+            .await
+            .is_err()
+    );
+    let error = host
+        .client
+        .patch_settings(&w::UpdateSettingsRequest {
+            revision: before.settings.revision + 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Api(e) if e.body.error.code == "revision_conflict"));
+    // The retired repeated-list tag must fail rather than masquerade as omission.
+    use buffa::Message;
+    let mut legacy = w::UpdateSettingsRequest {
+        revision: before.settings.revision,
+        ..Default::default()
+    }
+    .encode_to_vec();
+    legacy.extend_from_slice(&[0x12, 0x00]);
+    let error = host
+        .client
+        .patch_settings(&w::UpdateSettingsRequest::decode_from_slice(&legacy).unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Api(e) if e.body.error.code == "invalid_request"));
+    assert_eq!(
+        host.client.snapshot(None).await.unwrap().cursor,
+        before.cursor
+    );
+}
+
+#[tokio::test]
+async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearable() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("host.db");
+    let store = Store::open(path.clone()).await.unwrap();
+    let mut config = store.configuration().await.unwrap();
+    let tts = uuid::Uuid::new_v4().to_string();
+    config.settings.connections = vec![w::Connection {
+        id: tts.clone(),
+        kind: "tts".into(),
+        adapter: "fixture".into(),
+        endpoint: "https://tts.test".into(),
+        options: document(json!({})).into(),
+        ..Default::default()
+    }];
+    store
+        .commit_configuration(ConfigurationCommit::Update(config))
+        .await
+        .unwrap();
+    let host = Host::serve(
+        crate::bootstrap::application(store.clone(), "private-token".into()),
+        temp,
+    )
+    .await;
+    let mut events = host.client.subscribe().await.unwrap();
+    let before = host.client.snapshot(None).await.unwrap();
+    let original = before.companions[0].clone();
+    let stored_original = store.snapshot().await.unwrap().companions[0].clone();
+    let body =
+        json!({"format":"vrm1", "environment_id":before.environment_id, "model":"avatar.vrm"});
+    let voice = json!({"connection_id":tts, "voice_id":"voice1"});
+    let valid = w::UpdateCompanionRequest {
+        revision: original.revision,
+        name: Some("configured".into()),
+        body: set_document(body.clone()).into(),
+        voice: set_document(voice.clone()).into(),
+        ..Default::default()
+    };
+    let mut bad_voice = valid.clone();
+    bad_voice.voice = set_document(json!({"connection_id":"missing", "voice_id":"voice1"})).into();
+    let mut bad_body = valid.clone();
+    bad_body.body =
+        set_document(json!({"format":"vrm1", "environment_id":"other", "model":"avatar.vrm"}))
+            .into();
+    let mut empty_patch = valid.clone();
+    empty_patch.voice = w::JsonDocumentPatch::default().into();
+    let mut bad_assignment = valid.clone();
+    bad_assignment.companion_assignment = w::AssignmentPatch {
+        change: Some(w::assignment_patch::Change::Set(Box::new(
+            w::ModelAssignment {
+                connection_id: "missing".into(),
+                model_id: "model".into(),
+                ..Default::default()
+            },
+        ))),
+        ..Default::default()
+    }
+    .into();
+    for invalid in [bad_voice, bad_body, empty_patch, bad_assignment] {
+        assert!(
+            host.client
+                .patch_companion(&original.id, &invalid)
+                .await
+                .is_err()
+        );
+        assert_eq!(host.client.companions().await.unwrap()[0], original);
+        assert_eq!(
+            store.snapshot().await.unwrap().companions[0],
+            stored_original
+        );
+        assert_eq!(
+            host.client.snapshot(None).await.unwrap().cursor,
+            before.cursor
+        );
+    }
+    let saved = host
+        .client
+        .patch_companion(&original.id, &valid)
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, original.revision + 1);
+    assert_eq!(saved.body, document(body).into());
+    assert_eq!(saved.voice, document(voice).into());
+    let Some(ene_api_client::ServerEvent::Notification(event)) =
+        timeout(Duration::from_secs(2), events.next())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("companion event missing")
+    };
+    assert!(
+        matches!(event.event, Some(w::notification::Event::CompanionUpdated(c)) if *c == saved)
+    );
+    let restarted = crate::bootstrap::application(
+        Store::open(path.clone()).await.unwrap(),
+        "other-token".into(),
+    );
+    assert_eq!(
+        restarted
+            .application
+            .snapshot(None)
+            .await
+            .unwrap()
+            .stored
+            .companions[0],
+        saved
+    );
+    let stale = host
+        .client
+        .patch_companion(&original.id, &valid)
+        .await
+        .unwrap_err();
+    assert!(matches!(stale, Error::Api(e) if e.body.error.code == "revision_conflict"));
+    // JSON null is omission, so a name-only edit cannot erase the documents.
+    let rename: w::UpdateCompanionRequest = serde_json::from_value(
+        json!({"revision":saved.revision, "name":"renamed", "body":null, "voice":null}),
+    )
+    .unwrap();
+    let renamed = host
+        .client
+        .patch_companion(&saved.id, &rename)
+        .await
+        .unwrap();
+    assert_eq!(renamed.body, saved.body);
+    assert_eq!(renamed.voice, saved.voice);
+    let settings = host.client.settings().await.unwrap();
+    let remove = w::UpdateSettingsRequest {
+        revision: settings.revision,
+        connections: w::ConnectionInputs::default().into(),
+        ..Default::default()
+    };
+    let error = host.client.patch_settings(&remove).await.unwrap_err();
+    assert!(matches!(error, Error::Api(e) if e.body.error.code == "state_conflict"));
+    let cleared = host
+        .client
+        .patch_companion(
+            &saved.id,
+            &w::UpdateCompanionRequest {
+                revision: renamed.revision,
+                body: clear_document().into(),
+                voice: clear_document().into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!cleared.body.is_set() && !cleared.voice.is_set());
+    assert!(
+        host.client
+            .patch_settings(&remove)
+            .await
+            .unwrap()
+            .connections
+            .is_empty()
+    );
+    let restarted =
+        crate::bootstrap::application(Store::open(path).await.unwrap(), "other-token".into());
+    let snapshot = restarted.application.snapshot(None).await.unwrap();
+    assert!(
+        !snapshot.stored.companions[0].body.is_set()
+            && !snapshot.stored.companions[0].voice.is_set()
+    );
+    assert!(snapshot.stored.settings.connections.is_empty());
 }
 
 struct TestAudioEngine;

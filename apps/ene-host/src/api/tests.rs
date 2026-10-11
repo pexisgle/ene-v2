@@ -1479,7 +1479,7 @@ async fn dropped_core_waiter_still_commits_publishes_and_is_joined_by_shutdown()
         owned
             .patch_settings(ene_core::application::SettingsPatch {
                 revision: 1,
-                connections: vec![],
+                connections: ene_rpc::ConnectionInputs::default().into(),
                 ..Default::default()
             })
             .await

@@ -203,19 +203,23 @@ async fn slow_startup_load_does_not_block_revocation_or_restore_its_retired_key(
     let settings = original
         .patch_settings(ene_core::application::SettingsPatch {
             revision: 1,
-            connections: vec![ene_core::application::ConnectionInput {
-                id: None,
-                create: false,
-                kind: "llm".into(),
-                adapter: "openai".into(),
-                endpoint: "https://api.openai.com/v1".into(),
-                options: ene_rpc::JsonDocument {
-                    json: "{}".into(),
+            connections: ene_rpc::ConnectionInputs {
+                items: vec![ene_core::application::ConnectionInput {
+                    id: None,
+                    create: false,
+                    kind: "llm".into(),
+                    adapter: "openai".into(),
+                    endpoint: "https://api.openai.com/v1".into(),
+                    options: ene_rpc::JsonDocument {
+                        json: "{}".into(),
+                        ..Default::default()
+                    }
+                    .into(),
                     ..Default::default()
-                }
-                .into(),
+                }],
                 ..Default::default()
-            }],
+            }
+            .into(),
             ..Default::default()
         })
         .await
@@ -309,19 +313,23 @@ async fn unresponsive_cleanup_is_bounded_visible_and_does_not_report_successful_
     let settings = app
         .patch_settings(ene_core::application::SettingsPatch {
             revision: 1,
-            connections: vec![ene_core::application::ConnectionInput {
-                id: None,
-                create: false,
-                kind: "llm".into(),
-                adapter: "openai".into(),
-                endpoint: "https://api.openai.com/v1".into(),
-                options: ene_rpc::JsonDocument {
-                    json: "{}".into(),
+            connections: ene_rpc::ConnectionInputs {
+                items: vec![ene_core::application::ConnectionInput {
+                    id: None,
+                    create: false,
+                    kind: "llm".into(),
+                    adapter: "openai".into(),
+                    endpoint: "https://api.openai.com/v1".into(),
+                    options: ene_rpc::JsonDocument {
+                        json: "{}".into(),
+                        ..Default::default()
+                    }
+                    .into(),
                     ..Default::default()
-                }
-                .into(),
+                }],
                 ..Default::default()
-            }],
+            }
+            .into(),
             ..Default::default()
         })
         .await

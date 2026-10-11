@@ -48,8 +48,12 @@ pub fn encode_request(op: &str, mut v: Value) -> Vec<u8> {
     }
     match op {
         "UpdateSettings" => {
-            for c in v["connections"].as_array_mut().unwrap() {
-                c["options"] = json!({"json":c["options"].to_string()});
+            if let Some(items) = v.get_mut("connections").and_then(Value::as_array_mut) {
+                for c in &mut *items {
+                    c["options"] = json!({"json":c["options"].to_string()});
+                }
+                let items = std::mem::take(items);
+                v["connections"] = json!({"items":items});
             }
             encode::<w::UpdateSettingsRequest>(v)
         }
