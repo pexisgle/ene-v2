@@ -568,12 +568,12 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn state() -> Result<State, Box<dyn std::error::Error>> {
+    fn make_state() -> Result<State, Box<dyn std::error::Error>> {
         State::for_test()
     }
     #[test]
     fn composition_and_input_windows_preserve_holes_without_activation() {
-        let mut state = state().unwrap();
+        let mut state = make_state().unwrap();
         let before = unsafe { GetForegroundWindow() };
         state.prepare_gpu_present(&[
             Run {
@@ -610,7 +610,7 @@ mod tests {
         }
         // Recovery must allow constructing a fresh window in the same process.
         drop(state);
-        drop(state().unwrap());
+        drop(make_state().unwrap());
     }
 }
 

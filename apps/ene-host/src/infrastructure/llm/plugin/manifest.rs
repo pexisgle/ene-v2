@@ -12,6 +12,7 @@ use std::{
 pub(crate) struct VerifiedFile {
     pub path: PathBuf,
     pub bytes: Option<Vec<u8>>,
+    #[cfg(unix)]
     pub mode: u32,
 }
 #[derive(Clone)]
@@ -110,6 +111,7 @@ fn digest(
             files.push(VerifiedFile {
                 path: p.strip_prefix(base).map_err(|_| invalid())?.to_path_buf(),
                 bytes: None,
+                #[cfg(unix)]
                 mode: mode(&m),
             });
             digest(&p, base, hash, budget, files)?;
@@ -124,6 +126,7 @@ fn digest(
             files.push(VerifiedFile {
                 path: p.strip_prefix(base).map_err(|_| invalid())?.to_path_buf(),
                 bytes: Some(bytes),
+                #[cfg(unix)]
                 mode: mode(&m),
             });
         }

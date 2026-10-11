@@ -23,7 +23,6 @@ time.workspace = true
 clap.workspace = true
 thiserror.workspace = true
 rusqlite_migration = "2"
-atomic-write-file.workspace = true
 axum = { workspace = true, features = ["ws"] }
 ene-ipc = { workspace = true, features = ["host-plugin"] }
 futures-util = { workspace = true, features = ["sink"] }
@@ -53,5 +52,6 @@ ene-api-client.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]
+atomic-write-file.workspace = true
 xdg.workspace = true
 rustix.workspace = true
