@@ -19,8 +19,10 @@ pub fn spawn(bundle: &super::manifest::Bundle) -> ene_core::ports::Result<Spawne
         return Err(Error::new(ErrorKind::StateConflict));
     }
     let image = tempfile::tempdir().map_err(|_| Error::unavailable())?;
+    let root = image.path().join("package");
+    ene_platform::storage::create_private_dir_all(&root).map_err(|_| Error::unavailable())?;
     for file in bundle.files.iter() {
-        let path = image.path().join(&file.path);
+        let path = root.join(&file.path);
         if let Some(bytes) = &file.bytes {
             if let Some(parent) = path.parent() {
                 ene_platform::storage::create_private_dir_all(parent)
@@ -32,7 +34,7 @@ pub fn spawn(bundle: &super::manifest::Bundle) -> ene_core::ports::Result<Spawne
                 .map_err(|_| Error::unavailable())?;
         }
     }
-    let child = ene_platform::sandbox::spawn(image.path(), &bundle.manifest.command, None)
+    let child = ene_platform::sandbox::spawn(&root, &bundle.manifest.command, None)
         .map_err(|_| Error::unavailable())?;
     Ok(Spawned { child, image })
 }

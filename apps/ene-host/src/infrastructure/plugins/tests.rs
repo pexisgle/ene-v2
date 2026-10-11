@@ -24,13 +24,9 @@ pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
     let mut manager = Manager::discover(store);
     manager.root = root;
     manager.cache = temp.path().join("cache");
-    manager.runner = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(ene_platform::executable("ene-plugin-runner"));
+    manager.runner = std::env::var_os("ENE_PLUGIN_RUNNER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ene_platform::sibling_executable("ene-plugin-runner"));
     manager.entries.write().unwrap().clear();
     manager.scan().unwrap();
     (manager, temp, companion)

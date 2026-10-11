@@ -18,3 +18,5 @@
 - ホスト側で利用する外部サービスのAPIキーなどの秘密情報はホスト上で厳重に管理し、各クライアントへの不用意な配布は行いません。
 
 参考：[nanobot](../../research/references.md#nanobot) のMCP連携とツール制限、および [OpenClaw](../../research/references.md#openclaw) の実行エンジン交換設計。
+
+Hostに実装した契約と管理APIは [Plugin実行基盤](plugin-runtime.md) を参照してください。

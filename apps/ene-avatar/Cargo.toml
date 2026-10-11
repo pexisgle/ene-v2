@@ -13,7 +13,6 @@ workspace = true
 dev-dynamic-linking = ["bevy/dynamic_linking"]
 
 [dependencies]
-ene-platform.workspace = true
 serde = { version = "1", features = ["derive"] }
 binrw = "0.15"
 gltf-json = { version = "1", features = ["extensions"] }

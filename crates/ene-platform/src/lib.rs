@@ -11,6 +11,24 @@ pub fn executable(name: &str) -> String {
     }
 }
 
+/// Locate a sibling in an installed bundle or Cargo's target profile directory.
+pub fn sibling_executable(name: &str) -> std::path::PathBuf {
+    let executable = std::env::current_exe().unwrap_or_default();
+    let sibling = executable.with_file_name(self::executable(name));
+    if sibling.is_file() {
+        return sibling;
+    }
+    executable
+        .ancestors()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|n| n == "debug" || n == "release")
+        })
+        .map(|path| path.join(self::executable(name)))
+        .filter(|path| path.is_file())
+        .unwrap_or(sibling)
+}
+
 /// Portable package paths use forward slashes, never native device paths.
 pub fn relative(path: &str) -> bool {
     !path.is_empty()

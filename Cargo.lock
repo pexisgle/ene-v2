@@ -3143,7 +3143,6 @@ dependencies = [
  "binrw",
  "clap",
  "ene-ipc",
- "ene-platform",
  "futures-util",
  "gltf-json",
  "raw-window-handle",

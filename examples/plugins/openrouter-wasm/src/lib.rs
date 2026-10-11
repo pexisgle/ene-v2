@@ -88,7 +88,7 @@ mod guest {
                     }
                     pending.drain(..=end);
                 }
-                if pending.len() > MAX_LINE {
+                if pending.len() > MAX_MESSAGE_BYTES {
                     return Err(extism_pdk::Error::msg("SSE line limit").into());
                 }
             }

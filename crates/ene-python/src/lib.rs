@@ -12,8 +12,12 @@ use pyo3::{
     types::PyBytes,
 };
 use pyo3_async_runtimes::{TaskLocals, into_future_with_locals, tokio::future_into_py};
-use std::{os::fd::AsFd, sync::Arc};
-use tokio::{net::unix::pipe, sync::Mutex};
+#[cfg(unix)]
+use std::os::fd::AsFd;
+use std::sync::Arc;
+#[cfg(unix)]
+use tokio::net::unix::pipe;
+use tokio::sync::Mutex;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 fn error(error: impl std::fmt::Display) -> PyErr {
@@ -253,10 +257,14 @@ fn serve<'py>(
             },
         }));
         // Cancellable OS pipes let process exit when its last RTC client is dropped.
+        #[cfg(unix)]
         let input = pipe::Receiver::from_owned_fd(std::io::stdin().as_fd().try_clone_to_owned()?)
             .map_err(error)?;
+        #[cfg(unix)]
         let output = pipe::Sender::from_owned_fd(std::io::stdout().as_fd().try_clone_to_owned()?)
             .map_err(error)?;
+        #[cfg(windows)]
+        let (input, output) = (tokio::io::stdin(), tokio::io::stdout());
         remoc::Connect::io::<_, _, provider::Client, provider::Client, remoc::codec::Default>(
             remoc::Cfg::default(),
             input,

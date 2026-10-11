@@ -129,7 +129,9 @@ impl Context {
         let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
             return;
         };
-        let (visible, failed, _status) = self.state.lock().unwrap().clone();
+        let (visible, failed, status) = self.state.lock().unwrap().clone();
+        let status: Vec<u16> = status.encode_utf16().chain(Some(0)).collect();
+        let _ = unsafe { AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr())) };
         for (i, label) in [
             "対話を表示",
             "設定",

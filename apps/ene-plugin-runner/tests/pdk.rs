@@ -75,7 +75,7 @@ async fn reference_pdk_models_split_utf8_streaming_and_shutdown() {
         } else {
             (
                 Operation::Generate {
-                    request: ene_ipc::provider::GenerationRequest {
+                    request: GenerationRequest {
                         endpoint,
                         options: json!({}),
                         model: "fixture".into(),
@@ -85,6 +85,7 @@ async fn reference_pdk_models_split_utf8_streaming_and_shutdown() {
                             text: "hello".into(),
                         }],
                         max_tokens: 64,
+                        tools: vec![],
                     },
                 },
                 format!(

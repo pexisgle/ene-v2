@@ -140,6 +140,7 @@ async fn metadata_authorization_cannot_generate_on_the_credential_origin() {
         server.abort();
     }
 }
+#[cfg(unix)]
 #[test]
 fn bundle_revision_distinguishes_file_boundaries_and_executable_content() {
     use std::os::unix::fs::PermissionsExt;

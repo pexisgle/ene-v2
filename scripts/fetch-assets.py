@@ -68,7 +68,7 @@ def write_atomic(destination, content):
 
 
 def fetch(asset):
-    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ene"
+    cache = (Path(os.environ["LOCALAPPDATA"]) / "ene" / "cache" if os.name == "nt" else Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ene")
     path = cache / asset["path"]
     cached = path.exists()
     if cached:

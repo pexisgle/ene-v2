@@ -87,16 +87,18 @@ async fn exercise() {
                 .is_some_and(|name| name == "debug" || name == "release")
         })
         .unwrap();
-    let mut candidates = vec![
-        target.join("libene_provider.so"),
-        target.join("deps/libene_provider.so"),
-    ];
+    let library = if cfg!(windows) {
+        "ene_provider.dll"
+    } else {
+        "libene_provider.so"
+    };
+    let mut candidates = vec![target.join(library), target.join("deps").join(library)];
     // The pinned Cargo's artifact layout places cdylibs under build/<package>.
     if let Ok(artifacts) = std::fs::read_dir(target.join("build/ene-python")) {
         candidates.extend(
             artifacts
                 .flatten()
-                .map(|entry| entry.path().join("out/libene_provider.so")),
+                .map(|entry| entry.path().join("out").join(library)),
         );
     }
     let extension = candidates
@@ -108,10 +110,18 @@ async fn exercise() {
         .max_by_key(|(modified, _)| *modified)
         .expect("Cargo must build the SDK cdylib")
         .1;
-    std::fs::copy(extension, image.path().join("ene_provider.so")).unwrap();
+    std::fs::copy(
+        extension,
+        image.path().join(if cfg!(windows) {
+            "ene_provider.pyd"
+        } else {
+            "ene_provider.so"
+        }),
+    )
+    .unwrap();
     let marker = image.path().join("cancelled");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/provider.py");
-    let mut child = tokio::process::Command::new("python3")
+    let mut child = tokio::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
         .arg("-I")
         .arg(script)
         .arg(image.path())

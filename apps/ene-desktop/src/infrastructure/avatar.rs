@@ -405,7 +405,7 @@ async fn wait_restart(controls: &mut mpsc::Receiver<Control>, stop: &Cancellatio
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod process_tests {
     use super::*;
     use ene_ipc::renderer::RendererState;

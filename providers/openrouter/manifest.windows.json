@@ -1,0 +1,17 @@
+{
+  "protocol_version": 1,
+  "id": "openrouter",
+  "name": "OpenRouter (plugin)",
+  "version": "1.0.0",
+  "command": ["/plugin/provider.exe"],
+  "endpoint": "https://openrouter.ai/api/v1",
+  "options": {"upstream": "openai", "allow_fallbacks": false},
+  "settings": [
+    {"key": "upstream", "label": "実処理プロバイダー", "kind": "select", "required": true, "choices": ["openai"]},
+    {"key": "allow_fallbacks", "label": "フォールバック", "kind": "boolean", "required": true}
+  ],
+  "auth": {"type": "bearer"},
+  "environment_variable": "OPENROUTER_API_KEY",
+  "destinations": ["https://openrouter.ai", "openai"],
+  "routing": {"type": "open_router", "only": ["openai"]}
+}

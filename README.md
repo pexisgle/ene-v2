@@ -6,7 +6,7 @@
 
 ## 起動と動作確認
 
-LinuxのWaylandセッションで、Slintの単一ウィンドウ、表示設定、トレイ、VRM 1.0とVRMAを利用できます。
+LinuxのWaylandセッションとWindows 11で、Slintの単一ウィンドウ、表示設定、トレイ、VRM 1.0とVRMAを利用できます。
 デモは日本語・改行・絵文字の入力に固定の仮応答を返し、外部へ送信しません。
 実ホストとの対話はConnect v1で逐次表示し、会話と設定をSQLiteへ保存します。
 外観は即時反映し、変更から300ms後と終了時に端末設定を原子的に保存します。
@@ -38,7 +38,7 @@ DBは `$XDG_STATE_HOME/ene/host.sqlite3`（既定 `~/.local/state/ene/host.sqlit
 設定の「コンパニオン」「AIサービス」「送信許可」を順に設定します。
 組込OpenAIは公式 `https://api.openai.com/v1` のResponses APIを使います。
 接続先とモデルを保存し、APIキーを登録します。ホストの `OPENAI_API_KEY` を使う操作もあります。
-環境変数のキーは起動中だけ保持し、手入力のキーはOSのSecret Serviceへ保存します。
+環境変数のキーは起動中だけ保持し、手入力のキーはOSのSecret Service／Credential Managerへ保存します。
 ストアが使えない場合は起動中だけ保持する状態を画面へ表示します。
 キーをクライアント設定・DB・取得API・ログへ保存しません。
 
@@ -53,7 +53,7 @@ DBは `$XDG_STATE_HOME/ene/host.sqlite3`（既定 `~/.local/state/ene/host.sqlit
 | パッケージ | 役割 |
 | --- | --- |
 | `apps/ene-desktop` | 共通UI、ホスト管理・対話、端末設定と描画プロセスの管理 |
-| `apps/ene-avatar` | ID付きの複数Waylandウィンドウ、VRM/VRMA、GPU画像と入力領域 |
+| `apps/ene-avatar` | ID付きの複数Wayland／Win32ウィンドウ、VRM/VRMA、GPU画像と入力領域 |
 | `apps/ene-host` | 認証付きConnectサービス、SQLite、プロバイダー、端末・音声セッション |
 | `crates/ene-ipc` | 描画チャネルとプロバイダーRTC・HTTP brokerのRemoc契約 |
 | `crates/ene-python` | PyO3製Python provider SDK、asyncioとRemocの接続 |
@@ -63,7 +63,7 @@ DBは `$XDG_STATE_HOME/ene/host.sqlite3`（既定 `~/.local/state/ene/host.sqlit
 | `crates/ene-outbound` | 認可済み送信先へのHTTP、資格情報付与、本文・SSE容量制限 |
 
 公開APIの正本は [`host.proto`](crates/ene-api-types/proto/host.proto) です。
-Cargoが `ene.host.v1.HostService` と `DeviceService` を生成します。
+Cargoが `ene.host.v1.HostService` と `DeviceService` と `PluginService` を生成します。
 SDKは `/rpc` のConnect v1と初期snapshot付き通知ストリームを利用します。
 旧REST・OpenAPI・旧通知WebSocketは提供しません。音声は生成AudioFrameの `/audio` WebSocketです。
 利用方法は [Connect契約](docs/design/connect-rpc.md)、機能追加時の不変条件は
@@ -113,3 +113,9 @@ cargo test --locked -p ene-python --all-features
 cargo build --locked -p ene-python --features extension-module
 ENE_PROVIDER_EXTENSION=/absolute/path/ene_provider.so cargo test --locked -p ene-host request_errors_do_not_disable_plugin -- --ignored
 ```
+
+## Host Plugin runtimeとWindows
+
+Extism／Luau／Processのパッケージはcharacter、harness、speech、LLMの型付き契約を提供します。実行は別runnerに隔離し、HostのConnect PluginServiceで管理します。[実行契約と限界](docs/features/extensions/plugin-runtime.md)、[Windowsの配置・検証](docs/windows.md)を参照してください。
+
+`cargo build --locked -p ene-plugin-runner` の後にhostの結合テストを実行してください。Wasm PDKは `cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown` と `python scripts/check-wasm-plugin.py` で検証します。
