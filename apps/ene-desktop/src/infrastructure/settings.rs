@@ -304,7 +304,10 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        #[cfg(unix)]
         fs::create_dir(&path).unwrap();
+        #[cfg(windows)]
+        ene_platform::storage::create_private_dir_all(&path).unwrap();
         path
     }
     fn wait_result(saver: &Saver) -> SaveResult {

@@ -22,10 +22,11 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
     slint::platform::set_platform(Box::new(Headless)).unwrap();
     let ui = AppWindow::new().unwrap();
     let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/client.json");
     let app = Application::bind(
         &ui,
         Mode::Demo,
-        temp.path().join("client.json"),
+        config.clone(),
         settings::ClientSettings::default(),
         None,
         None,
@@ -226,7 +227,7 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
         _ => panic!("expected reconfirmed permission save"),
     }
     app.shutdown(&ui);
-    let saved = settings::ClientSettings::load(&temp.path().join("client.json")).unwrap();
+    let saved = settings::ClientSettings::load(&config).unwrap();
     assert_eq!(saved.avatar.config.size_percent, 170);
     assert_eq!(saved.theme_index, 2);
     assert_eq!(saved.font_family, "monospace");
