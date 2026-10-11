@@ -1,0 +1,14 @@
+import { UiState } from "../../../state/ui-state.slint";
+import { ActionButton } from "../../../widgets/action-button.slint";
+import { LineEdit } from "std-widgets.slint";
+
+export component HostInput inherits LineEdit {
+    min-height: UiState.control-height;
+    enabled: UiState.host-connected && !UiState.host-busy;
+    changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+}
+
+export component HostAction inherits ActionButton {
+    scroll-to-focus: true;
+    fill-width: false;
+}

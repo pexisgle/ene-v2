@@ -1,0 +1,83 @@
+import { Icons, ToolButton } from "../../../foundation/icons.slint";
+import { UiState } from "../../../state/ui-state.slint";
+import { QuietButton } from "../../../widgets/quiet-button.slint";
+import { SettingField } from "../../../widgets/settings/field.slint";
+import { SettingsActions, SettingsSection } from "../../../widgets/settings/page.slint";
+import { LineEdit } from "std-widgets.slint";
+
+export component AvatarAssets inherits SettingsSection {
+    in property <bool> editing;
+    in property <bool> form-wide;
+    title: "モデル・モーション";
+    SettingField {
+        label: "VRMファイル";
+        wide: root.form-wide;
+        LineEdit {
+            changed has-focus => {
+                if self.has-focus {
+                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                }
+            }
+            enabled: root.editing;
+            accessible-label: "VRMファイル";
+            x: 0px;
+            width: max(0px, parent.control-width - UiState.control-height - 8px);
+            height: UiState.control-height;
+            text <=> UiState.settings-draft.model;
+            edited => {
+                UiState.settings-edited();
+            }
+        }
+        ToolButton {
+            ui-scale: UiState.scale;
+            width: UiState.control-height; height: UiState.control-height;
+            x: parent.control-width - self.width;
+            y: (parent.height - self.height) / 2;
+            icon: Icons.folder;
+            label: "VRMを選ぶ";
+            enabled: root.editing && !UiState.picker-active;
+            changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+            clicked => { UiState.select-model(); }
+        }
+    }
+
+    SettingField {
+        label: "VRMAファイル";
+        wide: root.form-wide;
+        LineEdit {
+            changed has-focus => {
+                if self.has-focus {
+                    UiState.reveal-settings-item(self.absolute-position.y, self.height);
+                }
+            }
+            enabled: root.editing;
+            accessible-label: "VRMAファイル";
+            x: 0px;
+            width: max(0px, parent.control-width - UiState.control-height - 8px);
+            height: UiState.control-height;
+            text <=> UiState.settings-draft.motion;
+            edited => {
+                UiState.settings-edited();
+            }
+        }
+        ToolButton {
+            ui-scale: UiState.scale;
+            width: UiState.control-height; height: UiState.control-height;
+            x: parent.control-width - self.width;
+            y: (parent.height - self.height) / 2;
+            icon: Icons.folder;
+            label: "VRMAを選ぶ";
+            enabled: root.editing && !UiState.picker-active;
+            changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+            clicked => { UiState.select-motion(); }
+        }
+    }
+    SettingsActions {
+        wide: root.form-wide;
+        QuietButton {
+            text: "モーションを外す"; icon: Icons.reset; scroll-to-focus: true;
+            enabled: root.editing && UiState.settings-draft.motion != "";
+            clicked => { UiState.settings-draft.motion = ""; UiState.settings-edited(); }
+        }
+    }
+}

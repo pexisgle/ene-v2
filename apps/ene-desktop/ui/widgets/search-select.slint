@@ -1,0 +1,189 @@
+import { Icon, Icons } from "../foundation/icons.slint";
+import { Theme } from "../foundation/theme.slint";
+import { SelectorSearch } from "../state/selector-search.slint";
+import { UiState } from "../state/ui-state.slint";
+import { LineEdit, ListView, Palette } from "std-widgets.slint";
+
+export component SearchSelect inherits Rectangle {
+    in property <[string]> model;
+    in property <bool> enabled: true;
+    in property <string> label;
+    in-out property <string> current-value;
+    out property <bool> has-focus: keyboard.has-focus || popup.is-open;
+    callback selected(string);
+    callback opening;
+    private property <string> query;
+    private property <string> edit-text;
+    private property <[string]> matches: SelectorSearch.filter-options(root.model, root.query);
+    private property <int> active-index;
+    private property <length> row-height: max(UiState.control-height, UiState.text-size * 1.5px + 8px);
+    private property <bool> above;
+    private property <int> visible-items: 6;
+    private property <length> list-height: root.visible-items * root.row-height;
+    private property <length> results-height: min(root.list-height, (root.matches.length == 0 ? 2 : max(1, root.matches.length)) * root.row-height);
+    private property <length> scroll-y;
+    min-height: UiState.control-height;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    forward-focus: keyboard;
+    background: Palette.control-background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.has-focus ? Palette.accent-background : Palette.border;
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.current-value;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-expand => { root.open(""); }
+    accessible-action-default => { root.open(""); }
+
+    function open(initial-query: string) {
+        if !root.enabled { return; }
+        root.opening();
+        let below = max(0px, UiState.window-height - root.absolute-position.y - root.height - 12px);
+        let above = max(0px, root.absolute-position.y - 12px);
+        root.above = below < root.row-height * 3 && above > below;
+        // Keep the selector's input anchored as results shrink or the catalog refreshes.
+        root.visible-items = min(6, max(2, root.model.length), max(1, floor(((root.above ? above : below) - 8px) / root.row-height)));
+        root.query = initial-query;
+        root.edit-text = initial-query;
+        root.active-index = initial-query.is-empty ? max(0, SelectorSearch.find-option(root.matches, root.current-value)) : 0;
+        root.reveal-active();
+        popup.show();
+    }
+    function reveal-active() {
+        let top = root.active-index * root.row-height;
+        if top + root.scroll-y < 0px { root.scroll-y = -top; }
+        else if top + root.row-height + root.scroll-y > root.results-height {
+            root.scroll-y = root.results-height - top - root.row-height;
+        }
+    }
+    function choose(index: int) {
+        if !root.enabled || index < 0 || index >= root.matches.length { return; }
+        root.current-value = root.matches[index];
+        popup.close();
+        root.selected(root.current-value);
+    }
+    changed enabled => { if !root.enabled { popup.close(); } }
+    changed current-value => { popup.close(); }
+    changed matches => {
+        root.active-index = root.query.is-empty ? max(0, SelectorSearch.find-option(root.matches, root.current-value)) : 0;
+        root.scroll-y = 0px;
+        root.reveal-active();
+    }
+    Text {
+        x: 12px; width: max(0px, parent.width - 44px * UiState.scale); height: parent.height;
+        text: root.current-value;
+        vertical-alignment: center;
+        overflow: elide;
+        color: Palette.foreground;
+        opacity: root.enabled ? 1 : 0.5;
+        accessible-role: none;
+    }
+    Icon {
+        source: Icons.dropdown;
+        width: 14px * UiState.scale; height: self.width;
+        x: parent.width - self.width - 12px;
+        y: (parent.height - self.height) / 2;
+        colorize: Theme.muted;
+        opacity: root.enabled ? 1 : 0.5;
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { keyboard.focus(); root.open(""); }
+    }
+    keyboard := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space || event.text == Key.DownArrow || event.text == Key.UpArrow {
+                root.open(""); return accept;
+            }
+            if !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && SelectorSearch.is-search-text(event.text) {
+                root.open(event.text); return accept;
+            }
+            return reject;
+        }
+    }
+    popup := PopupWindow {
+        x: 0px; y: root.above ? -root.list-height - 8px : 0px;
+        width: root.width;
+        height: root.height + root.list-height + 8px;
+        close-policy: close-on-click-outside;
+        forward-focus: editor;
+        // Unused popup space is transparent and acts like a click outside the list.
+        TouchArea { clicked => { popup.close(); } }
+        Rectangle {
+            y: root.above ? root.list-height - root.results-height : 0px;
+            width: parent.width; height: root.height + root.results-height + 8px;
+            background: Palette.background;
+            border-width: 1px; border-color: Palette.border; border-radius: 4px;
+            editor := LineEdit {
+                y: root.above ? root.results-height + 8px : 0px;
+                width: parent.width; height: root.height;
+                text <=> root.edit-text;
+                placeholder-text: root.current-value.is-empty ? root.label + "を検索" : root.current-value;
+                accessible-label: root.label;
+                init => {
+                    let end = SelectorSearch.byte-count(root.edit-text);
+                    self.set-selection-offsets(end, end);
+                }
+                edited(value) => {
+                    root.query = value;
+                    root.active-index = 0;
+                    root.scroll-y = 0px;
+                }
+                accepted => { root.choose(root.active-index); }
+                key-pressed(event) => {
+                    if event.text == Key.DownArrow || event.text == Key.UpArrow {
+                        root.active-index = clamp(root.active-index + (event.text == Key.DownArrow ? 1 : -1), 0, max(0, root.matches.length - 1));
+                        root.reveal-active(); return accept;
+                    }
+                    if event.text == Key.Escape { popup.close(); return accept; }
+                    if event.text == Key.Tab { popup.close(); return reject; }
+                    return reject;
+                }
+            }
+            if root.matches.length == 0 : Text {
+                x: 12px; y: root.above ? 4px : root.height + 4px;
+                width: max(0px, parent.width - 24px); height: root.results-height;
+                text: "一致する候補がありません";
+                wrap: word-wrap; vertical-alignment: center; color: Theme.muted;
+                accessible-live-region: polite;
+            }
+            choices := ListView {
+                x: 4px; y: root.above ? 4px : root.height + 4px;
+                width: max(0px, parent.width - 8px); height: root.results-height;
+                visible: root.matches.length > 0;
+                content-width: self.visible-width;
+                content-y <=> root.scroll-y;
+                horizontal-scrollbar-policy: always-off;
+                accessible-label: root.label + "の候補";
+                accessible-item-count: root.matches.length;
+                accessible-delegate-focus: root.active-index;
+                for value[index] in root.matches : Rectangle {
+                    height: root.row-height;
+                    background: root.active-index == index ? Palette.accent-background : pointer.has-hover ? Palette.alternate-background : transparent;
+                    border-radius: 3px;
+                    accessible-role: list-item;
+                    accessible-label: value;
+                    accessible-item-index: index;
+                    accessible-item-selectable: true;
+                    accessible-item-selected: root.active-index == index;
+                    accessible-action-default => { root.choose(index); }
+                    Text {
+                        x: 8px; width: max(0px, parent.width - 16px); height: parent.height;
+                        text: value; overflow: elide; vertical-alignment: center;
+                        color: root.active-index == index ? Palette.accent-foreground : Palette.foreground;
+                        accessible-role: none;
+                    }
+                    pointer := TouchArea { clicked => { root.choose(index); } }
+                    Tooltip { text: @markdown("\{value}"); }
+                }
+            }
+        }
+    }
+}

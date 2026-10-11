@@ -1,0 +1,32 @@
+import { UiState } from "../../state/ui-state.slint";
+import { BodyText } from "../typography.slint";
+
+export component SettingField inherits Rectangle {
+    in property <string> label;
+    in property <bool> wide;
+    in property <length> label-width: UiState.settings-label-width;
+    in property <length> content-height: UiState.control-height;
+    out property <length> control-width: control-slot.width;
+    min-height: field-layout.min-height;
+    vertical-stretch: 0;
+    field-layout := GridLayout {
+        spacing: UiState.settings-field-gap;
+        BodyText {
+            row: 0;
+            col: 0;
+            min-width: root.wide ? root.label-width : 0px;
+            max-width: root.wide ? root.label-width : 100000px;
+            vertical-alignment: root.wide ? center : top;
+            horizontal-stretch: root.wide ? 0 : 1;
+            text: root.label;
+        }
+        control-slot := Rectangle {
+            row: root.wide ? 0 : 1;
+            col: root.wide ? 1 : 0;
+            min-height: root.content-height;
+            min-width: 0px;
+            horizontal-stretch: 1;
+            @children
+        }
+    }
+}

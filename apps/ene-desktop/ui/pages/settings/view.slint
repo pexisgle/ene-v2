@@ -1,0 +1,115 @@
+import { Icons } from "../../foundation/icons.slint";
+import { UiState } from "../../state/ui-state.slint";
+import { QuietButton } from "../../widgets/quiet-button.slint";
+import { AboutView } from "../about.slint";
+import { HostSelectionView } from "../host-selection.slint";
+import { AppearanceView } from "appearance.slint";
+import { HostSettingsView } from "host/view.slint";
+import { ComboBox } from "std-widgets.slint";
+
+export component SettingsView inherits Rectangle {
+    in property <bool> active;
+    in property <bool> compact;
+    public function reveal-item(y: length, item-height: length) {
+        if UiState.category == 4 { host-connection.reveal-item(y, item-height); return; }
+        if UiState.category != 0 { host-settings.reveal-item(y, item-height); return; }
+        appearance.reveal-item(y, item-height);
+    }
+    public function focus-entry() {
+        if root.compact { categories.focus(); }
+        else if UiState.category == 1 { companion-button.focus(); }
+        else if UiState.category == 2 { ai-button.focus(); }
+        else if UiState.category == 3 { permissions-button.focus(); }
+        else if UiState.category == 4 { connection-button.focus(); }
+        else if UiState.category == 5 { about-button.focus(); }
+        else { terminal-button.focus(); }
+    }
+    public function focus-error() { appearance.focus-error(); }
+    GridLayout {
+        spacing: 16px;
+        Rectangle {
+            row: 0;
+            col: 0;
+            min-width: root.compact ? 0px : 168px * UiState.scale;
+            max-width: root.compact ? 100000px : 168px * UiState.scale;
+            height: root.compact ? UiState.control-height : root.height;
+            vertical-stretch: root.compact ? 0 : 1;
+            categories := ComboBox {
+                visible: root.compact;
+                width: parent.width; height: UiState.control-height;
+                model: ["外観", "コンパニオン", "AIサービス", "送信許可", "ホスト管理", "eneについて"];
+                current-index <=> UiState.category;
+                accessible-label: "設定カテゴリ";
+                enabled: root.active && root.compact;
+            }
+            VerticalLayout {
+                visible: !root.compact;
+                spacing: 8px;
+                terminal-button := QuietButton {
+                    icon: Icons.desktop; text: "外観"; leading: true; fill-width: true;
+                    enabled: root.active && !root.compact; checked: UiState.category == 0; checkable: true;
+                    clicked => { UiState.category = 0; }
+                }
+                companion-button := QuietButton {
+                    icon: Icons.avatar; text: "コンパニオン"; leading: true; fill-width: true;
+                    enabled: root.active && !root.compact; checked: UiState.category == 1; checkable: true;
+                    clicked => { UiState.category = 1; }
+                }
+                ai-button := QuietButton {
+                    icon: Icons.connection; text: "AIサービス"; leading: true; fill-width: true;
+                    enabled: root.active && !root.compact; checked: UiState.category == 2; checkable: true;
+                    clicked => { UiState.category = 2; }
+                }
+                permissions-button := QuietButton {
+                    icon: Icons.shield; text: "送信許可"; leading: true; fill-width: true;
+                    enabled: root.active && !root.compact; checked: UiState.category == 3; checkable: true;
+                    clicked => { UiState.category = 3; }
+                }
+                Rectangle { vertical-stretch: 1; }
+                connection-button := QuietButton {
+                    icon: Icons.desktop; text: "ホスト管理"; leading: true; fill-width: true;
+                    enabled: root.active && !root.compact; checked: UiState.category == 4; checkable: true;
+                    clicked => { UiState.category = 4; }
+                }
+                about-button := QuietButton {
+                    icon: Icons.info; text: "eneについて"; leading: true; fill-width: true;
+                    enabled: root.active && !root.compact; checked: UiState.category == 5; checkable: true;
+                    clicked => { UiState.category = 5; }
+                }
+            }
+        }
+        Rectangle {
+            row: root.compact ? 1 : 0;
+            col: root.compact ? 0 : 1;
+            min-width: 0px;
+            vertical-stretch: 1;
+            // Stacked persistent pages: hiding does not remove editor instances.
+            appearance := AppearanceView {
+                width: min(parent.width, 840px * UiState.scale);
+                height: parent.height;
+                visible: UiState.category == 0;
+                active: root.active;
+                compact: root.compact;
+            }
+            host-connection := HostSelectionView {
+                width: min(parent.width, 680px * UiState.scale);
+                height: parent.height;
+                embedded: true;
+                visible: UiState.category == 4;
+                active: root.active && UiState.category == 4;
+            }
+            if UiState.category == 5 : AboutView {
+                width: min(parent.width, 680px * UiState.scale);
+                height: parent.height;
+                active: root.active;
+            }
+            host-settings := HostSettingsView {
+                compact: root.compact;
+                width: min(parent.width, 840px * UiState.scale);
+                height: parent.height;
+                visible: UiState.category > 0 && UiState.category < 4;
+                active: root.active && UiState.category > 0 && UiState.category < 4;
+            }
+        }
+    }
+}

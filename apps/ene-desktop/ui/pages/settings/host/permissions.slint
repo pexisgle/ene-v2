@@ -1,0 +1,69 @@
+import { Icons } from "../../../foundation/icons.slint";
+import { QuietButton } from "../../../widgets/quiet-button.slint";
+import { UiState } from "../../../state/ui-state.slint";
+import { SettingField } from "../../../widgets/settings/field.slint";
+import { SettingsActions, SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
+import { BodyText, HintText } from "../../../widgets/typography.slint";
+import { CheckBox } from "std-widgets.slint";
+
+export component PermissionToggle inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled;
+    in-out property <bool> checked;
+    callback toggled;
+    forward-focus: checkbox;
+    min-height: max(UiState.control-height, label.preferred-height + 8px);
+    vertical-stretch: 0;
+    label-measure := Text { visible: false; text: root.text; font-size: UiState.text-size * 1px; }
+    HorizontalLayout {
+        spacing: 8px;
+        checkbox := CheckBox {
+            width: 32px; enabled: root.enabled; checked <=> root.checked;
+            accessible-label: root.text;
+            changed has-focus => { if self.has-focus { UiState.reveal-settings-item(self.absolute-position.y, self.height); } }
+            toggled => { root.toggled(); }
+        }
+        label := BodyText {
+            text: root.text; min-width: 0px; max-width: label-measure.preferred-width; horizontal-stretch: 1;
+            vertical-alignment: center; accessible-role: none;
+            TouchArea { enabled: root.enabled; clicked => { checkbox.focus(); root.checked = !root.checked; root.toggled(); } }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+}
+
+export component PermissionsSettings inherits VerticalLayout {
+    in property <bool> active;
+    in property <bool> connected-provider;
+    in property <bool> wide;
+    alignment: start; spacing: 24px;
+    SettingsSection {
+        SettingField {
+            label: "AIサービス"; wide: root.wide;
+            content-height: max(UiState.control-height, provider-name.preferred-height);
+            provider-name := BodyText { width: parent.control-width; text: UiState.provider-name; vertical-alignment: center; }
+        }
+        SettingField {
+            label: "送信先"; wide: root.wide;
+            content-height: max(UiState.control-height, destination.preferred-height);
+            destination := BodyText { width: parent.control-width; text: UiState.availability-state == 1 ? "送信先・許可を確認しています…" : UiState.availability-state == 3 ? "送信先・許可を取得できませんでした。再試行してください。" : UiState.destinations == "" ? "AIサービスで接続先を保存してください。" : UiState.destinations; vertical-alignment: center; }
+        }
+    }
+    SettingsSection {
+        title: "許可するデータ";
+        SettingField {
+            label: "会話"; wide: root.wide;
+            content-height: conversation-toggle.min-height;
+            if UiState.availability-state != 2 : BodyText { width: parent.control-width; text: UiState.availability-state == 1 ? "許可を確認しています…" : "許可は未取得です。"; vertical-alignment: center; }
+            conversation-toggle := PermissionToggle { visible: UiState.availability-state == 2; width: parent.control-width; height: self.min-height; text: "会話本文・履歴・口調を送信する"; checked <=> UiState.allow-conversation; enabled: root.connected-provider && UiState.availability-state == 2; toggled => { UiState.host-draft-edited(2); } }
+        }
+        SettingField {
+            label: "接続テスト"; wide: root.wide;
+            content-height: check-toggle.min-height;
+            if UiState.availability-state != 2 : BodyText { width: parent.control-width; text: UiState.availability-state == 1 ? "許可を確認しています…" : "許可は未取得です。"; vertical-alignment: center; }
+            check-toggle := PermissionToggle { visible: UiState.availability-state == 2; width: parent.control-width; height: self.min-height; text: "接続テスト・モデル情報を送受信する"; checked <=> UiState.allow-check; enabled: root.connected-provider && UiState.availability-state == 2; toggled => { UiState.host-draft-edited(2); } }
+        }
+        SettingsActions { wide: root.wide; QuietButton { text: "送信許可を解除"; icon: Icons.reset; scroll-to-focus: true; enabled: root.active && UiState.host-connected && UiState.selected-connection-id != ""; clicked => { UiState.revoke-permissions(); } } }
+        SettingsSupplement { wide: root.wide; HintText { text: "「" + UiState.selected-companion-name + "」がこのAIサービスへ送信できるデータです。会話の許可を解除すると生成中の返答も停止します。送信済みのデータは取り消せません。"; } }
+    }
+}

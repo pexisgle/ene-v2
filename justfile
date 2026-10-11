@@ -1,6 +1,3 @@
-[windows]
-set shell := ["powershell.exe", "-NoLogo", "-Command"]
-
 default:
     @just --list
 
@@ -13,22 +10,20 @@ fmt-check:
 check:
     cargo check --workspace --all-targets --all-features --locked
 
+check-package package:
+    cargo check -p "{{ package }}" --all-targets --all-features --locked
+
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+clippy-package package:
+    cargo clippy -p "{{ package }}" --all-targets --all-features --locked -- -D warnings
 
 test:
     cargo test --workspace --all-features --locked
 
 build:
     cargo build --workspace --all-targets --all-features --locked
-
-[windows]
-fetch-assets asset="all":
-    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/fetch-assets.py "{{asset}}" } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/fetch-assets.py "{{asset}}" } else { python scripts/fetch-assets.py "{{asset}}" }
-
-[unix]
-fetch-assets asset="all":
-    python3 scripts/fetch-assets.py "{{asset}}"
 
 # Re-run tests only when the behavior under test changes.
 verify: fmt-check clippy
@@ -37,13 +32,20 @@ run-host:
     cargo run --locked -p ene-host
 
 run-desktop:
+    cargo build --locked -p ene-avatar -p ene-host -p ene-plugin-runner
     cargo run --locked -p ene-desktop
 
-# Control the transparent renderer using JSON Lines on stdin.
-run-avatar:
-    cargo run --release --locked -p ene-avatar
+run-demo:
+    cargo build --locked -p ene-avatar -p ene-host -p ene-plugin-runner
+    cargo run --locked -p ene-desktop -- --demo
 
-# Build the renderer and launch its interactive CLI example.
-run-avatar-cli:
-    cargo build --release --locked -p ene-avatar --bin ene-avatar
-    cargo run --release --locked -p ene-avatar --example control
+fetch-assets asset="all":
+    python3 scripts/fetch-assets.py "{{ asset }}"
+
+run-avatar:
+    cargo run --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm"
+
+# Stack: #1 contracts -> #2 avatar -> #9 client -> #13 plugin/SDK -> #10 core -> #12 runtime -> #4 host -> #5 desktop.
+# ene-rpc: generated RPC; ene-ipc: renderer data; ene-plugin: Luau/Extism contracts.
+validate-plugin package="examples/plugins/reference":
+    cargo run --locked -p ene-plugin-runner -- --package "{{ package }}" --validate

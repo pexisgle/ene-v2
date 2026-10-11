@@ -1,0 +1,57 @@
+import { Icons, ToolButton } from "../../foundation/icons.slint";
+import { LineEdit, Palette, Slider } from "std-widgets.slint";
+
+export component ThemePicker inherits Rectangle {
+    in-out property <int> current-index;
+    in property <float> ui-scale: 1;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: system.has-focus || light.has-focus || dark.has-focus;
+    callback edited;
+    min-height: max(32px, 16px * root.ui-scale + 12px);
+    vertical-stretch: 0;
+    forward-focus: system;
+    HorizontalLayout {
+        spacing: 8px;
+        system := ToolButton { ui-scale: root.ui-scale; label: "システムに合わせる"; icon: Icons.desktop; enabled: root.enabled; accessible-checkable: true; checked: root.current-index == 0; clicked => { root.current-index = 0; root.edited(); } }
+        light := ToolButton { ui-scale: root.ui-scale; label: "ライト"; icon: Icons.sun; enabled: root.enabled; accessible-checkable: true; checked: root.current-index == 1; clicked => { root.current-index = 1; root.edited(); } }
+        dark := ToolButton { ui-scale: root.ui-scale; label: "ダーク"; icon: Icons.moon; enabled: root.enabled; accessible-checkable: true; checked: root.current-index == 2; clicked => { root.current-index = 2; root.edited(); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+}
+
+export component SizeControl inherits Rectangle {
+    in-out property <string> text <=> number.text;
+    in property <float> ui-scale: 1;
+    private property <length> control-height: max(32px, 16px * root.ui-scale + 12px);
+    in property <bool> enabled: true;
+    out property <bool> has-focus: number.has-focus || slider.has-focus;
+    callback edited;
+    min-height: root.control-height;
+    vertical-stretch: 0;
+    forward-focus: number;
+    changed text => {
+        if root.text.is-float() { slider.value = clamp(root.text.to-float(), 50, 200); }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        slider := Slider {
+            enabled: root.enabled;
+            minimum: 50; maximum: 200; step: 1;
+            min-width: 44px;
+            value: root.text.is-float() ? clamp(root.text.to-float(), 50, 200) : 100;
+            accessible-label: "キャラクターの大きさ";
+            changed => { root.text = "\{round(self.value)}"; root.edited(); }
+        }
+        number := LineEdit {
+            enabled: root.enabled;
+            input-type: InputType.number;
+            accessible-label: "キャラクターの大きさ（%）";
+            placeholder-text: "50〜200";
+            min-width: 64px; max-width: 88px * root.ui-scale;
+            min-height: root.control-height;
+            max-height: root.control-height;
+            edited => { root.edited(); }
+        }
+        Text { text: "%"; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 0; }
+    }
+}

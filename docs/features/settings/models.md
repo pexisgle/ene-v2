@@ -15,4 +15,4 @@
 - ホスト側で使用するAPIキーなどの秘密情報はホスト上で安全に保持され、各クライアントへ不必要に共有されることはありません。
 - ローカルモデルの手軽なセットアップ手順や、タスクの種類に応じた動的なモデル自動選択ルールについては順次検討を進めます。既存ツールの過度に複雑な設定体系を踏襲せず、誰でも直感的に扱える分かりやすさを最優先とします。
 
-参考：[OpenClaw](../../references.md#openclaw) のキー管理・接続確認UI、および [OpenCode](../../references.md#opencode) の用途別モデル選択の考え方。
+参考：[OpenClaw](../../research/references.md#openclaw) のキー管理・接続確認UI、および [OpenCode](../../research/references.md#opencode) の用途別モデル選択の考え方。

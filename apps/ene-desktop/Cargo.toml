@@ -8,3 +8,45 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+ene-platform.workspace = true
+ene-rpc.workspace = true
+ene-api-client.workspace = true
+uuid.workspace = true
+url.workspace = true
+clap.workspace = true
+tokio = { workspace = true, default-features = true, features = ["rt", "rt-multi-thread", "io-util", "net", "process"] }
+tokio-util = { workspace = true, features = ["codec"] }
+futures-util = { workspace = true, features = ["sink"] }
+
+ene-ipc = { workspace = true, features = ["renderer"] }
+remoc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slint = { workspace = true, features = ["std", "compat-1-2", "renderer-femtovg-wgpu", "unstable-fontique-011"] }
+
+[build-dependencies]
+lucide-slint = "1"
+slint-build = { version = "1", default-features = false, features = ["compat-1-18"] }
+
+[dev-dependencies]
+buffa.workspace = true
+connectrpc.workspace = true
+axum.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+slint = { workspace = true, features = ["renderer-software"] }
+
+[target.'cfg(unix)'.dependencies]
+atomic-write-file.workspace = true
+slint = { workspace = true, features = ["backend-winit-wayland"] }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "file_chooser"] }
+ksni = "0.3"
+rustix.workspace = true
+xdg.workspace = true
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+slint = { workspace = true, features = ["backend-winit"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }

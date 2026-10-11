@@ -1,0 +1,35 @@
+import { IconData } from "../foundation/icons.slint";
+import { Icon, Icons } from "../foundation/icons.slint";
+import { Theme } from "../foundation/theme.slint";
+
+export component StatusBadge inherits Rectangle {
+    in property <IconData> icon;
+    in property <string> label;
+    in property <bool> compact;
+    in property <int> state;
+    min-width: root.compact ? 32px : 0px;
+    preferred-width: root.compact ? 32px : status-label.preferred-width + 32px;
+    max-width: root.compact ? 32px : 100000px;
+    min-height: max(32px, status-label.preferred-height + 8px);
+    vertical-stretch: 0;
+    accessible-role: text;
+    accessible-label: root.label;
+    HorizontalLayout {
+        spacing: 8px;
+        Icon {
+            source: root.state == 3 ? Icons.warning : root.state == 1 ? Icons.check : root.icon;
+            width: 18px; height: 18px; y: (parent.height - self.height) / 2;
+            colorize: root.state == 3 ? Theme.danger : Theme.muted;
+        }
+        status-label := Text {
+            visible: !root.compact;
+            text: root.label;
+            color: root.state == 3 ? Theme.danger : Theme.muted;
+            font-size: 14px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+    }
+    Tooltip { text: @markdown("\{root.label}"); }
+}

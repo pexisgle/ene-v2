@@ -1,0 +1,204 @@
+import { Icons } from "../../foundation/icons.slint";
+import { Theme } from "../../foundation/theme.slint";
+import { UiState } from "../../state/ui-state.slint";
+import { ActionButton } from "../../widgets/action-button.slint";
+import { QuietButton } from "../../widgets/quiet-button.slint";
+import { BodyText, HintText } from "../../widgets/typography.slint";
+import { CompanionSelector, CompanionSidebar } from "companion-selector.slint";
+import { HostControl } from "host-control.slint";
+import { MessageBubble } from "message-bubble.slint";
+import { MessageInput } from "message-input.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
+
+export component ConversationView inherits Rectangle {
+    in property <bool> active;
+    in property <bool> compact;
+    out property <bool> companion-sidebar: UiState.companion-names.length > 1 && root.width >= 1044px * UiState.scale;
+    private property <bool> following: true;
+    private property <bool> prepending;
+    private property <length> prepend-height;
+    private property <length> prepend-position;
+    public function prepare-history-prepend() {
+        root.following = false;
+        root.prepend-height = history.content-height;
+        root.prepend-position = history.content-y;
+        root.prepending = true;
+    }
+    private property <length> retained-scroll;
+    changed active => {
+        if root.active {
+            if root.following && UiState.messages.length > 0 {
+                root.scroll-to-latest();
+            }
+            else {
+                history.content-y = max(min(0px, history.visible-height - history.content-height), root.retained-scroll);
+            }
+        }
+        else {
+            root.retained-scroll = history.content-y;
+        }
+    }
+    public function focus-input() {
+        editor.focus();
+    }
+    public function scroll-to-latest() {
+        history.content-y = min(0px, history.visible-height - history.content-height);
+        root.following = true;
+    }
+    CompanionSidebar {
+        x: 0px; y: 0px;
+        visible: root.companion-sidebar;
+        active: root.active && root.companion-sidebar;
+        width: 220px * UiState.scale; height: parent.height;
+    }
+    VerticalLayout {
+        x: root.companion-sidebar ? 244px * UiState.scale : 0px;
+        width: parent.width - self.x; height: parent.height;
+        HorizontalLayout {
+            spacing: 8px;
+            if UiState.send-pending || UiState.demo-mode : HintText {
+                text: UiState.send-pending ? "受付確認中…" : "デモ · 外部送信なし";
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            host-control := HostControl {
+                visible: !UiState.demo-mode;
+                available-width: root.width;
+                available-left: root.absolute-position.x;
+                enabled: root.active && !UiState.demo-mode;
+            }
+            QuietButton {
+                icon: Icons.settings; text: "設定"; icon-only: true;
+                hint: !UiState.demo-mode && UiState.host-connected && !UiState.chat-ready ? UiState.setup-hint : UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" ? "キャラクターの表示設定を確認" : "設定";
+                enabled: root.active;
+                clicked => {
+                    if !UiState.demo-mode && UiState.host-connected && !UiState.chat-ready { UiState.category = UiState.setup-category; }
+                    else if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" { UiState.category = 0; }
+                    UiState.navigate(1);
+                }
+                if UiState.avatar-failed || UiState.motion-failed || UiState.apply-error != "" : Rectangle {
+                    x: parent.width - self.width - 2px;
+                    y: parent.height - self.height - 2px;
+                    width: 8px * UiState.scale; height: self.width;
+                    border-radius: self.width / 2;
+                    border-width: 1px; border-color: Palette.background;
+                    background: Theme.danger;
+                    accessible-role: none;
+                }
+            }
+        }
+        if !root.companion-sidebar && (UiState.companion-names.length > 1 || (UiState.companion-index < 0 && UiState.companion-names.length > 0)) : CompanionSelector { active: root.active; }
+        if UiState.has-older : QuietButton {
+            icon: Icons.history; text: UiState.host-operation == 4 ? "読み込み中…" : "過去の会話を読み込む";
+            enabled: root.active && UiState.host-connected && !UiState.host-busy;
+            clicked => { UiState.load-history(); }
+        }
+        spacing: 8px;
+        history := ScrollView {
+            vertical-stretch: 1;
+            min-height: 40px;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            changed content-height => {
+                if root.prepending {
+                    history.content-y = root.prepend-position - (history.content-height - root.prepend-height);
+                    root.prepending = false;
+                } else if root.following && UiState.messages.length > 0 {
+                    root.scroll-to-latest();
+                }
+            }
+            scrolled => {
+                root.following = self.content-y <= self.visible-height - self.content-height + 24px;
+            }
+            VerticalLayout {
+                alignment: start;
+                spacing: 12px;
+                padding: 0px;
+                padding-right: 12px;
+                if UiState.messages.length == 0 : VerticalLayout {
+                    min-height: max(180px, history.visible-height - 24px);
+                    alignment: center;
+                    spacing: 12px;
+                    BodyText { text: "何から話しましょう？"; font-size: max(24px, UiState.text-size * 1.125px); font-weight: 600; horizontal-alignment: center; }
+                }
+                for entry in UiState.messages : MessageBubble {
+                    active: root.active;
+                    author: entry.author; body: entry.body; provisional: entry.provisional; state: entry.state; outgoing: entry.outgoing;
+                }
+            }
+        }
+        if !root.following && UiState.messages.length > 0 : QuietButton {
+            text: "最新のメッセージへ"; icon: Icons.chat;
+            enabled: root.active;
+            clicked => { root.scroll-to-latest(); }
+        }
+        if UiState.conversation-error != "" : HintText { text: UiState.conversation-error; accessible-live-region: polite; }
+        composer := Rectangle {
+            background: Palette.control-background;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: editor.has-focus ? Palette.accent-background : Palette.border;
+            vertical-stretch: 0;
+            min-height: compose-layout.min-height;
+            preferred-height: min(max(compose-layout.min-height, min(240px * UiState.scale, root.height / 3)), max(compose-layout.min-height, measure.preferred-height + 24px));
+            measure := Text {
+                visible: false;
+                width: max(1px, editor.width - 20px);
+                text: UiState.draft;
+                font-family: UiState.font-family;
+                font-size: UiState.text-size * 1px;
+                wrap: word-wrap;
+            }
+            compose-layout := GridLayout {
+                padding: 12px;
+                spacing: 8px;
+                editor := MessageInput {
+                    row: 0;
+                    col: 0;
+                    text <=> UiState.draft;
+                    font-family: UiState.font-family;
+                    font-size: UiState.text-size * 1px;
+                    placeholder-text: "メッセージを入力…";
+                    active: root.active;
+                    min-height: UiState.text-size * 1px + 16px;
+                    min-width: 0px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    edited(text) => {
+                        UiState.draft-edited(text);
+                    }
+                    submit => {
+                        if root.active && UiState.can-send {
+                            UiState.submit();
+                        }
+                    }
+                }
+                Rectangle {
+                    row: 0;
+                    col: 1;
+                    min-width: UiState.control-height;
+                    max-width: UiState.control-height;
+                    min-height: UiState.control-height;
+                    VerticalLayout {
+                        spacing: 0px;
+                        Rectangle { min-height: 0px; vertical-stretch: 1; }
+                        ActionButton {
+                            vertical-stretch: 0;
+                            icon-only: true;
+                            icon: Icons.send;
+                            text: "送信";
+                            hint: !UiState.demo-mode && !UiState.host-connected ? "ホストに接続してください" : !UiState.demo-mode && !UiState.chat-ready ? UiState.setup-hint : "送信";
+
+                            primary: true;
+                            fill-width: false;
+                            enabled: root.active && UiState.can-send;
+                            clicked => {
+                                UiState.submit();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
