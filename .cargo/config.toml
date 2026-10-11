@@ -5,9 +5,9 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld", "-Zshare-generics=y"]
 [unstable]
 codegen-backend = true
 
-# Compile workspace crates quickly; keep dependencies and releases on LLVM.
+# Keep panic isolation in development: the pinned Cranelift backend cannot unwind.
 [profile.dev]
-codegen-backend = "cranelift"
+codegen-backend = "llvm"
 
 [profile.dev.package."*"]
 codegen-backend = "llvm"

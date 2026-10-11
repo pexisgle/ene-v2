@@ -1,0 +1,17 @@
+[package]
+name = "ene-rpc"
+description = "Generated ene Connect RPC contract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[dependencies]
+serde.workspace = true
+buffa.workspace = true
+connectrpc.workspace = true
+
+[build-dependencies]
+connectrpc-build = "0.9"
+protoc-bin-vendored = "3"
