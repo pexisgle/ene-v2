@@ -566,6 +566,24 @@ impl State {
 }
 
 #[cfg(test)]
+impl State {
+    pub(crate) fn for_test() -> Result<State, Box<dyn std::error::Error>> {
+        let (states, _) = ene_ipc::remoc::rch::watch::channel(Default::default());
+        let mut state = State::new(
+            AvatarId::new(),
+            AvatarConfig::default(),
+            AvatarPlacement::default(),
+            crate::ipc::Output {
+                messages: None,
+                states: Arc::new(states),
+            },
+        )?;
+        state.visible = false;
+        Ok(state)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn make_state() -> Result<State, Box<dyn std::error::Error>> {
@@ -611,23 +629,5 @@ mod tests {
         // Recovery must allow constructing a fresh window in the same process.
         drop(state);
         drop(make_state().unwrap());
-    }
-}
-
-#[cfg(test)]
-impl State {
-    pub(crate) fn for_test() -> Result<State, Box<dyn std::error::Error>> {
-        let (states, _) = ene_ipc::remoc::rch::watch::channel(Default::default());
-        let mut state = State::new(
-            AvatarId::new(),
-            AvatarConfig::default(),
-            AvatarPlacement::default(),
-            crate::ipc::Output {
-                messages: None,
-                states: Arc::new(states),
-            },
-        )?;
-        state.visible = false;
-        Ok(state)
     }
 }
