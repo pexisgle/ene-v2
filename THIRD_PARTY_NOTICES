@@ -1,4 +1,13 @@
-Extism Rust PDK 1.4.1 — BSD-3-Clause
-https://github.com/extism/rust-pdk
+# Plugin runtime dependencies
 
-The upstream license and copyright notice are in licenses/extism-pdk-LICENSE.
+These notices and `licenses/` must accompany distributions containing `ene-plugin-runner`.
+
+| Component | Pinned version | License | Source |
+| --- | --- | --- | --- |
+| Extism Rust SDK | 1.41.0 | BSD-3-Clause | https://github.com/extism/extism |
+| Extism Rust PDK | 1.4.1 | BSD-3-Clause | https://github.com/extism/rust-pdk |
+| mlua | 0.11.6 | MIT | https://github.com/mlua-rs/mlua |
+| mlua-luau-scheduler | 0.2.4 | MPL-2.0 | https://crates.io/crates/mlua-luau-scheduler |
+| Luau | luau709 (mlua-sys/luau0-src) | MIT | https://github.com/luau-lang/luau |
+
+The scheduler is used unmodified. MPL-2.0 text is in `licenses/MPL-2.0.txt`; its covered source is the versioned crate published on crates.io. Runtime dependencies and their versions are recorded in `Cargo.lock`. Include the corresponding upstream license and copyright notices when packaging binaries.
