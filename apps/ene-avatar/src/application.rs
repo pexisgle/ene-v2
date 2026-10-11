@@ -8,6 +8,7 @@ use ene_ipc::renderer::{
     AvatarConfig, AvatarEvent, AvatarId, AvatarInstance, AvatarPlacement, MotionState,
     RendererConfig, RendererRequest,
 };
+#[cfg(unix)]
 use smithay_client_toolkit::{
     reexports::{calloop::EventLoop, calloop_wayland_source::WaylandSource},
     shell::WaylandSurface,
@@ -16,6 +17,7 @@ use std::{
     error::Error,
     time::{Duration, Instant},
 };
+#[cfg(unix)]
 use wayland_client::{Connection, globals::registry_queue_init};
 
 use bevy::render::renderer::{RenderAdapter, RenderDevice, RenderInstance, RenderQueue};
@@ -92,32 +94,38 @@ pub(crate) fn run_window(
 ) -> Result<(), Box<dyn Error>> {
     let ipc::WindowIpc { requests, output } = ipc;
     settings.validate()?;
-    let connection = Connection::connect_to_env()?;
-    let (globals, mut queue) = registry_queue_init(&connection)?;
-    let qh = queue.handle();
-    let mut state = native::State::new(
-        &globals,
-        &qh,
-        id,
-        settings,
-        placement,
-        connection.clone(),
-        output.clone(),
-    )?;
-    queue.roundtrip(&mut state)?;
-    state.recreate(&qh);
-    let mut event_loop = EventLoop::<native::State>::try_new()?;
-    WaylandSource::new(connection.clone(), queue).insert(event_loop.handle())?;
-    event_loop
-        .handle()
-        .insert_source(requests, |event, _, state| match event {
-            smithay_client_toolkit::reexports::calloop::channel::Event::Msg(request) => {
-                state.requests.push(request)
-            }
-            smithay_client_toolkit::reexports::calloop::channel::Event::Closed => {
-                state.stopping = true
-            }
-        })?;
+    #[cfg(unix)]
+    let (mut state, mut event_loop, connection, qh) = {
+        let connection = Connection::connect_to_env()?;
+        let (globals, mut queue) = registry_queue_init(&connection)?;
+        let qh = queue.handle();
+        let mut state = native::State::new(
+            &globals,
+            &qh,
+            id,
+            settings,
+            placement,
+            connection.clone(),
+            output.clone(),
+        )?;
+        queue.roundtrip(&mut state)?;
+        state.recreate(&qh);
+        let mut event_loop = EventLoop::<native::State>::try_new()?;
+        WaylandSource::new(connection.clone(), queue).insert(event_loop.handle())?;
+        event_loop
+            .handle()
+            .insert_source(requests, |event, _, state| match event {
+                smithay_client_toolkit::reexports::calloop::channel::Event::Msg(request) => {
+                    state.requests.push(request)
+                }
+                smithay_client_toolkit::reexports::calloop::channel::Event::Closed => {
+                    state.stopping = true
+                }
+            })?;
+        (state, event_loop, connection, qh)
+    };
+    #[cfg(windows)]
+    let mut state = native::State::new(id, settings, placement, output.clone())?;
     output.update_state(id, |status| status.placement = state.placement.clone());
     let mut renderer = None::<renderer::Renderer>;
     let mut next_frame = Instant::now();
@@ -143,9 +151,29 @@ pub(crate) fn run_window(
                     .min(Duration::from_millis(2)),
             )
         };
-        event_loop.dispatch(wait, &mut state)?;
-        state.apply_drag();
-        connection.flush()?;
+        #[cfg(unix)]
+        {
+            event_loop.dispatch(wait, &mut state)?;
+            state.apply_drag();
+            connection.flush()?;
+        }
+        #[cfg(windows)]
+        {
+            state.dispatch(
+                wait.unwrap_or(Duration::from_millis(20))
+                    .min(Duration::from_millis(20)),
+            );
+            loop {
+                match requests.try_recv() {
+                    Ok(request) => state.requests.push(request),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        state.stopping = true;
+                        break;
+                    }
+                }
+            }
+        }
         let remap = state.output_changed || state.closed;
         state.output_changed = false;
         let mut configure_renderer = false;
@@ -205,13 +233,17 @@ pub(crate) fn run_window(
         }
         if properties_changed && !remap {
             state.properties();
+            #[cfg(unix)]
             state.layer.commit();
         }
         if remap {
             // Layer-shell fixes the output at creation. Replace only this role;
             // the renderer, model and animation remain alive.
             gpu_surface = None;
+            #[cfg(unix)]
             state.recreate(&qh);
+            #[cfg(windows)]
+            state.recreate();
             if let Some(renderer) = renderer.as_mut() {
                 renderer.generation = renderer
                     .generation

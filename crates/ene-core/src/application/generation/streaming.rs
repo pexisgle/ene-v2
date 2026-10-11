@@ -9,6 +9,7 @@ pub async fn generate(
     mut predecessor: Option<watch::Receiver<Option<Result<(), Error>>>>,
     done: watch::Sender<Option<Result<(), Error>>>,
 ) {
+    app.character_event(&companion, json!({"type":"conversation_started"}));
     let provider_cancel = cancelled.clone();
     let waiting = async {
         if let Some(previous) = predecessor.as_mut() {
@@ -149,6 +150,17 @@ pub async fn generate(
         }
         if !finished {
             return Err("incomplete_output");
+        }
+        if let Ok(Some(message)) = app
+            .0
+            .repository
+            .message(companion.clone(), id.clone())
+            .await
+        {
+            app.character_event(
+                &companion,
+                json!({"type":"conversation_finished","text":message.text}),
+            );
         }
         Ok::<_, &'static str>(())
     };

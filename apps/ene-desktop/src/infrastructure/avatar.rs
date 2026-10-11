@@ -101,7 +101,7 @@ impl Controller {
             .unwrap_or_else(|| {
                 std::env::current_exe()
                     .unwrap_or_default()
-                    .with_file_name("ene-avatar")
+                    .with_file_name(ene_platform::executable("ene-avatar"))
             });
         Self::with_executable(executable, wake)
     }

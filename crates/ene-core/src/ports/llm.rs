@@ -148,6 +148,18 @@ pub enum Event {
 pub trait Authorization: Send + Sync {
     fn check(&self) -> BoxFuture<'_, Result<()>>;
 }
+struct RestrictedAuthorization {
+    original: Arc<dyn Authorization>,
+    scope: Arc<dyn Authorization>,
+}
+impl Authorization for RestrictedAuthorization {
+    fn check(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async {
+            self.original.check().await?;
+            self.scope.check().await
+        })
+    }
+}
 pub(crate) enum InvocationInput {
     Conversation(Generation),
     ConnectionCheck(Generation),
@@ -210,6 +222,14 @@ impl Invocation {
     }
     pub fn id(&self) -> &str {
         &self.id
+    }
+    /// Add runtime revocation without replacing the host's original authorization.
+    pub fn restrict(mut self, scope: Arc<dyn Authorization>) -> Self {
+        self.authorization = Arc::new(RestrictedAuthorization {
+            original: self.authorization,
+            scope,
+        });
+        self
     }
     pub fn connection(&self) -> &Connection {
         &self.connection

@@ -1,7 +1,7 @@
 //! Non-secret provider descriptors shared with RPC and plugins.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SettingField {
     pub key: String,
     pub label: String,
@@ -14,6 +14,7 @@ pub struct SettingField {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(schemars::JsonSchema)]
 pub enum SettingKind {
     Text,
     Number,
@@ -23,7 +24,7 @@ pub enum SettingKind {
     Unknown(String),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Model {
     pub id: String,
     pub name: String,
@@ -32,7 +33,7 @@ pub struct Model {
     pub metadata: Option<ModelMetadata>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelMetadata {
     /// URL of the API or authoritative catalog used to obtain these values.
     pub source: String,
@@ -58,6 +59,7 @@ pub struct ModelMetadata {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(schemars::JsonSchema)]
 pub enum MetadataScope {
     #[default]
     Catalog,
@@ -66,13 +68,13 @@ pub enum MetadataScope {
     Unknown(String),
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Capabilities {
     pub streaming_text: bool,
     pub model_list: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderInfo {
     pub id: String,
     pub name: String,

@@ -2,6 +2,7 @@
 pub(crate) mod auth;
 mod device_rpc;
 pub(crate) mod error;
+mod plugin_rpc;
 mod rpc;
 #[cfg(test)]
 mod rpc_tests;

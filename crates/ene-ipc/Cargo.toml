@@ -9,12 +9,16 @@ publish.workspace = true
 workspace = true
 [features]
 default = []
+host-plugin-contracts = ["provider-contracts", "dep:schemars"]
+host-plugin = ["host-plugin-contracts", "provider-plugin"]
 renderer = ["dep:serde", "dep:uuid"]
-provider-plugin = ["dep:serde", "dep:ene-api-types", "dep:serde_json", "rpc", "remoc/codec-message-pack", "dep:thiserror"]
+provider-contracts = ["dep:serde", "dep:ene-api-types", "dep:serde_json"]
+provider-plugin = ["provider-contracts", "rpc", "remoc/codec-message-pack", "dep:thiserror"]
 transport = ["dep:remoc"]
 rpc = ["transport", "remoc/rtc"]
 
 [dependencies]
+schemars = { version = "1", optional = true }
 ene-api-types = { path = "../ene-api-types", optional = true }
 thiserror = { workspace = true, optional = true }
 serde_json = { version = "1", optional = true }

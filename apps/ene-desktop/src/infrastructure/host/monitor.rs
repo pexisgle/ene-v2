@@ -37,7 +37,7 @@ async fn inspect(path: &Path) -> RuntimeStatus {
 }
 
 pub(super) async fn run(mut commands: channel::Receiver<Request>, emit: &(impl Fn(Event) + Sync)) {
-    let path = match xdg::BaseDirectories::new().get_runtime_directory() {
+    let path = match ene_platform::paths::runtime() {
         Ok(root) => root.join("ene-host/connection.json"),
         Err(_) => {
             emit(Event::Runtime(RuntimeStatus::unavailable(

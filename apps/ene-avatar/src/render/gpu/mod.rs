@@ -15,3 +15,6 @@ impl fmt::Display for GpuError {
     }
 }
 impl std::error::Error for GpuError {}
+
+#[cfg(all(test, windows))]
+mod windows_tests;

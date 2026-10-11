@@ -13,6 +13,7 @@ rpc = ["dep:buffa", "dep:connectrpc", "dep:connectrpc-build", "dep:protoc-bin-ve
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+schemars = "1"
 buffa = { workspace = true, optional = true }
 connectrpc = { workspace = true, optional = true }
 

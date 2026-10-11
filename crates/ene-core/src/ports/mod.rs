@@ -1,5 +1,6 @@
 //! Operation-level boundaries. Application code never receives a SQL connection.
 pub mod llm;
+pub mod plugin;
 use crate::domain::*;
 use futures_util::future::BoxFuture;
 use serde_json::Value;

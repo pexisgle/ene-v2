@@ -2,6 +2,7 @@ mod commit;
 mod credentials;
 mod generation;
 mod operations;
+mod plugins;
 mod runtime;
 use crate::ports::{Credentials, llm::ProviderRegistry};
 use crate::{domain::*, ports::Repository};
@@ -47,6 +48,9 @@ struct Inner {
     repository: Arc<dyn Repository>,
     providers: Arc<dyn ProviderRegistry>,
     credentials: Arc<dyn Credentials>,
+    plugins: Option<Arc<dyn crate::ports::plugin::Plugins>>,
+    plugin_events: Arc<tokio::sync::Semaphore>,
+    plugin_tasks: TaskTracker,
     controls: Mutex<Controls>,
     boundary: Mutex<Boundary>,
     events: broadcast::Sender<Notification>,
@@ -66,10 +70,22 @@ impl HostApplication {
         credentials: Arc<dyn Credentials>,
         shutdown: watch::Sender<bool>,
     ) -> Self {
+        Self::with_plugins(repository, providers, credentials, shutdown, None)
+    }
+    pub fn with_plugins(
+        repository: Arc<dyn Repository>,
+        providers: Arc<dyn ProviderRegistry>,
+        credentials: Arc<dyn Credentials>,
+        shutdown: watch::Sender<bool>,
+        plugins: Option<Arc<dyn crate::ports::plugin::Plugins>>,
+    ) -> Self {
         Self(Arc::new(Inner {
             repository,
             providers,
             credentials,
+            plugins,
+            plugin_events: Arc::new(tokio::sync::Semaphore::new(16)),
+            plugin_tasks: TaskTracker::new(),
             controls: Mutex::new(Controls::default()),
             shutdown,
             generations: TaskTracker::new(),
@@ -88,6 +104,7 @@ impl HostApplication {
         }))
     }
     pub async fn stop(&self) -> Result<(), Error> {
+        self.0.plugin_tasks.close();
         self.0.stops.close();
         self.0.mutations.close();
         self.0.shutdown.send_replace(true);
@@ -101,6 +118,10 @@ impl HostApplication {
         self.0.stops.wait().await;
         self.0.mutations.wait().await;
         self.0.providers.shutdown().await;
+        if let Some(plugins) = &self.0.plugins {
+            plugins.shutdown().await;
+        }
+        self.0.plugin_tasks.wait().await;
         // Cancellation only signals generation. Its terminal database write
         // and persistence-failure handling must finish before the runtime exits.
         self.0.generations.wait().await;

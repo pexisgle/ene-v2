@@ -786,6 +786,16 @@ impl RpcConvert for h::Notification {
                     .collect::<Result<_, _>>()?,
                 ..Default::default()
             })),
+            "plugin.character_action" => {
+                Event::PluginCharacterAction(Box::new(w::CharacterActionNotification {
+                    binding_id: self.data["binding_id"].as_str().ok_or_else(invalid)?.into(),
+                    revision: self.data["revision"].as_str().ok_or_else(invalid)?.into(),
+                    generation: self.data["generation"].as_u64().ok_or_else(invalid)?,
+                    expires_at_ms: self.data["expires_at_ms"].as_u64().ok_or_else(invalid)?,
+                    event: self.data["event"].clone().into_wire()?.into(),
+                    ..Default::default()
+                }))
+            }
             "host.storage_failed" | "generation.persistence_failed" => {
                 let failure = Box::new(w::PersistenceFailure {
                     message_id: self.data["message_id"].as_str().map(str::to_owned),
@@ -833,6 +843,13 @@ impl RpcConvert for h::Notification {
                         .map(h::DataTransferGrant::from_wire)
                         .collect::<Result<Vec<_>, _>>()?,
                 )?,
+            ),
+            Event::PluginCharacterAction(v) => (
+                "plugin.character_action",
+                serde_json::json!({
+                    "binding_id":v.binding_id,"revision":v.revision,"generation":v.generation,"expires_at_ms":v.expires_at_ms,
+                    "event":Value::from_wire(v.event.into_option().ok_or_else(invalid)?)?
+                }),
             ),
             Event::HostStorageFailed(v) => {
                 ("host.storage_failed", serde_json::json!({"code":v.code}))

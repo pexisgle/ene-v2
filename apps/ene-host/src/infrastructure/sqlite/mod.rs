@@ -1,4 +1,5 @@
 //! SQLite execution, schema lifecycle and repository implementation.
+mod plugins;
 mod queries;
 mod repository;
 mod schema;

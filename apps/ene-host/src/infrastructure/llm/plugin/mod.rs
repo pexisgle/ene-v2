@@ -1,4 +1,4 @@
-mod broker;
+pub(crate) mod broker;
 pub mod manifest;
 pub mod process;
 mod sandbox;

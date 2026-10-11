@@ -41,6 +41,7 @@ impl State {
 }
 pub struct Registry {
     root: PathBuf,
+    plugins: Option<std::sync::Arc<crate::infrastructure::plugins::Manager>>,
     entries: std::sync::Arc<RwLock<BTreeMap<String, Entry>>>,
     supervisor: process::Supervisor,
     discovery_errors: RwLock<Vec<Descriptor>>,
@@ -67,20 +68,29 @@ fn observe_failure(
     }
 }
 impl Registry {
+    #[cfg(test)]
     pub fn discover() -> Self {
+        Self::with_plugins(None)
+    }
+    pub fn with_plugins(
+        plugins: Option<std::sync::Arc<crate::infrastructure::plugins::Manager>>,
+    ) -> Self {
         let root = std::env::var_os("ENE_PROVIDER_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                xdg::BaseDirectories::new()
-                    .get_data_home()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("ene/providers")
-            });
-        Self::at(root)
+            .unwrap_or_else(|| ene_platform::paths::providers());
+        Self::at_with_plugins(root, plugins)
     }
+    #[cfg(test)]
     fn at(root: PathBuf) -> Self {
+        Self::at_with_plugins(root, None)
+    }
+    fn at_with_plugins(
+        root: PathBuf,
+        plugins: Option<std::sync::Arc<crate::infrastructure::plugins::Manager>>,
+    ) -> Self {
         let r = Self {
             root,
+            plugins,
             entries: std::sync::Arc::new(RwLock::new(BTreeMap::new())),
             supervisor: process::Supervisor::default(),
             discovery_errors: RwLock::new(Vec::new()),
@@ -123,7 +133,13 @@ impl Registry {
                 }
             };
             let id = &bundle.manifest.id;
-            if next.contains_key(id) || duplicates.contains(id) {
+            if next.contains_key(id)
+                || duplicates.contains(id)
+                || self
+                    .plugins
+                    .as_ref()
+                    .is_some_and(|p| p.provider_entry(id).is_some())
+            {
                 next.remove(id);
                 if duplicates.insert(id.clone()) {
                     errors.push(bundle.descriptor(
@@ -241,6 +257,9 @@ impl ProviderRegistry for Registry {
         if let Ok(errors) = self.discovery_errors.read() {
             v.extend(errors.iter().cloned());
         }
+        if let Some(plugins) = &self.plugins {
+            v.extend(plugins.descriptors());
+        }
         v
     }
     fn policy(&self, c: &Connection) -> Result<Policy> {
@@ -248,11 +267,23 @@ impl ProviderRegistry for Registry {
             return ProviderBinding::resolve(std::sync::Arc::new(openai::Provider), c)
                 .map(|binding| binding.policy().clone());
         }
+        if let Some(plugins) = &self.plugins
+            && plugins.provider_entry(&c.adapter).is_some()
+        {
+            return plugins.provider_policy(c).map(|p| p.bind_connection(c));
+        }
         Ok(self.bundle(&c.adapter)?.policy(c)?.bind_connection(c))
     }
     fn scope_fingerprint(&self, c: &Connection) -> Result<serde_json::Value> {
         if c.adapter == openai::ID {
             return self.policy(c).map(|p| p.fingerprint);
+        }
+        if let Some(plugins) = &self.plugins
+            && plugins.provider_entry(&c.adapter).is_some()
+        {
+            return plugins
+                .provider_identity(c)
+                .map(|p| p.bind_connection(c).fingerprint);
         }
         Ok(self
             .bundle(&c.adapter)?
@@ -263,6 +294,16 @@ impl ProviderRegistry for Registry {
     fn resolve(&self, c: &Connection) -> Result<ProviderBinding> {
         if c.adapter == openai::ID {
             return ProviderBinding::resolve(std::sync::Arc::new(openai::Provider), c);
+        }
+        if let Some(plugins) = &self.plugins
+            && plugins.provider_entry(&c.adapter).is_some()
+        {
+            return ProviderBinding::resolve(
+                plugins
+                    .provider(&c.adapter)
+                    .ok_or_else(Error::unavailable)?,
+                c,
+            );
         }
         let entries = self.entries.read().map_err(|_| Error::unavailable())?;
         let entry = entries
@@ -286,7 +327,13 @@ impl ProviderRegistry for Registry {
         Box::pin(self.supervisor.shutdown())
     }
     fn reload(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { self.reload_scan() })
+        Box::pin(async move {
+            if let Some(plugins) = &self.plugins {
+                use ene_core::ports::plugin::Plugins;
+                plugins.reload().await?;
+            }
+            self.reload_scan()
+        })
     }
     fn enable(&self, id: String, enabled: bool) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
@@ -296,6 +343,11 @@ impl ProviderRegistry for Registry {
                 } else {
                     Err(Error::new(ErrorKind::UnsupportedCapability))
                 };
+            }
+            if let Some(plugins) = &self.plugins
+                && plugins.provider_entry(&id).is_some()
+            {
+                return plugins.enable_provider(&id, enabled).await;
             }
             let (bundle, ticket, cancelled) = {
                 let mut entries = self.entries.write().map_err(|_| Error::unavailable())?;
@@ -356,6 +408,7 @@ mod tests {
         let manifest = serde_json::json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3"],"endpoint":"https://example.com/v1","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
         std::fs::write(path.join("manifest.json"), manifest.to_string()).unwrap();
         let registry = Registry {
+            plugins: None,
             root: root.path().into(),
             entries: Default::default(),
             supervisor: process::Supervisor::default(),
@@ -533,6 +586,7 @@ asyncio.run(main())
         )
         .unwrap();
         let registry = Registry {
+            plugins: None,
             root: root.path().to_path_buf(),
             entries: std::sync::Arc::new(RwLock::new(BTreeMap::new())),
             supervisor: process::Supervisor::default(),

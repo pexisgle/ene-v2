@@ -1,11 +1,10 @@
 //! Client preferences and serial, debounced persistence.
+#[cfg(unix)]
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
 use ene_ipc::renderer::{AvatarConfig, AvatarPlacement};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -92,22 +91,37 @@ impl ClientSettings {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.avatar.validate()?;
         let directory = path.parent().ok_or("設定フォルダがありません")?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(directory)
-            .map_err(|e| format!("設定フォルダを作れません: {e}"))?;
-        preserve_invalid(path)?;
-        let result = (|| -> std::io::Result<()> {
-            let mut file = AtomicWriteFile::options()
-                .mode(0o600)
-                .preserve_mode(false)
-                .preserve_owner(false)
-                .open(path)?;
-            serde_json::to_writer_pretty(&mut file, self)?;
-            file.write_all(b"\n")?;
-            file.commit()
-        })();
+        #[cfg(unix)]
+        let result = {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(directory)
+                .map_err(|e| format!("設定フォルダを作れません: {e}"))?;
+            preserve_invalid(path)?;
+            (|| -> std::io::Result<()> {
+                let mut file = AtomicWriteFile::options()
+                    .mode(0o600)
+                    .preserve_mode(false)
+                    .preserve_owner(false)
+                    .open(path)?;
+                serde_json::to_writer_pretty(&mut file, self)?;
+                file.write_all(b"\n")?;
+                file.commit()
+            })()
+        };
+        #[cfg(windows)]
+        let result = {
+            ene_platform::storage::create_private_dir_all(directory)
+                .map_err(|e| format!("設定フォルダを作れません: {e}"))?;
+            preserve_invalid(path)?;
+            (|| -> std::io::Result<()> {
+                let mut bytes = serde_json::to_vec_pretty(self)?;
+                bytes.push(b'\n');
+                ene_platform::storage::write_atomic(path, &bytes)
+            })()
+        };
+
         result.map_err(|e| format!("設定を保存できません: {e}"))
     }
 }
@@ -127,7 +141,19 @@ fn preserve_invalid(path: &Path) -> Result<(), String> {
     // if preserving it fails; only then may the atomic writer replace it.
     for index in 0.. {
         let backup = path.with_file_name(format!("client.json.invalid-{index}"));
-        match fs::hard_link(path, &backup) {
+        #[cfg(unix)]
+        let saved = fs::hard_link(path, &backup);
+        #[cfg(windows)]
+        let saved = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut backup_file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup)?;
+            backup_file.write_all(&bytes)?;
+            backup_file.sync_all()
+        })();
+        match saved {
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("読めない設定を退避できません: {error}")),
@@ -362,3 +388,9 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 }
+
+#[cfg(unix)]
+use std::{
+    io::Write,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+};

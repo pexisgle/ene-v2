@@ -1,7 +1,7 @@
 syntax = "proto3";
 package ene.host.v1;
 
-// Only provider-specific extension objects use JSON; API operations and events
+// Provider and plugin-specific extension objects use JSON; API operations and events
 // have concrete protobuf types. JSON text preserves arbitrary integer precision.
 message JsonDocument { string json = 1; }
 message Empty {}
@@ -114,6 +114,27 @@ message Provider {
   string revision = 12; ProviderCapabilities capabilities = 13; repeated Model models = 14;
 }
 message Providers { repeated Provider items = 1; }
+message PluginEntry {
+  string id = 1; string target = 2; string runtime = 3;
+  repeated string provides = 4; repeated string uses = 5;
+}
+message Plugin {
+  string id = 1; string name = 2; string version = 3; string revision = 4;
+  string state = 5; optional string error = 6; repeated PluginEntry entrypoints = 7;
+}
+message Plugins { repeated Plugin items = 1; }
+message EnablePluginRequest { string id = 1; bool enabled = 2; string revision = 3; }
+message PluginBinding {
+  string id = 1; string plugin_id = 2; string entrypoint = 3; string revision = 4;
+  string companion_id = 5; repeated string services = 6; JsonDocument configuration = 7;
+}
+message PluginBindings { repeated PluginBinding items = 1; }
+message PluginInvocation { string binding_id = 1; JsonDocument operation = 2; }
+message PluginResult { uint64 generation = 1; repeated JsonDocument events = 2; JsonDocument result = 3; }
+message CharacterActionNotification {
+  string binding_id = 1; string revision = 2; uint64 generation = 3;
+  uint64 expires_at_ms = 4; JsonDocument event = 5;
+}
 message EnableProviderRequest { string id = 1; bool enabled = 2; }
 message AvailabilityRequest { string connection_id = 1; string companion_id = 2; }
 message OperationAvailability {
@@ -135,6 +156,7 @@ message Notification {
     Settings settings_updated = 8; Grants grants_updated = 9;
     PersistenceFailure host_storage_failed = 10;
     PersistenceFailure generation_persistence_failed = 11;
+    CharacterActionNotification plugin_character_action = 12;
   }
 }
 message InitialState { string subscription_id = 1; Snapshot snapshot = 2; }
@@ -211,6 +233,15 @@ service HostService {
   rpc ReloadProviders(Empty) returns (Providers);
   rpc EnableProvider(EnableProviderRequest) returns (Providers);
   rpc GetAvailability(AvailabilityRequest) returns (Availability);
+}
+service PluginService {
+  rpc List(Empty) returns (Plugins);
+  rpc Get(Id) returns (Plugin);
+  rpc Reload(Empty) returns (Plugins);
+  rpc Enable(EnablePluginRequest) returns (Plugins);
+  rpc ListBindings(Empty) returns (PluginBindings);
+  rpc Bind(PluginBinding) returns (PluginBindings);
+  rpc Invoke(PluginInvocation) returns (PluginResult);
 }
 service DeviceService {
   rpc RegisterDevice(RegisterDeviceRequest) returns (DeviceRegistration);

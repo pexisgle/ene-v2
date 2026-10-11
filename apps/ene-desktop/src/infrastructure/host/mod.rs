@@ -4,13 +4,7 @@ use ene_api_client::{ApiClient as Http, IdempotencyKey};
 use ene_api_types::host::Replica;
 use ene_api_types::host::{Message, RuntimeConnection, Snapshot};
 use serde_json::Value;
-use std::{
-    fs,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::Path,
-    sync::mpsc,
-    time::Duration,
-};
+use std::{fs, path::Path, sync::mpsc, time::Duration};
 use tokio::sync::mpsc as channel;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -239,10 +233,13 @@ use settings::{ActionResult, action_with_key};
 use transport::{Error, descriptor};
 #[cfg(test)]
 mod regression_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../../../crates/ene-api-client/tests/support/mod.rs"]
 mod connect_fixture;
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};

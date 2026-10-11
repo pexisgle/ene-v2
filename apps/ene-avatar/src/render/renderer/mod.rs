@@ -64,7 +64,16 @@ impl Renderer {
         let window = WindowWrapper::new(native_window);
         let wrapper = RawHandleWrapper::new(&window)?;
         let resources = bevy::tasks::block_on(bevy::render::renderer::initialize_renderer(
-            bevy::render::settings::Backends::VULKAN,
+            {
+                #[cfg(unix)]
+                {
+                    bevy::render::settings::Backends::VULKAN
+                }
+                #[cfg(windows)]
+                {
+                    bevy::render::settings::Backends::DX12
+                }
+            },
             Some(RawHandleWrapperHolder(Arc::new(Mutex::new(Some(wrapper))))),
             &WgpuSettings {
                 force_fallback_adapter: std::env::var_os("ENE_AVATAR_CPU_GPU").is_some(),

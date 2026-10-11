@@ -10,6 +10,7 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
         }),
         M::up(include_str!("../../../migrations/002_companions.sql")),
         M::up(include_str!("../../../migrations/003_rpc_state.sql")),
+        M::up(include_str!("../../../migrations/004_plugins.sql")),
     ])
 }
 fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {

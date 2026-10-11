@@ -1,3 +1,4 @@
+use super::sandbox::Child;
 use super::{broker, manifest::Bundle, sandbox};
 use ene_core::{
     domain::{Error, ErrorKind},
@@ -9,7 +10,7 @@ use ene_ipc::{
 };
 use futures_util::stream::BoxStream;
 use std::{sync::Arc, time::Duration};
-use tokio::{process::Child, sync::mpsc};
+use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
 struct Process {

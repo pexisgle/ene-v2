@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(super) fn service(app: App) -> connectrpc::ConnectRpcService {
     connectrpc::Router::new()
         .add_service(Arc::new(HostRpc { app: app.clone() }))
+        .add_service(Arc::new(super::plugin_rpc::PluginRpc { app: app.clone() }))
         .add_service(Arc::new(super::device_rpc::DeviceRpc { app }))
         .into_axum_service()
         .with_limits(

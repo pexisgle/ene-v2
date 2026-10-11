@@ -3,10 +3,12 @@ use super::*;
 use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
 use ene_api_types::{rpc as w, rpc_conversion::RpcConvert};
 pub type HostRpcClient = w::HostServiceClient<HttpClient>;
+pub type PluginRpcClient = w::PluginServiceClient<HttpClient>;
 pub type DeviceRpcClient = w::DeviceServiceClient<HttpClient>;
 pub(crate) struct RpcApi {
     pub host: HostRpcClient,
     pub devices: DeviceRpcClient,
+    pub plugins: PluginRpcClient,
 }
 impl RpcApi {
     pub fn new(endpoint: &Url, bearer: HeaderValue) -> Result<Self, Error> {
@@ -36,6 +38,7 @@ impl RpcApi {
         .with_default_max_message_size(MAX_RESPONSE);
         Ok(Self {
             host: HostRpcClient::new(transport.clone(), config.clone()),
+            plugins: PluginRpcClient::new(transport.clone(), config.clone()),
             devices: DeviceRpcClient::new(transport, config),
         })
     }
@@ -616,5 +619,121 @@ impl ApiClient {
             .await
             .map_err(rpc_error)?;
         Ok(())
+    }
+}
+
+impl ApiClient {
+    pub async fn plugins(&self) -> Result<Vec<ene_api_types::plugin::PluginInfo>, Error> {
+        self.0
+            .rpc
+            .plugins
+            .list_with_options(w::Empty::default(), options(5))
+            .await
+            .map_err(rpc_error)?
+            .into_owned()
+            .items
+            .into_iter()
+            .map(decode)
+            .collect()
+    }
+    pub async fn plugin(&self, id: &str) -> Result<ene_api_types::plugin::PluginInfo, Error> {
+        decode(
+            self.0
+                .rpc
+                .plugins
+                .get_with_options(
+                    w::Id {
+                        id: id.into(),
+                        ..Default::default()
+                    },
+                    options(5),
+                )
+                .await
+                .map_err(rpc_error)?
+                .into_owned(),
+        )
+    }
+    pub async fn reload_plugins(&self) -> Result<Vec<ene_api_types::plugin::PluginInfo>, Error> {
+        self.0
+            .rpc
+            .plugins
+            .reload_with_options(w::Empty::default(), options(30))
+            .await
+            .map_err(rpc_error)?
+            .into_owned()
+            .items
+            .into_iter()
+            .map(decode)
+            .collect()
+    }
+    pub async fn enable_plugin(
+        &self,
+        id: &str,
+        input: &ene_api_types::plugin::PluginEnabled,
+    ) -> Result<Vec<ene_api_types::plugin::PluginInfo>, Error> {
+        self.0
+            .rpc
+            .plugins
+            .enable_with_options(
+                w::EnablePluginRequest {
+                    id: id.into(),
+                    enabled: input.enabled,
+                    revision: input.revision.clone(),
+                    ..Default::default()
+                },
+                options(60),
+            )
+            .await
+            .map_err(rpc_error)?
+            .into_owned()
+            .items
+            .into_iter()
+            .map(decode)
+            .collect()
+    }
+    pub async fn plugin_bindings(
+        &self,
+    ) -> Result<Vec<ene_api_types::plugin::PluginBinding>, Error> {
+        self.0
+            .rpc
+            .plugins
+            .list_bindings_with_options(w::Empty::default(), options(5))
+            .await
+            .map_err(rpc_error)?
+            .into_owned()
+            .items
+            .into_iter()
+            .map(decode)
+            .collect()
+    }
+    pub async fn bind_plugin(
+        &self,
+        input: &ene_api_types::plugin::PluginBinding,
+    ) -> Result<Vec<ene_api_types::plugin::PluginBinding>, Error> {
+        self.0
+            .rpc
+            .plugins
+            .bind_with_options(encode(input.clone())?, options(10))
+            .await
+            .map_err(rpc_error)?
+            .into_owned()
+            .items
+            .into_iter()
+            .map(decode)
+            .collect()
+    }
+    pub async fn invoke_plugin(
+        &self,
+        input: &ene_api_types::plugin::PluginInvocation,
+    ) -> Result<ene_api_types::plugin::PluginResult, Error> {
+        decode(
+            self.0
+                .rpc
+                .plugins
+                .invoke_with_options(encode(input.clone())?, options(190))
+                .await
+                .map_err(rpc_error)?
+                .into_owned(),
+        )
     }
 }

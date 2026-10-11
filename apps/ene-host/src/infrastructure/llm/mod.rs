@@ -1,3 +1,3 @@
 mod openai;
-mod plugin;
+pub(crate) mod plugin;
 pub mod registry;

@@ -1,0 +1,15 @@
+[package]
+name = "ene-openrouter-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+ene-plugin-sdk = { path = "../../../crates/ene-plugin-sdk" }
+ene-ipc = { workspace = true, features = ["host-plugin-contracts"] }
+serde_json = "1"
+base64 = "0.22"

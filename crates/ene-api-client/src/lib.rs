@@ -32,7 +32,7 @@ mod rpc;
 mod transport;
 pub use error::{ApiFailure, Error};
 pub use idempotency::IdempotencyKey;
-pub use rpc::{DeviceRpcClient, HostRpcClient};
+pub use rpc::{DeviceRpcClient, HostRpcClient, PluginRpcClient};
 pub use transport::ApiClient;
 
 #[cfg(test)]

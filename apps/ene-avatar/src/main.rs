@@ -4,6 +4,7 @@
 mod application;
 mod ipc;
 mod render;
+#[cfg_attr(windows, path = "native_windows.rs")]
 mod wayland;
 
 use ene_ipc::{
@@ -50,14 +51,20 @@ fn run(
         let local = if args.standalone {
             Some(client)
         } else {
-            use std::os::fd::AsFd;
-            use tokio::net::unix::pipe;
-            // IPC owns these pipe ends. Unlike Tokio Stdin, they have no
-            // uncancellable blocking read that can delay process shutdown.
-            let input =
-                pipe::Receiver::from_owned_fd(std::io::stdin().as_fd().try_clone_to_owned()?)?;
-            let output =
-                pipe::Sender::from_owned_fd(std::io::stdout().as_fd().try_clone_to_owned()?)?;
+            #[cfg(unix)]
+            let (input, output) = {
+                use std::os::fd::AsFd;
+                use tokio::net::unix::pipe;
+                // IPC owns these pipe ends. Unlike Tokio Stdin, they have no
+                // uncancellable blocking read that can delay process shutdown.
+                let input =
+                    pipe::Receiver::from_owned_fd(std::io::stdin().as_fd().try_clone_to_owned()?)?;
+                let output =
+                    pipe::Sender::from_owned_fd(std::io::stdout().as_fd().try_clone_to_owned()?)?;
+                (input, output)
+            };
+            #[cfg(windows)]
+            let (input, output) = (tokio::io::stdin(), tokio::io::stdout());
             Connect::io::<_, _, RendererClient, RendererClient, remoc::codec::Default>(
                 Cfg::default(),
                 input,
@@ -71,5 +78,6 @@ fn run(
     })?;
     let exit = application::run(args, receiver, output);
     drop(local);
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
     Ok(exit)
 }

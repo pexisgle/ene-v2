@@ -4,7 +4,6 @@ use super::{
     frames::{FrameIdentity, LeasedFrame},
     surface::GpuSurface,
 };
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
 
 struct Target {
@@ -28,12 +27,12 @@ pub struct AvatarPresenter {
     sequence: u64,
 }
 impl AvatarPresenter {
-    pub fn new<W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static>(
+    pub fn new(
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        window: Arc<W>,
+        window: Arc<crate::wayland::NativeWindow>,
     ) -> Result<Self, GpuError> {
         Ok(Self {
             surface: GpuSurface::new(instance, adapter, device, queue, window)?,
@@ -75,6 +74,7 @@ impl AvatarPresenter {
         };
         state.prepare_gpu_present(&frame.runs);
         output.present();
+        self.surface.commit()?;
         let covered = !frame.runs.is_empty();
         self.sequence = frame.identity.sequence;
         self.current = Some(frame);

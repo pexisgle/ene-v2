@@ -1,22 +1,30 @@
 use super::*;
 pub(super) fn descriptor(path: &Path) -> Result<RuntimeConnection, String> {
-    // Inspect the opened file rather than a potentially replaced path.
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(
-            rustix::fs::OFlags::NOFOLLOW.bits() as i32 | rustix::fs::OFlags::NONBLOCK.bits() as i32,
-        )
-        .open(path)
-        .map_err(|_| "このPCのホストが起動していません")?;
-    let meta = file.metadata().map_err(|_| "接続情報を確認できません")?;
-    if !meta.is_file()
-        || meta.uid() != rustix::process::geteuid().as_raw()
-        || meta.mode() & 0o077 != 0
-        || meta.nlink() != 1
-        || meta.len() > 8192
-    {
-        return Err("接続情報の所有者・権限・形式が不正です".into());
-    }
+    #[cfg(unix)]
+    let file = {
+        // Inspect the opened file rather than a potentially replaced path.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                rustix::fs::OFlags::NOFOLLOW.bits() as i32
+                    | rustix::fs::OFlags::NONBLOCK.bits() as i32,
+            )
+            .open(path)
+            .map_err(|_| "このPCのホストが起動していません")?;
+        let meta = file.metadata().map_err(|_| "接続情報を確認できません")?;
+        if !meta.is_file()
+            || meta.uid() != rustix::process::geteuid().as_raw()
+            || meta.mode() & 0o077 != 0
+            || meta.nlink() != 1
+            || meta.len() > 8192
+        {
+            return Err("接続情報の所有者・権限・形式が不正です".into());
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = ene_platform::storage::open(path, false, true)
+        .map_err(|_| "接続情報の所有者・権限・形式が不正です")?;
     let value: RuntimeConnection = serde_json::from_reader(std::io::Read::take(file, 8193))
         .map_err(|_| "接続情報を読めません")?;
     let url = url::Url::parse(&value.endpoint).map_err(|_| "接続先が不正です")?;

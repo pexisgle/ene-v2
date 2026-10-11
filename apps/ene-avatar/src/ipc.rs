@@ -7,7 +7,13 @@ use ene_ipc::{
         RendererMessage, RendererRequest, RendererState,
     },
 };
+#[cfg(unix)]
 use smithay_client_toolkit::reexports::calloop::channel;
+#[cfg(windows)]
+mod channel {
+    pub use std::sync::mpsc::{SyncSender, sync_channel};
+    pub type Channel<T> = std::sync::mpsc::Receiver<T>;
+}
 use std::{sync::Arc, thread::JoinHandle};
 
 #[derive(Resource, Clone)]

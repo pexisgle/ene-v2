@@ -14,19 +14,52 @@ pub struct GpuSurface {
     pipeline: wgpu::RenderPipeline,
     needs_reconfigure: bool,
 }
-trait WindowHandles: HasWindowHandle + HasDisplayHandle + Send + Sync {}
-impl<T: HasWindowHandle + HasDisplayHandle + Send + Sync> WindowHandles for T {}
+trait WindowHandles: HasWindowHandle + HasDisplayHandle + Send + Sync {
+    fn create_surface(
+        &self,
+        instance: &wgpu::Instance,
+    ) -> Result<wgpu::Surface<'static>, wgpu::CreateSurfaceError>;
+    fn commit(&self) -> Result<(), GpuError>;
+}
+impl WindowHandles for crate::wayland::NativeWindow {
+    fn create_surface(
+        &self,
+        instance: &wgpu::Instance,
+    ) -> Result<wgpu::Surface<'static>, wgpu::CreateSurfaceError> {
+        #[cfg(unix)]
+        {
+            instance.create_surface(Arc::new(self.clone()))
+        }
+        #[cfg(windows)]
+        {
+            self.create_surface(instance)
+        }
+    }
+    fn commit(&self) -> Result<(), GpuError> {
+        #[cfg(unix)]
+        {
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            self.commit().map_err(|e| GpuError(e.to_string()))
+        }
+    }
+}
 impl GpuSurface {
-    pub fn new<W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static>(
+    pub(crate) fn commit(&self) -> Result<(), GpuError> {
+        self.window.commit()
+    }
+    pub fn new(
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        window: Arc<W>,
+        window: Arc<crate::wayland::NativeWindow>,
     ) -> Result<Self, GpuError> {
         let window: Arc<dyn WindowHandles> = window;
-        let surface = instance
-            .create_surface(window.clone())
+        let surface = window
+            .create_surface(instance)
             .map_err(|error| GpuError(error.to_string()))?;
         let capabilities = surface.get_capabilities(adapter);
         let format = [
@@ -63,7 +96,7 @@ impl GpuSurface {
     /// submitted before returning; the caller installs input coverage and
     /// double-buffered Wayland state, then calls `SurfaceTexture::present`.
     /// Acquisition failures skip this frame; reconfiguration occurs next call.
-    pub(super) fn draw(
+    pub(crate) fn draw(
         &mut self,
         texture: &wgpu::Texture,
         width: u32,
@@ -107,8 +140,8 @@ impl GpuSurface {
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface = self
-                    .instance
-                    .create_surface(self.window.clone())
+                    .window
+                    .create_surface(&self.instance)
                     .map_err(|error| GpuError(error.to_string()))?;
                 self.needs_reconfigure = true;
                 return Ok(None);

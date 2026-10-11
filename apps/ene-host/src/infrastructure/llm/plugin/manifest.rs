@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fmt::Write,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 pub(crate) struct VerifiedFile {
@@ -25,6 +24,32 @@ pub struct Bundle {
 fn invalid() -> Error {
     Error::invalid()
 }
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
+fn mode(m: &std::fs::Metadata) -> u32 {
+    m.mode() & 0o777
+}
+#[cfg(windows)]
+fn mode(_: &std::fs::Metadata) -> u32 {
+    0o700
+}
+fn trusted(path: &Path, m: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = path;
+        m.uid() == rustix::process::geteuid().as_raw() && m.mode() & 0o022 == 0
+    }
+    #[cfg(windows)]
+    {
+        ene_platform::storage::check(path, m.is_dir(), false).is_ok()
+    }
+}
+#[cfg(windows)]
+fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    ene_platform::storage::read(path, limit, false).map_err(|_| invalid())
+}
+#[cfg(unix)]
 fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
     use std::io::Read;
     let f = std::fs::OpenOptions::new()
@@ -35,12 +60,7 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
         .open(path)
         .map_err(|_| invalid())?;
     let m = f.metadata().map_err(|_| invalid())?;
-    if !m.is_file()
-        || m.uid() != rustix::process::geteuid().as_raw()
-        || m.mode() & 0o022 != 0
-        || m.nlink() != 1
-        || m.len() > limit
-    {
+    if !m.is_file() || !trusted(path, &m) || m.nlink() != 1 || m.len() > limit {
         return Err(invalid());
     }
     let mut data = Vec::new();
@@ -71,10 +91,7 @@ fn digest(
             return Err(invalid());
         }
         let m = std::fs::symlink_metadata(&p).map_err(|_| invalid())?;
-        if m.file_type().is_symlink()
-            || m.uid() != rustix::process::geteuid().as_raw()
-            || m.mode() & 0o022 != 0
-        {
+        if m.file_type().is_symlink() || !trusted(&p, &m) {
             return Err(invalid());
         }
         // Lengths and entry kinds make the tree encoding unambiguous. Hashing
@@ -88,12 +105,12 @@ fn digest(
         });
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name);
-        hash.update((m.mode() & 0o777).to_le_bytes());
+        hash.update(mode(&m).to_le_bytes());
         if m.is_dir() {
             files.push(VerifiedFile {
                 path: p.strip_prefix(base).map_err(|_| invalid())?.to_path_buf(),
                 bytes: None,
-                mode: m.mode() & 0o777,
+                mode: mode(&m),
             });
             digest(&p, base, hash, budget, files)?;
         } else {
@@ -107,7 +124,7 @@ fn digest(
             files.push(VerifiedFile {
                 path: p.strip_prefix(base).map_err(|_| invalid())?.to_path_buf(),
                 bytes: Some(bytes),
-                mode: m.mode() & 0o777,
+                mode: mode(&m),
             });
         }
     }
@@ -115,15 +132,132 @@ fn digest(
 }
 pub fn load(root: &Path) -> Result<Bundle> {
     let m = std::fs::symlink_metadata(root).map_err(|_| invalid())?;
-    if !m.is_dir()
-        || m.file_type().is_symlink()
-        || m.uid() != rustix::process::geteuid().as_raw()
-        || m.mode() & 0o022 != 0
-    {
+    if !m.is_dir() || m.file_type().is_symlink() || !trusted(root, &m) {
         return Err(invalid());
     }
     let manifest_bytes = read(&root.join("manifest.json"), 65536)?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(|_| invalid())?;
+    validate(&manifest)?;
+    let mut hash = Sha256::new();
+    hash.update(b"ene-provider-bundle-v2\0");
+    let mut files = Vec::new();
+    digest(root, root, &mut hash, &mut (0, 0), &mut files)?;
+    if files
+        .iter()
+        .find(|file| file.path == Path::new("manifest.json"))
+        .and_then(|file| file.bytes.as_ref())
+        != Some(&manifest_bytes)
+    {
+        return Err(Error::new(ErrorKind::StateConflict));
+    }
+    let mut revision = String::with_capacity(64);
+    for byte in hash.finalize() {
+        write!(&mut revision, "{byte:02x}").expect("write SHA-256 to String");
+    }
+    Ok(Bundle {
+        root: root.to_path_buf(),
+        manifest,
+        revision,
+        files: std::sync::Arc::new(files),
+    })
+}
+pub fn valid_endpoint(u: &url::Url) -> Result<()> {
+    if !(u.scheme() == "https"
+        || u.scheme() == "http"
+            && [Some("127.0.0.1"), Some("[::1]"), Some("localhost")].contains(&u.host_str()))
+        || u.host_str().is_none()
+        || !u.username().is_empty()
+        || u.password().is_some()
+        || u.query().is_some()
+        || u.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+fn validate_options(m: &Manifest, options: &Value) -> Result<()> {
+    let object = options.as_object().ok_or_else(invalid)?;
+    if object
+        .keys()
+        .any(|k| !m.settings.iter().any(|f| f.key == *k))
+    {
+        return Err(invalid());
+    }
+    for f in &m.settings {
+        match object.get(&f.key) {
+            None if !f.required => {}
+            None => return Err(invalid()),
+            Some(v) => {
+                let valid = match f.kind {
+                    SettingKind::Text => v.as_str().is_some_and(|s| s.len() <= 8192),
+                    SettingKind::Number => v.is_number(),
+                    SettingKind::Boolean => v.is_boolean(),
+                    SettingKind::Unknown(_) => false,
+                    SettingKind::Select => {
+                        v.as_str().is_some_and(|s| f.choices.iter().any(|c| c == s))
+                    }
+                };
+                if !valid {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+impl Bundle {
+    pub fn descriptor(
+        &self,
+        state: &str,
+        capabilities: Capabilities,
+        error: Option<String>,
+    ) -> Descriptor {
+        Descriptor {
+            id: self.manifest.id.clone(),
+            name: self.manifest.name.clone(),
+            kind: "plugin".into(),
+            endpoint: self.manifest.endpoint.clone(),
+            options: self.manifest.options.clone(),
+            settings: self.manifest.settings.clone(),
+            requires_credentials: !matches!(self.manifest.auth, AuthProfile::None),
+            environment_variable: self.manifest.environment_variable.clone(),
+            destinations: self.manifest.destinations.clone(),
+            state: state.into(),
+            error,
+            revision: self.revision.clone(),
+            capabilities,
+            models: self.manifest.models.clone(),
+        }
+    }
+    pub fn policy(&self, c: &Connection) -> Result<Policy> {
+        if c.kind != "llm" {
+            return Err(invalid());
+        }
+        let endpoint = url::Url::parse(&c.endpoint).map_err(|_| invalid())?;
+        valid_endpoint(&endpoint)?;
+        if !self
+            .manifest
+            .destinations
+            .contains(&endpoint.origin().ascii_serialization())
+        {
+            return Err(Error::new(ErrorKind::PermissionRequired));
+        }
+        validate_options(&self.manifest, &c.options)?;
+        Ok(self.identity_policy(c))
+    }
+    /// The verified package's scope can change even if it rejects an old endpoint.
+    pub fn identity_policy(&self, c: &Connection) -> Policy {
+        Policy {
+            revision: self.revision.clone(),
+            fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":c.options,"implementation":self.revision,"destinations":self.manifest.destinations,"auth":self.manifest.auth}),
+            destinations: self.manifest.destinations.clone(),
+            requires_credentials: !matches!(self.manifest.auth, AuthProfile::None),
+            environment_variable: self.manifest.environment_variable.clone(),
+        }
+    }
+}
+
+pub fn validate(manifest: &Manifest) -> Result<()> {
     if manifest.protocol_version != VERSION
         || manifest.id == super::super::openai::ID
         || manifest.id.is_empty()
@@ -261,122 +395,6 @@ pub fn load(root: &Path) -> Result<Bundle> {
             return Err(invalid());
         }
     }
-    validate_options(&manifest, &manifest.options)?;
-    let mut hash = Sha256::new();
-    hash.update(b"ene-provider-bundle-v2\0");
-    let mut files = Vec::new();
-    digest(root, root, &mut hash, &mut (0, 0), &mut files)?;
-    if files
-        .iter()
-        .find(|file| file.path == Path::new("manifest.json"))
-        .and_then(|file| file.bytes.as_ref())
-        != Some(&manifest_bytes)
-    {
-        return Err(Error::new(ErrorKind::StateConflict));
-    }
-    let mut revision = String::with_capacity(64);
-    for byte in hash.finalize() {
-        write!(&mut revision, "{byte:02x}").expect("write SHA-256 to String");
-    }
-    Ok(Bundle {
-        root: root.to_path_buf(),
-        manifest,
-        revision,
-        files: std::sync::Arc::new(files),
-    })
-}
-pub fn valid_endpoint(u: &url::Url) -> Result<()> {
-    if !(u.scheme() == "https"
-        || u.scheme() == "http"
-            && [Some("127.0.0.1"), Some("[::1]"), Some("localhost")].contains(&u.host_str()))
-        || u.host_str().is_none()
-        || !u.username().is_empty()
-        || u.password().is_some()
-        || u.query().is_some()
-        || u.fragment().is_some()
-    {
-        return Err(invalid());
-    }
+    validate_options(manifest, &manifest.options)?;
     Ok(())
-}
-fn validate_options(m: &Manifest, options: &Value) -> Result<()> {
-    let object = options.as_object().ok_or_else(invalid)?;
-    if object
-        .keys()
-        .any(|k| !m.settings.iter().any(|f| f.key == *k))
-    {
-        return Err(invalid());
-    }
-    for f in &m.settings {
-        match object.get(&f.key) {
-            None if !f.required => {}
-            None => return Err(invalid()),
-            Some(v) => {
-                let valid = match f.kind {
-                    SettingKind::Text => v.as_str().is_some_and(|s| s.len() <= 8192),
-                    SettingKind::Number => v.is_number(),
-                    SettingKind::Boolean => v.is_boolean(),
-                    SettingKind::Unknown(_) => false,
-                    SettingKind::Select => {
-                        v.as_str().is_some_and(|s| f.choices.iter().any(|c| c == s))
-                    }
-                };
-                if !valid {
-                    return Err(invalid());
-                }
-            }
-        }
-    }
-    Ok(())
-}
-impl Bundle {
-    pub fn descriptor(
-        &self,
-        state: &str,
-        capabilities: Capabilities,
-        error: Option<String>,
-    ) -> Descriptor {
-        Descriptor {
-            id: self.manifest.id.clone(),
-            name: self.manifest.name.clone(),
-            kind: "plugin".into(),
-            endpoint: self.manifest.endpoint.clone(),
-            options: self.manifest.options.clone(),
-            settings: self.manifest.settings.clone(),
-            requires_credentials: !matches!(self.manifest.auth, AuthProfile::None),
-            environment_variable: self.manifest.environment_variable.clone(),
-            destinations: self.manifest.destinations.clone(),
-            state: state.into(),
-            error,
-            revision: self.revision.clone(),
-            capabilities,
-            models: self.manifest.models.clone(),
-        }
-    }
-    pub fn policy(&self, c: &Connection) -> Result<Policy> {
-        if c.kind != "llm" {
-            return Err(invalid());
-        }
-        let endpoint = url::Url::parse(&c.endpoint).map_err(|_| invalid())?;
-        valid_endpoint(&endpoint)?;
-        if !self
-            .manifest
-            .destinations
-            .contains(&endpoint.origin().ascii_serialization())
-        {
-            return Err(Error::new(ErrorKind::PermissionRequired));
-        }
-        validate_options(&self.manifest, &c.options)?;
-        Ok(self.identity_policy(c))
-    }
-    /// The verified package's scope can change even if it rejects an old endpoint.
-    pub fn identity_policy(&self, c: &Connection) -> Policy {
-        Policy {
-            revision: self.revision.clone(),
-            fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":c.options,"implementation":self.revision,"destinations":self.manifest.destinations,"auth":self.manifest.auth}),
-            destinations: self.manifest.destinations.clone(),
-            requires_credentials: !matches!(self.manifest.auth, AuthProfile::None),
-            environment_variable: self.manifest.environment_variable.clone(),
-        }
-    }
 }

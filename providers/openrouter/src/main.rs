@@ -10,7 +10,10 @@ use ene_ipc::{
 use eventsource_stream::Eventsource;
 use futures_util::{FutureExt, StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
-use std::{os::fd::AsFd, sync::Arc};
+#[cfg(unix)]
+use std::os::fd::AsFd;
+use std::sync::Arc;
+#[cfg(unix)]
 use tokio::net::unix::pipe;
 
 type Result<T> = std::result::Result<T, ProviderError>;
@@ -228,11 +231,22 @@ impl Provider for OpenRouter {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(serve());
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    result
+}
+async fn serve() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (server, client) = ProviderServerShared::<_, Codec>::new(Arc::new(OpenRouter));
+    #[cfg(unix)]
     let input = pipe::Receiver::from_owned_fd(std::io::stdin().as_fd().try_clone_to_owned()?)?;
+    #[cfg(unix)]
     let output = pipe::Sender::from_owned_fd(std::io::stdout().as_fd().try_clone_to_owned()?)?;
+    #[cfg(windows)]
+    let (input, output) = (tokio::io::stdin(), tokio::io::stdout());
     remoc::Connect::io::<_, _, _, _, remoc::codec::Default>(remoc::Cfg::default(), input, output)
         .provide(client)
         .await?;

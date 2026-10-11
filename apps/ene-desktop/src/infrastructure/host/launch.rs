@@ -1,9 +1,12 @@
 //! Start the local service on an explicit connection request. Its lifetime is
 //! independent of the client, including cancellation during startup.
 use super::*;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     io,
-    os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
 };
@@ -21,7 +24,7 @@ impl Launcher {
             .unwrap_or_else(|| {
                 std::env::current_exe()
                     .unwrap_or_default()
-                    .with_file_name("ene-host")
+                    .with_file_name(ene_platform::executable("ene-host"))
             });
         Self::new(Command::new(executable))
     }
@@ -31,8 +34,11 @@ impl Launcher {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .process_group(0);
+            .stderr(Stdio::inherit());
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(0x00000200 | 0x08000000);
         Self {
             command,
             child: None,
@@ -152,7 +158,7 @@ impl Drop for Launcher {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

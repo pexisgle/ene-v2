@@ -1,6 +1,7 @@
 //! Shared storage/plugin DTOs, notification rules and generated Connect RPC contract; no UI, database or transport.
 pub mod budget;
 pub mod host;
+pub mod plugin;
 pub mod provider;
 pub mod sync;
 pub use host::*;
@@ -15,3 +16,6 @@ pub mod rpc {
 
 #[cfg(feature = "rpc")]
 pub mod rpc_conversion;
+
+#[cfg(feature = "rpc")]
+mod plugin_rpc_conversion;
