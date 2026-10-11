@@ -38,7 +38,7 @@ fn application(store: Store, registry: Registry) -> HostApplication {
 
 #[test]
 fn discovery_isolates_invalid_and_duplicate_packages() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::package_directory();
     package(root.path(), "healthy", "valid");
     std::fs::create_dir(root.path().join("broken")).unwrap();
     package(root.path(), "duplicate-a", "duplicate");
@@ -93,7 +93,7 @@ fn discovery_isolates_invalid_and_duplicate_packages() {
 
 #[tokio::test]
 async fn persisted_grants_survive_restart_and_unavailable_policy_but_invalidate_known_changes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support::package_directory();
     let root = temp.path().join("providers");
     std::fs::create_dir(&root).unwrap();
     let path = package(&root, "healthy", "valid");

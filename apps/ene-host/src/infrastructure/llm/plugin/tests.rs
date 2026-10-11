@@ -14,7 +14,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 fn bundle() -> (tempfile::TempDir, manifest::Bundle) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_support::package_directory();
     std::fs::write(dir.path().join("provider.py"), "").unwrap();
     let value = json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3","-I","-u","/plugin/provider.py"],"endpoint":"https://example.com/api","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
     std::fs::write(dir.path().join("manifest.json"), value.to_string()).unwrap();

@@ -3,6 +3,8 @@ mod audio;
 mod bootstrap;
 mod devices;
 mod infrastructure;
+#[cfg(test)]
+mod test_support;
 
 use clap::Parser;
 use std::error::Error;

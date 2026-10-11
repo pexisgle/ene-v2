@@ -402,7 +402,7 @@ mod tests {
     use super::*;
     #[test]
     fn scope_queries_use_scanned_bundle_until_reload() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::package_directory();
         let path = root.path().join("fixture");
         std::fs::create_dir(&path).unwrap();
         let manifest = serde_json::json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3"],"endpoint":"https://example.com/v1","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
@@ -438,7 +438,7 @@ mod tests {
     }
     #[test]
     fn request_failure_keeps_plugin_ready_and_old_process_cannot_poison_reenabled_plugin() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::package_directory();
         let manifest = serde_json::json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3"],"endpoint":"https://example.com/v1","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
         std::fs::write(dir.path().join("manifest.json"), manifest.to_string()).unwrap();
         let bundle = manifest::load(dir.path()).unwrap();
@@ -551,7 +551,7 @@ mod request_failure_integration_tests {
             std::path::Path::new("/usr/bin/python3").exists(),
             "OS Python is required inside the sandbox"
         );
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::package_directory();
         let path = root.path().join("fixture");
         std::fs::create_dir(&path).unwrap();
         let manifest = serde_json::json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3","-I","-u","/plugin/provider.py"],"endpoint":"https://example.com/v1","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
