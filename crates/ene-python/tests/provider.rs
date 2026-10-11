@@ -195,10 +195,11 @@ async fn exercise() {
     // Dropping the Rust RTC call must also cancel the Python coroutine.
     call.abort();
     assert!(call.await.unwrap_err().is_cancelled());
-    while !marker.exists() {
+    // Creating the file precedes writing its bytes, especially on Windows.
+    // Wait for the coroutine's completed marker, rather than its empty file.
+    while !std::fs::read_to_string(&marker).is_ok_and(|text| text == "cancelled") {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(std::fs::read_to_string(marker).unwrap(), "cancelled");
     assert!(client.capabilities().await.unwrap().streaming_text);
     drop(deltas);
     drop(client);

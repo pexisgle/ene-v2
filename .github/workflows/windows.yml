@@ -30,4 +30,4 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo fmt --all -- --check
-      - run: cargo --config "profile.dev.package.'*'.opt-level=0" --config "profile.test.opt-level=0" test --locked --all-features -p ene-platform --test windows -- --nocapture
+      - run: cargo --config "profile.dev.package.'*'.opt-level=0" --config "profile.test.opt-level=0" test --locked --all-features -p ene-python --test provider -- --nocapture
