@@ -102,7 +102,19 @@ async fn verify() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
     ene_platform::storage::create_private_dir_all(&source).unwrap();
-    std::fs::copy(std::env::current_exe().unwrap(), source.join("probe.exe")).unwrap();
+    let probe = source.join("probe.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+    // Package the executable code, without dependency debug information that
+    // can exceed the production package budget in an all-features test build.
+    #[cfg(target_os = "linux")]
+    assert!(
+        std::process::Command::new("strip")
+            .arg("--strip-unneeded")
+            .arg(&probe)
+            .status()
+            .expect("binutils strip is required for the native process fixture")
+            .success()
+    );
     std::fs::write(source.join("manifest.json"), json!({
         "package_version": 1, "api_version": 1, "id": "native-fixture", "name": "Native fixture", "version": "1",
         "code_files": ["probe.exe"], "entrypoints": [{"id": "behavior", "target": "host", "runtime": "process",
