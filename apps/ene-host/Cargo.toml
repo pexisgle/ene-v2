@@ -8,3 +8,50 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+ene-rpc.workspace = true
+ene-plugin.workspace = true
+connectrpc = { workspace = true, features = ["axum"] }
+buffa.workspace = true
+bytes.workspace = true
+ene-core.workspace = true
+ene-platform.workspace = true
+ene-plugin-runtime.workspace = true
+rig-core = { version = "0.44", default-features = false, features = [] }
+keyring = { version = "4", default-features = false, features = ["v1"] }
+time.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+rusqlite_migration = "2"
+axum = { workspace = true, features = ["ws"] }
+futures-util = { workspace = true, features = ["sink"] }
+serde.workspace = true
+serde_json.workspace = true
+subtle = "2"
+tokio = { workspace = true, default-features = true, features = ["rt-multi-thread", "net", "signal", "process", "io-util"] }
+tokio-rusqlite = { version = "0.8", features = ["bundled"] }
+uuid.workspace = true
+
+ene-outbound.workspace = true
+url.workspace = true
+async-stream.workspace = true
+base64.workspace = true
+sha2 = "0.11"
+tokio-util.workspace = true
+
+tempfile.workspace = true
+
+[dev-dependencies]
+wat = "1"
+reqwest.workspace = true
+tokio-tungstenite = "0.30"
+tokio = { workspace = true, default-features = true, features = ["test-util"] }
+ene-core = { workspace = true, features = ["test-support"] }
+ene-api-client.workspace = true
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(unix)'.dependencies]
+atomic-write-file.workspace = true
+xdg.workspace = true
+rustix.workspace = true
