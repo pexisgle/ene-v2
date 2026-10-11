@@ -1,6 +1,6 @@
 //! GPU composition and input coverage are separate HWNDs: a region must not clip soft visual edges.
 use crate::render::mask::Run;
-use ene_ipc::renderer::{AvatarConfig, AvatarId, AvatarPlacement};
+use ene_ipc::renderer::{AvatarConfig, AvatarEvent, AvatarId, AvatarPlacement};
 use raw_window_handle::*;
 use std::{
     num::NonZeroIsize,
@@ -517,7 +517,7 @@ impl State {
                         if drag.moved {
                             self.position();
                         } else {
-                            self.position();
+                            self.output.emit(self.id, AvatarEvent::ShowChat);
                         }
                     }
                 }

@@ -480,7 +480,7 @@ mod process_tests {
             messages
                 .send(RendererMessage::Event {
                     avatar_id: id,
-                    event: AvatarEvent::MotionFinished,
+                    event: AvatarEvent::ShowChat,
                 })
                 .await
                 .unwrap();
@@ -539,7 +539,7 @@ mod process_tests {
             notifications.state.unwrap().model.as_deref(),
             Some("second")
         );
-        assert_eq!(notifications.events.len(), 1);
+        assert_eq!(notifications.events, vec![AvatarEvent::ShowChat]);
         controller.shutdown();
         assert!(directory.join("second-exited").exists());
         let requests: Vec<RendererRequest> = fs::read_to_string(&log)

@@ -69,6 +69,7 @@ impl Application {
             for event in notifications.events {
                 match event {
                     AvatarEvent::MotionFinished => {}
+                    AvatarEvent::ShowChat => navigate(ui, 0),
                 }
             }
             if let Some(error) = notifications.error {

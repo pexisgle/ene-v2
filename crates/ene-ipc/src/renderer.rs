@@ -218,6 +218,8 @@ impl RendererRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AvatarEvent {
     MotionFinished,
+    /// Open the desktop chat after clicking an avatar without dragging it.
+    ShowChat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
