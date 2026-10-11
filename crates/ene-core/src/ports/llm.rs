@@ -445,4 +445,57 @@ mod contract_tests {
         connection.endpoint = "https://example.test/other".into();
         assert_ne!(policy(&connection), original);
     }
+
+    #[tokio::test]
+    async fn adding_runtime_scope_cannot_replace_original_send_authorization() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Permission(AtomicBool);
+        impl Authorization for Permission {
+            fn check(&self) -> BoxFuture<'_, Result<()>> {
+                Box::pin(async {
+                    if self.0.load(Ordering::SeqCst) {
+                        Ok(())
+                    } else {
+                        Err(Error::new(ErrorKind::PermissionRequired))
+                    }
+                })
+            }
+        }
+        let connection = Connection {
+            id: "c".into(),
+            kind: "llm".into(),
+            adapter: "minimal".into(),
+            endpoint: "https://example.test/v1".into(),
+            options: serde_json::json!({}),
+            credential_state: "missing".into(),
+            capabilities: None,
+            last_check: None,
+        };
+        let binding = ProviderBinding::resolve(Arc::new(MinimalProvider), &connection).unwrap();
+        let original = Arc::new(Permission(AtomicBool::new(true)));
+        let runtime = Arc::new(Permission(AtomicBool::new(true)));
+        let (_cancel, receiver) = watch::channel(false);
+        let invocation = Invocation::new(
+            "i".into(),
+            connection,
+            InvocationInput::ModelList,
+            None,
+            original.clone(),
+            receiver,
+            binding,
+        )
+        .restrict(runtime.clone());
+        invocation.authorization().check().await.unwrap();
+        original.0.store(false, Ordering::SeqCst);
+        assert_eq!(
+            invocation.authorization().check().await.unwrap_err().kind,
+            ErrorKind::PermissionRequired
+        );
+        original.0.store(true, Ordering::SeqCst);
+        runtime.0.store(false, Ordering::SeqCst);
+        assert_eq!(
+            invocation.authorization().check().await.unwrap_err().kind,
+            ErrorKind::PermissionRequired
+        );
+    }
 }

@@ -1,0 +1,3947 @@
+{
+  "desktop_capabilities": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "device_id": {
+        "type": "string"
+      },
+      "generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "services": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "device_id",
+      "generation",
+      "services"
+    ],
+    "title": "DesktopCapabilities",
+    "type": "object"
+  },
+  "event": {
+    "$defs": {
+      "AudioChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_base64": {
+            "type": "string"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "format": {
+            "type": "string"
+          },
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "utterance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "utterance_id",
+          "generation",
+          "sequence",
+          "format",
+          "sample_rate",
+          "channels",
+          "data_base64",
+          "done"
+        ],
+        "type": "object"
+      },
+      "CharacterAction": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "speak",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "duration_ms": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "expression",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "asset": {
+                "type": "string"
+              },
+              "duration_ms": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "motion",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "asset",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChatMessage": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "text"
+        ],
+        "type": "object"
+      },
+      "GenerationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/$defs/ChatMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "options": true,
+          "preamble": {
+            "type": "string"
+          },
+          "tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ToolDefinition"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "endpoint",
+          "options",
+          "model",
+          "preamble",
+          "messages",
+          "max_tokens"
+        ],
+        "type": "object"
+      },
+      "HarnessEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "progress",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation_id": {
+                "type": "string"
+              },
+              "request": {
+                "$ref": "#/$defs/GenerationRequest"
+              },
+              "type": {
+                "const": "model_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": true,
+              "name": {
+                "type": "string"
+              },
+              "operation_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "question_id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "question",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "question_id",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "report": {
+                "type": "string"
+              },
+              "type": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "report"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MetadataScope": {
+        "anyOf": [
+          {
+            "enum": [
+              "catalog",
+              "route"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "Model": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-reported information. Absence means unknown, not unsupported."
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "ModelMetadata": {
+        "properties": {
+          "context_window": {
+            "default": null,
+            "description": "Published context capacity in tokens. Null means unknown, never unlimited.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "field_sources": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-field provenance when missing API values were filled from a catalog.",
+            "type": "object"
+          },
+          "input_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scope": {
+            "$ref": "#/$defs/MetadataScope",
+            "description": "Catalog values may differ from the endpoint selected for generation."
+          },
+          "source": {
+            "description": "URL of the API or authoritative catalog used to obtain these values.",
+            "type": "string"
+          },
+          "supported_parameters": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "ToolDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": true
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/$defs/Model"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "models",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "models"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": true,
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_call",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "arguments"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "const": "finished",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/CharacterAction"
+          },
+          "type": {
+            "const": "character",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "action"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/$defs/HarnessEvent"
+          },
+          "type": {
+            "const": "harness",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "event"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "chunk": {
+            "$ref": "#/$defs/AudioChunk"
+          },
+          "type": {
+            "const": "audio",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "chunk"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "transcript",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "Event"
+  },
+  "host_message": {
+    "$defs": {
+      "AudioChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_base64": {
+            "type": "string"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "format": {
+            "type": "string"
+          },
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "utterance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "utterance_id",
+          "generation",
+          "sequence",
+          "format",
+          "sample_rate",
+          "channels",
+          "data_base64",
+          "done"
+        ],
+        "type": "object"
+      },
+      "Call": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "generation"
+        ],
+        "type": "object"
+      },
+      "CharacterEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "activated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "deactivated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "conversation_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "conversation_finished",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "task_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "task_id",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "timer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data": true,
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "data"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChatMessage": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "text"
+        ],
+        "type": "object"
+      },
+      "Failure": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "GenerationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/$defs/ChatMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "options": true,
+          "preamble": {
+            "type": "string"
+          },
+          "tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ToolDefinition"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "endpoint",
+          "options",
+          "model",
+          "preamble",
+          "messages",
+          "max_tokens"
+        ],
+        "type": "object"
+      },
+      "HarnessInput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "instruction": {
+                "type": "string"
+              },
+              "type": {
+                "const": "start",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "instruction"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "answer": {
+                "type": "string"
+              },
+              "question_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "answer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "question_id",
+              "answer"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation_id": {
+                "type": "string"
+              },
+              "result": true,
+              "type": {
+                "const": "result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "cancel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Operation": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "options": true,
+              "type": {
+                "const": "list_models",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "endpoint",
+              "options"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/GenerationRequest"
+              },
+              "type": {
+                "const": "generate",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "event": {
+                "$ref": "#/$defs/CharacterEvent"
+              },
+              "type": {
+                "const": "character",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/HarnessInput"
+              },
+              "type": {
+                "const": "harness",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/SpeechInput"
+              },
+              "type": {
+                "const": "speech",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Result_of_AnyValue_or_Failure": {
+        "oneOf": [
+          {
+            "properties": {
+              "Ok": true
+            },
+            "required": [
+              "Ok"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "Err": {
+                "$ref": "#/$defs/Failure"
+              }
+            },
+            "required": [
+              "Err"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SpeechInput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "synthesize",
+                "type": "string"
+              },
+              "utterance_id": {
+                "type": "string"
+              },
+              "voice": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "utterance_id",
+              "text",
+              "voice"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "audio": {
+                "$ref": "#/$defs/AudioChunk"
+              },
+              "type": {
+                "const": "transcribe",
+                "type": "string"
+              },
+              "utterance_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "utterance_id",
+              "audio"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": true
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "entrypoint": {
+            "type": "string"
+          },
+          "protocol_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "initialize",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "protocol_version",
+          "call",
+          "entrypoint"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "operation": {
+            "$ref": "#/$defs/Operation"
+          },
+          "type": {
+            "const": "invoke",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call",
+          "operation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "result": {
+            "$ref": "#/$defs/Result_of_AnyValue_or_Failure"
+          },
+          "service_id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "service_result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call",
+          "service_id",
+          "result"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "type": {
+            "const": "cancel",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "shutdown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "HostMessage"
+  },
+  "http_chunk": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "data_base64": {
+        "type": "string"
+      },
+      "done": {
+        "type": "boolean"
+      },
+      "handle": {
+        "type": "string"
+      },
+      "headers": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "status": {
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "handle",
+      "status",
+      "headers",
+      "data_base64",
+      "done"
+    ],
+    "title": "HttpChunk",
+    "type": "object"
+  },
+  "llm_capabilities": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "cancellation": {
+        "default": false,
+        "type": "boolean"
+      },
+      "model_list": {
+        "type": "boolean"
+      },
+      "streaming_text": {
+        "type": "boolean"
+      },
+      "tools": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "streaming_text",
+      "model_list"
+    ],
+    "title": "LlmCapabilities",
+    "type": "object"
+  },
+  "manifest": {
+    "$defs": {
+      "Asset": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "size"
+        ],
+        "type": "object"
+      },
+      "AuthProfile": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "bearer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "header",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BrokerRouting": {
+        "description": "Host-enforced intermediary routing; plugin-supplied HTTP bodies cannot override it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "direct",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "only": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "open_router",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "only"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "EntryPoint": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file": {
+            "description": "Relative file inside the verified code snapshot; not a host path.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProviderConfiguration"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "provides": {
+            "items": {
+              "$ref": "#/$defs/Extension"
+            },
+            "type": "array"
+          },
+          "runtime": {
+            "$ref": "#/$defs/Runtime"
+          },
+          "target": {
+            "$ref": "#/$defs/Target"
+          },
+          "uses": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Service"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "target",
+          "runtime",
+          "file",
+          "provides"
+        ],
+        "type": "object"
+      },
+      "Extension": {
+        "enum": [
+          "llm",
+          "tts",
+          "stt",
+          "character",
+          "harness",
+          "desktop"
+        ],
+        "type": "string"
+      },
+      "MetadataScope": {
+        "anyOf": [
+          {
+            "enum": [
+              "catalog",
+              "route"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "Model": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-reported information. Absence means unknown, not unsupported."
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "ModelMetadata": {
+        "properties": {
+          "context_window": {
+            "default": null,
+            "description": "Published context capacity in tokens. Null means unknown, never unlimited.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "field_sources": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-field provenance when missing API values were filled from a catalog.",
+            "type": "object"
+          },
+          "input_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scope": {
+            "$ref": "#/$defs/MetadataScope",
+            "description": "Catalog values may differ from the endpoint selected for generation."
+          },
+          "source": {
+            "description": "URL of the API or authoritative catalog used to obtain these values.",
+            "type": "string"
+          },
+          "supported_parameters": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "ProviderConfiguration": {
+        "additionalProperties": false,
+        "properties": {
+          "auth": {
+            "$ref": "#/$defs/AuthProfile"
+          },
+          "destinations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "environment_variable": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "models": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Model"
+            },
+            "type": "array"
+          },
+          "options": {
+            "default": {}
+          },
+          "routing": {
+            "$ref": "#/$defs/BrokerRouting",
+            "default": {
+              "type": "direct"
+            }
+          },
+          "settings": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/SettingField"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "endpoint",
+          "auth",
+          "destinations"
+        ],
+        "type": "object"
+      },
+      "Runtime": {
+        "enum": [
+          "extism",
+          "luau",
+          "process",
+          "provider_remoc"
+        ],
+        "type": "string"
+      },
+      "Service": {
+        "enum": [
+          "log",
+          "configuration",
+          "state",
+          "http",
+          "models",
+          "tools",
+          "character_actions",
+          "desktop"
+        ],
+        "type": "string"
+      },
+      "SettingField": {
+        "properties": {
+          "choices": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/SettingKind"
+          },
+          "label": {
+            "type": "string"
+          },
+          "required": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "SettingKind": {
+        "anyOf": [
+          {
+            "enum": [
+              "text",
+              "number",
+              "boolean",
+              "select"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "Target": {
+        "enum": [
+          "host",
+          "desktop"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "api_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "assets": {
+        "additionalProperties": {
+          "$ref": "#/$defs/Asset"
+        },
+        "default": {},
+        "type": "object"
+      },
+      "code_files": {
+        "description": "All executable modules, including each entrypoint; assets have a separate budget.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "description": {
+        "default": "",
+        "type": "string"
+      },
+      "entrypoints": {
+        "items": {
+          "$ref": "#/$defs/EntryPoint"
+        },
+        "type": "array"
+      },
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "package_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "version": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "package_version",
+      "api_version",
+      "id",
+      "name",
+      "version",
+      "entrypoints",
+      "code_files"
+    ],
+    "title": "Manifest",
+    "type": "object"
+  },
+  "operation": {
+    "$defs": {
+      "AudioChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_base64": {
+            "type": "string"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "format": {
+            "type": "string"
+          },
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "utterance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "utterance_id",
+          "generation",
+          "sequence",
+          "format",
+          "sample_rate",
+          "channels",
+          "data_base64",
+          "done"
+        ],
+        "type": "object"
+      },
+      "CharacterEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "activated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "deactivated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "conversation_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "conversation_finished",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "task_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "task_id",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "timer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data": true,
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "data"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChatMessage": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "text"
+        ],
+        "type": "object"
+      },
+      "GenerationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/$defs/ChatMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "options": true,
+          "preamble": {
+            "type": "string"
+          },
+          "tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ToolDefinition"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "endpoint",
+          "options",
+          "model",
+          "preamble",
+          "messages",
+          "max_tokens"
+        ],
+        "type": "object"
+      },
+      "HarnessInput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "instruction": {
+                "type": "string"
+              },
+              "type": {
+                "const": "start",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "instruction"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "answer": {
+                "type": "string"
+              },
+              "question_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "answer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "question_id",
+              "answer"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation_id": {
+                "type": "string"
+              },
+              "result": true,
+              "type": {
+                "const": "result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "cancel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SpeechInput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "synthesize",
+                "type": "string"
+              },
+              "utterance_id": {
+                "type": "string"
+              },
+              "voice": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "utterance_id",
+              "text",
+              "voice"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "audio": {
+                "$ref": "#/$defs/AudioChunk"
+              },
+              "type": {
+                "const": "transcribe",
+                "type": "string"
+              },
+              "utterance_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "utterance_id",
+              "audio"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": true
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "options": true,
+          "type": {
+            "const": "list_models",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "endpoint",
+          "options"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/GenerationRequest"
+          },
+          "type": {
+            "const": "generate",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/$defs/CharacterEvent"
+          },
+          "type": {
+            "const": "character",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "event"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "input": {
+            "$ref": "#/$defs/HarnessInput"
+          },
+          "type": {
+            "const": "harness",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "input"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "input": {
+            "$ref": "#/$defs/SpeechInput"
+          },
+          "type": {
+            "const": "speech",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "input"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "Operation"
+  },
+  "resource_handle": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "expires_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "id": {
+        "type": "string"
+      },
+      "media_type": {
+        "type": "string"
+      },
+      "size": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "id",
+      "media_type",
+      "size",
+      "expires_at_ms"
+    ],
+    "title": "ResourceHandle",
+    "type": "object"
+  },
+  "service_request": {
+    "$defs": {
+      "CharacterAction": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "speak",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "duration_ms": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "expression",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "asset": {
+                "type": "string"
+              },
+              "duration_ms": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "motion",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "asset",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChatMessage": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "text"
+        ],
+        "type": "object"
+      },
+      "DesktopOperation": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "clipboard_read",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "clipboard_write",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "type": {
+                "const": "notify",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "title",
+              "body"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "select_file",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "capture_screen",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/CharacterAction"
+              },
+              "type": {
+                "const": "avatar",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "length": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "read_resource",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "handle",
+              "offset",
+              "length"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "type": {
+                "const": "close_resource",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "handle"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "GenerationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/$defs/ChatMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "options": true,
+          "preamble": {
+            "type": "string"
+          },
+          "tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ToolDefinition"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "endpoint",
+          "options",
+          "model",
+          "preamble",
+          "messages",
+          "max_tokens"
+        ],
+        "type": "object"
+      },
+      "HttpRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "body_base64": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "url"
+        ],
+        "type": "object"
+      },
+      "ToolDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": true
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "type": {
+            "const": "log",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "configuration",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "type": {
+            "const": "state_read",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "key"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "type": {
+            "const": "state_write",
+            "type": "string"
+          },
+          "value": true
+        },
+        "required": [
+          "type",
+          "key",
+          "value"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/HttpRequest"
+          },
+          "type": {
+            "const": "http_open",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "type": {
+            "const": "http_read",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "handle"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "type": {
+            "const": "http_close",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "handle"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/GenerationRequest"
+          },
+          "type": {
+            "const": "models",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": true,
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "name",
+          "arguments"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/CharacterAction"
+          },
+          "type": {
+            "const": "character",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "action"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/$defs/DesktopOperation"
+          },
+          "type": {
+            "const": "desktop",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "operation"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "ServiceRequest"
+  },
+  "worker_message": {
+    "$defs": {
+      "AudioChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_base64": {
+            "type": "string"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "format": {
+            "type": "string"
+          },
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "utterance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "utterance_id",
+          "generation",
+          "sequence",
+          "format",
+          "sample_rate",
+          "channels",
+          "data_base64",
+          "done"
+        ],
+        "type": "object"
+      },
+      "Call": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "generation"
+        ],
+        "type": "object"
+      },
+      "CharacterAction": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "speak",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "duration_ms": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "expression",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "asset": {
+                "type": "string"
+              },
+              "duration_ms": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "motion",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "asset",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChatMessage": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "text"
+        ],
+        "type": "object"
+      },
+      "DesktopOperation": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "clipboard_read",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "clipboard_write",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "type": {
+                "const": "notify",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "title",
+              "body"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "select_file",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "capture_screen",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/CharacterAction"
+              },
+              "type": {
+                "const": "avatar",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "length": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "read_resource",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "handle",
+              "offset",
+              "length"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "type": {
+                "const": "close_resource",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "handle"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Event": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "models": {
+                "items": {
+                  "$ref": "#/$defs/Model"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "models",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "models"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": true,
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "const": "finished",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/CharacterAction"
+              },
+              "type": {
+                "const": "character",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "event": {
+                "$ref": "#/$defs/HarnessEvent"
+              },
+              "type": {
+                "const": "harness",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "chunk": {
+                "$ref": "#/$defs/AudioChunk"
+              },
+              "type": {
+                "const": "audio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "chunk"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "transcript",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Failure": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "GenerationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/$defs/ChatMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "options": true,
+          "preamble": {
+            "type": "string"
+          },
+          "tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ToolDefinition"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "endpoint",
+          "options",
+          "model",
+          "preamble",
+          "messages",
+          "max_tokens"
+        ],
+        "type": "object"
+      },
+      "HarnessEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "progress",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation_id": {
+                "type": "string"
+              },
+              "request": {
+                "$ref": "#/$defs/GenerationRequest"
+              },
+              "type": {
+                "const": "model_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": true,
+              "name": {
+                "type": "string"
+              },
+              "operation_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "question_id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "question",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "question_id",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "report": {
+                "type": "string"
+              },
+              "type": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "report"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HttpRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "body_base64": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "url"
+        ],
+        "type": "object"
+      },
+      "MetadataScope": {
+        "anyOf": [
+          {
+            "enum": [
+              "catalog",
+              "route"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "Model": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-reported information. Absence means unknown, not unsupported."
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "ModelMetadata": {
+        "properties": {
+          "context_window": {
+            "default": null,
+            "description": "Published context capacity in tokens. Null means unknown, never unlimited.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "field_sources": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-field provenance when missing API values were filled from a catalog.",
+            "type": "object"
+          },
+          "input_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scope": {
+            "$ref": "#/$defs/MetadataScope",
+            "description": "Catalog values may differ from the endpoint selected for generation."
+          },
+          "source": {
+            "description": "URL of the API or authoritative catalog used to obtain these values.",
+            "type": "string"
+          },
+          "supported_parameters": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "ServiceRequest": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "const": "log",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "configuration",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "type": {
+                "const": "state_read",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "type": {
+                "const": "state_write",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "key",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/HttpRequest"
+              },
+              "type": {
+                "const": "http_open",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "type": {
+                "const": "http_read",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "handle"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "type": {
+                "const": "http_close",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "handle"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/GenerationRequest"
+              },
+              "type": {
+                "const": "models",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": true,
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/CharacterAction"
+              },
+              "type": {
+                "const": "character",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/DesktopOperation"
+              },
+              "type": {
+                "const": "desktop",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": true
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "capabilities": true,
+          "protocol_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "ready",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "protocol_version",
+          "call",
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "event": {
+            "$ref": "#/$defs/Event"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "event",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call",
+          "sequence",
+          "event"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "request": {
+            "$ref": "#/$defs/ServiceRequest"
+          },
+          "service_id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "service",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call",
+          "service_id",
+          "request"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "result": true,
+          "type": {
+            "const": "complete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call",
+          "result"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/$defs/Call"
+          },
+          "error": {
+            "$ref": "#/$defs/Failure"
+          },
+          "type": {
+            "const": "failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call",
+          "error"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WorkerMessage"
+  }
+}
