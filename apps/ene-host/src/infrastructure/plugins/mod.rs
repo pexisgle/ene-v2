@@ -143,11 +143,7 @@ impl Manager {
             .unwrap_or_else(|| data.join("plugin-code"));
         let runner = std::env::var_os("ENE_PLUGIN_RUNNER_BIN")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::current_exe()
-                    .unwrap_or_default()
-                    .with_file_name(ene_platform::executable("ene-plugin-runner"))
-            });
+            .unwrap_or_else(|| ene_platform::sibling_executable("ene-plugin-runner"));
         let manager = Self {
             root,
             cache,

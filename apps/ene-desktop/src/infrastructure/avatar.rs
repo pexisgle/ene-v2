@@ -98,11 +98,7 @@ impl Controller {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let executable = std::env::var_os("ENE_AVATAR_BIN")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::current_exe()
-                    .unwrap_or_default()
-                    .with_file_name(ene_platform::executable("ene-avatar"))
-            });
+            .unwrap_or_else(|| ene_platform::sibling_executable("ene-avatar"));
         Self::with_executable(executable, wake)
     }
     fn with_executable(executable: PathBuf, wake: Arc<dyn Fn() + Send + Sync>) -> Self {

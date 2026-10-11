@@ -21,11 +21,7 @@ impl Launcher {
     pub(super) fn local() -> Self {
         let executable = std::env::var_os("ENE_HOST_BIN")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::current_exe()
-                    .unwrap_or_default()
-                    .with_file_name(ene_platform::executable("ene-host"))
-            });
+            .unwrap_or_else(|| ene_platform::sibling_executable("ene-host"));
         Self::new(Command::new(executable))
     }
 

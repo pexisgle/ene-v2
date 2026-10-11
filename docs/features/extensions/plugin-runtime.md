@@ -31,7 +31,7 @@ Provider は要求ごと、Character は binding ごと、Harness はタスク�
 
 初期化は 30 秒、実行は 180 秒、協調停止は 3 秒。Extism のメモリは最大 1,024 pages（64 MiB）、実行 fuel は 1 億、初期化 fuel は 1,000 万。Luau の VM メモリは 64 MiB、割り込みでキャンセル・期限を確認します。Remoc の型付きメッセージは 1 MiB、イベントは 128 KiB、キューは 16、監督する Provider 要求と保持する拡張インスタンスは各 16 まで。管理 API が収集するイベントは 256 件／合計 1 MiB。状態はキーごと 64 KiB、コンパニオンのエントリポイントごと 256 キーです。
 
-HTTP は `http_open` → `http_read` → `http_close`。open は最初のチャンク、read は続き、done は最後のチャンクを返します。ハンドルは broker が発行する参照で、ポインタやファイルパスではありません。HTTP のストリームは最大 8 本、各キューは 4。Extism 組み込み HTTP と WASI を無効化し、Host が既存の送信許可、送信先・経路、資格情報、redirect を検証します。生成中の無効化や再有効化でも、旧世代の送信権限は復活しません。
+HTTP は `http_open` → `http_read` → `http_close`。open は最初のチャンク、read は続き、done は最後のチャンクを返します。ハンドルは broker が発行する参照で、ポインタやファイルパスではありません。HTTP のストリームは最大 8 本、各キューは 4。現行brokerの呼び出し上限は1 Invocationにつき8回、同時実行は1回です。Extism 組み込み HTTP と WASI を無効化し、Host が既存の送信許可、送信先・経路、資格情報、redirect を検証します。生成中の無効化や再有効化でも、旧世代の送信権限は復活しません。
 
 binding の `services` は利用者が許可するサービスです。現在の汎用 binding は log／configuration／state を許可できます。HTTP は Provider の接続設定・送信許可に結び付けて提供します。汎用 Character／Harness に任意の HTTP や shell を与えません。API キーは既存の資格情報管理を利用し、manifest・binding の設定は非秘密値に限定します。
 

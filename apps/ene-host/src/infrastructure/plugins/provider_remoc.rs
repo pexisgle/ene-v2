@@ -97,29 +97,32 @@ impl ProviderServices {
             .get_mut(&handle)
             .ok_or_else(|| Failure::new("unknown_stream"))?;
         let done = if stream.pending.is_empty() {
-            match stream
-                .output
-                .recv()
-                .await
-                .map_err(|_| Failure::new("http_failed"))?
-            {
-                Some(HttpResponsePart::Head { status, headers }) if stream.status == 0 => {
-                    stream.status = status;
-                    stream.headers = headers;
-                    false
+            loop {
+                match stream
+                    .output
+                    .recv()
+                    .await
+                    .map_err(|_| Failure::new("http_failed"))?
+                {
+                    Some(HttpResponsePart::Head { status, headers }) if stream.status == 0 => {
+                        stream.status = status;
+                        stream.headers = headers;
+                    }
+                    Some(HttpResponsePart::Data(data)) if stream.status != 0 => {
+                        stream.pending.extend(data);
+                        if !stream.pending.is_empty() {
+                            break false;
+                        }
+                    }
+                    None if stream.status != 0 => {
+                        (&mut stream.task)
+                            .await
+                            .map_err(|_| Failure::new("http_failed"))?
+                            .map_err(|_| Failure::new("http_failed"))?;
+                        break true;
+                    }
+                    _ => return Err(Failure::new("invalid_http_response")),
                 }
-                Some(HttpResponsePart::Data(data)) if stream.status != 0 => {
-                    stream.pending.extend(data);
-                    false
-                }
-                None if stream.status != 0 => {
-                    (&mut stream.task)
-                        .await
-                        .map_err(|_| Failure::new("http_failed"))?
-                        .map_err(|_| Failure::new("http_failed"))?;
-                    true
-                }
-                _ => return Err(Failure::new("invalid_http_response")),
             }
         } else {
             false
@@ -153,7 +156,7 @@ impl ProviderServices {
                 .map_err(|_| Failure::new("invalid_body"))?,
         };
         let handle = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = ene_ipc::remoc::rch::mpsc::channel::<HttpResponsePart, Codec>();
+        let (tx, rx) = ene_ipc::remoc::rch::mpsc::with_local_buffer::<HttpResponsePart, Codec>(4);
         {
             let mut streams = self.streams.lock().await;
             if streams.len() >= 8 {

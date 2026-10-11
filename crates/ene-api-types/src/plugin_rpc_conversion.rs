@@ -6,10 +6,10 @@ use crate::{
 use serde::{Serialize, de::DeserializeOwned};
 
 fn name<T: Serialize>(value: T) -> Result<String, ConversionError> {
-    serde_json::from_value(serde_json::to_value(value)?).map_err(Into::into)
+    serde_json::from_value(serde_json::to_value(value)?)
 }
 fn parse<T: DeserializeOwned>(value: String) -> Result<T, ConversionError> {
-    serde_json::from_value(serde_json::Value::String(value)).map_err(Into::into)
+    serde_json::from_value(serde_json::Value::String(value))
 }
 fn invalid() -> ConversionError {
     crate::rpc_conversion::invalid()
