@@ -83,12 +83,15 @@ fn tree_descendant() {
 #[ignore = "only launched by the process-tree integration test"]
 fn tree_child() {
     // The outer test waits on both process handles after killing the Job.
+    std::panic::set_hook(Box::new(|info| println!("tree fixture failure: {info}")));
     use std::io::{Read, Write};
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "tree_descendant", "--ignored", "--nocapture"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Reuse the handles already granted to this AppContainer instead of
+        // opening fresh NUL handles inside the restricted process.
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .unwrap();
     let secret = std::env::temp_dir().join("private-worker");
@@ -132,6 +135,7 @@ async fn job_cancellation_stops_descendants_and_workers_cannot_share_files_or_cr
     let input = tree.stdin.take().unwrap();
     let mut output = BufReader::new(tree.stdout.take().unwrap());
     let mut line = String::new();
+    let mut diagnostics = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         line.clear();
@@ -140,13 +144,14 @@ async fn job_cancellation_stops_descendants_and_workers_cannot_share_files_or_cr
             .map_err(io::Error::other)??
             == 0
         {
-            return Err(io::Error::other(
-                "tree fixture exited before reporting descendants",
-            ));
+            return Err(io::Error::other(format!(
+                "tree fixture exited before reporting descendants: {diagnostics}",
+            )));
         }
         if line.starts_with("tree:") {
             break;
         }
+        diagnostics.push_str(&line);
     }
     let mut parts = line.trim().splitn(4, ':');
     parts.next();
