@@ -77,7 +77,7 @@ impl Registry {
     ) -> Self {
         let root = std::env::var_os("ENE_PROVIDER_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| ene_platform::paths::providers());
+            .unwrap_or_else(ene_platform::paths::providers);
         Self::at_with_plugins(root, plugins)
     }
     #[cfg(test)]
