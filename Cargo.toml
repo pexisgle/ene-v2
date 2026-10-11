@@ -14,7 +14,12 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.dependencies]
 buffa = { version = "0.9", features = ["json"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
+clap = { version = "4", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
+remoc = { version = "0.20", default-features = false, features = ["rch", "codec-message-pack"] }
+tokio = { version = "1", default-features = false, features = ["macros", "sync", "time"] }
 
 [profile.dev]
 opt-level = 1

@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
