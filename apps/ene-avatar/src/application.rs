@@ -110,7 +110,7 @@ pub(crate) fn run_window(
         )?;
         queue.roundtrip(&mut state)?;
         state.recreate(&qh);
-        let mut event_loop = EventLoop::<native::State>::try_new()?;
+        let event_loop = EventLoop::<native::State>::try_new()?;
         WaylandSource::new(connection.clone(), queue).insert(event_loop.handle())?;
         event_loop
             .handle()
