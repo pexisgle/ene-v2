@@ -120,6 +120,8 @@ pub(super) async fn action_with_key(
             revision,
             name,
             mind,
+            body,
+            voice,
         } => {
             http.patch_companion(
                 &c.id,
@@ -127,7 +129,8 @@ pub(super) async fn action_with_key(
                     revision,
                     name: Some(name),
                     mind: Some(mind),
-
+                    body: body.into(),
+                    voice: voice.into(),
                     ..Default::default()
                 },
             )
@@ -316,9 +319,9 @@ mod identity_tests {
                 "id":"dynamic","name":"Dynamic","kind":"plugin","endpoint":"https://selected.test/v1","options":{"json":"{}"},"settings":[],
                 "requires_credentials":false,"environment_variable":null,"destinations":["https://selected.test"],"state":"ready","error":null,"revision":"v1","capabilities":{"streaming_text":true,"model_list":true}}]})) }))
             .route("/rpc/ene.host.v1.HostService/UpdateSettings", axum::routing::post(move |axum::Json(input):axum::Json<UpdateSettingsRequest>| async move {
-                assert_eq!(input.connections[0].endpoint,"https://first.test/v1");
-                assert_eq!(input.connections[1].id.as_deref(),Some("selected"));
-                assert_eq!(input.connections[1].endpoint,"https://updated.test/v1");
+                assert_eq!(input.connections.items[0].endpoint,"https://first.test/v1");
+                assert_eq!(input.connections.items[1].id.as_deref(),Some("selected"));
+                assert_eq!(input.connections.items[1].endpoint,"https://updated.test/v1");
                 axum::Json(reply)
             }))
             .route("/rpc/ene.host.v1.HostService/UpdateCompanion", axum::routing::post(move |axum::Json(input):axum::Json<UpdateCompanionRequest>| {
@@ -396,11 +399,11 @@ mod identity_tests {
                         let mut db=saved.lock().unwrap();
                         if input.revision==db.revision {
                             db.revision+=1;
-                            db.connections=input.connections.into_iter().map(|c|Connection {
+                            db.connections=input.connections.into_option().unwrap().items.into_iter().map(|c|Connection {
                                 id:c.id.expect("caller retains creation identity"),kind:c.kind,adapter:c.adapter,
                                 endpoint:c.endpoint,options:c.options,credential_state:"missing".into(),..Default::default() }).collect();
                         } else {
-                            assert_eq!(input.connections[0].id.as_deref(),Some(db.connections[0].id.as_str()));
+                            assert_eq!(input.connections.items[0].id.as_deref(),Some(db.connections[0].id.as_str()));
                         }
                         if lose_response && *calls==1 {
                             (axum::http::StatusCode::SERVICE_UNAVAILABLE,axum::Json(serde_json::json!({"error":{"code":"unavailable","message":"response lost","details":{}}})))

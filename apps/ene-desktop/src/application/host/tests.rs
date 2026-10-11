@@ -64,6 +64,27 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
         "messages":[],"message_cursors":{},"grants":[],
         "settings":{"revision":1,"connections":[{"id":"p","kind":"llm","adapter":"fixture","endpoint":"https://old.test/v1","options":{"json":"{}"},"credential_state":"missing","capabilities":null,"last_check":null}]}
     })).unwrap();
+    snapshot
+        .settings
+        .get_or_insert_default()
+        .connections
+        .push(ene_rpc::Connection {
+            id: "tts1".into(),
+            kind: "tts".into(),
+            adapter: "voice fixture".into(),
+            endpoint: "https://tts.test".into(),
+            ..Default::default()
+        });
+    snapshot.companions[0].body = ene_rpc::JsonDocument {
+        json: json!({"format":"vrm1","environment_id":"e","model":"old.vrm"}).to_string(),
+        ..Default::default()
+    }
+    .into();
+    snapshot.companions[0].voice = ene_rpc::JsonDocument {
+        json: json!({"connection_id":"tts1","voice_id":"old voice"}).to_string(),
+        ..Default::default()
+    }
+    .into();
     app.handle_host_event(&ui, Event::Providers(vec![provider.clone()]));
     app.handle_host_event(&ui, Event::View(Box::new(snapshot.clone()), vec![]));
     assert_eq!(state.get_credential_state(), 0);
@@ -131,6 +152,16 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
     snapshot.settings.get_or_insert_default().revision = 2;
     snapshot.companions[0].revision = 2;
     snapshot.companions[0].mind = "remote mind".into();
+    snapshot.companions[0].body = ene_rpc::JsonDocument {
+        json: json!({"format":"vrm1","environment_id":"e","model":"remote.vrm"}).to_string(),
+        ..Default::default()
+    }
+    .into();
+    snapshot.companions[0].voice = ene_rpc::JsonDocument {
+        json: json!({"connection_id":"tts1","voice_id":"remote voice"}).to_string(),
+        ..Default::default()
+    }
+    .into();
     snapshot.settings.get_or_insert_default().connections[0].endpoint =
         "https://remote.test/v1".into();
     app.handle_host_event(&ui, Event::Providers(vec![provider]));
@@ -145,6 +176,8 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
     );
     assert_eq!(state.get_destinations(), "https://old.test");
     assert_eq!(state.get_companion_mind(), "old mind");
+    assert_eq!(state.get_companion_body_model(), "old.vrm");
+    assert_eq!(state.get_companion_voice_id(), "old voice");
     assert_eq!(state.get_provider_endpoint(), "https://draft.test/v1");
 
     state.invoke_save_companion();
@@ -153,10 +186,16 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
             revision,
             name,
             mind,
+            body,
+            voice,
         } => {
             assert_eq!(revision, 1);
             assert_eq!(name, "draft name");
             assert_eq!(mind, "old mind");
+            assert!(
+                body.is_none() && voice.is_none(),
+                "untouched documents must be omitted"
+            );
         }
         _ => panic!("expected companion save"),
     }
@@ -196,6 +235,8 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
     state.set_category(1);
     app.reset_host_page(&ui);
     assert_eq!(state.get_companion_mind(), "remote mind");
+    assert_eq!(state.get_companion_body_model(), "remote.vrm");
+    assert_eq!(state.get_companion_voice_id(), "remote voice");
     state.invoke_save_companion();
     match requests.try_recv().unwrap().command {
         Command::Companion { revision, .. } => assert_eq!(revision, 2),
@@ -228,6 +269,87 @@ fn notifications_preserve_displayed_drafts_and_save_their_original_revisions() {
         }
         _ => panic!("expected reconfirmed permission save"),
     }
+    app.host_ui.borrow_mut().busy = None;
+    app.project_host_model(&ui);
+    let model = temp.path().join("chosen.vrm");
+    std::fs::write(&model, []).unwrap();
+    state.set_companion_body_model(model.to_str().unwrap().into());
+    state.set_companion_voice_id("chosen voice".into());
+    state.invoke_host_draft_edited(1);
+    let mut notification = app.snapshot.borrow().clone().unwrap();
+    notification.companions[0].revision = 3;
+    notification.companions[0].body = ene_rpc::JsonDocument {
+        json: json!({"format":"vrm1","environment_id":"e","model":"latest.vrm"}).to_string(),
+        ..Default::default()
+    }
+    .into();
+    app.handle_host_event(&ui, Event::View(Box::new(notification), vec![]));
+    while let Ok(request) = requests.try_recv() {
+        assert!(matches!(request.command, Command::Availability(_)));
+    }
+    state.invoke_save_companion();
+    match requests.try_recv().unwrap().command {
+        Command::Companion {
+            revision,
+            body: Some(body),
+            voice: Some(voice),
+            ..
+        } => {
+            assert_eq!(revision, 2);
+            let Some(ene_rpc::json_document_patch::Change::Set(body)) = body.change else {
+                panic!("body set")
+            };
+            let body: serde_json::Value = serde_json::from_str(&body.json).unwrap();
+            assert_eq!(body["model"], model.to_str().unwrap());
+            assert_eq!(body["environment_id"], "e");
+            let Some(ene_rpc::json_document_patch::Change::Set(voice)) = voice.change else {
+                panic!("voice set")
+            };
+            let voice: serde_json::Value = serde_json::from_str(&voice.json).unwrap();
+            assert_eq!(voice["connection_id"], "tts1");
+            assert_eq!(voice["voice_id"], "chosen voice");
+        }
+        _ => panic!("expected document changes"),
+    }
+    app.host_ui.borrow_mut().busy = None;
+    app.project_host_model(&ui);
+    state.set_category(1);
+    app.reset_host_page(&ui);
+    while let Ok(request) = requests.try_recv() {
+        assert!(matches!(request.command, Command::Availability(_)));
+    }
+    state.set_companion_body_model("".into());
+    state.set_companion_voice_index(0);
+    state.invoke_host_draft_edited(1);
+    state.invoke_save_companion();
+    match requests.try_recv().unwrap().command {
+        Command::Companion {
+            revision,
+            body: Some(body),
+            voice: Some(voice),
+            ..
+        } => {
+            assert_eq!(revision, 3);
+            assert!(matches!(
+                body.change,
+                Some(ene_rpc::json_document_patch::Change::Clear(_))
+            ));
+            assert!(matches!(
+                voice.change,
+                Some(ene_rpc::json_document_patch::Change::Clear(_))
+            ));
+        }
+        _ => panic!("expected explicit clear"),
+    }
+    app.host_ui.borrow_mut().busy = None;
+    app.project_host_model(&ui);
+    state.set_companion_body_model(temp.path().join("missing.vrm").to_str().unwrap().into());
+    state.invoke_save_companion();
+    assert!(
+        requests.try_recv().is_err(),
+        "invalid local reference cannot be sent"
+    );
+    assert!(state.get_host_feedback_error());
     app.shutdown(&ui);
     let saved = settings::ClientSettings::load(&config).unwrap();
     assert_eq!(saved.avatar.config.size_percent, 170);

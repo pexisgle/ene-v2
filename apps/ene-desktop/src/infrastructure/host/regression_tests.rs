@@ -59,6 +59,8 @@ async fn companion_draft_keeps_its_revision_when_the_queue_refreshes() {
                 revision: 1,
                 name: "draft name".into(),
                 mind: "old mind".into(),
+                body: None,
+                voice: None,
             },
             IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
             "h".into(),
@@ -96,7 +98,7 @@ async fn connection_draft_keeps_its_revision_when_the_queue_refreshes() {
                 if input.revision != saved.revision {
                     return (axum::http::StatusCode::CONFLICT, Json(json!({"error":{"code":"revision_conflict","message":"changed","details":{}}})));
                 }
-                saved.connections[0].options = input.connections[0].options.clone(); saved.revision += 1;
+                saved.connections[0].options = input.connections.items[0].options.clone(); saved.revision += 1;
                 (axum::http::StatusCode::OK, Json(serde_json::to_value(&*saved).unwrap()))
             }
         }));
@@ -725,12 +727,12 @@ async fn new_draft_does_not_overwrite_a_partially_saved_connection() {
         .route("/rpc/ene.host.v1.HostService/UpdateSettings", post(move |Json(input): Json<ene_rpc::UpdateSettingsRequest>| {
             let original = original.clone(); let expected_id = expected_id.clone();
             async move {
-                assert_eq!(input.connections.len(), 2);
-                assert_eq!(input.connections[0].id.as_deref(), Some(original.id.as_str()));
-                assert_eq!(input.connections[0].adapter, original.adapter);
-                assert_eq!(input.connections[0].endpoint, original.endpoint);
-                assert!(!input.connections[0].create);
-                let created = &input.connections[1];
+                assert_eq!(input.connections.items.len(), 2);
+                assert_eq!(input.connections.items[0].id.as_deref(), Some(original.id.as_str()));
+                assert_eq!(input.connections.items[0].adapter, original.adapter);
+                assert_eq!(input.connections.items[0].endpoint, original.endpoint);
+                assert!(!input.connections.items[0].create);
+                let created = &input.connections.items[1];
                 assert_eq!(created.id.as_deref(), Some(expected_id.as_str()));
                 assert!(created.create);
                 Json(ene_rpc::Settings { revision: 2, connections: vec![original,

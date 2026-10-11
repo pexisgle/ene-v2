@@ -71,6 +71,8 @@ pub enum Command {
         revision: u64,
         name: String,
         mind: String,
+        body: Option<ene_rpc::JsonDocumentPatch>,
+        voice: Option<ene_rpc::JsonDocumentPatch>,
     },
     History,
 }

@@ -1,5 +1,6 @@
 //! Host connection actions, setting projections and event dispatch.
 mod connection;
+mod documents;
 mod events;
 mod settings;
 mod snapshot;
@@ -7,6 +8,7 @@ mod snapshot;
 #[derive(Default)]
 pub(super) struct Drafts {
     pub companion_revision: u64,
+    pub documents: documents::CompanionDocuments,
     pub settings_revision: u64,
     pub assignment_revision: u64,
     pub permission: Option<PermissionDraft>,

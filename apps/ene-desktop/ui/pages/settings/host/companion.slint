@@ -3,6 +3,7 @@ import { SettingField } from "../../../widgets/settings/field.slint";
 import { SettingsSection, SettingsSupplement } from "../../../widgets/settings/page.slint";
 import { HintText } from "../../../widgets/typography.slint";
 import { HostInput } from "controls.slint";
+import { ComboBox } from "std-widgets.slint";
 
 export component CompanionSettings inherits SettingsSection {
     in property <bool> editing;
@@ -16,4 +17,18 @@ export component CompanionSettings inherits SettingsSection {
         HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.companion-mind; accessible-label: "口調・人格"; enabled: root.editing; edited => { UiState.host-draft-edited(1); } }
     }
     SettingsSupplement { wide: root.wide; HintText { text: "口調・人格は、会話の送信許可に含まれます。"; } }
+    SettingField {
+        label: "モデル（VRM 1.0）"; wide: root.wide;
+        HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.companion-body-model; accessible-label: "コンパニオンのモデル"; placeholder-text: "この端末の .vrm ファイルのパス"; enabled: root.editing; edited => { UiState.host-draft-edited(1); } }
+    }
+    SettingsSupplement { wide: root.wide; HintText { text: "モデルの参照をホストへ保存します。空欄で保存すると解除します。画面に表示するモデルは見た目の設定で選べます。"; } }
+    SettingField {
+        label: "音声合成サービス"; wide: root.wide;
+        ComboBox { width: parent.control-width; height: UiState.control-height; model: UiState.companion-voice-names; current-index <=> UiState.companion-voice-index; accessible-label: "音声合成サービス"; enabled: root.editing; selected(value) => { UiState.host-draft-edited(1); } }
+    }
+    SettingField {
+        label: "声ID"; wide: root.wide;
+        HostInput { width: parent.control-width; height: UiState.control-height; text <=> UiState.companion-voice-id; accessible-label: "声ID"; enabled: root.editing && UiState.companion-voice-index > 0; edited => { UiState.host-draft-edited(1); } }
+    }
+    SettingsSupplement { wide: root.wide; HintText { text: "保存済みの音声合成接続から選びます。「未設定」で保存すると解除します。音声合成エンジンは未接続のため、現在は設定のみ保存します。"; } }
 }

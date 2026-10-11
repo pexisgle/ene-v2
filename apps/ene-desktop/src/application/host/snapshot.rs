@@ -139,6 +139,23 @@ impl Application {
         if !state.get_companion_dirty() {
             state.set_companion_name(c.name.clone().into());
             state.set_companion_mind(c.mind.clone().into());
+            let mut drafts = self.host_drafts.borrow_mut();
+            drafts.companion_revision = c.revision;
+            drafts.documents = super::documents::CompanionDocuments::new(&snapshot, c);
+            state.set_companion_body_model(drafts.documents.model().into());
+            state.set_companion_voice_id(drafts.documents.voice_id().into());
+            state.set_companion_voice_index(drafts.documents.voice_index());
+            state.set_companion_voice_names(
+                Rc::new(VecModel::from(
+                    drafts
+                        .documents
+                        .voices
+                        .iter()
+                        .map(|(_, label)| slint::SharedString::from(label.as_str()))
+                        .collect::<Vec<_>>(),
+                ))
+                .into(),
+            );
         }
         if !state.get_connection_dirty() {
             let mut drafts = self.host_drafts.borrow_mut();
@@ -149,9 +166,6 @@ impl Application {
                 p.adapter == state.get_provider_id().as_str()
                     && p.endpoint == state.get_provider_endpoint().as_str()
             }));
-        }
-        if !state.get_companion_dirty() {
-            self.host_drafts.borrow_mut().companion_revision = c.revision;
         }
         {
             let mut model = self.host_ui.borrow_mut();

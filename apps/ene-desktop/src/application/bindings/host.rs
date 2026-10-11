@@ -231,12 +231,40 @@ impl Application {
                 ui.global::<UiState>().get_selected_connection_id().into(),
             )
         });
-        host_action!(on_save_companion, |app: &Application, ui: &AppWindow| {
-            let state = ui.global::<UiState>();
-            crate::infrastructure::host::Command::Companion {
-                revision: app.host_drafts.borrow().companion_revision,
-                name: state.get_companion_name().into(),
-                mind: state.get_companion_mind().into(),
+        let owner = Rc::downgrade(self);
+        let view = ui.as_weak();
+        ui.global::<UiState>().on_save_companion(move || {
+            if let (Some(app), Some(ui)) = (owner.upgrade(), view.upgrade()) {
+                let state = ui.global::<UiState>();
+                if !state.get_host_connected()
+                    || state.get_companion_index() < 0
+                    || state.get_host_busy()
+                {
+                    return;
+                }
+                let drafts = app.host_drafts.borrow();
+                let changes = drafts.documents.patches(
+                    state.get_companion_body_model().as_str(),
+                    state.get_companion_voice_index(),
+                    state.get_companion_voice_id().as_str(),
+                );
+                let (body, voice) = match changes {
+                    Ok(changes) => changes,
+                    Err(message) => {
+                        state.set_host_feedback_error(true);
+                        state.set_host_feedback(message.into());
+                        return;
+                    }
+                };
+                let command = crate::infrastructure::host::Command::Companion {
+                    revision: drafts.companion_revision,
+                    name: state.get_companion_name().into(),
+                    mind: state.get_companion_mind().into(),
+                    body,
+                    voice,
+                };
+                drop(drafts);
+                app.host_request(&ui, command);
             }
         });
         host_action!(on_load_history, |_: &Application, _: &AppWindow| {

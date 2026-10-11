@@ -70,6 +70,10 @@ export global UiState {
     callback leave-demo;
     in-out property <string> companion-name;
     in-out property <string> companion-mind;
+    in-out property <string> companion-body-model;
+    in-out property <[string]> companion-voice-names;
+    in-out property <int> companion-voice-index: 0;
+    in-out property <string> companion-voice-id;
     // 0: unavailable, 1: loading, 2: ready, 3: failed.
     in-out property <int> availability-state;
     callback retry-availability;
