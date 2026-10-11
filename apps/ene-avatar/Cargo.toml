@@ -10,7 +10,9 @@ publish.workspace = true
 workspace = true
 
 [features]
-dev-dynamic-linking = ["bevy/dynamic_linking"]
+# MSVC cannot export all Bevy symbols within its DLL object limit.
+# Keep the development dylib opt-in limited to Unix, including --all-features.
+dev-dynamic-linking = ["dep:bevy_dylib", "dep:bevy_internal"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +36,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { workspace = true, features = ["process"] }
 
 [target.'cfg(unix)'.dependencies]
+bevy_dylib = { version = "0.19", optional = true }
+bevy_internal = { version = "0.19", default-features = false, features = ["dynamic_linking"], optional = true }
 wgpu = { version = "29", default-features = false, features = ["vulkan"] }
 rustix.workspace = true
 smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }

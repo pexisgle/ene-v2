@@ -595,7 +595,6 @@ version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4bfadbebfc6599aa59289b754ac30023959854304f3d393da2cf62bb3cd5df8f"
 dependencies = [
- "bevy_dylib",
  "bevy_internal",
 ]
 
@@ -3139,6 +3138,8 @@ name = "ene-avatar"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_dylib",
+ "bevy_internal",
  "bevy_vrm1",
  "binrw",
  "clap",

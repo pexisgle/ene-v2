@@ -1,6 +1,16 @@
 // WGPU's nested resource types need a deeper trait check on nightly.
 #![recursion_limit = "256"]
 
+#[cfg(all(unix, feature = "dev-dynamic-linking"))]
+#[expect(
+    unused_imports,
+    clippy::single_component_path_imports,
+    reason = "Importing the dylib keeps Bevy linked dynamically in Unix development builds."
+)]
+use bevy_dylib;
+#[cfg(all(unix, feature = "dev-dynamic-linking"))]
+use bevy_internal as _;
+
 mod application;
 mod ipc;
 mod render;
