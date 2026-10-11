@@ -340,7 +340,10 @@ mod tests {
         let directory = directory();
         let path = directory.join("client.json");
         let original = b"{\"avatar\":{\"right\":42,\"bottom\":12}}";
+        #[cfg(unix)]
         fs::write(&path, original).unwrap();
+        #[cfg(windows)]
+        ene_platform::storage::write_atomic(&path, original).unwrap();
         fs::write(directory.join("client.json.invalid-0"), "existing backup").unwrap();
         assert!(ClientSettings::load(&path).is_err());
         ClientSettings::default().save(&path).unwrap();
