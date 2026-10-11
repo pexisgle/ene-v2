@@ -394,10 +394,14 @@ async fn run(package: Package, entrypoint: String) -> Result<()> {
             }
         }
     });
+    let mut execution_finished = false;
     let result = async {
         loop {
             tokio::select! {
-                finished = done_rx.recv() => { return finished.context("execution thread failed")?; }
+                finished = done_rx.recv() => {
+                    execution_finished = true;
+                    return finished.context("execution thread failed")?;
+                }
                 result=&mut writer=>{return result?;}
                 message = input.receive() => {
                     match message? {
@@ -423,6 +427,20 @@ async fn run(package: Package, entrypoint: String) -> Result<()> {
     writer_stop.cancel();
     if !writer.is_finished() {
         let _ = writer.await;
+    }
+    if execution_finished && result.is_ok() {
+        // Sending finishes before the remote channel necessarily decodes its
+        // terminal event. Keep Remoc alive until the host acknowledges with
+        // Shutdown; a disconnected or unresponsive host cannot keep us alive.
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match input.receive().await {
+                    Ok(Some(HostMessage::Shutdown)) | Ok(None) | Err(_) => break,
+                    Ok(Some(_)) => {}
+                }
+            }
+        })
+        .await;
     }
     // Host supervisor enforces the final deadline even for a non-cooperative native runtime.
     result

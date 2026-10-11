@@ -141,13 +141,7 @@ async fn luau_interrupts_infinite_loop() {
         .await
         .unwrap();
     assert!(matches!(r.receive().await, WorkerMessage::Failed { .. }));
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), r.child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success()
-    );
+    r.stop().await;
 }
 fn write(data: &str) -> String {
     let mut code = format!("i64.const {} call $alloc local.set $p\n", data.len());
