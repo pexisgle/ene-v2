@@ -129,7 +129,11 @@ impl ApiClient {
                 let saved = self
                     .patch_settings(&UpdateSettingsRequest {
                         revision: intent.settings_revision,
-                        connections,
+                        connections: ConnectionInputs {
+                            items: connections,
+                            ..Default::default()
+                        }
+                        .into(),
                         ..Default::default()
                     })
                     .await?;

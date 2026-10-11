@@ -71,6 +71,85 @@ async fn serve(router: Router) -> (ApiClient, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
+async fn update_transport_preserves_connection_presence_and_document_changes() {
+    let (settings_tx, mut settings_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (companion_tx, mut companion_rx) = tokio::sync::mpsc::unbounded_channel();
+    let router = Router::new()
+        .route(
+            "/rpc/ene.host.v1.HostService/UpdateSettings",
+            post(move |body: axum::body::Bytes| async move {
+                let request = w::UpdateSettingsRequest::decode_from_slice(&body).unwrap();
+                settings_tx.send(request).unwrap();
+                (
+                    [("content-type", "application/proto")],
+                    w::Settings::default().encode_to_vec(),
+                )
+            }),
+        )
+        .route(
+            "/rpc/ene.host.v1.HostService/UpdateCompanion",
+            post(move |body: axum::body::Bytes| async move {
+                let request = w::UpdateCompanionRequest::decode_from_slice(&body).unwrap();
+                companion_tx.send(request.clone()).unwrap();
+                (
+                    [("content-type", "application/proto")],
+                    w::Companion {
+                        id: request.id,
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+            }),
+        );
+    let (client, server) = serve(router).await;
+    client
+        .patch_settings(&w::UpdateSettingsRequest {
+            revision: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(!settings_rx.recv().await.unwrap().connections.is_set());
+    client
+        .patch_settings(&w::UpdateSettingsRequest {
+            revision: 1,
+            connections: w::ConnectionInputs::default().into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let empty = settings_rx.recv().await.unwrap();
+    assert!(empty.connections.is_set());
+    assert!(empty.connections.items.is_empty());
+    let patch = w::UpdateCompanionRequest {
+        revision: 1,
+        body: w::JsonDocumentPatch {
+            change: Some(w::json_document_patch::Change::Set(Box::new(
+                w::JsonDocument {
+                    json: r#"{"model":"avatar.vrm"}"#.into(),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        }
+        .into(),
+        voice: w::JsonDocumentPatch {
+            change: Some(w::json_document_patch::Change::Clear(Box::default())),
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    };
+    client.patch_companion("c1", &patch).await.unwrap();
+    let received = companion_rx.recv().await.unwrap();
+    assert_eq!(received.id, "c1");
+    assert_eq!(received.body, patch.body);
+    assert_eq!(received.voice, patch.voice);
+    assert!(!received.companion_assignment.is_set());
+    server.abort();
+}
+
+#[tokio::test]
 async fn auth_redirects_and_connect_default_response_bounds_are_enforced() {
     use axum::response::IntoResponse;
     use std::sync::{

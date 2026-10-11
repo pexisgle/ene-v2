@@ -85,6 +85,7 @@ impl ApiClient {
             .map_err(rpc_error)?
             .into_owned())
     }
+    /// Omitted body/voice patches preserve their values; use `clear` to unset them.
     pub async fn patch_companion(
         &self,
         id: &str,
@@ -172,6 +173,7 @@ impl ApiClient {
             .map_err(rpc_error)?
             .into_owned())
     }
+    /// An omitted connection list preserves settings; a present empty list replaces it.
     pub async fn patch_settings(&self, input: &UpdateSettingsRequest) -> Result<Settings, Error> {
         Ok(self
             .0
