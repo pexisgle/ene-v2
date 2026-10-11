@@ -115,7 +115,10 @@ async fn job_cancellation_stops_descendants_and_workers_cannot_share_files_or_cr
     let temp = tempfile::tempdir()?;
     let package = temp.path().join("package");
     storage::create_private_dir_all(&package)?;
-    std::fs::copy(std::env::current_exe()?, package.join("probe.exe"))?;
+    storage::write_atomic(
+        &package.join("probe.exe"),
+        &std::fs::read(std::env::current_exe()?)?,
+    )?;
     let command = |fixture: &str| {
         vec![
             "/plugin/probe.exe".into(),
@@ -231,7 +234,10 @@ async fn isolated_executable_has_bounded_stdio_and_no_host_or_network_access() -
     storage::create_private_dir_all(&host)?;
     let secret = host.join("secret");
     storage::write_atomic(&secret, b"private")?;
-    std::fs::copy(std::env::current_exe()?, package.join("probe.exe"))?;
+    storage::write_atomic(
+        &package.join("probe.exe"),
+        &std::fs::read(std::env::current_exe()?)?,
+    )?;
     storage::write_atomic(
         &package.join("host-path.txt"),
         secret.to_string_lossy().as_bytes(),

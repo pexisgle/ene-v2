@@ -103,7 +103,14 @@ async fn verify() {
     let source = temp.path().join("source");
     ene_platform::storage::create_private_dir_all(&source).unwrap();
     let probe = source.join("probe.exe");
+    #[cfg(unix)]
     std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+    #[cfg(windows)]
+    ene_platform::storage::write_atomic(
+        &probe,
+        &std::fs::read(std::env::current_exe().unwrap()).unwrap(),
+    )
+    .unwrap();
     // Package the executable code, without dependency debug information that
     // can exceed the production package budget in an all-features test build.
     #[cfg(target_os = "linux")]
@@ -115,11 +122,11 @@ async fn verify() {
             .expect("binutils strip is required for the native process fixture")
             .success()
     );
-    std::fs::write(source.join("manifest.json"), json!({
+    ene_platform::storage::write_atomic(&source.join("manifest.json"), json!({
         "package_version": 1, "api_version": 1, "id": "native-fixture", "name": "Native fixture", "version": "1",
         "code_files": ["probe.exe"], "entrypoints": [{"id": "behavior", "target": "host", "runtime": "process",
         "file": "probe.exe", "command": ["/plugin/probe.exe", "--worker"], "provides": ["character"], "uses": []}]
-    }).to_string()).unwrap();
+    }).to_string().as_bytes()).unwrap();
     let package = Package::load(&source).unwrap();
     let cancel = CancellationToken::new();
     let mut worker = Worker::start(

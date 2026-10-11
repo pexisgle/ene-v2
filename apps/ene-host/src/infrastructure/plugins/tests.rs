@@ -174,7 +174,7 @@ async fn stale_revisions_undeclared_grants_and_missing_targets_are_rejected() {
     b.revision = "old".into();
     assert!(manager.bind(b).await.is_err());
     let package = manager.entries.read().unwrap()["reference"].package.clone();
-    std::fs::write(package.root.join("character.luau"), "return {}").unwrap();
+    crate::test_support::write(package.root.join("character.luau"), "return {}").unwrap();
     assert_eq!(
         manager
             .list()
@@ -319,9 +319,9 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
             local.get $p i64.const 1 i64.add i32.const 125 call $store
             local.get $p i64.const 2 call $output i32.const 0))"#)).unwrap();
         let package = manager.root.join("wasm");
-        std::fs::create_dir(&package).unwrap();
-        std::fs::write(package.join("main.wasm"), code).unwrap();
-        std::fs::write(package.join("manifest.json"),json!({"package_version":1,"api_version":1,"id":"wasm-fixture","name":"Wasm fixture","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"llm","target":"host","runtime":"extism","file":"main.wasm","provides":["llm"],"uses":["http"],"provider":{"id":"wasm-fixture","endpoint":endpoint,"auth":{"type":"none"},"destinations":[endpoint]}}]}).to_string()).unwrap();
+        crate::test_support::create_directory(&package).unwrap();
+        crate::test_support::write(package.join("main.wasm"), code).unwrap();
+        crate::test_support::write(package.join("manifest.json"),json!({"package_version":1,"api_version":1,"id":"wasm-fixture","name":"Wasm fixture","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"llm","target":"host","runtime":"extism","file":"main.wasm","provides":["llm"],"uses":["http"],"provider":{"id":"wasm-fixture","endpoint":endpoint,"auth":{"type":"none"},"destinations":[endpoint]}}]}).to_string()).unwrap();
         manager.scan().unwrap();
         let revision = manager.entries.read().unwrap()["wasm-fixture"]
             .package
@@ -590,7 +590,7 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
         .state = "ready".into();
     // A real isolated child that consumes Initialize but never sends Ready.
     let runner = temp.path().join("waiting-runner");
-    std::fs::write(&runner, "#!/bin/sh\nread request\nread shutdown\n").unwrap();
+    crate::test_support::write(&runner, "#!/bin/sh\nread request\nread shutdown\n").unwrap();
     std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
     manager.runner = runner;
     let binding = binding(&manager, &companion, "task", "harness", vec![]);

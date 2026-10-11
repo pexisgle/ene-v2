@@ -309,8 +309,8 @@ mod tests {
     }
     fn fixture(dir: &Path) {
         ene_platform::storage::create_private_dir_all(dir).unwrap();
-        std::fs::write(dir.join("main.luau"), "return {}").unwrap();
-        std::fs::write(dir.join("manifest.json"), serde_json::json!({"package_version":1,"api_version":1,"id":"sample","name":"Sample","version":"1","code_files":["main.luau"],"entrypoints":[{"id":"behavior","target":"host","runtime":"luau","file":"main.luau","provides":["character"]}]}).to_string()).unwrap();
+        ene_platform::storage::write_atomic(&dir.join("main.luau"), b"return {}").unwrap();
+        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"package_version":1,"api_version":1,"id":"sample","name":"Sample","version":"1","code_files":["main.luau"],"entrypoints":[{"id":"behavior","target":"host","runtime":"luau","file":"main.luau","provides":["character"]}]}).to_string().as_bytes()).unwrap();
     }
     #[test]
     fn snapshots_capture_code_and_source_changes_invalidate_revision() {
