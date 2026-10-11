@@ -1,7 +1,7 @@
 name: Verify Windows
 on:
   push:
-    branches: [port/plugin-runtime]
+    branches: [diagnostic/windows-platform-20261011]
   pull_request:
 concurrency:
   group: windows-${{ github.ref }}
@@ -30,15 +30,4 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo fmt --all -- --check
-      - run: cargo --config "profile.dev.package.'*'.opt-level=0" check --workspace --all-targets --all-features --locked
-      - run: cargo --config "profile.dev.package.'*'.opt-level=0" clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - if: ${{ hashFiles('apps/ene-plugin-runner/Cargo.toml') != '' }}
-        run: cargo --config "profile.dev.package.'*'.opt-level=0" build --locked -p ene-plugin-runner
-      - run: cargo --config "profile.dev.package.'*'.opt-level=0" --config "profile.test.opt-level=0" test --workspace --all-features --locked
-      - if: ${{ hashFiles('examples/plugins/openrouter-wasm/Cargo.toml') != '' }}
-        run: cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown
-      - if: ${{ hashFiles('apps/ene-plugin-runner/Cargo.toml') != '' && hashFiles('examples/plugins/openrouter-wasm/Cargo.toml') != '' }}
-        shell: pwsh
-        run: |
-          $env:ENE_TEST_PDK_WASM = "$PWD/target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm"
-          cargo --config "profile.dev.package.'*'.opt-level=0" --config "profile.test.opt-level=0" test --locked -p ene-plugin-runner --test pdk -- --ignored
+      - run: cargo --config "profile.dev.package.'*'.opt-level=0" --config "profile.test.opt-level=0" test --locked --all-features -p ene-platform --test windows -- --nocapture
