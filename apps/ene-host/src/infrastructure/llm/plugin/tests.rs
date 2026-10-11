@@ -15,9 +15,9 @@ use std::sync::{
 };
 fn bundle() -> (tempfile::TempDir, manifest::Bundle) {
     let dir = crate::test_support::package_directory();
-    std::fs::write(dir.path().join("provider.py"), "").unwrap();
+    crate::test_support::write(dir.path().join("provider.py"), "").unwrap();
     let value = json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3","-I","-u","/plugin/provider.py"],"endpoint":"https://example.com/api","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
-    std::fs::write(dir.path().join("manifest.json"), value.to_string()).unwrap();
+    crate::test_support::write(dir.path().join("manifest.json"), value.to_string()).unwrap();
     let b = manifest::load(dir.path()).unwrap();
     (dir, b)
 }
@@ -148,7 +148,7 @@ fn bundle_revision_distinguishes_file_boundaries_and_executable_content() {
     let (dir, _) = bundle();
     // Fixed bytes and permissions also guard the persisted fingerprint across
     // SHA-256 library and serde_json feature changes.
-    std::fs::write(
+    crate::test_support::write(
         dir.path().join("manifest.json"),
         concat!(
             r#"{"auth":{"type":"none"},"command":["/usr/bin/python3","-I","-u","/plugin/provider.py"],"#,
@@ -159,8 +159,8 @@ fn bundle_revision_distinguishes_file_boundaries_and_executable_content() {
     .unwrap();
     let safe = "print('safe')\n#";
     let extra = "\nprint('changed execution')\n";
-    std::fs::write(dir.path().join("provider.py"), safe).unwrap();
-    std::fs::write(dir.path().join("z"), extra).unwrap();
+    crate::test_support::write(dir.path().join("provider.py"), safe).unwrap();
+    crate::test_support::write(dir.path().join("z"), extra).unwrap();
     for name in ["manifest.json", "provider.py", "z"] {
         std::fs::set_permissions(
             dir.path().join(name),
@@ -173,7 +173,7 @@ fn bundle_revision_distinguishes_file_boundaries_and_executable_content() {
         original.revision,
         "6ad8b967fab6d8927db8ab7d1ea7b9dfb3bb9b5ba07116db3d08a7f751e2920d",
     );
-    std::fs::write(dir.path().join("provider.py"), format!("{safe}z{extra}")).unwrap();
+    crate::test_support::write(dir.path().join("provider.py"), format!("{safe}z{extra}")).unwrap();
     std::fs::remove_file(dir.path().join("z")).unwrap();
     let changed = manifest::load(dir.path()).unwrap();
     assert_ne!(original.revision, changed.revision);

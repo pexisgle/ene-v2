@@ -6,13 +6,13 @@ use std::{path::Path, sync::Arc};
 
 fn package(root: &Path, name: &str, id: &str) -> PathBuf {
     let path = root.join(name);
-    std::fs::create_dir(&path).unwrap();
+    crate::test_support::create_directory(&path).unwrap();
     let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../../../providers/openrouter/manifest.json"
     ))
     .unwrap();
     manifest["id"] = json!(id);
-    std::fs::write(path.join("manifest.json"), manifest.to_string()).unwrap();
+    crate::test_support::write(path.join("manifest.json"), manifest.to_string()).unwrap();
     path
 }
 fn connection() -> Connection {
@@ -40,7 +40,7 @@ fn application(store: Store, registry: Registry) -> HostApplication {
 fn discovery_isolates_invalid_and_duplicate_packages() {
     let root = crate::test_support::package_directory();
     package(root.path(), "healthy", "valid");
-    std::fs::create_dir(root.path().join("broken")).unwrap();
+    crate::test_support::create_directory(root.path().join("broken")).unwrap();
     package(root.path(), "duplicate-a", "duplicate");
     package(root.path(), "duplicate-b", "duplicate");
     package(root.path(), "duplicate-c", "duplicate");
@@ -95,7 +95,7 @@ fn discovery_isolates_invalid_and_duplicate_packages() {
 async fn persisted_grants_survive_restart_and_unavailable_policy_but_invalidate_known_changes() {
     let temp = crate::test_support::package_directory();
     let root = temp.path().join("providers");
-    std::fs::create_dir(&root).unwrap();
+    crate::test_support::create_directory(&root).unwrap();
     let path = package(&root, "healthy", "valid");
     let db = temp.path().join("host.sqlite3");
     let registry = Registry::at(root.clone());
@@ -158,14 +158,14 @@ async fn persisted_grants_survive_restart_and_unavailable_policy_but_invalidate_
     );
 
     let manifest = std::fs::read(path.join("manifest.json")).unwrap();
-    std::fs::write(path.join("manifest.json"), "broken").unwrap();
+    crate::test_support::write(path.join("manifest.json"), "broken").unwrap();
     app.reload_providers().await.unwrap();
     assert_eq!(
         Repository::configuration(&store).await.unwrap().grants[0].status,
         GrantStatus::Active
     );
-    std::fs::write(path.join("manifest.json"), manifest).unwrap();
-    std::fs::write(path.join("provider"), "changed implementation").unwrap();
+    crate::test_support::write(path.join("manifest.json"), manifest).unwrap();
+    crate::test_support::write(path.join("provider"), "changed implementation").unwrap();
     app.reload_providers().await.unwrap();
     let changed = Repository::configuration(&store).await.unwrap();
     assert_eq!(changed.grants[0].status, GrantStatus::Invalidated);
@@ -188,7 +188,7 @@ async fn persisted_grants_survive_restart_and_unavailable_policy_but_invalidate_
     manifest["endpoint"] = json!("https://other.example/v1");
     manifest["destinations"] = json!(["https://other.example"]);
     manifest["routing"] = json!({"type":"direct"});
-    std::fs::write(path.join("manifest.json"), manifest.to_string()).unwrap();
+    crate::test_support::write(path.join("manifest.json"), manifest.to_string()).unwrap();
     let registry = Registry::at(root);
     assert!(registry.policy(&p).is_err());
     assert!(registry.scope_fingerprint(&p).is_ok());

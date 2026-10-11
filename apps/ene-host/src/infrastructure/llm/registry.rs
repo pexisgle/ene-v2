@@ -404,9 +404,9 @@ mod tests {
     fn scope_queries_use_scanned_bundle_until_reload() {
         let root = crate::test_support::package_directory();
         let path = root.path().join("fixture");
-        std::fs::create_dir(&path).unwrap();
+        crate::test_support::create_directory(&path).unwrap();
         let manifest = serde_json::json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3"],"endpoint":"https://example.com/v1","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
-        std::fs::write(path.join("manifest.json"), manifest.to_string()).unwrap();
+        crate::test_support::write(path.join("manifest.json"), manifest.to_string()).unwrap();
         let registry = Registry {
             plugins: None,
             root: root.path().into(),
@@ -440,7 +440,7 @@ mod tests {
     fn request_failure_keeps_plugin_ready_and_old_process_cannot_poison_reenabled_plugin() {
         let dir = crate::test_support::package_directory();
         let manifest = serde_json::json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3"],"endpoint":"https://example.com/v1","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
-        std::fs::write(dir.path().join("manifest.json"), manifest.to_string()).unwrap();
+        crate::test_support::write(dir.path().join("manifest.json"), manifest.to_string()).unwrap();
         let bundle = manifest::load(dir.path()).unwrap();
         let revision = bundle.revision.clone();
         let ticket = Some((revision.clone(), 1));
@@ -553,9 +553,9 @@ mod request_failure_integration_tests {
         );
         let root = crate::test_support::package_directory();
         let path = root.path().join("fixture");
-        std::fs::create_dir(&path).unwrap();
+        crate::test_support::create_directory(&path).unwrap();
         let manifest = serde_json::json!({"protocol_version":1,"id":"fixture","name":"Fixture","version":"1","command":["/usr/bin/python3","-I","-u","/plugin/provider.py"],"endpoint":"https://example.com/v1","options":{},"auth":{"type":"none"},"destinations":["https://example.com"]});
-        std::fs::write(path.join("manifest.json"), manifest.to_string()).unwrap();
+        crate::test_support::write(path.join("manifest.json"), manifest.to_string()).unwrap();
         let executable = std::env::current_exe().unwrap();
         let target = executable
             .ancestors()
@@ -569,7 +569,7 @@ mod request_failure_integration_tests {
             .unwrap_or_else(|| target.join("libene_provider.so"));
         std::fs::copy(extension, path.join("ene_provider.so"))
             .expect("build the Python SDK before testing isolated Python providers");
-        std::fs::write(
+        crate::test_support::write(
             path.join("provider.py"),
             r#"import asyncio,sys
 sys.path.insert(0, '/plugin')
