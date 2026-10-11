@@ -11,3 +11,7 @@ API・保存・クライアントで同じ型を直接使い、手書きDTOや�
 モデル情報・設定項目・Provider能力も、このクレートの生成型を直接使います。
 JSON表現もprotobufの形式に統一され、フィールド名はcamelCase、64ビット整数は文字列です。
 メッセージフィールドは未指定と空のメッセージを区別し、`JsonDocument` はJSON文字列を保持します。
+
+Wasmゲストは同じ `host.proto` のメッセージ型をBuffaの公式ビルダーで生成します。
+Connect RPCのブラウザー用runtimeをExtismへ持ち込まないよう、Wasmではサービスを
+生成せず、`connectrpc` を実行時依存に含めません。nativeのclient・server APIはそのままです。

@@ -6,10 +6,21 @@ fn main() {
             protoc_bin_vendored::protoc_bin_path().expect("vendored protoc"),
         );
     }
-    connectrpc_build::Config::new()
-        .files(&["proto/host.proto"])
-        .includes(&["proto"])
-        .include_file("_connectrpc.rs")
-        .compile()
-        .expect("generate Connect services and messages");
+    if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("wasm") {
+        // Extism guests share messages without a browser RPC runtime.
+        buffa_build::Config::new()
+            .files(&["proto/host.proto"])
+            .includes(&["proto"])
+            .generate_json(true)
+            .include_file("_connectrpc.rs")
+            .compile()
+            .expect("generate protobuf messages");
+    } else {
+        connectrpc_build::Config::new()
+            .files(&["proto/host.proto"])
+            .includes(&["proto"])
+            .include_file("_connectrpc.rs")
+            .compile()
+            .expect("generate Connect services and messages");
+    }
 }

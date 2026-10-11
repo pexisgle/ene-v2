@@ -10,8 +10,11 @@ workspace = true
 [dependencies]
 serde.workspace = true
 buffa.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 connectrpc.workspace = true
 
 [build-dependencies]
+buffa-build = "0.9"
 connectrpc-build = "0.9"
 protoc-bin-vendored = "3"
