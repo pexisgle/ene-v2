@@ -34,6 +34,7 @@ enum Event {
 #[derive(Debug)]
 struct Context {
     events: Arc<Mutex<Vec<Event>>>,
+    input: HWND,
 }
 #[derive(Debug)]
 struct Windows {
@@ -141,7 +142,8 @@ unsafe extern "system" fn proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM)
         let mut point = POINT::default();
         match message {
             WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
-            WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP => {
+            WM_NCHITTEST if hwnd != context.input => return LRESULT(HTTRANSPARENT as isize),
+            WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP if hwnd == context.input => {
                 unsafe {
                     let _ = GetCursorPos(&mut point);
                 }
@@ -241,12 +243,15 @@ impl State {
             let events = Arc::new(Mutex::new(Vec::new()));
             let mut context = Box::new(Context {
                 events: events.clone(),
+                input: HWND::default(),
             });
             let pointer = (&mut *context as *mut Context).cast();
             let common =
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
             let visual = CreateWindowExW(
-                common | WS_EX_TRANSPARENT,
+                // WS_EX_TRANSPARENT alone only changes painting order. Layering
+                // makes this visual HWND pass mouse input across threads/processes.
+                common | WS_EX_LAYERED | WS_EX_TRANSPARENT,
                 class,
                 w!("ene-avatar"),
                 WS_POPUP,
@@ -259,6 +264,10 @@ impl State {
                 Some(instance.into()),
                 Some(pointer),
             )?;
+            if let Err(error) = SetLayeredWindowAttributes(visual, COLORREF(0), 255, LWA_ALPHA) {
+                let _ = DestroyWindow(visual);
+                return Err(error.into());
+            }
             let input = match CreateWindowExW(
                 common,
                 class,
@@ -279,6 +288,7 @@ impl State {
                     return Err(error.into());
                 }
             };
+            context.input = input;
             let composition_result = (|| -> windows::core::Result<_> {
                 let device: IDCompositionDevice = DCompositionCreateDevice(None)?;
                 let target = device.CreateTargetForHwnd(visual, true)?;
@@ -567,6 +577,56 @@ impl State {
 
 #[cfg(test)]
 impl State {
+    pub(crate) fn show_for_test(&mut self) {
+        self.visible = true;
+        self.request_recenter();
+        self.apply_recenter();
+    }
+    pub(crate) fn assert_input_points_for_test(
+        &self,
+        covered: &[(i32, i32)],
+        transparent: &[(i32, i32)],
+    ) {
+        let mut rect = RECT::default();
+        unsafe {
+            GetWindowRect(self.window.0.visual, &mut rect).unwrap();
+        }
+        let points: Vec<_> = covered
+            .iter()
+            .chain(transparent)
+            .map(|&(x, y)| POINT {
+                x: rect.left + x,
+                y: rect.top + y,
+            })
+            .collect();
+        // Query from another thread: HTTRANSPARENT alone only passes input to
+        // the same thread, unlike a transparent layered HWND.
+        let selected = std::thread::spawn(move || {
+            points
+                .into_iter()
+                .map(|point| unsafe { WindowFromPoint(point).0 as isize })
+                .collect::<Vec<_>>()
+        })
+        .join()
+        .unwrap();
+        for (index, &selected) in selected.iter().enumerate() {
+            if index < covered.len() {
+                assert_eq!(
+                    selected, self.window.0.input.0 as isize,
+                    "covered pixel {index} must select input HWND"
+                );
+            } else {
+                assert_ne!(
+                    selected, self.window.0.visual.0 as isize,
+                    "transparent pixel {index} selected visual HWND"
+                );
+                assert_ne!(
+                    selected, self.window.0.input.0 as isize,
+                    "transparent pixel {index} selected input HWND"
+                );
+            }
+        }
+    }
     pub(crate) fn for_test() -> Result<State, Box<dyn std::error::Error>> {
         let (states, _) = remoc::rch::watch::channel(Default::default());
         let mut state = State::new(
@@ -589,6 +649,39 @@ mod tests {
     fn make_state() -> Result<State, Box<dyn std::error::Error>> {
         State::for_test()
     }
+    #[test]
+    fn transparent_pixels_do_not_select_the_avatar_windows() {
+        let mut state = make_state().unwrap();
+        state.show_for_test();
+        state.prepare_gpu_present(&[
+            Run {
+                x: 20,
+                y: 20,
+                width: 10,
+            },
+            Run {
+                x: 40,
+                y: 20,
+                width: 10,
+            },
+        ]);
+        let covered = [(20, 20), (29, 20), (40, 20), (49, 20)];
+        let transparent = [(19, 20), (30, 20), (35, 20), (50, 20), (25, 21)];
+        state.assert_input_points_for_test(&covered, &transparent);
+        state.placement.x += 30;
+        state.properties();
+        state.assert_input_points_for_test(&covered, &transparent);
+        // A render failure/resize must leave no stale clickable silhouette.
+        state.clear_input();
+        state.assert_input_points_for_test(&[], &covered);
+        // Even a directly posted visual mouse message cannot begin a drag.
+        state.events.lock().unwrap().clear();
+        unsafe {
+            SendMessageW(state.window.0.visual, WM_LBUTTONDOWN, None, None);
+        }
+        assert!(state.events.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn composition_and_input_windows_preserve_holes_without_activation() {
         let mut state = make_state().unwrap();

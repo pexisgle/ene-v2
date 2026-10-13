@@ -83,3 +83,103 @@ fn dx12_composition_presents_gpu_mask_on_the_same_device() {
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     presenter.commit().unwrap();
 }
+
+#[test]
+#[ignore = "requires DX12 and a VRM 1.0 file in ENE_AVATAR_TEST_MODEL"]
+fn vrm_transparent_pixels_pass_input_through_the_composition_window() {
+    use bevy::render::renderer::{RenderAdapter, RenderDevice, RenderInstance, RenderQueue};
+    let model = std::env::var("ENE_AVATAR_TEST_MODEL")
+        .expect("set ENE_AVATAR_TEST_MODEL to a VRM 1.0 file");
+    let mut state = crate::wayland::State::for_test().unwrap();
+    state.settings.model = model;
+    state.show_for_test();
+    let mut renderer = crate::render::renderer::Renderer::new(
+        state.width,
+        state.height,
+        state.scale,
+        &state.settings,
+        state.native_window(),
+        state.id,
+        &state.output,
+    )
+    .unwrap();
+    let world = renderer.app.world();
+    let device = world.resource::<RenderDevice>().clone();
+    let queue = world.resource::<RenderQueue>().clone();
+    let mut frames = GpuFrames::new(device.clone(), queue.clone());
+    let mut presenter = {
+        let world = renderer.app.sub_app(bevy::render::RenderApp).world();
+        surface::GpuSurface::new(
+            world.resource::<RenderInstance>(),
+            world.resource::<RenderAdapter>(),
+            device.wgpu_device(),
+            &queue,
+            Arc::new(state.native_window()),
+        )
+        .unwrap()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let mut sequence = 0;
+    let frame = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "VRM GPU frame did not complete"
+        );
+        state.dispatch(Duration::from_millis(2));
+        renderer.app.update();
+        assert!(renderer.load_error().is_none(), "VRM load failed");
+        if renderer.ready(state.avatar_height(), state.height)
+            && let Some(texture) = renderer.rendered_texture()
+        {
+            sequence += 1;
+            frames.enqueue(
+                &texture,
+                state.width,
+                state.height,
+                state.scale,
+                renderer.generation,
+                sequence,
+            );
+        }
+        if let Some(frame) = frames.poll().into_iter().find(|frame| {
+            frame.identity.generation == renderer.generation && !frame.runs.is_empty()
+        }) {
+            break frame;
+        }
+        assert!(frames.take_errors().is_empty(), "GPU mask error");
+    };
+    let output = presenter
+        .draw(&frame.texture, state.width, state.height)
+        .unwrap()
+        .expect("composition must acquire a frame");
+    state.prepare_gpu_present(&frame.runs);
+    output.present();
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    presenter.commit().unwrap();
+    let covered: Vec<_> = frame
+        .runs
+        .iter()
+        .step_by((frame.runs.len() / 20).max(1))
+        .map(|run| (run.x + run.width / 2, run.y))
+        .collect();
+    let mut transparent = Vec::new();
+    for y in (0..state.height as i32).step_by(20) {
+        for x in (0..state.width as i32).step_by(20) {
+            if !frame
+                .runs
+                .iter()
+                .any(|run| run.y == y && x >= run.x && x < run.x + run.width)
+            {
+                transparent.push((x, y));
+            }
+        }
+    }
+    assert!(!covered.is_empty());
+    assert!(!transparent.is_empty());
+    state.assert_input_points_for_test(&covered, &transparent);
+    eprintln!(
+        "VRM hit test: {} covered points and {} transparent points passed",
+        covered.len(),
+        transparent.len()
+    );
+}

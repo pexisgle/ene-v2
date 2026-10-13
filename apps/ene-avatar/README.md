@@ -148,3 +148,18 @@ PR2の `10992f6` を基点にしたWindows修正を、Windows MSVC、固定night
 | 実測FPS・DPI／モニター切替・Ctrl+C・Linux実機 | 今回は未実施 |
 
 ログと実プロセス検証スクリプトは `target/pr2-fix-review/`（Git管理対象外）へ保存しました。状態確認と合成GPUテストの成功を、目視結果の合格とは扱いません。
+
+### 2026-10-14 Windowsの透明部分でドラッグが始まる問題
+
+Seed-sanの透明部分でもアバターが動く報告に対し、描画用HWNDがモデルの輪郭に関係なくマウスを受け取っていたことを確認しました。`WS_EX_TRANSPARENT` 単独ではトップレベルウィンドウの入力透過を保証しないため、描画用HWNDへ `WS_EX_LAYERED` を併用して透過を有効にします（[Microsoftの仕様](https://learn.microsoft.com/en-us/windows/win32/dwm/bestpractices-ovw)）。モデルのGPUアルファから作った領域を持つ入力用HWNDだけがドラッグ・クリックを受け取ります。描画用HWNDへのマウスメッセージではドラッグを開始しません。
+
+回帰テストでは、表示中のウィンドウについて別スレッドから `WindowFromPoint` を呼び、輪郭・穴・領域外・移動後・領域解除後の入力先を確認します。修正前はモデル上の点でも描画用HWNDが選ばれて失敗し、修正後は入力用HWNDが選ばれ、透明部分では両方のHWNDが除外されます。
+
+実Seed-sanをDX12で描画する明示テストでも、モデル部分21点・透明部分1,648点の入力先を確認しました。これはWin32の入力先判定を検証した結果で、実マウスのドラッグ、ShowChat通知、背後の他アプリのクリック操作を自動実行した結果ではありません。
+
+```powershell
+$env:ENE_AVATAR_TEST_MODEL = 'C:\path\to\Seed-san.vrm'
+cargo test --locked -p ene-avatar --all-features vrm_transparent_pixels_pass_input_through_the_composition_window -- --ignored --nocapture --test-threads=1
+```
+
+修正後の整形・全workspaceのClippy・通常テスト13件、既存のDX12／DirectComposition明示テストにも成功しました。Linux実機、目視、実マウス操作は今回未実施です。
