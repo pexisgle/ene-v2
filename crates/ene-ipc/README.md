@@ -7,6 +7,10 @@ avatarはtraitを実装し、生成されたサーバーの `serve()` で操作�
 要求enum、要求ID、返信チャネル、要求を振り分けるrunnerは自前で実装しません。
 
 接続時に `RendererSession` を標準入出力のパイプ上で `provide`／`consume` します。
+avatar側のパイプI/Oは `interprocess`、標準入出力のFD／HANDLEの借用は
+`io-lifetimes` に委譲し、Linux／Windowsで同じ接続コードを使用します。
+Windowsのパイプ読み取りはブロッキング処理を使うため、ランタイム終了の
+タイムアウトは維持します。
 セッションは次の3経路を持ちます。
 
 - `renderer`: 初期化、アバター追加・削除、設定変更、中央配置、終了のRTCクライアント。
@@ -34,6 +38,10 @@ async fn control(mut session: RendererSession) -> Result<(), ene_ipc::renderer::
 `shutdown(self)` はクライアントを消費して生成サーバーを終了し、全ウィンドウを解放します。
 Remocが返信の送信完了を待ち、desktopは子プロセスの `wait()` で終了を確認します。
 クライアントの破棄や接続切断でもサーバーが終了し、ウィンドウを解放します。
+ウィンドウの所有フィールドは、要求チャネル、`jod-thread` の終了待ちハンドル、
+`scopeguard` の状態登録ガードの順に破棄します。これにより、要求チャネルの
+切断→描画スレッドの終了待ち→watchからの削除を、手書きの `Drop` なしで行います。
+描画のpanicは引き続きワーカースレッド内で捕捉し、アバターのエラー状態に反映します。
 イベント送信はFuturesのローカルキューをRemocの `SenderSink` へ `forward` し、
 描画スレッドでは通信を待ちません。手書きのイベント転送ループは持ちません。
 キューは非有界で、接続済みの相手がイベントを長時間読まなければメモリが増えます。

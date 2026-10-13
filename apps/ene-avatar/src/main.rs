@@ -19,6 +19,8 @@ mod wayland;
 
 use ene_ipc::renderer::{Renderer, RendererConfig, RendererServer, RendererSession};
 use futures_util::StreamExt;
+use interprocess::unnamed_pipe::tokio::{Recver, Sender};
+use io_lifetimes::AsFilelike;
 use remoc::rtc::Server;
 use remoc::{Cfg, Connect, ConnectExt, rch};
 
@@ -71,20 +73,8 @@ fn run(args: application::Args) -> Result<(), Box<dyn std::error::Error + Send +
         let _local = if standalone {
             Some(client)
         } else {
-            #[cfg(unix)]
-            let (input, output) = {
-                use std::os::fd::AsFd;
-                use tokio::net::unix::pipe;
-                // IPC owns these pipe ends. Unlike Tokio Stdin, they have no
-                // uncancellable blocking read that can delay process shutdown.
-                let input =
-                    pipe::Receiver::from_owned_fd(std::io::stdin().as_fd().try_clone_to_owned()?)?;
-                let output =
-                    pipe::Sender::from_owned_fd(std::io::stdout().as_fd().try_clone_to_owned()?)?;
-                (input, output)
-            };
-            #[cfg(windows)]
-            let (input, output) = (tokio::io::stdin(), tokio::io::stdout());
+            let input = Recver::try_from(std::io::stdin().as_filelike().try_clone_to_owned()?)?;
+            let output = Sender::try_from(std::io::stdout().as_filelike().try_clone_to_owned()?)?;
             Connect::io::<_, _, RendererSession, RendererSession, remoc::codec::Default>(
                 Cfg::default(),
                 input,

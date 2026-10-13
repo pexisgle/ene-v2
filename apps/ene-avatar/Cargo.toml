@@ -19,9 +19,13 @@ serde = { version = "1", features = ["derive"] }
 binrw = "0.15"
 gltf-json = { version = "1", features = ["extensions"] }
 clap.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-std"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 futures-channel = "0.3"
 futures-util = { workspace = true, features = ["sink"] }
+interprocess = { version = "2.4.5", features = ["tokio"] }
+io-lifetimes = "3"
+jod-thread = "1"
+scopeguard = "1"
 
 ene-ipc = { path = "../../crates/ene-ipc", default-features = false, features = ["renderer"] }
 remoc.workspace = true

@@ -14,7 +14,6 @@ use remoc::rch::watch;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    thread::JoinHandle,
 };
 
 type Result = std::result::Result<(), RendererError>;
@@ -66,11 +65,14 @@ pub struct WindowIpc {
     pub requests: channel::Channel<WindowRequest>,
     pub output: Output,
 }
+type AvatarRegistration = scopeguard::ScopeGuard<(AvatarId, Output), fn((AvatarId, Output))>;
+
 struct Window {
     id: AvatarId,
-    requests: Option<channel::SyncSender<WindowRequest>>,
-    worker: Option<JoinHandle<()>>,
-    output: Output,
+    // Fields drop in declaration order: close requests, join, then unregister.
+    requests: channel::SyncSender<WindowRequest>,
+    _worker: jod_thread::JoinHandle,
+    _registration: AvatarRegistration,
 }
 impl Window {
     fn new(avatar: AvatarInstance, fps: u32, output: Output) -> Self {
@@ -90,7 +92,7 @@ impl Window {
             output: output.clone(),
         };
         let worker_output = output.clone();
-        let worker = std::thread::spawn(move || {
+        let worker = jod_thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::application::run_window(id, avatar.config, avatar.placement, fps, ipc)
             }));
@@ -105,30 +107,19 @@ impl Window {
         });
         Self {
             id,
-            requests: Some(requests),
-            worker: Some(worker),
-            output,
+            requests,
+            _worker: worker,
+            _registration: scopeguard::guard((id, output), |(id, output)| {
+                output.states.send_modify(|states| {
+                    states.avatars.remove(&id);
+                });
+            }),
         }
     }
     fn command(&self, request: WindowRequest) -> Result {
-        self.requests
-            .as_ref()
-            .unwrap()
-            .try_send(request)
-            .map_err(|_| {
-                RendererError::Rejected("Avatar command queue full or window stopped.".into())
-            })
-    }
-}
-impl Drop for Window {
-    fn drop(&mut self) {
-        drop(self.requests.take());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-        self.output.states.send_modify(|states| {
-            states.avatars.remove(&self.id);
-        });
+        self.requests.try_send(request).map_err(|_| {
+            RendererError::Rejected("Avatar command queue full or window stopped.".into())
+        })
     }
 }
 
