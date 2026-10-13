@@ -19,6 +19,9 @@ test:
 build:
     cargo build --workspace --all-targets --all-features --locked
 
+fetch-assets asset="all":
+    python3 scripts/fetch-assets.py "{{asset}}"
+
 # Re-run tests only when the behavior under test changes.
 verify: fmt-check clippy
 

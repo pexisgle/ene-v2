@@ -66,6 +66,7 @@ Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポー�
 | `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
 | `just test` | ワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
+| `just fetch-assets [asset]` | 開発用VRM・VRMAを取得（省略時は全件、`vrma`でモーションのみ、個別名も指定可能） |
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just run-host` | ホストの骨組みを起動 |
 | `just run-desktop` | デスクトップの骨組みを起動 |
