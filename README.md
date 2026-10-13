@@ -70,3 +70,4 @@ Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポー�
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just run-host` | ホストの骨組みを起動 |
 | `just run-desktop` | デスクトップの骨組みを起動 |
+| `just avatar-console` | 描画バイナリをビルドし、[アバター操作用コンソール](apps/ene-avatar/README.md)を起動 |

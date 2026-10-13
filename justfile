@@ -30,3 +30,8 @@ run-host:
 
 run-desktop:
     cargo run --locked -p ene-desktop
+
+# Control the real renderer over IPC without the desktop UI.
+avatar-console:
+    cargo build --locked -p ene-avatar --bin ene-avatar --example renderer-console
+    cargo run --locked -p ene-avatar --example renderer-console
