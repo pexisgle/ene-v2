@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
-remoc = { version = "0.20", default-features = false, features = ["rch", "codec-message-pack"] }
+remoc = { version = "0.20", default-features = false, features = ["rtc", "codec-message-pack"] }
 tokio = { version = "1", default-features = false, features = ["macros", "sync", "time"] }
 
 [profile.dev]

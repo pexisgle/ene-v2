@@ -2021,6 +2021,7 @@ dependencies = [
  "binrw",
  "clap",
  "ene-ipc",
+ "futures-channel",
  "futures-util",
  "gltf-json",
  "raw-window-handle",
@@ -2049,7 +2050,9 @@ version = "0.1.0"
 name = "ene-ipc"
 version = "0.1.0"
 dependencies = [
+ "remoc",
  "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3397,6 +3400,7 @@ dependencies = [
  "custom_debug",
  "futures",
  "postbag",
+ "remoc_macro",
  "rmp-serde",
  "serde",
  "tokio",
@@ -3404,6 +3408,17 @@ dependencies = [
  "tracing",
  "uuid",
  "wokio",
+]
+
+[[package]]
+name = "remoc_macro"
+version = "0.20.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a50941f6b9a35eaa4eea37c41f74d324e553b31c4066c2b4e6f529183e2462c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.7",
 ]
 
 [[package]]

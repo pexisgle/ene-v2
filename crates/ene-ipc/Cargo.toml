@@ -9,7 +9,9 @@ publish.workspace = true
 workspace = true
 [features]
 default = []
-renderer = ["dep:serde"]
+renderer = ["dep:serde", "dep:remoc", "dep:thiserror"]
 
 [dependencies]
+remoc = { workspace = true, optional = true }
+thiserror = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }

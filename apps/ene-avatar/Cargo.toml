@@ -20,7 +20,8 @@ binrw = "0.15"
 gltf-json = { version = "1", features = ["extensions"] }
 clap.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-std"] }
-futures-util.workspace = true
+futures-channel = "0.3"
+futures-util = { workspace = true, features = ["sink"] }
 
 ene-ipc = { path = "../../crates/ene-ipc", default-features = false, features = ["renderer"] }
 remoc.workspace = true

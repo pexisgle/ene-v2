@@ -17,7 +17,9 @@ mod render;
 #[cfg_attr(windows, path = "native_windows.rs")]
 mod wayland;
 
-use ene_ipc::renderer::RendererClient;
+use ene_ipc::renderer::{Renderer, RendererConfig, RendererServer, RendererSession};
+use futures_util::StreamExt;
+use remoc::rtc::Server;
 use remoc::{Cfg, Connect, ConnectExt, rch};
 
 fn main() -> std::process::ExitCode {
@@ -27,8 +29,7 @@ fn main() -> std::process::ExitCode {
         .init();
     use clap::Parser;
     match run(application::Args::parse()) {
-        Ok(exit) if !exit.is_error() => std::process::ExitCode::SUCCESS,
-        Ok(_) => std::process::ExitCode::FAILURE,
+        Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("ene-avatar: {error}");
             std::process::ExitCode::FAILURE
@@ -36,27 +37,38 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run(
-    args: application::Args,
-) -> Result<bevy::app::AppExit, Box<dyn std::error::Error + Send + Sync>> {
-    // Bevy runs on the main thread; the runtime drives only asynchronous IPC.
+fn run(args: application::Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Each native window owns its Bevy renderer on its worker thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let (receiver, output, local) = runtime.block_on(async {
-        let (requests, receiver) = rch::mpsc::channel();
+    let result = runtime.block_on(async {
+        let standalone = args.standalone;
         let (messages, events) = rch::mpsc::channel();
+        let (event_sender, event_receiver) = futures_channel::mpsc::unbounded();
+        tokio::spawn(
+            event_receiver
+                .map(Ok)
+                .forward(rch::mpsc::SenderSink::new(messages)),
+        );
         let (states, updates) = rch::watch::channel(ene_ipc::renderer::RendererState::default());
-        let client = RendererClient {
-            requests,
+        let output = ipc::Output {
+            messages: (!standalone).then_some(event_sender),
+            states: std::sync::Arc::new(states),
+        };
+        let mut service = ipc::RendererService::new(output);
+        if let Some(avatar) = args.initial_avatar() {
+            service
+                .initialize(RendererConfig::default(), vec![avatar])
+                .await?;
+        }
+        let (server, renderer) = RendererServer::new(service);
+        let client = RendererSession {
+            renderer,
             messages: events,
             states: updates,
         };
-        let output = ipc::Output {
-            messages: (!args.standalone).then_some(messages),
-            states: std::sync::Arc::new(states),
-        };
-        let local = if args.standalone {
+        let _local = if standalone {
             Some(client)
         } else {
             #[cfg(unix)]
@@ -73,7 +85,7 @@ fn run(
             };
             #[cfg(windows)]
             let (input, output) = (tokio::io::stdin(), tokio::io::stdout());
-            Connect::io::<_, _, ipc::AvatarClient, ipc::AvatarClient, remoc::codec::Default>(
+            Connect::io::<_, _, RendererSession, RendererSession, remoc::codec::Default>(
                 Cfg::default(),
                 input,
                 output,
@@ -82,10 +94,10 @@ fn run(
             .await?;
             None
         };
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((receiver, output, local))
-    })?;
-    let exit = application::run(args, receiver, output);
-    drop(local);
+        let (_service, result) = server.serve().await;
+        result.map_err(|error| error.to_string())?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    });
     runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-    Ok(exit)
+    result
 }

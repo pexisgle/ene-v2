@@ -6,7 +6,6 @@ use crate::{
 };
 use ene_ipc::renderer::{
     AvatarConfig, AvatarEvent, AvatarId, AvatarInstance, AvatarPlacement, MotionState,
-    RendererConfig, RendererRequest,
 };
 #[cfg(unix)]
 use smithay_client_toolkit::{
@@ -35,54 +34,19 @@ pub(super) struct Args {
     #[arg(long)]
     no_loop: bool,
 }
-pub(super) fn run(
-    args: Args,
-    mut requests: remoc::rch::mpsc::Receiver<RendererRequest>,
-    output: ipc::Output,
-) -> bevy::app::AppExit {
-    let initial = args.standalone.then(|| RendererRequest::Initialize {
-        config: RendererConfig::default(),
-        avatars: vec![AvatarInstance {
+impl Args {
+    pub(super) fn initial_avatar(self) -> Option<AvatarInstance> {
+        self.standalone.then(|| AvatarInstance {
             id: AvatarId(1),
             config: AvatarConfig {
-                model: args.model.unwrap_or_default(),
-                motion: args.motion,
-                motion_loop: !args.no_loop,
+                model: self.model.unwrap_or_default(),
+                motion: self.motion,
+                motion_loop: !self.no_loop,
                 ..Default::default()
             },
             placement: AvatarPlacement::default(),
-        }],
-    });
-    bevy::prelude::App::new()
-        .add_plugins(ipc::RendererPlugin(output))
-        .set_runner(move |mut app| {
-            // Custom runners perform plugin finalization themselves.
-            app.finish();
-            app.cleanup();
-            let handler = app.world_mut().register_system(ipc::apply_request);
-            let mut next = initial;
-            loop {
-                let request = match next.take() {
-                    Some(request) => request,
-                    None => match requests.blocking_recv() {
-                        Ok(Some(request)) => request,
-                        Ok(None) => return bevy::app::AppExit::Success,
-                        Err(error) => {
-                            eprintln!("renderer request: {error}");
-                            return bevy::app::AppExit::error();
-                        }
-                    },
-                };
-                app.world_mut()
-                    .run_system_with(handler, request)
-                    .expect("renderer request system is registered");
-                app.update();
-                if let Some(exit) = app.should_exit() {
-                    return exit;
-                }
-            }
         })
-        .run()
+    }
 }
 
 pub(crate) fn run_window(
@@ -93,7 +57,6 @@ pub(crate) fn run_window(
     ipc: ipc::WindowIpc,
 ) -> Result<(), Box<dyn Error>> {
     let ipc::WindowIpc { requests, output } = ipc;
-    settings.validate()?;
     #[cfg(unix)]
     let (mut state, mut event_loop, connection, qh) = {
         let connection = Connection::connect_to_env()?;

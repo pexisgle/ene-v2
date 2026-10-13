@@ -1,21 +1,54 @@
 //! Contracts for one renderer process with one transparent window per avatar.
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-};
+use std::{collections::HashMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
-/// Channel halves transferred once from the renderer to its client.
-/// Avatar and desktop select the concrete channel types and implement transport.
+/// Session transferred once over the child process's stdin/stdout connection.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RendererClient<RequestSender, MessageReceiver, StateReceiver> {
-    pub requests: RequestSender,
-    /// Ordered events and errors.
-    pub messages: MessageReceiver,
-    /// Latest authoritative state map, independent of message arrival order.
-    pub states: StateReceiver,
+pub struct RendererSession {
+    pub renderer: RendererClient,
+    pub messages: remoc::rch::mpsc::Receiver<RendererMessage>,
+    /// Latest authoritative state, independent of RPC and event arrival order.
+    pub states: remoc::rch::watch::Receiver<RendererState>,
+}
+
+/// Operation rejection or failure of the remote call itself.
+#[derive(Debug, Serialize, Deserialize, thiserror::Error)]
+pub enum RendererError {
+    #[error("{0}")]
+    Rejected(String),
+    #[error(transparent)]
+    Call(#[from] remoc::rtc::CallError),
+}
+
+/// Renderer operations. The macro generates the client and server.
+/// Success acknowledges registration/removal or queueing a window command;
+/// model loading and actual window state are reported through the session's watch.
+#[remoc::rtc::remote(server(Value))]
+pub trait Renderer {
+    /// Initialize once; validate all avatars before registering any windows.
+    async fn initialize(
+        &mut self,
+        config: RendererConfig,
+        avatars: Vec<AvatarInstance>,
+    ) -> Result<(), RendererError>;
+    /// Update the shared FPS cap; per-window delivery failures are asynchronous errors.
+    async fn set_render_config(&mut self, config: RendererConfig) -> Result<(), RendererError>;
+    /// Register a new ID and start its window; reject an existing ID.
+    async fn add_avatar(&mut self, avatar: AvatarInstance) -> Result<(), RendererError>;
+    /// Returns after this avatar's window and resources have been released.
+    async fn remove_avatar(&mut self, avatar_id: AvatarId) -> Result<(), RendererError>;
+    /// Queue settings without changing placement or the shared FPS cap.
+    async fn set_avatar_config(
+        &mut self,
+        avatar_id: AvatarId,
+        config: AvatarConfig,
+    ) -> Result<(), RendererError>;
+    /// Queue centering on the current monitor; report the resulting placement in watch.
+    async fn recenter(&mut self, avatar_id: AvatarId) -> Result<(), RendererError>;
+    /// Release all windows and stop the server; use the child process handle to await exit.
+    async fn shutdown(self) -> Result<(), RendererError>;
 }
 
 /// Complete latest renderer state. Channel notifications may be coalesced.
@@ -37,7 +70,7 @@ impl fmt::Display for AvatarId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RendererConfig {
     /// Rendering FPS cap for all windows. 0 disables the app's cap.
     pub fps: u32,
@@ -129,69 +162,6 @@ pub struct AvatarInstance {
     pub config: AvatarConfig,
     pub placement: AvatarPlacement,
 }
-impl AvatarInstance {
-    pub fn validate(&self) -> Result<(), String> {
-        self.config.validate()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum RendererRequest {
-    /// Initialize the process with a possibly empty list of avatar windows.
-    Initialize {
-        config: RendererConfig,
-        avatars: Vec<AvatarInstance>,
-    },
-    SetRenderConfig {
-        config: RendererConfig,
-    },
-    /// Create a window. An existing ID must cause an error, not replacement.
-    AddAvatar {
-        avatar: AvatarInstance,
-    },
-    /// Release this avatar's window and resources; other avatars remain active.
-    RemoveAvatar {
-        avatar_id: AvatarId,
-    },
-    /// Update one avatar without changing its placement or the shared FPS cap.
-    SetAvatarConfig {
-        avatar_id: AvatarId,
-        config: AvatarConfig,
-    },
-    /// Center the avatar window within its current monitor using logical pixels.
-    /// Keep the selected monitor; update the reported placement after moving.
-    Recenter {
-        avatar_id: AvatarId,
-    },
-    /// Close all avatar windows and terminate the renderer process.
-    Shutdown,
-}
-impl RendererRequest {
-    /// Validate after deserialization, before changing renderer state.
-    /// The renderer must also reject existing IDs on add and unknown IDs on
-    /// individual operations; those checks require its live avatar registry.
-    pub fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::Initialize { avatars, .. } => {
-                let mut ids = HashSet::with_capacity(avatars.len());
-                for avatar in avatars {
-                    avatar.validate()?;
-                    if !ids.insert(avatar.id) {
-                        return Err(format!("Duplicate avatar ID: {}", avatar.id));
-                    }
-                }
-                Ok(())
-            }
-            Self::AddAvatar { avatar } => avatar.validate(),
-            Self::SetAvatarConfig { config, .. } => config.validate(),
-            Self::RemoveAvatar { .. }
-            | Self::Recenter { .. }
-            | Self::SetRenderConfig { .. }
-            | Self::Shutdown => Ok(()),
-        }
-    }
-}
-
 // Many avatar event types may be added as interactions and behaviors are implemented.
 // Define new variants when the corresponding features are introduced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,8 +177,6 @@ pub enum RendererMessage {
         avatar_id: AvatarId,
         event: AvatarEvent,
     },
-    /// Emitted after the target window and avatar resources have been released.
-    AvatarRemoved { avatar_id: AvatarId },
     Error {
         /// None indicates a process-level error.
         avatar_id: Option<AvatarId>,

@@ -1,10 +1,10 @@
-//! Development console for the real renderer's Remoc channels.
+//! Development console for the real renderer's Remoc RPC and channels.
 use clap::{Parser, Subcommand, ValueEnum};
 use ene_ipc::renderer::{
-    AvatarConfig, AvatarId, AvatarInstance, AvatarPlacement, AvatarState, MotionState,
-    RendererClient, RendererConfig, RendererMessage, RendererRequest, RendererState,
+    AvatarConfig, AvatarId, AvatarInstance, AvatarPlacement, AvatarState, MotionState, Renderer,
+    RendererClient, RendererConfig, RendererError, RendererMessage, RendererSession, RendererState,
 };
-use remoc::{Cfg, Connect, ConnectExt, rch};
+use remoc::{Cfg, Connect, ConnectExt};
 use std::{
     collections::HashMap,
     io::{self, BufRead, IsTerminal, Write},
@@ -19,11 +19,7 @@ use tokio::{
 };
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
-type Client = RendererClient<
-    rch::mpsc::Sender<RendererRequest>,
-    rch::mpsc::Receiver<RendererMessage>,
-    rch::watch::Receiver<RendererState>,
->;
+type Client = RendererSession;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Parser)]
@@ -171,6 +167,27 @@ impl AssetPaths {
     }
 }
 
+// Prepared console edits retain settings until the renderer acknowledges the call.
+#[derive(Debug, Clone, PartialEq)]
+enum Edit {
+    AddAvatar {
+        avatar: AvatarInstance,
+    },
+    SetRenderConfig {
+        config: RendererConfig,
+    },
+    RemoveAvatar {
+        avatar_id: AvatarId,
+    },
+    Recenter {
+        avatar_id: AvatarId,
+    },
+    SetAvatarConfig {
+        avatar_id: AvatarId,
+        config: AvatarConfig,
+    },
+}
+
 struct Sent {
     next_id: Option<u64>,
     avatars: HashMap<AvatarId, AvatarConfig>,
@@ -190,10 +207,10 @@ impl Default for Sent {
 }
 
 impl Sent {
-    // Build a request without changing the cache; commit only after transport delivery.
-    fn request(&self, command: ConsoleCommand) -> Result<RendererRequest, String> {
+    // Commit the settings cache only after a successful RPC result.
+    fn request(&self, command: ConsoleCommand) -> Result<Edit, String> {
         let request = match command {
-            ConsoleCommand::Add { model, monitor } => RendererRequest::AddAvatar {
+            ConsoleCommand::Add { model, monitor } => Edit::AddAvatar {
                 avatar: AvatarInstance {
                     id: AvatarId(self.next_id.ok_or("Avatar IDs exhausted")?),
                     config: AvatarConfig {
@@ -208,18 +225,18 @@ impl Sent {
                     },
                 },
             },
-            ConsoleCommand::Fps { value } => RendererRequest::SetRenderConfig {
+            ConsoleCommand::Fps { value } => Edit::SetRenderConfig {
                 config: RendererConfig { fps: value },
             },
             ConsoleCommand::Remove { id } => {
                 self.config(id)?;
-                RendererRequest::RemoveAvatar {
+                Edit::RemoveAvatar {
                     avatar_id: AvatarId(id),
                 }
             }
             ConsoleCommand::Recenter { id } => {
                 self.config(id)?;
-                RendererRequest::Recenter {
+                Edit::Recenter {
                     avatar_id: AvatarId(id),
                 }
             }
@@ -251,13 +268,17 @@ impl Sent {
                     ConsoleCommand::Size { percent, .. } => config.size_percent = percent,
                     _ => return Err("Unsupported setting command".into()),
                 }
-                RendererRequest::SetAvatarConfig {
+                Edit::SetAvatarConfig {
                     avatar_id: AvatarId(id),
                     config,
                 }
             }
         };
-        request.validate()?;
+        match &request {
+            Edit::AddAvatar { avatar } => avatar.config.validate()?,
+            Edit::SetAvatarConfig { config, .. } => config.validate()?,
+            _ => {}
+        }
         Ok(request)
     }
 
@@ -267,20 +288,20 @@ impl Sent {
             .ok_or_else(|| format!("Unknown or removed avatar ID: {id}"))
     }
 
-    fn commit(&mut self, request: &RendererRequest) {
+    fn commit(&mut self, request: &Edit) {
         match request {
-            RendererRequest::AddAvatar { avatar } => {
+            Edit::AddAvatar { avatar } => {
                 self.avatars.insert(avatar.id, avatar.config.clone());
                 self.next_id = avatar.id.0.checked_add(1);
                 println!("[sent avatar {}] added", avatar.id);
             }
-            RendererRequest::SetAvatarConfig { avatar_id, config } => {
+            Edit::SetAvatarConfig { avatar_id, config } => {
                 self.avatars.insert(*avatar_id, config.clone());
             }
-            RendererRequest::RemoveAvatar { avatar_id } => {
+            Edit::RemoveAvatar { avatar_id } => {
                 self.avatars.remove(avatar_id);
             }
-            RendererRequest::SetRenderConfig { config } => self.render = config.clone(),
+            Edit::SetRenderConfig { config } => self.render = *config,
             _ => {}
         }
     }
@@ -322,12 +343,16 @@ async fn connect(child: &mut Child) -> Result<Client, Error> {
     .map_err(|_| "Renderer connection timed out after 5 seconds")??)
 }
 
-async fn send(
-    sender: &rch::mpsc::Sender<RendererRequest>,
-    request: RendererRequest,
-) -> Result<(), Error> {
-    sender.send(request).await?.await?;
-    Ok(())
+async fn execute(renderer: &mut RendererClient, command: Edit) -> Result<(), RendererError> {
+    match command {
+        Edit::AddAvatar { avatar } => renderer.add_avatar(avatar).await,
+        Edit::SetRenderConfig { config } => renderer.set_render_config(config).await,
+        Edit::RemoveAvatar { avatar_id } => renderer.remove_avatar(avatar_id).await,
+        Edit::Recenter { avatar_id } => renderer.recenter(avatar_id).await,
+        Edit::SetAvatarConfig { avatar_id, config } => {
+            renderer.set_avatar_config(avatar_id, config).await
+        }
+    }
 }
 
 fn input_lines() -> Result<mpsc::Receiver<io::Result<String>>, Error> {
@@ -526,9 +551,6 @@ fn print_message(message: &RendererMessage) {
         RendererMessage::Event { avatar_id, event } => {
             println!("[event avatar {avatar_id}] {event:?}")
         }
-        RendererMessage::AvatarRemoved { avatar_id } => {
-            println!("[event avatar {avatar_id}] AvatarRemoved")
-        }
         RendererMessage::Error {
             avatar_id: Some(id),
             message,
@@ -545,9 +567,7 @@ async fn session(child: &mut Child, client: &mut Client) -> Result<(), Error> {
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     tokio::select! {
-        result = timeout(TIMEOUT, send(&client.requests, RendererRequest::Initialize {
-            config: RendererConfig::default(), avatars: Vec::new(),
-        })) => result.map_err(|_| "Renderer initialization send timed out")??,
+        result = timeout(TIMEOUT, client.renderer.initialize(RendererConfig::default(), Vec::new())) => result.map_err(|_| "Renderer initialization timed out")??,
         result = &mut interrupt => { result?; return Ok(()); }
     }
     let mut lines = input_lines()?;
@@ -602,16 +622,25 @@ async fn session(child: &mut Child, client: &mut Client) -> Result<(), Error> {
                     Ok(Some(command)) => match sent.request(command) {
                         Ok(request) => {
                             println!("[sent request] {request:?}");
-                            // Keep receiving channels active while delivery is pending:
-                            // renderer notifications must never block command delivery.
-                            let delivery = send(&client.requests, request.clone());
-                            tokio::pin!(delivery);
+                            // Keep receiving events and state while the RPC result is pending.
+                            let operation = execute(&mut client.renderer, request.clone());
+                            tokio::pin!(operation);
                             let deadline = tokio::time::sleep(TIMEOUT);
                             tokio::pin!(deadline);
                             loop {
                                 tokio::select! {
-                                    result = &mut delivery => { result?; sent.commit(&request); break; }
-                                    _ = &mut deadline => return Err("Renderer request delivery timed out".into()),
+                                    result = &mut operation => {
+                                        match result {
+                                            Ok(()) => {
+                                                sent.commit(&request);
+                                                println!("[accepted request] {request:?}");
+                                            }
+                                            Err(RendererError::Rejected(message)) => eprintln!("[command error] {message}"),
+                                            Err(error) => return Err(error.into()),
+                                        }
+                                        break;
+                                    }
+                                    _ = &mut deadline => return Err("Renderer operation timed out".into()),
                                     result = &mut interrupt => { result?; return Ok(()); }
                                     status = child.wait() => return Err(format!("Renderer exited: {}", status?).into()),
                                     message = client.messages.recv() => print_message(&message?.ok_or("Renderer event channel disconnected")?),
@@ -635,14 +664,14 @@ async fn session(child: &mut Child, client: &mut Client) -> Result<(), Error> {
     }
 }
 
-async fn shutdown(child: &mut Child, client: &mut Client) -> Result<(), Error> {
+async fn shutdown(child: &mut Child, mut client: Client) -> Result<(), Error> {
     if let Some(status) = child.try_wait()? {
         println!("[renderer] exited: {status}");
         return Ok(());
     }
     let result = {
         let stopping = timeout(TIMEOUT, async {
-            send(&client.requests, RendererRequest::Shutdown).await?;
+            client.renderer.shutdown().await?;
             Ok::<_, Error>(child.wait().await?)
         });
         tokio::pin!(stopping);
@@ -715,7 +744,7 @@ async fn main() -> Result<(), Error> {
         }
     };
     let result = session(&mut child, &mut client).await;
-    let stopped = shutdown(&mut child, &mut client).await;
+    let stopped = shutdown(&mut child, client).await;
     result.and(stopped)
 }
 
@@ -723,7 +752,7 @@ async fn main() -> Result<(), Error> {
 mod tests {
     use super::*;
 
-    fn request(sent: &Sent, line: &str) -> RendererRequest {
+    fn request(sent: &Sent, line: &str) -> Edit {
         sent.request(parse(line).unwrap().unwrap()).unwrap()
     }
 
@@ -830,7 +859,7 @@ mod tests {
             assets,
             ..Default::default()
         };
-        let RendererRequest::AddAvatar { avatar } = request(&sent, "add --monitor DP-1") else {
+        let Edit::AddAvatar { avatar } = request(&sent, "add --monitor DP-1") else {
             panic!()
         };
         assert_eq!(
@@ -874,7 +903,7 @@ mod tests {
     #[test]
     fn quoted_paths_and_monitor_names_are_preserved() {
         let sent = Sent::default();
-        let RendererRequest::AddAvatar { avatar } =
+        let Edit::AddAvatar { avatar } =
             request(&sent, r#"add "C:\Models\Seed san.vrm" --monitor 'DP 1'"#)
         else {
             panic!()
@@ -960,7 +989,7 @@ mod tests {
             let change = request(&edited, line);
             assert_eq!(
                 change,
-                RendererRequest::SetAvatarConfig {
+                Edit::SetAvatarConfig {
                     avatar_id: AvatarId(1),
                     config: expected.clone()
                 }
@@ -982,7 +1011,7 @@ mod tests {
         }
         assert_eq!(sent.avatars[&AvatarId(1)].size_percent, 100);
         sent.commit(&request(&sent, "remove 1"));
-        let RendererRequest::AddAvatar { avatar } = request(&sent, "add other.vrm") else {
+        let Edit::AddAvatar { avatar } = request(&sent, "add other.vrm") else {
             panic!()
         };
         assert_eq!(avatar.id, AvatarId(2));
