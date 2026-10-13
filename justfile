@@ -1,3 +1,6 @@
+[windows]
+set shell := ["powershell.exe", "-NoLogo", "-Command"]
+
 default:
     @just --list
 
@@ -19,6 +22,11 @@ test:
 build:
     cargo build --workspace --all-targets --all-features --locked
 
+[windows]
+fetch-assets asset="all":
+    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/fetch-assets.py "{{asset}}" } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/fetch-assets.py "{{asset}}" } else { python scripts/fetch-assets.py "{{asset}}" }
+
+[unix]
 fetch-assets asset="all":
     python3 scripts/fetch-assets.py "{{asset}}"
 
