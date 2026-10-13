@@ -33,6 +33,7 @@
             python3
             git
             just
+            bubblewrap
           ]);
 
           buildInputs = desktopLibraries;

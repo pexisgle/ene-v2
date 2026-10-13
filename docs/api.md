@@ -6,6 +6,15 @@ Linuxの単一PC上で、コンパニオン1体、Task同時1件、テキスト�
 
 `features/`は将来の完成像、本書はMVPで提供する契約です。機能を利用できるかはホストの対応能力と現在の設定・許可から判断し、将来の機能を利用できるように見せません。既存UXとの対応と拡張時の制約は[将来拡張・検証項目](#将来拡張検証項目)にまとめます。
 
+実装するRPCの正本は[`host.proto`](../crates/ene-rpc/proto/host.proto)です。
+`UpdateSettingsRequest.connections`は省略で維持、`{"items":[...]}`で一覧置換、
+`{}`で空一覧への置換を表します。省略だけの要求はrevisionを検証して現在値を返し、保存・revision加算・通知を行いません。
+`UpdateCompanionRequest.body`・`voice`は省略で維持、`{"set":{"json":"..."}}`で設定、
+`{"clear":{}}`で解除します。protobuf JSONの`null`は省略と同じです。
+空パッチと不正な参照は拒否し、複数項目の変更は同じ保存処理で確定します。
+体の設定は`format: "vrm1"`・ホストの`environment_id`・`model`参照を持つJSONオブジェクト、
+声の設定は`connection_id`・`voice_id`を持つJSONオブジェクトです。描画と音声合成の成功は設定保存から推測しません。
+
 ## 目的と責務
 
 ### コンパニオンとTask
