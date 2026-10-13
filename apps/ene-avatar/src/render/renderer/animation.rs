@@ -58,7 +58,7 @@ impl Renderer {
         let Some(path) = path else { return };
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
             let path = local_path(path)?;
-            crate::render::motion::validate(&Path::new("/").join(&path))?;
+            crate::render::motion::validate(&path)?;
             Ok(path)
         })();
         match result {
@@ -68,7 +68,7 @@ impl Renderer {
                 if retry {
                     server.reload(asset_path.clone());
                 }
-                let handle = server.load(asset_path);
+                let handle = server.load_builder().override_unapproved().load(asset_path);
                 let entity = world
                     .spawn((VrmaHandle(handle.clone()), ChildOf(self.model)))
                     .id();

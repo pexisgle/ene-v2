@@ -188,6 +188,7 @@ pub(crate) fn run_window(
                         status.model = Some(renderer.credit.clone());
                         status.loading = false;
                         status.error = None;
+                        status.motion = renderer.motion_state.clone();
                     });
                 }
                 Ok(false) => {}

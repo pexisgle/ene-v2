@@ -127,3 +127,24 @@ exampleのテストはワークスペースの `just test` でも実行されま
 | 同上 | 操作性改善後の確認 | CLIテスト5件・既存IPCテスト2件、整形・全workspaceのClippyに成功。実プロセスで `add`、`motion 1 walk`、`pause 1`、ホームパス展開、`state` の詳細表示、正常終了を確認。ログは `target/avatar-console-usability.log` |
 | 同上 | 目視・マウス操作による描画、実測FPS、透過、ドラッグ、クリック通知、モニター切替 | 未実施 |
 | 未記録・Windows | 描画・入力・DirectComposition | 未実施 |
+
+### 2026-10-14 Windows修正と再検証
+
+PR2の `10992f6` を基点にしたWindows修正を、Windows MSVC、固定nightly、AMD Radeon RX 9060 XT（driver `32.0.31041.1004`）、`\\.\DISPLAY2` で確認しました。サンプルは取得スクリプトのSHA-256検証に成功しています。修正前のモデル読み込みは `prefix not found`、終了はEOFの追加5回中2回・quitの追加5回中3回が `Call(Receive(Receive(ChMux)))` で失敗しました。
+
+モデル／モーションの正規化した絶対パスをOSのまま保持し、検証済みのファイルだけBevyのパス制限を個別に上書きして読み込みます。shutdownの返信をパイプまでflushしてからランタイムを止めます。また、不正なモデルの選択後に元のモデルへ戻したとき、維持していた再生状態もwatchへ戻します。
+
+| 確認項目 | 修正後の結果 |
+| --- | --- |
+| 自動検証 | 整形、全workspaceのClippy、全workspaceの通常テスト12件に成功。Linux専用IPCテスト6件はWindowsで実行されない |
+| 絶対パスの回帰 | 日本語・空白・`#` を含むVRM／VRMAパスから、Bevyの実ファイルreaderで内容を読み込めることを確認 |
+| shutdown回帰 | 空一覧で状態・イベント受信側を開いたまま、shutdownの返信と子プロセスの正常終了を32回確認。clientだけを破棄した場合も正常終了 |
+| DX12／DirectComposition | 明示GPUテスト1件に成功。合成画像の提示とGPU入力マスクを確認 |
+| 実VRM／VRMAの報告状態 | Seed-sanの `ready` と利用条件、sample／dance／walkの再生、`Paused`／`Playing`、単発の `Finished` と `MotionFinished`、解除後の `None` を確認 |
+| エラー復旧・複数体 | 無効なモーションから `Playing` へ復旧。無効なモデルから元のモデルへ戻して `ready`／`Playing` を確認。別IDの準備完了を維持し、片方の削除後にも残ることを確認 |
+| 表示設定・ID | サイズ50／100／200%の受理、49／201%の拒否、FPS60の報告、中央配置による座標変更、削除後にIDを再利用しないことを確認 |
+| 実モデル読み込み後の終了 | EOF／quitを各5回追加検証し、すべて正常終了。プロセス残留なし |
+| 目視・マウス操作 | UIツールがavatarのネイティブウィンドウを列挙できず、画像・透過・ドラッグ・クリック通知の確認は未実施 |
+| 実測FPS・DPI／モニター切替・Ctrl+C・Linux実機 | 今回は未実施 |
+
+ログと実プロセス検証スクリプトは `target/pr2-fix-review/`（Git管理対象外）へ保存しました。状態確認と合成GPUテストの成功を、目視結果の合格とは扱いません。

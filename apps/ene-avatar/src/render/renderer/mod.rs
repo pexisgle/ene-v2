@@ -1,6 +1,6 @@
 use bevy::{
     app::{AnimationSystems, PluginsState},
-    asset::{AssetPath, LoadState},
+    asset::{AssetPath, LoadState, UnapprovedPathMode},
     camera::RenderTarget,
     core_pipeline::tonemapping::Tonemapping,
     prelude::*,
@@ -18,7 +18,7 @@ use bevy::{
 use bevy_vrm1::prelude::*;
 use ene_ipc::renderer::{AvatarConfig, AvatarId, MotionState};
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -87,12 +87,7 @@ impl Renderer {
                     exit_condition: ExitCondition::DontExit,
                     ..default()
                 })
-                .set(AssetPlugin {
-                    // Load validated embedded files from any selected folder
-                    // without rebuilding the asset server or GPU environment.
-                    file_path: "/".into(),
-                    ..default()
-                })
+                .set(local_asset_plugin())
                 .set(RenderPlugin {
                     render_creation: RenderCreation::Manual(resources),
                     ..default()
@@ -228,7 +223,19 @@ impl Renderer {
     }
 }
 
-fn local_path(path: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = std::fs::canonicalize(path)?;
-    Ok(path.strip_prefix("/")?.to_path_buf())
+fn local_asset_plugin() -> AssetPlugin {
+    AssetPlugin {
+        // Retain drive/UNC prefixes. Only individually validated model/motion loads
+        // override the default refusal of paths outside the asset directory.
+        file_path: String::new(),
+        unapproved_path_mode: UnapprovedPathMode::Deny,
+        ..default()
+    }
 }
+
+fn local_path(path: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(std::fs::canonicalize(path)?)
+}
+
+#[cfg(test)]
+mod tests;

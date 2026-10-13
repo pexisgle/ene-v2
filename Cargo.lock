@@ -2041,6 +2041,7 @@ dependencies = [
  "serde_json",
  "shell-words",
  "smithay-client-toolkit",
+ "tempfile",
  "tokio",
  "tracing-subscriber",
  "wayland-client",

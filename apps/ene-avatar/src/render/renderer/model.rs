@@ -5,8 +5,7 @@ impl Renderer {
         let path = local_path(&settings.model).map_err(|error| {
             format!("VRMを読めません: {error}。設定でモデルを選び直してください。")
         })?;
-        let credit = crate::render::model::validate(&Path::new("/").join(&path))
-            .map_err(|error| error.to_string())?;
+        let credit = crate::render::model::validate(&path).map_err(|error| error.to_string())?;
         // Validate before removing the current model. A bad selection leaves
         // the existing model usable and can be corrected through SetAvatarConfig.
         let asset_path = AssetPath::from(path);
@@ -14,7 +13,7 @@ impl Renderer {
         if self.model_failed && self.model_path == settings.model {
             server.reload(asset_path.clone());
         }
-        let handle = server.load(asset_path);
+        let handle = server.load_builder().override_unapproved().load(asset_path);
         self.set_motion(None);
         let world = self.app.world_mut();
         world.despawn(self.model);
