@@ -316,6 +316,8 @@ SlintのRoyalty-free LicenseにはSlintの利用表示が必要です。eneは�
 
 ### Rust実行基盤とVRM描画
 
+現在の実装は[ene-vrm](../crates/ene-vrm/README.md)を使い、glTF共通処理をBevy標準へ委譲します。以下のbevy_vrm1の記述は初期選定時の参考資料です。
+
 [Tokio](https://tokio.rs/tokio/tutorial)は非同期処理、[Axum](https://docs.rs/axum/latest/axum/)はHTTPとWebSocketのホストAPIに用います。[Rig](https://rig.rs/docs/)はAIプロバイダー接続とストリーミングに利用します。[OpenRouterプロバイダーのAPI資料](https://docs.rs/rig/0.43.0/rig/providers/openrouter/index.html)には接続とルーティング設定の受け渡しがあり、モデル接続をeneのタスク実行制御から分離する材料になります。権限、停止、バックアップ、ファイル変更の成否確認はeneの責務として残します。
 
 [bevy_vrm1の固定コミットのREADME](https://github.com/not-elm/bevy_vrm1/blob/c8601e2854bd9c6cce0f6d282c7d90a65a895fb7/README.md)はVRM 1.0のみを対象とし、Spring Bone、Look At、VRMAなどの対応を示しています。同時に開発初期で破壊的変更があり得ることを明記しています。[同コミットのCargo.toml](https://github.com/not-elm/bevy_vrm1/blob/c8601e2854bd9c6cce0f6d282c7d90a65a895fb7/Cargo.toml)はパッケージ0.9.5、Bevy 0.19系、MIT／Apache-2.0を示し、[MToonの実装](https://github.com/not-elm/bevy_vrm1/blob/c8601e2854bd9c6cce0f6d282c7d90a65a895fb7/src/vrm/mtoon/material.rs)も参照できます。これは確認したソースの組み合わせであり、eneでのモデル互換性や公開パッケージの採用バージョンを検証した記録ではありません。

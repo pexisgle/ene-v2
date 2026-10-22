@@ -1,165 +1,81 @@
-# ene-avatar 操作用コンソール
+# ene-avatar
 
-`ene-avatar` はVRM 1.0／VRMAを描画する子プロセスです。PR2の段階では `ene-desktop` は骨組みなので、開発用の対話CLIで実際のRemoc IPCを操作します。LinuxではWayland layer-shellとVulkan、WindowsではDX12を利用できるデスクトップセッションが必要です。
+VRM拡張は[ene-vrm](../../crates/ene-vrm/README.md)で扱い、glTF・シーン・アニメーション・描画はBevyの標準APIを使います。
 
-## 起動
-
-リポジトリのルートで実行します。Nixを使わない場合は固定nightlyとOSの開発ライブラリを用意してください。
-
-```sh
-nix develop
-just fetch-assets
-just avatar-console
-```
-
-`avatar-console` は描画バイナリをビルドし、同じビルド先にある `ene-avatar` を起動するコンソールを実行します。最初は空のアバター一覧です。`add` だけで取得済みのSeed-sanを追加できます。独自のモデル・モーションはパスを指定してください。Linuxの既定のキャッシュ先は `~/.cache/ene`、Windowsは `%LOCALAPPDATA%/ene/cache` です。
-
-独自の描画バイナリを指定する場合:
+VRM 1.0モデルをモニターごとの透過ウィンドウへ描画します。
+WindowsはBevy/winit、LinuxはWaylandのlayer-shellとxdg-outputを使います。
+1つのプロセスで複数のキャラクターを扱います。
 
 ```sh
-cargo run --locked -p ene-avatar --example renderer-console -- --renderer /absolute/path/to/ene-avatar
+cargo run --release --locked -p ene-avatar
 ```
 
-ログを増やす場合は `RUST_LOG=info just avatar-console` で起動します。コンソールは描画プロセスのstderrをそのまま表示し、stdoutはIPC専用にします。
+## JSON Linesによる操作
 
-## 操作
+標準入力へ1行につき1つのJSONを送り、標準出力を継続して読み取ってください。
+ログは標準エラーへ出ます。モデルとモーションには絶対パスを推奨します。
+従来のRemoc接続は廃止しました。
 
-コマンドは**コンソール内**に入力します。次の例は `just fetch-assets` で取得したサンプルを使います。`~/`（Windowsでは `~\` も）をホームディレクトリに展開できます。シェル変数とワイルドカードは展開しません。空白を含むパスは引用符で囲み、Windowsのパスは `'C:\Models\Seed san.vrm'` のように単引用符で囲むと確実です。
-
-```text
-add
-list
-motion 1 sample
-pause 1
-play 1
-loop 1 off
-size 1 150
-fps 60
-recenter 1
-state
-motion-clear 1
-remove 1
-quit
+```json
+{"id":1,"op":"add","character":"ene","config":{"model":"/absolute/path/model.vrm"}}
+{"id":2,"op":"get"}
+{"id":3,"op":"set","character":"ene","config":{"model":"/absolute/path/model.vrm","motion":"/absolute/path/motion.vrma","playing":false}}
+{"id":4,"op":"center","character":"ene","monitor":null}
+{"id":5,"op":"fps","value":60}
+{"id":6,"op":"remove","character":"ene"}
+{"id":7,"op":"quit"}
 ```
 
-| コマンド | 操作 |
+Windowsのパスは`C:/models/model.vrm`のように書けます。
+`character`は空でない128バイト以内の文字列で、追加時の重複は拒否します。
+
+| 操作 | 内容 |
 | --- | --- |
-| `add [MODEL] [--monitor NAME]` | 専用ウィンドウを追加。省略時は取得済みSeed-san。IDは1から増加し、削除後も再利用しない |
-| `remove ID` | 指定したアバターを削除 |
-| `list` | 描画側が管理しているID・状態・モニター・位置を一覧表示。送信済みIDとの食い違いも表示 |
-| `model ID PATH` | モデルを変更。他の設定を保持 |
-| `motion ID PATH` / `motion-clear ID` | モーションを変更／解除。他の設定を保持 |
-| `play ID` / `pause ID` | 再生／一時停止 |
-| `loop ID on\|off` | 繰り返しを変更 |
-| `size ID PERCENT` | サイズを50〜200%で変更 |
-| `fps VALUE` | 全体のFPS上限を変更。0はアプリ側の上限を解除 |
-| `recenter ID` | 現在のモニター中央へ移動 |
-| `state` / `help` / `quit` | 状態表示／操作案内／終了 |
+| `add` | IDを登録し、`config`のモデルとモーションを非同期で読み込む |
+| `set` | 設定全体を置き換える。省略した項目は既定値に戻る |
+| `get` | キャラクターの状態・設定・再生時刻、モニター一覧、FPS設定を返す |
+| `center` | 指定モニターの既定位置へ戻す。`null`は最初の出力を使う |
+| `fps` | 全体の更新頻度を0～1000で指定する。既定値は30、0は制限なし |
+| `remove` | 指定キャラクターとその子エンティティを削除する |
+| `quit` | 描画を終了し、受理済みの出力を送信してプロセスを終了する |
 
-モデルの短縮名は `seed`、モーションは `sample`／`dance`／`walk`／`slow-run` です。例えば `model 1 seed`、`motion 1 walk` で選択できます。サンプルの取得先は `XDG_CACHE_HOME`／`LOCALAPPDATA` の設定にも従います。ファイルは自動ダウンロードしないので、先に `just fetch-assets` を実行してください。同名の自作ファイルを指定する場合は `./walk` のようにパスを明示します。
+`config`は次の項目を持ちます。`model`は`.vrm`、`motion`は`.vrma`のパスです。
 
-```text
-model 1 "~/Models/自分のモデル.vrm"
-motion 1 walk
+```json
+{"model":"/absolute/path/model.vrm","motion":null,"playing":true,"looping":true,"monitor":null,"position":null,"size_percent":100}
 ```
 
-再生中に `loop 1 off` にすると、現在の再生が終わるまで待ちます。停止・終了後の再生挙動も `play`／`pause` と報告状態で確認してください。モニター指定にはOSの出力名（例: `DP-1`）を使います。稼働中のモニター変更はCLIコマンドでは提供せず、OSの表示設定変更やモニター切断で確認します。
+`position`はモニター左上から足元までの論理ピクセル座標`[x,y]`です。
+`null`はモニター幅の50%、高さの80%に配置します。`size_percent`は50～200で、
+100ではモデルの1mを160論理ピクセルとして描きます。
+未知のモニター名は最初の出力へフォールバックします。
+`get`の設定には解決後のモニター名と位置が入ります。
 
-### 出力の読み方
+## 応答と通知
 
-`list` は描画IPCの最新 `RendererState.avatars` を参照します。読み込み中・エラー状態のアバターも含み、ID順に表示します。`REGISTRY` が `both` なら描画側と送信済み設定の両方にIDがあり、`renderer-only`／`sent-only` なら片方だけにあります。追加・削除の反映中は一時的に食い違う場合があります。現在のIPCは各アバターの適用済み設定を返さないため、モデルパス・サイズなどの設定値が一致しているかは判定しません。詳細やエラー内容は `state` で確認してください。
+成功は`{"id":1,"ok":null}`、拒否は`{"id":1,"error":"理由"}`です。
+`get`の`ok`には`characters`、`monitors`、`fps`が入ります。
+読み込み開始の成功は描画完了を意味しません。状態は通知または`get`で確認します。
 
-- `[sent request]` は呼び出す操作、`[accepted request]` と `[sent avatar ID]` はRPCで受理された操作・設定です。追加はID登録と読み込み開始、個別設定変更はウィンドウへの投入を意味し、描画・読み込み完了は状態で確認します。拒否された操作は設定キャッシュに反映しません。存在しないファイルも指定できるため、読み込み失敗と復旧を試せます。
-- `[renderer avatar ID]` の自動通知は、読み込み状態・モーション・モニター・位置・エラーを1行で表示します。モデルの利用条件は変更時に `[model avatar ID]` で表示します。`state` で全状態と送信済み設定の詳細を確認できます。状態通知は集約されるため、すべての中間状態が表示されるとは限りません。
-- `[event avatar ID]` は順序付きの通知です。`MotionFinished`、クリック時の `ShowChat` を表示します。削除完了は `remove_avatar` のRPC結果で確認します。`ShowChat` は通知の確認だけで、コンソールからチャット画面は開きません。
-- `[error avatar ID]`／`[renderer error]` はIPCのエラー通知、`[command error]` は入力・設定値の検証エラーや描画側による操作の拒否です。
+```json
+{"event":"state","character":"ene","status":"ready","error":null}
+{"event":"state","character":"ene","status":"error","error":"読み込み失敗の理由"}
+{"event":"finished","character":"ene"}
+{"event":"click","character":"ene"}
+```
 
-入力待ち中も通知を表示するため、プロンプトと通知が同じ行に混ざることがあります。入力内容を編集する高度な行エディタはありません。
+状態は`loading`、`ready`、`suspended`（出力なし）、`error`です。
+失敗したファイルを修復した後は同じ設定を`set`すると再試行します。
+`finished`はループしないモーションの終了、`click`はドラッグせずにクリックした通知です。
 
-接続・RPC結果の待ち時間は5秒です。これはモデル読み込みの完了待ちとは別で、描画側の表示タイムアウトは90秒です。`quit`、EOF（Linuxでは空行でCtrl+D）、Ctrl+Cで `shutdown()` を呼び出します。要求から終了まで5秒を超えた場合や送信できない場合は子プロセスを停止し、エラー終了します。通信切断・描画プロセス終了もコンソールに表示します。
+入力は1行64KiB以内です。不正なJSONなど要求IDを取得できない入力のエラーは`id:0`で返します。
+標準入力のEOFでも終了します。終了時も標準出力を読み続けてください。
+出力キューが満杯または切断された場合は失敗終了します。
+終了時の送信待ちは最大2秒で、送信失敗・タイムアウトも失敗終了として返します。
 
-## 実機チェックリスト
-
-描画側の状態と目視結果を両方記録します。`loading: false` は描画処理の準備完了を確認できますが、見た目やクリック透過の確認は目視・マウス操作が必要です。
-
-| 確認項目 | 手順と期待結果 |
-| --- | --- |
-| モデル表示・利用条件 | `add` して表示を待つ。背景が透明で、最新状態の `loading` がfalse、`error` がNone、`model` に利用条件がある |
-| モーション切替 | サンプル、ダンス、歩行を順に指定。動作と `Playing` を確認 |
-| 一時停止・再開 | `pause`／`play` で動作と `Paused`／`Playing` が一致 |
-| 繰り返し・単発 | `loop on` で繰り返し、`loop off` で `Finished` と `MotionFinished` 通知を確認 |
-| モーション解除 | `motion-clear` で動作が解除され、`None` になる |
-| サイズ・FPS | サイズ50／100／200%で表示を確認。FPS変更後に全体の状態が更新される。実際のFPSは状態値だけで断定しない |
-| 入力・位置 | ドラッグ後に `placement` が変化。`recenter` 後に現在のモニター中央へ移動 |
-| クリック透過 | 透明部分をクリックして背後のアプリを操作できる。キャラクターをドラッグせずクリックすると `ShowChat` が届く |
-| 複数体の独立性 | 2体追加し、片方の設定変更・削除中も他方の表示・再生・位置が維持される |
-| モデル読み込み失敗・復旧 | `model ID /missing.vrm` でエラーを確認。有効なモデルへ戻して表示・状態が復旧 |
-| モーション読み込み失敗・復旧 | 存在しないモーションで `Failed` を確認。有効なモーションへ戻して再生が復旧 |
-| モニター・表示設定 | `add MODEL --monitor NAME` の表示先を確認。表示倍率変更・モニター切断後も表示と操作を確認 |
-| 終了 | `quit`、EOF、Ctrl+Cを別々の起動で確認。終了後にウィンドウ・描画プロセスが残らない |
-
-Windowsの描画・入力・DirectCompositionはWindows実機で別途確認します。既存のDX12明示テストは通常のテスト実行では無視されます。
-
-## 自動検証
+## 検証
 
 ```sh
-cargo test --locked -p ene-avatar --example renderer-console
-cargo test --locked -p ene-avatar --test ipc
-just verify
+cargo test --locked -p ene-avatar
+cargo clippy --locked -p ene-avatar --all-targets --all-features -- -D warnings
 ```
-
-exampleのテストはワークスペースの `just test` でも実行されます。引用符付きパス、サンプル短縮名・ホームパスの展開、短い状態表示、個別変更による他の設定・他のアバターの保持、入力値の検証、IDを再利用しないことを検証します。既存IPCテストはWayland接続を意図的に失敗させてライフサイクルを確認するもので、描画成功を保証しません。
-
-## レビュー記録
-
-確認日、OS／コンポジター、GPU、表示倍率・モニター構成、対象コミット、操作、報告状態、目視結果を記録してください。未実施は合格扱いにしません。
-
-2026-10-13のローカル確認: PR2の `0924b70` にこのCLIを追加した作業ツリー、NixOS 26.11、KDE／KWin 6.7.5のWaylandセッション、`eDP-1`（1920×1200、60Hz、倍率1）を使用しました。環境のGPUデバイスは `/dev/dri/renderD128`（amdgpu、PCI ID `1002:1681`）です。サンプルは `just fetch-assets` でチェックサムを確認しました。以下は実プロセスのIPCとGPU表示準備の報告状態を使った確認で、目視・マウス操作は含みません。ローカルの実行ログは `target/avatar-console-review/` にあります（Git管理対象外）。
-
-| 確認日・環境 | 項目 | 結果 |
-| --- | --- | --- |
-| 2026-10-13・上記Linux環境 | Seed-sanのGPU表示準備・利用条件 | `loading: false`、`error: None`、利用条件の報告を確認 |
-| 同上 | サンプルVRMAの再生・一時停止・再開・単発再生 | `Playing`→`Paused`→`Playing`→`Finished` と `MotionFinished` を確認 |
-| 同上 | 無効なモーション・モデルからの復旧 | モーションの `Failed` から歩行の `Playing` へ復旧。モデルの `error` が有効なモデルの再指定で消えることを確認 |
-| 同上 | 設定変更・複数体 | サイズ50／100／200%の送信、FPS60の報告、中央移動による位置更新を確認。2体目の状態が1体目のモデル変更・削除で変わらないことを確認 |
-| 同上 | 終了・切断 | `quit`／EOF／Ctrl+C、描画プロセスの強制終了、接続5秒タイムアウト、接続中Ctrl+Cを確認。子プロセスの残留なし |
-| 同上 | 自動検証 | CLIテスト3件・既存IPCテスト2件、全workspaceの整形・Clippyに成功。操作用コンソールのビルド・起動・EOF終了も成功 |
-| 同上 | 操作性改善後の確認 | CLIテスト5件・既存IPCテスト2件、整形・全workspaceのClippyに成功。実プロセスで `add`、`motion 1 walk`、`pause 1`、ホームパス展開、`state` の詳細表示、正常終了を確認。ログは `target/avatar-console-usability.log` |
-| 同上 | 目視・マウス操作による描画、実測FPS、透過、ドラッグ、クリック通知、モニター切替 | 未実施 |
-| 未記録・Windows | 描画・入力・DirectComposition | 未実施 |
-
-### 2026-10-14 Windows修正と再検証
-
-PR2の `10992f6` を基点にしたWindows修正を、Windows MSVC、固定nightly、AMD Radeon RX 9060 XT（driver `32.0.31041.1004`）、`\\.\DISPLAY2` で確認しました。サンプルは取得スクリプトのSHA-256検証に成功しています。修正前のモデル読み込みは `prefix not found`、終了はEOFの追加5回中2回・quitの追加5回中3回が `Call(Receive(Receive(ChMux)))` で失敗しました。
-
-モデル／モーションの正規化した絶対パスをOSのまま保持し、検証済みのファイルだけBevyのパス制限を個別に上書きして読み込みます。shutdownの返信をパイプまでflushしてからランタイムを止めます。また、不正なモデルの選択後に元のモデルへ戻したとき、維持していた再生状態もwatchへ戻します。
-
-| 確認項目 | 修正後の結果 |
-| --- | --- |
-| 自動検証 | 整形、全workspaceのClippy、全workspaceの通常テスト12件に成功。Linux専用IPCテスト6件はWindowsで実行されない |
-| 絶対パスの回帰 | 日本語・空白・`#` を含むVRM／VRMAパスから、Bevyの実ファイルreaderで内容を読み込めることを確認 |
-| shutdown回帰 | 空一覧で状態・イベント受信側を開いたまま、shutdownの返信と子プロセスの正常終了を32回確認。clientだけを破棄した場合も正常終了 |
-| DX12／DirectComposition | 明示GPUテスト1件に成功。合成画像の提示とGPU入力マスクを確認 |
-| 実VRM／VRMAの報告状態 | Seed-sanの `ready` と利用条件、sample／dance／walkの再生、`Paused`／`Playing`、単発の `Finished` と `MotionFinished`、解除後の `None` を確認 |
-| エラー復旧・複数体 | 無効なモーションから `Playing` へ復旧。無効なモデルから元のモデルへ戻して `ready`／`Playing` を確認。別IDの準備完了を維持し、片方の削除後にも残ることを確認 |
-| 表示設定・ID | サイズ50／100／200%の受理、49／201%の拒否、FPS60の報告、中央配置による座標変更、削除後にIDを再利用しないことを確認 |
-| 実モデル読み込み後の終了 | EOF／quitを各5回追加検証し、すべて正常終了。プロセス残留なし |
-| 目視・マウス操作 | UIツールがavatarのネイティブウィンドウを列挙できず、画像・透過・ドラッグ・クリック通知の確認は未実施 |
-| 実測FPS・DPI／モニター切替・Ctrl+C・Linux実機 | 今回は未実施 |
-
-ログと実プロセス検証スクリプトは `target/pr2-fix-review/`（Git管理対象外）へ保存しました。状態確認と合成GPUテストの成功を、目視結果の合格とは扱いません。
-
-### 2026-10-14 Windowsの透明部分でドラッグが始まる問題
-
-Seed-sanの透明部分でもアバターが動く報告に対し、描画用HWNDがモデルの輪郭に関係なくマウスを受け取っていたことを確認しました。`WS_EX_TRANSPARENT` 単独ではトップレベルウィンドウの入力透過を保証しないため、描画用HWNDへ `WS_EX_LAYERED` を併用して透過を有効にします（[Microsoftの仕様](https://learn.microsoft.com/en-us/windows/win32/dwm/bestpractices-ovw)）。モデルのGPUアルファから作った領域を持つ入力用HWNDだけがドラッグ・クリックを受け取ります。描画用HWNDへのマウスメッセージではドラッグを開始しません。
-
-回帰テストでは、表示中のウィンドウについて別スレッドから `WindowFromPoint` を呼び、輪郭・穴・領域外・移動後・領域解除後の入力先を確認します。修正前はモデル上の点でも描画用HWNDが選ばれて失敗し、修正後は入力用HWNDが選ばれ、透明部分では両方のHWNDが除外されます。
-
-実Seed-sanをDX12で描画する明示テストでも、モデル部分21点・透明部分1,648点の入力先を確認しました。これはWin32の入力先判定を検証した結果で、実マウスのドラッグ、ShowChat通知、背後の他アプリのクリック操作を自動実行した結果ではありません。
-
-```powershell
-$env:ENE_AVATAR_TEST_MODEL = 'C:\path\to\Seed-san.vrm'
-cargo test --locked -p ene-avatar --all-features vrm_transparent_pixels_pass_input_through_the_composition_window -- --ignored --nocapture --test-threads=1
-```
-
-修正後の整形・全workspaceのClippy・通常テスト13件、既存のDX12／DirectComposition明示テストにも成功しました。Linux実機、目視、実マウス操作は今回未実施です。

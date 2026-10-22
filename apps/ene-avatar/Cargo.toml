@@ -1,6 +1,5 @@
 [package]
 name = "ene-avatar"
-description = "VRM 1.0 Wayland companion renderer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,52 +8,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-# MSVC cannot export all Bevy symbols within its DLL object limit.
-# Keep the development dylib opt-in limited to Unix, including --all-features.
-dev-dynamic-linking = ["dep:bevy_dylib", "dep:bevy_internal"]
-
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-binrw = "0.15"
-gltf-json = { version = "1", features = ["extensions"] }
-clap.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
-futures-channel = "0.3"
-futures-util = { workspace = true, features = ["sink"] }
-interprocess = { version = "2.4.5", features = ["tokio"] }
-io-lifetimes = "3"
-jod-thread = "1"
-scopeguard = "1"
-
-ene-ipc = { path = "../../crates/ene-ipc", default-features = false, features = ["renderer"] }
-remoc.workspace = true
-# bevy_vrm1 0.10 uses Bevy 0.19; direct WGPU types must match Bevy's WGPU 29.
-bevy = { version = "0.19", default-features = false, features = ["reflect_auto_register", "bevy_world_serialization", "bevy_log", "std", "async_executor", "multi_threaded", "bevy_asset", "bevy_scene", "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_gltf", "bevy_animation", "bevy_camera", "bevy_light", "bevy_image", "bevy_mesh", "bevy_window", "png", "morph", "morph_animation"] }
-bevy_vrm1 = { version = "0.10", default-features = false }
+bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset", "bevy_animation", "bevy_color", "bevy_core_pipeline", "bevy_gltf", "bevy_image", "bevy_light", "bevy_log", "bevy_mesh", "bevy_pbr", "bevy_render", "bevy_shader", "bevy_window", "bevy_world_serialization", "gltf_animation", "png", "morph_animation", "reflect_auto_register"] }
+ene-vrm = { path = "../../crates/ene-vrm" }
+serde.workspace = true
 serde_json = "1"
-wgpu = { version = "29", default-features = false, features = ["wgsl"] }
 raw-window-handle = "0.6"
 
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[dev-dependencies]
-tempfile = "3"
-shell-words = "1"
-tokio = { workspace = true, features = ["process", "signal"] }
-
-[[example]]
-name = "renderer-console"
-test = true
-
-[target.'cfg(unix)'.dependencies]
-bevy_dylib = { version = "0.19", optional = true }
-bevy_internal = { version = "0.19", default-features = false, features = ["dynamic_linking"], optional = true }
-wgpu = { version = "29", default-features = false, features = ["vulkan"] }
-rustix.workspace = true
-smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
-wayland-client = { version = "0.31", features = ["system"] }
-
 [target.'cfg(windows)'.dependencies]
-wgpu = { version = "29", default-features = false, features = ["dx12"] }
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Graphics_Gdi", "Win32_Graphics_Dxgi", "Win32_Graphics_DirectComposition", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+bevy = { version = "=0.19.1", default-features = false, features = ["bevy_winit", "statically-linked-dxc"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+exwlshellev = "=0.20.1"

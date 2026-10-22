@@ -1,102 +1,64 @@
-// WGPU's nested resource types need a deeper trait check on nightly.
-#![recursion_limit = "256"]
+use bevy::prelude::*;
+use bevy::render::settings::{MemoryHints, WgpuSettings};
+use bevy::render::{RenderPlugin, settings::RenderCreation};
+use ene_vrm::VrmPlugin;
 
-#[cfg(all(unix, feature = "dev-dynamic-linking"))]
-#[expect(
-    unused_imports,
-    clippy::single_component_path_imports,
-    reason = "Importing the dylib keeps Bevy linked dynamically in Unix development builds."
-)]
-use bevy_dylib;
-#[cfg(all(unix, feature = "dev-dynamic-linking"))]
-use bevy_internal as _;
+mod character;
+mod control;
+mod desktop;
 
-mod application;
-mod ipc;
-mod render;
-#[cfg_attr(windows, path = "native_windows.rs")]
+#[cfg(target_os = "linux")]
 mod wayland;
+#[cfg(windows)]
+mod windows;
 
-use ene_ipc::renderer::{Renderer, RendererConfig, RendererServer, RendererSession};
-use futures_util::StreamExt;
-use interprocess::unnamed_pipe::tokio::{Recver, Sender};
-use io_lifetimes::AsFilelike;
-use remoc::rtc::Server;
-use remoc::{Cfg, Connect, rch};
-
-fn main() -> std::process::ExitCode {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-    use clap::Parser;
-    match run(application::Args::parse()) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("ene-avatar: {error}");
-            std::process::ExitCode::FAILURE
-        }
+fn main() -> bevy::app::AppExit {
+    // DXGI HWND swapchains do not support desktop alpha composition.
+    #[cfg(windows)]
+    unsafe {
+        std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "Visual");
     }
-}
-
-fn run(args: application::Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Each native window owns its Bevy renderer on its worker thread.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let result = runtime.block_on(async {
-        let standalone = args.standalone;
-        let (messages, events) = rch::mpsc::channel();
-        let (event_sender, event_receiver) = futures_channel::mpsc::unbounded();
-        tokio::spawn(
-            event_receiver
-                .map(Ok)
-                .forward(rch::mpsc::SenderSink::new(messages)),
-        );
-        let (states, updates) = rch::watch::channel(ene_ipc::renderer::RendererState::default());
-        let output = ipc::Output {
-            messages: (!standalone).then_some(event_sender),
-            states: std::sync::Arc::new(states),
-        };
-        let mut service = ipc::RendererService::new(output);
-        if let Some(avatar) = args.initial_avatar() {
-            service
-                .initialize(RendererConfig::default(), vec![avatar])
-                .await?;
-        }
-        let (server, renderer) = RendererServer::new(service);
-        let client = RendererSession {
-            renderer,
-            messages: events,
-            states: updates,
-        };
-        let (_local, transport) = if standalone {
-            (Some(client), None)
-        } else {
-            let input = Recver::try_from(std::io::stdin().as_filelike().try_clone_to_owned()?)?;
-            let output = Sender::try_from(std::io::stdout().as_filelike().try_clone_to_owned()?)?;
-            let (connection, mut sender, receiver) =
-                Connect::io::<_, _, RendererSession, RendererSession, remoc::codec::Default>(
-                    Cfg::default(),
-                    input,
-                    output,
-                )
-                .await?;
-            tokio::spawn(connection);
-            sender.send(client).await?;
-            drop(receiver);
-            // Keep access to the global transport flush after the RTC server stops.
-            (None, Some(sender.into_inner()))
-        };
-        let (_service, result) = server.serve().await;
-        result.map_err(|error| error.to_string())?;
-        // RTC completion queues the final reply; it can still be buffered by chmux.
-        // Flush it before runtime shutdown aborts the connection dispatcher.
-        if let Some(mut transport) = transport {
-            transport.flush().await;
-        }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::NONE));
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: ".".into(),
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                    memory_hints: MemoryHints::MemoryUsage,
+                    #[cfg(windows)]
+                    backends: Some(bevy::render::settings::Backends::DX12),
+                    ..default()
+                })),
+                ..default()
+            }),
+    );
+    app.add_plugins((VrmPlugin, control::setup, character::setup, desktop::setup));
+    app.add_systems(Startup, |mut commands: Commands| {
+        commands.spawn((
+            DirectionalLight::default(),
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
+        ));
     });
-    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-    result
+    #[cfg(windows)]
+    app.add_plugins(windows::setup);
+    #[cfg(target_os = "linux")]
+    app.add_plugins(wayland::setup);
+    // A resident desktop mascot cares more about CPU than parallel dispatch.
+    // Interleaved A/B (2 avatars, 30-60fps) measured ~5-7% lower process CPU
+    // with serial PostUpdate; the systems still keep disjoint borrows so this
+    // can be revisited if the scene grows.
+    app.edit_schedule(PostUpdate, |schedule| {
+        schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+    });
+    control::run(app)
 }

@@ -10,6 +10,7 @@
 | --- | --- |
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
+| [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
 
 ## Nixで開発する
 
@@ -53,7 +54,7 @@ cargo run --locked -p ene-desktop
 
 Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じnightlyを使うため、日付を`nightly-2026-10-07`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドの日付を揃えて変更します。
 
-ツールチェーンとビルド設定の変更後は初回に再コンパイルが発生します。Craneliftは開発用の設定で、Wasmには対応していません。現在はBevyが未導入のため、`dynamic_linking`はキャラクター描画クレートを追加した際に開発用機能として有効にします。
+ツールチェーンとビルド設定の変更後は初回に再コンパイルが発生します。キャラクター描画はBevyの必要な機能のみ有効にし、`dynamic_linking`は使っていません。
 
 ## 開発コマンド
 
@@ -70,4 +71,4 @@ Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポー�
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just run-host` | ホストの骨組みを起動 |
 | `just run-desktop` | デスクトップの骨組みを起動 |
-| `just avatar-console` | 描画バイナリをビルドし、[アバター操作用コンソール](apps/ene-avatar/README.md)を起動 |
+| `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |
