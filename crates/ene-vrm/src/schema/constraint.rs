@@ -2,7 +2,7 @@ use super::version::Version;
 use bevy::prelude::*;
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NodeConstraint {
     #[serde(rename = "specVersion")]
@@ -10,7 +10,7 @@ pub(crate) struct NodeConstraint {
     pub constraint: Constraint,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum Constraint {
     Rotation(Rotation),
@@ -18,13 +18,13 @@ pub(crate) enum Constraint {
     Aim(Aim),
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct Rotation {
     pub source: usize,
     pub weight: Option<f32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Roll {
     pub source: usize,
@@ -32,7 +32,7 @@ pub(crate) struct Roll {
     pub weight: Option<f32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Aim {
     pub source: usize,

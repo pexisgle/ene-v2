@@ -4,6 +4,10 @@ use crate::VrmSystems;
 use bevy::{ecs::entity::MapEntities, prelude::*, transform::helper::TransformHelper};
 use serde::Deserialize;
 
+/// VRM 1.0 spring parameters in model-space meters.
+///
+/// The solver scales `stiffness`, `gravity_power`, and `hit_radius` by the
+/// rig root's world scale. Callers should not pre-scale these values.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Deserialize, Reflect)]
 #[reflect(Component, Clone)]
 #[serde(default, rename_all = "camelCase")]
@@ -62,16 +66,6 @@ pub struct SpringRig {
     pub(crate) colliders: Vec<Collider>,
 }
 
-impl SpringRig {
-    pub fn reset(&mut self) {
-        for chain in &mut self.chains {
-            for joint in &mut chain.joints {
-                joint.state = None;
-            }
-        }
-    }
-}
-
 pub(crate) fn setup(app: &mut App) {
     app.register_type::<SpringJointProps>()
         .register_type::<SpringRig>()
@@ -80,7 +74,7 @@ pub(crate) fn setup(app: &mut App) {
 
 fn springs(
     time: Res<Time>,
-    mut rigs: Query<&mut SpringRig>,
+    mut rigs: Query<(&GlobalTransform, &mut SpringRig)>,
     props: Query<&SpringJointProps>,
     parents: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
@@ -89,7 +83,8 @@ fn springs(
     if dt <= 0. {
         return;
     }
-    for mut rig in &mut rigs {
+    for (root, mut rig) in &mut rigs {
+        let unit_scale = root.scale().abs().max_element();
         let SpringRig {
             chains,
             colliders: defs,
@@ -128,17 +123,24 @@ fn springs(
                 let [current, previous] = joint
                     .state
                     .map_or([initial; 2], |s| s.map(|p| center.transform_point(p)));
-                let stiffness = (initial - head).normalize_or_zero() * props.stiffness * dt;
+                let stiffness =
+                    (initial - head).normalize_or_zero() * props.stiffness * unit_scale * dt;
                 let mut next = head
                     + (current
                         + (current - previous) * (1. - props.drag_force)
                         + stiffness
-                        + props.gravity_dir.normalize_or_zero() * props.gravity_power * dt
+                        + props.gravity_dir * props.gravity_power * unit_scale * dt
                         - head)
                         .normalize_or_zero()
                         * length;
                 for (segment, radius) in &colliders {
-                    collide(&mut next, head, length, props.hit_radius + radius, segment);
+                    collide(
+                        &mut next,
+                        head,
+                        length,
+                        props.hit_radius * unit_scale + radius,
+                        segment,
+                    );
                 }
                 joint.state = Some([next, current].map(|p| inv_center.transform_point3(p)));
                 let dir = rest
@@ -177,7 +179,7 @@ mod tests {
     use crate::runtime::Vrm;
     use std::time::Duration;
 
-    fn simulation(scale: f32, display_units: bool, collision: bool) -> (App, Entity) {
+    fn simulation(scale: f32, collision: bool) -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin))
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -189,11 +191,10 @@ mod tests {
             .spawn(Transform::from_scale(Vec3::splat(scale)))
             .id();
         let rest = Transform::from_xyz(0., 1., 0.);
-        let unit = if display_units { scale } else { 1. };
         let props = SpringJointProps {
-            gravity_power: if collision { 0. } else { unit },
-            stiffness: if collision { 0. } else { 0.5 * unit },
-            hit_radius: 0.02 * unit,
+            gravity_power: if collision { 0. } else { 1. },
+            stiffness: if collision { 0. } else { 0.5 },
+            hit_radius: 0.02,
             drag_force: if collision { 1. } else { 0.4 },
             ..default()
         };
@@ -232,11 +233,12 @@ mod tests {
         use crate::tests::{Files, app, settle};
         let files = Files::new();
         let mut value = files.model();
-        value["nodes"][1]["children"] = serde_json::json!([2, 3, 5]);
+        let base = value["nodes"].as_array().unwrap().len();
+        value["nodes"][1]["children"] = serde_json::json!([2, 4, 7, base, base + 2]);
         value["nodes"].as_array_mut().unwrap().extend([
-            serde_json::json!({"translation":[0.1,1.,0.],"children":[4]}),
+            serde_json::json!({"translation":[0.1,1.,0.],"children":[base + 1]}),
             serde_json::json!({"translation":[0.,0.1,0.]}),
-            serde_json::json!({"translation":[-0.1,1.,0.],"children":[6]}),
+            serde_json::json!({"translation":[-0.1,1.,0.],"children":[base + 3]}),
             serde_json::json!({"translation":[0.,0.1,0.]}),
         ]);
         value["extensions"]["VRMC_springBone"] = serde_json::json!({
@@ -244,8 +246,8 @@ mod tests {
             "colliders":[{"node":1,"shape":{"sphere":{"offset":[0.,10.,0.],"radius":0.01}}}],
             "colliderGroups":[{"colliders":[0]}],
             "springs":[
-                {"joints":[{"node":3},{"node":4}],"colliderGroups":[0]},
-                {"joints":[{"node":5},{"node":6}],"colliderGroups":[0]}
+                {"joints":[{"node":base},{"node":base + 1}],"colliderGroups":[0]},
+                {"joints":[{"node":base + 2},{"node":base + 3}],"colliderGroups":[0]}
             ]
         });
         let mut app = app();
@@ -300,17 +302,42 @@ mod tests {
         for _ in 0..3 {
             app.update();
         }
-        let mut q = app.world_mut().query::<&mut SpringRig>();
-        let mut rig = q.single_mut(app.world_mut()).unwrap();
+        let mut q = app.world_mut().query::<&SpringRig>();
+        let rig = q.single(app.world()).unwrap();
         assert!(rig.chains[0].joints[0].state.is_some());
-        rig.reset();
-        assert!(rig.chains[0].joints[0].state.is_none());
+    }
+
+    #[test]
+    fn gravity_dir_scale_matches_gravity_power_scale() {
+        let (mut by_dir, dir_joint) = simulation(1., false);
+        let (mut by_power, power_joint) = simulation(1., false);
+        by_dir
+            .world_mut()
+            .get_mut::<SpringJointProps>(dir_joint)
+            .unwrap()
+            .gravity_dir = Vec3::NEG_Y * 2.;
+        by_power
+            .world_mut()
+            .get_mut::<SpringJointProps>(power_joint)
+            .unwrap()
+            .gravity_power = 2.;
+        for _ in 0..30 {
+            by_dir.update();
+            by_power.update();
+        }
+        let a = by_dir.world().get::<Transform>(dir_joint).unwrap().rotation;
+        let b = by_power
+            .world()
+            .get::<Transform>(power_joint)
+            .unwrap()
+            .rotation;
+        assert!(a.abs_diff_eq(b, 1e-5));
     }
 
     #[test]
     fn spring_center_scale_and_collision_invariants() {
-        let (mut normal, a) = simulation(1., false, false);
-        let (mut centered, b) = simulation(1., false, false);
+        let (mut normal, a) = simulation(1., false);
+        let (mut centered, b) = simulation(1., false);
         let center_tf = Transform::from_xyz(5., 7., 11.)
             .with_rotation(Quat::from_rotation_z(0.4))
             .with_scale(Vec3::splat(2.));
@@ -341,7 +368,7 @@ mod tests {
         );
 
         // Non-uniform scale rest pose preservation
-        let (mut non_uni, joint) = simulation(1., false, false);
+        let (mut non_uni, joint) = simulation(1., false);
         let root = non_uni.world().get::<ChildOf>(joint).unwrap().parent();
         non_uni
             .world_mut()
@@ -400,34 +427,31 @@ mod tests {
         assert!(zero_tail.is_finite() && zero_tail.length() == 160.);
 
         // Unit scaling and collision radius behavior
-        let (mut scaled, s_joint) = simulation(160., false, false);
-        let (mut display, d_joint) = simulation(160., true, false);
+        let (mut scaled, s_joint) = simulation(160., false);
         for _ in 0..30 {
             normal.update();
         }
         for _ in 0..60 {
             scaled.update();
-            display.update();
         }
         let rot = |app: &App, e| app.world().get::<Transform>(e).unwrap().rotation;
         assert!(
-            rot(&scaled, s_joint).angle_between(Quat::IDENTITY)
-                < rot(&normal, a).angle_between(Quat::IDENTITY) / 2.
+            rot(&normal, a).angle_between(rot(&scaled, s_joint)) < 0.001,
+            "spec-meter spring parameters must be scale invariant"
         );
-        assert!(rot(&normal, a).angle_between(rot(&display, d_joint)) < 0.001);
 
-        let (mut col_1, ca) = simulation(1., true, true);
-        let (mut col_160, cb) = simulation(160., true, true);
-        let (mut col_raw, cc) = simulation(160., false, true);
+        let (mut col_1, ca) = simulation(1., true);
+        let (mut col_160, cb) = simulation(160., true);
         col_1.update();
         col_160.update();
-        col_raw.update();
         assert!(rot(&col_1, ca).angle_between(Quat::IDENTITY) > 0.01);
-        assert!(rot(&col_1, ca).angle_between(rot(&col_160, cb)) < 0.001);
-        assert_eq!(rot(&col_raw, cc), Quat::IDENTITY);
+        assert!(
+            rot(&col_1, ca).angle_between(rot(&col_160, cb)) < 0.001,
+            "collision radius and hit radius must scale together"
+        );
 
         // Collapsed direction recovery
-        let (mut collapsed, cj) = simulation(1., false, false);
+        let (mut collapsed, cj) = simulation(1., false);
         collapsed
             .world_mut()
             .query::<&mut SpringRig>()

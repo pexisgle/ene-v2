@@ -28,8 +28,7 @@ pub struct HumanoidBone {
 pub struct Vrm {
     #[entities]
     pub bones: Vec<HumanoidBone>,
-    pub meta: Option<schema::VrmMeta>,
-    pub thumbnail: Option<Handle<Image>>,
+    pub meta: schema::VrmMeta,
 }
 
 impl Vrm {
@@ -46,15 +45,28 @@ pub(crate) fn setup(app: &mut App) {
     spring::setup(app);
 }
 
+fn depth(parents: &HashMap<Entity, Entity>, mut entity: Entity) -> usize {
+    let mut result = 0;
+    while let Some(&parent) = parents.get(&entity) {
+        result += 1;
+        entity = parent;
+    }
+    result
+}
+
 pub(crate) fn attach(
     world: &mut World,
     root: Entity,
     model: &schema::Model,
-    thumbnail: Option<Handle<Image>>,
     springs: Option<&schema::Springs>,
     constraints: &[(usize, schema::NodeConstraint)],
     nodes: &HashMap<usize, Entity>,
 ) -> std::io::Result<()> {
+    let mut parent_query = world.query::<(Entity, &ChildOf)>();
+    let parents: HashMap<Entity, Entity> = parent_query
+        .iter(world)
+        .map(|(entity, child_of)| (entity, child_of.parent()))
+        .collect();
     let constraints = constraint::compile_constraints(constraints, world, nodes)?;
     let root_inv = world
         .get::<GlobalTransform>(root)
@@ -109,7 +121,6 @@ pub(crate) fn attach(
         Vrm {
             bones,
             meta: model.meta.clone(),
-            thumbnail,
         },
         AnimationPlayer::default(),
         constraints,
@@ -152,13 +163,9 @@ pub(crate) fn attach(
             if spring_def.joints.is_empty() {
                 return Err(invalid("VRMC spring requires joints"));
             }
-            let mut used = std::collections::HashSet::new();
-            let mut joints = Vec::new();
-            for (i, joint) in spring_def.joints.iter().enumerate() {
+            let mut joint_entities = Vec::with_capacity(spring_def.joints.len());
+            for joint in &spring_def.joints {
                 let entity = require_node(nodes, joint.node)?;
-                if !used.insert(joint.node) {
-                    return Err(invalid("VRMC spring repeats a joint"));
-                }
                 let p = &joint.props;
                 if !p.gravity_dir.is_finite()
                     || !p.gravity_power.is_finite()
@@ -171,10 +178,11 @@ pub(crate) fn attach(
                 {
                     return Err(invalid("VRMC invalid spring parameters"));
                 }
-                let Some(next) = spring_def.joints.get(i + 1) else {
-                    break;
-                };
-                let next = require_node(nodes, next.node)?;
+                joint_entities.push(entity);
+            }
+            let mut joints = Vec::new();
+            for (i, pair) in joint_entities.windows(2).enumerate() {
+                let (entity, next) = (pair[0], pair[1]);
                 let (&local, global) = world
                     .entity(entity)
                     .components::<(&Transform, &GlobalTransform)>();
@@ -187,7 +195,7 @@ pub(crate) fn attach(
                 if tail.length_squared() == 0. {
                     continue;
                 }
-                world.entity_mut(entity).insert(joint.props);
+                world.entity_mut(entity).insert(spring_def.joints[i].props);
                 joints.push(spring::SpringJoint {
                     entity,
                     rest: local,
@@ -214,6 +222,15 @@ pub(crate) fn attach(
                     .transpose()?,
             });
         }
+        // Chains cannot share joints, but a chain may start below another
+        // chain's tail. Evaluate ancestors first so the child chain reads this
+        // frame's parent pose instead of being one frame late.
+        chains.sort_by_key(|chain| {
+            chain
+                .joints
+                .first()
+                .map_or(0, |joint| depth(&parents, joint.entity))
+        });
         world
             .entity_mut(root)
             .insert(spring::SpringRig { chains, colliders });
@@ -268,9 +285,10 @@ mod tests {
             };
             let model: schema::Model = serde_json::from_value(serde_json::json!({
                 "specVersion":"1.0",
+                "meta":{"name":"Test","authors":["Test"],"licenseUrl":"https://vrm.dev/licenses/1.0/"},
                 "humanoid":{"humanBones":{"hips":{"node":0},"head":{"node":1},"leftEye":{"node":2}}},
                 "expressions":{"preset":presets},
-                "lookAt":{"type":"expression","rangeMapHorizontalOuter":{"inputMaxValue":90.,"outputScale":1.},"rangeMapVerticalUp":{"inputMaxValue":90.,"outputScale":1.}}
+                "lookAt":{"offsetFromHeadBone":[0.,0.,0.],"type":"expression","rangeMapHorizontalOuter":{"inputMaxValue":90.,"outputScale":1.},"rangeMapVerticalUp":{"inputMaxValue":90.,"outputScale":1.}}
             })).unwrap();
             let springs = (i == 0).then(|| serde_json::from_value::<schema::Springs>(serde_json::json!({
                 "specVersion":"1.0",
@@ -282,16 +300,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(bevy::transform::systems::propagate_transforms_for::<()>)
                 .unwrap();
-            attach(
-                app.world_mut(),
-                root,
-                &model,
-                None,
-                springs.as_ref(),
-                &[],
-                &nodes,
-            )
-            .unwrap();
+            attach(app.world_mut(), root, &model, springs.as_ref(), &[], &nodes).unwrap();
             app.world_mut().get_mut::<LookAt>(root).unwrap().target = Some(target);
             roots.push(root);
         }
@@ -337,5 +346,55 @@ mod tests {
         for name in ["lookLeft", "lookRight", "lookUp"] {
             assert_eq!(val(&app, roots[3], name), 0.);
         }
+    }
+
+    #[test]
+    fn bone_look_at_without_eyes_falls_back_to_expressions() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin));
+        setup(&mut app);
+        animation::setup(&mut app);
+        app.configure_sets(
+            PostUpdate,
+            VrmSystems::LookAt.after(bevy::app::AnimationSystems),
+        );
+
+        let root = app.world_mut().spawn(Transform::default()).id();
+        let hips = app
+            .world_mut()
+            .spawn((Transform::from_xyz(0., 1., 0.), ChildOf(root)))
+            .id();
+        let head = app
+            .world_mut()
+            .spawn((Transform::from_xyz(0., 1., 0.), ChildOf(hips)))
+            .id();
+        let model: schema::Model = serde_json::from_value(serde_json::json!({
+            "specVersion":"1.0",
+            "meta":{"name":"Test","authors":["Test"],"licenseUrl":"https://vrm.dev/licenses/1.0/"},
+            "humanoid":{"humanBones":{"hips":{"node":0},"head":{"node":1}}},
+            "expressions":{"preset":{"lookLeft":{},"lookRight":{},"lookUp":{},"lookDown":{}}},
+            "lookAt":{"offsetFromHeadBone":[0.,0.,0.],"type":"bone"}
+        }))
+        .unwrap();
+        let nodes = HashMap::from_iter([(0, hips), (1, head)]);
+        app.world_mut()
+            .run_system_once(bevy::transform::systems::propagate_transforms_for::<()>)
+            .unwrap();
+        attach(app.world_mut(), root, &model, None, &[], &nodes).unwrap();
+        app.world_mut().get_mut::<LookAt>(root).unwrap().target = Some(Vec3::new(1., 2., 1.));
+        app.update();
+
+        let binds = app.world().get::<crate::expressions::Binds>(root).unwrap();
+        let look_left = binds.target("lookLeft").unwrap();
+        assert!(
+            app.world()
+                .get::<Transform>(look_left)
+                .unwrap()
+                .translation
+                .x
+                > 0.,
+            "bone LookAt without eye bones did not fall back to look expressions"
+        );
     }
 }

@@ -1,5 +1,9 @@
 use super::version::Version;
-use bevy::{prelude::*, render::render_resource::ShaderType};
+use bevy::{
+    math::{Affine2, Mat3},
+    prelude::*,
+    render::render_resource::ShaderType,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -45,12 +49,16 @@ pub(crate) struct ToonParams {
     pub shading_shift_texture_scale: f32,
     #[serde(skip)]
     pub texture_flags: u32,
+    #[serde(skip)]
+    pub texture_uvs: u32,
+    #[serde(skip)]
+    pub uv_transforms: [Mat3; 6],
 }
 
 impl Default for ToonParams {
     fn default() -> Self {
         Self {
-            shade_color_factor: Vec3::ONE,
+            shade_color_factor: Vec3::ZERO,
             parametric_rim_color_factor: Vec3::ZERO,
             matcap_factor: Vec3::ONE,
             outline_color_factor: Vec3::ZERO,
@@ -67,6 +75,8 @@ impl Default for ToonParams {
             uv_animation_rotation_speed_factor: 0.,
             shading_shift_texture_scale: 0.,
             texture_flags: 0,
+            texture_uvs: 0,
+            uv_transforms: [Mat3::IDENTITY; 6],
         }
     }
 }
@@ -88,6 +98,31 @@ pub(crate) struct ShadingShiftTexture {
     pub scale: Option<f32>,
 }
 
+pub(crate) fn texture_transform(
+    info: &gltf::json::texture::Info,
+) -> Option<&gltf::json::extensions::texture::TextureTransform> {
+    info.extensions
+        .as_ref()
+        .and_then(|extensions| extensions.texture_transform.as_ref())
+}
+
+pub(crate) fn texture_uv(info: &gltf::json::texture::Info) -> u32 {
+    texture_transform(info)
+        .and_then(|transform| transform.tex_coord)
+        .unwrap_or(info.tex_coord)
+}
+
+pub(crate) fn texture_affine(info: &gltf::json::texture::Info) -> Affine2 {
+    let Some(transform) = texture_transform(info) else {
+        return Affine2::IDENTITY;
+    };
+    Affine2::from_scale_angle_translation(
+        Vec2::from(transform.scale.0),
+        -transform.rotation.0,
+        Vec2::from(transform.offset.0),
+    )
+}
+
 impl Toon {
     pub fn textures(&self) -> [Option<&gltf::json::texture::Info>; 6] {
         [
@@ -98,5 +133,16 @@ impl Toon {
             self.uv_animation_mask_texture.as_ref(),
             self.outline_width_multiply_texture.as_ref(),
         ]
+    }
+    pub fn texture_uvs(&self) -> u32 {
+        let mut bits = 0;
+        for (index, info) in self.textures().into_iter().enumerate() {
+            if index != 3
+                && let Some(info) = info
+            {
+                bits |= u32::from(texture_uv(info) == 1) << index;
+            }
+        }
+        bits
     }
 }

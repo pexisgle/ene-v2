@@ -17,5 +17,5 @@ pub(crate) use mtoon::*;
 pub(crate) use spring::*;
 #[cfg(test)]
 pub(crate) use version::Version;
-pub use vrm::VrmMeta;
 pub(crate) use vrm::*;
+pub use vrm::{AvatarPermission, CommercialUsage, CreditNotation, Modification, VrmMeta};

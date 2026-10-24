@@ -2,7 +2,7 @@ use super::{
     version::Version,
     vrm::{Humanoid, Node},
 };
-use bevy::{platform::collections::HashMap, prelude::*};
+use bevy::platform::collections::HashMap;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -16,11 +16,11 @@ pub(crate) struct Motion {
     pub look_at: Option<MotionLookAt>,
 }
 
-#[derive(Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MotionLookAt {
-    pub node: Option<usize>,
-    pub offset_from_head_bone: Vec3,
+    /// VRMA JSON Schema requires `node`; a `lookAt` object without it is invalid.
+    pub node: usize,
 }
 
 #[derive(Default, Deserialize)]

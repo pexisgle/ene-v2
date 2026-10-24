@@ -1,7 +1,9 @@
 use super::*;
+use crate::material::{MaterialSlot, Outline};
 use bevy::{
     animation::{AnimatedBy, AnimationTargetId},
     asset::{LoadState, RenderAssetUsages},
+    camera::visibility::{NoFrustumCulling, RenderLayers},
     gltf::Gltf,
     light::NotShadowCaster,
     mesh::morph::MorphWeights,
@@ -37,16 +39,35 @@ impl Files {
     }
     pub(super) fn model(&self) -> Value {
         json!({
-            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,1]}],
+            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
             "nodes":[
-                {"name":"Same"},
-                {"name":"Same","translation":[0,1,0],"children":[2]},
-                {"name":"Same","translation":[0,1,0]}
+                {"name":"Same","children":[1]},
+                {"name":"Same","translation":[0,1,0],"children":[2,4,7]},
+                {"name":"Same","translation":[0,1,0],"children":[3,10,13]},
+                {"name":"Head"},
+                {"name":"LeftUpperLeg","children":[5]},
+                {"name":"LeftLowerLeg","children":[6]},
+                {"name":"LeftFoot"},
+                {"name":"RightUpperLeg","children":[8]},
+                {"name":"RightLowerLeg","children":[9]},
+                {"name":"RightFoot"},
+                {"name":"LeftUpperArm","children":[11]},
+                {"name":"LeftLowerArm","children":[12]},
+                {"name":"LeftHand"},
+                {"name":"RightUpperArm","children":[14]},
+                {"name":"RightLowerArm","children":[15]},
+                {"name":"RightHand"}
             ],
             "extensions":{"VRMC_vrm":{
                 "specVersion":"1.0",
-                "humanoid":{"humanBones":{"hips":{"node":1},"spine":{"node":2}}},
-                "firstPerson":{"meshAnnotations":[{"node":0,"type":"both"}]},
+                "meta":{"name":"Test","authors":["Test"],"licenseUrl":"https://vrm.dev/licenses/1.0/"},
+                "humanoid":{"humanBones":{
+                    "hips":{"node":1},"spine":{"node":2},"head":{"node":3},
+                    "leftUpperLeg":{"node":4},"leftLowerLeg":{"node":5},"leftFoot":{"node":6},
+                    "rightUpperLeg":{"node":7},"rightLowerLeg":{"node":8},"rightFoot":{"node":9},
+                    "leftUpperArm":{"node":10},"leftLowerArm":{"node":11},"leftHand":{"node":12},
+                    "rightUpperArm":{"node":13},"rightLowerArm":{"node":14},"rightHand":{"node":15}
+                }},
                 "expressions":{"preset":{"aa":{},"happy":{"overrideMouth":"block"}}}
             }}
         })
@@ -64,7 +85,8 @@ impl Files {
         )
         .unwrap();
         let mut v = self.model();
-        v["extensions"] = json!({"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"hips":{"node":1},"spine":{"node":2}}}}});
+        let humanoid = v["extensions"]["VRMC_vrm"]["humanoid"].clone();
+        v["extensions"] = json!({"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":humanoid}});
         v["buffers"] = json!([{"byteLength":64,"uri":"motion.bin"}]);
         v["bufferViews"] = json!([
             {"buffer":0,"byteLength":8},
@@ -208,135 +230,123 @@ fn vrm_spec_system_order_runs_pose_lookat_expressions_constraints_springbone() {
 }
 
 #[test]
-fn loader_validates_vrm_and_vrma_specifications() {
+fn loader_rejects_unusable_data_and_tolerates_spec_noise() {
     let files = Files::new();
-    let mut native = app_with_vrm(false);
-    let mut invalid = files.model();
-    invalid["extensions"]["VRMC_vrm"] = json!({"specVersion":"0.0"});
-    let path = files.write("invalid-native.vrm", &invalid);
-    let handles: Vec<Handle<Gltf>> = [
-        files.write("valid-native.vrm", &files.model()),
-        path.clone(),
-    ]
-    .into_iter()
-    .map(|p| native.world().resource::<AssetServer>().load(p))
-    .collect();
-    settle(&mut native, &handles);
-    for h in handles {
-        assert!(
-            native
-                .world()
-                .resource::<AssetServer>()
-                .is_loaded_with_dependencies(h.id())
-        );
-    }
-    let clip: Handle<AnimationClip> = native.world().resource::<AssetServer>().load(format!(
-        "{}#Animation0",
-        files.write("native-subasset.vrma", &files.motion("LINEAR"))
-    ));
-    settle(&mut native, std::slice::from_ref(&clip));
-    assert!(matches!(
-        native
-            .world()
-            .resource::<AssetServer>()
-            .get_load_state(clip.id()),
-        Some(LoadState::Failed(_))
-    ));
-
     let mut app = app();
     let model = files.model();
     let motion = files.motion("LINEAR");
-    let mut cases = Vec::new();
-    for anim in [false, true] {
-        let base = if anim { &motion } else { &model };
-        let ext = if anim {
-            "VRMC_vrm_animation"
-        } else {
-            "VRMC_vrm"
-        };
-        for m in 0..if anim { 11 } else { 9 } {
-            let mut v = base.clone();
-            match m {
-                0 => v["extensions"] = json!({}),
-                1 => v["extensions"][ext]["humanoid"]["humanBones"] = json!({}),
-                2 => v["extensions"][ext]["humanoid"]["humanBones"]["hips"]["node"] = json!(99),
-                3 => v["scenes"][0]["nodes"] = json!([]),
-                4 => v["scenes"] = json!([]),
-                5 => v["extensions"][ext]["specVersion"] = json!("0.0"),
-                // Hierarchy violation: spine is node 0 (not descendant of hips node 1)
-                6 => v["extensions"][ext]["humanoid"]["humanBones"]["spine"]["node"] = json!(0),
-                // Unknown humanoid bone name
-                7 => {
-                    v["extensions"][ext]["humanoid"]["humanBones"]["unknownBone"] =
-                        json!({"node":2})
-                }
-                8 if !anim => {
-                    v["extensions"][ext]["firstPerson"]["meshAnnotations"] = json!([{"node":99}])
-                }
-                8 => v["animations"] = json!([]),
-                9 => v["accessors"][0]["count"] = json!(0),
-                // Prohibited eye bone or neutral/gaze preset in VRMA
-                _ => v["extensions"][ext]["expressions"]["preset"]["lookUp"] = json!({"node":0}),
-            }
-            cases.push((anim, v));
-        }
-    }
-    let mut vrma_eye = motion.clone();
-    vrma_eye["nodes"][2]["children"] = json!([3, 4]);
-    vrma_eye["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .extend([json!({}), json!({})]);
-    vrma_eye["extensions"]["VRMC_vrm_animation"]["humanoid"]["humanBones"]["head"] =
-        json!({"node":3});
-    vrma_eye["extensions"]["VRMC_vrm_animation"]["humanoid"]["humanBones"]["leftEye"] =
-        json!({"node":4});
-    cases.push((true, vrma_eye));
 
+    let mut cases: Vec<(bool, Value, bool)> = Vec::new();
+    let mut push = |v: Value, anim: bool, reject: bool| cases.push((anim, v, reject));
+
+    // Missing or unreadable extension data, missing scenes and dangling indices
+    // are structural problems the loader still has to report.
+    let mut v = model.clone();
+    v["extensions"] = json!({});
+    push(v, false, true);
+    let mut v = model.clone();
+    v["extensions"]["VRMC_vrm"]["specVersion"] = json!("0.0");
+    push(v, false, true);
+    let mut v = model.clone();
+    v["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["hips"]["node"] = json!(99);
+    push(v, false, true);
+    let mut v = model.clone();
+    v["scenes"] = json!([]);
+    push(v, false, true);
+    let mut v = model.clone();
+    v["extensions"]["VRMC_vrm"]
+        .as_object_mut()
+        .unwrap()
+        .remove("meta");
+    push(v, false, true);
+    let mut v = motion.clone();
+    v["animations"] = json!([]);
+    push(v, true, true);
+    let mut v = motion.clone();
+    v["accessors"][0]["count"] = json!(0);
+    push(v, true, true);
+    let mut v = motion.clone();
+    v["extensions"]["VRMC_vrm_animation"]["lookAt"] = json!({});
+    push(v, true, true);
+
+    // Physics and constraints still need valid indices and acyclic ordering.
     for spring in [
         json!({}),
-        json!({"specVersion":"1.0","springs":"invalid"}),
-        json!({"specVersion":"1.0","springs":[{"joints":[]}]}),
-        json!({"specVersion":"1.0","springs":[{"joints":[{"node":1},{"node":1}]}]}),
-        json!({"specVersion":"1.0","springs":[{"joints":[{"node":1},{"node":2,"hitRadius":-1.}]}]}),
         json!({"specVersion":"1.0","springs":[{"joints":[{"node":99}]}]}),
+        json!({"specVersion":"1.0","springs":[{"joints":[]}]}),
         json!({"specVersion":"1.0","springs":[{"joints":[{"node":1}],"colliderGroups":[0]}]}),
-        json!({"specVersion":"1.0","springs":[{"joints":[{"node":1}],"center":99}]}),
+        json!({"specVersion":"1.0","springs":[{"joints":[{"node":1},{"node":2,"hitRadius":-1.}]}]}),
         json!({"specVersion":"1.0","colliders":[{"node":1,"shape":{"sphere":{"radius":-1.}}}]}),
-        json!({"specVersion":"1.0","colliderGroups":[{"colliders":[0]}]}),
     ] {
         let mut v = model.clone();
         v["extensions"]["VRMC_springBone"] = spring;
-        cases.push((false, v));
+        push(v, false, true);
     }
-    for constraint in [
-        json!({"rotation":{"source":99}}),
-        json!({"rotation":{"source":1,"weight":2.}}),
-        json!({"rotation":{"source":0}}),
-    ] {
-        let mut v = model.clone();
-        v["nodes"][0]["extensions"]["VRMC_node_constraint"] =
-            json!({"specVersion":"1.0","constraint":constraint});
-        cases.push((false, v));
-    }
-    for mtoon in [
-        json!({"specVersion":"1.0","rimLightingMixFactor":"invalid"}),
-        json!({"specVersion":"1.0","renderQueueOffsetNumber":10.0}),
-        json!({"specVersion":"1.0","shadeMultiplyTexture":{"index":0}}),
-    ] {
-        let mut v = model.clone();
-        v["materials"] = json!([{"extensions":{"VRMC_materials_mtoon":mtoon}}]);
-        cases.push((false, v));
-    }
-    let mut bad_thumb = model.clone();
-    bad_thumb["extensions"]["VRMC_vrm"]["meta"] = json!({"thumbnailImage":0});
-    cases.push((false, bad_thumb));
+    let mut v = model.clone();
+    v["nodes"][0]["extensions"]["VRMC_node_constraint"] =
+        json!({"specVersion":"1.0","constraint":{"rotation":{"source":0}}});
+    push(v, false, true);
 
-    let handles: Vec<Handle<Gltf>> = cases
+    // VRM conformance is enforced by authoring tools, not by a renderer: these
+    // documents are renderable and must not fail the load.
+    let mut v = model.clone();
+    v["extensions"]["VRMC_vrm"]["meta"]["name"] = json!("");
+    v["extensions"]["VRMC_vrm"]["meta"]["authors"] = json!([]);
+    v["extensions"]["VRMC_vrm"]["meta"]["references"] = json!([]);
+    v["extensions"]["VRMC_vrm"]["meta"]["licenseUrl"] = json!("https://example.com/license");
+    v["extensions"]["VRMC_vrm"]["meta"]["thumbnailImage"] = json!(0);
+    push(v, false, false);
+    let mut v = model.clone();
+    v["extensions"]["VRMC_vrm"]["expressions"]["preset"]["unknown"] = json!({});
+    v["extensions"]["VRMC_vrm"]["expressions"]["custom"] = json!({"aa":{}});
+    v["extensions"]["VRMC_vrm"]["expressions"]["preset"]["aa"] = json!({"morphTargetBinds":[]});
+    push(v, false, false);
+    let mut v = model.clone();
+    v["nodes"][1]["scale"] = json!([1., 2., 1.]);
+    let extra = v["nodes"].as_array().unwrap().len();
+    v["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"scale":[0., 0., 0.]}));
+    v["scenes"][0]["nodes"] = json!([0, extra]);
+    push(v, false, false);
+    let mut v = model.clone();
+    v["materials"] = json!([
+        {"alphaMode":"OPAQUE","extensions":{"VRMC_materials_mtoon":{
+            "specVersion":"1.0","renderQueueOffsetNumber":10.0,
+            "shadingToonyFactor":2.0,"outlineWidthFactor":-1.0,
+            "shadeMultiplyTexture":{"index":0}
+        }}},
+        {"alphaMode":"BLEND","extensions":{"VRMC_materials_mtoon":{
+            "specVersion":"1.0","transparentWithZWrite":true,"renderQueueOffsetNumber":2.0
+        }}}
+    ]);
+    push(v, false, false);
+    let mut v = model.clone();
+    v["extensions"]["VRMC_springBone"] = json!({
+        "specVersion":"1.0",
+        "springs":[
+            {"joints":[{"node":1},{"node":3}],"center":4},
+            {"joints":[{"node":2},{"node":10}]}
+        ]
+    });
+    push(v, false, false);
+    let mut v = motion.clone();
+    v["animations"][0]["channels"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            json!({"sampler":0,"target":{"node":2,"path":"scale"}}),
+            json!({"sampler":0,"target":{"node":2,"path":"translation"}}),
+        ]);
+    push(v, true, false);
+
+    let handles: Vec<(bool, Handle<Gltf>)> = cases
         .into_iter()
         .enumerate()
-        .map(|(i, (anim, v))| {
-            app.world()
+        .map(|(i, (anim, v, reject))| {
+            let handle = app
+                .world()
                 .resource::<AssetServer>()
                 .load_builder()
                 .with_settings(|s: &mut bevy::gltf::GltfLoaderSettings| {
@@ -346,20 +356,92 @@ fn loader_validates_vrm_and_vrma_specifications() {
                 .load(files.write(
                     &format!("case-{i}.{}", if anim { "vrma" } else { "vrm" }),
                     &v,
-                ))
+                ));
+            (reject, handle)
+        })
+        .collect();
+    settle(
+        &mut app,
+        &handles.iter().map(|(_, h)| h.clone()).collect::<Vec<_>>(),
+    );
+    for (i, (reject, h)) in handles.iter().enumerate() {
+        let failed = matches!(
+            app.world().resource::<AssetServer>().get_load_state(h.id()),
+            Some(LoadState::Failed(_))
+        );
+        assert_eq!(
+            failed,
+            *reject,
+            "case {i} was {}",
+            if failed { "rejected" } else { "accepted" }
+        );
+    }
+}
+
+#[test]
+fn vrma_neutral_and_zero_input_max_value_load() {
+    let files = Files::new();
+    let mut app = app();
+
+    let mut neutral = files.motion("LINEAR");
+    neutral["extensions"]["VRMC_vrm_animation"]["expressions"] =
+        json!({"preset":{"neutral":{"node":0}}});
+    let mut zero = files.model();
+    zero["extensions"]["VRMC_vrm"]["lookAt"] = json!({
+        "type":"bone",
+        "rangeMapHorizontalOuter":{"inputMaxValue":0.,"outputScale":10.}
+    });
+
+    let handles: Vec<Handle<Gltf>> = [("neutral.vrma", neutral), ("zero.vrm", zero)]
+        .into_iter()
+        .map(|(name, value)| {
+            app.world()
+                .resource::<AssetServer>()
+                .load(files.write(name, &value))
         })
         .collect();
     settle(&mut app, &handles);
-    for h in &handles {
+    for handle in &handles {
         assert!(
-            matches!(
-                app.world().resource::<AssetServer>().get_load_state(h.id()),
-                Some(LoadState::Failed(_))
-            ),
-            "accepted invalid {:?}",
-            h.path()
+            app.world()
+                .resource::<AssetServer>()
+                .is_loaded_with_dependencies(handle.id()),
+            "failed to load {:?}",
+            handle.path()
         );
     }
+
+    let gaze: schema::Gaze = serde_json::from_value(json!({
+        "type":"bone",
+        "rangeMapHorizontalOuter":{"inputMaxValue":0.,"outputScale":10.}
+    }))
+    .unwrap();
+    assert_eq!(gaze.horizontal_outer().map(0.), 0.);
+    assert_eq!(gaze.horizontal_outer().map(1.), 10.);
+}
+
+#[test]
+fn gltf_with_vrm_extension_is_not_processed() {
+    let files = Files::new();
+    let mut app = app();
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("plain.gltf", &files.model()));
+    settle(&mut app, std::slice::from_ref(&handle));
+    let scene = app
+        .world()
+        .resource::<Assets<Gltf>>()
+        .get(&handle)
+        .unwrap()
+        .default_scene
+        .clone()
+        .unwrap();
+    app.world_mut().spawn(WorldAssetRoot(scene));
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(app.world_mut().query::<&Vrm>().iter(app.world()).count(), 0);
 }
 
 #[test]
@@ -376,7 +458,7 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
             json!({"sampler":1,"target":{"node":0,"path":"rotation"}}),
         );
 
-    // Same-node multi-channel with ignored scale channel
+    // Same-node multi-channel
     let mut same_node = files.motion("LINEAR");
     let mut bytes = std::fs::read(files.0.join("motion.bin")).unwrap();
     bytes.extend(
@@ -400,7 +482,6 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
         .push(json!({"input":0,"output":3,"interpolation":"LINEAR"}));
     same_node["animations"][0]["channels"] = json!([
         {"sampler":1,"target":{"node":1,"path":"rotation"}},
-        {"sampler":2,"target":{"node":1,"path":"scale"}},
         {"sampler":0,"target":{"node":1,"path":"translation"}}
     ]);
 
@@ -532,24 +613,94 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
 }
 
 #[test]
+fn vrma_skipped_channel_keeps_other_curves() {
+    let files = Files::new();
+    let mut app = app();
+    let mut motion = files.motion("LINEAR");
+    let mut bytes = std::fs::read(files.0.join("motion.bin")).unwrap();
+    bytes.extend([0u8, 1u8, 0u8, 0u8]);
+    bytes.extend([0f32, 1f32].into_iter().flat_map(f32::to_le_bytes));
+    std::fs::write(files.0.join("sparse.bin"), bytes).unwrap();
+    motion["buffers"] = json!([{"byteLength":76,"uri":"sparse.bin"}]);
+    motion["bufferViews"] = json!([
+        {"buffer":0,"byteLength":8},
+        {"buffer":0,"byteOffset":8,"byteLength":24},
+        {"buffer":0,"byteOffset":32,"byteLength":32},
+        {"buffer":0,"byteOffset":64,"byteLength":2},
+        {"buffer":0,"byteOffset":68,"byteLength":8}
+    ]);
+    motion["accessors"].as_array_mut().unwrap().push(json!({
+        "componentType":5126,"count":2,"type":"SCALAR",
+        "sparse":{
+            "count":2,
+            "indices":{"bufferView":3,"componentType":5121},
+            "values":{"bufferView":4}
+        }
+    }));
+    motion["animations"][0]["samplers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"input":3,"output":2,"interpolation":"LINEAR"}));
+    motion["animations"][0]["channels"]
+        .as_array_mut()
+        .unwrap()
+        .insert(
+            0,
+            json!({"sampler":2,"target":{"node":1,"path":"rotation"}}),
+        );
+
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("sparse.vrma", &motion));
+    settle(&mut app, std::slice::from_ref(&handle));
+    assert!(
+        app.world()
+            .resource::<AssetServer>()
+            .is_loaded_with_dependencies(handle.id())
+    );
+    let clip = app
+        .world()
+        .resource::<Assets<Gltf>>()
+        .get(&handle)
+        .unwrap()
+        .animations[0]
+        .clone();
+    let clip = app
+        .world()
+        .resource::<Assets<AnimationClip>>()
+        .get(&clip)
+        .unwrap();
+    let hips = clip
+        .curves_for_target(animation::bone_target("hips"))
+        .unwrap();
+    let spine = clip
+        .curves_for_target(animation::bone_target("spine"))
+        .unwrap();
+    assert_eq!(hips.len(), 1);
+    assert_eq!(spine.len(), 1);
+    let hips_mid = *hips[0].0.sample_clamped(0.5).downcast::<Vec3>().unwrap();
+    assert!(
+        hips_mid.abs_diff_eq(Vec3::new(0.5, 0., 0.), 1e-4),
+        "unexpected hips translation {hips_mid:?}"
+    );
+}
+
+#[test]
 fn scene_instances_remap_bones_and_preserve_native_and_vrma_playback() {
     let files = Files::new();
     let mut app = app();
     let mut model = files.model();
-    model["scenes"] = json!([{"nodes":[0]},{"nodes":[0,1]}]);
+    model["scenes"] = json!([{"nodes":[0]},{"nodes":[0]}]);
     model["scene"] = json!(1);
-    model["nodes"][2]["children"] = json!([3]);
-    model["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"name":"Head","translation":[0.,1.,0.],"children":[4,5]}));
+    let eye = model["nodes"].as_array().unwrap().len();
+    model["nodes"][3]["children"] = json!([eye, eye + 1]);
     model["nodes"].as_array_mut().unwrap().extend([
         json!({"name":"LeftEye","translation":[0.1,0.1,0.],"rotation":Quat::from_rotation_z(0.15).to_array()}),
         json!({"name":"RightEye","translation":[-0.1,0.1,0.]})
     ]);
-    model["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["head"] = json!({"node":3});
-    model["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["leftEye"] = json!({"node":4});
-    model["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["rightEye"] = json!({"node":5});
+    model["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["leftEye"] = json!({"node":eye});
+    model["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["rightEye"] = json!({"node":eye + 1});
     model["extensions"]["VRMC_vrm"]["lookAt"] =
         json!({"type":"bone","offsetFromHeadBone":[0.02,0.03,0.04]});
     model["extensions"]["VRMC_vrm"]["expressions"]["preset"]["blink"] =
@@ -660,6 +811,21 @@ fn scene_instances_remap_bones_and_preserve_native_and_vrma_playback() {
         );
         assert!(gaze_input_active(&app, root));
     }
+    let gaze_eye_rest = app
+        .world()
+        .get::<animation::RestPose>(rigs[0].4)
+        .unwrap()
+        .local
+        .rotation;
+    assert!(
+        app.world()
+            .get::<Transform>(rigs[0].4)
+            .unwrap()
+            .rotation
+            .angle_between(gaze_eye_rest)
+            > 0.01,
+        "VRMA gaze did not rotate the eye bone"
+    );
 
     // LookAt target and overrideLookAt suppression on first instance
     let (root, _, _, head, eye) = rigs[0];
@@ -904,21 +1070,35 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
 #[test]
 fn mtoon_materials_outlines_meta_and_schema_defaults() {
     let toon: schema::Toon = serde_json::from_value(json!({"specVersion":"1.0"})).unwrap();
-    assert_eq!(toon.params.shade_color_factor, Vec3::ONE);
+    assert_eq!(toon.params.shade_color_factor, Vec3::ZERO);
     assert_eq!(toon.params.shading_toony_factor, 0.9);
     assert_eq!(toon.outline_width_mode, schema::OutlineMode::None);
-    assert_eq!(schema::ToonParams::min_size().get(), 112);
+    assert_eq!(schema::ToonParams::min_size().get(), 416);
 
     let gaze: schema::Gaze = serde_json::from_value(json!({"type":"expression"})).unwrap();
-    assert_eq!(gaze.horizontal_inner().output_scale, 1.0);
-    let motion: schema::Motion = serde_json::from_value(
-        json!({"specVersion":"1.0","lookAt":{"offsetFromHeadBone":[0.,0.06,0.]}}),
-    )
+    assert_eq!(gaze.horizontal_inner().output_scale, Some(1.0));
+    assert_eq!(gaze.offset_from_head_bone, Vec3::new(0., 0.06, 0.));
+    let expression_missing_scale: schema::Gaze = serde_json::from_value(json!({
+        "type":"expression",
+        "rangeMapHorizontalOuter":{"inputMaxValue":90.}
+    }))
     .unwrap();
     assert_eq!(
-        motion.look_at.unwrap().offset_from_head_bone,
-        Vec3::new(0., 0.06, 0.)
+        expression_missing_scale.horizontal_outer().output_scale,
+        Some(1.0)
     );
+    let bone_missing_scale: schema::Gaze = serde_json::from_value(json!({
+        "type":"bone",
+        "rangeMapHorizontalOuter":{"inputMaxValue":90.}
+    }))
+    .unwrap();
+    assert_eq!(
+        bone_missing_scale.horizontal_outer().output_scale,
+        Some(10.0)
+    );
+    let motion: schema::Motion =
+        serde_json::from_value(json!({"specVersion":"1.0","lookAt":{"node":3}})).unwrap();
+    assert_eq!(motion.look_at.unwrap().node, 3);
 
     let files = Files::new();
     let mut app = app();
@@ -967,17 +1147,17 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     value["skins"] = json!([{"joints":[1]}]);
     value["nodes"][0]["skin"] = json!(0);
     value["nodes"][0]["mesh"] = json!(0);
-    value["nodes"][1]["mesh"] = json!(0);
-    value["nodes"][1]["scale"] = json!([-1, 1, 1]);
+    value["scenes"][0]["nodes"] = json!([0]);
     value["materials"] = json!([
         {
             "alphaMode":"OPAQUE",
+            "doubleSided":true,
             "pbrMetallicRoughness":{"baseColorTexture":{"index":0,"extensions":{"KHR_texture_transform":{"offset":[0.5,0.25]}}}},
-            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","outlineWidthMode":"screenCoordinates","outlineWidthFactor":0.001,"renderQueueOffsetNumber":5.0,"shadingShiftTexture":{"index":0}}}
+            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","outlineWidthMode":"screenCoordinates","outlineWidthFactor":0.001,"renderQueueOffsetNumber":0,"shadingShiftTexture":{"index":0}}}
         },
         {
             "alphaMode":"BLEND",
-            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","renderQueueOffsetNumber":3.0}}
+            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","renderQueueOffsetNumber":-3.0}}
         },
         {
             "alphaMode":"BLEND",
@@ -987,11 +1167,21 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     value["extensions"]["VRMC_vrm"]["meta"] = json!({
         "name":"Ene Avatar",
         "authors":["Test Author"],
-        "thumbnailImage":0,
-        "commercialUsage":"personalCommercial"
+        "licenseUrl":"https://vrm.dev/licenses/1.0/",
+        "commercialUsage":"personalNonProfit"
     });
     let path = files.write("full.vrm", &value);
-    let handle: Handle<Gltf> = app.world().resource::<AssetServer>().load(path.clone());
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load_builder()
+        .with_settings(|s: &mut bevy::gltf::GltfLoaderSettings| {
+            s.convert_coordinates = Some(bevy::gltf::convert_coordinates::GltfConvertCoordinates {
+                rotate_scene_entity: false,
+                rotate_meshes: true,
+            });
+        })
+        .load(path.clone());
     let m0: Handle<MToonMaterial> = app
         .world()
         .resource::<AssetServer>()
@@ -1011,8 +1201,13 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     assert_eq!(mat0.base.depth_bias, 0.0);
     assert_eq!(mat0.base.uv_transform.translation, Vec2::new(0.5, 0.25));
     assert!(mat0.extension.shift.is_some());
-    assert_eq!(materials.get(&m1).unwrap().base.depth_bias, 3.0);
-    assert_eq!(materials.get(&m2).unwrap().base.depth_bias, 2.0 - 10.0);
+    assert_eq!(mat0.extension.params.texture_uvs, 0);
+    assert_eq!(
+        mat0.extension.params.uv_transforms[1],
+        bevy::math::Mat3::IDENTITY
+    );
+    assert_eq!(materials.get(&m1).unwrap().base.depth_bias, -3.0);
+    assert_eq!(materials.get(&m2).unwrap().base.depth_bias, 2.0 - 20.0);
 
     let scene = app
         .world()
@@ -1027,14 +1222,52 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
         app.update();
     }
     let vrm = app.world_mut().query::<&Vrm>().single(app.world()).unwrap();
-    assert_eq!(vrm.meta.as_ref().unwrap().name, "Ene Avatar");
-    assert!(vrm.thumbnail.is_some());
+    assert_eq!(vrm.meta.name, "Ene Avatar");
     let outlines = app
         .world_mut()
         .query_filtered::<&MeshMaterial3d<MToonMaterial>, With<NotShadowCaster>>()
         .iter(app.world())
         .count();
-    assert_eq!(outlines, 2);
+    assert_eq!(outlines, 1);
+
+    // Outlines are children of their body so visibility and despawn are
+    // inherited; their local transform is identity.
+    let mut bodies: HashMap<Entity, (usize, GlobalTransform)> = HashMap::default();
+    let mut outline_entities = Vec::new();
+    let mut query = app.world_mut().query::<(
+        Entity,
+        &ChildOf,
+        &MaterialSlot,
+        &Transform,
+        &GlobalTransform,
+        Option<&Outline>,
+    )>();
+    for (entity, parent, slot, transform, global, outline) in query.iter(app.world()) {
+        if outline.is_some() {
+            outline_entities.push((entity, parent.parent(), slot.0, *transform, *global));
+        } else {
+            bodies.insert(entity, (slot.0, *global));
+        }
+    }
+    assert_eq!(outline_entities.len(), 1);
+    for (_, parent, slot, transform, global) in &outline_entities {
+        let (body_slot, body_global) = bodies.get(parent).expect("outline parent is the body");
+        assert_eq!(*body_slot, *slot);
+        assert_eq!(*transform, Transform::IDENTITY);
+        assert_eq!(*global, *body_global);
+    }
+
+    let (outline, body) = (outline_entities[0].0, outline_entities[0].1);
+    app.world_mut()
+        .entity_mut(body)
+        .insert((Visibility::Hidden, RenderLayers::layer(3)));
+    app.update();
+    let visibility = app.world().get::<InheritedVisibility>(outline).unwrap();
+    assert!(!visibility.get(), "outline ignores the body's visibility");
+    assert_eq!(
+        app.world().get::<RenderLayers>(outline).unwrap(),
+        &RenderLayers::layer(3)
+    );
 }
 
 #[test]
@@ -1145,5 +1378,233 @@ fn gpu_model_material_skin_morph_and_outline_smoke() {
             .iter(app.world())
             .count()
             > 0
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU; runs in CI with lavapipe"]
+fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
+    use bevy::mesh::PrimitiveTopology;
+    use bevy::render::{
+        RenderApp, RenderPlugin,
+        render_resource::{CachedPipelineState, PipelineCache},
+    };
+    let plugins = DefaultPlugins
+        .build()
+        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+    #[cfg(windows)]
+    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+    let mut app = App::new();
+    app.add_plugins(
+        plugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                synchronous_pipeline_compilation: true,
+                ..default()
+            }),
+    )
+    .add_plugins(VrmPlugin)
+    .insert_resource(ClearColor(Color::NONE));
+    while app.plugins_state() != bevy::app::PluginsState::Ready {
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        std::thread::yield_now();
+    }
+    app.finish();
+    app.cleanup();
+
+    let image = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(Image::new_fill(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[128, 128, 128, 255],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        ));
+    let toon: schema::Toon = serde_json::from_value(json!({
+        "specVersion":"1.0",
+        "shadeMultiplyTexture":{"index":0,"texCoord":1},
+        "uvAnimationMaskTexture":{"index":0,"texCoord":1},
+        "outlineWidthMode":"screenCoordinates",
+        "outlineWidthFactor":0.01,
+        "outlineWidthMultiplyTexture":{"index":0,"texCoord":1}
+    }))
+    .unwrap();
+    let body_material =
+        app.world_mut()
+            .resource_mut::<Assets<MToonMaterial>>()
+            .add(MToonMaterial {
+                base: StandardMaterial::default(),
+                extension: MToonExtension::new(&toon, std::slice::from_ref(&image)),
+            });
+    let mut outline_extension = MToonExtension::new(&toon, std::slice::from_ref(&image));
+    outline_extension.outline = Some(schema::OutlineMode::ScreenCoordinates);
+    let outline_material =
+        app.world_mut()
+            .resource_mut::<Assets<MToonMaterial>>()
+            .add(MToonMaterial {
+                base: StandardMaterial {
+                    cull_mode: Some(bevy::render::render_resource::Face::Back),
+                    ..default()
+                },
+                extension: outline_extension,
+            });
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![[-1., -1., 0.], [1., -1., 0.], [0., 1., 0.]],
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 3]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0., 0.], [1., 0.], [0., 1.]]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, vec![[0., 0.], [1., 0.], [0., 1.]]);
+    let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+    let body = app
+        .world_mut()
+        .spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(body_material),
+            Visibility::Visible,
+            NoFrustumCulling,
+        ))
+        .id();
+    app.world_mut().spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(outline_material),
+        Visibility::Visible,
+        NoFrustumCulling,
+        NotShadowCaster,
+        Transform::IDENTITY,
+        ChildOf(body),
+    ));
+
+    let target = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(Image::new_target_texture(
+            64,
+            64,
+            TextureFormat::Rgba8UnormSrgb,
+            None,
+        ));
+    app.world_mut().spawn((
+        Camera3d::default(),
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::camera::RenderTarget::Image(target.into()),
+        Transform::from_xyz(0., 0., 3.).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    app.world_mut().spawn((
+        DirectionalLight::default(),
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
+    ));
+    for _ in 0..30 {
+        app.update();
+    }
+    for pipeline in app
+        .sub_app(RenderApp)
+        .world()
+        .resource::<PipelineCache>()
+        .pipelines()
+    {
+        assert!(
+            !matches!(pipeline.state, CachedPipelineState::Err(_)),
+            "{:?}",
+            pipeline.state
+        );
+    }
+}
+
+#[test]
+fn constraint_in_unselected_scene_does_not_fail_selected_scene() {
+    let files = Files::new();
+    let mut app = app();
+    let mut model = files.model();
+    let other = model["nodes"].as_array().unwrap().len();
+    model["nodes"].as_array_mut().unwrap().push(json!({}));
+    model["scenes"] = json!([{"nodes":[0, other]}, {"nodes":[0]}]);
+    model["scene"] = json!(1);
+    model["nodes"][other]["extensions"] = json!({
+        "VRMC_node_constraint": {
+            "specVersion": "1.0",
+            "constraint": {"rotation": {"source": 1}}
+        }
+    });
+    let handle: Handle<bevy::gltf::Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("scenes.vrm", &model));
+    settle(&mut app, std::slice::from_ref(&handle));
+    assert!(
+        app.world()
+            .resource::<AssetServer>()
+            .is_loaded_with_dependencies(handle.id()),
+        "constraint outside the selected scene blocked the load"
+    );
+}
+
+#[test]
+fn humanoid_accepts_non_humanoid_nodes_between_bones() {
+    let files = Files::new();
+    let mut app = app();
+    let mut model = files.model();
+    let extra = model["nodes"].as_array().unwrap().len();
+    model["nodes"].as_array_mut().unwrap().push(json!({
+        "name": "Intermediate",
+        "children": [2]
+    }));
+    model["nodes"][1]["children"] = json!([extra, 4, 7]);
+    let handle: Handle<bevy::gltf::Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("intermediate.vrm", &model));
+    settle(&mut app, std::slice::from_ref(&handle));
+    assert!(
+        app.world()
+            .resource::<AssetServer>()
+            .is_loaded_with_dependencies(handle.id()),
+        "non-humanoid intermediate node was rejected"
+    );
+}
+
+#[test]
+fn only_the_selected_scene_is_attached() {
+    let files = Files::new();
+    let mut app = app();
+    let mut model = files.model();
+    model["scenes"] = json!([{"nodes":[0]},{"nodes":[0]}]);
+    model["scene"] = json!(1);
+    let handle: Handle<bevy::gltf::Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("two-scenes.vrm", &model));
+    settle(&mut app, std::slice::from_ref(&handle));
+    let scenes = app
+        .world()
+        .resource::<Assets<Gltf>>()
+        .get(&handle)
+        .unwrap()
+        .scenes
+        .clone();
+    app.world_mut().spawn(WorldAssetRoot(scenes[0].clone()));
+    app.world_mut().spawn(WorldAssetRoot(scenes[1].clone()));
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(
+        app.world_mut().query::<&Vrm>().iter(app.world()).count(),
+        1,
+        "the non-default scene was validated and attached"
     );
 }

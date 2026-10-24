@@ -3,11 +3,7 @@ use crate::{
     animation::{self, RestPose},
     expressions, schema,
 };
-use bevy::{
-    ecs::{entity::MapEntities, system::SystemChangeTick},
-    prelude::*,
-    transform::helper::TransformHelper,
-};
+use bevy::{ecs::system::SystemChangeTick, prelude::*, transform::helper::TransformHelper};
 
 /// Optional world-space target. `None` allows VRMA gaze animation.
 #[derive(Component, Clone, Default, Reflect)]
@@ -16,7 +12,7 @@ pub struct LookAt {
     pub target: Option<Vec3>,
 }
 
-#[derive(Component, Clone, Reflect, MapEntities)]
+#[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct Gaze {
     pub(crate) definition: schema::Gaze,
@@ -96,14 +92,23 @@ fn look_at(
         } else {
             continue;
         };
-        gaze.active = matches!(gaze.definition.r#type, schema::GazeType::Bone);
+        // VRM 1.0 makes leftEye/rightEye optional. UniVRM falls back to
+        // expression LookAt when a `bone` model has no eye bones; follow that
+        // instead of silently doing nothing.
+        let has_eyes = vrm.bone("leftEye").is_some() && vrm.bone("rightEye").is_some();
+        let bone = matches!(gaze.definition.r#type, schema::GazeType::Bone) && has_eyes;
+        gaze.active = bone;
         let def = &gaze.definition;
         let pitch = if angles.y > 0. {
             def.vertical_up().map(angles.y)
         } else {
             -def.vertical_down().map(angles.y)
         };
-        match def.r#type {
+        match if bone {
+            schema::GazeType::Bone
+        } else {
+            schema::GazeType::Expression
+        } {
             schema::GazeType::Bone => {
                 let p2 = transforms.p2();
                 let scale = binds.map_or(1., |b| {

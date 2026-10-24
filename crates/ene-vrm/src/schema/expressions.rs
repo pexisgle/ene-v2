@@ -29,8 +29,11 @@ pub(crate) struct Expression {
     pub override_blink: Override,
     pub override_mouth: Override,
     pub override_look_at: Override,
+    #[serde(default)]
     pub morph_target_binds: Vec<MorphBind>,
+    #[serde(default)]
     pub material_color_binds: Vec<ColorBind>,
+    #[serde(default)]
     pub texture_transform_binds: Vec<TextureBind>,
 }
 
@@ -80,11 +83,17 @@ pub(crate) enum ColorType {
 }
 
 #[derive(Clone, Debug, Deserialize, Reflect)]
-#[serde(default)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct TextureBind {
     pub material: usize,
+    #[serde(default = "default_uv_scale")]
     pub scale: Vec2,
+    #[serde(default)]
     pub offset: Vec2,
+}
+
+fn default_uv_scale() -> Vec2 {
+    Vec2::ONE
 }
 
 impl Default for TextureBind {

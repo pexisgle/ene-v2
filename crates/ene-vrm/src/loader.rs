@@ -83,7 +83,7 @@ impl AssetLoader for VrmLoader {
             .world
             .iter_entities()
             .find_map(|e| Some((e.id(), e.get::<VrmScene>()?)))
-            .ok_or_else(|| invalid("VRMC scene validation unavailable"))?;
+            .ok_or_else(|| invalid("VRMC scene data unavailable"))?;
         if let Some(motion) = result.0.as_ref().map_err(|e| invalid(e.to_string()))? {
             for (label, clip) in crate::animation::retarget_motion(
                 &motion.source,
@@ -117,6 +117,10 @@ pub(crate) fn extension<T: serde::de::DeserializeOwned>(
 ) -> std::io::Result<T> {
     T::deserialize(value.ok_or_else(|| invalid(format!("missing {name}")))?).map_err(invalid)
 }
+fn render_queue_bias(offset: f32, z_write: bool) -> f32 {
+    offset + if z_write { -20. } else { 0. }
+}
+
 pub(crate) fn require_node(
     nodes: &HashMap<usize, Entity>,
     index: usize,
@@ -125,42 +129,6 @@ pub(crate) fn require_node(
         .get(&index)
         .copied()
         .ok_or_else(|| invalid(format!("VRMC node {index} is outside the selected scene")))
-}
-
-fn validate_humanoid(
-    humanoid: &schema::Humanoid,
-    nodes: &HashMap<usize, Entity>,
-    world: &mut World,
-    is_motion: bool,
-) -> std::io::Result<()> {
-    if !humanoid.human_bones.contains_key("hips") {
-        return Err(invalid("VRMC humanoid requires hips"));
-    }
-    let mut parent_query = world.query::<&ChildOf>();
-    let parents = parent_query.query(world);
-    let mut used = std::collections::HashSet::new();
-    for (name, node) in &humanoid.human_bones {
-        if is_motion && matches!(name.as_str(), "leftEye" | "rightEye") {
-            return Err(invalid("VRMA humanoid prohibits eye bones"));
-        }
-        let mut parent = schema::humanoid_parent(name)
-            .ok_or_else(|| invalid(format!("unknown VRMC humanoid bone {name}")))?;
-        let entity = require_node(nodes, node.node)?;
-        if !used.insert(node.node) {
-            return Err(invalid("VRMC humanoid bones must reference distinct nodes"));
-        }
-        while !parent.is_empty() {
-            if let Some(anc) = humanoid.human_bones.get(parent) {
-                let anc_entity = require_node(nodes, anc.node)?;
-                if !parents.iter_ancestors(entity).any(|e| e == anc_entity) {
-                    return Err(invalid("VRMC humanoid bone violates hierarchy"));
-                }
-                break;
-            }
-            parent = schema::humanoid_parent(parent).unwrap_or("");
-        }
-    }
-    Ok(())
 }
 
 // Extension hooks cannot return errors; the wrapper reads this load-only result.
@@ -181,15 +149,19 @@ enum Definition {
 #[derive(Default)]
 struct VrmExtensions {
     definition: Option<std::io::Result<Definition>>,
+    /// glTF scene that Bevy's `default_scene` (or the first scene) resolves to.
+    selected_scene: usize,
     materials: HashMap<usize, schema::Toon>,
     springs: Option<schema::Springs>,
     nodes: HashMap<usize, Entity>,
     textures: Vec<Handle<Image>>,
     constraints: Vec<(usize, schema::NodeConstraint)>,
-    thumbnail: Option<Handle<Image>>,
-    thumbnail_texture: Option<usize>,
 }
 
+// Reject data this crate cannot use (missing extension, dangling indices,
+// constraint cycles), but leave VRM schema conformance to authoring tools so a
+// renderable file still loads.
+// ponytail: no JSON Schema pass; add one if import diagnostics are needed.
 impl GltfExtensionHandler for VrmExtensions {
     fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
         Box::<Self>::default()
@@ -198,85 +170,29 @@ impl GltfExtensionHandler for VrmExtensions {
         &mut self,
         context: &mut LoadContext<'_>,
         source: &gltf::Gltf,
-        settings: &GltfLoaderSettings,
+        _settings: &GltfLoaderSettings,
     ) {
         let suffix = context.path().path().extension().and_then(|x| x.to_str());
-        let motion = suffix == Some("vrma")
-            || (suffix != Some("vrm")
-                && source.extension_value("VRMC_vrm").is_none()
-                && source.extension_value("VRMC_vrm_animation").is_some());
-        if !motion && suffix != Some("vrm") && source.extension_value("VRMC_vrm").is_none() {
+        let motion = suffix == Some("vrma");
+        if !motion && suffix != Some("vrm") {
             return;
         }
+        self.selected_scene = source.default_scene().map_or(0, |scene| scene.index());
         self.definition = Some((|| {
             if motion {
-                return Ok(Definition::Motion(Arc::new(extension(
+                let motion: schema::Motion = extension(
                     source.extension_value("VRMC_vrm_animation"),
                     "VRMC_vrm_animation",
-                )?)));
+                )?;
+                return Ok(Definition::Motion(Arc::new(motion)));
             }
             let model: schema::Model = extension(source.extension_value("VRMC_vrm"), "VRMC_vrm")?;
-            if let Some(img) = model.meta.as_ref().and_then(|m| m.thumbnail_image) {
-                let image = source
-                    .images()
-                    .nth(img)
-                    .ok_or_else(|| invalid("VRM thumbnail image out of range"))?;
-                if let Some(t) = source.textures().find(|t| t.source().index() == img) {
-                    self.thumbnail_texture = Some(t.index());
-                } else {
-                    self.thumbnail = match image.source() {
-                        gltf::image::Source::Uri { uri, .. } => Some(
-                            context.load(context.path().resolve_embed_str(uri).map_err(invalid)?),
-                        ),
-                        gltf::image::Source::View { view, mime_type } => source
-                            .blob
-                            .as_deref()
-                            .and_then(|b| b.get(view.offset()..view.offset() + view.length()))
-                            .map(|bytes| {
-                                Image::from_buffer(
-                                    bytes,
-                                    bevy::image::ImageType::MimeType(mime_type),
-                                    CompressedImageFormats::NONE,
-                                    true,
-                                    bevy::image::ImageSampler::Default,
-                                    settings.load_materials,
-                                )
-                                .map(|img| context.add_labeled_asset("VrmThumbnail", img))
-                                .map_err(invalid)
-                            })
-                            .transpose()?,
-                    };
-                }
-            }
-            if model
-                .expressions
-                .materials()
-                .any(|i| i >= source.materials().len())
-            {
-                return Err(invalid("VRM expression material out of range"));
-            }
             for material in source.materials() {
                 if let Some(value) = material.extension_value("VRMC_materials_mtoon") {
-                    let toon = schema::Toon::deserialize(value).map_err(invalid)?;
-                    if !toon.render_queue_offset_number.is_finite()
-                        || !(-9. ..=9.).contains(&toon.render_queue_offset_number)
-                        || toon
-                            .shading_shift_texture
-                            .as_ref()
-                            .is_some_and(|s| s.scale.is_some_and(|sc| !sc.is_finite()))
-                    {
-                        return Err(invalid("MToon parameters out of range"));
-                    }
-                    if toon
-                        .textures()
-                        .into_iter()
-                        .flatten()
-                        .any(|t| t.index.value() >= source.textures().len())
-                    {
-                        return Err(invalid("MToon texture out of range"));
-                    }
-                    self.materials
-                        .insert(material.index().expect("indexed material"), toon);
+                    self.materials.insert(
+                        material.index().expect("indexed material"),
+                        schema::Toon::deserialize(value).map_err(invalid)?,
+                    );
                 }
             }
             self.springs = source
@@ -326,12 +242,10 @@ impl GltfExtensionHandler for VrmExtensions {
         };
         base.opaque_render_method = bevy::material::OpaqueRendererMethod::Forward;
         if base.alpha_mode == AlphaMode::Blend {
-            base.depth_bias += toon.render_queue_offset_number
-                + if toon.transparent_with_z_write {
-                    -10.
-                } else {
-                    0.
-                };
+            base.depth_bias += render_queue_bias(
+                toon.render_queue_offset_number,
+                toon.transparent_with_z_write,
+            );
         }
         let material = MToonMaterial {
             base,
@@ -341,7 +255,7 @@ impl GltfExtensionHandler for VrmExtensions {
         if toon.outline_width_mode != schema::OutlineMode::None {
             let mut outline = material.clone();
             outline.base.double_sided = false;
-            if outline.base.cull_mode.is_none() && label.ends_with("/inverted/vrm") {
+            if outline.base.cull_mode.is_none() && label.ends_with("(inverted)/vrm") {
                 outline.base.cull_mode = Some(bevy::render::render_resource::Face::Front);
             }
             outline.extension.outline = Some(toon.outline_width_mode);
@@ -352,7 +266,7 @@ impl GltfExtensionHandler for VrmExtensions {
     fn on_spawn_mesh_and_material(
         &mut self,
         context: &mut LoadContext<'_>,
-        _: &gltf::Primitive,
+        _primitive: &gltf::Primitive,
         _: &gltf::Mesh,
         source: &gltf::Material,
         entity: &mut EntityWorldMut,
@@ -387,13 +301,19 @@ impl GltfExtensionHandler for VrmExtensions {
     fn on_scene_completed(
         &mut self,
         context: &mut LoadContext<'_>,
-        _: &gltf::Scene,
+        scene: &gltf::Scene,
         root: Entity,
         world: &mut World,
     ) {
         let Some(definition) = &self.definition else {
             return;
         };
+        // VRM metadata is document-wide but nodes are per-scene. Only the scene
+        // that Bevy (and `VrmLoader::load`) uses may be attached.
+        if scene.index() != self.selected_scene {
+            self.nodes.clear();
+            return;
+        }
         let result = (|| {
             let definition = definition.as_ref().map_err(|e| invalid(e.to_string()))?;
             world
@@ -410,76 +330,40 @@ impl GltfExtensionHandler for VrmExtensions {
                                 .get_label_handle(format!("{}/outline", handle.path()?.label()?)),
                         )
                     });
-                    validate_humanoid(&model.humanoid, &self.nodes, world, false)?;
-                    for a in &model.first_person.mesh_annotations {
-                        require_node(&self.nodes, a.node)?;
-                    }
-                    if let Some(g) = &model.look_at
-                        && (!g.offset_from_head_bone.is_finite()
-                            || [
-                                g.horizontal_inner(),
-                                g.horizontal_outer(),
-                                g.vertical_down(),
-                                g.vertical_up(),
-                            ]
-                            .into_iter()
-                            .any(|r| {
-                                !r.input_max_value.is_finite()
-                                    || r.input_max_value <= 0.
-                                    || !r.output_scale.is_finite()
-                                    || r.output_scale < 0.
-                            }))
-                    {
-                        return Err(invalid("VRM lookAt contains invalid range map or offset"));
-                    }
-                    let thumbnail = self.thumbnail.clone().or_else(|| {
-                        self.thumbnail_texture
-                            .and_then(|i| self.textures.get(i).cloned())
-                    });
+                    let constraints: Vec<_> = self
+                        .constraints
+                        .iter()
+                        .filter(|(node, _)| self.nodes.contains_key(node))
+                        .cloned()
+                        .collect();
                     runtime::attach(
                         world,
                         root,
                         model,
-                        thumbnail,
                         self.springs.as_ref(),
-                        &self.constraints,
+                        &constraints,
                         &self.nodes,
                     )?;
                     Ok(None)
                 }
-                Definition::Motion(motion) => {
-                    if let Some(humanoid) = &motion.humanoid {
-                        validate_humanoid(humanoid, &self.nodes, world, true)?;
-                    }
-                    if motion.expressions.preset.keys().any(|k| {
-                        matches!(
-                            k.as_str(),
-                            "lookUp" | "lookDown" | "lookLeft" | "lookRight" | "neutral"
-                        )
-                    }) {
-                        return Err(invalid("VRMA preset expression is prohibited"));
-                    }
-                    if let Some(l) = &motion.look_at
-                        && !l.offset_from_head_bone.is_finite()
-                    {
-                        return Err(invalid("VRMA lookAt offset must be finite"));
-                    }
-                    for &node in motion
-                        .expressions
-                        .iter()
-                        .map(|(_, n)| &n.node)
-                        .chain(motion.look_at.as_ref().and_then(|l| l.node.as_ref()))
-                    {
-                        require_node(&self.nodes, node)?;
-                    }
-                    Ok(Some(MotionScene {
-                        source: motion.clone(),
-                        nodes: std::mem::take(&mut self.nodes),
-                    }))
-                }
+                Definition::Motion(motion) => Ok(Some(MotionScene {
+                    source: motion.clone(),
+                    nodes: std::mem::take(&mut self.nodes),
+                })),
             }
         })();
         world.entity_mut(root).insert(VrmScene(result));
         self.nodes.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_queue_bias;
+
+    #[test]
+    fn render_queue_offset_groups_are_disjoint() {
+        assert!(render_queue_bias(9., true) < render_queue_bias(-9., false));
+        assert!(render_queue_bias(0., true) < render_queue_bias(0., false));
     }
 }

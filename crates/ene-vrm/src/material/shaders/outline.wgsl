@@ -1,6 +1,6 @@
 #import "embedded://bevy_pbr/render/mesh.wgsl" as native_mesh
-#import bevy_pbr::{forward_io::{Vertex, VertexOutput}, mesh_functions, mesh_view_bindings::view, pbr_bindings::material, view_transformations::position_world_to_clip}
-#import ene_vrm::toon::{toon, animated_uv, width_texture, width_sampler, linear_to_srgb_f32}
+#import bevy_pbr::{forward_io::{Vertex, VertexOutput}, mesh_functions, mesh_view_bindings::view, view_transformations::position_world_to_clip}
+#import ene_vrm::toon::{toon, animated_uv, uv_animation_mask, texture_uv, linear_to_srgb_f32, width_texture, width_sampler}
 
 @vertex
 fn vertex(input: Vertex) -> VertexOutput {
@@ -12,9 +12,29 @@ fn vertex(input: Vertex) -> VertexOutput {
 #endif
     var out = native_mesh::vertex(corrected);
     var width = toon.outline_width_factor;
+#ifdef MTOON_UVS
 #ifdef VERTEX_UVS_A
-    let uv = (material.uv_transform * vec3(animated_uv(out.uv), 1.0)).xy;
-    if (toon.texture_flags & 32u) != 0u { width *= linear_to_srgb_f32(textureSampleLevel(width_texture, width_sampler, uv, 0.).g); }
+    var raw_uv0 = out.uv;
+#else
+    var raw_uv0 = vec2<f32>(0.0);
+#endif
+#ifdef VERTEX_UVS_B
+    var raw_uv1 = out.uv_b;
+#else
+    var raw_uv1 = vec2<f32>(0.0);
+#endif
+#ifndef VERTEX_UVS_A
+    raw_uv0 = raw_uv1;
+#endif
+#ifndef VERTEX_UVS_B
+    raw_uv1 = raw_uv0;
+#endif
+    let mask = uv_animation_mask(texture_uv(raw_uv0, raw_uv1, 4u));
+    let uv0 = animated_uv(raw_uv0, mask);
+    let uv1 = animated_uv(raw_uv1, mask);
+    if (toon.texture_flags & 32u) != 0u {
+        width *= linear_to_srgb_f32(textureSampleLevel(width_texture, width_sampler, texture_uv(uv0, uv1, 5u), 0.).g);
+    }
 #endif
 #ifdef SCREEN_SPACE_OUTLINE
     // Screen width is a fraction of viewport height, independent of distance.

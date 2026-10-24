@@ -114,6 +114,7 @@ pub(crate) fn retarget_motion(
         animated_field!(Transform::translation),
     );
     let (rot_id, trans_id) = (rot_prop.evaluator_id(), trans_prop.evaluator_id());
+    let gaze_node = motion.look_at.as_ref().map(|l| l.node);
     let mut clips = Vec::new();
     for animation in source.animations() {
         let label = format!("Animation{}", animation.index());
@@ -121,29 +122,44 @@ pub(crate) fn retarget_motion(
             .get_labeled(&label)
             .and_then(|x| x.get::<AnimationClip>())
             .ok_or_else(|| invalid("VRMA clip unavailable"))?;
-        let mut curves: HashMap<_, _> = native
-            .curves()
-            .iter()
-            .map(|(id, c)| (*id, c.iter()))
-            .collect();
         let mut clip = AnimationClip::default();
         clip.set_duration(native.duration());
         for channel in animation.channels() {
             let node = channel.target().node().index();
-            let entity = require_node(nodes, node)?;
-            let id = world
-                .get::<AnimationTargetId>(entity)
-                .ok_or_else(|| invalid("VRMA animated node has no native target"))?;
-            let curve = curves
-                .get_mut(id)
-                .and_then(Iterator::next)
-                .ok_or_else(|| invalid("VRMA channel has no native curve"))?;
+            let property = channel.target().property();
             let bone =
                 bones.and_then(|b| b.iter().find_map(|(k, v)| (v.node == node).then_some(k)));
             let expr = motion
                 .expressions
                 .iter()
                 .find_map(|(k, v)| (v.node == node).then_some(k));
+            let gaze = gaze_node == Some(node);
+            let relevant = match property {
+                gltf::animation::Property::Rotation => bone.is_some() || gaze,
+                gltf::animation::Property::Translation => {
+                    bone.is_some_and(|b| b == "hips") || expr.is_some()
+                }
+                _ => false,
+            };
+            if !relevant {
+                continue;
+            }
+            let entity = require_node(nodes, node)?;
+            let id = world
+                .get::<AnimationTargetId>(entity)
+                .ok_or_else(|| invalid("VRMA animated node has no native target"))?;
+            // Bevy skips channels it cannot decode (for example sparse sampler inputs).
+            // Match by property/evaluator instead of channel position, and skip a channel
+            // whose native curve is absent rather than failing the whole VRMA.
+            let Some(curve) = native.curves().get(id).and_then(|curves| {
+                curves.iter().find(|curve| match property {
+                    gltf::animation::Property::Rotation => curve.0.evaluator_id() == rot_id,
+                    gltf::animation::Property::Translation => curve.0.evaluator_id() == trans_id,
+                    _ => false,
+                })
+            }) else {
+                continue;
+            };
             let domain = curve.0.domain();
             let (&local, global) = world
                 .entity(entity)
@@ -195,7 +211,7 @@ pub(crate) fn retarget_motion(
                 && let Some(expr) = expr
             {
                 clip.add_variable_curve_to_target(expression_target(expr), curve.clone());
-            } else if eval == rot_id && motion.look_at.as_ref().and_then(|l| l.node) == Some(node) {
+            } else if eval == rot_id && motion.look_at.as_ref().map(|l| l.node) == Some(node) {
                 clip.add_variable_curve_to_target(gaze_target(), curve.clone());
             }
         }

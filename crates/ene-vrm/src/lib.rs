@@ -15,8 +15,8 @@ mod tests;
 use bevy::{app::AnimationSystems, prelude::*, transform::TransformSystems};
 pub use expressions::ExpressionWeights;
 pub use material::{MToonExtension, MToonMaterial};
-pub use runtime::{LookAt, SpringJointProps, SpringRig, Vrm};
-pub use schema::VrmMeta;
+pub use runtime::{HumanoidBone, LookAt, SpringJointProps, SpringRig, Vrm};
+pub use schema::{AvatarPermission, CommercialUsage, CreditNotation, Modification, VrmMeta};
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VrmSystems {

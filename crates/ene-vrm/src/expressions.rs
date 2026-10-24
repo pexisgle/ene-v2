@@ -26,7 +26,7 @@ pub(crate) struct MorphTarget {
     pub node: usize,
 }
 
-#[derive(Component, Clone, Reflect, MapEntities)]
+#[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct Binds {
     pub definitions: std::sync::Arc<schema::Expressions>,
@@ -84,17 +84,6 @@ pub(crate) fn attach(
         .collect();
     let mut morphs: HashMap<usize, MorphTarget> = HashMap::default();
     for (_, expr) in definitions.iter() {
-        if expr
-            .material_color_binds
-            .iter()
-            .any(|b| !b.target_value.is_finite())
-            || expr
-                .texture_transform_binds
-                .iter()
-                .any(|b| !b.scale.is_finite() || !b.offset.is_finite())
-        {
-            return Err(invalid("VRM material bind contains non-finite values"));
-        }
         for bind in &expr.morph_target_binds {
             let entity = require_node(nodes, bind.node)?;
             let rest = world
@@ -142,39 +131,60 @@ pub(crate) fn setup(app: &mut App) {
         );
 }
 
+/// Clone each affected material once per scene instance.
+///
+/// A root without `MaterialBinds` is retried every frame until every affected
+/// material is available; only then are handles replaced. An empty map marks
+/// roots whose expressions do not target materials.
+#[allow(clippy::type_complexity)]
 fn initialize_materials<M: bevy::pbr::Material + Clone>(
     mut commands: Commands,
-    roots: Query<(Entity, &Binds), Added<Binds>>,
+    roots: Query<(Entity, &Binds), Without<MaterialBinds<M>>>,
     children: Query<&Children>,
-    mut meshes: Query<(&crate::material::MaterialSlot, &mut MeshMaterial3d<M>)>,
+    mut meshes: ParamSet<(
+        Query<(&crate::material::MaterialSlot, &MeshMaterial3d<M>)>,
+        Query<&mut MeshMaterial3d<M>>,
+    )>,
     mut materials: ResMut<Assets<M>>,
 ) {
     for (root, binds) in &roots {
-        let mut instances = HashMap::default();
         let affected: std::collections::HashSet<_> = binds.definitions.materials().collect();
-        for entity in children.iter_descendants(root) {
-            let Ok((slot, mut handle)) = meshes.get_mut(entity) else {
-                continue;
-            };
-            if !affected.contains(&slot.0) {
-                continue;
+        let mut targets = Vec::new();
+        let mut pending = false;
+        {
+            let meshes = meshes.p0();
+            for entity in std::iter::once(root).chain(children.iter_descendants(root)) {
+                let Ok((slot, handle)) = meshes.get(entity) else {
+                    continue;
+                };
+                if !affected.contains(&slot.0) {
+                    continue;
+                }
+                if !materials.contains(&handle.0) {
+                    pending = true;
+                    break;
+                }
+                targets.push((entity, slot.0, handle.0.clone()));
             }
-            let clone = match instances.entry((slot.0, handle.0.clone())) {
+        }
+        if pending {
+            continue;
+        }
+        let mut instances = HashMap::default();
+        let mut handles = meshes.p1();
+        for (entity, slot, original) in targets {
+            let clone = match instances.entry((slot, original.clone())) {
                 Entry::Occupied(e) => e.into_mut(),
                 Entry::Vacant(e) => {
-                    let Some(mat) = materials.get(&handle.0).cloned() else {
-                        continue;
-                    };
-                    e.insert(materials.add(mat))
+                    let material = materials.get(&original).cloned().expect("checked above");
+                    e.insert(materials.add(material))
                 }
             };
-            handle.0 = clone.clone();
+            if let Ok(mut handle) = handles.get_mut(entity) {
+                handle.0 = clone.clone();
+            }
         }
-        if instances.is_empty() {
-            commands.entity(root).remove::<MaterialBinds<M>>();
-        } else {
-            commands.entity(root).insert(MaterialBinds::<M>(instances));
-        }
+        commands.entity(root).insert(MaterialBinds::<M>(instances));
     }
 }
 
@@ -192,19 +202,14 @@ fn weight(name: &str, e: &schema::Expression, raw: impl Fn(&str) -> f32) -> f32 
     if e.is_binary { f32::from(v > 0.5) } else { v }
 }
 
-pub(crate) fn look_at_scale(binds: &schema::Expressions, raw: impl Fn(&str) -> f32) -> f32 {
-    let rate: f32 = binds
-        .iter()
-        .filter(|(n, _)| !(binds.preset.contains_key(*n) && category(n) == Some(2)))
-        .map(|(n, e)| e.override_look_at.rate(weight(n, e, &raw)))
-        .sum();
-    1. - rate.clamp(0., 1.)
-}
-
-fn effective(
+#[allow(clippy::type_complexity)]
+fn weights_and_rates(
     binds: &schema::Expressions,
     raw: impl Fn(&str) -> f32,
-) -> Vec<(&str, &schema::Expression, f32)> {
+) -> (
+    Vec<(&str, &schema::Expression, f32, Option<usize>)>,
+    [f32; 3],
+) {
     let weights: Vec<_> = binds
         .preset
         .iter()
@@ -228,6 +233,19 @@ fn effective(
             }
         }
     }
+    (weights, rates)
+}
+
+pub(crate) fn look_at_scale(binds: &schema::Expressions, raw: impl Fn(&str) -> f32) -> f32 {
+    let (_, rates) = weights_and_rates(binds, raw);
+    1. - rates[2].clamp(0., 1.)
+}
+
+fn effective(
+    binds: &schema::Expressions,
+    raw: impl Fn(&str) -> f32,
+) -> Vec<(&str, &schema::Expression, f32)> {
+    let (weights, rates) = weights_and_rates(binds, raw);
     weights
         .into_iter()
         .map(|(name, e, mut w, cat)| {
@@ -277,15 +295,8 @@ fn apply_material<M: BindMaterial>(
             continue;
         };
         let (cur_base, cur_toon) = current.base();
-        let seed_toon = rest_toon.zip(cur_toon).map(|(r, c)| schema::ToonParams {
-            shade_color_factor: r.shade_color_factor,
-            matcap_factor: r.matcap_factor,
-            parametric_rim_color_factor: r.parametric_rim_color_factor,
-            outline_color_factor: r.outline_color_factor,
-            ..*c
-        });
         let (color, emissive, uv, toon) =
-            compute_material(rest, seed_toon.as_ref(), index, effective);
+            compute_material(rest, rest_toon.as_ref(), index, effective);
         if (cur_base.base_color != color
             || cur_base.emissive != emissive
             || cur_base.uv_transform != uv
@@ -349,17 +360,18 @@ pub(crate) fn apply(
 }
 
 pub(crate) fn compute_material(
-    (base_color, emissive, uv_transform): (Color, LinearRgba, Affine2),
+    (base_color, emissive, mut uv_transform): (Color, LinearRgba, Affine2),
     rest_toon: Option<&schema::ToonParams>,
     index: usize,
     weights: &[(&str, &schema::Expression, f32)],
 ) -> (Color, LinearRgba, Affine2, Option<schema::ToonParams>) {
     let mut value = base_color.to_linear().to_vec4();
     let mut emission = emissive.to_vec3();
-    let mut scale = Vec2::ONE;
-    let mut offset = Vec2::ZERO;
     let mut color_bound = false;
     let mut uv_bound = false;
+    let mut uv_weight = 0.;
+    let mut uv_scale = Vec2::ZERO;
+    let mut uv_offset = Vec2::ZERO;
     let mut toon_params = rest_toon.copied();
     for (_, e, weight) in weights {
         for bind in e
@@ -402,8 +414,18 @@ pub(crate) fn compute_material(
             .filter(|b| b.material == index)
         {
             uv_bound = true;
-            scale += (bind.scale - Vec2::ONE) * weight;
-            offset += bind.offset * weight;
+            uv_weight += weight;
+            uv_scale += bind.scale * weight;
+            uv_offset += bind.offset * weight;
+        }
+    }
+    if uv_bound {
+        uv_transform = blend_uv(uv_transform, uv_weight, uv_scale, uv_offset);
+        if let (Some(params), Some(rest)) = (&mut toon_params, rest_toon) {
+            for (i, transform) in params.uv_transforms.iter_mut().enumerate() {
+                let base = Affine2::from_mat3(rest.uv_transforms[i]);
+                *transform = blend_uv(base, uv_weight, uv_scale, uv_offset).into();
+            }
         }
     }
     (
@@ -413,18 +435,67 @@ pub(crate) fn compute_material(
             base_color
         },
         LinearRgba::from_vec3(emission).with_alpha(emissive.alpha),
-        if uv_bound {
-            uv_transform * Affine2::from_scale_angle_translation(scale, 0., offset)
-        } else {
-            uv_transform
-        },
+        uv_transform,
         toon_params,
+    )
+}
+
+fn blend_uv(base: Affine2, weight: f32, scale: Vec2, offset: Vec2) -> Affine2 {
+    if !base.matrix2.is_finite()
+        || !base.translation.is_finite()
+        || base.matrix2.determinant() == 0.
+    {
+        return base;
+    }
+    let (base_scale, angle, base_offset) = base.to_scale_angle_translation();
+    Affine2::from_scale_angle_translation(
+        base_scale * (1. - weight) + scale,
+        angle,
+        base_offset * (1. - weight) + offset,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_transform_binds_interpolate_from_the_base_uv_transform() {
+        let defs: schema::Expressions = serde_json::from_value(serde_json::json!({
+            "preset": {
+                "happy": {
+                    "textureTransformBinds": [
+                        {"material":0,"scale":[2.,1.],"offset":[0.5,0.]}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let weights = effective(&defs, |_| 1.);
+        let base =
+            Affine2::from_scale_angle_translation(Vec2::splat(3.), 0.4, Vec2::new(0.5, 0.25));
+        let rest_toon = schema::ToonParams {
+            uv_transforms: [base.into(); 6],
+            ..default()
+        };
+        let (_, _, uv, toon) = compute_material(
+            (Color::WHITE, LinearRgba::BLACK, base),
+            Some(&rest_toon),
+            0,
+            &weights,
+        );
+        let (scale, angle, offset) = uv.to_scale_angle_translation();
+        assert!(scale.abs_diff_eq(Vec2::new(2., 1.), 1e-5));
+        assert!((angle - 0.4).abs() < 1e-5);
+        assert!(offset.abs_diff_eq(Vec2::new(0.5, 0.), 1e-5));
+        let toon = toon.unwrap();
+        let (scale, angle, offset) =
+            Affine2::from_mat3(toon.uv_transforms[0]).to_scale_angle_translation();
+        assert!(scale.abs_diff_eq(Vec2::new(2., 1.), 1e-5));
+        assert!((angle - 0.4).abs() < 1e-5);
+        assert!(offset.abs_diff_eq(Vec2::new(0.5, 0.), 1e-5));
+    }
+
     #[test]
     fn material_binds_and_overrides_follow_spec() {
         let defs: schema::Expressions = serde_json::from_value(serde_json::json!({
@@ -443,7 +514,7 @@ mod tests {
                 }
             },
             "custom": {
-                "aa": {}
+                "smile": {}
             }
         })).unwrap();
         let weights = effective(&defs, |n| match n {
@@ -455,7 +526,10 @@ mod tests {
             weights.iter().find(|(n, _, _)| *n == "blink").unwrap().2,
             0.
         );
-        assert_eq!(weights.iter().find(|(n, _, _)| *n == "aa").unwrap().2, 1.);
+        assert_eq!(
+            weights.iter().find(|(n, _, _)| *n == "smile").unwrap().2,
+            1.
+        );
 
         let weights = effective(&defs, |n| if n == "happy" { 0.25 } else { 0.6 });
         assert_eq!(

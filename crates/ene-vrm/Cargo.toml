@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_animation", "bevy_gltf", "bevy_pbr", "bevy_render", "bevy_shader", "bevy_world_serialization", "gltf_animation", "morph_animation"] }
-gltf = { version = "1.4", default-features = false, features = ["extensions", "names"] }
+gltf = { version = "1.4", default-features = false, features = ["extensions", "KHR_texture_transform"] }
 serde.workspace = true
 serde_json = "1"
 
