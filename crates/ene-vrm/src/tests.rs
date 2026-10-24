@@ -205,6 +205,34 @@ fn gaze_input_active(app: &App, root: Entity) -> bool {
         )
 }
 
+/// Asserts that each main-world mesh entity was specialized and its pipeline
+/// reached the GPU, instead of only checking that no pipeline failed.
+fn assert_specialized_pipelines_ok(app: &App, entities: &[Entity]) {
+    use bevy::pbr::SpecializedMaterialPipelineCache;
+    use bevy::render::{
+        RenderApp,
+        render_resource::{CachedPipelineState, PipelineCache},
+        sync_world::MainEntity,
+    };
+    let world = app.sub_app(RenderApp).world();
+    let cache = world.resource::<SpecializedMaterialPipelineCache>();
+    let pipelines = world.resource::<PipelineCache>();
+    for entity in entities {
+        let id = cache
+            .values()
+            .find_map(|view| view.get(&MainEntity::from(*entity)))
+            .copied()
+            .unwrap_or_else(|| panic!("{entity:?} has no specialized material pipeline"));
+        assert!(
+            matches!(
+                pipelines.get_render_pipeline_state(id),
+                CachedPipelineState::Ok(_)
+            ),
+            "{entity:?} pipeline was not created"
+        );
+    }
+}
+
 #[test]
 fn vrm_spec_system_order_runs_pose_lookat_expressions_constraints_springbone() {
     let mut app = app();
@@ -331,6 +359,33 @@ fn loader_rejects_unusable_data_and_tolerates_spec_noise() {
         ]
     });
     push(v, false, false);
+    // glTF `extras`/`extensions` are valid inside constraint and collider shape
+    // objects and must not be mistaken for a second variant.
+    let mut v = model.clone();
+    v["nodes"][2]["extensions"]["VRMC_node_constraint"] = json!({
+        "specVersion":"1.0",
+        "constraint":{
+            "rotation":{"source":1},
+            "extras":{"note":"authoring metadata"},
+            "extensions":{}
+        }
+    });
+    push(v, false, false);
+    let mut v = model.clone();
+    v["extensions"]["VRMC_springBone"] = json!({
+        "specVersion":"1.0",
+        "colliders":[{
+            "node":1,
+            "shape":{
+                "sphere":{"radius":0.1},
+                "extras":{"note":"authoring metadata"},
+                "extensions":{}
+            },
+            "extras":{"note":"collider metadata"}
+        }],
+        "springs":[{"joints":[{"node":1},{"node":2}]}]
+    });
+    push(v, false, false);
     let mut v = motion.clone();
     v["animations"][0]["channels"]
         .as_array_mut()
@@ -418,6 +473,46 @@ fn vrma_neutral_and_zero_input_max_value_load() {
     .unwrap();
     assert_eq!(gaze.horizontal_outer().map(0.), 0.);
     assert_eq!(gaze.horizontal_outer().map(1.), 10.);
+}
+
+#[test]
+fn vrma_rejects_same_name_siblings_with_one_animation_target() {
+    let files = Files::new();
+    let mut app = app();
+    let mut value = files.motion("LINEAR");
+    let extra = value["nodes"].as_array().unwrap().len();
+    // Two nodes with the same name and the same parent produce one Bevy
+    // animation target, so the source node can no longer be identified.
+    value["nodes"][0]["children"] = json!([1, extra]);
+    value["nodes"][1]["name"] = json!("Arm");
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"Arm"}));
+    value["extensions"]["VRMC_vrm_animation"]["humanoid"]["humanBones"] =
+        json!({"leftUpperArm":{"node":1},"rightUpperArm":{"node":extra}});
+    value["animations"][0]["channels"] = json!([
+        {"sampler":1,"target":{"node":1,"path":"rotation"}},
+        {"sampler":1,"target":{"node":extra,"path":"rotation"}}
+    ]);
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("same-name.vrma", &value));
+    settle(&mut app, std::slice::from_ref(&handle));
+    let state = app
+        .world()
+        .resource::<AssetServer>()
+        .get_load_state(handle.id())
+        .unwrap();
+    let message = match state {
+        LoadState::Failed(error) => error.to_string(),
+        other => panic!("expected the ambiguous VRMA to be rejected, got {other:?}"),
+    };
+    assert!(
+        message.contains(&format!("VRMA nodes 1 and {extra}")),
+        "{message}"
+    );
 }
 
 #[test]
@@ -783,6 +878,34 @@ fn scene_instances_remap_bones_and_preserve_native_and_vrma_playback() {
         })
         .collect();
     assert_eq!(rigs.len(), 2);
+    let bone_count: usize = app
+        .world_mut()
+        .query::<&Vrm>()
+        .iter(app.world())
+        .map(|vrm| vrm.bones.len())
+        .sum();
+    assert_eq!(
+        app.world_mut()
+            .query::<&animation::Pose>()
+            .iter(app.world())
+            .count(),
+        bone_count,
+        "humanoid bones own Pose directly; no per-bone target entities"
+    );
+    for &(root, hips, spine, head, left_eye) in &rigs {
+        assert_eq!(
+            app.world().get::<AnimationTargetId>(hips),
+            Some(&animation::bone_target("hips"))
+        );
+        for bone in [hips, spine, head, left_eye] {
+            assert!(app.world().get::<animation::Pose>(bone).is_some());
+            assert!(
+                app.world()
+                    .get::<AnimatedBy>(bone)
+                    .is_some_and(|by| by.0 == root)
+            );
+        }
+    }
 
     for &(root, _, _, _, _) in &rigs {
         let mut player = AnimationPlayer::default();
@@ -926,7 +1049,7 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
         .resource_mut::<Assets<MToonMaterial>>()
         .add(MToonMaterial {
             base: StandardMaterial::default(),
-            extension: MToonExtension::new(&toon_def, &[]),
+            extension: MToonExtension::new(&toon_def, &[], &Default::default()),
         });
 
     let mut rigs = Vec::new();
@@ -1068,6 +1191,52 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
 }
 
 #[test]
+fn expression_morph_binds_accumulate_from_zero_without_clamping() {
+    let mut app = app();
+    let definitions: schema::Expressions = serde_json::from_value(json!({"preset":{
+        "aa":{"morphTargetBinds":[{"node":0,"index":0,"weight":0.75}]},
+        "ih":{"morphTargetBinds":[{"node":0,"index":0,"weight":0.75}]}
+    }}))
+    .unwrap();
+    let root = app.world_mut().spawn(Transform::default()).id();
+    let morph = app
+        .world_mut()
+        .spawn((
+            MorphWeights::new(vec![0.25, 0.7], None).unwrap(),
+            ChildOf(root),
+        ))
+        .id();
+    expressions::attach(
+        app.world_mut(),
+        root,
+        &definitions,
+        &HashMap::from_iter([(0, morph)]),
+    )
+    .unwrap();
+    app.world_mut()
+        .get_mut::<ExpressionWeights>(root)
+        .unwrap()
+        .extend([("aa".into(), 1.), ("ih".into(), 1.)]);
+    app.update();
+    assert_eq!(
+        app.world().get::<MorphWeights>(morph).unwrap().weights(),
+        &[1.5, 0.7],
+        "bound morphs start at zero and are not clamped after accumulation"
+    );
+
+    app.world_mut()
+        .get_mut::<ExpressionWeights>(root)
+        .unwrap()
+        .clear();
+    app.update();
+    assert_eq!(
+        app.world().get::<MorphWeights>(morph).unwrap().weights(),
+        &[0., 0.7],
+        "a bound morph returns to the zero-based rest, not the glTF initial weight"
+    );
+}
+
+#[test]
 fn mtoon_materials_outlines_meta_and_schema_defaults() {
     let toon: schema::Toon = serde_json::from_value(json!({"specVersion":"1.0"})).unwrap();
     assert_eq!(toon.params.shade_color_factor, Vec3::ZERO);
@@ -1127,17 +1296,26 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
             .into_iter()
             .flat_map(f32::to_le_bytes),
     );
+    let png = std::fs::read(files.0.join("tex.png")).unwrap();
+    let image_offset = data.len();
+    data.extend_from_slice(&png);
+    let length = data.len();
     std::fs::write(files.0.join("tri.bin"), data).unwrap();
 
     let mut value = files.model();
-    value["buffers"] = json!([{"uri":"tri.bin","byteLength":96}]);
-    value["bufferViews"] = json!([{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12},{"buffer":0,"byteOffset":48,"byteLength":48}]);
+    value["buffers"] = json!([{"uri":"tri.bin","byteLength":length}]);
+    value["bufferViews"] = json!([
+        {"buffer":0,"byteLength":36},
+        {"buffer":0,"byteOffset":36,"byteLength":12},
+        {"buffer":0,"byteOffset":48,"byteLength":48},
+        {"buffer":0,"byteOffset":image_offset,"byteLength":png.len()}
+    ]);
     value["accessors"] = json!([
         {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
         {"bufferView":1,"componentType":5121,"count":3,"type":"VEC4"},
         {"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"}
     ]);
-    value["images"] = json!([{"uri":"tex.png"}]);
+    value["images"] = json!([{"bufferView":3,"mimeType":"image/png"}]);
     value["textures"] = json!([{"source":0}]);
     value["meshes"] = json!([{"primitives":[
         {"attributes":{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2},"material":0},
@@ -1152,8 +1330,12 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
         {
             "alphaMode":"OPAQUE",
             "doubleSided":true,
+            "emissiveFactor":[1.,0.5,0.],
             "pbrMetallicRoughness":{"baseColorTexture":{"index":0,"extensions":{"KHR_texture_transform":{"offset":[0.5,0.25]}}}},
-            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","outlineWidthMode":"screenCoordinates","outlineWidthFactor":0.001,"renderQueueOffsetNumber":0,"shadingShiftTexture":{"index":0}}}
+            "extensions":{
+                "KHR_materials_unlit":{},
+                "VRMC_materials_mtoon":{"specVersion":"1.0","outlineWidthMode":"screenCoordinates","outlineWidthFactor":0.001,"renderQueueOffsetNumber":0,"shadeMultiplyTexture":{"index":0},"shadingShiftTexture":{"index":0}}
+            }
         },
         {
             "alphaMode":"BLEND",
@@ -1196,18 +1378,38 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
         .load(format!("{path}#Material2/vrm"));
     settle(&mut app, std::slice::from_ref(&handle));
 
-    let materials = app.world().resource::<Assets<MToonMaterial>>();
-    let mat0 = materials.get(&m0).unwrap();
-    assert_eq!(mat0.base.depth_bias, 0.0);
-    assert_eq!(mat0.base.uv_transform.translation, Vec2::new(0.5, 0.25));
-    assert!(mat0.extension.shift.is_some());
-    assert_eq!(mat0.extension.params.texture_uvs, 0);
-    assert_eq!(
-        mat0.extension.params.uv_transforms[1],
-        bevy::math::Mat3::IDENTITY
-    );
-    assert_eq!(materials.get(&m1).unwrap().base.depth_bias, -3.0);
-    assert_eq!(materials.get(&m2).unwrap().base.depth_bias, 2.0 - 20.0);
+    let (shade, shift) = {
+        let materials = app.world().resource::<Assets<MToonMaterial>>();
+        let mat0 = materials.get(&m0).unwrap();
+        assert!(
+            !mat0.base.unlit,
+            "MToon must keep Bevy's lighting and emission inputs enabled"
+        );
+        assert_eq!(mat0.base.emissive, LinearRgba::new(1., 0.5, 0., 1.));
+        assert_eq!(mat0.base.depth_bias, 0.0);
+        assert_eq!(mat0.base.uv_transform.translation, Vec2::new(0.5, 0.25));
+        assert!(mat0.extension.shift.is_some());
+        assert_eq!(mat0.extension.params.texture_uvs, 0);
+        assert_eq!(
+            mat0.extension.params.uv_transforms[1],
+            bevy::math::Mat3::IDENTITY
+        );
+        // MToon transparent queue offsets and ZWrite are delegated to Bevy's
+        // standard transparent drawing.
+        assert_eq!(materials.get(&m1).unwrap().base.depth_bias, 0.0);
+        assert_eq!(materials.get(&m2).unwrap().base.depth_bias, 0.0);
+        (mat0.extension.shade.clone(), mat0.extension.shift.clone())
+    };
+    {
+        let images = app.world().resource::<Assets<Image>>();
+        let shade = images.get(shade.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            shade.texture_descriptor.format,
+            TextureFormat::Rgba8UnormSrgb
+        );
+        let shift = images.get(shift.as_ref().unwrap()).unwrap();
+        assert_eq!(shift.texture_descriptor.format, TextureFormat::Rgba8Unorm);
+    }
 
     let scene = app
         .world()
@@ -1416,20 +1618,40 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
     app.finish();
     app.cleanup();
 
-    let image = app
+    let color_image = app
         .world_mut()
         .resource_mut::<Assets<Image>>()
-        .add(Image::new_fill(
+        .add(Image::new(
             Extent3d {
-                width: 1,
-                height: 1,
+                width: 2,
+                height: 2,
                 depth_or_array_layers: 1,
             },
             TextureDimension::D2,
-            &[128, 128, 128, 255],
+            vec![
+                255, 0, 0, 255, // red
+                0, 255, 0, 255, // green
+                0, 0, 255, 255, // blue
+                255, 255, 0, 255, // yellow
+            ],
             TextureFormat::Rgba8UnormSrgb,
             RenderAssetUsages::default(),
         ));
+    let mask_image = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(Image::new(
+            Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            vec![0, 255, 0, 255, 0, 64, 0, 255, 0, 0, 0, 128, 0, 192, 0, 255],
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::default(),
+        ));
+    let linear = HashMap::from([(0usize, mask_image)]);
     let toon: schema::Toon = serde_json::from_value(json!({
         "specVersion":"1.0",
         "shadeMultiplyTexture":{"index":0,"texCoord":1},
@@ -1444,9 +1666,10 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
             .resource_mut::<Assets<MToonMaterial>>()
             .add(MToonMaterial {
                 base: StandardMaterial::default(),
-                extension: MToonExtension::new(&toon, std::slice::from_ref(&image)),
+                extension: MToonExtension::new(&toon, std::slice::from_ref(&color_image), &linear),
             });
-    let mut outline_extension = MToonExtension::new(&toon, std::slice::from_ref(&image));
+    let mut outline_extension =
+        MToonExtension::new(&toon, std::slice::from_ref(&color_image), &linear);
     outline_extension.outline = Some(schema::OutlineMode::ScreenCoordinates);
     let outline_material =
         app.world_mut()
@@ -1468,8 +1691,10 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         vec![[-1., -1., 0.], [1., -1., 0.], [0., 1., 0.]],
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 3]);
+    // UV0 and UV1 differ so the MToon texture coordinate selection is
+    // exercised instead of comparing equal coordinates.
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0., 0.], [1., 0.], [0., 1.]]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, vec![[0., 0.], [1., 0.], [0., 1.]]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, vec![[0., 0.], [0., 1.], [1., 0.]]);
     let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
     let body = app
         .world_mut()
@@ -1524,6 +1749,13 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
             pipeline.state
         );
     }
+    let entities: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<MeshMaterial3d<MToonMaterial>>>()
+        .iter(app.world())
+        .collect();
+    assert_eq!(entities.len(), 2, "body and outline materials");
+    assert_specialized_pipelines_ok(&app, &entities);
 }
 
 #[test]

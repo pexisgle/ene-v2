@@ -9,7 +9,7 @@
     shadows::fetch_directional_shadow,
     ambient::ambient_light,
 }
-#import ene_vrm::toon::{toon, animated_uv, uv_animation_mask, texture_uv, linear_to_srgb_f32, shade_texture, shade_sampler, shift_texture, shift_sampler, rim_texture, rim_sampler, matcap_texture, matcap_sampler}
+#import ene_vrm::toon::{toon, animated_uv, uv_animation_mask, texture_uv, shade_texture, shade_sampler, shift_texture, shift_sampler, rim_texture, rim_sampler, matcap_texture, matcap_sampler}
 
 @fragment
 fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> FragmentOutput {
@@ -52,7 +52,7 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> Fragmen
     let shade_uv = texture_uv(uv0, uv1, 0u);
     if (toon.texture_flags & 1u) != 0u { shade *= textureSampleBias(shade_texture, shade_sampler, shade_uv, view.mip_bias).rgb; }
     let shift_uv = texture_uv(uv0, uv1, 1u);
-    if (toon.texture_flags & 2u) != 0u { shift += linear_to_srgb_f32(textureSampleBias(shift_texture, shift_sampler, shift_uv, view.mip_bias).r) * toon.shading_shift_texture_scale; }
+    if (toon.texture_flags & 2u) != 0u { shift += textureSampleBias(shift_texture, shift_sampler, shift_uv, view.mip_bias).r * toon.shading_shift_texture_scale; }
 #endif
     var direct = vec3(0.);
     var direct_lighting = vec3(0.);

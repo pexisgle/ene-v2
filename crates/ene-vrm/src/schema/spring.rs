@@ -27,22 +27,64 @@ pub(crate) struct Collider {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "ShapeObject")]
 pub(crate) enum Shape {
     Sphere {
-        #[serde(default)]
         offset: Vec3,
-        #[serde(default)]
         radius: f32,
     },
     Capsule {
-        #[serde(default)]
         offset: Vec3,
-        #[serde(default)]
         radius: f32,
-        #[serde(default)]
         tail: Vec3,
     },
+}
+
+/// Accepts the glTF `extras`/`extensions` fields alongside the shape kind.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShapeObject {
+    sphere: Option<Sphere>,
+    capsule: Option<Capsule>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Sphere {
+    #[serde(default)]
+    offset: Vec3,
+    #[serde(default)]
+    radius: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Capsule {
+    #[serde(default)]
+    offset: Vec3,
+    #[serde(default)]
+    radius: f32,
+    #[serde(default)]
+    tail: Vec3,
+}
+
+impl TryFrom<ShapeObject> for Shape {
+    type Error = &'static str;
+
+    fn try_from(value: ShapeObject) -> Result<Self, Self::Error> {
+        match (value.sphere, value.capsule) {
+            (Some(sphere), None) => Ok(Self::Sphere {
+                offset: sphere.offset,
+                radius: sphere.radius,
+            }),
+            (None, Some(capsule)) => Ok(Self::Capsule {
+                offset: capsule.offset,
+                radius: capsule.radius,
+                tail: capsule.tail,
+            }),
+            _ => Err("VRMC collider requires exactly one of sphere or capsule"),
+        }
+    }
 }
 
 #[derive(Deserialize)]

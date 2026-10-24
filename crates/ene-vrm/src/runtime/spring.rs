@@ -74,16 +74,27 @@ pub(crate) fn setup(app: &mut App) {
 
 fn springs(
     time: Res<Time>,
-    mut rigs: Query<(&GlobalTransform, &mut SpringRig)>,
+    mut rigs: Query<(Entity, &mut SpringRig)>,
     props: Query<&SpringJointProps>,
     parents: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
-    let dt = time.delta_secs().min(0.05);
+    // Run at the 60 Hz reference step so a low frame rate does not silently
+    // discard simulated time. Long stalls are still capped.
+    const STEP: f32 = 1. / 60.;
+    const MAX_FRAME: f32 = 0.25;
+    let dt = time.delta_secs().min(MAX_FRAME);
     if dt <= 0. {
         return;
     }
-    for (root, mut rig) in &mut rigs {
+    let steps = (dt / STEP).ceil().max(1.) as usize;
+    let step = dt / steps as f32;
+    for (root_entity, mut rig) in &mut rigs {
+        // Bevy propagates `GlobalTransform` after `VrmSystems::SpringBone`, so
+        // read the rig root from `Transform` like every other node here.
+        let Ok(root) = transforms.p0().compute_global_transform(root_entity) else {
+            continue;
+        };
         let unit_scale = root.scale().abs().max_element();
         let SpringRig {
             chains,
@@ -120,29 +131,32 @@ fn springs(
                 let head = rest.translation();
                 let length = rest.affine().transform_vector3(joint.tail).length();
                 let initial = rest.transform_point(joint.tail);
-                let [current, previous] = joint
-                    .state
-                    .map_or([initial; 2], |s| s.map(|p| center.transform_point(p)));
                 let stiffness =
-                    (initial - head).normalize_or_zero() * props.stiffness * unit_scale * dt;
-                let mut next = head
-                    + (current
-                        + (current - previous) * (1. - props.drag_force)
-                        + stiffness
-                        + props.gravity_dir * props.gravity_power * unit_scale * dt
-                        - head)
-                        .normalize_or_zero()
-                        * length;
-                for (segment, radius) in &colliders {
-                    collide(
-                        &mut next,
-                        head,
-                        length,
-                        props.hit_radius * unit_scale + radius,
-                        segment,
-                    );
+                    (initial - head).normalize_or_zero() * props.stiffness * unit_scale * step;
+                let mut next = initial;
+                for _ in 0..steps {
+                    let [current, previous] = joint
+                        .state
+                        .map_or([initial; 2], |s| s.map(|p| center.transform_point(p)));
+                    next = head
+                        + (current
+                            + (current - previous) * (1. - props.drag_force)
+                            + stiffness
+                            + props.gravity_dir * props.gravity_power * unit_scale * step
+                            - head)
+                            .normalize_or_zero()
+                            * length;
+                    for (segment, radius) in &colliders {
+                        collide(
+                            &mut next,
+                            head,
+                            length,
+                            props.hit_radius * unit_scale + radius,
+                            segment,
+                        );
+                    }
+                    joint.state = Some([next, current].map(|p| inv_center.transform_point3(p)));
                 }
-                joint.state = Some([next, current].map(|p| inv_center.transform_point3(p)));
                 let dir = rest
                     .affine()
                     .inverse()
@@ -186,6 +200,10 @@ mod tests {
                 Duration::from_secs_f64(1. / 60.),
             ));
         crate::runtime::setup(&mut app);
+        app.configure_sets(
+            PostUpdate,
+            crate::VrmSystems::SpringBone.before(bevy::transform::TransformSystems::Propagate),
+        );
         let root = app
             .world_mut()
             .spawn(Transform::from_scale(Vec3::splat(scale)))
@@ -477,5 +495,69 @@ mod tests {
             .gravity_power = 1.;
         collapsed.update();
         assert!(rot(&collapsed, cj).angle_between(Quat::IDENTITY) > 0.1);
+    }
+
+    #[test]
+    fn springbone_reads_the_current_root_scale_before_propagation() {
+        let (mut stale, stale_joint) = simulation(1., false);
+        let (mut propagated, propagated_joint) = simulation(1., false);
+        for _ in 0..10 {
+            stale.update();
+            propagated.update();
+        }
+        let stale_root = stale.world().get::<ChildOf>(stale_joint).unwrap().parent();
+        let propagated_root = propagated
+            .world()
+            .get::<ChildOf>(propagated_joint)
+            .unwrap()
+            .parent();
+        stale
+            .world_mut()
+            .get_mut::<Transform>(stale_root)
+            .unwrap()
+            .scale = Vec3::splat(2.);
+        propagated
+            .world_mut()
+            .get_mut::<Transform>(propagated_root)
+            .unwrap()
+            .scale = Vec3::splat(2.);
+        // Simulate the frame in which propagation already ran for one app.
+        propagated
+            .world_mut()
+            .entity_mut(propagated_root)
+            .insert(GlobalTransform::from(Transform::from_scale(Vec3::splat(
+                2.,
+            ))));
+        stale.update();
+        propagated.update();
+        let a = stale
+            .world()
+            .get::<Transform>(stale_joint)
+            .unwrap()
+            .rotation;
+        let b = propagated
+            .world()
+            .get::<Transform>(propagated_joint)
+            .unwrap()
+            .rotation;
+        assert!(a.abs_diff_eq(b, 1e-5), "{a:?} != {b:?}");
+    }
+
+    #[test]
+    fn springbone_substeps_preserve_simulated_time_at_low_frame_rates() {
+        let (mut low, low_joint) = simulation(1., false);
+        let (mut high, high_joint) = simulation(1., false);
+        low.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f64(0.1),
+        ));
+        for _ in 0..6 {
+            low.update();
+        }
+        for _ in 0..36 {
+            high.update();
+        }
+        let a = low.world().get::<Transform>(low_joint).unwrap().rotation;
+        let b = high.world().get::<Transform>(high_joint).unwrap().rotation;
+        assert!(a.abs_diff_eq(b, 1e-3), "10 FPS: {a:?}, 60 FPS: {b:?}");
     }
 }

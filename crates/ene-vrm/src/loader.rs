@@ -6,7 +6,8 @@ use bevy::{
     asset::{AssetLoader, LoadContext, io::Reader},
     ecs::system::RunSystemOnce,
     gltf::{
-        DefaultGltfImageSampler, Gltf, GltfError, GltfLoader, GltfLoaderSettings, GltfMaterial,
+        DefaultGltfImageSampler, Gltf, GltfAssetLabel, GltfError, GltfLoader, GltfLoaderSettings,
+        GltfMaterial,
         extensions::{ErasedGltfExtensionHandler, GltfExtensionHandler, GltfExtensionHandlers},
     },
     image::{CompressedImageFormatSupport, CompressedImageFormats},
@@ -117,8 +118,30 @@ pub(crate) fn extension<T: serde::de::DeserializeOwned>(
 ) -> std::io::Result<T> {
     T::deserialize(value.ok_or_else(|| invalid(format!("missing {name}")))?).map_err(invalid)
 }
-fn render_queue_bias(offset: f32, z_write: bool) -> f32 {
-    offset + if z_write { -20. } else { 0. }
+
+/// Returns an image handle that samples as plain numbers for an embedded MToon
+/// data texture.
+///
+/// MToon stores shading shift, UV animation mask and outline width as linear
+/// numbers, but Bevy only knows the core glTF color/linear slots, so these
+/// textures load with an sRGB format. Clone the decoded image with the sRGB
+/// suffix removed so sampling returns the stored value instead of a transfer
+/// curve. External image URIs are left to Bevy's glTF texture loading.
+fn linear_texture(
+    context: &mut LoadContext<'_>,
+    index: usize,
+    original: &Handle<Image>,
+) -> Option<Handle<Image>> {
+    let label = GltfAssetLabel::Texture(index).to_string();
+    // ponytail: only GLB-embedded images are converted; VRM requires GLB and
+    // external URI textures would need their own non-sRGB asset load.
+    let image = context.get_labeled(&label)?.get::<Image>()?;
+    if !image.texture_descriptor.format.is_srgb() {
+        return Some(original.clone());
+    }
+    let mut image = image.clone();
+    image.texture_descriptor.format = image.texture_descriptor.format.remove_srgb_suffix();
+    Some(context.add_labeled_asset(format!("{label}/linear"), image))
 }
 
 pub(crate) fn require_node(
@@ -155,6 +178,7 @@ struct VrmExtensions {
     springs: Option<schema::Springs>,
     nodes: HashMap<usize, Entity>,
     textures: Vec<Handle<Image>>,
+    linear_textures: HashMap<usize, Handle<Image>>,
     constraints: Vec<(usize, schema::NodeConstraint)>,
 }
 
@@ -240,16 +264,26 @@ impl GltfExtensionHandler for VrmExtensions {
         else {
             return;
         };
+        base.unlit = false;
         base.opaque_render_method = bevy::material::OpaqueRendererMethod::Forward;
-        if base.alpha_mode == AlphaMode::Blend {
-            base.depth_bias += render_queue_bias(
-                toon.render_queue_offset_number,
-                toon.transparent_with_z_write,
-            );
+        for slot in material::NUMERIC_SLOTS {
+            let Some(info) = toon.textures()[slot] else {
+                continue;
+            };
+            let index = info.index.value();
+            if self.linear_textures.contains_key(&index) {
+                continue;
+            }
+            let Some(original) = self.textures.get(index).cloned() else {
+                continue;
+            };
+            if let Some(linear) = linear_texture(context, index, &original) {
+                self.linear_textures.insert(index, linear);
+            }
         }
         let material = MToonMaterial {
             base,
-            extension: MToonExtension::new(toon, &self.textures),
+            extension: MToonExtension::new(toon, &self.textures, &self.linear_textures),
         };
         let label = format!("{label}/vrm");
         if toon.outline_width_mode != schema::OutlineMode::None {
@@ -354,16 +388,5 @@ impl GltfExtensionHandler for VrmExtensions {
         })();
         world.entity_mut(root).insert(VrmScene(result));
         self.nodes.clear();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::render_queue_bias;
-
-    #[test]
-    fn render_queue_offset_groups_are_disjoint() {
-        assert!(render_queue_bias(9., true) < render_queue_bias(-9., false));
-        assert!(render_queue_bias(0., true) < render_queue_bias(0., false));
     }
 }

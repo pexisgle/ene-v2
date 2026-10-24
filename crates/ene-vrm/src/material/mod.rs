@@ -5,6 +5,7 @@ use bevy::{
     light::NotShadowCaster,
     mesh::{MeshVertexBufferLayoutRef, morph::MeshMorphWeights, skinning::SkinnedMesh},
     pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
+    platform::collections::HashMap,
     prelude::*,
     render::render_resource::{
         AsBindGroup, Face, RenderPipelineDescriptor, SpecializedMeshPipelineError,
@@ -13,6 +14,10 @@ use bevy::{
 };
 
 pub type MToonMaterial = ExtendedMaterial<StandardMaterial, MToonExtension>;
+
+/// MToon texture slots that store numbers instead of colors: shading shift,
+/// UV animation mask and outline width.
+pub(crate) const NUMERIC_SLOTS: [usize; 3] = [1, 4, 5];
 
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
@@ -47,20 +52,15 @@ pub struct MToonExtension {
     #[sampler(112)]
     pub(crate) outline_width: Option<Handle<Image>>,
     pub(crate) outline: Option<OutlineMode>,
-    pub(crate) z_write: bool,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct ToonKey {
     outline: Option<OutlineMode>,
-    z_write: bool,
 }
 impl From<&MToonExtension> for ToonKey {
     fn from(x: &MToonExtension) -> Self {
-        Self {
-            outline: x.outline,
-            z_write: x.z_write,
-        }
+        Self { outline: x.outline }
     }
 }
 
@@ -125,29 +125,25 @@ impl MaterialExtension for MToonExtension {
                 frag.shader_defs.push("OUTLINE_PASS".into());
             }
         }
-        if key.bind_group_data.z_write
-            && let Some(depth) = &mut descriptor.depth_stencil
-        {
-            depth.depth_write_enabled = Some(true);
-        }
-        if let Some(depth) = &mut descriptor.depth_stencil {
-            // `depth_bias` is the only per-material transparent sort key in
-            // Bevy 0.19. It is also copied into the depth-stencil state by
-            // `StandardMaterial::specialize`, but MToon only uses it for queue
-            // ordering. Keep the depth test unaffected by the queue offset.
-            depth.bias.constant = 0;
-        }
         Ok(())
     }
 }
 
 impl MToonExtension {
-    pub(crate) fn new(toon: &Toon, images: &[Handle<Image>]) -> Self {
+    pub(crate) fn new(
+        toon: &Toon,
+        images: &[Handle<Image>],
+        linear: &HashMap<usize, Handle<Image>>,
+    ) -> Self {
         let textures = toon.textures();
-        let img = |i: usize| {
-            textures[i]
-                .and_then(|t| images.get(t.index.value()))
-                .cloned()
+        let img = |slot: usize| {
+            let index = textures[slot]?.index.value();
+            let handle = if NUMERIC_SLOTS.contains(&slot) {
+                linear.get(&index).or_else(|| images.get(index))
+            } else {
+                images.get(index)
+            };
+            handle.cloned()
         };
         let mut params = toon.params;
         params.texture_flags = textures
@@ -176,7 +172,6 @@ impl MToonExtension {
             uv_mask: img(4),
             outline_width: img(5),
             outline: None,
-            z_write: toon.transparent_with_z_write,
         }
     }
 }
@@ -263,7 +258,7 @@ mod tests {
             "rimMultiplyTexture":{"index":2}
         }))
         .unwrap();
-        let extension = MToonExtension::new(&toon, &[]);
+        let extension = MToonExtension::new(&toon, &[], &Default::default());
         assert_eq!(extension.params.texture_uvs, 0b11);
         let expected: bevy::math::Mat3 =
             schema::texture_affine(toon.shade_multiply_texture.as_ref().unwrap()).into();

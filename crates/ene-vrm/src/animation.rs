@@ -10,7 +10,7 @@ use bevy::{
     },
     app::AnimationSystems,
     math::curve::FunctionCurve,
-    platform::collections::HashMap,
+    platform::collections::{HashMap, hash_map::Entry},
     prelude::*,
 };
 use std::sync::Arc;
@@ -68,11 +68,8 @@ fn reset(
     }
 }
 
-fn apply(poses: Query<(&Pose, &ChildOf)>, mut transforms: Query<(&RestPose, &mut Transform)>) {
-    for (pose, target) in &poses {
-        let Ok((rest, mut transform)) = transforms.get_mut(target.parent()) else {
-            continue;
-        };
+fn apply(mut poses: Query<(&Pose, &RestPose, &mut Transform)>) {
+    for (pose, rest, mut transform) in &mut poses {
         if let Some(rotation) = pose.rotation {
             transform.rotation =
                 denormalize_rotation(rest.local.rotation, rest.global_rotation, rotation);
@@ -124,6 +121,31 @@ pub(crate) fn retarget_motion(
             .ok_or_else(|| invalid("VRMA clip unavailable"))?;
         let mut clip = AnimationClip::default();
         clip.set_duration(native.duration());
+        // Bevy groups native curves by `AnimationTargetId`, which it derives
+        // from the node name path. Sibling nodes with the same name share one
+        // group, so the source node can no longer be recovered from the group.
+        // ponytail: reject ambiguous paths instead of matching curves by channel
+        // order; revisit if Bevy exposes per-node curve identity.
+        let mut seen: HashMap<AnimationTargetId, usize> = HashMap::default();
+        let mut conflicts: HashMap<AnimationTargetId, (usize, usize)> = HashMap::default();
+        for channel in animation.channels() {
+            let node = channel.target().node().index();
+            let Some(&entity) = nodes.get(&node) else {
+                continue;
+            };
+            let Some(&id) = world.get::<AnimationTargetId>(entity) else {
+                continue;
+            };
+            match seen.entry(id) {
+                Entry::Occupied(e) if *e.get() != node => {
+                    conflicts.insert(id, (*e.get(), node));
+                }
+                Entry::Occupied(_) => {}
+                Entry::Vacant(e) => {
+                    e.insert(node);
+                }
+            }
+        }
         for channel in animation.channels() {
             let node = channel.target().node().index();
             let property = channel.target().property();
@@ -148,6 +170,11 @@ pub(crate) fn retarget_motion(
             let id = world
                 .get::<AnimationTargetId>(entity)
                 .ok_or_else(|| invalid("VRMA animated node has no native target"))?;
+            if let Some(&(first, second)) = conflicts.get(id) {
+                return Err(invalid(format!(
+                    "VRMA nodes {first} and {second} share the same animation target path"
+                )));
+            }
             // Bevy skips channels it cannot decode (for example sparse sampler inputs).
             // Match by property/evaluator instead of channel position, and skip a channel
             // whose native curve is absent rather than failing the whole VRMA.

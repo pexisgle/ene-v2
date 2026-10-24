@@ -1,6 +1,6 @@
 #import "embedded://bevy_pbr/render/mesh.wgsl" as native_mesh
 #import bevy_pbr::{forward_io::{Vertex, VertexOutput}, mesh_functions, mesh_view_bindings::view, view_transformations::position_world_to_clip}
-#import ene_vrm::toon::{toon, animated_uv, uv_animation_mask, texture_uv, linear_to_srgb_f32, width_texture, width_sampler}
+#import ene_vrm::toon::{toon, animated_uv, uv_animation_mask, texture_uv, width_texture, width_sampler}
 
 @vertex
 fn vertex(input: Vertex) -> VertexOutput {
@@ -33,7 +33,7 @@ fn vertex(input: Vertex) -> VertexOutput {
     let uv0 = animated_uv(raw_uv0, mask);
     let uv1 = animated_uv(raw_uv1, mask);
     if (toon.texture_flags & 32u) != 0u {
-        width *= linear_to_srgb_f32(textureSampleLevel(width_texture, width_sampler, texture_uv(uv0, uv1, 5u), 0.).g);
+        width *= textureSampleLevel(width_texture, width_sampler, texture_uv(uv0, uv1, 5u), 0.).g;
     }
 #endif
 #ifdef SCREEN_SPACE_OUTLINE

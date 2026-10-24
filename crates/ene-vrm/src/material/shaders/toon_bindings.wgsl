@@ -37,14 +37,6 @@ struct Toon {
 
 #import bevy_pbr::mesh_view_bindings::globals
 
-fn linear_to_srgb_f32(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        return c * 12.92;
-    } else {
-        return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
-    }
-}
-
 fn texture_uv(uv0: vec2<f32>, uv1: vec2<f32>, slot: u32) -> vec2<f32> {
     let uv = select(uv0, uv1, ((toon.texture_uvs >> slot) & 1u) != 0u);
     return (toon.uv_transforms[slot] * vec3<f32>(uv, 1.0)).xy;
@@ -54,7 +46,7 @@ fn uv_animation_mask(mask_uv: vec2<f32>) -> f32 {
     if (toon.texture_flags & 16u) == 0u {
         return 1.0;
     }
-    return linear_to_srgb_f32(textureSampleLevel(uv_texture, uv_sampler, mask_uv, 0.0).b);
+    return textureSampleLevel(uv_texture, uv_sampler, mask_uv, 0.0).b;
 }
 
 fn animated_uv(uv: vec2<f32>, mask: f32) -> vec2<f32> {

@@ -81,18 +81,17 @@ pub(crate) fn attach(
             .entity(entity)
             .components::<(&Transform, &GlobalTransform)>();
         let global = GlobalTransform::from(root_inv * global.affine());
-        world.entity_mut(entity).insert(RestPose {
-            local,
-            global_rotation: global.rotation().normalize(),
-            translation_from_normalized: (local.compute_affine() * global.affine().inverse())
-                .matrix3
-                * height,
-        });
-        world.spawn((
+        world.entity_mut(entity).insert((
+            RestPose {
+                local,
+                global_rotation: global.rotation().normalize(),
+                translation_from_normalized: (local.compute_affine() * global.affine().inverse())
+                    .matrix3
+                    * height,
+            },
             Pose::default(),
             animation::bone_target(name),
             AnimatedBy(root),
-            ChildOf(entity),
         ));
         bones.push(HumanoidBone {
             name: name.clone(),

@@ -21,10 +21,6 @@ pub(crate) struct Toon {
     pub uv_animation_mask_texture: Option<gltf::json::texture::Info>,
     #[serde(default)]
     pub outline_width_mode: OutlineMode,
-    #[serde(default)]
-    pub transparent_with_z_write: bool,
-    #[serde(default)]
-    pub render_queue_offset_number: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, ShaderType)]

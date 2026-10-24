@@ -11,11 +11,33 @@ pub(crate) struct NodeConstraint {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "ConstraintObject")]
 pub(crate) enum Constraint {
     Rotation(Rotation),
     Roll(Roll),
     Aim(Aim),
+}
+
+/// Accepts the glTF `extras`/`extensions` fields alongside the constraint kind.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConstraintObject {
+    rotation: Option<Rotation>,
+    roll: Option<Roll>,
+    aim: Option<Aim>,
+}
+
+impl TryFrom<ConstraintObject> for Constraint {
+    type Error = &'static str;
+
+    fn try_from(value: ConstraintObject) -> Result<Self, Self::Error> {
+        match (value.rotation, value.roll, value.aim) {
+            (Some(rotation), None, None) => Ok(Self::Rotation(rotation)),
+            (None, Some(roll), None) => Ok(Self::Roll(roll)),
+            (None, None, Some(aim)) => Ok(Self::Aim(aim)),
+            _ => Err("VRMC constraint requires exactly one of rotation, roll or aim"),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]

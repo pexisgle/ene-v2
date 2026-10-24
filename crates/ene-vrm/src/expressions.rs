@@ -22,7 +22,7 @@ pub struct ExpressionWeights(pub HashMap<String, f32>);
 pub(crate) struct MorphTarget {
     #[entities]
     pub entity: Entity,
-    pub rest: HashMap<usize, f32>,
+    pub indices: Vec<usize>,
     pub node: usize,
 }
 
@@ -86,21 +86,23 @@ pub(crate) fn attach(
     for (_, expr) in definitions.iter() {
         for bind in &expr.morph_target_binds {
             let entity = require_node(nodes, bind.node)?;
-            let rest = world
+            let exists = world
                 .get::<MorphWeights>(entity)
-                .and_then(|w| w.weights().get(bind.index))
-                .filter(|_| bind.weight.is_finite() && (0. ..=1.).contains(&bind.weight))
-                .copied()
-                .ok_or_else(|| invalid("VRM morph bind out of range"))?;
-            morphs
-                .entry(bind.node)
-                .or_insert_with(|| MorphTarget {
-                    entity,
-                    node: bind.node,
-                    rest: default(),
-                })
-                .rest
-                .insert(bind.index, rest);
+                .is_some_and(|w| w.weights().get(bind.index).is_some());
+            if !exists {
+                return Err(invalid("VRM morph bind index out of range"));
+            }
+            if !bind.weight.is_finite() || !(0. ..=1.).contains(&bind.weight) {
+                return Err(invalid("VRM morph bind weight out of range"));
+            }
+            let target = morphs.entry(bind.node).or_insert_with(|| MorphTarget {
+                entity,
+                node: bind.node,
+                indices: Vec::new(),
+            });
+            if !target.indices.contains(&bind.index) {
+                target.indices.push(bind.index);
+            }
         }
     }
     world.entity_mut(root).insert((
@@ -336,8 +338,11 @@ pub(crate) fn apply(
         );
         for target in &binds.morphs {
             if let Ok(mut morph) = morphs.get_mut(target.entity) {
-                for (&index, &rest) in &target.rest {
-                    let mut next = rest;
+                for &index in &target.indices {
+                    // VRM expressions set bound morphs to 0 and accumulate
+                    // `bind.weight * expression weight` from there. The final
+                    // value is not clamped.
+                    let mut next = 0.;
                     for (_, expr, value) in &effective {
                         for bind in &expr.morph_target_binds {
                             if bind.node == target.node && bind.index == index {
@@ -345,7 +350,6 @@ pub(crate) fn apply(
                             }
                         }
                     }
-                    let next = next.clamp(0., 1.);
                     if morph.weights().get(index) != Some(&next)
                         && let Some(w) = morph.weights_mut().get_mut(index)
                     {
@@ -440,18 +444,31 @@ pub(crate) fn compute_material(
     )
 }
 
+/// Decomposes a scale-rotation matrix without requiring an invertible one.
+///
+/// `Affine2::to_scale_angle_translation` cannot handle a zero scale, but
+/// `KHR_texture_transform` allows one and expressions still have to blend the
+/// offset in that case.
+fn uv_scale_angle(matrix: Mat2) -> (Vec2, f32) {
+    let (x, y) = (matrix.x_axis, matrix.y_axis);
+    let scale = Vec2::new(x.length() * matrix.determinant().signum(), y.length());
+    let angle = if y.length_squared() > 0. {
+        (-y.x).atan2(y.y)
+    } else {
+        x.y.atan2(x.x)
+    };
+    (scale, angle)
+}
+
 fn blend_uv(base: Affine2, weight: f32, scale: Vec2, offset: Vec2) -> Affine2 {
-    if !base.matrix2.is_finite()
-        || !base.translation.is_finite()
-        || base.matrix2.determinant() == 0.
-    {
+    if !base.matrix2.is_finite() || !base.translation.is_finite() {
         return base;
     }
-    let (base_scale, angle, base_offset) = base.to_scale_angle_translation();
+    let (base_scale, angle) = uv_scale_angle(base.matrix2);
     Affine2::from_scale_angle_translation(
         base_scale * (1. - weight) + scale,
         angle,
-        base_offset * (1. - weight) + offset,
+        base.translation * (1. - weight) + offset,
     )
 }
 
@@ -494,6 +511,46 @@ mod tests {
         assert!(scale.abs_diff_eq(Vec2::new(2., 1.), 1e-5));
         assert!((angle - 0.4).abs() < 1e-5);
         assert!(offset.abs_diff_eq(Vec2::new(0.5, 0.), 1e-5));
+    }
+
+    #[test]
+    fn texture_transform_binds_survive_a_zero_base_scale() {
+        let defs: schema::Expressions = serde_json::from_value(serde_json::json!({
+            "preset": {
+                "happy": {
+                    "textureTransformBinds": [
+                        {"material":0,"scale":[1.,1.],"offset":[0.5,0.]}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let base =
+            Affine2::from_scale_angle_translation(Vec2::new(0., 1.), 0.4, Vec2::new(0.25, 0.1));
+        let rest_toon = schema::ToonParams {
+            uv_transforms: [base.into(); 6],
+            ..default()
+        };
+        let weights = effective(&defs, |_| 1.);
+        let (_, _, uv, _) = compute_material(
+            (Color::WHITE, LinearRgba::BLACK, base),
+            Some(&rest_toon),
+            0,
+            &weights,
+        );
+        let expected = Affine2::from_scale_angle_translation(Vec2::ONE, 0.4, Vec2::new(0.5, 0.));
+        assert!(uv.matrix2.abs_diff_eq(expected.matrix2, 1e-5));
+        assert!(uv.translation.abs_diff_eq(expected.translation, 1e-5));
+
+        let weights = effective(&defs, |_| 0.);
+        let (_, _, uv, _) = compute_material(
+            (Color::WHITE, LinearRgba::BLACK, base),
+            Some(&rest_toon),
+            0,
+            &weights,
+        );
+        assert!(uv.matrix2.abs_diff_eq(base.matrix2, 1e-5));
+        assert!(uv.translation.abs_diff_eq(base.translation, 1e-5));
     }
 
     #[test]
