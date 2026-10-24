@@ -108,15 +108,50 @@ pub(crate) fn texture_uv(info: &gltf::json::texture::Info) -> u32 {
         .unwrap_or(info.tex_coord)
 }
 
-pub(crate) fn texture_affine(info: &gltf::json::texture::Info) -> Affine2 {
-    let Some(transform) = texture_transform(info) else {
-        return Affine2::IDENTITY;
-    };
-    Affine2::from_scale_angle_translation(
-        Vec2::from(transform.scale.0),
-        -transform.rotation.0,
-        Vec2::from(transform.offset.0),
-    )
+/// `KHR_texture_transform` parameters as authored.
+///
+/// Expressions interpolate the scale and offset of that transform, so keep the
+/// source values instead of recovering them from a matrix that can be singular.
+#[derive(Clone, Copy, Debug, Reflect)]
+pub(crate) struct UvTransform {
+    pub scale: Vec2,
+    pub rotation: f32,
+    pub offset: Vec2,
+}
+
+impl Default for UvTransform {
+    fn default() -> Self {
+        Self {
+            scale: Vec2::ONE,
+            rotation: 0.,
+            offset: Vec2::ZERO,
+        }
+    }
+}
+
+impl UvTransform {
+    pub fn from_json(info: &gltf::json::texture::Info) -> Self {
+        let Some(transform) = texture_transform(info) else {
+            return Self::default();
+        };
+        Self {
+            scale: Vec2::from(transform.scale.0),
+            rotation: -transform.rotation.0,
+            offset: Vec2::from(transform.offset.0),
+        }
+    }
+
+    pub fn from_gltf(transform: gltf::texture::TextureTransform<'_>) -> Self {
+        Self {
+            scale: Vec2::from(transform.scale()),
+            rotation: -transform.rotation(),
+            offset: Vec2::from(transform.offset()),
+        }
+    }
+
+    pub fn affine(self) -> Affine2 {
+        Affine2::from_scale_angle_translation(self.scale, self.rotation, self.offset)
+    }
 }
 
 impl Toon {

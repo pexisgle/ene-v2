@@ -310,7 +310,12 @@ impl GltfExtensionHandler for VrmExtensions {
             return;
         }
         if let Some(index) = source.index() {
-            entity.insert(material::MaterialSlot(index));
+            let base_uv = source
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .and_then(|info| info.texture_transform().map(schema::UvTransform::from_gltf))
+                .unwrap_or_default();
+            entity.insert((material::MaterialSlot(index), material::BaseUv(base_uv)));
             if self.materials.contains_key(&index)
                 && entity.contains::<MeshMaterial3d<StandardMaterial>>()
             {

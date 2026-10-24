@@ -40,7 +40,7 @@ glTF本体のデコード、バッファ・画像・メッシュ・スキンの�
 
 MToonの半透明材質は、`alphaMode`が`BLEND`のときBevy標準の半透明合成で描画します。`renderQueueOffsetNumber`による描画順の指定と`transparentWithZWrite`による深度書き込みは対象外です。Bevy 0.19.1の半透明ソートはワールド距離だけをキーにするため、キュー番号を距離への加算値で近似しても通常の表示倍率では順序を保証できません。MToonに数値として使うテクスチャ（shading shift、UVアニメーションマスク、輪郭幅）は、GLB内の画像をロード時にsRGB接尾辞のない画像として複製します。色テクスチャは従来どおりsRGBのままです。
 
-SpringBoneは[VRM 1.0仕様](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_springBone-1.0)どおり隣接ジョイントの組だけを計算します。末端は尾として使い、VRM 0.xの仮想7cmボーンを追加しません。表情処理も、バインドが指定するモーフ番号・材質項目だけを変更します。バインドされたモーフは仕様どおり毎フレーム0から加算し、glTFの初期モーフウェイトは使いません。低FPS時は1/60秒のサブステップに分割し、長時間停止は0.25秒で打ち切ります。
+SpringBoneは[VRM 1.0仕様](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_springBone-1.0)どおり隣接ジョイントの組だけを計算します。末端は尾として使い、VRM 0.xの仮想7cmボーンを追加しません。表情処理も、バインドが指定するモーフ番号・材質項目だけを変更します。バインドされたモーフは仕様どおり毎フレーム0から加算し、glTFの初期モーフウェイトは使いません。低FPS時は1/60秒の固定ステップで祖先から子孫の順に追従し、残余時間を次のフレームへ繰り越します。長時間停止は約0.25秒で打ち切ります。
 
 MToonは前方描画のDirectionalLight・環境光を対象とします。VRM 0.x、FirstPerson、BodyTracking、SpringBoneの追加拡張、遅延描画、独自ファイル監視は対象外です。glTF共通機能の対応範囲はBevyに従います。
 

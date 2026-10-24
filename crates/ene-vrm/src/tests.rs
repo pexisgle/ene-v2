@@ -1,5 +1,5 @@
 use super::*;
-use crate::material::{MaterialSlot, Outline};
+use crate::material::{BaseUv, MaterialSlot, Outline};
 use bevy::{
     animation::{AnimatedBy, AnimationTargetId},
     asset::{LoadState, RenderAssetUsages},
@@ -1425,6 +1425,13 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     }
     let vrm = app.world_mut().query::<&Vrm>().single(app.world()).unwrap();
     assert_eq!(vrm.meta.name, "Ene Avatar");
+    assert!(
+        app.world_mut()
+            .query::<&BaseUv>()
+            .iter(app.world())
+            .any(|uv| uv.0.offset == Vec2::new(0.5, 0.25)),
+        "the authored base texture transform must survive scene instantiation"
+    );
     let outlines = app
         .world_mut()
         .query_filtered::<&MeshMaterial3d<MToonMaterial>, With<NotShadowCaster>>()

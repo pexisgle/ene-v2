@@ -1,4 +1,4 @@
-use crate::schema::{self, OutlineMode, Toon, ToonParams};
+use crate::schema::{OutlineMode, Toon, ToonParams, UvTransform};
 use bevy::{
     asset::embedded_asset,
     camera::visibility::{NoFrustumCulling, RenderLayers},
@@ -28,6 +28,15 @@ pub(crate) struct MaterialSlot(pub usize);
 #[reflect(Component, Clone)]
 pub(crate) struct Outline;
 
+/// Authored `KHR_texture_transform` of the material's base color texture.
+///
+/// `StandardMaterial::uv_transform` is a matrix, which cannot represent a
+/// rotation once an axis has zero scale. Expressions keep the source
+/// parameters so a zero or negative scale still blends correctly.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component, Clone)]
+pub(crate) struct BaseUv(pub UvTransform);
+
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 #[bind_group_data(ToonKey)]
 pub struct MToonExtension {
@@ -52,6 +61,8 @@ pub struct MToonExtension {
     #[sampler(112)]
     pub(crate) outline_width: Option<Handle<Image>>,
     pub(crate) outline: Option<OutlineMode>,
+    /// Authored transforms of the six MToon textures, for expression blending.
+    pub(crate) rest_uv: [UvTransform; 6],
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -156,11 +167,13 @@ impl MToonExtension {
             .and_then(|x| x.scale)
             .unwrap_or(1.);
         params.texture_uvs = toon.texture_uvs();
+        let mut rest_uv = [UvTransform::default(); 6];
         for (index, info) in textures.into_iter().enumerate() {
             if index != 3
                 && let Some(info) = info
             {
-                params.uv_transforms[index] = schema::texture_affine(info).into();
+                rest_uv[index] = UvTransform::from_json(info);
+                params.uv_transforms[index] = rest_uv[index].affine().into();
             }
         }
         Self {
@@ -172,6 +185,7 @@ impl MToonExtension {
             uv_mask: img(4),
             outline_width: img(5),
             outline: None,
+            rest_uv,
         }
     }
 }
@@ -182,6 +196,8 @@ pub(crate) fn setup(app: &mut App) {
     bevy::shader::load_shader_library!(app, "shaders/toon_bindings.wgsl");
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()
+        .register_type::<BaseUv>()
+        .register_type::<UvTransform>()
         .register_type::<Outline>()
         .add_systems(PostUpdate, sync_outline_layers);
 }
@@ -225,7 +241,9 @@ pub(crate) fn add_outlines(
             .id();
         world
             .entity_mut(entity)
-            .clone_components::<(Mesh3d, SkinnedMesh, MeshMorphWeights, MaterialSlot)>(outline);
+            .clone_components::<(Mesh3d, SkinnedMesh, MeshMorphWeights, MaterialSlot, BaseUv)>(
+                outline,
+            );
     }
 }
 
@@ -261,11 +279,16 @@ mod tests {
         let extension = MToonExtension::new(&toon, &[], &Default::default());
         assert_eq!(extension.params.texture_uvs, 0b11);
         let expected: bevy::math::Mat3 =
-            schema::texture_affine(toon.shade_multiply_texture.as_ref().unwrap()).into();
+            UvTransform::from_json(toon.shade_multiply_texture.as_ref().unwrap())
+                .affine()
+                .into();
         assert_eq!(extension.params.uv_transforms[0], expected);
         assert_eq!(
             extension.params.uv_transforms[1],
-            schema::texture_affine(&toon.shading_shift_texture.as_ref().unwrap().texture).into()
+            UvTransform::from_json(&toon.shading_shift_texture.as_ref().unwrap().texture)
+                .affine()
+                .into()
         );
+        assert_eq!(extension.rest_uv[0].scale, Vec2::new(2., 3.));
     }
 }

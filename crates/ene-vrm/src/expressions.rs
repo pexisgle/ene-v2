@@ -1,8 +1,8 @@
 use crate::{
     VrmSystems, animation,
     loader::{invalid, require_node},
-    material::MToonMaterial,
-    schema::{self, ColorType},
+    material::{BaseUv, MToonMaterial},
+    schema::{self, ColorType, UvTransform},
 };
 use bevy::{
     animation::AnimatedBy,
@@ -60,7 +60,9 @@ impl Binds {
 
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
-pub(crate) struct MaterialBinds<M: bevy::pbr::Material>(HashMap<(usize, Handle<M>), Handle<M>>);
+pub(crate) struct MaterialBinds<M: bevy::pbr::Material>(
+    HashMap<(usize, Handle<M>), (Handle<M>, UvTransform)>,
+);
 
 pub(crate) fn attach(
     world: &mut World,
@@ -144,7 +146,11 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
     roots: Query<(Entity, &Binds), Without<MaterialBinds<M>>>,
     children: Query<&Children>,
     mut meshes: ParamSet<(
-        Query<(&crate::material::MaterialSlot, &MeshMaterial3d<M>)>,
+        Query<(
+            &crate::material::MaterialSlot,
+            &MeshMaterial3d<M>,
+            Option<&BaseUv>,
+        )>,
         Query<&mut MeshMaterial3d<M>>,
     )>,
     mut materials: ResMut<Assets<M>>,
@@ -156,7 +162,7 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
         {
             let meshes = meshes.p0();
             for entity in std::iter::once(root).chain(children.iter_descendants(root)) {
-                let Ok((slot, handle)) = meshes.get(entity) else {
+                let Ok((slot, handle, base_uv)) = meshes.get(entity) else {
                     continue;
                 };
                 if !affected.contains(&slot.0) {
@@ -166,7 +172,8 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
                     pending = true;
                     break;
                 }
-                targets.push((entity, slot.0, handle.0.clone()));
+                let base_uv = base_uv.map_or_else(UvTransform::default, |uv| uv.0);
+                targets.push((entity, slot.0, handle.0.clone(), base_uv));
             }
         }
         if pending {
@@ -174,16 +181,16 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
         }
         let mut instances = HashMap::default();
         let mut handles = meshes.p1();
-        for (entity, slot, original) in targets {
+        for (entity, slot, original, base_uv) in targets {
             let clone = match instances.entry((slot, original.clone())) {
                 Entry::Occupied(e) => e.into_mut(),
                 Entry::Vacant(e) => {
                     let material = materials.get(&original).cloned().expect("checked above");
-                    e.insert(materials.add(material))
+                    e.insert((materials.add(material), base_uv))
                 }
             };
             if let Ok(mut handle) = handles.get_mut(entity) {
-                handle.0 = clone.clone();
+                handle.0 = clone.0.clone();
             }
         }
         commands.entity(root).insert(MaterialBinds::<M>(instances));
@@ -263,6 +270,9 @@ fn effective(
 trait BindMaterial: bevy::pbr::Material + Clone {
     fn base(&self) -> (&StandardMaterial, Option<&schema::ToonParams>);
     fn base_mut(&mut self) -> (&mut StandardMaterial, Option<&mut schema::ToonParams>);
+    fn uv_rest(&self) -> Option<[UvTransform; 6]> {
+        None
+    }
 }
 impl BindMaterial for StandardMaterial {
     fn base(&self) -> (&StandardMaterial, Option<&schema::ToonParams>) {
@@ -279,6 +289,9 @@ impl BindMaterial for MToonMaterial {
     fn base_mut(&mut self) -> (&mut StandardMaterial, Option<&mut schema::ToonParams>) {
         (&mut self.base, Some(&mut self.extension.params))
     }
+    fn uv_rest(&self) -> Option<[UvTransform; 6]> {
+        Some(self.extension.rest_uv)
+    }
 }
 
 fn apply_material<M: BindMaterial>(
@@ -286,10 +299,10 @@ fn apply_material<M: BindMaterial>(
     assets: &mut Assets<M>,
     effective: &[(&str, &schema::Expression, f32)],
 ) {
-    for (&(index, ref original), handle) in binds.into_iter().flat_map(|b| &b.0) {
-        let Some((rest, rest_toon)) = assets.get(original).map(|m| {
-            let (b, t) = m.base();
-            ((b.base_color, b.emissive, b.uv_transform), t.copied())
+    for (&(index, ref original), (handle, base_uv)) in binds.into_iter().flat_map(|b| &b.0) {
+        let Some((base_color, emissive, rest_toon, toon_uv)) = assets.get(original).map(|m| {
+            let (base, toon) = m.base();
+            (base.base_color, base.emissive, toon.copied(), m.uv_rest())
         }) else {
             continue;
         };
@@ -297,8 +310,14 @@ fn apply_material<M: BindMaterial>(
             continue;
         };
         let (cur_base, cur_toon) = current.base();
-        let (color, emissive, uv, toon) =
-            compute_material(rest, rest_toon.as_ref(), index, effective);
+        let (color, emissive, uv, toon) = compute_material(
+            (base_color, emissive),
+            *base_uv,
+            rest_toon.as_ref(),
+            toon_uv,
+            index,
+            effective,
+        );
         if (cur_base.base_color != color
             || cur_base.emissive != emissive
             || cur_base.uv_transform != uv
@@ -364,8 +383,10 @@ pub(crate) fn apply(
 }
 
 pub(crate) fn compute_material(
-    (base_color, emissive, mut uv_transform): (Color, LinearRgba, Affine2),
+    (base_color, emissive): (Color, LinearRgba),
+    base_uv: UvTransform,
     rest_toon: Option<&schema::ToonParams>,
+    toon_uv: Option<[UvTransform; 6]>,
     index: usize,
     weights: &[(&str, &schema::Expression, f32)],
 ) -> (Color, LinearRgba, Affine2, Option<schema::ToonParams>) {
@@ -423,12 +444,14 @@ pub(crate) fn compute_material(
             uv_offset += bind.offset * weight;
         }
     }
+    let mut uv = base_uv;
     if uv_bound {
-        uv_transform = blend_uv(uv_transform, uv_weight, uv_scale, uv_offset);
-        if let (Some(params), Some(rest)) = (&mut toon_params, rest_toon) {
+        uv = blend_uv(base_uv, uv_weight, uv_scale, uv_offset);
+        if let (Some(params), Some(rest)) = (&mut toon_params, toon_uv) {
             for (i, transform) in params.uv_transforms.iter_mut().enumerate() {
-                let base = Affine2::from_mat3(rest.uv_transforms[i]);
-                *transform = blend_uv(base, uv_weight, uv_scale, uv_offset).into();
+                *transform = blend_uv(rest[i], uv_weight, uv_scale, uv_offset)
+                    .affine()
+                    .into();
             }
         }
     }
@@ -439,37 +462,21 @@ pub(crate) fn compute_material(
             base_color
         },
         LinearRgba::from_vec3(emission).with_alpha(emissive.alpha),
-        uv_transform,
+        uv.affine(),
         toon_params,
     )
 }
 
-/// Decomposes a scale-rotation matrix without requiring an invertible one.
+/// Blends the authored scale and offset while keeping the authored rotation.
 ///
-/// `Affine2::to_scale_angle_translation` cannot handle a zero scale, but
-/// `KHR_texture_transform` allows one and expressions still have to blend the
-/// offset in that case.
-fn uv_scale_angle(matrix: Mat2) -> (Vec2, f32) {
-    let (x, y) = (matrix.x_axis, matrix.y_axis);
-    let scale = Vec2::new(x.length() * matrix.determinant().signum(), y.length());
-    let angle = if y.length_squared() > 0. {
-        (-y.x).atan2(y.y)
-    } else {
-        x.y.atan2(x.x)
-    };
-    (scale, angle)
-}
-
-fn blend_uv(base: Affine2, weight: f32, scale: Vec2, offset: Vec2) -> Affine2 {
-    if !base.matrix2.is_finite() || !base.translation.is_finite() {
-        return base;
+/// `KHR_texture_transform` allows zero and negative scales, so blending the
+/// source parameters avoids decomposing a matrix that can be singular.
+fn blend_uv(base: UvTransform, weight: f32, scale: Vec2, offset: Vec2) -> UvTransform {
+    UvTransform {
+        scale: base.scale * (1. - weight) + scale,
+        rotation: base.rotation,
+        offset: base.offset * (1. - weight) + offset,
     }
-    let (base_scale, angle) = uv_scale_angle(base.matrix2);
-    Affine2::from_scale_angle_translation(
-        base_scale * (1. - weight) + scale,
-        angle,
-        base.translation * (1. - weight) + offset,
-    )
 }
 
 #[cfg(test)]
@@ -489,15 +496,20 @@ mod tests {
         }))
         .unwrap();
         let weights = effective(&defs, |_| 1.);
-        let base =
-            Affine2::from_scale_angle_translation(Vec2::splat(3.), 0.4, Vec2::new(0.5, 0.25));
+        let base = UvTransform {
+            scale: Vec2::splat(3.),
+            rotation: 0.4,
+            offset: Vec2::new(0.5, 0.25),
+        };
         let rest_toon = schema::ToonParams {
-            uv_transforms: [base.into(); 6],
+            uv_transforms: [base.affine().into(); 6],
             ..default()
         };
         let (_, _, uv, toon) = compute_material(
-            (Color::WHITE, LinearRgba::BLACK, base),
+            (Color::WHITE, LinearRgba::BLACK),
+            base,
             Some(&rest_toon),
+            Some([base; 6]),
             0,
             &weights,
         );
@@ -525,16 +537,21 @@ mod tests {
             }
         }))
         .unwrap();
-        let base =
-            Affine2::from_scale_angle_translation(Vec2::new(0., 1.), 0.4, Vec2::new(0.25, 0.1));
+        let base = UvTransform {
+            scale: Vec2::new(0., 1.),
+            rotation: 0.4,
+            offset: Vec2::new(0.25, 0.1),
+        };
         let rest_toon = schema::ToonParams {
-            uv_transforms: [base.into(); 6],
+            uv_transforms: [base.affine().into(); 6],
             ..default()
         };
         let weights = effective(&defs, |_| 1.);
         let (_, _, uv, _) = compute_material(
-            (Color::WHITE, LinearRgba::BLACK, base),
+            (Color::WHITE, LinearRgba::BLACK),
+            base,
             Some(&rest_toon),
+            Some([base; 6]),
             0,
             &weights,
         );
@@ -544,13 +561,48 @@ mod tests {
 
         let weights = effective(&defs, |_| 0.);
         let (_, _, uv, _) = compute_material(
-            (Color::WHITE, LinearRgba::BLACK, base),
+            (Color::WHITE, LinearRgba::BLACK),
+            base,
             Some(&rest_toon),
+            Some([base; 6]),
             0,
             &weights,
         );
-        assert!(uv.matrix2.abs_diff_eq(base.matrix2, 1e-5));
-        assert!(uv.translation.abs_diff_eq(base.translation, 1e-5));
+        assert!(uv.matrix2.abs_diff_eq(base.affine().matrix2, 1e-5));
+        assert!(uv.translation.abs_diff_eq(base.affine().translation, 1e-5));
+    }
+
+    #[test]
+    fn texture_transform_binds_preserve_negative_and_zero_scales() {
+        // A negative scale on the zero-length axis must not flip the matrix at
+        // weight 0 (a signed zero determinant used to invert it).
+        let base = UvTransform {
+            scale: Vec2::new(-1., 0.),
+            ..default()
+        };
+        let kept = blend_uv(base, 0., Vec2::ZERO, Vec2::ZERO);
+        assert!(kept.scale.abs_diff_eq(base.scale, 1e-6));
+        assert!(
+            kept.affine()
+                .matrix2
+                .abs_diff_eq(base.affine().matrix2, 1e-6)
+        );
+
+        // Both axes zero still carry the authored rotation into the bind.
+        let flat = UvTransform {
+            scale: Vec2::ZERO,
+            rotation: 0.4,
+            offset: Vec2::ZERO,
+        };
+        let restored = blend_uv(flat, 1., Vec2::ONE, Vec2::ZERO);
+        assert_eq!(restored.rotation, 0.4);
+        let expected = Affine2::from_scale_angle_translation(Vec2::ONE, 0.4, Vec2::ZERO);
+        assert!(
+            restored
+                .affine()
+                .matrix2
+                .abs_diff_eq(expected.matrix2, 1e-6)
+        );
     }
 
     #[test]
@@ -609,8 +661,10 @@ mod tests {
             ..default()
         };
         let (color, emission, uv, toon) = compute_material(
-            (rest.base_color, rest.emissive, rest.uv_transform),
+            (rest.base_color, rest.emissive),
+            UvTransform::default(),
             Some(&rest_toon),
+            None,
             0,
             &weights,
         );

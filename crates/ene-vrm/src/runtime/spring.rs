@@ -72,23 +72,35 @@ pub(crate) fn setup(app: &mut App) {
         .add_systems(PostUpdate, springs.in_set(VrmSystems::SpringBone));
 }
 
+/// Reference solver step. The simulation runs on a fixed clock so frame-time
+/// jitter does not change how many times inertia and damping are applied.
+const STEP: f32 = 1. / 60.;
+/// Upper bound for time spent catching up after a long stall.
+const MAX_STEPS: usize = 15;
+
+/// Accumulates frame time and returns how many fixed [`STEP`]s to simulate.
+fn fixed_steps(accumulator: &mut f32, dt: f32) -> usize {
+    // Keep half a step of slack so the capped value does not truncate to one
+    // step less through float rounding.
+    let max = STEP * (MAX_STEPS as f32 + 0.5);
+    *accumulator = (*accumulator + dt).min(max);
+    let steps = ((*accumulator / STEP) as usize).min(MAX_STEPS);
+    *accumulator = (*accumulator - steps as f32 * STEP).max(0.);
+    steps
+}
+
 fn springs(
     time: Res<Time>,
+    mut accumulator: Local<f32>,
     mut rigs: Query<(Entity, &mut SpringRig)>,
     props: Query<&SpringJointProps>,
     parents: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
-    // Run at the 60 Hz reference step so a low frame rate does not silently
-    // discard simulated time. Long stalls are still capped.
-    const STEP: f32 = 1. / 60.;
-    const MAX_FRAME: f32 = 0.25;
-    let dt = time.delta_secs().min(MAX_FRAME);
-    if dt <= 0. {
+    let steps = fixed_steps(&mut accumulator, time.delta_secs());
+    if steps == 0 {
         return;
     }
-    let steps = (dt / STEP).ceil().max(1.) as usize;
-    let step = dt / steps as f32;
     for (root_entity, mut rig) in &mut rigs {
         // Bevy propagates `GlobalTransform` after `VrmSystems::SpringBone`, so
         // read the rig root from `Transform` like every other node here.
@@ -100,49 +112,53 @@ fn springs(
             chains,
             colliders: defs,
         } = &mut *rig;
-        for chain in chains {
-            let colliders: Vec<_> = chain
-                .colliders
-                .iter()
-                .filter_map(|&i| {
-                    let c = &defs[i];
-                    let g = transforms.p0().compute_global_transform(c.entity).ok()?;
-                    Some((
-                        Segment3d::from(c.segment.vertices.map(|p| g.transform_point(p))),
-                        c.radius * g.scale().abs().max_element(),
-                    ))
-                })
-                .collect();
-            let center = chain
-                .center
-                .and_then(|e| transforms.p0().compute_global_transform(e).ok())
-                .unwrap_or_default();
-            let inv_center = center.affine().inverse();
-            for joint in &mut chain.joints {
-                let Ok(props) = props.get(joint.entity) else {
-                    continue;
-                };
-                let parent = parents
-                    .get(joint.entity)
-                    .ok()
-                    .and_then(|p| transforms.p0().compute_global_transform(p.parent()).ok())
+        // Step the whole rig before the next step: a child joint must see the
+        // pose its parent has at the start of the same step, not the pose after
+        // every substep has run.
+        for _ in 0..steps {
+            for chain in chains.iter_mut() {
+                // A collider or center may be driven by a joint updated above,
+                // so recompute them for each step.
+                let colliders: Vec<_> = chain
+                    .colliders
+                    .iter()
+                    .filter_map(|&i| {
+                        let c = &defs[i];
+                        let g = transforms.p0().compute_global_transform(c.entity).ok()?;
+                        Some((
+                            Segment3d::from(c.segment.vertices.map(|p| g.transform_point(p))),
+                            c.radius * g.scale().abs().max_element(),
+                        ))
+                    })
+                    .collect();
+                let center = chain
+                    .center
+                    .and_then(|e| transforms.p0().compute_global_transform(e).ok())
                     .unwrap_or_default();
-                let rest = parent.mul_transform(joint.rest);
-                let head = rest.translation();
-                let length = rest.affine().transform_vector3(joint.tail).length();
-                let initial = rest.transform_point(joint.tail);
-                let stiffness =
-                    (initial - head).normalize_or_zero() * props.stiffness * unit_scale * step;
-                let mut next = initial;
-                for _ in 0..steps {
+                let inv_center = center.affine().inverse();
+                for joint in &mut chain.joints {
+                    let Ok(props) = props.get(joint.entity) else {
+                        continue;
+                    };
+                    let parent = parents
+                        .get(joint.entity)
+                        .ok()
+                        .and_then(|p| transforms.p0().compute_global_transform(p.parent()).ok())
+                        .unwrap_or_default();
+                    let rest = parent.mul_transform(joint.rest);
+                    let head = rest.translation();
+                    let length = rest.affine().transform_vector3(joint.tail).length();
+                    let initial = rest.transform_point(joint.tail);
+                    let stiffness =
+                        (initial - head).normalize_or_zero() * props.stiffness * unit_scale * STEP;
                     let [current, previous] = joint
                         .state
                         .map_or([initial; 2], |s| s.map(|p| center.transform_point(p)));
-                    next = head
+                    let mut next = head
                         + (current
                             + (current - previous) * (1. - props.drag_force)
                             + stiffness
-                            + props.gravity_dir * props.gravity_power * unit_scale * step
+                            + props.gravity_dir * props.gravity_power * unit_scale * STEP
                             - head)
                             .normalize_or_zero()
                             * length;
@@ -156,19 +172,19 @@ fn springs(
                         );
                     }
                     joint.state = Some([next, current].map(|p| inv_center.transform_point3(p)));
-                }
-                let dir = rest
-                    .affine()
-                    .inverse()
-                    .transform_vector3(next - head)
-                    .normalize_or_zero();
-                if let Ok(mut t) = transforms.p1().get_mut(joint.entity) {
-                    t.rotation = joint.rest.rotation
-                        * if dir != Vec3::ZERO {
-                            Quat::from_rotation_arc(joint.tail.normalize_or_zero(), dir)
-                        } else {
-                            Quat::IDENTITY
-                        };
+                    let dir = rest
+                        .affine()
+                        .inverse()
+                        .transform_vector3(next - head)
+                        .normalize_or_zero();
+                    if let Ok(mut t) = transforms.p1().get_mut(joint.entity) {
+                        t.rotation = joint.rest.rotation
+                            * if dir != Vec3::ZERO {
+                                Quat::from_rotation_arc(joint.tail.normalize_or_zero(), dir)
+                            } else {
+                                Quat::IDENTITY
+                            };
+                    }
                 }
             }
         }
@@ -543,21 +559,98 @@ mod tests {
         assert!(a.abs_diff_eq(b, 1e-5), "{a:?} != {b:?}");
     }
 
+    /// Builds a two-segment chain so a child joint can observe its parent.
+    fn chain(dt: Duration) -> (App, [Entity; 2]) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin))
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(dt));
+        crate::runtime::setup(&mut app);
+        app.configure_sets(
+            PostUpdate,
+            crate::VrmSystems::SpringBone.before(bevy::transform::TransformSystems::Propagate),
+        );
+        let root = app.world_mut().spawn(Transform::default()).id();
+        let props = SpringJointProps {
+            gravity_power: 1.,
+            stiffness: 0.5,
+            drag_force: 0.4,
+            ..default()
+        };
+        let parent_rest = Transform::from_xyz(0., 1., 0.);
+        // Horizontal segments so gravity applies torque to both joints.
+        let child_rest = Transform::from_xyz(0.1, 0., 0.);
+        let parent = app
+            .world_mut()
+            .spawn((parent_rest, ChildOf(root), props))
+            .id();
+        let child = app
+            .world_mut()
+            .spawn((child_rest, ChildOf(parent), props))
+            .id();
+        app.world_mut().entity_mut(root).insert(SpringRig {
+            chains: vec![SpringChain {
+                joints: vec![
+                    SpringJoint {
+                        entity: parent,
+                        rest: parent_rest,
+                        tail: Vec3::X * 0.1,
+                        state: None,
+                    },
+                    SpringJoint {
+                        entity: child,
+                        rest: child_rest,
+                        tail: Vec3::X * 0.1,
+                        state: None,
+                    },
+                ],
+                colliders: vec![],
+                center: None,
+            }],
+            colliders: vec![],
+        });
+        // Consume the first-update zero delta.
+        app.update();
+        (app, [parent, child])
+    }
+
     #[test]
-    fn springbone_substeps_preserve_simulated_time_at_low_frame_rates() {
-        let (mut low, low_joint) = simulation(1., false);
-        let (mut high, high_joint) = simulation(1., false);
-        low.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f64(0.1),
-        ));
+    fn springbone_steps_children_with_the_current_parent_pose() {
+        let step = Duration::from_secs_f64(1. / 60.);
+        // 6.25 steps in one frame: exactly six steps and a carried remainder.
+        let (mut low, low_joints) = chain(Duration::from_secs_f64(1. / 60. * 6.25));
+        let (mut high, high_joints) = chain(step);
+        low.update();
         for _ in 0..6 {
-            low.update();
-        }
-        for _ in 0..36 {
             high.update();
         }
-        let a = low.world().get::<Transform>(low_joint).unwrap().rotation;
-        let b = high.world().get::<Transform>(high_joint).unwrap().rotation;
-        assert!(a.abs_diff_eq(b, 1e-3), "10 FPS: {a:?}, 60 FPS: {b:?}");
+        for (low_joint, high_joint) in low_joints.into_iter().zip(high_joints) {
+            let a = low.world().get::<Transform>(low_joint).unwrap().rotation;
+            let b = high.world().get::<Transform>(high_joint).unwrap().rotation;
+            assert!(a.abs_diff_eq(b, 1e-5), "{a:?} != {b:?}");
+        }
+    }
+
+    #[test]
+    fn fixed_step_accumulator_does_not_double_steps_at_the_frame_boundary() {
+        for dt in [1. / 60., 0.01666, 0.01667, 0.1] {
+            let mut accumulator = 0.;
+            let frames = 600;
+            let mut steps = 0;
+            for _ in 0..frames {
+                steps += fixed_steps(&mut accumulator, dt);
+            }
+            let expected = (frames as f32 * dt / STEP) as usize;
+            assert!(
+                steps.abs_diff(expected) <= 1,
+                "dt {dt}: {steps} steps, expected {expected}"
+            );
+            assert!(
+                (0. ..STEP).contains(&accumulator),
+                "remainder {accumulator}"
+            );
+        }
+        let mut accumulator = 0.;
+        assert_eq!(fixed_steps(&mut accumulator, 10.), MAX_STEPS);
+        assert!(accumulator < STEP);
     }
 }
