@@ -6,11 +6,7 @@ use ene_vrm::VrmPlugin;
 mod character;
 mod control;
 mod desktop;
-
-#[cfg(target_os = "linux")]
-mod wayland;
-#[cfg(windows)]
-mod windows;
+mod platform;
 
 fn main() -> bevy::app::AppExit {
     // DXGI HWND swapchains do not support desktop alpha composition.
@@ -50,9 +46,9 @@ fn main() -> bevy::app::AppExit {
         ));
     });
     #[cfg(windows)]
-    app.add_plugins(windows::setup);
+    app.add_plugins(platform::windows::setup);
     #[cfg(target_os = "linux")]
-    app.add_plugins(wayland::setup);
+    app.add_plugins(platform::wayland::setup);
     // A resident desktop mascot cares more about CPU than parallel dispatch.
     // Interleaved A/B (2 avatars, 30-60fps) measured ~5-7% lower process CPU
     // with serial PostUpdate; the systems still keep disjoint borrows so this
