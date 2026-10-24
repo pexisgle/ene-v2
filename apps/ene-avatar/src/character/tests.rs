@@ -1,9 +1,9 @@
-use super::lifecycle::{PausedSpring, update_avatars};
+use super::lifecycle::update_avatars;
 use super::*;
 use crate::desktop::Output;
 use bevy::ecs::message::Messages;
 use bevy::ecs::system::RunSystemOnce;
-use ene_vrm::{SpringJointProps, Vrm, VrmMeta};
+use ene_vrm::{SpringJointProps, SpringRig, Vrm, VrmMeta};
 use serde_json::json;
 
 fn ready() -> Vrm {
@@ -36,6 +36,7 @@ fn spring_spec_values_survive_pause_and_scale_changes_without_app_scaling() {
             CharacterId("scale".into()),
             ready(),
             AvatarState::Ready,
+            SpringRig::default(),
             Transform::from_scale(Vec3::splat(160.)),
         ))
         .id();
@@ -54,12 +55,19 @@ fn spring_spec_values_survive_pause_and_scale_changes_without_app_scaling() {
 
     app.world_mut().get_mut::<Config>(root).unwrap().playing = false;
     app.update();
-    assert!(app.world().get::<SpringJointProps>(joint).is_none());
-    assert_eq!(app.world().get::<PausedSpring>(joint).unwrap().0, original);
+    assert_eq!(
+        *app.world().get::<SpringJointProps>(joint).unwrap(),
+        original
+    );
+    assert!(app.world().get::<SpringRig>(root).unwrap().paused);
 
     app.world_mut().get_mut::<Transform>(root).unwrap().scale = Vec3::splat(320.);
     app.update();
-    assert_eq!(app.world().get::<PausedSpring>(joint).unwrap().0, original);
+    assert_eq!(
+        *app.world().get::<SpringJointProps>(joint).unwrap(),
+        original
+    );
+    assert!(app.world().get::<SpringRig>(root).unwrap().paused);
 
     app.world_mut().get_mut::<Config>(root).unwrap().playing = true;
     app.update();
@@ -68,7 +76,41 @@ fn spring_spec_values_survive_pause_and_scale_changes_without_app_scaling() {
         *app.world().get::<SpringJointProps>(joint).unwrap(),
         original
     );
+    assert!(!app.world().get::<SpringRig>(root).unwrap().paused);
 }
+
+fn native_app() -> App {
+    let plugins = DefaultPlugins
+        .build()
+        .disable::<AssetPlugin>()
+        .disable::<bevy::render::RenderPlugin>()
+        .disable::<bevy::log::LogPlugin>();
+    #[cfg(windows)]
+    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+    let mut app = App::new();
+    app.add_plugins(AssetPlugin {
+        unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+        ..default()
+    })
+    .init_asset::<Shader>()
+    .init_asset_loader::<bevy::shader::ShaderLoader>()
+    .add_plugins(plugins.set(WindowPlugin {
+        primary_window: None,
+        ..default()
+    }))
+    .add_plugins((
+        bevy::render::sync_world::SyncWorldPlugin,
+        ene_vrm::VrmPlugin,
+        setup,
+    ))
+    .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f64(1. / 60.),
+    ));
+    app.finish();
+    app.cleanup();
+    app
+}
+
 #[test]
 fn native_scene_loading_errors_retry_and_replacement_reach_a_terminal_state() {
     let directory = std::env::temp_dir().join(format!("ene-avatar-native-{}", std::process::id()));
@@ -132,29 +174,7 @@ fn native_scene_loading_errors_retry_and_replacement_reach_a_terminal_state() {
     motion_value["animations"] = json!([{"samplers":[{"input":0,"output":1}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]);
     std::fs::write(&motion, motion_value.to_string()).unwrap();
     std::fs::write(&bad_motion, "{}").unwrap();
-    let plugins = DefaultPlugins
-        .build()
-        .disable::<AssetPlugin>()
-        .disable::<bevy::render::RenderPlugin>()
-        .disable::<bevy::log::LogPlugin>();
-    #[cfg(windows)]
-    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
-    let mut app = App::new();
-    app.add_plugins(AssetPlugin {
-        unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
-        ..default()
-    })
-    .init_asset::<Shader>()
-    .init_asset_loader::<bevy::shader::ShaderLoader>()
-    .add_plugins(plugins.set(WindowPlugin {
-        primary_window: None,
-        ..default()
-    }))
-    .add_plugins((
-        bevy::render::sync_world::SyncWorldPlugin,
-        ene_vrm::VrmPlugin,
-        setup,
-    ));
+    let mut app = native_app();
     app.world_mut().spawn(Output {
         name: "test".into(),
         origin: Vec2::ZERO,
@@ -192,8 +212,6 @@ fn native_scene_loading_errors_retry_and_replacement_reach_a_terminal_state() {
         .run_system_cached_with(reload, actors[2])
         .unwrap();
     assert!(app.world().get_entity(replaced).is_err());
-    app.finish();
-    app.cleanup();
     for repair in [false, true] {
         if repair {
             std::fs::write(&bad, model.to_string()).unwrap();
@@ -234,6 +252,145 @@ fn native_scene_loading_errors_retry_and_replacement_reach_a_terminal_state() {
 }
 
 #[test]
+fn native_pause_holds_constraint_spring_pose() {
+    let directory = std::env::temp_dir().join(format!("ene-avatar-pause-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let nodes = vec![
+        json!({"children":[1,3,6]}),
+        json!({"children":[2,9,12]}),
+        json!({"children":[15]}),
+        json!({"children":[4]}),
+        json!({"children":[5]}),
+        json!({}),
+        json!({"children":[7]}),
+        json!({"children":[8]}),
+        json!({}),
+        json!({"children":[10]}),
+        json!({"children":[11]}),
+        json!({}),
+        json!({"children":[13]}),
+        json!({"children":[14]}),
+        json!({}),
+        json!({"translation":[0.2,0.0,0.0]}),
+    ];
+    let human_bones = json!({
+        "hips":{"node":0},"spine":{"node":1},"head":{"node":2},
+        "leftUpperLeg":{"node":3},"leftLowerLeg":{"node":4},"leftFoot":{"node":5},
+        "rightUpperLeg":{"node":6},"rightLowerLeg":{"node":7},"rightFoot":{"node":8},
+        "leftUpperArm":{"node":9},"leftLowerArm":{"node":10},"leftHand":{"node":11},
+        "rightUpperArm":{"node":12},"rightLowerArm":{"node":13},"rightHand":{"node":14}
+    });
+    let mut model = json!({
+        "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+        "nodes":nodes,
+        "extensions":{
+            "VRMC_vrm":{
+                "specVersion":"1.0",
+                "meta":{"name":"Test","authors":["Test"],"licenseUrl":"https://vrm.dev/licenses/1.0/"},
+                "humanoid":{"humanBones":human_bones}
+            },
+            "VRMC_springBone":{
+                "specVersion":"1.0",
+                "springs":[{"joints":[
+                    {"node":2,"gravityPower":1.0,"stiffness":0.5,"dragForce":0.4},
+                    {"node":15}
+                ]}]
+            }
+        }
+    });
+    model["nodes"][2]["extensions"] = json!({
+        "VRMC_node_constraint": {
+            "specVersion": "1.0",
+            "constraint": {"rotation": {"source": 1}}
+        }
+    });
+    let path = directory.join("pause.vrm");
+    std::fs::write(&path, model.to_string()).unwrap();
+
+    let mut app = native_app();
+    app.world_mut().spawn(Output {
+        name: "test".into(),
+        origin: Vec2::ZERO,
+        size: Vec2::splat(100.),
+        units_per_logical_pixel: 1.,
+    });
+    let avatar = app
+        .world_mut()
+        .spawn((
+            CharacterId("pause".into()),
+            Config {
+                model: path.to_str().unwrap().into(),
+                ..default()
+            },
+        ))
+        .id();
+    app.world_mut()
+        .run_system_cached_with(reload, avatar)
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        app.update();
+        let ready = app.world().get::<AvatarState>(avatar) == Some(&AvatarState::Ready);
+        let rig = {
+            let mut query = app.world_mut().query_filtered::<Entity, With<SpringRig>>();
+            query.iter(app.world()).next().is_some()
+        };
+        if ready && rig {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "paused-model test did not become ready"
+        );
+        std::thread::yield_now();
+    }
+
+    let (root, head) = {
+        let mut query = app.world_mut().query::<(Entity, &Vrm)>();
+        let (root, vrm) = query.single(app.world()).unwrap();
+        (root, vrm.bone("head").expect("head bone"))
+    };
+    let mut simulated = Quat::IDENTITY;
+    for _ in 0..120 {
+        app.update();
+        let rotation = app.world().get::<Transform>(head).unwrap().rotation;
+        if rotation.angle_between(Quat::IDENTITY) > 0.01 {
+            simulated = rotation;
+            break;
+        }
+    }
+    assert!(
+        simulated.angle_between(Quat::IDENTITY) > 0.01,
+        "spring joint did not move under the constraint"
+    );
+
+    app.world_mut().get_mut::<Config>(avatar).unwrap().playing = false;
+    app.update();
+    assert!(app.world().get::<SpringRig>(root).unwrap().paused);
+    assert!(app.world().get::<SpringJointProps>(head).is_some());
+    for _ in 0..10 {
+        app.update();
+        let held = app.world().get::<Transform>(head).unwrap().rotation;
+        assert!(
+            held.abs_diff_eq(simulated, 1e-5),
+            "playing=false changed the spring pose: {held:?} != {simulated:?}"
+        );
+        assert!(app.world().get::<SpringRig>(root).unwrap().paused);
+    }
+
+    app.world_mut().get_mut::<Config>(avatar).unwrap().playing = true;
+    app.update();
+    assert!(!app.world().get::<SpringRig>(root).unwrap().paused);
+    assert!(app.world().get::<SpringJointProps>(head).is_some());
+
+    app.world_mut().entity_mut(avatar).despawn();
+    app.update();
+    drop(app);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn pause_and_resume_only_touch_the_selected_characters_players_and_springs() {
     let mut app = scene_app();
     let world = app.world_mut();
@@ -256,6 +413,7 @@ fn pause_and_resume_only_touch_the_selected_characters_players_and_springs() {
             CharacterId(root.to_bits().to_string()),
             AvatarState::Ready,
             ready(),
+            SpringRig::default(),
             Config {
                 playing,
                 looping: true,
@@ -266,7 +424,7 @@ fn pause_and_resume_only_touch_the_selected_characters_players_and_springs() {
     }
 
     world.run_system_once(update_avatars).unwrap();
-    for (index, (_, players, spring)) in actors.iter().enumerate() {
+    for (index, (root, players, spring)) in actors.iter().enumerate() {
         for &player in players {
             let player = world.get::<AnimationPlayer>(player).unwrap();
             assert_eq!(player.all_paused(), index == 0);
@@ -275,8 +433,8 @@ fn pause_and_resume_only_touch_the_selected_characters_players_and_springs() {
                 1.25
             );
         }
-        assert_eq!(world.get::<SpringJointProps>(*spring).is_none(), index == 0);
-        assert_eq!(world.get::<PausedSpring>(*spring).is_some(), index == 0);
+        assert_eq!(world.get::<SpringRig>(*root).unwrap().paused, index == 0);
+        assert!(world.get::<SpringJointProps>(*spring).is_some());
     }
     world.get_mut::<Config>(actors[0].0).unwrap().playing = true;
     world.run_system_once(update_avatars).unwrap();
@@ -286,8 +444,8 @@ fn pause_and_resume_only_touch_the_selected_characters_players_and_springs() {
             .unwrap()
             .all_paused()
     );
+    assert!(!world.get::<SpringRig>(actors[0].0).unwrap().paused);
     assert!(world.get::<SpringJointProps>(actors[0].2).is_some());
-    assert!(world.get::<PausedSpring>(actors[0].2).is_none());
 }
 
 #[test]
@@ -300,6 +458,7 @@ fn unchanged_controls_do_not_rewrite_players_and_late_parts_inherit_pause() {
             CharacterId("a".into()),
             AvatarState::Ready,
             ready(),
+            SpringRig::default(),
             Config {
                 playing: false,
                 looping: true,
@@ -334,6 +493,10 @@ fn unchanged_controls_do_not_rewrite_players_and_late_parts_inherit_pause() {
     let mut late = AnimationPlayer::default();
     late.play(AnimationNodeIndex::new(0));
     let late = app.world_mut().spawn((late, ChildOf(avatar))).id();
+    let late_rig = app
+        .world_mut()
+        .spawn((SpringRig::default(), ChildOf(avatar)))
+        .id();
     let spring = app
         .world_mut()
         .spawn((SpringJointProps::default(), ChildOf(avatar)))
@@ -345,14 +508,14 @@ fn unchanged_controls_do_not_rewrite_players_and_late_parts_inherit_pause() {
             .unwrap()
             .all_paused()
     );
-    assert!(app.world().get::<PausedSpring>(spring).is_some());
-    assert!(app.world().get::<SpringJointProps>(spring).is_none());
+    assert!(app.world().get::<SpringRig>(late_rig).unwrap().paused);
+    assert!(app.world().get::<SpringJointProps>(spring).is_some());
     let other = app
         .world_mut()
         .spawn((CharacterId("b".into()), AvatarState::Ready, ready()))
         .id();
     app.world_mut().entity_mut(late).insert(ChildOf(other));
-    app.world_mut().entity_mut(spring).insert(ChildOf(other));
+    app.world_mut().entity_mut(late_rig).insert(ChildOf(other));
     app.update();
     assert!(
         !app.world()
@@ -360,8 +523,8 @@ fn unchanged_controls_do_not_rewrite_players_and_late_parts_inherit_pause() {
             .unwrap()
             .all_paused()
     );
+    assert!(!app.world().get::<SpringRig>(late_rig).unwrap().paused);
     assert!(app.world().get::<SpringJointProps>(spring).is_some());
-    assert!(app.world().get::<PausedSpring>(spring).is_none());
 }
 
 #[test]

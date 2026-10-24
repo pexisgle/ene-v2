@@ -6,7 +6,7 @@ use bevy::{
 };
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Toon {
     #[serde(rename = "specVersion")]
@@ -87,7 +87,7 @@ pub(crate) enum OutlineMode {
     ScreenCoordinates = 2,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct ShadingShiftTexture {
     #[serde(flatten)]
     pub texture: gltf::json::texture::Info,

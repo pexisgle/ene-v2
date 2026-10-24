@@ -19,6 +19,27 @@ pub type MToonMaterial = ExtendedMaterial<StandardMaterial, MToonExtension>;
 /// UV animation mask and outline width.
 pub(crate) const NUMERIC_SLOTS: [usize; 3] = [1, 4, 5];
 
+/// MToon texture slots that store colors: shade multiply, rim multiply and
+/// matcap.
+pub(crate) const COLOR_SLOTS: [usize; 3] = [0, 2, 3];
+
+/// Sampling space a texture is used in. Bevy picks the loaded image format
+/// from the core glTF slots, which can disagree with an MToon slot sharing the
+/// same texture index; the loader keeps a converted image per space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TextureSpace {
+    Linear,
+    Srgb,
+}
+
+pub(crate) fn texture_space(slot: usize) -> TextureSpace {
+    if NUMERIC_SLOTS.contains(&slot) {
+        TextureSpace::Linear
+    } else {
+        TextureSpace::Srgb
+    }
+}
+
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct MaterialSlot(pub usize);
@@ -89,6 +110,9 @@ impl MaterialExtension for MToonExtension {
     fn fragment_shader() -> ShaderRef {
         "embedded://ene_vrm/material/shaders/mtoon.wgsl".into()
     }
+    fn prepass_vertex_shader() -> ShaderRef {
+        "embedded://ene_vrm/material/shaders/mtoon_prepass.wgsl".into()
+    }
     fn specialize(
         pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -144,17 +168,15 @@ impl MToonExtension {
     pub(crate) fn new(
         toon: &Toon,
         images: &[Handle<Image>],
-        linear: &HashMap<usize, Handle<Image>>,
+        converted: &HashMap<(usize, TextureSpace), Handle<Image>>,
     ) -> Self {
         let textures = toon.textures();
         let img = |slot: usize| {
             let index = textures[slot]?.index.value();
-            let handle = if NUMERIC_SLOTS.contains(&slot) {
-                linear.get(&index).or_else(|| images.get(index))
-            } else {
-                images.get(index)
-            };
-            handle.cloned()
+            converted
+                .get(&(index, texture_space(slot)))
+                .or_else(|| images.get(index))
+                .cloned()
         };
         let mut params = toon.params;
         params.texture_flags = textures
@@ -193,6 +215,7 @@ impl MToonExtension {
 pub(crate) fn setup(app: &mut App) {
     embedded_asset!(app, "shaders/mtoon.wgsl");
     embedded_asset!(app, "shaders/outline.wgsl");
+    embedded_asset!(app, "shaders/mtoon_prepass.wgsl");
     bevy::shader::load_shader_library!(app, "shaders/toon_bindings.wgsl");
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()

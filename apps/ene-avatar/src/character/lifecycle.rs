@@ -7,17 +7,12 @@ use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
     prelude::*,
 };
-use ene_vrm::{SpringJointProps, Vrm};
+use ene_vrm::{SpringRig, Vrm};
 use serde_json::json;
-
-#[derive(Component)]
-// The VRM solver has no individual pause; disabling bones would also stop transform updates.
-pub(crate) struct PausedSpring(pub(super) SpringJointProps);
 
 /// The single place that decides an avatar's state and applies the transition.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn update_avatars(
-    mut commands: Commands,
     mut actors: Query<(
         Entity,
         &CharacterId,
@@ -29,15 +24,7 @@ pub(super) fn update_avatars(
     outputs: Query<&Output>,
     server: Res<AssetServer>,
     children: Query<&Children>,
-    mut parts: Query<(
-        Entity,
-        AnyOf<(
-            &mut AnimationPlayer,
-            &mut SpringJointProps,
-            &mut PausedSpring,
-            &Vrm,
-        )>,
-    )>,
+    mut parts: Query<(Entity, AnyOf<(&mut AnimationPlayer, &mut SpringRig, &Vrm)>)>,
     mut states: MessageWriter<Notification>,
 ) {
     use bevy::animation::RepeatAnimation;
@@ -46,7 +33,7 @@ pub(super) fn update_avatars(
         let subtree = assets.map_or(root, |assets| assets.scene);
         let mut initialized = false;
         let mut motion_ready = config.motion.is_none();
-        for (_, (player, _, _, rig)) in
+        for (_, (player, _, rig)) in
             parts.iter_many(std::iter::once(subtree).chain(children.iter_descendants(subtree)))
         {
             initialized |= rig.is_some();
@@ -97,7 +84,7 @@ pub(super) fn update_avatars(
         let running = config.playing && *state == AvatarState::Ready;
         let mut parts =
             parts.iter_many_mut(std::iter::once(root).chain(children.iter_descendants(root)));
-        while let Some((entity, (player, props, paused, _rig))) = parts.fetch_next() {
+        while let Some((_, (player, spring, _))) = parts.fetch_next() {
             if let Some(mut player) = player
                 && player.playing_animations().any(|(_, animation)| {
                     animation.is_paused() == running
@@ -120,18 +107,13 @@ pub(super) fn update_avatars(
                     }
                 }
             }
-            if running {
-                if let Some(paused) = paused {
-                    commands
-                        .entity(entity)
-                        .insert(paused.0)
-                        .remove::<PausedSpring>();
+            if let Some(mut spring) = spring {
+                // Keep the last simulated pose visible while paused; removing
+                // SpringJointProps here would also disable apply_spring_poses.
+                let paused = !running;
+                if spring.paused != paused {
+                    spring.paused = paused;
                 }
-            } else if let Some(props) = props {
-                commands
-                    .entity(entity)
-                    .insert(PausedSpring(*props))
-                    .remove::<SpringJointProps>();
             }
         }
     }

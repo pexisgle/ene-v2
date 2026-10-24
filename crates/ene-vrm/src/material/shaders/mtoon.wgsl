@@ -4,12 +4,12 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, main_pass_post_lighting_processing},
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
-    mesh_view_bindings::{lights, view},
+    mesh_view_bindings::{lights, view, globals},
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     shadows::fetch_directional_shadow,
     ambient::ambient_light,
 }
-#import ene_vrm::toon::{toon, animated_uv, uv_animation_mask, texture_uv, shade_texture, shade_sampler, shift_texture, shift_sampler, rim_texture, rim_sampler, matcap_texture, matcap_sampler}
+#import ene_vrm::toon::{toon, animated_uvs, texture_uv, shade_texture, shade_sampler, shift_texture, shift_sampler, rim_texture, rim_sampler, matcap_texture, matcap_sampler}
 
 @fragment
 fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> FragmentOutput {
@@ -30,9 +30,9 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> Fragmen
 #ifndef VERTEX_UVS_B
     raw_uv1 = raw_uv0;
 #endif
-    let mask = uv_animation_mask(texture_uv(raw_uv0, raw_uv1, 4u));
-    let uv0 = animated_uv(raw_uv0, mask);
-    let uv1 = animated_uv(raw_uv1, mask);
+    let uvs = animated_uvs(raw_uv0, raw_uv1, globals.time);
+    let uv0 = uvs.xy;
+    let uv1 = uvs.zw;
 #ifdef VERTEX_UVS_A
     input.uv = uv0;
 #endif

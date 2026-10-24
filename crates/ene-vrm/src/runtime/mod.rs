@@ -45,15 +45,6 @@ pub(crate) fn setup(app: &mut App) {
     spring::setup(app);
 }
 
-fn depth(parents: &HashMap<Entity, Entity>, mut entity: Entity) -> usize {
-    let mut result = 0;
-    while let Some(&parent) = parents.get(&entity) {
-        result += 1;
-        entity = parent;
-    }
-    result
-}
-
 pub(crate) fn attach(
     world: &mut World,
     root: Entity,
@@ -62,11 +53,6 @@ pub(crate) fn attach(
     constraints: &[(usize, schema::NodeConstraint)],
     nodes: &HashMap<usize, Entity>,
 ) -> std::io::Result<()> {
-    let mut parent_query = world.query::<(Entity, &ChildOf)>();
-    let parents: HashMap<Entity, Entity> = parent_query
-        .iter(world)
-        .map(|(entity, child_of)| (entity, child_of.parent()))
-        .collect();
     let constraints = constraint::compile_constraints(constraints, world, nodes)?;
     let root_inv = world
         .get::<GlobalTransform>(root)
@@ -225,15 +211,21 @@ pub(crate) fn attach(
         // Chains cannot share joints, but a chain may start below another
         // chain's tail. Evaluate ancestors first so the child chain reads this
         // frame's parent pose instead of being one frame late.
-        chains.sort_by_key(|chain| {
-            chain
-                .joints
-                .first()
-                .map_or(0, |joint| depth(&parents, joint.entity))
+        {
+            let mut parent_query = world.query::<&ChildOf>();
+            let parents = parent_query.query(world);
+            chains.sort_by_key(|chain| {
+                chain
+                    .joints
+                    .first()
+                    .map_or(0, |joint| parents.iter_ancestors(joint.entity).count())
+            });
+        }
+        world.entity_mut(root).insert(spring::SpringRig {
+            chains,
+            colliders,
+            paused: false,
         });
-        world
-            .entity_mut(root)
-            .insert(spring::SpringRig { chains, colliders });
     }
     Ok(())
 }

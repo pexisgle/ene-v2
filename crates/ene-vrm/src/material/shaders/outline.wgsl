@@ -1,6 +1,6 @@
 #import "embedded://bevy_pbr/render/mesh.wgsl" as native_mesh
-#import bevy_pbr::{forward_io::{Vertex, VertexOutput}, mesh_functions, mesh_view_bindings::view, view_transformations::position_world_to_clip}
-#import ene_vrm::toon::{toon, animated_uv, uv_animation_mask, texture_uv, width_texture, width_sampler}
+#import bevy_pbr::{forward_io::{Vertex, VertexOutput}, mesh_functions, mesh_view_bindings::{view, globals}, view_transformations::position_world_to_clip}
+#import ene_vrm::toon::{toon, animated_uvs, texture_uv, width_texture, width_sampler}
 
 @vertex
 fn vertex(input: Vertex) -> VertexOutput {
@@ -29,9 +29,9 @@ fn vertex(input: Vertex) -> VertexOutput {
 #ifndef VERTEX_UVS_B
     raw_uv1 = raw_uv0;
 #endif
-    let mask = uv_animation_mask(texture_uv(raw_uv0, raw_uv1, 4u));
-    let uv0 = animated_uv(raw_uv0, mask);
-    let uv1 = animated_uv(raw_uv1, mask);
+    let uvs = animated_uvs(raw_uv0, raw_uv1, globals.time);
+    let uv0 = uvs.xy;
+    let uv1 = uvs.zw;
     if (toon.texture_flags & 32u) != 0u {
         width *= textureSampleLevel(width_texture, width_sampler, texture_uv(uv0, uv1, 5u), 0.).g;
     }

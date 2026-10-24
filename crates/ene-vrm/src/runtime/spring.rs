@@ -61,13 +61,21 @@ pub(crate) struct SpringChain {
     pub(crate) center: Option<Entity>,
 }
 
-#[derive(Component, Clone, Reflect)]
+#[derive(Component, Clone, Default, Reflect)]
 #[reflect(Component, Clone)]
 pub struct SpringRig {
     #[entities]
     pub(crate) chains: Vec<SpringChain>,
     #[entities]
     pub(crate) colliders: Vec<Collider>,
+    /// When true, [`springs`] does not advance the simulation and instead
+    /// re-applies the last simulated local rotations. This keeps the visible
+    /// pose while the character is paused, even if constraints keep writing
+    /// the same transforms.
+    ///
+    /// This is separate from removing [`SpringJointProps`], which opts a joint
+    /// out of SpringBone entirely.
+    pub paused: bool,
 }
 
 pub(crate) fn setup(app: &mut App) {
@@ -103,7 +111,7 @@ fn springs(
 ) {
     let steps = fixed_steps(&mut accumulator, time.delta_secs());
     for (root_entity, mut rig) in &mut rigs {
-        if steps == 0 {
+        if rig.paused || steps == 0 {
             // Nothing to simulate, but a system earlier this frame (for
             // example node constraints) may have overwritten a joint pose.
             let mut query = transforms.p1();
@@ -119,6 +127,7 @@ fn springs(
         let SpringRig {
             chains,
             colliders: defs,
+            ..
         } = &mut *rig;
         // Step the whole rig before the next step: a child joint must see the
         // pose its parent has at the start of the same step, not the pose after
@@ -293,6 +302,7 @@ mod tests {
             } else {
                 vec![]
             },
+            paused: false,
         });
         app.update();
         (app, joint)
@@ -645,6 +655,7 @@ mod tests {
                 center: None,
             }],
             colliders: vec![],
+            paused: false,
         });
         // Consume the first-update zero delta.
         app.update();
@@ -718,6 +729,7 @@ mod tests {
                     center: None,
                 }],
                 colliders: vec![],
+                paused: false,
             },
             Constraints(vec![Constraint {
                 target: joint,
@@ -753,6 +765,24 @@ mod tests {
             restored.abs_diff_eq(simulated, 1e-5),
             "{restored:?} != {simulated:?}"
         );
+        // Pausing the rig must hold the simulated pose even while frames keep
+        // advancing the fixed-step accumulator and the constraint keeps
+        // rewriting the transform.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f64(1. / 60.),
+        ));
+        app.world_mut().get_mut::<SpringRig>(root).unwrap().paused = true;
+        for _ in 0..10 {
+            app.update();
+            let held = app.world().get::<Transform>(joint).unwrap().rotation;
+            assert!(
+                held.abs_diff_eq(simulated, 1e-5),
+                "paused spring pose changed: {held:?} != {simulated:?}"
+            );
+        }
+        app.world_mut().get_mut::<SpringRig>(root).unwrap().paused = false;
+        app.update();
+        assert!(app.world().get::<SpringJointProps>(joint).is_some());
     }
 
     #[test]

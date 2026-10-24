@@ -35,8 +35,6 @@ struct Toon {
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var width_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(112) var width_sampler: sampler;
 
-#import bevy_pbr::mesh_view_bindings::globals
-
 fn texture_uv(uv0: vec2<f32>, uv1: vec2<f32>, slot: u32) -> vec2<f32> {
     let uv = select(uv0, uv1, ((toon.texture_uvs >> slot) & 1u) != 0u);
     return (toon.uv_transforms[slot] * vec3<f32>(uv, 1.0)).xy;
@@ -49,9 +47,9 @@ fn uv_animation_mask(mask_uv: vec2<f32>) -> f32 {
     return textureSampleLevel(uv_texture, uv_sampler, mask_uv, 0.0).b;
 }
 
-fn animated_uv(uv: vec2<f32>, mask: f32) -> vec2<f32> {
-    let time = globals.time * mask;
-    let angle = time * toon.uv_animation_rotation_speed_factor;
+fn animated_uv(uv: vec2<f32>, mask: f32, time: f32) -> vec2<f32> {
+    let t = time * mask;
+    let angle = t * toon.uv_animation_rotation_speed_factor;
     let c = cos(angle);
     let s = sin(angle);
     // MToon 1.0 UV rotation: [[cos, sin], [-sin, cos]] * (uv - 0.5).
@@ -59,5 +57,12 @@ fn animated_uv(uv: vec2<f32>, mask: f32) -> vec2<f32> {
     // three-vrm and bevy_vrm1 use the same matrix. KHR_texture_transform's
     // GLSL sample uses a different row/column convention; MToon's explicit
     // equation is the one implemented here.
-    return mat2x2(c, -s, s, c) * (uv - 0.5) + 0.5 + time * vec2(toon.uv_animation_scroll_x_speed_factor, toon.uv_animation_scroll_y_speed_factor);
+    return mat2x2(c, -s, s, c) * (uv - 0.5) + 0.5 + t * vec2(toon.uv_animation_scroll_x_speed_factor, toon.uv_animation_scroll_y_speed_factor);
+}
+
+// Packed as (uv0, uv1) to keep the helper free of a struct whose field names
+// could collide during Naga's composable-module writeback.
+fn animated_uvs(raw_uv0: vec2<f32>, raw_uv1: vec2<f32>, time: f32) -> vec4<f32> {
+    let mask = uv_animation_mask(texture_uv(raw_uv0, raw_uv1, 4u));
+    return vec4<f32>(animated_uv(raw_uv0, mask, time), animated_uv(raw_uv1, mask, time));
 }

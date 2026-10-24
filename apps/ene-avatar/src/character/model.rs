@@ -37,6 +37,8 @@ pub struct CharacterId(pub String);
 pub struct Config {
     pub model: String,
     pub motion: Option<String>,
+    /// Plays the VRMA and advances SpringBone. Material UV animation follows
+    /// the global clock and is not controlled by this flag.
     pub playing: bool,
     pub looping: bool,
     pub monitor: Option<String>,

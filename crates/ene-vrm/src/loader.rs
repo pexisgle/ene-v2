@@ -57,12 +57,17 @@ impl AssetLoader for VrmLoader {
         settings: &Self::Settings,
         context: &mut LoadContext<'_>,
     ) -> Result<Gltf, GltfError> {
+        let motion = context.path().path().extension().and_then(|x| x.to_str()) == Some("vrma");
         let mut asset = self
             .0
             .load(
                 reader,
                 &GltfLoaderSettings {
                     include_source: true,
+                    // VRM's glTF animations are unused and cameras are not
+                    // part of the avatar; VRMA needs its animation clips.
+                    load_animations: motion,
+                    load_cameras: false,
                     default_sampler: settings.default_sampler.clone(),
                     ..*settings
                 },
@@ -119,29 +124,43 @@ pub(crate) fn extension<T: serde::de::DeserializeOwned>(
     T::deserialize(value.ok_or_else(|| invalid(format!("missing {name}")))?).map_err(invalid)
 }
 
-/// Returns an image handle that samples as plain numbers for an embedded MToon
-/// data texture.
+/// Returns an image handle that samples as `space`, cloning the decoded image
+/// when Bevy loaded the shared texture for the other purpose.
 ///
-/// MToon stores shading shift, UV animation mask and outline width as linear
-/// numbers, but Bevy only knows the core glTF color/linear slots, so these
-/// textures load with an sRGB format. Clone the decoded image with the sRGB
-/// suffix removed so sampling returns the stored value instead of a transfer
-/// curve. External image URIs are left to Bevy's glTF texture loading.
-fn linear_texture(
+/// Bevy picks the format from the core glTF slots (base color is sRGB,
+/// normal/occlusion/metallic-roughness are linear). An MToon slot can share the
+/// same texture index for the opposite purpose, so neither the original format
+/// nor a one-way conversion is sufficient. The sampled bytes are unchanged;
+/// only the format suffix controls the GPU transfer function.
+fn texture_in_space(
     context: &mut LoadContext<'_>,
     index: usize,
     original: &Handle<Image>,
+    space: material::TextureSpace,
 ) -> Option<Handle<Image>> {
     let label = GltfAssetLabel::Texture(index).to_string();
-    // ponytail: only GLB-embedded images are converted; VRM requires GLB and
-    // external URI textures would need their own non-sRGB asset load.
+    // ponytail: only GLB-embedded images are converted; external URI textures
+    // would need their own asset load with the opposite `is_srgb` setting.
     let image = context.get_labeled(&label)?.get::<Image>()?;
-    if !image.texture_descriptor.format.is_srgb() {
+    let format = image.texture_descriptor.format;
+    let wants_srgb = space == material::TextureSpace::Srgb;
+    if format.is_srgb() == wants_srgb {
+        return Some(original.clone());
+    }
+    let converted = if wants_srgb {
+        format.add_srgb_suffix()
+    } else {
+        format.remove_srgb_suffix()
+    };
+    if converted == format {
+        // The format has no variant for the requested transfer function
+        // (floating point, two-channel compressed, ...). Keep the decoded data.
         return Some(original.clone());
     }
     let mut image = image.clone();
-    image.texture_descriptor.format = image.texture_descriptor.format.remove_srgb_suffix();
-    Some(context.add_labeled_asset(format!("{label}/linear"), image))
+    image.texture_descriptor.format = converted;
+    let suffix = if wants_srgb { "srgb" } else { "linear" };
+    Some(context.add_labeled_asset(format!("{label}/{suffix}"), image))
 }
 
 pub(crate) fn require_node(
@@ -178,8 +197,27 @@ struct VrmExtensions {
     springs: Option<schema::Springs>,
     nodes: HashMap<usize, Entity>,
     textures: Vec<Handle<Image>>,
-    linear_textures: HashMap<usize, Handle<Image>>,
+    converted: HashMap<(usize, material::TextureSpace), Handle<Image>>,
     constraints: Vec<(usize, schema::NodeConstraint)>,
+}
+
+impl VrmExtensions {
+    fn ensure_texture(
+        &mut self,
+        context: &mut LoadContext<'_>,
+        index: usize,
+        space: material::TextureSpace,
+    ) {
+        if self.converted.contains_key(&(index, space)) {
+            return;
+        }
+        let Some(original) = self.textures.get(index).cloned() else {
+            return;
+        };
+        if let Some(texture) = texture_in_space(context, index, &original, space) {
+            self.converted.insert((index, space), texture);
+        }
+    }
 }
 
 // Reject data this crate cannot use (missing extension, dangling indices,
@@ -254,7 +292,7 @@ impl GltfExtensionHandler for VrmExtensions {
         if !matches!(self.definition, Some(Ok(Definition::Model(_)))) {
             return;
         }
-        let Some(toon) = source.index().and_then(|i| self.materials.get(&i)) else {
+        let Some(toon) = source.index().and_then(|i| self.materials.get(&i)).cloned() else {
             return;
         };
         let Some(mut base) = context
@@ -266,24 +304,43 @@ impl GltfExtensionHandler for VrmExtensions {
         };
         base.unlit = false;
         base.opaque_render_method = bevy::material::OpaqueRendererMethod::Forward;
-        for slot in material::NUMERIC_SLOTS {
+        for slot in material::NUMERIC_SLOTS
+            .into_iter()
+            .chain(material::COLOR_SLOTS)
+        {
             let Some(info) = toon.textures()[slot] else {
                 continue;
             };
-            let index = info.index.value();
-            if self.linear_textures.contains_key(&index) {
-                continue;
-            }
-            let Some(original) = self.textures.get(index).cloned() else {
-                continue;
-            };
-            if let Some(linear) = linear_texture(context, index, &original) {
-                self.linear_textures.insert(index, linear);
-            }
+            self.ensure_texture(context, info.index.value(), material::texture_space(slot));
+        }
+        // The core color slots also use the shared texture index. Bevy may have
+        // loaded it linearly because another material uses it as a numeric
+        // texture; the MToon material still needs the sRGB view.
+        let base_color = source
+            .pbr_metallic_roughness()
+            .base_color_texture()
+            .map(|info| info.texture().index());
+        let emissive = source.emissive_texture().map(|info| info.texture().index());
+        for index in [base_color, emissive].into_iter().flatten() {
+            self.ensure_texture(context, index, material::TextureSpace::Srgb);
+        }
+        if let Some(index) = base_color {
+            base.base_color_texture = self
+                .converted
+                .get(&(index, material::TextureSpace::Srgb))
+                .cloned()
+                .or(base.base_color_texture.clone());
+        }
+        if let Some(index) = emissive {
+            base.emissive_texture = self
+                .converted
+                .get(&(index, material::TextureSpace::Srgb))
+                .cloned()
+                .or(base.emissive_texture.clone());
         }
         let material = MToonMaterial {
             base,
-            extension: MToonExtension::new(toon, &self.textures, &self.linear_textures),
+            extension: MToonExtension::new(&toon, &self.textures, &self.converted),
         };
         let label = format!("{label}/vrm");
         if toon.outline_width_mode != schema::OutlineMode::None {

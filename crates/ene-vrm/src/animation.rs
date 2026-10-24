@@ -10,7 +10,7 @@ use bevy::{
     },
     app::AnimationSystems,
     math::curve::FunctionCurve,
-    platform::collections::{HashMap, hash_map::Entry},
+    platform::collections::{HashMap, HashSet},
     prelude::*,
 };
 use std::sync::Arc;
@@ -88,6 +88,42 @@ pub(crate) fn denormalize_rotation(local: Quat, global: Quat, value: Quat) -> Qu
     local * global.inverse() * value * global
 }
 
+/// Collects the animation target id for every node reachable from a scene.
+///
+/// Mirrors `bevy_gltf` 0.19.1's path derivation (`node_name` + `collect_path`)
+/// so that curves from unselected scenes are grouped exactly as they are in the
+/// native `AnimationClip`. Keep in sync with the Bevy loader on upgrades.
+fn collect_target(
+    node: &gltf::Node,
+    current: &[Name],
+    targets: &mut HashMap<usize, AnimationTargetId>,
+    visited: &mut HashSet<usize>,
+) {
+    let mut path = current.to_vec();
+    path.push(Name::new(
+        node.name()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("GltfNode{}", node.index())),
+    ));
+    visited.insert(node.index());
+    for child in node.children() {
+        if !visited.contains(&child.index()) {
+            collect_target(&child, &path, targets, visited);
+        }
+    }
+    targets.insert(node.index(), AnimationTargetId::from_names(path.iter()));
+}
+
+fn motion_targets(document: &gltf::Document) -> HashMap<usize, AnimationTargetId> {
+    let mut targets = HashMap::default();
+    for scene in document.scenes() {
+        for node in scene.nodes() {
+            collect_target(&node, &[], &mut targets, &mut HashSet::default());
+        }
+    }
+    targets
+}
+
 pub(crate) fn retarget_motion(
     motion: &schema::Motion,
     source: &gltf::Document,
@@ -112,6 +148,7 @@ pub(crate) fn retarget_motion(
     );
     let (rot_id, trans_id) = (rot_prop.evaluator_id(), trans_prop.evaluator_id());
     let gaze_node = motion.look_at.as_ref().map(|l| l.node);
+    let targets = motion_targets(source);
     let mut clips = Vec::new();
     for animation in source.animations() {
         let label = format!("Animation{}", animation.index());
@@ -122,28 +159,30 @@ pub(crate) fn retarget_motion(
         let mut clip = AnimationClip::default();
         clip.set_duration(native.duration());
         // Bevy groups native curves by `AnimationTargetId`, which it derives
-        // from the node name path. Sibling nodes with the same name share one
-        // group, so the source node can no longer be recovered from the group.
+        // from the node name path. Sibling nodes, and nodes in any other scene,
+        // share that group when their paths match, so the source node can no
+        // longer be recovered from the curve list.
         // ponytail: reject ambiguous paths instead of matching curves by channel
         // order; revisit if Bevy exposes per-node curve identity.
-        let mut seen: HashMap<AnimationTargetId, usize> = HashMap::default();
-        let mut conflicts: HashMap<AnimationTargetId, (usize, usize)> = HashMap::default();
+        let mut seen: HashMap<(AnimationTargetId, u8), usize> = HashMap::default();
         for channel in animation.channels() {
             let node = channel.target().node().index();
-            let Some(&entity) = nodes.get(&node) else {
+            let Some(&id) = targets.get(&node) else {
                 continue;
             };
-            let Some(&id) = world.get::<AnimationTargetId>(entity) else {
-                continue;
+            let kind = match channel.target().property() {
+                gltf::animation::Property::Rotation => 0,
+                gltf::animation::Property::Translation => 1,
+                _ => continue,
             };
-            match seen.entry(id) {
-                Entry::Occupied(e) if *e.get() != node => {
-                    conflicts.insert(id, (*e.get(), node));
+            if let Some(&first) = seen.get(&(id, kind)) {
+                if first != node {
+                    return Err(invalid(format!(
+                        "VRMA nodes {first} and {node} share the same animation target path"
+                    )));
                 }
-                Entry::Occupied(_) => {}
-                Entry::Vacant(e) => {
-                    e.insert(node);
-                }
+            } else {
+                seen.insert((id, kind), node);
             }
         }
         for channel in animation.channels() {
@@ -170,9 +209,13 @@ pub(crate) fn retarget_motion(
             let id = world
                 .get::<AnimationTargetId>(entity)
                 .ok_or_else(|| invalid("VRMA animated node has no native target"))?;
-            if let Some(&(first, second)) = conflicts.get(id) {
+            let native_id = targets
+                .get(&node)
+                .copied()
+                .ok_or_else(|| invalid("VRMA animated node has no native target path"))?;
+            if *id != native_id {
                 return Err(invalid(format!(
-                    "VRMA nodes {first} and {second} share the same animation target path"
+                    "VRMA node {node} has multiple animation target paths"
                 )));
             }
             // Bevy skips channels it cannot decode (for example sparse sampler inputs).

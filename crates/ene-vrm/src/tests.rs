@@ -1,5 +1,5 @@
 use super::*;
-use crate::material::{BaseUv, MaterialSlot, Outline};
+use crate::material::{BaseUv, MaterialSlot, Outline, TextureSpace};
 use bevy::{
     animation::{AnimatedBy, AnimationTargetId},
     asset::{LoadState, RenderAssetUsages},
@@ -513,6 +513,70 @@ fn vrma_rejects_same_name_siblings_with_one_animation_target() {
         message.contains(&format!("VRMA nodes 1 and {extra}")),
         "{message}"
     );
+}
+
+#[test]
+fn vrma_rejects_cross_scene_animation_target_reuse() {
+    let files = Files::new();
+    let mut app = app();
+    let mut value = files.motion("LINEAR");
+    let expr = value["nodes"].as_array().unwrap().len();
+    let other = expr + 1;
+    // The selected scene's expression is a root named "Weight"; another scene
+    // has an unrelated root with the same name. Bevy still puts both curves in
+    // the same `AnimationTargetId`, so the selected expression could otherwise
+    // receive the other node's value.
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!({"name":"Weight"}), json!({"name":"Weight"})]);
+    value["scenes"] = json!([{"nodes":[0, expr]}, {"nodes":[other]}]);
+    value["scene"] = json!(0);
+    value["extensions"]["VRMC_vrm_animation"]["expressions"] =
+        json!({"preset":{"smile":{"node":expr}}});
+    std::fs::write(
+        files.0.join("weight.bin"),
+        [0.9f32, 0., 0., 0.1, 0., 0.]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    value["buffers"] = json!([
+        {"byteLength":64,"uri":"motion.bin"},
+        {"byteLength":24,"uri":"weight.bin"}
+    ]);
+    value["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer":1,"byteLength":24}));
+    value["accessors"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"bufferView":3,"componentType":5126,"count":2,"type":"VEC3"}));
+    value["animations"][0]["samplers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"input":0,"output":3,"interpolation":"LINEAR"}));
+    value["animations"][0]["channels"] = json!([
+        {"sampler":2,"target":{"node":other,"path":"translation"}},
+        {"sampler":2,"target":{"node":expr,"path":"translation"}}
+    ]);
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("cross-scene.vrma", &value));
+    settle(&mut app, std::slice::from_ref(&handle));
+    let state = app
+        .world()
+        .resource::<AssetServer>()
+        .get_load_state(handle.id())
+        .unwrap();
+    let message = match state {
+        LoadState::Failed(error) => error.to_string(),
+        other => panic!("expected the cross-scene VRMA to be rejected, got {other:?}"),
+    };
+    assert!(message.contains("VRMA nodes"), "{message}");
 }
 
 #[test]
@@ -1331,6 +1395,7 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
             "alphaMode":"OPAQUE",
             "doubleSided":true,
             "emissiveFactor":[1.,0.5,0.],
+            "occlusionTexture":{"index":0},
             "pbrMetallicRoughness":{"baseColorTexture":{"index":0,"extensions":{"KHR_texture_transform":{"offset":[0.5,0.25]}}}},
             "extensions":{
                 "KHR_materials_unlit":{},
@@ -1400,6 +1465,14 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
         assert_eq!(materials.get(&m2).unwrap().base.depth_bias, 0.0);
         (mat0.extension.shade.clone(), mat0.extension.shift.clone())
     };
+    let (base_color, occlusion) = {
+        let materials = app.world().resource::<Assets<MToonMaterial>>();
+        let mat0 = materials.get(&m0).unwrap();
+        (
+            mat0.base.base_color_texture.clone(),
+            mat0.base.occlusion_texture.clone(),
+        )
+    };
     {
         let images = app.world().resource::<Assets<Image>>();
         let shade = images.get(shade.as_ref().unwrap()).unwrap();
@@ -1409,6 +1482,18 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
         );
         let shift = images.get(shift.as_ref().unwrap()).unwrap();
         assert_eq!(shift.texture_descriptor.format, TextureFormat::Rgba8Unorm);
+        // The shared texture is linear because of the occlusion slot, so the
+        // MToon color slots must ask for their own sRGB image.
+        let base_color = images.get(base_color.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            base_color.texture_descriptor.format,
+            TextureFormat::Rgba8UnormSrgb
+        );
+        let occlusion = images.get(occlusion.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            occlusion.texture_descriptor.format,
+            TextureFormat::Rgba8Unorm
+        );
     }
 
     let scene = app
@@ -1658,7 +1743,7 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
             TextureFormat::Rgba8Unorm,
             RenderAssetUsages::default(),
         ));
-    let linear = HashMap::from([(0usize, mask_image)]);
+    let converted = HashMap::from([((0usize, TextureSpace::Linear), mask_image)]);
     let toon: schema::Toon = serde_json::from_value(json!({
         "specVersion":"1.0",
         "shadeMultiplyTexture":{"index":0,"texCoord":1},
@@ -1672,11 +1757,19 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         app.world_mut()
             .resource_mut::<Assets<MToonMaterial>>()
             .add(MToonMaterial {
-                base: StandardMaterial::default(),
-                extension: MToonExtension::new(&toon, std::slice::from_ref(&color_image), &linear),
+                base: StandardMaterial {
+                    alpha_mode: bevy::material::AlphaMode::Mask(0.5),
+                    base_color_texture: Some(color_image.clone()),
+                    ..default()
+                },
+                extension: MToonExtension::new(
+                    &toon,
+                    std::slice::from_ref(&color_image),
+                    &converted,
+                ),
             });
     let mut outline_extension =
-        MToonExtension::new(&toon, std::slice::from_ref(&color_image), &linear);
+        MToonExtension::new(&toon, std::slice::from_ref(&color_image), &converted);
     outline_extension.outline = Some(schema::OutlineMode::ScreenCoordinates);
     let outline_material =
         app.world_mut()
@@ -1733,12 +1826,16 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         ));
     app.world_mut().spawn((
         Camera3d::default(),
+        bevy::core_pipeline::prepass::DepthPrepass,
         bevy::core_pipeline::tonemapping::Tonemapping::None,
         bevy::camera::RenderTarget::Image(target.into()),
         Transform::from_xyz(0., 0., 3.).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     app.world_mut().spawn((
-        DirectionalLight::default(),
+        DirectionalLight {
+            shadow_maps_enabled: true,
+            ..default()
+        },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
     ));
     for _ in 0..30 {
@@ -1763,6 +1860,219 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         .collect();
     assert_eq!(entities.len(), 2, "body and outline materials");
     assert_specialized_pipelines_ok(&app, &entities);
+}
+
+#[test]
+#[ignore = "requires a GPU; runs in CI with lavapipe"]
+fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    use bevy::render::{
+        RenderPlugin,
+        gpu_readback::{Readback, ReadbackComplete},
+        render_resource::TextureUsages,
+    };
+
+    fn quad(size: f32, uv: Vec2) -> Mesh {
+        let h = size * 0.5;
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[-h, -h, 0.], [h, -h, 0.], [h, h, 0.], [-h, h, 0.]],
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 4]);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[uv.x, uv.y]; 4]);
+        mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+        mesh
+    }
+
+    let plugins = DefaultPlugins
+        .build()
+        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+    #[cfg(windows)]
+    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+    let mut app = App::new();
+    app.add_plugins(
+        plugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                synchronous_pipeline_compilation: true,
+                ..default()
+            }),
+    )
+    .add_plugins(VrmPlugin)
+    .insert_resource(ClearColor(Color::BLACK))
+    .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f64(1. / 60.),
+    ));
+    while app.plugins_state() != bevy::app::PluginsState::Ready {
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        std::thread::yield_now();
+    }
+    app.finish();
+    app.cleanup();
+
+    // 16x16 texture: the first two columns are opaque, the rest transparent.
+    // All caster vertices start at u=0.05 and scroll by 0.25/s, so after a few
+    // seconds the main pass samples the transparent region.
+    let mut pixels = Vec::with_capacity(16 * 16 * 4);
+    for _ in 0..16 {
+        for x in 0..16 {
+            pixels.extend([255u8, 255, 255, if x < 2 { 255 } else { 0 }]);
+        }
+    }
+    let mut color_image = Image::new(
+        Extent3d {
+            width: 16,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    color_image.sampler = bevy::image::ImageSampler::nearest();
+    let color_image = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(color_image);
+
+    let toon: schema::Toon = serde_json::from_value(json!({
+        "specVersion":"1.0",
+        "uvAnimationScrollXSpeedFactor":0.25
+    }))
+    .unwrap();
+    let body_material =
+        app.world_mut()
+            .resource_mut::<Assets<MToonMaterial>>()
+            .add(MToonMaterial {
+                base: StandardMaterial {
+                    base_color_texture: Some(color_image),
+                    alpha_mode: bevy::material::AlphaMode::Mask(0.5),
+                    double_sided: true,
+                    perceptual_roughness: 1.,
+                    ..default()
+                },
+                extension: MToonExtension::new(&toon, &[], &Default::default()),
+            });
+    let receiver_material = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 1.,
+            ..default()
+        });
+    let receiver_mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(quad(6., Vec2::splat(0.5)));
+    let caster_mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(quad(1.5, Vec2::new(0.05, 0.5)));
+
+    app.world_mut().spawn((
+        Mesh3d(receiver_mesh),
+        MeshMaterial3d(receiver_material),
+        Visibility::Visible,
+        NoFrustumCulling,
+        NotShadowCaster,
+    ));
+    app.world_mut().spawn((
+        Mesh3d(caster_mesh),
+        MeshMaterial3d(body_material),
+        Transform::from_xyz(0., 0., 1.),
+        Visibility::Visible,
+        NoFrustumCulling,
+    ));
+
+    let mut target_image = Image::new_target_texture(64, 64, TextureFormat::Rgba8UnormSrgb, None);
+    target_image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(target_image);
+    let latest = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+    let latest_observer = latest.clone();
+    app.world_mut()
+        .spawn(Readback::texture(target.clone()))
+        .observe(move |event: On<ReadbackComplete>| {
+            *latest_observer.lock().unwrap() = Some(event.data.clone());
+        });
+
+    app.world_mut().spawn((
+        Camera3d::default(),
+        bevy::core_pipeline::prepass::DepthPrepass,
+        Msaa::Off,
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::camera::RenderTarget::Image(target.into()),
+        bevy::camera::Projection::Orthographic(bevy::camera::OrthographicProjection {
+            scaling_mode: bevy::camera::ScalingMode::Fixed {
+                width: 6.,
+                height: 6.,
+            },
+            near: 0.1,
+            far: 20.,
+            ..bevy::camera::OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(0., 0., 5.).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    let light = app
+        .world_mut()
+        .spawn((
+            DirectionalLight {
+                shadow_maps_enabled: true,
+                ..default()
+            },
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.4, 0.)),
+        ))
+        .id();
+
+    // Warm up assets, pipelines, and the UV animation. At ~2.5 s the main pass
+    // discards the caster but a prepass that samples the original UV still
+    // casts its shadow.
+    for _ in 0..150 {
+        app.update();
+    }
+    let shadowed = latest.lock().unwrap().clone().expect("readback completed");
+    assert!(
+        shadowed
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[0] > 10),
+        "the receiver was not visible"
+    );
+
+    app.world_mut()
+        .get_mut::<DirectionalLight>(light)
+        .unwrap()
+        .shadow_maps_enabled = false;
+    for _ in 0..30 {
+        app.update();
+    }
+    let unshadowed = latest.lock().unwrap().clone().expect("readback completed");
+    assert_eq!(shadowed.len(), unshadowed.len());
+
+    let differing = shadowed
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(unshadowed.as_chunks::<4>().0)
+        .filter(|(a, b)| a[..3].iter().zip(&b[..3]).any(|(a, b)| a.abs_diff(*b) > 8))
+        .count();
+    assert!(
+        differing <= 4,
+        "prepass alpha mask differs from the main pass: {differing} pixels"
+    );
 }
 
 #[test]
