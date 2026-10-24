@@ -38,6 +38,10 @@ pub(crate) struct SpringJoint {
     pub(crate) rest: Transform,
     pub(crate) tail: Vec3,
     pub(crate) state: Option<[Vec3; 2]>,
+    /// Last simulated local rotation, kept so frames without a physics step
+    /// can restore the pose after earlier systems (for example constraints)
+    /// wrote to the same Transform.
+    pub(crate) rotation: Option<Quat>,
 }
 
 #[derive(Clone, Reflect, MapEntities)]
@@ -98,10 +102,14 @@ fn springs(
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
     let steps = fixed_steps(&mut accumulator, time.delta_secs());
-    if steps == 0 {
-        return;
-    }
     for (root_entity, mut rig) in &mut rigs {
+        if steps == 0 {
+            // Nothing to simulate, but a system earlier this frame (for
+            // example node constraints) may have overwritten a joint pose.
+            let mut query = transforms.p1();
+            apply_spring_poses(&rig, &props, &mut query);
+            continue;
+        }
         // Bevy propagates `GlobalTransform` after `VrmSystems::SpringBone`, so
         // read the rig root from `Transform` like every other node here.
         let Ok(root) = transforms.p0().compute_global_transform(root_entity) else {
@@ -177,15 +185,42 @@ fn springs(
                         .inverse()
                         .transform_vector3(next - head)
                         .normalize_or_zero();
-                    if let Ok(mut t) = transforms.p1().get_mut(joint.entity) {
-                        t.rotation = joint.rest.rotation
-                            * if dir != Vec3::ZERO {
-                                Quat::from_rotation_arc(joint.tail.normalize_or_zero(), dir)
-                            } else {
-                                Quat::IDENTITY
-                            };
+                    let rotation = joint.rest.rotation
+                        * if dir != Vec3::ZERO {
+                            Quat::from_rotation_arc(joint.tail.normalize_or_zero(), dir)
+                        } else {
+                            Quat::IDENTITY
+                        };
+                    joint.rotation = Some(rotation);
+                    if let Ok(mut transform) = transforms.p1().get_mut(joint.entity)
+                        && transform.rotation != rotation
+                    {
+                        transform.rotation = rotation;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Applies the last simulated pose when a frame does not advance the solver.
+fn apply_spring_poses(
+    rig: &SpringRig,
+    props: &Query<&SpringJointProps>,
+    transforms: &mut Query<&mut Transform>,
+) {
+    for chain in &rig.chains {
+        for joint in &chain.joints {
+            if props.get(joint.entity).is_err() {
+                continue;
+            }
+            let Some(rotation) = joint.rotation else {
+                continue;
+            };
+            if let Ok(mut transform) = transforms.get_mut(joint.entity)
+                && transform.rotation != rotation
+            {
+                transform.rotation = rotation;
             }
         }
     }
@@ -244,6 +279,7 @@ mod tests {
                     rest,
                     tail: Vec3::X * 0.1,
                     state: None,
+                    rotation: None,
                 }],
                 colliders: if collision { vec![0] } else { vec![] },
                 center: None,
@@ -595,12 +631,14 @@ mod tests {
                         rest: parent_rest,
                         tail: Vec3::X * 0.1,
                         state: None,
+                        rotation: None,
                     },
                     SpringJoint {
                         entity: child,
                         rest: child_rest,
                         tail: Vec3::X * 0.1,
                         state: None,
+                        rotation: None,
                     },
                 ],
                 colliders: vec![],
@@ -628,6 +666,93 @@ mod tests {
             let b = high.world().get::<Transform>(high_joint).unwrap().rotation;
             assert!(a.abs_diff_eq(b, 1e-5), "{a:?} != {b:?}");
         }
+    }
+
+    #[test]
+    fn springbone_restores_its_pose_on_frames_without_a_physics_step() {
+        use crate::runtime::constraint::{Constraint, ConstraintKind, Constraints};
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin))
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs_f64(1. / 120.),
+            ));
+        crate::runtime::setup(&mut app);
+        app.configure_sets(
+            PostUpdate,
+            (
+                crate::VrmSystems::Constraints.before(crate::VrmSystems::SpringBone),
+                crate::VrmSystems::SpringBone.before(bevy::transform::TransformSystems::Propagate),
+            ),
+        );
+        let root = app.world_mut().spawn(Transform::default()).id();
+        let source = app
+            .world_mut()
+            .spawn((Transform::default(), ChildOf(root)))
+            .id();
+        let rest = Transform::from_xyz(0., 1., 0.);
+        let joint = app
+            .world_mut()
+            .spawn((
+                rest,
+                ChildOf(root),
+                SpringJointProps {
+                    gravity_power: 1.,
+                    stiffness: 0.5,
+                    drag_force: 0.4,
+                    ..default()
+                },
+            ))
+            .id();
+        app.world_mut().entity_mut(root).insert((
+            SpringRig {
+                chains: vec![SpringChain {
+                    joints: vec![SpringJoint {
+                        entity: joint,
+                        rest,
+                        tail: Vec3::X * 0.1,
+                        state: None,
+                        rotation: None,
+                    }],
+                    colliders: vec![],
+                    center: None,
+                }],
+                colliders: vec![],
+            },
+            Constraints(vec![Constraint {
+                target: joint,
+                source,
+                rest: Quat::IDENTITY,
+                source_rest: Quat::IDENTITY,
+                kind: ConstraintKind::Rotation,
+                weight: 1.,
+            }]),
+        ));
+        app.update(); // consume the first-update zero delta
+        let mut simulated = Quat::IDENTITY;
+        for _ in 0..6 {
+            app.update();
+            let rotation = app.world().get::<Transform>(joint).unwrap().rotation;
+            if rotation.angle_between(Quat::IDENTITY) > 0.01 {
+                simulated = rotation;
+                break;
+            }
+        }
+        assert!(
+            simulated.angle_between(Quat::IDENTITY) > 0.01,
+            "spring joint did not move"
+        );
+        // The constraint rewrites the transform every frame. A frame without a
+        // physics step must restore the simulated pose instead of keeping it.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_nanos(1),
+        ));
+        app.update();
+        let restored = app.world().get::<Transform>(joint).unwrap().rotation;
+        assert!(
+            restored.abs_diff_eq(simulated, 1e-5),
+            "{restored:?} != {simulated:?}"
+        );
     }
 
     #[test]

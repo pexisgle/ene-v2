@@ -200,6 +200,7 @@ pub(crate) fn attach(
                     rest: local,
                     tail,
                     state: None,
+                    rotation: None,
                 });
             }
             let mut chain_colliders = Vec::new();
