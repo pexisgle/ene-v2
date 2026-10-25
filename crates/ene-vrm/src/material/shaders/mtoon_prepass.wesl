@@ -1,4 +1,9 @@
-// Standard prepass fragment logic adapted from Bevy 0.20 (MIT OR Apache-2.0).
+// Copied from bevy_pbr 0.20.0 `crates/bevy_pbr/src/render/pbr_prepass.wesl`
+// (`fragment`), MIT OR Apache-2.0, without the `MESHLET_MESH_MATERIAL_PASS`
+// variant (MToon has no meshlet pass; add it if that changes). Local changes:
+// UVs are animated per fragment before the standard work, and `Globals` is bound
+// at the prepass view layout's group 0 binding 1. Re-check against the upstream
+// source when updating Bevy.
 import bevy_pbr::prepass::io;
 import bevy_pbr::render::{
     mesh_bindings::mesh,

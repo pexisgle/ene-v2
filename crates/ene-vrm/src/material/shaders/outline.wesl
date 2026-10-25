@@ -1,4 +1,7 @@
-// Standard mesh vertex logic adapted from Bevy 0.20 (MIT OR Apache-2.0).
+// Copied from bevy_pbr 0.20.0 `crates/bevy_pbr/src/render/mesh.wesl` (`vertex`),
+// MIT OR Apache-2.0. Local changes: `morph_vertex` is imported instead of
+// copied, and the outline extrusion is inserted before the clip-space
+// conversion. Re-check this file against the upstream source when updating Bevy.
 import bevy_pbr::render::{
     forward_io::{Vertex, VertexOutput, decompress_vertex},
     mesh_functions,
