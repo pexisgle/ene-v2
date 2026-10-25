@@ -15,7 +15,7 @@ use bevy::{
     prelude::*,
 };
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 use vrm_spec::{
     vrmc_materials_mtoon_1_0::VRMC_MATERIALS_MTOON, vrmc_spring_bone_1_0::VRMC_SPRING_BONE,
     vrmc_vrm_1_0::VRMC_VRM, vrmc_vrm_animation_1_0::VRMC_VRM_ANIMATION,
@@ -64,9 +64,13 @@ const VRMC_EXTENSIONS: [&str; 5] = [
 
 fn validate_gltf(bytes: &[u8]) -> Result<(), gltf::Error> {
     use gltf::json::validation::Validate;
-    let mut root = gltf::Gltf::from_slice_without_validation(bytes)?
-        .document
-        .into_json();
+    // Only the JSON chunk is needed; `Gltf` would copy the BIN chunk too.
+    let json = if bytes.starts_with(b"glTF") {
+        gltf::binary::Glb::from_slice(bytes)?.json
+    } else {
+        Cow::Borrowed(bytes)
+    };
+    let mut root: gltf::json::Root = gltf::json::deserialize::from_slice(&json)?;
     root.extensions_required
         .retain(|extension| !VRMC_EXTENSIONS.contains(&extension.as_str()));
     let mut errors = Vec::new();
@@ -547,5 +551,30 @@ impl GltfExtensionHandler for VrmExtensions {
         })();
         world.entity_mut(root).insert(VrmScene(result));
         self.nodes.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gltf::binary::{Glb, Header};
+    use std::borrow::Cow;
+
+    #[test]
+    fn validation_reads_only_the_glb_json_chunk() {
+        let json = br#"{"asset":{"version":"2.0"}}"#;
+        let bin = [0u8; 1024];
+        let bytes = Glb {
+            header: Header {
+                magic: *b"glTF",
+                version: 2,
+                length: 0,
+            },
+            json: Cow::Borrowed(json),
+            bin: Some(Cow::Borrowed(&bin)),
+        }
+        .to_vec()
+        .unwrap();
+        validate_gltf(&bytes).unwrap();
     }
 }

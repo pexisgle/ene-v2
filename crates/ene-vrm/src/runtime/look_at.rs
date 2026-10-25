@@ -157,7 +157,7 @@ fn look_at(
         if bone {
             let p2 = transforms.p2();
             let scale = binds.map_or(1., |binds| {
-                let weights = binds.weight(manual, |entity| {
+                let weights = expressions::weight(manual, |entity| {
                     p2.get(entity).ok().map(|transform| transform.translation.x)
                 });
                 expressions::look_at_scale(binds, &weights)

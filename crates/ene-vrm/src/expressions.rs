@@ -59,19 +59,6 @@ impl Binds {
             .map(|binding| binding.target)
     }
 
-    pub(crate) fn weight<'a>(
-        &'a self,
-        manual: Option<&'a ExpressionWeights>,
-        transforms: impl Fn(Entity) -> Option<f32> + 'a,
-    ) -> impl Fn(&ExpressionName) -> f32 + 'a {
-        move |name| {
-            manual
-                .and_then(|weights| weights.get(name).copied())
-                .or_else(|| self.target(name).and_then(&transforms))
-                .unwrap_or(0.)
-        }
-    }
-
     fn materials(&self) -> impl Iterator<Item = usize> + '_ {
         self.bindings.iter().flat_map(|binding| {
             binding
@@ -89,6 +76,18 @@ impl Binds {
                         .map(|bind| schema::index(bind.material)),
                 )
         })
+    }
+}
+
+pub(crate) fn weight<'a>(
+    manual: Option<&'a ExpressionWeights>,
+    transforms: impl Fn(Entity) -> Option<f32> + 'a,
+) -> impl Fn(&ExpressionBinding) -> f32 + 'a {
+    move |binding| {
+        manual
+            .and_then(|weights| weights.get(&binding.name).copied())
+            .or_else(|| transforms(binding.target))
+            .unwrap_or(0.)
     }
 }
 
@@ -302,8 +301,8 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
     }
 }
 
-fn binding_weight(binding: &ExpressionBinding, raw: &impl Fn(&ExpressionName) -> f32) -> f32 {
-    let value = raw(&binding.name).clamp(0., 1.);
+fn binding_weight(binding: &ExpressionBinding, raw: &impl Fn(&ExpressionBinding) -> f32) -> f32 {
+    let value = raw(binding).clamp(0., 1.);
     if binding.definition.is_binary.unwrap_or(false) {
         f32::from(value > 0.5)
     } else {
@@ -321,9 +320,9 @@ fn override_rate(rule: Option<schema::ExpressionOverrideType>, weight: f32) -> f
 
 fn effective<'a>(
     bindings: &'a [ExpressionBinding],
-    raw: &impl Fn(&ExpressionName) -> f32,
-) -> Vec<(&'a ExpressionName, &'a Expression, f32)> {
-    let weighted: Vec<_> = bindings
+    raw: &impl Fn(&ExpressionBinding) -> f32,
+) -> Vec<(&'a ExpressionBinding, f32)> {
+    let mut weighted: Vec<_> = bindings
         .iter()
         .map(|binding| (binding, binding_weight(binding, raw)))
         .collect();
@@ -343,23 +342,20 @@ fn effective<'a>(
             }
         }
     }
+    for (binding, weight) in &mut weighted {
+        if let Some(category) = binding.category {
+            let multiplier = 1. - rates[category].clamp(0., 1.);
+            *weight = if binding.definition.is_binary.unwrap_or(false) && multiplier < 1. {
+                0.
+            } else {
+                *weight * multiplier
+            };
+        }
+    }
     weighted
-        .into_iter()
-        .map(|(binding, mut weight)| {
-            if let Some(category) = binding.category {
-                let multiplier = 1. - rates[category].clamp(0., 1.);
-                weight = if binding.definition.is_binary.unwrap_or(false) && multiplier < 1. {
-                    0.
-                } else {
-                    weight * multiplier
-                };
-            }
-            (&binding.name, &binding.definition, weight)
-        })
-        .collect()
 }
 
-pub(crate) fn look_at_scale(binds: &Binds, raw: impl Fn(&ExpressionName) -> f32) -> f32 {
+pub(crate) fn look_at_scale(binds: &Binds, raw: impl Fn(&ExpressionBinding) -> f32) -> f32 {
     let mut rate = 0.;
     for binding in &binds.bindings {
         if binding.category != Some(2) {
@@ -415,7 +411,7 @@ pub(crate) struct MaterialBounds {
 fn apply_material<M: BindMaterial>(
     binds: Option<&MaterialBinds<M>>,
     assets: &mut Assets<M>,
-    effective: &[(&ExpressionName, &Expression, f32)],
+    effective: &[(&ExpressionBinding, f32)],
 ) {
     for (&(index, ref original), (handle, base_uv, emissive_strength)) in
         binds.into_iter().flat_map(|binds| &binds.0)
@@ -508,7 +504,7 @@ pub(crate) fn apply(
     mut toon: ResMut<Assets<MToonMaterial>>,
 ) {
     for (manual, binds, standard_binds, toon_binds) in &roots {
-        let raw = binds.weight(Some(manual), |entity| {
+        let raw = weight(Some(manual), |entity| {
             transforms
                 .get(entity)
                 .ok()
@@ -522,8 +518,8 @@ pub(crate) fn apply(
                     // `bind.weight * expression weight` from there. The final
                     // value is not clamped.
                     let mut next = 0.;
-                    for (_, expression, value) in &effective {
-                        for bind in expression.morph_target_binds.iter().flatten() {
+                    for (binding, value) in &effective {
+                        for bind in binding.definition.morph_target_binds.iter().flatten() {
                             if schema::index(bind.node) == target.node && bind.index == index {
                                 next += bind.weight as f32 * value;
                             }
@@ -552,7 +548,7 @@ pub(crate) fn compute_material(
     rest_toon: Option<&schema::ToonParams>,
     toon_uv: Option<[UvTransform; 6]>,
     index: usize,
-    weights: &[(&ExpressionName, &Expression, f32)],
+    weights: &[(&ExpressionBinding, f32)],
 ) -> (
     Color,
     LinearRgba,
@@ -567,8 +563,9 @@ pub(crate) fn compute_material(
     let mut uv_scale = Vec2::ZERO;
     let mut uv_offset = Vec2::ZERO;
     let mut toon_params = rest_toon.copied();
-    for (_, expression, weight) in weights {
-        for bind in expression
+    for &(binding, weight) in weights {
+        for bind in binding
+            .definition
             .material_color_binds
             .iter()
             .flatten()
@@ -617,7 +614,8 @@ pub(crate) fn compute_material(
                 }
             }
         }
-        for bind in expression
+        for bind in binding
+            .definition
             .texture_transform_binds
             .iter()
             .flatten()
@@ -850,7 +848,7 @@ mod tests {
         }))
         .unwrap();
         let bindings = bindings(&definitions);
-        let weights = effective(&bindings, &|name| match name {
+        let weights = effective(&bindings, &|binding| match &binding.name {
             ExpressionName::Preset(schema::ExpressionPresetName::Happy) => 0.25,
             ExpressionName::Preset(schema::ExpressionPresetName::Blink) => 0.4,
             _ => 1.,
@@ -858,22 +856,22 @@ mod tests {
         let weight = |name: schema::ExpressionPresetName| {
             weights
                 .iter()
-                .find(|(candidate, _, _)| **candidate == ExpressionName::Preset(name))
+                .find(|(binding, _)| binding.name == ExpressionName::Preset(name))
                 .unwrap()
-                .2
+                .1
         };
         assert_eq!(weight(schema::ExpressionPresetName::Blink), 0.);
         assert_eq!(
             weights
                 .iter()
-                .find(|(name, _, _)| **name == ExpressionName::Custom("smile".into()))
+                .find(|(binding, _)| { binding.name == ExpressionName::Custom("smile".into()) })
                 .unwrap()
-                .2,
+                .1,
             1.
         );
 
-        let weights = effective(&bindings, &|name| {
-            if *name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
+        let weights = effective(&bindings, &|binding| {
+            if binding.name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
                 0.25
             } else {
                 0.6
@@ -882,16 +880,16 @@ mod tests {
         assert_eq!(
             weights
                 .iter()
-                .find(|(name, _, _)| {
-                    **name == ExpressionName::Preset(schema::ExpressionPresetName::Blink)
+                .find(|(binding, _)| {
+                    binding.name == ExpressionName::Preset(schema::ExpressionPresetName::Blink)
                 })
                 .unwrap()
-                .2,
+                .1,
             0.
         );
 
-        let weights = effective(&bindings, &|name| {
-            if *name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
+        let weights = effective(&bindings, &|binding| {
+            if binding.name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
                 0.
             } else {
                 0.6
@@ -900,16 +898,16 @@ mod tests {
         assert_eq!(
             weights
                 .iter()
-                .find(|(name, _, _)| {
-                    **name == ExpressionName::Preset(schema::ExpressionPresetName::Blink)
+                .find(|(binding, _)| {
+                    binding.name == ExpressionName::Preset(schema::ExpressionPresetName::Blink)
                 })
                 .unwrap()
-                .2,
+                .1,
             1.
         );
 
-        let weights = effective(&bindings, &|name| {
-            if *name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
+        let weights = effective(&bindings, &|binding| {
+            if binding.name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
                 0.25
             } else {
                 0.
