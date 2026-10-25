@@ -17,27 +17,20 @@ use bevy::{
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-pub(super) struct Files(PathBuf);
+pub(super) struct Files(tempfile::TempDir);
 impl Files {
     pub(super) fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ene-vrm-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(tempfile::tempdir().expect("create test fixture directory"))
+    }
+    pub(super) fn join(&self, name: &str) -> PathBuf {
+        self.0.path().join(name)
     }
     pub(super) fn write(&self, name: &str, value: &Value) -> String {
-        let path = self.0.join(name);
+        let path = self.join(name);
         std::fs::write(&path, value.to_string()).unwrap();
         path.to_str().unwrap().to_owned()
     }
@@ -81,7 +74,7 @@ impl Files {
             0., 1., 0., 1., 0., 1., 1., 0., 0., 0., 0., 1., 0.19866933, 0., 0., 0.9800666,
         ];
         std::fs::write(
-            self.0.join("motion.bin"),
+            self.join("motion.bin"),
             values
                 .into_iter()
                 .flat_map(f32::to_le_bytes)
@@ -113,11 +106,6 @@ impl Files {
             ]
         }]);
         v
-    }
-}
-impl Drop for Files {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -568,7 +556,7 @@ fn vrma_rejects_cross_scene_animation_target_reuse() {
     value["extensions"]["VRMC_vrm_animation"]["expressions"] =
         json!({"custom":{"smile":{"node":expr}}});
     std::fs::write(
-        files.0.join("weight.bin"),
+        files.join("weight.bin"),
         [0.9f32, 0., 0., 0.1, 0., 0.]
             .into_iter()
             .flat_map(f32::to_le_bytes)
@@ -688,13 +676,13 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
 
     // Same-node multi-channel
     let mut same_node = files.motion("LINEAR");
-    let mut bytes = std::fs::read(files.0.join("motion.bin")).unwrap();
+    let mut bytes = std::fs::read(files.join("motion.bin")).unwrap();
     bytes.extend(
         [2f32, 2., 2., 3., 3., 3.]
             .into_iter()
             .flat_map(f32::to_le_bytes),
     );
-    std::fs::write(files.0.join("same.bin"), bytes).unwrap();
+    std::fs::write(files.join("same.bin"), bytes).unwrap();
     same_node["buffers"] = json!([{"byteLength":88,"uri":"same.bin"}]);
     same_node["bufferViews"]
         .as_array_mut()
@@ -719,7 +707,7 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
         0., 1., 0., 0., 0., 0., 1., 0., 2., 0., 0., 2., 0., 0., 1., 1., 0., 0., 0., 0.,
     ];
     std::fs::write(
-        files.0.join("cubic.bin"),
+        files.join("cubic.bin"),
         cubic_vals
             .into_iter()
             .flat_map(f32::to_le_bytes)
@@ -845,10 +833,10 @@ fn vrma_skipped_channel_keeps_other_curves() {
     let files = Files::new();
     let mut app = app();
     let mut motion = files.motion("LINEAR");
-    let mut bytes = std::fs::read(files.0.join("motion.bin")).unwrap();
+    let mut bytes = std::fs::read(files.join("motion.bin")).unwrap();
     bytes.extend([0u8, 1u8, 0u8, 0u8]);
     bytes.extend([0f32, 1f32].into_iter().flat_map(f32::to_le_bytes));
-    std::fs::write(files.0.join("sparse.bin"), bytes).unwrap();
+    std::fs::write(files.join("sparse.bin"), bytes).unwrap();
     motion["buffers"] = json!([{"byteLength":76,"uri":"sparse.bin"}]);
     motion["bufferViews"] = json!([
         {"buffer":0,"byteLength":8},
@@ -1461,7 +1449,7 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     )
     .try_into_dynamic()
     .unwrap()
-    .save(files.0.join("tex.png"))
+    .save(files.join("tex.png"))
     .unwrap();
 
     let vertices = [0f32, 0., 0., 1., 0., 0., 0., 1., 0.];
@@ -1473,11 +1461,11 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
             .into_iter()
             .flat_map(f32::to_le_bytes),
     );
-    let png = std::fs::read(files.0.join("tex.png")).unwrap();
+    let png = std::fs::read(files.join("tex.png")).unwrap();
     let image_offset = data.len();
     data.extend_from_slice(&png);
     let length = data.len();
-    std::fs::write(files.0.join("tri.bin"), data).unwrap();
+    std::fs::write(files.join("tri.bin"), data).unwrap();
 
     let mut value = files.model();
     value["buffers"] = json!([{"uri":"tri.bin","byteLength":length}]);

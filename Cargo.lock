@@ -2149,6 +2149,7 @@ dependencies = [
  "petgraph",
  "serde",
  "serde_json",
+ "tempfile",
  "vrm-spec",
 ]
 

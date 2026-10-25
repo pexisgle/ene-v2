@@ -19,6 +19,7 @@ vrm-spec = { version = "0.1.1", default-features = false, features = ["gltf_inde
 
 [dev-dependencies]
 bevy = { version = "=0.20.0", default-features = false, features = ["bevy_window", "bevy_log", "png"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dev-dependencies]
 bevy = { version = "=0.20.0", default-features = false, features = ["bevy_winit"] }

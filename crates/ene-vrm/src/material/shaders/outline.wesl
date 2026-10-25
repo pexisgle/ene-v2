@@ -1,10 +1,8 @@
 // Standard mesh vertex logic adapted from Bevy 0.20 (MIT OR Apache-2.0).
 import bevy_pbr::render::{
-    forward_io::{UncompressedVertex, Vertex, VertexOutput, decompress_vertex},
-    mesh_bindings::mesh,
+    forward_io::{Vertex, VertexOutput, decompress_vertex},
     mesh_functions,
     mesh_view_bindings::{globals, view},
-    morph,
     skinning,
     view_transformations::position_world_to_clip,
 };
@@ -14,30 +12,10 @@ import super::toon::{
 
 // The standard mesh vertex entry point cannot be imported (WESL forbids calling
 // another entry point), so this mirrors `bevy_pbr::render::mesh` and adds only
-// the VRM outline extrusion. Revisit when Bevy exposes a reusable vertex helper.
+// the VRM outline extrusion. Its morph displacement is a plain function there,
+// so it is imported instead of copied.
 @if(MORPH_TARGETS)
-fn morph_vertex(vertex_in: UncompressedVertex, instance_index: u32) -> UncompressedVertex {
-    var vertex = vertex_in;
-    let first_vertex = mesh[instance_index].first_vertex_index;
-    let vertex_index = vertex.index - first_vertex;
-    let morph_descriptor_index = mesh[instance_index].morph_descriptor_index;
-
-    let weight_count = morph::layer_count(morph_descriptor_index);
-    for (var i: u32 = 0u; i < weight_count; i ++) {
-        let weight = morph::weight_at(i, morph_descriptor_index);
-        if weight == 0.0 {
-            continue;
-        }
-        vertex.position += weight * morph::morph_position(vertex_index, i, morph_descriptor_index);
-        @if(VERTEX_NORMALS) {
-            vertex.normal += weight * morph::morph_normal(vertex_index, i, morph_descriptor_index);
-        }
-        @if(VERTEX_TANGENTS) {
-            vertex.tangent += vec4(weight * morph::morph_tangent(vertex_index, i, morph_descriptor_index), 0.0);
-        }
-    }
-    return vertex;
-}
+import bevy_pbr::render::mesh::morph_vertex;
 
 @vertex
 fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
