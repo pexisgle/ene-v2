@@ -372,7 +372,11 @@ impl GltfExtensionHandler for VrmExtensions {
                 .base_color_texture()
                 .and_then(|info| info.texture_transform().map(schema::UvTransform::from_gltf))
                 .unwrap_or_default();
-            entity.insert((material::MaterialSlot(index), material::BaseUv(base_uv)));
+            entity.insert((
+                material::MaterialSlot(index),
+                material::BaseUv(base_uv),
+                material::EmissiveStrength(source.emissive_strength().unwrap_or(1.)),
+            ));
             if self.materials.contains_key(&index)
                 && entity.contains::<MeshMaterial3d<StandardMaterial>>()
             {

@@ -18,7 +18,7 @@ glTF本体のデコード、バッファ・画像・メッシュ・スキンの�
 - `SpringRig::paused`をtrueにすると固定ステップの積分を止め、最後にシミュレーションした回転を適用し続けます。制約が同じTransformを毎フレーム書いても姿勢を保持します。`SpringJointProps`は設定であり、外すとそのジョイントはSpringBoneの対象外になります。
 - 実行順はアニメーション→姿勢→LookAt→表情→制約→SpringBone→BevyのTransform伝播です。追加の全ワールド伝播はありません。
 
-必須拡張の欠落、ノード・コライダーなどの参照範囲、選択シーン外の参照、制約の循環、使える曲線のないVRMAはロードエラーになります。Bevyのアニメーションターゲットを一意に決められないVRMAもロードエラーになります。これは同一の親の下の同名ノードだけでなく、選択していないシーンのノードが同じ名前パスへ入る場合も含みます。表情だけのVRMAも読み込めます。メタ情報の内容、ヒューマノイド階層やT-pose、MToonの値域など、制作ツールが保証する仕様適合はロード時に再検証しません。JSON Schemaの検証器ではありません。
+必須拡張の欠落、ノード・コライダーなどの参照範囲、選択シーン外の参照、制約の循環、使える曲線のないVRMAはロードエラーになります。モデルへ割り当てる曲線（ヒューマノイド・表情・視線）のアニメーションターゲットを一意に決められないVRMAもロードエラーになります。同一の親の下の同名ノードだけでなく、選択していないシーンのノードが同じ名前パスへ入る場合も、割り当てる曲線が関与すれば拒否します。割り当てない曲線同士だけが同じ名前パスを共有する場合は読み込めます。表情だけのVRMAも読み込めます。メタ情報の内容、ヒューマノイド階層やT-pose、MToonの値域など、制作ツールが保証する仕様適合はロード時に再検証しません。JSON Schemaの検証器ではありません。
 
 ## VRM仕様のデフォルトと制限
 
@@ -31,6 +31,7 @@ glTF本体のデコード、バッファ・画像・メッシュ・スキンの�
 - MToonのテクスチャは用途ごとの色空間で読みます。数値用途（`shadingShiftTexture`、`uvAnimationMaskTexture`、`outlineWidthMultiplyTexture`）は線形、色用途（`shadeMultiplyTexture`、`rimMultiplyTexture`、`matcapTexture`、baseColor、emissive）はsRGBです。同じテクスチャ番号がコア材質のnormal/occlusion/metallic-roughnessと共有され、Bevyが線形形式で読み込んだ場合も、色用途にはsRGB形式の複製を渡します。GLB内の埋め込み画像だけが対象で、外部ファイルURIの画像は変換しません。
 - 片眼のみのbone型LookAtはUniVRM互換でexpressionへフォールバックします。
 - コアテクスチャのテクスチャごとの`KHR_texture_transform`はBevyが単一`uv_transform`しか持たないため対象外です（VRM本体仕様もrotation/texCoordを非推奨）。MToon拡張テクスチャはUV0/UV1と`texCoord`、テクスチャごとの`KHR_texture_transform`に対応します。
+- glTFコア材質の解釈はBevyに従います。Bevy 0.19.1のglTFローダーは`normalTexture.scale`を未実装（`TODO: handle normal_texture.scale`）のため、MToonの法線テクスチャ強度は反映されません。上流での対応を待ちます。
 - VRM 0.x、BodyTracking、`VRMC_springBone`の拡張colliderは対象外です。
 
 ## 材質と対象範囲
@@ -41,7 +42,7 @@ glTF本体のデコード、バッファ・画像・メッシュ・スキンの�
 
 MToonの半透明材質は、`alphaMode`が`BLEND`のときBevy標準の半透明合成で描画します。`renderQueueOffsetNumber`による描画順の指定と`transparentWithZWrite`による深度書き込みは対象外です。Bevy 0.19.1の半透明ソートはワールド距離だけをキーにするため、キュー番号を距離への加算値で近似しても通常の表示倍率では順序を保証できません。MToonの色テクスチャはsRGB、数値テクスチャは線形で読みます。コア材質との共有でBevyが逆向きの形式を選んだ場合は、ローダーが `(texture index, color space)` ごとに画像を複製します。UVアニメーションはマスク・スクロール・回転を本体とプリパスの両方でフラグメント単位に評価するため、影・深度のアルファ判定も本体と一致します。
 
-SpringBoneは[VRM 1.0仕様](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_springBone-1.0)どおり隣接ジョイントの組だけを計算します。末端は尾として使い、VRM 0.xの仮想7cmボーンを追加しません。`SpringRig::paused`は積分だけを止め、最後の回転を再適用するので、ポーズ中も制約に姿勢を上書きされません。表情処理も、バインドが指定するモーフ番号・材質項目だけを変更します。バインドされたモーフは仕様どおり毎フレーム0から加算し、glTFの初期モーフウェイトは使いません。低FPS時は1/60秒の固定ステップで祖先から子孫の順に追従し、残余時間を次のフレームへ繰り越します。長時間停止は約0.25秒で打ち切ります。
+SpringBoneは[VRM 1.0仕様](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_springBone-1.0)どおり隣接ジョイントの組だけを計算します。末端は尾として使い、VRM 0.xの仮想7cmボーンを追加しません。`SpringRig::paused`は積分だけを止め、最後の回転を再適用するので、ポーズ中も制約に姿勢を上書きされません。表情処理も、バインドが指定するモーフ番号・材質項目だけを変更します。`emissionColor`はglTFの`emissiveFactor`として補間し、読み込み時にBevyが`emissive`へ掛けた`KHR_materials_emissive_strength`の倍率を目標値にも適用します。バインドされたモーフは仕様どおり毎フレーム0から加算し、glTFの初期モーフウェイトは使いません。低FPS時は1/60秒の固定ステップで祖先から子孫の順に追従し、残余時間を次のフレームへ繰り越します。長時間停止は約0.25秒で打ち切ります。
 
 MToonは前方描画のDirectionalLight・環境光を対象とします。VRM 0.x、FirstPerson、BodyTracking、SpringBoneの追加拡張、遅延描画、独自ファイル監視は対象外です。glTF共通機能の対応範囲はBevyに従います。
 
@@ -54,4 +55,4 @@ cargo test --locked -p ene-vrm -p ene-avatar
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
 
-GPUのスモークテストは通常のCIでは無効です。ライセンスを確認したモデルを`ENE_VRM_TEST_MODEL`へ指定し、`cargo test -p ene-vrm gpu_model -- --ignored --nocapture`で実行します。合成MToon/outlineのパイプラインスモークは`cargo test -p ene-vrm synthetic_mtoon_uv1_outline_pipeline_smoke -- --ignored --nocapture`で実行し、CIではlavapipe上で実行します。UVアニメーションマスクのピクセル回帰`cargo test -p ene-vrm synthetic_mtoon_uv_alpha_shadow_matches_prepass -- --ignored --nocapture`はハードウェアGPUで実行してください。lavapipeはプリパス・フラグメントのdiscard経路でクラッシュするため、このテストはCIの対象外です。
+GPUのスモークテストは通常のCIでは無効です。ライセンスを確認したモデルを`ENE_VRM_TEST_MODEL`へ指定し、`cargo test -p ene-vrm gpu_model -- --ignored --nocapture`で実行します。合成MToon/outlineのパイプラインスモークは`cargo test -p ene-vrm synthetic_mtoon_uv1_outline_pipeline_smoke -- --ignored --nocapture`で実行し、CIではlavapipe上で実行します。UVアニメーションマスクのピクセル回帰`cargo test -p ene-vrm synthetic_mtoon_uv_alpha_shadow_matches_prepass -- --ignored --nocapture`はハードウェアGPUで実行してください。lavapipeはプリパス・フラグメントのdiscard経路でクラッシュするため、このテストはCIの対象外です。CIのGPU確認はlavapipe上の合成シーンだけです。Windowsを含む実ハードウェアGPUと、ライセンス済み実モデルでの描画はCIでは確認していません。

@@ -1,5 +1,5 @@
 use super::*;
-use crate::material::{BaseUv, MaterialSlot, Outline, TextureSpace};
+use crate::material::{BaseUv, EmissiveStrength, MaterialSlot, Outline, TextureSpace};
 use bevy::{
     animation::{AnimatedBy, AnimationTargetId},
     asset::{LoadState, RenderAssetUsages},
@@ -580,6 +580,42 @@ fn vrma_rejects_cross_scene_animation_target_reuse() {
 }
 
 #[test]
+fn vrma_allows_colliding_target_paths_between_unbound_curves() {
+    let files = Files::new();
+    let mut app = app();
+    let mut value = files.motion("LINEAR");
+    let extra = value["nodes"].as_array().unwrap().len();
+    let other = extra + 1;
+    // An unselected scene has two roots with the same name path. Neither node
+    // is a humanoid bone, expression, or look-at target, so those curves are
+    // never adopted and their collision cannot misattribute a used curve.
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!({"name":"Unused"}), json!({"name":"Unused"})]);
+    value["scenes"] = json!([{"nodes":[0]}, {"nodes":[extra, other]}]);
+    value["scene"] = json!(0);
+    value["animations"][0]["channels"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            json!({"sampler":1,"target":{"node":extra,"path":"rotation"}}),
+            json!({"sampler":1,"target":{"node":other,"path":"rotation"}}),
+        ]);
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("unbound-collision.vrma", &value));
+    settle(&mut app, std::slice::from_ref(&handle));
+    assert!(
+        app.world()
+            .resource::<AssetServer>()
+            .is_loaded_with_dependencies(handle.id()),
+        "collisions between unbound curves must not reject the VRMA"
+    );
+}
+
+#[test]
 fn gltf_with_vrm_extension_is_not_processed() {
     let files = Files::new();
     let mut app = app();
@@ -1098,7 +1134,10 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
         "aa":{"morphTargetBinds":[{"node":0,"index":0,"weight":1.}]},
         "happy":{
             "overrideMouth":"block",
-            "materialColorBinds":[{"material":0,"type":"color","targetValue":[1.,0.,0.,1.]}],
+            "materialColorBinds":[
+                {"material":0,"type":"color","targetValue":[1.,0.,0.,1.]},
+                {"material":0,"type":"emissionColor","targetValue":[0.4,0.25,0.,1.]}
+            ],
             "textureTransformBinds":[{"material":0,"scale":[2.,1.],"offset":[0.5,0.]}]
         }
     }}))
@@ -1152,6 +1191,7 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
             .spawn((
                 MeshMaterial3d(orig_std.clone()),
                 material::MaterialSlot(0),
+                EmissiveStrength(10.),
                 ChildOf(root),
             ))
             .id();
@@ -1160,6 +1200,7 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
             .spawn((
                 MeshMaterial3d(orig_toon.clone()),
                 material::MaterialSlot(0),
+                EmissiveStrength(10.),
                 ChildOf(root),
             ))
             .id();
@@ -1216,6 +1257,25 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
             .base_color
             .to_linear(),
         LinearRgba::RED
+    );
+    // The target is a raw `emissiveFactor`, so the authored strength scales it
+    // once; the already scaled rest color is not multiplied again.
+    assert_eq!(
+        app.world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&std_h0)
+            .unwrap()
+            .emissive,
+        LinearRgba::new(4., 2.5, 0., 1.)
+    );
+    assert_eq!(
+        app.world()
+            .resource::<Assets<MToonMaterial>>()
+            .get(&toon_h0)
+            .unwrap()
+            .base
+            .emissive,
+        LinearRgba::new(4., 2.5, 0., 1.)
     );
 
     // Removing manual key restores blended VRMA weight (0.25)
@@ -1399,6 +1459,7 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
             "pbrMetallicRoughness":{"baseColorTexture":{"index":0,"extensions":{"KHR_texture_transform":{"offset":[0.5,0.25]}}}},
             "extensions":{
                 "KHR_materials_unlit":{},
+                "KHR_materials_emissive_strength":{"emissiveStrength":10.0},
                 "VRMC_materials_mtoon":{"specVersion":"1.0","outlineWidthMode":"screenCoordinates","outlineWidthFactor":0.001,"renderQueueOffsetNumber":0,"shadeMultiplyTexture":{"index":0},"shadingShiftTexture":{"index":0}}
             }
         },
@@ -1450,7 +1511,9 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
             !mat0.base.unlit,
             "MToon must keep Bevy's lighting and emission inputs enabled"
         );
-        assert_eq!(mat0.base.emissive, LinearRgba::new(1., 0.5, 0., 1.));
+        // Bevy folds `KHR_materials_emissive_strength` into the loaded color;
+        // expressions must keep the factor to scale their targets once.
+        assert_eq!(mat0.base.emissive.to_vec3(), Vec3::new(10., 5., 0.));
         assert_eq!(mat0.base.depth_bias, 0.0);
         assert_eq!(mat0.base.uv_transform.translation, Vec2::new(0.5, 0.25));
         assert!(mat0.extension.shift.is_some());
@@ -1550,6 +1613,15 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
         assert_eq!(*transform, Transform::IDENTITY);
         assert_eq!(*global, *body_global);
     }
+    let strengths: HashMap<usize, f32> = app
+        .world_mut()
+        .query::<(&MaterialSlot, &EmissiveStrength)>()
+        .iter(app.world())
+        .map(|(slot, strength)| (slot.0, strength.0))
+        .collect();
+    assert_eq!(strengths.get(&0), Some(&10.));
+    assert_eq!(strengths.get(&1), Some(&1.));
+    assert_eq!(strengths.get(&2), Some(&1.));
 
     let (outline, body) = (outline_entities[0].0, outline_entities[0].1);
     app.world_mut()

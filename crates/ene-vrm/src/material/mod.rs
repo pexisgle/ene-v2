@@ -58,6 +58,22 @@ pub(crate) struct Outline;
 #[reflect(Component, Clone)]
 pub(crate) struct BaseUv(pub UvTransform);
 
+/// `KHR_materials_emissive_strength` of the glTF material.
+///
+/// Bevy folds the strength into [`StandardMaterial::emissive`] while loading,
+/// but expression binds target the raw `emissiveFactor`. Keep the factor so a
+/// bind can apply it to its target as well instead of interpolating toward an
+/// unscaled color.
+#[derive(Component, Clone, Copy, Debug, Reflect)]
+#[reflect(Component, Clone)]
+pub(crate) struct EmissiveStrength(pub f32);
+
+impl Default for EmissiveStrength {
+    fn default() -> Self {
+        Self(1.)
+    }
+}
+
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 #[bind_group_data(ToonKey)]
 pub struct MToonExtension {
@@ -220,6 +236,7 @@ pub(crate) fn setup(app: &mut App) {
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()
         .register_type::<BaseUv>()
+        .register_type::<EmissiveStrength>()
         .register_type::<UvTransform>()
         .register_type::<Outline>()
         .add_systems(PostUpdate, sync_outline_layers);
@@ -262,11 +279,14 @@ pub(crate) fn add_outlines(
                 ChildOf(entity),
             ))
             .id();
-        world
-            .entity_mut(entity)
-            .clone_components::<(Mesh3d, SkinnedMesh, MeshMorphWeights, MaterialSlot, BaseUv)>(
-                outline,
-            );
+        world.entity_mut(entity).clone_components::<(
+            Mesh3d,
+            SkinnedMesh,
+            MeshMorphWeights,
+            MaterialSlot,
+            BaseUv,
+            EmissiveStrength,
+        )>(outline);
     }
 }
 

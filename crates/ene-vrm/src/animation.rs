@@ -161,30 +161,9 @@ pub(crate) fn retarget_motion(
         // Bevy groups native curves by `AnimationTargetId`, which it derives
         // from the node name path. Sibling nodes, and nodes in any other scene,
         // share that group when their paths match, so the source node can no
-        // longer be recovered from the curve list.
-        // ponytail: reject ambiguous paths instead of matching curves by channel
-        // order; revisit if Bevy exposes per-node curve identity.
-        let mut seen: HashMap<(AnimationTargetId, u8), usize> = HashMap::default();
-        for channel in animation.channels() {
-            let node = channel.target().node().index();
-            let Some(&id) = targets.get(&node) else {
-                continue;
-            };
-            let kind = match channel.target().property() {
-                gltf::animation::Property::Rotation => 0,
-                gltf::animation::Property::Translation => 1,
-                _ => continue,
-            };
-            if let Some(&first) = seen.get(&(id, kind)) {
-                if first != node {
-                    return Err(invalid(format!(
-                        "VRMA nodes {first} and {node} share the same animation target path"
-                    )));
-                }
-            } else {
-                seen.insert((id, kind), node);
-            }
-        }
+        // longer be recovered from the curve list. Only a curve we actually
+        // adopt can be misattributed; collisions between unbound curves are
+        // harmless.
         for channel in animation.channels() {
             let node = channel.target().node().index();
             let property = channel.target().property();
@@ -230,6 +209,20 @@ pub(crate) fn retarget_motion(
             }) else {
                 continue;
             };
+            // ponytail: reject instead of matching curves by channel order;
+            // revisit if Bevy exposes per-node curve identity. The scan is
+            // quadratic in channel count, which keeps VRMA-sized inputs simple.
+            if let Some(other) = animation.channels().find(|other| {
+                let target = other.target();
+                target.node().index() != node
+                    && target.property() == property
+                    && targets.get(&target.node().index()) == Some(&native_id)
+            }) {
+                let other = other.target().node().index();
+                return Err(invalid(format!(
+                    "VRMA nodes {node} and {other} share the same animation target path"
+                )));
+            }
             let domain = curve.0.domain();
             let (&local, global) = world
                 .entity(entity)

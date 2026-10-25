@@ -1,7 +1,7 @@
 use crate::{
     VrmSystems, animation,
     loader::{invalid, require_node},
-    material::{BaseUv, MToonMaterial},
+    material::{BaseUv, EmissiveStrength, MToonMaterial},
     schema::{self, ColorType, UvTransform},
 };
 use bevy::{
@@ -58,10 +58,14 @@ impl Binds {
     }
 }
 
+/// A per-instance material clone with its authored base UV transform and
+/// `KHR_materials_emissive_strength`.
+type MaterialInstance<M> = (Handle<M>, UvTransform, f32);
+
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct MaterialBinds<M: bevy::pbr::Material>(
-    HashMap<(usize, Handle<M>), (Handle<M>, UvTransform)>,
+    HashMap<(usize, Handle<M>), MaterialInstance<M>>,
 );
 
 pub(crate) fn attach(
@@ -150,6 +154,7 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
             &crate::material::MaterialSlot,
             &MeshMaterial3d<M>,
             Option<&BaseUv>,
+            Option<&EmissiveStrength>,
         )>,
         Query<&mut MeshMaterial3d<M>>,
     )>,
@@ -162,7 +167,7 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
         {
             let meshes = meshes.p0();
             for entity in std::iter::once(root).chain(children.iter_descendants(root)) {
-                let Ok((slot, handle, base_uv)) = meshes.get(entity) else {
+                let Ok((slot, handle, base_uv, emissive_strength)) = meshes.get(entity) else {
                     continue;
                 };
                 if !affected.contains(&slot.0) {
@@ -173,7 +178,8 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
                     break;
                 }
                 let base_uv = base_uv.map_or_else(UvTransform::default, |uv| uv.0);
-                targets.push((entity, slot.0, handle.0.clone(), base_uv));
+                let emissive_strength = emissive_strength.map_or(1., |s| s.0);
+                targets.push((entity, slot.0, handle.0.clone(), base_uv, emissive_strength));
             }
         }
         if pending {
@@ -181,12 +187,12 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
         }
         let mut instances = HashMap::default();
         let mut handles = meshes.p1();
-        for (entity, slot, original, base_uv) in targets {
+        for (entity, slot, original, base_uv, emissive_strength) in targets {
             let clone = match instances.entry((slot, original.clone())) {
                 Entry::Occupied(e) => e.into_mut(),
                 Entry::Vacant(e) => {
                     let material = materials.get(&original).cloned().expect("checked above");
-                    e.insert((materials.add(material), base_uv))
+                    e.insert((materials.add(material), base_uv, emissive_strength))
                 }
             };
             if let Ok(mut handle) = handles.get_mut(entity) {
@@ -299,7 +305,9 @@ fn apply_material<M: BindMaterial>(
     assets: &mut Assets<M>,
     effective: &[(&str, &schema::Expression, f32)],
 ) {
-    for (&(index, ref original), (handle, base_uv)) in binds.into_iter().flat_map(|b| &b.0) {
+    for (&(index, ref original), (handle, base_uv, emissive_strength)) in
+        binds.into_iter().flat_map(|b| &b.0)
+    {
         let Some((base_color, emissive, rest_toon, toon_uv)) = assets.get(original).map(|m| {
             let (base, toon) = m.base();
             (base.base_color, base.emissive, toon.copied(), m.uv_rest())
@@ -312,6 +320,7 @@ fn apply_material<M: BindMaterial>(
         let (cur_base, cur_toon) = current.base();
         let (color, emissive, uv, toon) = compute_material(
             (base_color, emissive),
+            *emissive_strength,
             *base_uv,
             rest_toon.as_ref(),
             toon_uv,
@@ -382,8 +391,12 @@ pub(crate) fn apply(
     }
 }
 
+/// `emissive` is the loaded value, which already includes
+/// `KHR_materials_emissive_strength`; expression targets are raw
+/// `emissiveFactor` values, so only the target is scaled again.
 pub(crate) fn compute_material(
     (base_color, emissive): (Color, LinearRgba),
+    emissive_strength: f32,
     base_uv: UvTransform,
     rest_toon: Option<&schema::ToonParams>,
     toon_uv: Option<[UvTransform; 6]>,
@@ -411,7 +424,8 @@ pub(crate) fn compute_material(
                     value += (target - base_color.to_linear().to_vec4()) * weight;
                 }
                 ColorType::EmissionColor => {
-                    emission += (target.truncate() - emissive.to_vec3()) * weight;
+                    emission +=
+                        (target.truncate() * emissive_strength - emissive.to_vec3()) * weight;
                 }
                 other => {
                     if let (Some(params), Some(rest)) = (&mut toon_params, rest_toon) {
@@ -507,6 +521,7 @@ mod tests {
         };
         let (_, _, uv, toon) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
+            1.,
             base,
             Some(&rest_toon),
             Some([base; 6]),
@@ -549,6 +564,7 @@ mod tests {
         let weights = effective(&defs, |_| 1.);
         let (_, _, uv, _) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
+            1.,
             base,
             Some(&rest_toon),
             Some([base; 6]),
@@ -562,6 +578,7 @@ mod tests {
         let weights = effective(&defs, |_| 0.);
         let (_, _, uv, _) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
+            1.,
             base,
             Some(&rest_toon),
             Some([base; 6]),
@@ -662,6 +679,7 @@ mod tests {
         };
         let (color, emission, uv, toon) = compute_material(
             (rest.base_color, rest.emissive),
+            1.,
             UvTransform::default(),
             Some(&rest_toon),
             None,
@@ -678,5 +696,56 @@ mod tests {
             LinearRgba::new(0.25, 0.125, 0., rest.emissive.alpha)
         );
         assert_eq!(uv, rest.uv_transform);
+    }
+
+    #[test]
+    fn emission_color_binds_apply_the_emissive_strength_once() {
+        let parse = |target: [f32; 4]| -> schema::Expressions {
+            serde_json::from_value(serde_json::json!({
+                "preset": {
+                    "glow": {"materialColorBinds": [
+                        {"material":0,"type":"emissionColor","targetValue":target}
+                    ]}
+                }
+            }))
+            .unwrap()
+        };
+        let sample = |defs: &schema::Expressions, base: LinearRgba, strength: f32, weight: f32| {
+            let weights = effective(defs, |_| weight);
+            compute_material(
+                (Color::WHITE, base),
+                strength,
+                UvTransform::default(),
+                None,
+                None,
+                0,
+                &weights,
+            )
+            .1
+        };
+
+        let target = parse([0.4, 0.2, 0.1, 1.]);
+        // 0.2 / 0.1 / 0.05 already scaled by 10, as loaded by Bevy.
+        let base = LinearRgba::rgb(2., 1., 0.5);
+        assert_eq!(sample(&target, base, 10., 0.), base);
+        assert_eq!(
+            sample(&target, base, 10., 0.5),
+            LinearRgba::rgb(3., 1.5, 0.75)
+        );
+        assert_eq!(sample(&target, base, 10., 1.), LinearRgba::rgb(4., 2., 1.));
+
+        // Strength 1 keeps the plain glTF factor interpolation.
+        assert_eq!(
+            sample(&target, LinearRgba::rgb(0.2, 0.1, 0.05), 1., 1.),
+            LinearRgba::rgb(0.4, 0.2, 0.1)
+        );
+        // Strength 0 suppresses emission even for a bright target.
+        assert_eq!(
+            sample(&target, LinearRgba::BLACK, 0., 1.),
+            LinearRgba::BLACK
+        );
+        // A target equal to the initial factor must not change a scaled base.
+        let same = parse([0.2, 0.1, 0.05, 1.]);
+        assert_eq!(sample(&same, base, 10., 1.), base);
     }
 }
