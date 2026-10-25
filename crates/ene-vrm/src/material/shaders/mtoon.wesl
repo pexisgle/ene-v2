@@ -1,59 +1,67 @@
 // MToon lighting adapted from bevy_vrm1 (Copyright 2025 elm), MIT/Apache-2.0.
-#import bevy_pbr::{
-    forward_io::{VertexOutput, FragmentOutput},
+import bevy_pbr::render::{
+    forward_io::{FragmentOutput, VertexOutput},
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    mesh_view_bindings::{globals, lights, view},
+    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+    pbr_ambient::ambient_light,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, main_pass_post_lighting_processing},
-    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
-    mesh_view_bindings::{lights, view, globals},
-    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     shadows::fetch_directional_shadow,
-    ambient::ambient_light,
-}
-#import ene_vrm::toon::{toon, animated_uvs, texture_uv, shade_texture, shade_sampler, shift_texture, shift_sampler, rim_texture, rim_sampler, matcap_texture, matcap_sampler}
+};
+import super::toon::{
+    animated_uvs, matcap_sampler, matcap_texture, rim_sampler, rim_texture, shade_sampler,
+    shade_texture, shift_sampler, shift_texture, texture_uv, toon,
+};
 
 @fragment
 fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> FragmentOutput {
     var input = vertex;
-#ifdef VERTEX_UVS_A
-    var raw_uv0 = input.uv;
-#else
     var raw_uv0 = vec2<f32>(0.0);
-#endif
-#ifdef VERTEX_UVS_B
-    var raw_uv1 = input.uv_b;
-#else
     var raw_uv1 = vec2<f32>(0.0);
-#endif
-#ifndef VERTEX_UVS_A
-    raw_uv0 = raw_uv1;
-#endif
-#ifndef VERTEX_UVS_B
-    raw_uv1 = raw_uv0;
-#endif
+    @if(VERTEX_UVS_A) {
+        raw_uv0 = input.uv;
+    }
+    @if(VERTEX_UVS_B) {
+        raw_uv1 = input.uv_b;
+    }
+    @if(!VERTEX_UVS_A) {
+        raw_uv0 = raw_uv1;
+    }
+    @if(!VERTEX_UVS_B) {
+        raw_uv1 = raw_uv0;
+    }
     let uvs = animated_uvs(raw_uv0, raw_uv1, globals.time);
     let uv0 = uvs.xy;
     let uv1 = uvs.zw;
-#ifdef VERTEX_UVS_A
-    input.uv = uv0;
-#endif
-#ifdef VERTEX_UVS_B
-    input.uv_b = uv1;
-#endif
-#ifdef OUTLINE_PASS
-    var pbr = pbr_input_from_standard_material(input, true);
-#else
+    @if(VERTEX_UVS_A) {
+        input.uv = uv0;
+    }
+    @if(VERTEX_UVS_B) {
+        input.uv_b = uv1;
+    }
     var pbr = pbr_input_from_standard_material(input, front);
-#endif
-    pbr.material.base_color = alpha_discard(pbr.material, pbr.material.base_color);
+    @if(OUTLINE_PASS) {
+        pbr = pbr_input_from_standard_material(input, true);
+    }
+    pbr.material.base_color = alpha_discard(
+        pbr.material.flags,
+        pbr.material.alpha_cutoff,
+        pbr.material.base_color,
+    );
     let lit = pbr.material.base_color;
     var shade = toon.shade_color_factor;
     var shift = toon.shading_shift_factor;
-#ifdef MTOON_UVS
-    let shade_uv = texture_uv(uv0, uv1, 0u);
-    if (toon.texture_flags & 1u) != 0u { shade *= textureSampleBias(shade_texture, shade_sampler, shade_uv, view.mip_bias).rgb; }
-    let shift_uv = texture_uv(uv0, uv1, 1u);
-    if (toon.texture_flags & 2u) != 0u { shift += textureSampleBias(shift_texture, shift_sampler, shift_uv, view.mip_bias).r * toon.shading_shift_texture_scale; }
-#endif
+    @if(MTOON_UVS) {
+        let shade_uv = texture_uv(uv0, uv1, 0u);
+        if (toon.texture_flags & 1u) != 0u {
+            shade *= textureSampleBias(shade_texture, shade_sampler, shade_uv, view.mip_bias).rgb;
+        }
+        let shift_uv = texture_uv(uv0, uv1, 1u);
+        if (toon.texture_flags & 2u) != 0u {
+            shift += textureSampleBias(shift_texture, shift_sampler, shift_uv, view.mip_bias).r * toon.shading_shift_texture_scale;
+        }
+    }
     var direct = vec3(0.);
     var direct_lighting = vec3(0.);
     for (var i = 0u; i < lights.n_directional_lights; i++) {
@@ -87,18 +95,20 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> Fragmen
         let matcap_uv = vec2(dot(world_view_x, pbr.N), -dot(world_view_y, pbr.N)) * 0.495 + 0.5;
         rim += textureSampleBias(matcap_texture, matcap_sampler, matcap_uv, view.mip_bias).rgb * toon.matcap_factor;
     }
-#ifdef MTOON_UVS
-    let rim_uv = texture_uv(uv0, uv1, 2u);
-    if (toon.texture_flags & 4u) != 0u { rim *= textureSampleBias(rim_texture, rim_sampler, rim_uv, view.mip_bias).rgb; }
-#endif
+    @if(MTOON_UVS) {
+        let rim_uv = texture_uv(uv0, uv1, 2u);
+        if (toon.texture_flags & 4u) != 0u {
+            rim *= textureSampleBias(rim_texture, rim_sampler, rim_uv, view.mip_bias).rgb;
+        }
+    }
     // UniVRM MToon10's rim mix uses direct light color + indirect light (not the
     // lit surface color), so this intentionally stays a lighting-only factor.
     rim *= mix(vec3(1.), direct_lighting + ambient_lighting, toon.rim_lighting_mix_factor);
     let emission = pbr.material.emissive.rgb * mix(1., view.exposure, pbr.material.emissive.a);
     var color = vec4(direct + indirect + rim + emission, lit.a);
-#ifdef OUTLINE_PASS
-    color = vec4(toon.outline_color_factor * mix(vec3(1.), color.rgb, toon.outline_lighting_mix_factor), lit.a);
-#endif
+    @if(OUTLINE_PASS) {
+        color = vec4(toon.outline_color_factor * mix(vec3(1.), color.rgb, toon.outline_lighting_mix_factor), lit.a);
+    }
     var out: FragmentOutput;
     out.color = main_pass_post_lighting_processing(pbr, color);
     return out;

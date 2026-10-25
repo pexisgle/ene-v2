@@ -143,7 +143,9 @@ fn app_with_vrm(vrm: bool) -> App {
         primary_window: None,
         ..default()
     }))
-    .add_plugins(bevy::render::sync_world::SyncWorldPlugin)
+    .add_plugins(bevy::extract::sync_world::SyncWorldPlugin::<
+        bevy::render::RenderApp,
+    >::default())
     .register_asset_loader(bevy::image::ImageLoader::new(
         bevy::image::CompressedImageFormats::NONE,
     ))
@@ -1758,7 +1760,7 @@ fn gpu_model_material_skin_morph_and_outline_smoke() {
         ));
     app.world_mut().spawn((
         Camera3d::default(),
-        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::core_pipeline::tonemapping::Tonemapping::Linear,
         bevy::camera::RenderTarget::Image(image.clone().into()),
         Transform::from_xyz(0., 1., 3.).looking_at(Vec3::new(0., 0.9, 0.), Vec3::Y),
     ));
@@ -1946,7 +1948,8 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
     app.world_mut().spawn((
         Camera3d::default(),
         bevy::core_pipeline::prepass::DepthPrepass,
-        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::core_pipeline::prepass::NormalPrepass,
+        bevy::core_pipeline::tonemapping::Tonemapping::Linear,
         bevy::camera::RenderTarget::Image(target.into()),
         Transform::from_xyz(0., 0., 3.).looking_at(Vec3::ZERO, Vec3::Y),
     ));
@@ -2170,7 +2173,7 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
         Camera3d::default(),
         bevy::core_pipeline::prepass::DepthPrepass,
         Msaa::Off,
-        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::core_pipeline::tonemapping::Tonemapping::Linear,
         bevy::camera::RenderTarget::Image(target.into()),
         bevy::camera::Projection::Orthographic(bevy::camera::OrthographicProjection {
             scaling_mode: bevy::camera::ScalingMode::Fixed {

@@ -323,7 +323,7 @@ fn settings_only_reload_changed_sources_and_retry_errors() {
     struct Reloads(usize);
     let (mut app, input, output) = test_app();
     app.init_resource::<Reloads>().add_observer(
-        |_: On<Insert, crate::character::ModelAssets>, mut count: ResMut<Reloads>| count.0 += 1,
+        |_: On<Insert<crate::character::ModelAssets>>, mut count: ResMut<Reloads>| count.0 += 1,
     );
     for (index, (model, motion, playing, reloads)) in [
         ("a.vrm", None, true, 1),

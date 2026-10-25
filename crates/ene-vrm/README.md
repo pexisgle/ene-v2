@@ -1,6 +1,6 @@
 # ene-vrm
 
-Bevy 0.19.1 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する、非公開のワークスペースクレートです。
+Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する、非公開のワークスペースクレートです。
 
 glTF本体のデコード、バッファ・画像・メッシュ・スキンの生成、補間曲線、シーン複製、描画キューはBevyが担当します。このクレートはVRMC拡張の解析、ヒューマノイドの姿勢変換、表情、LookAt、ノード制約、SpringBone、MToonと輪郭を担当します。`VRMC_vrm`／`VRMC_vrm_animation`／`VRMC_springBone`のデータ構造には`vrm-spec`を使い、制約の依存順序は`petgraph`で解決します。`.vrm`／`.vrma`のローダーは拡張子を接続してBevyの`GltfLoader`へ委譲します。
 
@@ -31,16 +31,16 @@ glTF本体のデコード、バッファ・画像・メッシュ・スキンの�
 - MToonのテクスチャは用途ごとの色空間で読みます。数値用途（`shadingShiftTexture`、`uvAnimationMaskTexture`、`outlineWidthMultiplyTexture`）は線形、色用途（`shadeMultiplyTexture`、`rimMultiplyTexture`、`matcapTexture`、baseColor、emissive）はsRGBです。同じテクスチャ番号がコア材質のnormal/occlusion/metallic-roughnessと共有され、Bevyが線形形式で読み込んだ場合も、色用途にはsRGB形式の複製を渡します。GLB内の埋め込み画像だけが対象で、外部ファイルURIの画像は変換しません。
 - 片眼のみのbone型LookAtはUniVRM互換でexpressionへフォールバックします。
 - コアテクスチャのテクスチャごとの`KHR_texture_transform`はBevyが単一`uv_transform`しか持たないため対象外です（VRM本体仕様もrotation/texCoordを非推奨）。MToon拡張テクスチャはUV0/UV1と`texCoord`、テクスチャごとの`KHR_texture_transform`に対応します。
-- glTFコア材質の解釈はBevyに従います。Bevy 0.19.1のglTFローダーは`normalTexture.scale`を未実装（`TODO: handle normal_texture.scale`）のため、MToonの法線テクスチャ強度は反映されません。上流での対応を待ちます。
+- glTFコア材質の解釈はBevyに従います。Bevy 0.20.0のglTFローダーは`normalTexture.scale`を未実装（`TODO: handle normal_texture.scale`）のため、MToonの法線テクスチャ強度は反映されません。上流での対応を待ちます。
 - VRM 0.x、BodyTracking、`VRMC_springBone`の拡張colliderは対象外です。
 
 ## 材質と対象範囲
 
-`MToonMaterial`は`ExtendedMaterial<StandardMaterial, MToonExtension>`です。Bevyが作成したStandardMaterialと、標準の頂点・スキン・モーフ処理をそのまま利用します。輪郭は同じメッシュ、スキン、モーフ参照を共有する追加エンティティです。独自RenderPhaseやRenderGraphはありません。表情で変更する材質だけをインスタンスごとに複製します。
+MToonのシェーダーはBevy 0.20のWESLで実装しています。`MToonMaterial`は`ExtendedMaterial<StandardMaterial, MToonExtension>`です。Bevyが作成したStandardMaterialと、標準のシーン・スキン・モーフ処理を利用します。MToon本体の頂点処理はBevy標準の`mesh.wesl`のままです。輪郭は同じメッシュ、スキン、モーフ参照を共有する追加エンティティです。独自RenderPhaseやRenderGraphはありません。表情で変更する材質だけをインスタンスごとに複製します。
 
-輪郭の頂点シェーダーはBevy標準の`mesh.wgsl`をimportし、その出力へVRM固有の押し出しだけを加えます。標準シェーダーの文字列置換・複製・実行時生成はありません。プリパス・影の頂点処理はBevy標準の`prepass.wgsl`のままです。プリパスのフラグメントは薄いラッパーで、標準頂点処理が補間したUVにMToonのマスク・スクロール・回転をフラグメント単位で適用してから、Bevy標準の`pbr_prepass.wgsl`へ渡します。標準プリパス全体のコピーはありません。[NagaのDX12での番号補正](https://github.com/gfx-rs/wgpu/issues/4564)に合わせ、頂点・インスタンス番号を呼び出し元のエントリーポイントで読み取ってから標準関数へ渡します。
+Bevy 0.20のWESLでは別シェーダーのエントリーポイントを呼び出せないため、輪郭の頂点シェーダーは標準`mesh.wesl`と同じ頂点処理（morph・スキニング・法線/接線・可視範囲）を`outline.wesl`内に持ち、VRM固有の押し出しだけを追加します。プリパスも同様に、標準`pbr_prepass.wesl`のフラグメント処理を`mtoon_prepass.wesl`内に持ち、標準頂点処理が補間したUVへMToonのマスク・スクロール・回転をフラグメント単位で適用してから、標準のアルファ判定・法線・モーション出力へ渡します。いずれもBevy 0.20.0の標準シェーダーを基準にしたコピーで、Bevy更新時に再同期が必要です。[NagaのDX12での番号補正](https://github.com/gfx-rs/wgpu/issues/4564)に合わせ、頂点・インスタンス番号を呼び出し元のエントリーポイントで読み取ってから標準関数へ渡します。
 
-MToonの半透明材質は、`alphaMode`が`BLEND`のときBevy標準の半透明合成で描画します。`renderQueueOffsetNumber`による描画順の指定と`transparentWithZWrite`による深度書き込みは対象外です。Bevy 0.19.1の半透明ソートはワールド距離だけをキーにするため、キュー番号を距離への加算値で近似しても通常の表示倍率では順序を保証できません。MToonの色テクスチャはsRGB、数値テクスチャは線形で読みます。コア材質との共有でBevyが逆向きの形式を選んだ場合は、ローダーが `(texture index, color space)` ごとに画像を複製します。UVアニメーションはマスク・スクロール・回転を本体とプリパスの両方でフラグメント単位に評価するため、影・深度のアルファ判定も本体と一致します。
+MToonの半透明材質は、`alphaMode`が`BLEND`のときBevy標準の半透明合成で描画します。`renderQueueOffsetNumber`による描画順の指定と`transparentWithZWrite`による深度書き込みは対象外です。Bevy 0.20.0の半透明ソートはワールド距離だけをキーにするため、キュー番号を距離への加算値で近似しても通常の表示倍率では順序を保証できません。MToonの色テクスチャはsRGB、数値テクスチャは線形で読みます。コア材質との共有でBevyが逆向きの形式を選んだ場合は、ローダーが `(texture index, color space)` ごとに画像を複製します。UVアニメーションはマスク・スクロール・回転を本体とプリパスの両方でフラグメント単位に評価するため、影・深度のアルファ判定も本体と一致します。MToonはOIT（`MaterialExtension::enable_oit`）を無効にしているため、OIT有効カメラでも通常の半透明パスで描画されます。
 
 SpringBoneは[VRM 1.0仕様](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_springBone-1.0)どおり隣接ジョイントの組だけを計算します。末端は尾として使い、VRM 0.xの仮想7cmボーンを追加しません。`SpringRig::paused`は積分だけを止め、最後の回転を再適用するので、ポーズ中も制約に姿勢を上書きされません。表情処理も、バインドが指定するモーフ番号・材質項目だけを変更します。`emissionColor`はglTFの`emissiveFactor`として補間し、読み込み時にBevyが`emissive`へ掛けた`KHR_materials_emissive_strength`の倍率を目標値にも適用します。バインドされたモーフは仕様どおり毎フレーム0から加算し、glTFの初期モーフウェイトは使いません。低FPS時は1/60秒の固定ステップで祖先から子孫の順に追従し、残余時間を次のフレームへ繰り越します。長時間停止は約0.25秒で打ち切ります。
 

@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_animation", "bevy_gltf", "bevy_pbr", "bevy_render", "bevy_shader", "bevy_world_serialization", "gltf_animation", "morph_animation"] }
+bevy = { version = "=0.20.0", default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_animation", "bevy_curve", "bevy_gltf", "bevy_pbr", "bevy_render", "bevy_shader", "bevy_world_serialization", "gltf_animation", "morph_animation"] }
 gltf = { version = "1.4", default-features = false, features = ["extensions", "KHR_texture_transform"] }
 petgraph = "0.8"
 serde.workspace = true
@@ -18,7 +18,7 @@ serde_json = "1"
 vrm-spec = { version = "0.1.1", default-features = false, features = ["gltf_index"] }
 
 [dev-dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["bevy_window", "bevy_log", "png"] }
+bevy = { version = "=0.20.0", default-features = false, features = ["bevy_window", "bevy_log", "png"] }
 
 [target.'cfg(windows)'.dev-dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["bevy_winit"] }
+bevy = { version = "=0.20.0", default-features = false, features = ["bevy_winit"] }

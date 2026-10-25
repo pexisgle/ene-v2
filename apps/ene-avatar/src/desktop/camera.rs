@@ -24,7 +24,7 @@ pub(super) fn cameras(mut commands: Commands, outputs: Query<(Entity, &Output), 
             RenderTarget::Window(WindowRef::Entity(entity)),
             Transform::from_xyz(center.x, -center.y, 50_000.0),
             Msaa::Off,
-            bevy::core_pipeline::tonemapping::Tonemapping::None,
+            bevy::core_pipeline::tonemapping::Tonemapping::Linear,
         ));
     }
 }

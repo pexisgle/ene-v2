@@ -120,14 +120,17 @@ fn outline_cull(cull: Option<Face>) -> Option<Face> {
 }
 
 impl MaterialExtension for MToonExtension {
+    fn enable_oit() -> bool {
+        false
+    }
     fn vertex_shader() -> ShaderRef {
-        "embedded://ene_vrm/material/shaders/outline.wgsl".into()
+        "embedded://ene_vrm/material/shaders/outline.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://ene_vrm/material/shaders/mtoon.wgsl".into()
+        "embedded://ene_vrm/material/shaders/mtoon.wesl".into()
     }
     fn prepass_fragment_shader() -> ShaderRef {
-        "embedded://ene_vrm/material/shaders/mtoon_prepass.wgsl".into()
+        "embedded://ene_vrm/material/shaders/mtoon_prepass.wesl".into()
     }
     fn specialize(
         pipeline: &MaterialExtensionPipeline,
@@ -229,10 +232,10 @@ impl MToonExtension {
 }
 
 pub(crate) fn setup(app: &mut App) {
-    embedded_asset!(app, "shaders/mtoon.wgsl");
-    embedded_asset!(app, "shaders/outline.wgsl");
-    embedded_asset!(app, "shaders/mtoon_prepass.wgsl");
-    bevy::shader::load_shader_library!(app, "shaders/toon_bindings.wgsl");
+    embedded_asset!(app, "shaders/mtoon.wesl");
+    embedded_asset!(app, "shaders/outline.wesl");
+    embedded_asset!(app, "shaders/mtoon_prepass.wesl");
+    bevy::shader::load_shader_library!(app, "shaders/toon.wesl");
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()
         .register_type::<BaseUv>()

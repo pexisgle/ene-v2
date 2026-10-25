@@ -117,6 +117,7 @@ fn snapshot(
     for (entity, id, config, state) in &views {
         let animation_times: Vec<_> = players
             .iter_many(std::iter::once(entity).chain(children.iter_descendants(entity)))
+            .matched()
             .flat_map(AnimationPlayer::playing_animations)
             .map(|(_, animation)| animation.seek_time())
             .collect();

@@ -18,6 +18,7 @@ pub(super) fn regions(
         .filter_map(|(entity, aabb, transform, visible)| {
             let (owner, state) = avatars
                 .iter_many(std::iter::once(entity).chain(parents.iter_ancestors(entity)))
+                .matched()
                 .next()?;
             if *state != AvatarState::Ready || !visible.get() {
                 return None;

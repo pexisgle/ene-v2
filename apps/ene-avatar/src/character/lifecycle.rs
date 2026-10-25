@@ -33,8 +33,9 @@ pub(super) fn update_avatars(
         let subtree = assets.map_or(root, |assets| assets.scene);
         let mut initialized = false;
         let mut motion_ready = config.motion.is_none();
-        for (_, (player, _, rig)) in
-            parts.iter_many(std::iter::once(subtree).chain(children.iter_descendants(subtree)))
+        for (_, (player, _, rig)) in parts
+            .iter_many(std::iter::once(subtree).chain(children.iter_descendants(subtree)))
+            .matched()
         {
             initialized |= rig.is_some();
             motion_ready |=
@@ -82,8 +83,9 @@ pub(super) fn update_avatars(
             states.write(Notification(event));
         }
         let running = config.playing && *state == AvatarState::Ready;
-        let mut parts =
-            parts.iter_many_mut(std::iter::once(root).chain(children.iter_descendants(root)));
+        let mut parts = parts
+            .iter_many_mut(std::iter::once(root).chain(children.iter_descendants(root)))
+            .matched();
         while let Some((_, (player, spring, _))) = parts.fetch_next() {
             if let Some(mut player) = player
                 && player.playing_animations().any(|(_, animation)| {
@@ -129,8 +131,11 @@ pub(crate) fn notify_finished(
         if !control.playing || control.looping || *state != AvatarState::Ready {
             continue;
         }
-        let players =
-            || players.iter_many(std::iter::once(entity).chain(children.iter_descendants(entity)));
+        let players = || {
+            players
+                .iter_many(std::iter::once(entity).chain(children.iter_descendants(entity)))
+                .matched()
+        };
         if players().all(AnimationPlayer::all_finished)
             && players()
                 .flat_map(AnimationPlayer::playing_animations)

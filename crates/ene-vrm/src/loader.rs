@@ -46,6 +46,7 @@ pub(crate) fn finish(app: &mut App) {
         extensions: world.resource::<GltfExtensionHandlers>().0.clone(),
         default_convert_coordinates: plugin.convert_coordinates,
         default_skinned_mesh_bounds_policy: plugin.skinned_mesh_bounds_policy,
+        default_mesh_compression: plugin.mesh_compression.clone(),
     }));
 }
 
@@ -73,7 +74,14 @@ impl AssetLoader for VrmLoader {
                     load_animations: motion,
                     load_cameras: false,
                     default_sampler: settings.default_sampler.clone(),
-                    ..*settings
+                    load_meshes: settings.load_meshes,
+                    load_materials: settings.load_materials,
+                    load_lights: settings.load_lights,
+                    override_sampler: settings.override_sampler,
+                    validate: settings.validate,
+                    convert_coordinates: settings.convert_coordinates,
+                    skinned_mesh_bounds_policy: settings.skinned_mesh_bounds_policy,
+                    mesh_compression: settings.mesh_compression.clone(),
                 },
                 context,
             )

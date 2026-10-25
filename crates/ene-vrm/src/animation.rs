@@ -10,7 +10,7 @@ use bevy::{
         animation_curves::{AnimatableCurve, AnimatableProperty, AnimatedField},
     },
     app::AnimationSystems,
-    math::curve::FunctionCurve,
+    curve::FunctionCurve,
     platform::collections::{HashMap, HashSet},
     prelude::*,
 };
@@ -94,7 +94,7 @@ pub(crate) fn denormalize_rotation(local: Quat, global: Quat, value: Quat) -> Qu
 
 /// Collects the animation target id for every node reachable from a scene.
 ///
-/// Mirrors `bevy_gltf` 0.19.1's path derivation (`node_name` + `collect_path`)
+/// Mirrors `bevy_gltf` 0.20.0's path derivation (`node_name` + `collect_path`)
 /// so that curves from unselected scenes are grouped exactly as they are in the
 /// native `AnimationClip`.
 // ponytail: bevy_gltf keeps `node_name`/`collect_path` private; drop this copy

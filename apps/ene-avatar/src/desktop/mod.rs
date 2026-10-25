@@ -29,8 +29,8 @@ pub fn setup(app: &mut App) {
         .add_systems(PreUpdate, pointer)
         .add_systems(Update, (camera::cameras, placement::place_avatars))
         .add_systems(Update, sync_virtual_time)
-        .add_observer(|_: On<Remove, Output>, mut drag: ResMut<Drag>| drag.entity = None)
-        .add_observer(|event: On<Remove, CharacterId>, mut drag: ResMut<Drag>| {
+        .add_observer(|_: On<Remove<Output>>, mut drag: ResMut<Drag>| drag.entity = None)
+        .add_observer(|event: On<Remove<CharacterId>>, mut drag: ResMut<Drag>| {
             if drag.entity == Some(event.entity) {
                 drag.entity = None;
             }

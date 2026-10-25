@@ -1,5 +1,3 @@
-#define_import_path ene_vrm::toon
-
 struct Toon {
     shade_color_factor: vec3<f32>,
     parametric_rim_color_factor: vec3<f32>,
@@ -21,19 +19,19 @@ struct Toon {
     texture_uvs: u32,
     uv_transforms: array<mat3x3<f32>, 6>,
 }
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> toon: Toon;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var shade_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var shade_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var shift_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var shift_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var rim_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106) var rim_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107) var matcap_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(108) var matcap_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(109) var uv_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(110) var uv_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(111) var width_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(112) var width_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> toon: Toon;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var shade_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var shade_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(103) var shift_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(104) var shift_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(105) var rim_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(106) var rim_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(107) var matcap_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(108) var matcap_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(109) var uv_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(110) var uv_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(111) var width_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(112) var width_sampler: sampler;
 
 fn texture_uv(uv0: vec2<f32>, uv1: vec2<f32>, slot: u32) -> vec2<f32> {
     let uv = select(uv0, uv1, ((toon.texture_uvs >> slot) & 1u) != 0u);

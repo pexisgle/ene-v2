@@ -96,7 +96,7 @@ fn native_app() -> App {
         ..default()
     }))
     .add_plugins((
-        bevy::render::sync_world::SyncWorldPlugin,
+        bevy::extract::sync_world::SyncWorldPlugin::<bevy::render::RenderApp>::default(),
         ene_vrm::VrmPlugin,
         setup,
     ))
