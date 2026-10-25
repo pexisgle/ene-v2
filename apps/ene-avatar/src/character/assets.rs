@@ -98,11 +98,9 @@ pub(super) fn load_scene(
                 let (graph, node) = AnimationGraph::from_clip(clip.clone());
                 let mut player = AnimationPlayer::default();
                 player.play(node).repeat();
-                commands.entity(root).insert((
-                    player,
-                    AnimationGraphHandle(graphs.add(graph)),
-                    AnimationTransitions::new(),
-                ));
+                commands
+                    .entity(root)
+                    .insert((player, AnimationGraphHandle(graphs.add(graph))));
             }
         }
     }
