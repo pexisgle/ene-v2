@@ -3,6 +3,7 @@
 use crate::VrmSystems;
 use bevy::{ecs::entity::MapEntities, prelude::*, transform::helper::TransformHelper};
 use serde::Deserialize;
+use std::time::Duration;
 
 /// VRM 1.0 spring parameters in model-space meters.
 ///
@@ -87,29 +88,40 @@ pub(crate) fn setup(app: &mut App) {
 /// Reference solver step. The simulation runs on a fixed clock so frame-time
 /// jitter does not change how many times inertia and damping are applied.
 const STEP: f32 = 1. / 60.;
+/// [`STEP`] truncated to whole nanoseconds. `Duration::from_secs_f32(STEP)`
+/// rounds up to 16_666_668 ns and would drop a step at a 60 Hz frame delta.
+const STEP_PERIOD: Duration = Duration::from_nanos(16_666_667);
 /// Upper bound for time spent catching up after a long stall.
 const MAX_STEPS: usize = 15;
 
-/// Accumulates frame time and returns how many fixed [`STEP`]s to simulate.
-fn fixed_steps(accumulator: &mut f32, dt: f32) -> usize {
-    // Keep half a step of slack so the capped value does not truncate to one
-    // step less through float rounding.
-    let max = STEP * (MAX_STEPS as f32 + 0.5);
-    *accumulator = (*accumulator + dt).min(max);
-    let steps = ((*accumulator / STEP) as usize).min(MAX_STEPS);
-    *accumulator = (*accumulator - steps as f32 * STEP).max(0.);
-    steps
+/// Fixed-step clock shared by every rig. Bevy accumulates frame time and
+/// reports how many whole steps elapsed; only the catch-up cap is ours.
+struct StepClock(Timer);
+
+impl Default for StepClock {
+    fn default() -> Self {
+        Self(Timer::new(STEP_PERIOD, TimerMode::Repeating))
+    }
+}
+
+/// Advances the clock and returns how many fixed [`STEP`]s to simulate.
+fn fixed_steps(clock: &mut StepClock, dt: Duration) -> usize {
+    // Clamp the input, not the remainder, so a long stall drops the excess
+    // time and still leaves less than one step for the next frame.
+    let max = clock.0.duration() * MAX_STEPS as u32;
+    clock.0.tick(dt.min(max));
+    clock.0.times_finished_this_tick() as usize
 }
 
 fn springs(
     time: Res<Time>,
-    mut accumulator: Local<f32>,
+    mut clock: Local<StepClock>,
     mut rigs: Query<(Entity, &mut SpringRig)>,
     props: Query<&SpringJointProps>,
     parents: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
-    let steps = fixed_steps(&mut accumulator, time.delta_secs());
+    let steps = fixed_steps(&mut clock, time.delta());
     for (root_entity, mut rig) in &mut rigs {
         if rig.paused || steps == 0 {
             // Nothing to simulate, but a system earlier this frame (for
@@ -251,7 +263,6 @@ fn collide(tail: &mut Vec3, head: Vec3, length: f32, radius: f32, segment: &Segm
 mod tests {
     use super::*;
     use crate::runtime::Vrm;
-    use std::time::Duration;
 
     fn simulation(scale: f32, collision: bool) -> (App, Entity) {
         let mut app = App::new();
@@ -786,13 +797,13 @@ mod tests {
     }
 
     #[test]
-    fn fixed_step_accumulator_does_not_double_steps_at_the_frame_boundary() {
+    fn fixed_step_clock_does_not_double_steps_at_the_frame_boundary() {
         for dt in [1. / 60., 0.01666, 0.01667, 0.1] {
-            let mut accumulator = 0.;
+            let mut clock = StepClock::default();
             let frames = 600;
             let mut steps = 0;
             for _ in 0..frames {
-                steps += fixed_steps(&mut accumulator, dt);
+                steps += fixed_steps(&mut clock, Duration::from_secs_f32(dt));
             }
             let expected = (frames as f32 * dt / STEP) as usize;
             assert!(
@@ -800,12 +811,21 @@ mod tests {
                 "dt {dt}: {steps} steps, expected {expected}"
             );
             assert!(
-                (0. ..STEP).contains(&accumulator),
-                "remainder {accumulator}"
+                clock.0.elapsed() < clock.0.duration(),
+                "remainder {:?}",
+                clock.0.elapsed()
             );
         }
-        let mut accumulator = 0.;
-        assert_eq!(fixed_steps(&mut accumulator, 10.), MAX_STEPS);
-        assert!(accumulator < STEP);
+        // A real 60 Hz delta is 16_666_667 ns, not the f32-rounded 16_666_668.
+        let mut clock = StepClock::default();
+        assert_eq!(
+            fixed_steps(&mut clock, Duration::from_secs_f64(1. / 60.)),
+            1
+        );
+        // A long stall is capped and keeps less than one step for the next frame.
+        let mut clock = StepClock::default();
+        fixed_steps(&mut clock, Duration::from_nanos(1));
+        assert_eq!(fixed_steps(&mut clock, Duration::from_secs(10)), MAX_STEPS);
+        assert!(clock.0.elapsed() < clock.0.duration());
     }
 }

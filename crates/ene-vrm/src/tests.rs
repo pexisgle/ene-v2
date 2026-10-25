@@ -516,6 +516,27 @@ fn vrma_rejects_same_name_siblings_with_one_animation_target() {
 }
 
 #[test]
+fn vrma_matches_bevy_generated_names_for_unnamed_nodes() {
+    let files = Files::new();
+    let mut app = app();
+    let mut value = files.motion("LINEAR");
+    // Node 1 is the hips. Bevy names unnamed nodes `GltfNode{index}`. If the
+    // path diverges, retarget_motion rejects the VRMA with a target-id mismatch.
+    let _ = value["nodes"][1].as_object_mut().unwrap().remove("name");
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("unnamed.vrma", &value));
+    settle(&mut app, std::slice::from_ref(&handle));
+    assert!(
+        app.world()
+            .resource::<AssetServer>()
+            .is_loaded_with_dependencies(handle.id()),
+        "unnamed VRMA node did not match Bevy's generated target path"
+    );
+}
+
+#[test]
 fn vrma_rejects_cross_scene_animation_target_reuse() {
     let files = Files::new();
     let mut app = app();

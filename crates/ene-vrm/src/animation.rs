@@ -92,7 +92,9 @@ pub(crate) fn denormalize_rotation(local: Quat, global: Quat, value: Quat) -> Qu
 ///
 /// Mirrors `bevy_gltf` 0.19.1's path derivation (`node_name` + `collect_path`)
 /// so that curves from unselected scenes are grouped exactly as they are in the
-/// native `AnimationClip`. Keep in sync with the Bevy loader on upgrades.
+/// native `AnimationClip`.
+// ponytail: bevy_gltf keeps `node_name`/`collect_path` private; drop this copy
+// when Bevy exposes node target paths. Recheck the path rules on upgrades.
 fn collect_target(
     node: &gltf::Node,
     current: &[Name],
