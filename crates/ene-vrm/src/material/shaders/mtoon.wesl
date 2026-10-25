@@ -40,10 +40,11 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> Fragmen
     @if(VERTEX_UVS_B) {
         input.uv_b = uv1;
     }
-    var pbr = pbr_input_from_standard_material(input, front);
+    var material_front = front;
     @if(OUTLINE_PASS) {
-        pbr = pbr_input_from_standard_material(input, true);
+        material_front = true;
     }
+    var pbr = pbr_input_from_standard_material(input, material_front);
     pbr.material.base_color = alpha_discard(
         pbr.material.flags,
         pbr.material.alpha_cutoff,

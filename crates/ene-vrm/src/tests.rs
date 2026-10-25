@@ -6,7 +6,11 @@ use bevy::{
     camera::visibility::{NoFrustumCulling, RenderLayers},
     gltf::Gltf,
     light::NotShadowCaster,
-    mesh::morph::MorphWeights,
+    mesh::{
+        VertexAttributeValues,
+        morph::{MeshMorphWeights, MorphAttributes, MorphWeights},
+        skinning::{SkinnedMesh, SkinnedMeshInverseBindposes},
+    },
     platform::collections::HashMap,
     render::render_resource::{Extent3d, ShaderType, TextureDimension, TextureFormat},
 };
@@ -1864,6 +1868,20 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
             TextureFormat::Rgba8Unorm,
             RenderAssetUsages::default(),
         ));
+    let normal_image = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(Image::new(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            vec![128, 128, 255, 255],
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::default(),
+        ));
     let converted = HashMap::from([((0usize, TextureSpace::Linear), mask_image)]);
     let toon: schema::Toon = serde_json::from_value(json!({
         "specVersion":"1.0",
@@ -1881,6 +1899,7 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
                 base: StandardMaterial {
                     alpha_mode: bevy::material::AlphaMode::Mask(0.5),
                     base_color_texture: Some(color_image.clone()),
+                    normal_map_texture: Some(normal_image),
                     ..default()
                 },
                 extension: MToonExtension::new(
@@ -1916,7 +1935,28 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
     // exercised instead of comparing equal coordinates.
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0., 0.], [1., 0.], [0., 1.]]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, vec![[0., 0.], [0., 1.], [1., 0.]]);
+    // Exercise the tangent/normal-map, skinning and morph shader variants.
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, vec![[1., 0., 0., 1.]; 3]);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_JOINT_INDEX,
+        VertexAttributeValues::Uint16x4(vec![[0u16; 4]; 3]),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, vec![[1., 0., 0., 0.]; 3]);
+    mesh.set_morph_targets(vec![
+        MorphAttributes::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
+        3
+    ]);
     let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+    let joint = app.world_mut().spawn(Transform::default()).id();
+    let inverse_bindposes = app
+        .world_mut()
+        .resource_mut::<Assets<SkinnedMeshInverseBindposes>>()
+        .add(SkinnedMeshInverseBindposes::from(vec![Mat4::IDENTITY]));
+    let skin = SkinnedMesh {
+        inverse_bindposes,
+        joints: vec![joint],
+    };
+    let morph = MeshMorphWeights::Value { weights: vec![0.5] };
     let body = app
         .world_mut()
         .spawn((
@@ -1924,6 +1964,8 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
             MeshMaterial3d(body_material),
             Visibility::Visible,
             NoFrustumCulling,
+            skin.clone(),
+            morph.clone(),
         ))
         .id();
     app.world_mut().spawn((
@@ -1934,6 +1976,8 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         NotShadowCaster,
         Transform::IDENTITY,
         ChildOf(body),
+        skin,
+        morph,
     ));
 
     let target = app
