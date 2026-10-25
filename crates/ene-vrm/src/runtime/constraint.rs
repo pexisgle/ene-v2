@@ -51,20 +51,27 @@ pub(crate) fn compile_constraints(
     let parents = parent_query.query(world);
     let mut pending = Vec::new();
     for (target, def) in definitions {
-        let (source, weight, kind) = match &def.constraint {
-            schema::Constraint::Rotation(d) => {
-                (d.source, d.weight.unwrap_or(1.), ConstraintKind::Rotation)
-            }
-            schema::Constraint::Roll(d) => (
+        let (source, weight, kind) = match (
+            &def.constraint.rotation,
+            &def.constraint.roll,
+            &def.constraint.aim,
+        ) {
+            (Some(d), None, None) => (d.source, d.weight.unwrap_or(1.), ConstraintKind::Rotation),
+            (None, Some(d), None) => (
                 d.source,
                 d.weight.unwrap_or(1.),
                 ConstraintKind::Roll(d.roll_axis.vector()),
             ),
-            schema::Constraint::Aim(d) => (
+            (None, None, Some(d)) => (
                 d.source,
                 d.weight.unwrap_or(1.),
                 ConstraintKind::Aim(d.aim_axis.vector()),
             ),
+            _ => {
+                return Err(invalid(
+                    "VRMC constraint requires exactly one of rotation, roll or aim",
+                ));
+            }
         };
         let (target, source) = (require_node(nodes, *target)?, require_node(nodes, source)?);
         if !weight.is_finite() || !(0. ..=1.).contains(&weight) {
@@ -245,19 +252,27 @@ mod tests {
             })
         };
         let rot = |s| schema::NodeConstraint {
-            _version: schema::Version::V1,
-            constraint: schema::Constraint::Rotation(schema::Rotation {
-                source: s,
-                weight: Some(1.),
-            }),
+            spec_version: "1.0".into(),
+            constraint: schema::Constraint {
+                rotation: Some(schema::Rotation {
+                    source: s,
+                    weight: Some(1.),
+                }),
+                roll: None,
+                aim: None,
+            },
         };
         let aim = || schema::NodeConstraint {
-            _version: schema::Version::V1,
-            constraint: schema::Constraint::Aim(schema::Aim {
-                source: 0,
-                aim_axis: schema::AimAxis::PositiveZ,
-                weight: Some(1.),
-            }),
+            spec_version: "1.0".into(),
+            constraint: schema::Constraint {
+                rotation: None,
+                roll: None,
+                aim: Some(schema::Aim {
+                    source: 0,
+                    aim_axis: schema::AimAxis::PositiveZ,
+                    weight: Some(1.),
+                }),
+            },
         };
         assert_eq!(
             order(&[(2, rot(1)), (1, rot(0))], app.world_mut()).unwrap(),
@@ -276,6 +291,26 @@ mod tests {
                 .len(),
             2
         );
+        let both = schema::NodeConstraint {
+            spec_version: "1.0".into(),
+            constraint: schema::Constraint {
+                rotation: Some(schema::Rotation {
+                    source: 1,
+                    weight: Some(1.),
+                }),
+                roll: Some(schema::Roll {
+                    source: 0,
+                    roll_axis: schema::RollAxis::X,
+                    weight: Some(1.),
+                }),
+                aim: None,
+            },
+        };
+        let err = match compile_constraints(&[(2, both)], app.world_mut(), &nodes) {
+            Err(err) => err,
+            Ok(_) => panic!("two constraint kinds must be rejected"),
+        };
+        assert!(err.to_string().contains("exactly one"));
 
         let rot_target = app.world_mut().spawn(Transform::from_rotation(rest)).id();
         app.world_mut()

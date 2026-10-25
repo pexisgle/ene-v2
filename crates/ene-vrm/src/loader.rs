@@ -365,10 +365,15 @@ impl GltfExtensionHandler for VrmExtensions {
                 return Err(invalid("VRMC_springBone requires specVersion 1.0"));
             }
             for node in source.nodes() {
-                if let Some(value) = node.extension_value(VRMC_NODE_CONSTRAINT) {
-                    self.constraints
-                        .push((node.index(), extension(Some(value), VRMC_NODE_CONSTRAINT)?));
+                let Some(value) = node.extension_value(VRMC_NODE_CONSTRAINT) else {
+                    continue;
+                };
+                let constraint: schema::NodeConstraint =
+                    extension(Some(value), VRMC_NODE_CONSTRAINT)?;
+                if constraint.spec_version != "1.0" {
+                    return Err(invalid("VRMC_node_constraint requires specVersion 1.0"));
                 }
+                self.constraints.push((node.index(), constraint));
             }
             Ok(Definition::Model(Box::new(model)))
         })());

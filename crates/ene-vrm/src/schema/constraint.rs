@@ -1,43 +1,20 @@
-use super::version::Version;
 use bevy::prelude::*;
 use serde::Deserialize;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NodeConstraint {
-    #[serde(rename = "specVersion")]
-    pub _version: Version,
+    pub spec_version: String,
     pub constraint: Constraint,
 }
 
+/// The spec's `oneOf`: exactly one of these is set, which `compile_constraints`
+/// enforces.
 #[derive(Clone, Deserialize)]
-#[serde(try_from = "ConstraintObject")]
-pub(crate) enum Constraint {
-    Rotation(Rotation),
-    Roll(Roll),
-    Aim(Aim),
-}
-
-/// Accepts the glTF `extras`/`extensions` fields alongside the constraint kind.
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ConstraintObject {
-    rotation: Option<Rotation>,
-    roll: Option<Roll>,
-    aim: Option<Aim>,
-}
-
-impl TryFrom<ConstraintObject> for Constraint {
-    type Error = &'static str;
-
-    fn try_from(value: ConstraintObject) -> Result<Self, Self::Error> {
-        match (value.rotation, value.roll, value.aim) {
-            (Some(rotation), None, None) => Ok(Self::Rotation(rotation)),
-            (None, Some(roll), None) => Ok(Self::Roll(roll)),
-            (None, None, Some(aim)) => Ok(Self::Aim(aim)),
-            _ => Err("VRMC constraint requires exactly one of rotation, roll or aim"),
-        }
-    }
+pub(crate) struct Constraint {
+    pub rotation: Option<Rotation>,
+    pub roll: Option<Roll>,
+    pub aim: Option<Aim>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -62,6 +39,8 @@ pub(crate) struct Aim {
     pub weight: Option<f32>,
 }
 
+/// The spec spells these `"X"`, `"Y"`, `"Z"` (unlike the camelCase names
+/// elsewhere in VRM).
 #[derive(Clone, Copy, Deserialize)]
 pub(crate) enum RollAxis {
     X,
@@ -79,6 +58,7 @@ impl RollAxis {
     }
 }
 
+/// The spec spells these `"PositiveX"` ... `"NegativeZ"`.
 #[derive(Clone, Copy, Deserialize)]
 pub(crate) enum AimAxis {
     PositiveX,
@@ -99,5 +79,37 @@ impl AimAxis {
             Self::PositiveZ => Vec3::Z,
             Self::NegativeZ => Vec3::NEG_Z,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn node_constraint_reads_spec_axis_names_and_ignores_extras() {
+        let roll: NodeConstraint = serde_json::from_value(json!({
+            "specVersion": "1.0",
+            "constraint": {
+                "roll": {"source": 2, "rollAxis": "Y", "weight": 0.5},
+                "extras": {"note": "authoring metadata"},
+                "extensions": {}
+            }
+        }))
+        .unwrap();
+        assert_eq!(roll.spec_version, "1.0");
+        let roll = roll.constraint.roll.unwrap();
+        assert_eq!(roll.roll_axis.vector(), Vec3::Y);
+        assert_eq!(roll.weight, Some(0.5));
+
+        let aim: NodeConstraint = serde_json::from_value(json!({
+            "specVersion": "1.0",
+            "constraint": {"aim": {"source": 3, "aimAxis": "NegativeZ"}}
+        }))
+        .unwrap();
+        let aim = aim.constraint.aim.unwrap();
+        assert_eq!(aim.aim_axis.vector(), Vec3::NEG_Z);
+        assert_eq!(aim.weight, None);
     }
 }

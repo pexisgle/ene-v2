@@ -1,13 +1,11 @@
-//! VRMC extension data not covered by `vrm-spec`, plus shared conversions.
+//! VRMC extension data `vrm-spec` cannot model on its own, plus shared
+//! conversions.
 
 mod constraint;
 mod mtoon;
-mod version;
 
 pub(crate) use constraint::*;
 pub(crate) use mtoon::*;
-#[cfg(test)]
-pub(crate) use version::Version;
 pub use vrm_spec::vrmc_vrm_1_0::{ExpressionPresetName, HumanBoneName, Meta as VrmMeta};
 pub(crate) use vrm_spec::{
     vrmc_spring_bone_1_0::VrmcSpringBoneSchema as Springs,

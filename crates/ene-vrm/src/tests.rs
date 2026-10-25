@@ -344,6 +344,21 @@ fn loader_rejects_unusable_data_and_tolerates_spec_noise() {
     v["nodes"][0]["extensions"]["VRMC_node_constraint"] =
         json!({"specVersion":"1.0","constraint":{"rotation":{"source":0}}});
     push(v, false, true);
+    let mut v = model.clone();
+    v["nodes"][2]["extensions"]["VRMC_node_constraint"] = json!({
+        "specVersion":"0.0",
+        "constraint":{"rotation":{"source":1}}
+    });
+    push(v, false, true);
+    let mut v = model.clone();
+    v["nodes"][2]["extensions"]["VRMC_node_constraint"] = json!({
+        "specVersion":"1.0",
+        "constraint":{
+            "rotation":{"source":1},
+            "roll":{"source":1,"rollAxis":"X"}
+        }
+    });
+    push(v, false, true);
 
     // VRM conformance is enforced by authoring tools, not by a renderer: these
     // documents are renderable and must not fail the load.
