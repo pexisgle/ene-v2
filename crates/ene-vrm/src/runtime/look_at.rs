@@ -4,7 +4,9 @@ use crate::{
     expressions::{self, ExpressionName},
     schema,
 };
-use bevy::{ecs::system::SystemChangeTick, prelude::*, transform::helper::TransformHelper};
+use bevy::{
+    ecs::system::SystemChangeTick, math::Affine3A, prelude::*, transform::helper::TransformHelper,
+};
 
 /// Optional world-space target. `None` allows VRMA gaze animation.
 #[derive(Component, Clone, Default, Reflect)]
@@ -82,6 +84,20 @@ pub(crate) fn head_offset(definition: &schema::LookAt) -> Vec3 {
         })
 }
 
+/// Returns yaw and pitch in the rest-pose head frame.
+///
+/// The LookAt target lives in world space, while `offsetFromHeadBone` and the
+/// rest pose are defined under the head. Invert the head's full affine
+/// transform, not just its rotation, so a non-uniform scale does not distort
+/// the direction.
+fn gaze_angles(head: Affine3A, rest_rotation: Quat, target: Vec3, offset: Vec3) -> Vec2 {
+    let dir = rest_rotation * (head.inverse().transform_point3(target) - offset);
+    Vec2::new(
+        dir.x.atan2(dir.z).to_degrees(),
+        dir.y.atan2(dir.xz().length()).to_degrees(),
+    )
+}
+
 #[allow(clippy::type_complexity)]
 fn look_at(
     mut roots: Query<(
@@ -110,11 +126,11 @@ fn look_at(
             ) else {
                 continue;
             };
-            let dir = (head.rotation().normalize() * rest.global_rotation.inverse()).inverse()
-                * (target - head.transform_point(head_offset(&gaze.definition)));
-            Vec2::new(
-                dir.x.atan2(dir.z).to_degrees(),
-                dir.y.atan2(dir.xz().length()).to_degrees(),
+            gaze_angles(
+                head.affine(),
+                rest.global_rotation,
+                target,
+                head_offset(&gaze.definition),
             )
         } else if let Ok(input) = transforms.p2().get(gaze.input)
             && input
@@ -126,16 +142,11 @@ fn look_at(
         } else {
             continue;
         };
-        // VRM 1.0 makes leftEye/rightEye optional. UniVRM falls back to
-        // expression LookAt when a `bone` model has no eye bones; follow that
-        // instead of silently doing nothing.
         let kind = gaze
             .definition
             .look_at_type
             .unwrap_or(schema::LookAtType::Bone);
-        let has_eyes = vrm.bone(schema::HumanBoneName::LeftEye).is_some()
-            && vrm.bone(schema::HumanBoneName::RightEye).is_some();
-        let bone = matches!(kind, schema::LookAtType::Bone) && has_eyes;
+        let bone = matches!(kind, schema::LookAtType::Bone);
         gaze.active = bone;
         let definition = &gaze.definition;
         let pitch = if angles.y > 0. {
@@ -208,5 +219,22 @@ fn look_at(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_uniform_head_scale_is_inverted() {
+        let head = Affine3A::from_scale_rotation_translation(
+            Vec3::new(2., 1., 1.),
+            Quat::IDENTITY,
+            Vec3::ZERO,
+        );
+        let angles = gaze_angles(head, Quat::IDENTITY, Vec3::new(2., 0., 1.), Vec3::ZERO);
+        assert!((angles.x - 45.).abs() < 1e-4, "{angles:?}");
+        assert!(angles.y.abs() < 1e-4, "{angles:?}");
     }
 }

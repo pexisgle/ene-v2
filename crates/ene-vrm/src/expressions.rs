@@ -399,6 +399,19 @@ impl BindMaterial for MToonMaterial {
     }
 }
 
+/// Material fields an expression bind owns. Fields outside this set keep
+/// whatever the application wrote to the instance material.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MaterialBounds {
+    base_color: bool,
+    emissive: bool,
+    uv: bool,
+    shade: bool,
+    matcap: bool,
+    rim: bool,
+    outline: bool,
+}
+
 fn apply_material<M: BindMaterial>(
     binds: Option<&MaterialBinds<M>>,
     assets: &mut Assets<M>,
@@ -424,7 +437,7 @@ fn apply_material<M: BindMaterial>(
             continue;
         };
         let (cur_base, cur_toon) = current.base();
-        let (color, emissive, uv, toon) = compute_material(
+        let (color, emissive, uv, toon, bounds) = compute_material(
             (base_color, emissive),
             *emissive_strength,
             *base_uv,
@@ -433,18 +446,49 @@ fn apply_material<M: BindMaterial>(
             index,
             effective,
         );
-        if (cur_base.base_color != color
-            || cur_base.emissive != emissive
-            || cur_base.uv_transform != uv
-            || cur_toon.copied() != toon)
+        let toon_changed = match (cur_toon, toon.as_ref()) {
+            (Some(cur), Some(next)) => {
+                (bounds.shade && cur.shade_color_factor != next.shade_color_factor)
+                    || (bounds.matcap && cur.matcap_factor != next.matcap_factor)
+                    || (bounds.rim
+                        && cur.parametric_rim_color_factor != next.parametric_rim_color_factor)
+                    || (bounds.outline && cur.outline_color_factor != next.outline_color_factor)
+                    || (bounds.uv && cur.uv_transforms != next.uv_transforms)
+            }
+            _ => false,
+        };
+        if ((bounds.base_color && cur_base.base_color != color)
+            || (bounds.emissive && cur_base.emissive != emissive)
+            || (bounds.uv && cur_base.uv_transform != uv)
+            || toon_changed)
             && let Some(mut material) = assets.get_mut(handle)
         {
             let (base, extension) = material.base_mut();
-            base.base_color = color;
-            base.emissive = emissive;
-            base.uv_transform = uv;
+            if bounds.base_color {
+                base.base_color = color;
+            }
+            if bounds.emissive {
+                base.emissive = emissive;
+            }
+            if bounds.uv {
+                base.uv_transform = uv;
+            }
             if let (Some(dst), Some(src)) = (extension, toon) {
-                *dst = src;
+                if bounds.shade {
+                    dst.shade_color_factor = src.shade_color_factor;
+                }
+                if bounds.matcap {
+                    dst.matcap_factor = src.matcap_factor;
+                }
+                if bounds.rim {
+                    dst.parametric_rim_color_factor = src.parametric_rim_color_factor;
+                }
+                if bounds.outline {
+                    dst.outline_color_factor = src.outline_color_factor;
+                }
+                if bounds.uv {
+                    dst.uv_transforms = src.uv_transforms;
+                }
             }
         }
     }
@@ -509,11 +553,16 @@ pub(crate) fn compute_material(
     toon_uv: Option<[UvTransform; 6]>,
     index: usize,
     weights: &[(&ExpressionName, &Expression, f32)],
-) -> (Color, LinearRgba, Affine2, Option<schema::ToonParams>) {
+) -> (
+    Color,
+    LinearRgba,
+    Affine2,
+    Option<schema::ToonParams>,
+    MaterialBounds,
+) {
     let mut value = base_color.to_linear().to_vec4();
     let mut emission = emissive.to_vec3();
-    let mut color_bound = false;
-    let mut uv_bound = false;
+    let mut bounds = MaterialBounds::default();
     let mut uv_weight = 0.;
     let mut uv_scale = Vec2::ZERO;
     let mut uv_offset = Vec2::ZERO;
@@ -530,28 +579,39 @@ pub(crate) fn compute_material(
             };
             match bind.r#type {
                 MaterialColorType::Color => {
-                    color_bound = true;
+                    bounds.base_color = true;
                     value += (target - base_color.to_linear().to_vec4()) * weight;
                 }
                 MaterialColorType::EmissionColor => {
+                    bounds.emissive = true;
                     emission +=
                         (target.truncate() * emissive_strength - emissive.to_vec3()) * weight;
                 }
                 other => {
                     if let (Some(params), Some(rest)) = (&mut toon_params, rest_toon) {
-                        let (field, base) = match other {
-                            MaterialColorType::ShadeColor => {
-                                (&mut params.shade_color_factor, rest.shade_color_factor)
-                            }
-                            MaterialColorType::MatcapColor => {
-                                (&mut params.matcap_factor, rest.matcap_factor)
-                            }
+                        let (field, base, bound) = match other {
+                            MaterialColorType::ShadeColor => (
+                                &mut params.shade_color_factor,
+                                rest.shade_color_factor,
+                                &mut bounds.shade,
+                            ),
+                            MaterialColorType::MatcapColor => (
+                                &mut params.matcap_factor,
+                                rest.matcap_factor,
+                                &mut bounds.matcap,
+                            ),
                             MaterialColorType::RimColor => (
                                 &mut params.parametric_rim_color_factor,
                                 rest.parametric_rim_color_factor,
+                                &mut bounds.rim,
                             ),
-                            _ => (&mut params.outline_color_factor, rest.outline_color_factor),
+                            _ => (
+                                &mut params.outline_color_factor,
+                                rest.outline_color_factor,
+                                &mut bounds.outline,
+                            ),
                         };
+                        *bound = true;
                         *field += (target.truncate() - base) * weight;
                     }
                 }
@@ -563,14 +623,14 @@ pub(crate) fn compute_material(
             .flatten()
             .filter(|bind| schema::index(bind.material) == index)
         {
-            uv_bound = true;
+            bounds.uv = true;
             uv_weight += weight;
             uv_scale += vec2(bind.scale.as_deref()).unwrap_or(Vec2::ONE) * weight;
             uv_offset += vec2(bind.offset.as_deref()).unwrap_or(Vec2::ZERO) * weight;
         }
     }
     let mut uv = base_uv;
-    if uv_bound {
+    if bounds.uv {
         uv = blend_uv(base_uv, uv_weight, uv_scale, uv_offset);
         if let (Some(params), Some(rest)) = (&mut toon_params, toon_uv) {
             for (index, transform) in params.uv_transforms.iter_mut().enumerate() {
@@ -581,7 +641,7 @@ pub(crate) fn compute_material(
         }
     }
     (
-        if color_bound {
+        if bounds.base_color {
             Color::LinearRgba(LinearRgba::from_vec4(value))
         } else {
             base_color
@@ -589,6 +649,7 @@ pub(crate) fn compute_material(
         LinearRgba::from_vec3(emission).with_alpha(emissive.alpha),
         uv.affine(),
         toon_params,
+        bounds,
     )
 }
 
@@ -662,7 +723,7 @@ mod tests {
             uv_transforms: [base.affine().into(); 6],
             ..default()
         };
-        let (_, _, uv, toon) = compute_material(
+        let (_, _, uv, toon, _) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
             1.,
             base,
@@ -706,7 +767,7 @@ mod tests {
         };
         let bindings = bindings(&definitions);
         let weights = effective(&bindings, &|_| 1.);
-        let (_, _, uv, _) = compute_material(
+        let (_, _, uv, _, _) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
             1.,
             base,
@@ -720,7 +781,7 @@ mod tests {
         assert!(uv.translation.abs_diff_eq(expected.translation, 1e-5));
 
         let weights = effective(&bindings, &|_| 0.);
-        let (_, _, uv, _) = compute_material(
+        let (_, _, uv, _, _) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
             1.,
             base,
@@ -861,7 +922,7 @@ mod tests {
             outline_width_factor: 0.2,
             ..default()
         };
-        let (color, emission, uv, toon) = compute_material(
+        let (color, emission, uv, toon, bounds) = compute_material(
             (rest.base_color, rest.emissive),
             1.,
             UvTransform::default(),
@@ -871,6 +932,8 @@ mod tests {
             &weights,
         );
         let toon = toon.unwrap();
+        assert!(bounds.shade && bounds.emissive);
+        assert!(!bounds.base_color && !bounds.uv);
         assert_eq!(toon.shade_color_factor, Vec3::new(1., 0.75, 0.75));
         assert_eq!(toon.parametric_rim_color_factor, Vec3::splat(0.3));
         assert_eq!(toon.outline_width_factor, 0.2);
@@ -932,5 +995,93 @@ mod tests {
         // A target equal to the initial factor must not change a scaled base.
         let same = parse([0.2, 0.1, 0.05, 1.]);
         assert_eq!(sample(&same, base, 10., 1.), base);
+    }
+
+    #[test]
+    fn expressions_leave_unbound_material_fields_alone() {
+        let definitions: Expressions = serde_json::from_value(serde_json::json!({
+            "custom": {
+                "slide": {
+                    "textureTransformBinds": [
+                        {"material":0,"scale":[2.,2.],"offset":[0.5,0.]}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let bindings = bindings(&definitions);
+        let weights = effective(&bindings, &|_| 1.);
+        let toon = schema::ToonParams {
+            shade_color_factor: Vec3::X,
+            matcap_factor: Vec3::Y,
+            ..default()
+        };
+        let extension = crate::material::MToonExtension {
+            params: toon,
+            shade: None,
+            shift: None,
+            rim: None,
+            matcap: None,
+            uv_mask: None,
+            outline_width: None,
+            outline: None,
+            rest_uv: [UvTransform::default(); 6],
+        };
+        let original = MToonMaterial {
+            base: StandardMaterial::default(),
+            extension: extension.clone(),
+        };
+        let mut instance = original.clone();
+        instance.base.base_color = Color::srgb(1., 0., 0.);
+        instance.base.emissive = LinearRgba::rgb(0.1, 0.2, 0.3);
+        instance.extension.params.shade_color_factor = Vec3::Z;
+        instance.extension.params.matcap_factor = Vec3::new(0.3, 0.4, 0.5);
+
+        let mut assets = Assets::<MToonMaterial>::default();
+        let original = assets.add(original);
+        let instance = assets.add(instance);
+        let binds = MaterialBinds(HashMap::from([(
+            (0, original),
+            (instance.clone(), UvTransform::default(), 1.),
+        )]));
+        apply_material(Some(&binds), &mut assets, &weights);
+
+        let result = assets.get(&instance).unwrap();
+        assert_eq!(
+            result.base.base_color,
+            Color::srgb(1., 0., 0.),
+            "a UV-only bind must not restore the base color"
+        );
+        assert_eq!(
+            result.base.emissive,
+            LinearRgba::rgb(0.1, 0.2, 0.3),
+            "a UV-only bind must not restore emission"
+        );
+        assert_eq!(
+            result.extension.params.shade_color_factor,
+            Vec3::Z,
+            "a UV-only bind must not restore MToon parameters"
+        );
+        assert_eq!(
+            result.extension.params.matcap_factor,
+            Vec3::new(0.3, 0.4, 0.5)
+        );
+        let expected =
+            Affine2::from_scale_angle_translation(Vec2::splat(2.), 0., Vec2::new(0.5, 0.));
+        assert!(
+            result
+                .base
+                .uv_transform
+                .matrix2
+                .abs_diff_eq(expected.matrix2, 1e-5)
+        );
+        assert!(
+            result
+                .base
+                .uv_transform
+                .translation
+                .abs_diff_eq(expected.translation, 1e-5)
+        );
+        assert_eq!(result.extension.params.uv_transforms, [expected.into(); 6]);
     }
 }

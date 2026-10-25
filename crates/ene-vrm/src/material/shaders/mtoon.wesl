@@ -1,13 +1,9 @@
 // MToon lighting adapted from bevy_vrm1 (Copyright 2025 elm), MIT/Apache-2.0.
 import bevy_pbr::render::{
     forward_io::{FragmentOutput, VertexOutput},
-    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     mesh_view_bindings::{globals, lights, view},
-    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
-    pbr_ambient::ambient_light,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, main_pass_post_lighting_processing},
-    shadows::fetch_directional_shadow,
 };
 import super::toon::{
     animated_uvs, matcap_sampler, matcap_texture, rim_sampler, rim_texture, shade_sampler,
@@ -67,23 +63,18 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> Fragmen
     var direct_lighting = vec3(0.);
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let light = lights.directional_lights[i];
-        var shadow = 1.;
-        if ((pbr.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
-                && (light.flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            let view_z = (view.view_from_world * input.world_position).z;
-            shadow = fetch_directional_shadow(i, input.world_position, pbr.N, view_z, pbr.frag_coord.xy);
-        }
         let ndotl = dot(pbr.N, light.direction_to_light);
         let edge = max(1. - toon.shading_toony_factor, 0.00001);
-        let shading = saturate((ndotl + shift + edge) / (2. * edge)) * shadow;
+        let shading = saturate((ndotl + shift + edge) / (2. * edge));
         direct += mix(shade, lit.rgb, shading) * light.color.rgb;
         direct_lighting += light.color.rgb * shading;
     }
     direct *= view.exposure;
     direct_lighting *= view.exposure;
+    // No direction-dependent GI is supported, so `giEqualizationFactor` has
+    // nothing to equalize and the uniform ambient term is the whole indirect.
     let ambient_lighting = view.exposure * lights.ambient_color.rgb;
-    let raw_indirect = view.exposure * ambient_light(input.world_position, pbr.N, pbr.V, dot(pbr.N, pbr.V), lit.rgb, vec3(0.), 1., pbr.diffuse_occlusion);
-    let indirect = mix(raw_indirect, ambient_lighting * lit.rgb * pbr.diffuse_occlusion, toon.gi_equalization_factor);
+    let indirect = ambient_lighting * lit.rgb * pbr.diffuse_occlusion;
 
     var rim = pow(saturate(1. - dot(pbr.N, pbr.V) + toon.parametric_rim_lift_factor), max(toon.parametric_rim_fresnel_power_factor, 0.0001)) * toon.parametric_rim_color_factor;
     if (toon.texture_flags & 8u) != 0u {

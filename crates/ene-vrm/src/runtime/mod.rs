@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn bone_look_at_without_eyes_falls_back_to_expressions() {
+    fn bone_look_at_without_eyes_leaves_expressions_alone() {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin));
@@ -495,14 +495,14 @@ mod tests {
                 schema::ExpressionPresetName::LookLeft,
             ))
             .unwrap();
-        assert!(
+        assert_eq!(
             app.world()
                 .get::<Transform>(look_left)
                 .unwrap()
                 .translation
-                .x
-                > 0.,
-            "bone LookAt without eye bones did not fall back to look expressions"
+                .x,
+            0.,
+            "bone LookAt without eye bones must not drive look expressions"
         );
     }
 }

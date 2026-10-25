@@ -5,7 +5,6 @@ use bevy::{
     asset::{LoadState, RenderAssetUsages},
     camera::visibility::{NoFrustumCulling, RenderLayers},
     gltf::Gltf,
-    light::NotShadowCaster,
     mesh::{
         VertexAttributeValues,
         morph::{MeshMorphWeights, MorphAttributes, MorphWeights},
@@ -425,6 +424,36 @@ fn loader_rejects_unusable_data_and_tolerates_spec_noise() {
             json!({"sampler":0,"target":{"node":2,"path":"translation"}}),
         ]);
     push(v, true, false);
+
+    // gltf-json does not know the VRMC extensions, but this crate does. A
+    // document may require them without failing Bevy's validation.
+    let mut v = model.clone();
+    v["extensionsUsed"] = json!([
+        "VRMC_vrm",
+        "VRMC_materials_mtoon",
+        "VRMC_springBone",
+        "VRMC_node_constraint"
+    ]);
+    v["extensionsRequired"] = v["extensionsUsed"].clone();
+    v["materials"] = json!([{"extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0"}}}]);
+    v["extensions"]["VRMC_springBone"] =
+        json!({"specVersion":"1.0","springs":[{"joints":[{"node":1},{"node":2}]}]});
+    v["nodes"][0]["extensions"] = json!({
+        "VRMC_node_constraint": {
+            "specVersion": "1.0",
+            "constraint": {"rotation": {"source": 1}}
+        }
+    });
+    push(v, false, false);
+    let mut v = motion.clone();
+    v["extensionsUsed"] = json!(["VRMC_vrm_animation"]);
+    v["extensionsRequired"] = json!(["VRMC_vrm_animation"]);
+    push(v, true, false);
+    // Unknown required extensions still fail validation.
+    let mut v = model.clone();
+    v["extensionsUsed"] = json!(["VRMC_vrm", "EXT_unknown"]);
+    v["extensionsRequired"] = json!(["EXT_unknown"]);
+    push(v, false, true);
 
     let handles: Vec<(bool, Handle<Gltf>)> = cases
         .into_iter()
@@ -1660,7 +1689,7 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     );
     let outlines = app
         .world_mut()
-        .query_filtered::<&MeshMaterial3d<MToonMaterial>, With<NotShadowCaster>>()
+        .query_filtered::<&MeshMaterial3d<MToonMaterial>, With<Outline>>()
         .iter(app.world())
         .count();
     assert_eq!(outlines, 1);
@@ -1794,10 +1823,7 @@ fn gpu_model_material_skin_morph_and_outline_smoke() {
         Transform::from_xyz(0., 1., 3.).looking_at(Vec3::new(0., 0.9, 0.), Vec3::Y),
     ));
     app.world_mut().spawn((
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            ..default()
-        },
+        DirectionalLight::default(),
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
     ));
     for _ in 0..60 {
@@ -1973,7 +1999,6 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         MeshMaterial3d(outline_material),
         Visibility::Visible,
         NoFrustumCulling,
-        NotShadowCaster,
         Transform::IDENTITY,
         ChildOf(body),
         skin,
@@ -1991,17 +2016,12 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         ));
     app.world_mut().spawn((
         Camera3d::default(),
-        bevy::core_pipeline::prepass::DepthPrepass,
-        bevy::core_pipeline::prepass::NormalPrepass,
         bevy::core_pipeline::tonemapping::Tonemapping::Linear,
         bevy::camera::RenderTarget::Image(target.into()),
         Transform::from_xyz(0., 0., 3.).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     app.world_mut().spawn((
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            ..default()
-        },
+        DirectionalLight::default(),
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
     ));
     for _ in 0..30 {
@@ -2026,229 +2046,6 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         .collect();
     assert_eq!(entities.len(), 2, "body and outline materials");
     assert_specialized_pipelines_ok(&app, &entities);
-}
-
-#[test]
-#[ignore = "requires a hardware GPU; lavapipe crashes in this per-fragment prepass discard path"]
-fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
-    use bevy::mesh::{Indices, PrimitiveTopology};
-    use bevy::render::{
-        gpu_readback::{Readback, ReadbackComplete},
-        render_resource::TextureUsages,
-    };
-
-    fn quad(size: f32, uvs: [Vec2; 4]) -> Mesh {
-        let h = size * 0.5;
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        );
-        mesh.insert_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            vec![[-h, -h, 0.], [h, -h, 0.], [h, h, 0.], [-h, h, 0.]],
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 4]);
-        mesh.insert_attribute(
-            Mesh::ATTRIBUTE_UV_0,
-            uvs.into_iter().map(|uv| [uv.x, uv.y]).collect::<Vec<_>>(),
-        );
-        mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
-        mesh
-    }
-
-    let mut app = gpu_app(ClearColor(Color::BLACK));
-
-    // 16x16 color texture with alpha only in the middle columns. The caster has
-    // corner UVs, so its vertices sample transparent columns while the opaque
-    // column can only be reached from the triangle interior.
-    let mut pixels = Vec::with_capacity(16 * 16 * 4);
-    for _ in 0..16 {
-        for x in 0..16 {
-            pixels.extend([255u8, 255, 255, if (8..12).contains(&x) { 255 } else { 0 }]);
-        }
-    }
-    let mut color_image = Image::new(
-        Extent3d {
-            width: 16,
-            height: 16,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        pixels,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
-    );
-    color_image.sampler = bevy::image::ImageSampler::nearest();
-    let color_image = app
-        .world_mut()
-        .resource_mut::<Assets<Image>>()
-        .add(color_image);
-
-    // Mask B: 0 near the outer columns (all caster vertices) and 1 in the middle.
-    // A vertex-stage evaluation therefore leaves the interior UV unanimated,
-    // while a fragment-stage evaluation shifts it to the transparent column.
-    let mut mask_pixels = Vec::with_capacity(16 * 16 * 4);
-    for _ in 0..16 {
-        for x in 0..16 {
-            mask_pixels.extend([0u8, 0, if (4..12).contains(&x) { 255 } else { 0 }, 255]);
-        }
-    }
-    let mut mask_image = Image::new(
-        Extent3d {
-            width: 16,
-            height: 16,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        mask_pixels,
-        TextureFormat::Rgba8Unorm,
-        RenderAssetUsages::default(),
-    );
-    mask_image.sampler = bevy::image::ImageSampler::nearest();
-    let mask_image = app
-        .world_mut()
-        .resource_mut::<Assets<Image>>()
-        .add(mask_image);
-
-    let toon: schema::Toon = serde_json::from_value(json!({
-        "specVersion":"1.0",
-        "uvAnimationScrollXSpeedFactor":0.5,
-        "uvAnimationMaskTexture":{"index":0}
-    }))
-    .unwrap();
-    let body_material =
-        app.world_mut()
-            .resource_mut::<Assets<MToonMaterial>>()
-            .add(MToonMaterial {
-                base: StandardMaterial {
-                    base_color_texture: Some(color_image),
-                    alpha_mode: bevy::material::AlphaMode::Mask(0.5),
-                    double_sided: true,
-                    perceptual_roughness: 1.,
-                    ..default()
-                },
-                extension: MToonExtension::new(
-                    &toon,
-                    std::slice::from_ref(&mask_image),
-                    &Default::default(),
-                ),
-            });
-    let receiver_material = app
-        .world_mut()
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 1.,
-            ..default()
-        });
-    let receiver_mesh = app
-        .world_mut()
-        .resource_mut::<Assets<Mesh>>()
-        .add(quad(6., [Vec2::splat(0.5); 4]));
-    let caster_mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(quad(
-        1.5,
-        [
-            Vec2::new(0., 0.),
-            Vec2::new(1., 0.),
-            Vec2::new(1., 1.),
-            Vec2::new(0., 1.),
-        ],
-    ));
-
-    app.world_mut().spawn((
-        Mesh3d(receiver_mesh),
-        MeshMaterial3d(receiver_material),
-        Visibility::Visible,
-        NoFrustumCulling,
-        NotShadowCaster,
-    ));
-    app.world_mut().spawn((
-        Mesh3d(caster_mesh),
-        MeshMaterial3d(body_material),
-        Transform::from_xyz(0., 0., 1.),
-        Visibility::Visible,
-        NoFrustumCulling,
-    ));
-
-    let mut target_image = Image::new_target_texture(64, 64, TextureFormat::Rgba8UnormSrgb, None);
-    target_image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
-    let target = app
-        .world_mut()
-        .resource_mut::<Assets<Image>>()
-        .add(target_image);
-    let latest = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
-    let latest_observer = latest.clone();
-    app.world_mut()
-        .spawn(Readback::texture(target.clone()))
-        .observe(move |event: On<ReadbackComplete>| {
-            *latest_observer.lock().unwrap() = Some(event.data.clone());
-        });
-
-    app.world_mut().spawn((
-        Camera3d::default(),
-        bevy::core_pipeline::prepass::DepthPrepass,
-        Msaa::Off,
-        bevy::core_pipeline::tonemapping::Tonemapping::Linear,
-        bevy::camera::RenderTarget::Image(target.into()),
-        bevy::camera::Projection::Orthographic(bevy::camera::OrthographicProjection {
-            scaling_mode: bevy::camera::ScalingMode::Fixed {
-                width: 6.,
-                height: 6.,
-            },
-            near: 0.1,
-            far: 20.,
-            ..bevy::camera::OrthographicProjection::default_3d()
-        }),
-        Transform::from_xyz(0., 0., 5.).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    let light = app
-        .world_mut()
-        .spawn((
-            DirectionalLight {
-                shadow_maps_enabled: true,
-                ..default()
-            },
-            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.4, 0.)),
-        ))
-        .id();
-
-    // Warm up assets and pipelines. The scroll is 0.5/s; after the warmup the
-    // per-fragment mask evaluation moves every masked interior UV out of the
-    // opaque column, while a vertex-stage evaluation leaves it unanimated.
-    for _ in 0..120 {
-        app.update();
-    }
-    let shadowed = latest.lock().unwrap().clone().expect("readback completed");
-    assert!(
-        shadowed
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .any(|pixel| pixel[0] > 10),
-        "the receiver was not visible"
-    );
-
-    app.world_mut()
-        .get_mut::<DirectionalLight>(light)
-        .unwrap()
-        .shadow_maps_enabled = false;
-    for _ in 0..30 {
-        app.update();
-    }
-    let unshadowed = latest.lock().unwrap().clone().expect("readback completed");
-    assert_eq!(shadowed.len(), unshadowed.len());
-
-    let differing = shadowed
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(unshadowed.as_chunks::<4>().0)
-        .filter(|(a, b)| a[..3].iter().zip(&b[..3]).any(|(a, b)| a.abs_diff(*b) > 8))
-        .count();
-    assert!(
-        differing <= 4,
-        "prepass alpha mask differs from the main pass: {differing} pixels"
-    );
 }
 
 #[test]

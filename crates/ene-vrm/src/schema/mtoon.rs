@@ -32,6 +32,8 @@ pub(crate) struct ToonParams {
     pub outline_color_factor: Vec3,
     pub shading_shift_factor: f32,
     pub shading_toony_factor: f32,
+    /// Applied only when direction-dependent GI exists; this crate supports
+    /// uniform ambient light only, so the value has no effect.
     pub gi_equalization_factor: f32,
     pub parametric_rim_fresnel_power_factor: f32,
     pub parametric_rim_lift_factor: f32,

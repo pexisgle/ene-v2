@@ -45,11 +45,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev libvulkan1 mesa-vulkan-drivers
-      - name: MToon/prepass GPU smoke
+      - name: MToon GPU smoke
         env:
           WGPU_BACKEND: vulkan
-        # The UV-mask pixel regression needs a hardware GPU; lavapipe crashes
-        # in its per-fragment prepass discard path.
         run: |
           cargo test -p ene-vrm synthetic_mtoon_uv1_outline_pipeline_smoke --locked -- --ignored --nocapture
           cargo test -p ene-vrm synthetic_skinned_morph_matches_cpu_reference --locked -- --ignored --nocapture

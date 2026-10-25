@@ -50,6 +50,36 @@ pub(crate) fn finish(app: &mut App) {
     }));
 }
 
+const VRMC_NODE_CONSTRAINT: &str = "VRMC_node_constraint";
+
+/// glTF extensions this crate implements. Bevy's validator does not know them,
+/// so the wrapper validates the document with these entries filtered out.
+const VRMC_EXTENSIONS: [&str; 5] = [
+    VRMC_VRM,
+    VRMC_VRM_ANIMATION,
+    VRMC_MATERIALS_MTOON,
+    VRMC_SPRING_BONE,
+    VRMC_NODE_CONSTRAINT,
+];
+
+fn validate_gltf(bytes: &[u8]) -> Result<(), gltf::Error> {
+    use gltf::json::validation::Validate;
+    let mut root = gltf::Gltf::from_slice_without_validation(bytes)?
+        .document
+        .into_json();
+    root.extensions_required
+        .retain(|extension| !VRMC_EXTENSIONS.contains(&extension.as_str()));
+    let mut errors = Vec::new();
+    root.validate(&root, gltf::json::Path::new, &mut |path, error| {
+        errors.push((path(), error))
+    });
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(gltf::Error::Validation(errors))
+    }
+}
+
 #[derive(TypePath)]
 struct VrmLoader(GltfLoader);
 impl AssetLoader for VrmLoader {
@@ -63,29 +93,35 @@ impl AssetLoader for VrmLoader {
         context: &mut LoadContext<'_>,
     ) -> Result<Gltf, GltfError> {
         let motion = context.path().path().extension().and_then(|x| x.to_str()) == Some("vrma");
-        let mut asset = self
-            .0
-            .load(
-                reader,
-                &GltfLoaderSettings {
-                    include_source: true,
-                    // VRM's glTF animations are unused and cameras are not
-                    // part of the avatar; VRMA needs its animation clips.
-                    load_animations: motion,
-                    load_cameras: false,
-                    default_sampler: settings.default_sampler.clone(),
-                    load_meshes: settings.load_meshes,
-                    load_materials: settings.load_materials,
-                    load_lights: settings.load_lights,
-                    override_sampler: settings.override_sampler,
-                    validate: settings.validate,
-                    convert_coordinates: settings.convert_coordinates,
-                    skinned_mesh_bounds_policy: settings.skinned_mesh_bounds_policy,
-                    mesh_compression: settings.mesh_compression.clone(),
-                },
-                context,
-            )
-            .await?;
+        let mut loader_settings = GltfLoaderSettings {
+            include_source: true,
+            // VRM's glTF animations are unused and cameras are not
+            // part of the avatar; VRMA needs its animation clips.
+            load_animations: motion,
+            load_cameras: false,
+            default_sampler: settings.default_sampler.clone(),
+            load_meshes: settings.load_meshes,
+            load_materials: settings.load_materials,
+            load_lights: settings.load_lights,
+            override_sampler: settings.override_sampler,
+            validate: settings.validate,
+            convert_coordinates: settings.convert_coordinates,
+            skinned_mesh_bounds_policy: settings.skinned_mesh_bounds_policy,
+            mesh_compression: settings.mesh_compression.clone(),
+        };
+        let mut asset = if settings.validate {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await?;
+            // gltf-json rejects every `extensionsRequired` entry outside its
+            // own list, including the VRMC extensions handled above. Validate
+            // the document with just those entries removed; unrelated errors
+            // still fail the load.
+            validate_gltf(&bytes)?;
+            loader_settings.validate = false;
+            GltfLoader::load_gltf(&self.0, &bytes, context, &loader_settings).await?
+        } else {
+            self.0.load(reader, &loader_settings, context).await?
+        };
         let source = asset.source.take().expect("native include_source setting");
         let scene_label = asset
             .default_scene
@@ -323,11 +359,9 @@ impl GltfExtensionHandler for VrmExtensions {
                 return Err(invalid("VRMC_springBone requires specVersion 1.0"));
             }
             for node in source.nodes() {
-                if let Some(value) = node.extension_value("VRMC_node_constraint") {
-                    self.constraints.push((
-                        node.index(),
-                        extension(Some(value), "VRMC_node_constraint")?,
-                    ));
+                if let Some(value) = node.extension_value(VRMC_NODE_CONSTRAINT) {
+                    self.constraints
+                        .push((node.index(), extension(Some(value), VRMC_NODE_CONSTRAINT)?));
                 }
             }
             Ok(Definition::Model(Box::new(model)))

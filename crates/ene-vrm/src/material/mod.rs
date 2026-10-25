@@ -2,7 +2,6 @@ use crate::schema::{OutlineMode, Toon, ToonParams, UvTransform};
 use bevy::{
     asset::embedded_asset,
     camera::visibility::{NoFrustumCulling, RenderLayers},
-    light::NotShadowCaster,
     mesh::{MeshVertexBufferLayoutRef, morph::MeshMorphWeights, skinning::SkinnedMesh},
     pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     platform::collections::HashMap,
@@ -129,8 +128,14 @@ impl MaterialExtension for MToonExtension {
     fn fragment_shader() -> ShaderRef {
         "embedded://ene_vrm/material/shaders/mtoon.wesl".into()
     }
-    fn prepass_fragment_shader() -> ShaderRef {
-        "embedded://ene_vrm/material/shaders/mtoon_prepass.wesl".into()
+    // ponytail: forward-only. Bevy's standard prepass would not evaluate the
+    // animated alpha mask; re-add a matching prepass and shadow sampling if
+    // those consumers become a requirement (see README「対象外と制限」).
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
     }
     fn specialize(
         pipeline: &MaterialExtensionPipeline,
@@ -159,12 +164,7 @@ impl MaterialExtension for MToonExtension {
                 frag.shader_defs.push("MTOON_UVS".into());
             }
         }
-        if key.bind_group_data.outline.is_none()
-            && !descriptor
-                .vertex
-                .shader_defs
-                .contains(&"PREPASS_PIPELINE".into())
-        {
+        if key.bind_group_data.outline.is_none() {
             descriptor.vertex.shader = pipeline.mesh_pipeline.shader.clone();
         }
         if let Some(mode) = key.bind_group_data.outline {
@@ -234,7 +234,6 @@ impl MToonExtension {
 pub(crate) fn setup(app: &mut App) {
     embedded_asset!(app, "shaders/mtoon.wesl");
     embedded_asset!(app, "shaders/outline.wesl");
-    embedded_asset!(app, "shaders/mtoon_prepass.wesl");
     bevy::shader::load_shader_library!(app, "shaders/toon.wesl");
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()
@@ -274,7 +273,6 @@ pub(crate) fn add_outlines(
         let outline = world
             .spawn((
                 MeshMaterial3d(material),
-                NotShadowCaster,
                 NoFrustumCulling,
                 Outline,
                 RenderLayers::default(),
@@ -297,17 +295,6 @@ pub(crate) fn add_outlines(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// `mtoon_prepass.wesl` has no `BINDLESS` path. Bevy only sets that shader
-    /// def when `bindless_slot_count()` is `Some`, which for `ExtendedMaterial`
-    /// requires the base material *and* the extension to be bindless.
-    #[test]
-    fn mtoon_material_is_not_bindless() {
-        assert!(
-            <MToonMaterial as AsBindGroup>::bindless_slot_count().is_none(),
-            "MToon became bindless: re-add the BINDLESS branches to mtoon_prepass.wesl"
-        );
-    }
 
     #[test]
     fn outline_cull_flips_the_base_face() {
