@@ -1,6 +1,5 @@
 // Standard prepass fragment logic adapted from Bevy 0.20 (MIT OR Apache-2.0).
 import bevy_pbr::prepass::io;
-import bevy_pbr::render::pbr_functions::SampleBias;
 import bevy_pbr::render::{
     mesh_bindings::mesh,
     mesh_view_bindings::view,
@@ -9,12 +8,8 @@ import bevy_pbr::render::{
     pbr_prepass_functions,
     pbr_types,
 };
-import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d};
 import bevy_render::globals::Globals;
 import super::toon::animated_uvs;
-
-@if(BINDLESS)
-import bevy_pbr::render::pbr_bindings::material_indices;
 
 // The prepass view layout binds Globals at group 0 binding 1; the main view
 // layout exposes it at binding 11 through mesh_view_bindings.
@@ -57,15 +52,11 @@ fn fragment(
 ) -> io::FragmentOutput {
     let in = animated_output(input);
 
-    @if(BINDLESS)
-    let slot = mesh[in.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
-    @if(BINDLESS)
-    let flags = pbr_bindings::material_array[material_indices[slot].material].flags;
-    @if(BINDLESS)
-    let uv_transform = pbr_bindings::material_array[material_indices[slot].material].uv_transform;
-    @if(!BINDLESS)
+    // MToon is not a bindless material: `ExtendedMaterial` turns bindless on
+    // only when the base material and the extension are both bindless, and the
+    // extension has no `#[bindless]` attribute. `mtoon_material_is_not_bindless`
+    // fails if that ever changes, so this shader has no `BINDLESS` variant.
     let flags = pbr_bindings::material.flags;
-    @if(!BINDLESS)
     let uv_transform = pbr_bindings::material.uv_transform;
 
     @if(VISIBILITY_RANGE_DITHER) {
@@ -95,17 +86,12 @@ fn fragment(
                         let uv = (uv_transform * vec3(in.uv_b, 1.0)).xy;
                         @if(!STANDARD_MATERIAL_NORMAL_MAP_UV_B)
                         let uv = (uv_transform * vec3(in.uv, 1.0)).xy;
-                        var bias: SampleBias;
-                        bias.mip_bias = view.mip_bias;
-                        @if(BINDLESS)
-                        let texture = bindless_textures_2d[material_indices[slot].normal_map_texture];
-                        @if(!BINDLESS)
-                        let texture = pbr_bindings::normal_map_texture;
-                        @if(BINDLESS)
-                        let sampler_ = bindless_samplers_filtering[material_indices[slot].normal_map_sampler];
-                        @if(!BINDLESS)
-                        let sampler_ = pbr_bindings::normal_map_sampler;
-                        let Nt = textureSampleBias(texture, sampler_, uv, bias.mip_bias).rgb;
+                        let Nt = textureSampleBias(
+                            pbr_bindings::normal_map_texture,
+                            pbr_bindings::normal_map_sampler,
+                            uv,
+                            view.mip_bias,
+                        ).rgb;
                         let TBN = pbr_functions::calculate_tbn_mikktspace(normal, in.world_tangent);
                         normal = pbr_functions::apply_normal_mapping(
                             flags,

@@ -298,6 +298,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// `mtoon_prepass.wesl` has no `BINDLESS` path. Bevy only sets that shader
+    /// def when `bindless_slot_count()` is `Some`, which for `ExtendedMaterial`
+    /// requires the base material *and* the extension to be bindless.
+    #[test]
+    fn mtoon_material_is_not_bindless() {
+        assert!(
+            <MToonMaterial as AsBindGroup>::bindless_slot_count().is_none(),
+            "MToon became bindless: re-add the BINDLESS branches to mtoon_prepass.wesl"
+        );
+    }
+
     #[test]
     fn outline_cull_flips_the_base_face() {
         assert_eq!(outline_cull(None), Some(Face::Front));

@@ -227,6 +227,43 @@ fn assert_specialized_pipelines_ok(app: &App, entities: &[Entity]) {
     }
 }
 
+/// Headless app that actually renders: the render plugin stays on, no window is
+/// created, pipelines compile synchronously, and time advances by 1/60 s per
+/// update so the synthetic GPU tests are deterministic.
+fn gpu_app(clear: ClearColor) -> App {
+    use bevy::render::RenderPlugin;
+    let plugins = DefaultPlugins
+        .build()
+        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+    #[cfg(windows)]
+    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+    let mut app = App::new();
+    app.add_plugins(
+        plugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                synchronous_pipeline_compilation: true,
+                ..default()
+            }),
+    )
+    .add_plugins(VrmPlugin)
+    .insert_resource(clear)
+    .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_secs_f64(1. / 60.),
+    ));
+    while app.plugins_state() != bevy::app::PluginsState::Ready {
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        std::thread::yield_now();
+    }
+    app.finish();
+    app.cleanup();
+    app
+}
+
 #[test]
 fn vrm_spec_system_order_runs_pose_lookat_expressions_constraints_springbone() {
     let mut app = app();
@@ -1793,35 +1830,10 @@ fn gpu_model_material_skin_morph_and_outline_smoke() {
 fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
     use bevy::mesh::PrimitiveTopology;
     use bevy::render::{
-        RenderApp, RenderPlugin,
+        RenderApp,
         render_resource::{CachedPipelineState, PipelineCache},
     };
-    let plugins = DefaultPlugins
-        .build()
-        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
-    #[cfg(windows)]
-    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
-    let mut app = App::new();
-    app.add_plugins(
-        plugins
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .set(RenderPlugin {
-                synchronous_pipeline_compilation: true,
-                ..default()
-            }),
-    )
-    .add_plugins(VrmPlugin)
-    .insert_resource(ClearColor(Color::NONE));
-    while app.plugins_state() != bevy::app::PluginsState::Ready {
-        bevy::tasks::tick_global_task_pools_on_main_thread();
-        std::thread::yield_now();
-    }
-    app.finish();
-    app.cleanup();
+    let mut app = gpu_app(ClearColor(Color::NONE));
 
     let color_image = app
         .world_mut()
@@ -2021,7 +2033,6 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
 fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
     use bevy::mesh::{Indices, PrimitiveTopology};
     use bevy::render::{
-        RenderPlugin,
         gpu_readback::{Readback, ReadbackComplete},
         render_resource::TextureUsages,
     };
@@ -2045,35 +2056,7 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
         mesh
     }
 
-    let plugins = DefaultPlugins
-        .build()
-        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
-    #[cfg(windows)]
-    let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
-    let mut app = App::new();
-    app.add_plugins(
-        plugins
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .set(RenderPlugin {
-                synchronous_pipeline_compilation: true,
-                ..default()
-            }),
-    )
-    .add_plugins(VrmPlugin)
-    .insert_resource(ClearColor(Color::BLACK))
-    .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-        std::time::Duration::from_secs_f64(1. / 60.),
-    ));
-    while app.plugins_state() != bevy::app::PluginsState::Ready {
-        bevy::tasks::tick_global_task_pools_on_main_thread();
-        std::thread::yield_now();
-    }
-    app.finish();
-    app.cleanup();
+    let mut app = gpu_app(ClearColor(Color::BLACK));
 
     // 16x16 color texture with alpha only in the middle columns. The caster has
     // corner UVs, so its vertices sample transparent columns while the opaque
@@ -2348,5 +2331,171 @@ fn only_the_selected_scene_is_attached() {
         app.world_mut().query::<&Vrm>().iter(app.world()).count(),
         1,
         "the non-default scene was validated and attached"
+    );
+}
+
+/// The outline smoke only proves the skinned/morph pipelines build. This test
+/// also checks the deformation: the same mesh is drawn twice through Bevy's
+/// standard shaders, once skinned by a joint rotated 90° about Z with one morph
+/// target displaced along +X, and once as a plain mesh whose CPU-side positions
+/// are already `Rz(90°) * (p + Δp)`. The silhouettes must agree, so dropping or
+/// reordering the morph and skin steps changes the result.
+#[test]
+#[ignore = "requires a GPU; runs in CI with lavapipe"]
+fn synthetic_skinned_morph_matches_cpu_reference() {
+    use bevy::mesh::PrimitiveTopology;
+    use bevy::render::{
+        gpu_readback::{Readback, ReadbackComplete},
+        render_resource::TextureUsages,
+    };
+
+    let mut app = gpu_app(ClearColor(Color::NONE));
+
+    // A morph along +X followed by a 90° bone rotation cannot be confused with
+    // the reverse order (rotate, then offset in world space) or with either
+    // step missing, because each variant yields a different silhouette.
+    let positions = [
+        Vec3::new(-0.4, -0.4, 0.),
+        Vec3::new(0.4, -0.4, 0.),
+        Vec3::new(0., 0.4, 0.),
+    ];
+    let morph_delta = Vec3::new(0.6, 0., 0.);
+    let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+
+    let material = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+    let triangle = |app: &mut App, positions: [Vec3; 3]| {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 3]);
+        app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh)
+    };
+
+    let mut skinned = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    skinned.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+    );
+    skinned.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 3]);
+    skinned.insert_attribute(
+        Mesh::ATTRIBUTE_JOINT_INDEX,
+        VertexAttributeValues::Uint16x4(vec![[0; 4]; 3]),
+    );
+    skinned.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, vec![[1., 0., 0., 0.]; 3]);
+    skinned.set_morph_targets(vec![
+        MorphAttributes::new(
+            morph_delta,
+            Vec3::ZERO,
+            Vec3::ZERO
+        );
+        3
+    ]);
+    let skinned = app.world_mut().resource_mut::<Assets<Mesh>>().add(skinned);
+
+    let reference = triangle(&mut app, positions.map(|p| rotation * (p + morph_delta)));
+
+    let joint = app
+        .world_mut()
+        .spawn(Transform::from_rotation(rotation))
+        .id();
+    let inverse_bindposes = app
+        .world_mut()
+        .resource_mut::<Assets<SkinnedMeshInverseBindposes>>()
+        .add(SkinnedMeshInverseBindposes::from(vec![Mat4::IDENTITY]));
+
+    let mut target_image = Image::new_target_texture(64, 64, TextureFormat::Rgba8UnormSrgb, None);
+    target_image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(target_image);
+    let latest = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+    let latest_observer = latest.clone();
+    app.world_mut()
+        .spawn(Readback::texture(target.clone()))
+        .observe(move |event: On<ReadbackComplete>| {
+            *latest_observer.lock().unwrap() = Some(event.data.clone());
+        });
+    app.world_mut().spawn((
+        Camera3d::default(),
+        Msaa::Off,
+        bevy::core_pipeline::tonemapping::Tonemapping::Linear,
+        bevy::camera::RenderTarget::Image(target.into()),
+        Transform::from_xyz(0., 0., 3.).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    let mask = |pixels: &[u8]| {
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3] > 128)
+            .collect::<Vec<bool>>()
+    };
+    let covered = |m: &[bool]| m.iter().filter(|&&hit| hit).count();
+
+    let deformed = app
+        .world_mut()
+        .spawn((
+            Mesh3d(skinned),
+            MeshMaterial3d(material.clone()),
+            Visibility::Visible,
+            NoFrustumCulling,
+            SkinnedMesh {
+                inverse_bindposes: inverse_bindposes.clone(),
+                joints: vec![joint],
+            },
+            MeshMorphWeights::Value { weights: vec![1.] },
+        ))
+        .id();
+    for _ in 0..30 {
+        app.update();
+    }
+    let skinned_mask = mask(&latest.lock().unwrap().clone().expect("readback completed"));
+
+    app.world_mut().entity_mut(deformed).despawn();
+    app.world_mut().entity_mut(joint).despawn();
+    *latest.lock().unwrap() = None;
+    app.world_mut().spawn((
+        Mesh3d(reference),
+        MeshMaterial3d(material),
+        Visibility::Visible,
+        NoFrustumCulling,
+    ));
+    for _ in 0..30 {
+        app.update();
+    }
+    let reference_mask = mask(&latest.lock().unwrap().clone().expect("readback completed"));
+
+    assert!(
+        covered(&skinned_mask) > 100 && covered(&reference_mask) > 100,
+        "the mesh was not visible: skinned {} px, reference {} px",
+        covered(&skinned_mask),
+        covered(&reference_mask)
+    );
+    let differing = skinned_mask
+        .iter()
+        .zip(&reference_mask)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        differing <= 4,
+        "skinned+morph silhouette differs from the CPU reference: {differing} pixels"
     );
 }
