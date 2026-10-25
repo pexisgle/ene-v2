@@ -344,12 +344,15 @@ impl GltfExtensionHandler for VrmExtensions {
                 return Err(invalid("VRMC_vrm requires specVersion 1.0"));
             }
             for material in source.materials() {
-                if let Some(value) = material.extension_value(VRMC_MATERIALS_MTOON) {
-                    self.materials.insert(
-                        material.index().expect("indexed material"),
-                        schema::Toon::deserialize(value).map_err(invalid)?,
-                    );
+                let Some(value) = material.extension_value(VRMC_MATERIALS_MTOON) else {
+                    continue;
+                };
+                let toon: schema::Toon = schema::Toon::deserialize(value).map_err(invalid)?;
+                if toon.schema.spec_version != "1.0" {
+                    return Err(invalid("VRMC_materials_mtoon requires specVersion 1.0"));
                 }
+                self.materials
+                    .insert(material.index().expect("indexed material"), toon);
             }
             self.springs = source
                 .extension_value(VRMC_SPRING_BONE)
@@ -440,13 +443,14 @@ impl GltfExtensionHandler for VrmExtensions {
             extension: MToonExtension::new(&toon, &self.textures, &self.converted),
         };
         let label = format!("{label}/vrm");
-        if toon.outline_width_mode != schema::OutlineMode::None {
+        let outline_mode = toon.outline_mode();
+        if outline_mode != schema::OutlineMode::None {
             let mut outline = material.clone();
             outline.base.double_sided = false;
             if outline.base.cull_mode.is_none() && label.ends_with("(inverted)/vrm") {
                 outline.base.cull_mode = Some(bevy::render::render_resource::Face::Front);
             }
-            outline.extension.outline = Some(toon.outline_width_mode);
+            outline.extension.outline = Some(outline_mode);
             context.add_labeled_asset(format!("{label}/outline"), outline);
         }
         context.add_labeled_asset(label, material);
@@ -521,7 +525,7 @@ impl GltfExtensionHandler for VrmExtensions {
                     material::add_outlines(world, &mut |slot, handle| {
                         self.materials
                             .get(&slot)
-                            .filter(|toon| toon.outline_width_mode != schema::OutlineMode::None)?;
+                            .filter(|toon| toon.outline_mode() != schema::OutlineMode::None)?;
                         Some(
                             context
                                 .get_label_handle(format!("{}/outline", handle.path()?.label()?)),

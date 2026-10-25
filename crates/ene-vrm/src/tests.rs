@@ -370,13 +370,13 @@ fn loader_rejects_unusable_data_and_tolerates_spec_noise() {
     let mut v = model.clone();
     v["materials"] = json!([
         {"alphaMode":"OPAQUE","extensions":{"VRMC_materials_mtoon":{
-            "specVersion":"1.0","renderQueueOffsetNumber":10.0,
+            "specVersion":"1.0","renderQueueOffsetNumber":10,
             "giEqualizationFactor":0.5,
             "shadingToonyFactor":2.0,"outlineWidthFactor":-1.0,
             "shadeMultiplyTexture":{"index":0}
         }}},
         {"alphaMode":"BLEND","extensions":{"VRMC_materials_mtoon":{
-            "specVersion":"1.0","transparentWithZWrite":true,"renderQueueOffsetNumber":2.0
+            "specVersion":"1.0","transparentWithZWrite":true,"renderQueueOffsetNumber":2
         }}}
     ]);
     push(v, false, false);
@@ -1457,9 +1457,10 @@ fn expression_morph_binds_accumulate_from_zero_without_clamping() {
 #[test]
 fn mtoon_materials_outlines_meta_and_schema_defaults() {
     let toon: schema::Toon = serde_json::from_value(json!({"specVersion":"1.0"})).unwrap();
-    assert_eq!(toon.params.shade_color_factor, Vec3::ZERO);
-    assert_eq!(toon.params.shading_toony_factor, 0.9);
-    assert_eq!(toon.outline_width_mode, schema::OutlineMode::None);
+    let params = schema::ToonParams::from(&toon.schema);
+    assert_eq!(params.shade_color_factor, Vec3::ZERO);
+    assert_eq!(params.shading_toony_factor, 0.9);
+    assert_eq!(toon.outline_mode(), schema::OutlineMode::None);
     assert_eq!(schema::ToonParams::min_size().get(), 400);
 
     let gaze: schema::LookAt = serde_json::from_value(json!({"type":"expression"})).unwrap();
@@ -1573,11 +1574,11 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
         },
         {
             "alphaMode":"BLEND",
-            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","renderQueueOffsetNumber":-3.0}}
+            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","renderQueueOffsetNumber":-3}}
         },
         {
             "alphaMode":"BLEND",
-            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","transparentWithZWrite":true,"renderQueueOffsetNumber":2.0}}
+            "extensions":{"VRMC_materials_mtoon":{"specVersion":"1.0","transparentWithZWrite":true,"renderQueueOffsetNumber":2}}
         }
     ]);
     value["extensions"]["VRMC_vrm"]["meta"] = json!({

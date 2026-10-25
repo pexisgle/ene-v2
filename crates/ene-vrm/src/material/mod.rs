@@ -197,7 +197,7 @@ impl MToonExtension {
                 .or_else(|| images.get(index))
                 .cloned()
         };
-        let mut params = toon.params;
+        let mut params = ToonParams::from(&toon.schema);
         params.texture_flags = textures
             .iter()
             .enumerate()
@@ -323,7 +323,7 @@ mod tests {
         let extension = MToonExtension::new(&toon, &[], &Default::default());
         assert_eq!(extension.params.texture_uvs, 0b11);
         let expected: bevy::math::Mat3 =
-            UvTransform::from_json(toon.shade_multiply_texture.as_ref().unwrap())
+            UvTransform::from_json(toon.schema.shade_multiply_texture.as_ref().unwrap())
                 .affine()
                 .into();
         assert_eq!(extension.params.uv_transforms[0], expected);

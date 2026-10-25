@@ -1,30 +1,27 @@
-use super::version::Version;
 use bevy::{
     math::{Affine2, Mat3},
     prelude::*,
     render::render_resource::ShaderType,
 };
 use serde::Deserialize;
+use vrm_spec::vrmc_materials_mtoon_1_0::{OutlineWidthMode, VrmcMaterialsMtoonSchema};
 
+/// `VRMC_materials_mtoon` as authored.
+///
+/// `vrm-spec` owns the parameter and texture fields. Only `shadingShiftTexture`
+/// is parsed locally: `vrm-spec` types that slot without the
+/// `KHR_texture_transform` this crate needs for UV animation, while the other
+/// five slots already use `gltf`'s typed texture info.
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Toon {
-    #[serde(rename = "specVersion")]
-    pub _version: Version,
     #[serde(flatten)]
-    pub params: ToonParams,
-    pub shade_multiply_texture: Option<gltf::json::texture::Info>,
+    pub schema: VrmcMaterialsMtoonSchema,
     pub shading_shift_texture: Option<ShadingShiftTexture>,
-    pub matcap_texture: Option<gltf::json::texture::Info>,
-    pub rim_multiply_texture: Option<gltf::json::texture::Info>,
-    pub outline_width_multiply_texture: Option<gltf::json::texture::Info>,
-    pub uv_animation_mask_texture: Option<gltf::json::texture::Info>,
-    #[serde(default)]
-    pub outline_width_mode: OutlineMode,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, ShaderType)]
-#[serde(default, rename_all = "camelCase")]
+/// Values uploaded to the shader. Defaults match three-vrm.
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
 pub(crate) struct ToonParams {
     pub shade_color_factor: Vec3,
     pub parametric_rim_color_factor: Vec3,
@@ -40,13 +37,9 @@ pub(crate) struct ToonParams {
     pub uv_animation_scroll_x_speed_factor: f32,
     pub uv_animation_scroll_y_speed_factor: f32,
     pub uv_animation_rotation_speed_factor: f32,
-    #[serde(skip)]
     pub shading_shift_texture_scale: f32,
-    #[serde(skip)]
     pub texture_flags: u32,
-    #[serde(skip)]
     pub texture_uvs: u32,
-    #[serde(skip)]
     pub uv_transforms: [Mat3; 6],
 }
 
@@ -75,14 +68,82 @@ impl Default for ToonParams {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-#[repr(u32)]
+impl From<&VrmcMaterialsMtoonSchema> for ToonParams {
+    fn from(schema: &VrmcMaterialsMtoonSchema) -> Self {
+        let mut params = Self::default();
+        for (target, value) in [
+            (&mut params.shade_color_factor, schema.shade_color_factor),
+            (
+                &mut params.parametric_rim_color_factor,
+                schema.parametric_rim_color_factor,
+            ),
+            (&mut params.matcap_factor, schema.matcap_factor),
+            (
+                &mut params.outline_color_factor,
+                schema.outline_color_factor,
+            ),
+        ] {
+            if let Some(value) = value {
+                *target = Vec3::from_array(value.map(|x| x as f32));
+            }
+        }
+        for (target, value) in [
+            (
+                &mut params.shading_shift_factor,
+                schema.shading_shift_factor,
+            ),
+            (
+                &mut params.shading_toony_factor,
+                schema.shading_toony_factor,
+            ),
+            (
+                &mut params.parametric_rim_fresnel_power_factor,
+                schema.parametric_rim_fresnel_power_factor,
+            ),
+            (
+                &mut params.parametric_rim_lift_factor,
+                schema.parametric_rim_lift_factor,
+            ),
+            (
+                &mut params.rim_lighting_mix_factor,
+                schema.rim_lighting_mix_factor,
+            ),
+            (
+                &mut params.outline_width_factor,
+                schema.outline_width_factor,
+            ),
+            (
+                &mut params.outline_lighting_mix_factor,
+                schema.outline_lighting_mix_factor,
+            ),
+            (
+                &mut params.uv_animation_scroll_x_speed_factor,
+                schema.uv_animation_scroll_x_speed_factor,
+            ),
+            (
+                &mut params.uv_animation_scroll_y_speed_factor,
+                schema.uv_animation_scroll_y_speed_factor,
+            ),
+            (
+                &mut params.uv_animation_rotation_speed_factor,
+                schema.uv_animation_rotation_speed_factor,
+            ),
+        ] {
+            if let Some(value) = value {
+                *target = value as f32;
+            }
+        }
+        params
+    }
+}
+
+/// Which outline pass a material needs. The pipeline keys on this, so it stays
+/// a local type; `vrm-spec`'s [`OutlineWidthMode`] lacks `Eq` and `Default`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum OutlineMode {
-    #[default]
     None,
-    WorldCoordinates = 1,
-    ScreenCoordinates = 2,
+    WorldCoordinates,
+    ScreenCoordinates,
 }
 
 #[derive(Clone, Deserialize)]
@@ -155,12 +216,12 @@ impl UvTransform {
 impl Toon {
     pub fn textures(&self) -> [Option<&gltf::json::texture::Info>; 6] {
         [
-            self.shade_multiply_texture.as_ref(),
+            self.schema.shade_multiply_texture.as_ref(),
             self.shading_shift_texture.as_ref().map(|s| &s.texture),
-            self.rim_multiply_texture.as_ref(),
-            self.matcap_texture.as_ref(),
-            self.uv_animation_mask_texture.as_ref(),
-            self.outline_width_multiply_texture.as_ref(),
+            self.schema.rim_multiply_texture.as_ref(),
+            self.schema.matcap_texture.as_ref(),
+            self.schema.uv_animation_mask_texture.as_ref(),
+            self.schema.outline_width_multiply_texture.as_ref(),
         ]
     }
     pub fn texture_uvs(&self) -> u32 {
@@ -173,5 +234,50 @@ impl Toon {
             }
         }
         bits
+    }
+    pub fn outline_mode(&self) -> OutlineMode {
+        match self.schema.outline_width_mode {
+            Some(OutlineWidthMode::WorldCoordinates) => OutlineMode::WorldCoordinates,
+            Some(OutlineWidthMode::ScreenCoordinates) => OutlineMode::ScreenCoordinates,
+            Some(OutlineWidthMode::None) | None => OutlineMode::None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn toon_keeps_the_shading_shift_transform_and_spec_values() {
+        let toon: Toon = serde_json::from_value(json!({
+            "specVersion": "1.0",
+            "outlineWidthMode": "screenCoordinates",
+            "shadeColorFactor": [0.5, 0.25, 0.0],
+            "shadingShiftTexture": {
+                "index": 1,
+                "scale": 0.5,
+                "extensions": {"KHR_texture_transform": {
+                    "offset": [0.1, 0.2],
+                    "scale": [2.0, 3.0]
+                }}
+            }
+        }))
+        .unwrap();
+        assert_eq!(toon.schema.spec_version, "1.0");
+        assert_eq!(toon.outline_mode(), OutlineMode::ScreenCoordinates);
+        assert_eq!(
+            toon.shading_shift_texture.as_ref().unwrap().scale,
+            Some(0.5)
+        );
+        assert_eq!(toon.textures()[1].unwrap().index.value(), 1);
+        assert_eq!(
+            ToonParams::from(&toon.schema).shade_color_factor,
+            Vec3::new(0.5, 0.25, 0.0)
+        );
+        let uv = UvTransform::from_json(&toon.shading_shift_texture.as_ref().unwrap().texture);
+        assert_eq!(uv.offset, Vec2::new(0.1, 0.2));
+        assert_eq!(uv.scale, Vec2::new(2.0, 3.0));
     }
 }
