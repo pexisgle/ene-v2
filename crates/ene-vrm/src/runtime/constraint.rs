@@ -9,6 +9,10 @@ use bevy::{
     ecs::entity::MapEntities, platform::collections::HashMap, prelude::*,
     transform::helper::TransformHelper,
 };
+use petgraph::{
+    algo::toposort,
+    graph::{DiGraph, NodeIndex},
+};
 
 #[derive(Clone, Reflect, MapEntities)]
 pub(crate) struct Constraint {
@@ -66,10 +70,10 @@ pub(crate) fn compile_constraints(
         if !weight.is_finite() || !(0. ..=1.).contains(&weight) {
             return Err(invalid("VRMC constraint weight out of range"));
         }
-        let mut reads = std::collections::HashSet::from([source]);
+        let mut reads = vec![source];
         if matches!(kind, ConstraintKind::Aim(_)) {
-            for e in [source, target] {
-                reads.extend(parents.iter_ancestors(e));
+            for entity in [source, target] {
+                reads.extend(parents.iter_ancestors(entity));
             }
         }
         pending.push((
@@ -84,18 +88,27 @@ pub(crate) fn compile_constraints(
             reads,
         ));
     }
-    let mut remaining: std::collections::HashSet<_> =
-        pending.iter().map(|(c, _)| c.target).collect();
-    let mut ordered = Vec::new();
-    while !pending.is_empty() {
-        let next = pending
-            .iter()
-            .position(|(_, reads)| reads.is_disjoint(&remaining))
-            .ok_or_else(|| invalid("VRMC constraint cycle"))?;
-        let (c, _) = pending.remove(next);
-        remaining.remove(&c.target);
-        ordered.push(c);
+    // A constraint must run after any constraint whose target it reads. Editing
+    // the graph is simpler than rescanning the pending list for every output.
+    let mut graph = DiGraph::<(), ()>::new();
+    let indices: Vec<NodeIndex> = pending.iter().map(|_| graph.add_node(())).collect();
+    let targets: HashMap<Entity, NodeIndex> = pending
+        .iter()
+        .zip(&indices)
+        .map(|((constraint, _), &index)| (constraint.target, index))
+        .collect();
+    for ((_, reads), &index) in pending.iter().zip(&indices) {
+        for &read in reads {
+            if let Some(&dependency) = targets.get(&read) {
+                graph.add_edge(dependency, index, ());
+            }
+        }
     }
+    let ordered = toposort(&graph, None)
+        .map_err(|_| invalid("VRMC constraint cycle"))?
+        .into_iter()
+        .map(|index| pending[index.index()].0.clone())
+        .collect();
     Ok(Constraints(ordered))
 }
 
@@ -257,6 +270,12 @@ mod tests {
             vec![1, 0]
         );
         assert!(order(&[(2, aim()), (1, rot(2))], app.world_mut()).is_err());
+        assert_eq!(
+            order(&[(2, rot(0)), (1, rot(0))], app.world_mut())
+                .unwrap()
+                .len(),
+            2
+        );
 
         let rot_target = app.world_mut().spawn(Transform::from_rotation(rest)).id();
         app.world_mut()

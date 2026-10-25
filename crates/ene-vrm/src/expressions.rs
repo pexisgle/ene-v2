@@ -2,7 +2,7 @@ use crate::{
     VrmSystems, animation,
     loader::{invalid, require_node},
     material::{BaseUv, EmissiveStrength, MToonMaterial},
-    schema::{self, ColorType, UvTransform},
+    schema::{self, Expression, Expressions, MaterialColorType, UvTransform},
 };
 use bevy::{
     animation::AnimatedBy,
@@ -13,48 +13,82 @@ use bevy::{
     prelude::*,
 };
 
+/// VRM expression identifier. Preset and custom names are distinct namespaces.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ExpressionName {
+    Preset(schema::ExpressionPresetName),
+    Custom(String),
+}
+
 /// Explicit manual weights override animation. Remove a key to restore animation.
 #[derive(Component, Clone, Default, Reflect, Deref, DerefMut)]
-#[reflect(Component, Clone)]
-pub struct ExpressionWeights(pub HashMap<String, f32>);
+#[reflect(Component, Clone, opaque)]
+pub struct ExpressionWeights(pub HashMap<ExpressionName, f32>);
 
-#[derive(Clone, Reflect, MapEntities)]
+#[derive(Clone, MapEntities)]
+pub(crate) struct ExpressionBinding {
+    pub(crate) name: ExpressionName,
+    pub(crate) definition: Expression,
+    #[entities]
+    pub(crate) target: Entity,
+    pub(crate) category: Option<usize>,
+}
+
+#[derive(Clone, MapEntities)]
 pub(crate) struct MorphTarget {
     #[entities]
-    pub entity: Entity,
-    pub indices: Vec<usize>,
-    pub node: usize,
+    pub(crate) entity: Entity,
+    pub(crate) indices: Vec<usize>,
+    pub(crate) node: usize,
 }
 
 #[derive(Component, Clone, Reflect)]
-#[reflect(Component, Clone)]
+#[reflect(Component, Clone, opaque)]
 pub(crate) struct Binds {
-    pub definitions: std::sync::Arc<schema::Expressions>,
     #[entities]
-    pub targets: Vec<Entity>,
+    pub(crate) bindings: Vec<ExpressionBinding>,
     #[entities]
-    pub morphs: Vec<MorphTarget>,
+    pub(crate) morphs: Vec<MorphTarget>,
 }
 
 impl Binds {
-    pub fn target(&self, name: &str) -> Option<Entity> {
-        self.definitions
+    pub(crate) fn target(&self, name: &ExpressionName) -> Option<Entity> {
+        self.bindings
             .iter()
-            .zip(&self.targets)
-            .find(|((n, _), _)| *n == name)
-            .map(|(_, &entity)| entity)
+            .find(|binding| &binding.name == name)
+            .map(|binding| binding.target)
     }
-    pub fn weight<'a>(
+
+    pub(crate) fn weight<'a>(
         &'a self,
         manual: Option<&'a ExpressionWeights>,
         transforms: impl Fn(Entity) -> Option<f32> + 'a,
-    ) -> impl Fn(&str) -> f32 + 'a {
+    ) -> impl Fn(&ExpressionName) -> f32 + 'a {
         move |name| {
             manual
-                .and_then(|m| m.get(name).copied())
+                .and_then(|weights| weights.get(name).copied())
                 .or_else(|| self.target(name).and_then(&transforms))
                 .unwrap_or(0.)
         }
+    }
+
+    fn materials(&self) -> impl Iterator<Item = usize> + '_ {
+        self.bindings.iter().flat_map(|binding| {
+            binding
+                .definition
+                .material_color_binds
+                .iter()
+                .flatten()
+                .map(|bind| schema::index(bind.material))
+                .chain(
+                    binding
+                        .definition
+                        .texture_transform_binds
+                        .iter()
+                        .flatten()
+                        .map(|bind| schema::index(bind.material)),
+                )
+        })
     }
 }
 
@@ -68,54 +102,119 @@ pub(crate) struct MaterialBinds<M: bevy::pbr::Material>(
     HashMap<(usize, Handle<M>), MaterialInstance<M>>,
 );
 
+fn expressions(definitions: &Expressions) -> impl Iterator<Item = (ExpressionName, &Expression)> {
+    let preset = definitions
+        .preset
+        .iter()
+        .flat_map(|preset| preset.0.iter())
+        .map(|(name, expression)| (ExpressionName::Preset(*name), expression));
+    let custom = definitions
+        .custom
+        .iter()
+        .flat_map(|custom| custom.iter())
+        .map(|(name, expression)| (ExpressionName::Custom(name.clone()), expression));
+    preset.chain(custom)
+}
+
+fn category(name: &ExpressionName) -> Option<usize> {
+    let ExpressionName::Preset(name) = name else {
+        return None;
+    };
+    match name {
+        schema::ExpressionPresetName::Aa
+        | schema::ExpressionPresetName::Ih
+        | schema::ExpressionPresetName::Ou
+        | schema::ExpressionPresetName::Ee
+        | schema::ExpressionPresetName::Oh => Some(0),
+        schema::ExpressionPresetName::Blink
+        | schema::ExpressionPresetName::BlinkLeft
+        | schema::ExpressionPresetName::BlinkRight => Some(1),
+        schema::ExpressionPresetName::LookUp
+        | schema::ExpressionPresetName::LookDown
+        | schema::ExpressionPresetName::LookLeft
+        | schema::ExpressionPresetName::LookRight => Some(2),
+        _ => None,
+    }
+}
+
+fn validate_expression(expression: &Expression) -> std::io::Result<()> {
+    for bind in expression.material_color_binds.iter().flatten() {
+        if bind.target_value.len() != 4
+            || bind
+                .target_value
+                .iter()
+                .any(|value| !(*value as f32).is_finite())
+        {
+            return Err(invalid("VRM color bind requires 4 finite components"));
+        }
+    }
+    for bind in expression.texture_transform_binds.iter().flatten() {
+        for values in [bind.scale.as_deref(), bind.offset.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if values.len() != 2 || values.iter().any(|value| !(*value as f32).is_finite()) {
+                return Err(invalid("VRM texture bind requires 2 finite components"));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn attach(
     world: &mut World,
     root: Entity,
-    definitions: &schema::Expressions,
+    definitions: Option<&Expressions>,
     nodes: &HashMap<usize, Entity>,
 ) -> std::io::Result<()> {
-    let definitions = std::sync::Arc::new(definitions.clone());
-    let targets = definitions
-        .iter()
-        .map(|(name, _)| {
-            world
+    let mut bindings = Vec::new();
+    let mut morphs: HashMap<usize, MorphTarget> = HashMap::default();
+    if let Some(definitions) = definitions {
+        for (name, expression) in expressions(definitions) {
+            validate_expression(expression)?;
+            let target = world
                 .spawn((
                     Transform::default(),
-                    animation::expression_target(name),
+                    animation::expression_target(&name),
                     AnimatedBy(root),
                     ChildOf(root),
                 ))
-                .id()
-        })
-        .collect();
-    let mut morphs: HashMap<usize, MorphTarget> = HashMap::default();
-    for (_, expr) in definitions.iter() {
-        for bind in &expr.morph_target_binds {
-            let entity = require_node(nodes, bind.node)?;
-            let exists = world
-                .get::<MorphWeights>(entity)
-                .is_some_and(|w| w.weights().get(bind.index).is_some());
-            if !exists {
-                return Err(invalid("VRM morph bind index out of range"));
+                .id();
+            for bind in expression.morph_target_binds.iter().flatten() {
+                let node = schema::index(bind.node);
+                let entity = require_node(nodes, node)?;
+                let exists = world
+                    .get::<MorphWeights>(entity)
+                    .is_some_and(|weights| weights.weights().get(bind.index).is_some());
+                if !exists {
+                    return Err(invalid("VRM morph bind index out of range"));
+                }
+                let weight = bind.weight as f32;
+                if !weight.is_finite() || !(0. ..=1.).contains(&weight) {
+                    return Err(invalid("VRM morph bind weight out of range"));
+                }
+                let morph = morphs.entry(node).or_insert_with(|| MorphTarget {
+                    entity,
+                    node,
+                    indices: Vec::new(),
+                });
+                if !morph.indices.contains(&bind.index) {
+                    morph.indices.push(bind.index);
+                }
             }
-            if !bind.weight.is_finite() || !(0. ..=1.).contains(&bind.weight) {
-                return Err(invalid("VRM morph bind weight out of range"));
-            }
-            let target = morphs.entry(bind.node).or_insert_with(|| MorphTarget {
-                entity,
-                node: bind.node,
-                indices: Vec::new(),
+            let category = category(&name);
+            bindings.push(ExpressionBinding {
+                name,
+                definition: expression.clone(),
+                target,
+                category,
             });
-            if !target.indices.contains(&bind.index) {
-                target.indices.push(bind.index);
-            }
         }
     }
     world.entity_mut(root).insert((
         ExpressionWeights::default(),
         Binds {
-            definitions,
-            targets,
+            bindings,
             morphs: morphs.into_values().collect(),
         },
     ));
@@ -161,7 +260,7 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
     mut materials: ResMut<Assets<M>>,
 ) {
     for (root, binds) in &roots {
-        let affected: std::collections::HashSet<_> = binds.definitions.materials().collect();
+        let affected: std::collections::HashSet<_> = binds.materials().collect();
         let mut targets = Vec::new();
         let mut pending = false;
         {
@@ -178,7 +277,7 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
                     break;
                 }
                 let base_uv = base_uv.map_or_else(UvTransform::default, |uv| uv.0);
-                let emissive_strength = emissive_strength.map_or(1., |s| s.0);
+                let emissive_strength = emissive_strength.map_or(1., |strength| strength.0);
                 targets.push((entity, slot.0, handle.0.clone(), base_uv, emissive_strength));
             }
         }
@@ -189,10 +288,10 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
         let mut handles = meshes.p1();
         for (entity, slot, original, base_uv, emissive_strength) in targets {
             let clone = match instances.entry((slot, original.clone())) {
-                Entry::Occupied(e) => e.into_mut(),
-                Entry::Vacant(e) => {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
                     let material = materials.get(&original).cloned().expect("checked above");
-                    e.insert((materials.add(material), base_uv, emissive_strength))
+                    entry.insert((materials.add(material), base_uv, emissive_strength))
                 }
             };
             if let Ok(mut handle) = handles.get_mut(entity) {
@@ -203,74 +302,74 @@ fn initialize_materials<M: bevy::pbr::Material + Clone>(
     }
 }
 
-fn category(name: &str) -> Option<usize> {
-    match name {
-        "aa" | "ih" | "ou" | "ee" | "oh" => Some(0),
-        "blink" | "blinkLeft" | "blinkRight" => Some(1),
-        "lookUp" | "lookDown" | "lookLeft" | "lookRight" => Some(2),
-        _ => None,
+fn binding_weight(binding: &ExpressionBinding, raw: &impl Fn(&ExpressionName) -> f32) -> f32 {
+    let value = raw(&binding.name).clamp(0., 1.);
+    if binding.definition.is_binary.unwrap_or(false) {
+        f32::from(value > 0.5)
+    } else {
+        value
     }
 }
 
-fn weight(name: &str, e: &schema::Expression, raw: impl Fn(&str) -> f32) -> f32 {
-    let v = raw(name).clamp(0., 1.);
-    if e.is_binary { f32::from(v > 0.5) } else { v }
+fn override_rate(rule: Option<schema::ExpressionOverrideType>, weight: f32) -> f32 {
+    match rule.unwrap_or(schema::ExpressionOverrideType::None) {
+        schema::ExpressionOverrideType::None => 0.,
+        schema::ExpressionOverrideType::Block => f32::from(weight > 0.),
+        schema::ExpressionOverrideType::Blend => weight,
+    }
 }
 
-#[allow(clippy::type_complexity)]
-fn weights_and_rates(
-    binds: &schema::Expressions,
-    raw: impl Fn(&str) -> f32,
-) -> (
-    Vec<(&str, &schema::Expression, f32, Option<usize>)>,
-    [f32; 3],
-) {
-    let weights: Vec<_> = binds
-        .preset
+fn effective<'a>(
+    bindings: &'a [ExpressionBinding],
+    raw: &impl Fn(&ExpressionName) -> f32,
+) -> Vec<(&'a ExpressionName, &'a Expression, f32)> {
+    let weighted: Vec<_> = bindings
         .iter()
-        .map(|(n, e)| (n.as_str(), e, weight(n, e, &raw), category(n)))
-        .chain(
-            binds
-                .custom
-                .iter()
-                .map(|(n, e)| (n.as_str(), e, weight(n, e, &raw), None)),
-        )
+        .map(|binding| (binding, binding_weight(binding, raw)))
         .collect();
     let mut rates = [0f32; 3];
-    for &(_, e, w, cat) in &weights {
-        for (i, (rate, rule)) in rates
+    for (binding, weight) in &weighted {
+        for (index, (rate, rule)) in rates
             .iter_mut()
-            .zip([e.override_mouth, e.override_blink, e.override_look_at])
+            .zip([
+                binding.definition.override_mouth,
+                binding.definition.override_blink,
+                binding.definition.override_look_at,
+            ])
             .enumerate()
         {
-            if cat != Some(i) {
-                *rate += rule.rate(w);
+            if binding.category != Some(index) {
+                *rate += override_rate(rule, *weight);
             }
         }
     }
-    (weights, rates)
-}
-
-pub(crate) fn look_at_scale(binds: &schema::Expressions, raw: impl Fn(&str) -> f32) -> f32 {
-    let (_, rates) = weights_and_rates(binds, raw);
-    1. - rates[2].clamp(0., 1.)
-}
-
-fn effective(
-    binds: &schema::Expressions,
-    raw: impl Fn(&str) -> f32,
-) -> Vec<(&str, &schema::Expression, f32)> {
-    let (weights, rates) = weights_and_rates(binds, raw);
-    weights
+    weighted
         .into_iter()
-        .map(|(name, e, mut w, cat)| {
-            if let Some(c) = cat {
-                let m = 1. - rates[c].clamp(0., 1.);
-                w *= if e.is_binary && m < 1. { 0. } else { m };
+        .map(|(binding, mut weight)| {
+            if let Some(category) = binding.category {
+                let multiplier = 1. - rates[category].clamp(0., 1.);
+                weight = if binding.definition.is_binary.unwrap_or(false) && multiplier < 1. {
+                    0.
+                } else {
+                    weight * multiplier
+                };
             }
-            (name, e, w)
+            (&binding.name, &binding.definition, weight)
         })
         .collect()
+}
+
+pub(crate) fn look_at_scale(binds: &Binds, raw: impl Fn(&ExpressionName) -> f32) -> f32 {
+    let mut rate = 0.;
+    for binding in &binds.bindings {
+        if binding.category != Some(2) {
+            rate += override_rate(
+                binding.definition.override_look_at,
+                binding_weight(binding, &raw),
+            );
+        }
+    }
+    1. - rate.clamp(0., 1.)
 }
 
 trait BindMaterial: bevy::pbr::Material + Clone {
@@ -303,15 +402,22 @@ impl BindMaterial for MToonMaterial {
 fn apply_material<M: BindMaterial>(
     binds: Option<&MaterialBinds<M>>,
     assets: &mut Assets<M>,
-    effective: &[(&str, &schema::Expression, f32)],
+    effective: &[(&ExpressionName, &Expression, f32)],
 ) {
     for (&(index, ref original), (handle, base_uv, emissive_strength)) in
-        binds.into_iter().flat_map(|b| &b.0)
+        binds.into_iter().flat_map(|binds| &binds.0)
     {
-        let Some((base_color, emissive, rest_toon, toon_uv)) = assets.get(original).map(|m| {
-            let (base, toon) = m.base();
-            (base.base_color, base.emissive, toon.copied(), m.uv_rest())
-        }) else {
+        let Some((base_color, emissive, rest_toon, toon_uv)) =
+            assets.get(original).map(|material| {
+                let (base, toon) = material.base();
+                (
+                    base.base_color,
+                    base.emissive,
+                    toon.copied(),
+                    material.uv_rest(),
+                )
+            })
+        else {
             continue;
         };
         let Some(current) = assets.get(handle) else {
@@ -331,13 +437,13 @@ fn apply_material<M: BindMaterial>(
             || cur_base.emissive != emissive
             || cur_base.uv_transform != uv
             || cur_toon.copied() != toon)
-            && let Some(mut mat) = assets.get_mut(handle)
+            && let Some(mut material) = assets.get_mut(handle)
         {
-            let (base, ext) = mat.base_mut();
+            let (base, extension) = material.base_mut();
             base.base_color = color;
             base.emissive = emissive;
             base.uv_transform = uv;
-            if let (Some(dst), Some(src)) = (ext, toon) {
+            if let (Some(dst), Some(src)) = (extension, toon) {
                 *dst = src;
             }
         }
@@ -358,12 +464,13 @@ pub(crate) fn apply(
     mut toon: ResMut<Assets<MToonMaterial>>,
 ) {
     for (manual, binds, standard_binds, toon_binds) in &roots {
-        let effective = effective(
-            &binds.definitions,
-            binds.weight(Some(manual), |e| {
-                transforms.get(e).ok().map(|t| t.translation.x)
-            }),
-        );
+        let raw = binds.weight(Some(manual), |entity| {
+            transforms
+                .get(entity)
+                .ok()
+                .map(|transform| transform.translation.x)
+        });
+        let effective = effective(&binds.bindings, &raw);
         for target in &binds.morphs {
             if let Ok(mut morph) = morphs.get_mut(target.entity) {
                 for &index in &target.indices {
@@ -371,17 +478,17 @@ pub(crate) fn apply(
                     // `bind.weight * expression weight` from there. The final
                     // value is not clamped.
                     let mut next = 0.;
-                    for (_, expr, value) in &effective {
-                        for bind in &expr.morph_target_binds {
-                            if bind.node == target.node && bind.index == index {
-                                next += bind.weight * value;
+                    for (_, expression, value) in &effective {
+                        for bind in expression.morph_target_binds.iter().flatten() {
+                            if schema::index(bind.node) == target.node && bind.index == index {
+                                next += bind.weight as f32 * value;
                             }
                         }
                     }
                     if morph.weights().get(index) != Some(&next)
-                        && let Some(w) = morph.weights_mut().get_mut(index)
+                        && let Some(weight) = morph.weights_mut().get_mut(index)
                     {
-                        *w = next;
+                        *weight = next;
                     }
                 }
             }
@@ -401,7 +508,7 @@ pub(crate) fn compute_material(
     rest_toon: Option<&schema::ToonParams>,
     toon_uv: Option<[UvTransform; 6]>,
     index: usize,
-    weights: &[(&str, &schema::Expression, f32)],
+    weights: &[(&ExpressionName, &Expression, f32)],
 ) -> (Color, LinearRgba, Affine2, Option<schema::ToonParams>) {
     let mut value = base_color.to_linear().to_vec4();
     let mut emission = emissive.to_vec3();
@@ -411,32 +518,35 @@ pub(crate) fn compute_material(
     let mut uv_scale = Vec2::ZERO;
     let mut uv_offset = Vec2::ZERO;
     let mut toon_params = rest_toon.copied();
-    for (_, e, weight) in weights {
-        for bind in e
+    for (_, expression, weight) in weights {
+        for bind in expression
             .material_color_binds
             .iter()
-            .filter(|b| b.material == index)
+            .flatten()
+            .filter(|bind| schema::index(bind.material) == index)
         {
-            let target = bind.target_value;
+            let Some(target) = vec4(&bind.target_value) else {
+                continue;
+            };
             match bind.r#type {
-                ColorType::Color => {
+                MaterialColorType::Color => {
                     color_bound = true;
                     value += (target - base_color.to_linear().to_vec4()) * weight;
                 }
-                ColorType::EmissionColor => {
+                MaterialColorType::EmissionColor => {
                     emission +=
                         (target.truncate() * emissive_strength - emissive.to_vec3()) * weight;
                 }
                 other => {
                     if let (Some(params), Some(rest)) = (&mut toon_params, rest_toon) {
                         let (field, base) = match other {
-                            ColorType::ShadeColor => {
+                            MaterialColorType::ShadeColor => {
                                 (&mut params.shade_color_factor, rest.shade_color_factor)
                             }
-                            ColorType::MatcapColor => {
+                            MaterialColorType::MatcapColor => {
                                 (&mut params.matcap_factor, rest.matcap_factor)
                             }
-                            ColorType::RimColor => (
+                            MaterialColorType::RimColor => (
                                 &mut params.parametric_rim_color_factor,
                                 rest.parametric_rim_color_factor,
                             ),
@@ -447,23 +557,24 @@ pub(crate) fn compute_material(
                 }
             }
         }
-        for bind in e
+        for bind in expression
             .texture_transform_binds
             .iter()
-            .filter(|b| b.material == index)
+            .flatten()
+            .filter(|bind| schema::index(bind.material) == index)
         {
             uv_bound = true;
             uv_weight += weight;
-            uv_scale += bind.scale * weight;
-            uv_offset += bind.offset * weight;
+            uv_scale += vec2(bind.scale.as_deref()).unwrap_or(Vec2::ONE) * weight;
+            uv_offset += vec2(bind.offset.as_deref()).unwrap_or(Vec2::ZERO) * weight;
         }
     }
     let mut uv = base_uv;
     if uv_bound {
         uv = blend_uv(base_uv, uv_weight, uv_scale, uv_offset);
         if let (Some(params), Some(rest)) = (&mut toon_params, toon_uv) {
-            for (i, transform) in params.uv_transforms.iter_mut().enumerate() {
-                *transform = blend_uv(rest[i], uv_weight, uv_scale, uv_offset)
+            for (index, transform) in params.uv_transforms.iter_mut().enumerate() {
+                *transform = blend_uv(rest[index], uv_weight, uv_scale, uv_offset)
                     .affine()
                     .into();
             }
@@ -479,6 +590,26 @@ pub(crate) fn compute_material(
         uv.affine(),
         toon_params,
     )
+}
+
+fn vec2(value: Option<&[f64]>) -> Option<Vec2> {
+    let value = value?;
+    if value.len() != 2 {
+        return None;
+    }
+    Some(Vec2::new(value[0] as f32, value[1] as f32))
+}
+
+fn vec4(value: &[f64]) -> Option<Vec4> {
+    if value.len() != 4 {
+        return None;
+    }
+    Some(Vec4::new(
+        value[0] as f32,
+        value[1] as f32,
+        value[2] as f32,
+        value[3] as f32,
+    ))
 }
 
 /// Blends the authored scale and offset while keeping the authored rotation.
@@ -497,9 +628,20 @@ fn blend_uv(base: UvTransform, weight: f32, scale: Vec2, offset: Vec2) -> UvTran
 mod tests {
     use super::*;
 
+    fn bindings(definitions: &Expressions) -> Vec<ExpressionBinding> {
+        expressions(definitions)
+            .map(|(name, definition)| ExpressionBinding {
+                category: category(&name),
+                name,
+                definition: definition.clone(),
+                target: Entity::PLACEHOLDER,
+            })
+            .collect()
+    }
+
     #[test]
     fn texture_transform_binds_interpolate_from_the_base_uv_transform() {
-        let defs: schema::Expressions = serde_json::from_value(serde_json::json!({
+        let definitions: Expressions = serde_json::from_value(serde_json::json!({
             "preset": {
                 "happy": {
                     "textureTransformBinds": [
@@ -509,7 +651,8 @@ mod tests {
             }
         }))
         .unwrap();
-        let weights = effective(&defs, |_| 1.);
+        let bindings = bindings(&definitions);
+        let weights = effective(&bindings, &|_| 1.);
         let base = UvTransform {
             scale: Vec2::splat(3.),
             rotation: 0.4,
@@ -542,7 +685,7 @@ mod tests {
 
     #[test]
     fn texture_transform_binds_survive_a_zero_base_scale() {
-        let defs: schema::Expressions = serde_json::from_value(serde_json::json!({
+        let definitions: Expressions = serde_json::from_value(serde_json::json!({
             "preset": {
                 "happy": {
                     "textureTransformBinds": [
@@ -561,7 +704,8 @@ mod tests {
             uv_transforms: [base.affine().into(); 6],
             ..default()
         };
-        let weights = effective(&defs, |_| 1.);
+        let bindings = bindings(&definitions);
+        let weights = effective(&bindings, &|_| 1.);
         let (_, _, uv, _) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
             1.,
@@ -575,7 +719,7 @@ mod tests {
         assert!(uv.matrix2.abs_diff_eq(expected.matrix2, 1e-5));
         assert!(uv.translation.abs_diff_eq(expected.translation, 1e-5));
 
-        let weights = effective(&defs, |_| 0.);
+        let weights = effective(&bindings, &|_| 0.);
         let (_, _, uv, _) = compute_material(
             (Color::WHITE, LinearRgba::BLACK),
             1.,
@@ -624,7 +768,7 @@ mod tests {
 
     #[test]
     fn material_binds_and_overrides_follow_spec() {
-        let defs: schema::Expressions = serde_json::from_value(serde_json::json!({
+        let definitions: Expressions = serde_json::from_value(serde_json::json!({
             "preset": {
                 "happy": {
                     "overrideBlink": "blend",
@@ -642,34 +786,74 @@ mod tests {
             "custom": {
                 "smile": {}
             }
-        })).unwrap();
-        let weights = effective(&defs, |n| match n {
-            "happy" => 0.25,
-            "blink" => 0.4,
+        }))
+        .unwrap();
+        let bindings = bindings(&definitions);
+        let weights = effective(&bindings, &|name| match name {
+            ExpressionName::Preset(schema::ExpressionPresetName::Happy) => 0.25,
+            ExpressionName::Preset(schema::ExpressionPresetName::Blink) => 0.4,
             _ => 1.,
         });
+        let weight = |name: schema::ExpressionPresetName| {
+            weights
+                .iter()
+                .find(|(candidate, _, _)| **candidate == ExpressionName::Preset(name))
+                .unwrap()
+                .2
+        };
+        assert_eq!(weight(schema::ExpressionPresetName::Blink), 0.);
         assert_eq!(
-            weights.iter().find(|(n, _, _)| *n == "blink").unwrap().2,
-            0.
-        );
-        assert_eq!(
-            weights.iter().find(|(n, _, _)| *n == "smile").unwrap().2,
+            weights
+                .iter()
+                .find(|(name, _, _)| **name == ExpressionName::Custom("smile".into()))
+                .unwrap()
+                .2,
             1.
         );
 
-        let weights = effective(&defs, |n| if n == "happy" { 0.25 } else { 0.6 });
+        let weights = effective(&bindings, &|name| {
+            if *name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
+                0.25
+            } else {
+                0.6
+            }
+        });
         assert_eq!(
-            weights.iter().find(|(n, _, _)| *n == "blink").unwrap().2,
+            weights
+                .iter()
+                .find(|(name, _, _)| {
+                    **name == ExpressionName::Preset(schema::ExpressionPresetName::Blink)
+                })
+                .unwrap()
+                .2,
             0.
         );
 
-        let weights = effective(&defs, |n| if n == "happy" { 0. } else { 0.6 });
+        let weights = effective(&bindings, &|name| {
+            if *name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
+                0.
+            } else {
+                0.6
+            }
+        });
         assert_eq!(
-            weights.iter().find(|(n, _, _)| *n == "blink").unwrap().2,
+            weights
+                .iter()
+                .find(|(name, _, _)| {
+                    **name == ExpressionName::Preset(schema::ExpressionPresetName::Blink)
+                })
+                .unwrap()
+                .2,
             1.
         );
 
-        let weights = effective(&defs, |n| if n == "happy" { 0.25 } else { 0. });
+        let weights = effective(&bindings, &|name| {
+            if *name == ExpressionName::Preset(schema::ExpressionPresetName::Happy) {
+                0.25
+            } else {
+                0.
+            }
+        });
         let rest = StandardMaterial::default();
         let rest_toon = schema::ToonParams {
             shade_color_factor: Vec3::ONE,
@@ -700,9 +884,9 @@ mod tests {
 
     #[test]
     fn emission_color_binds_apply_the_emissive_strength_once() {
-        let parse = |target: [f32; 4]| -> schema::Expressions {
+        let parse = |target: [f64; 4]| -> Expressions {
             serde_json::from_value(serde_json::json!({
-                "preset": {
+                "custom": {
                     "glow": {"materialColorBinds": [
                         {"material":0,"type":"emissionColor","targetValue":target}
                     ]}
@@ -710,8 +894,9 @@ mod tests {
             }))
             .unwrap()
         };
-        let sample = |defs: &schema::Expressions, base: LinearRgba, strength: f32, weight: f32| {
-            let weights = effective(defs, |_| weight);
+        let sample = |definitions: &Expressions, base: LinearRgba, strength: f32, weight: f32| {
+            let bindings = bindings(definitions);
+            let weights = effective(&bindings, &|_| weight);
             compute_material(
                 (Color::WHITE, base),
                 strength,

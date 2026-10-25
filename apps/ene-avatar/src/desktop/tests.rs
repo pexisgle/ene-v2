@@ -463,10 +463,7 @@ fn regions_observe_spring_updates_after_bounds_calculation() {
         .spawn((
             CharacterId("a".into()),
             AvatarState::Ready,
-            ene_vrm::Vrm {
-                bones: vec![],
-                meta: ene_vrm::VrmMeta::default(),
-            },
+            ene_vrm::Vrm::default(),
         ))
         .id();
     app.world_mut().spawn((

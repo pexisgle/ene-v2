@@ -2,7 +2,7 @@
 
 Bevy 0.19.1 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する、非公開のワークスペースクレートです。
 
-glTF本体のデコード、バッファ・画像・メッシュ・スキンの生成、補間曲線、シーン複製、描画キューはBevyが担当します。このクレートはVRMC拡張の解析、ヒューマノイドの姿勢変換、表情、LookAt、ノード制約、SpringBone、MToonと輪郭を担当します。`.vrm`／`.vrma`のローダーは拡張子を接続してBevyの`GltfLoader`へ委譲します。
+glTF本体のデコード、バッファ・画像・メッシュ・スキンの生成、補間曲線、シーン複製、描画キューはBevyが担当します。このクレートはVRMC拡張の解析、ヒューマノイドの姿勢変換、表情、LookAt、ノード制約、SpringBone、MToonと輪郭を担当します。`VRMC_vrm`／`VRMC_vrm_animation`／`VRMC_springBone`のデータ構造には`vrm-spec`を使い、制約の依存順序は`petgraph`で解決します。`.vrm`／`.vrma`のローダーは拡張子を接続してBevyの`GltfLoader`へ委譲します。
 
 ## API
 
@@ -10,9 +10,9 @@ glTF本体のデコード、バッファ・画像・メッシュ・スキンの�
 
 モーションも標準の`AnimationClip`です。`AssetServer::load("motion.vrma#Animation0")`で読み、`AnimationGraph`／`AnimationGraphHandle`／`AnimationPlayer`／`AnimationTransitions`で再生します。ノード番号をVRMのボーン・表情へ対応付け、Bevyの曲線をそのまま写像するので、STEP・LINEAR・CUBICSPLINE・単一キーを再サンプリングしません。正規化したクリップを複数モデルで共有できます。
 
-- `Vrm::bone("hips")`などで、そのインスタンスのボーンを取得します。
-- `vrm.meta`でVRMC_vrmのアバター名、作者、ライセンス情報（`licenseUrl`、再配布・改変許諾など）を取得します。値の内容は再検証しません。
-- `ExpressionWeights`は手動指定です。指定したキーはアニメーションより優先し、キーを削除するとアニメーションへ戻ります。
+- `Vrm::bone(HumanBoneName::Hips)`などで、そのインスタンスのボーンを取得します。
+- `vrm.meta`は`vrm-spec`の`Meta`で、VRMC_vrmのアバター名、作者、ライセンス情報（`licenseUrl`、再配布・改変許諾など）を取得します。値の内容は再検証しません。
+- `ExpressionWeights`は手動指定です。キーは`ExpressionName::Preset(...)`／`ExpressionName::Custom(...)`で、指定したキーはアニメーションより優先し、キーを削除するとアニメーションへ戻ります。
 - `LookAt::target`は任意のワールド座標です。`None`ではVRMAの視線を使います。
 - `SpringJointProps`の力・半径はモデル空間のメートルです。デスクトップ表示のメートル→ピクセル変換はアプリが担当します。
 - `SpringRig::paused`をtrueにすると固定ステップの積分を止め、最後にシミュレーションした回転を適用し続けます。制約が同じTransformを毎フレーム書いても姿勢を保持します。`SpringJointProps`は設定であり、外すとそのジョイントはSpringBoneの対象外になります。

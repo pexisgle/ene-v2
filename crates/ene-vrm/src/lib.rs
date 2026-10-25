@@ -13,10 +13,10 @@ mod schema;
 mod tests;
 
 use bevy::{app::AnimationSystems, prelude::*, transform::TransformSystems};
-pub use expressions::ExpressionWeights;
+pub use expressions::{ExpressionName, ExpressionWeights};
 pub use material::{MToonExtension, MToonMaterial};
-pub use runtime::{HumanoidBone, LookAt, SpringJointProps, SpringRig, Vrm};
-pub use schema::{AvatarPermission, CommercialUsage, CreditNotation, Modification, VrmMeta};
+pub use runtime::{LookAt, SpringJointProps, SpringRig, Vrm};
+pub use schema::{ExpressionPresetName, HumanBoneName, VrmMeta};
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VrmSystems {

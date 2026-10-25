@@ -16,6 +16,10 @@ use bevy::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use vrm_spec::{
+    vrmc_materials_mtoon_1_0::VRMC_MATERIALS_MTOON, vrmc_spring_bone_1_0::VRMC_SPRING_BONE,
+    vrmc_vrm_1_0::VRMC_VRM, vrmc_vrm_animation_1_0::VRMC_VRM_ANIMATION,
+};
 
 pub(crate) fn setup(app: &mut App) {
     app.preregister_asset_loader::<VrmLoader>(&["vrm", "vrma"]);
@@ -122,6 +126,42 @@ pub(crate) fn extension<T: serde::de::DeserializeOwned>(
     name: &str,
 ) -> std::io::Result<T> {
     T::deserialize(value.ok_or_else(|| invalid(format!("missing {name}")))?).map_err(invalid)
+}
+
+/// The JSON schema requires a node for every animated human bone, expression
+/// and look-at target, but `vrm-spec` models them as optional.
+fn validate_motion(motion: &schema::Motion) -> std::io::Result<()> {
+    if let Some(humanoid) = &motion.humanoid {
+        for bone in humanoid.human_bones.0.values() {
+            if bone.as_ref().and_then(|bone| bone.node).is_none() {
+                return Err(invalid("VRMA human bone requires a node"));
+            }
+        }
+    }
+    if let Some(expressions) = &motion.expressions {
+        if let Some(preset) = &expressions.preset {
+            for expression in preset.0.values() {
+                if expression.node.is_none() {
+                    return Err(invalid("VRMA expression requires a node"));
+                }
+            }
+        }
+        if let Some(custom) = &expressions.custom {
+            for expression in custom.values() {
+                if expression.node.is_none() {
+                    return Err(invalid("VRMA expression requires a node"));
+                }
+            }
+        }
+    }
+    if motion
+        .look_at
+        .as_ref()
+        .is_some_and(|look_at| look_at.node.is_none())
+    {
+        return Err(invalid("VRMA lookAt requires a node"));
+    }
+    Ok(())
 }
 
 /// Returns an image handle that samples as `space`, cloning the decoded image
@@ -243,14 +283,21 @@ impl GltfExtensionHandler for VrmExtensions {
         self.definition = Some((|| {
             if motion {
                 let motion: schema::Motion = extension(
-                    source.extension_value("VRMC_vrm_animation"),
+                    source.extension_value(VRMC_VRM_ANIMATION),
                     "VRMC_vrm_animation",
                 )?;
+                if motion.spec_version != "1.0" {
+                    return Err(invalid("VRMC_vrm_animation requires specVersion 1.0"));
+                }
+                validate_motion(&motion)?;
                 return Ok(Definition::Motion(Arc::new(motion)));
             }
-            let model: schema::Model = extension(source.extension_value("VRMC_vrm"), "VRMC_vrm")?;
+            let model: schema::Model = extension(source.extension_value(VRMC_VRM), "VRMC_vrm")?;
+            if model.spec_version != "1.0" {
+                return Err(invalid("VRMC_vrm requires specVersion 1.0"));
+            }
             for material in source.materials() {
-                if let Some(value) = material.extension_value("VRMC_materials_mtoon") {
+                if let Some(value) = material.extension_value(VRMC_MATERIALS_MTOON) {
                     self.materials.insert(
                         material.index().expect("indexed material"),
                         schema::Toon::deserialize(value).map_err(invalid)?,
@@ -258,10 +305,15 @@ impl GltfExtensionHandler for VrmExtensions {
                 }
             }
             self.springs = source
-                .extension_value("VRMC_springBone")
+                .extension_value(VRMC_SPRING_BONE)
                 .map(schema::Springs::deserialize)
                 .transpose()
                 .map_err(invalid)?;
+            if let Some(springs) = &self.springs
+                && springs.spec_version != "1.0"
+            {
+                return Err(invalid("VRMC_springBone requires specVersion 1.0"));
+            }
             for node in source.nodes() {
                 if let Some(value) = node.extension_value("VRMC_node_constraint") {
                     self.constraints.push((

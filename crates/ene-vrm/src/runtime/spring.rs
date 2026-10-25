@@ -373,7 +373,10 @@ mod tests {
         let rigs: Vec<_> = q.iter(app.world()).collect();
         assert_eq!(rigs.len(), 2);
         for (vrm, rig) in &rigs {
-            assert_eq!(rig.colliders[0].entity, vrm.bone("hips").unwrap());
+            assert_eq!(
+                rig.colliders[0].entity,
+                vrm.bone(crate::schema::HumanBoneName::Hips).unwrap()
+            );
             assert_eq!(rig.chains.len(), 2);
             for chain in &rig.chains {
                 assert_eq!(chain.colliders, vec![0]);

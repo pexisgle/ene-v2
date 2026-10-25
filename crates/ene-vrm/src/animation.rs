@@ -1,5 +1,6 @@
 use crate::{
     VrmSystems,
+    expressions::ExpressionName,
     loader::{invalid, require_node},
     schema,
 };
@@ -15,11 +16,13 @@ use bevy::{
 };
 use std::sync::Arc;
 
-pub(crate) fn bone_target(name: &str) -> AnimationTargetId {
-    AnimationTargetId::from_name(&Name::new(format!("VRMC_vrm/bone/{name}")))
+pub(crate) fn bone_target(name: schema::HumanBoneName) -> AnimationTargetId {
+    // These ids are internal to this crate; attach and retargeting only need to
+    // agree within one binary.
+    AnimationTargetId::from_name(&Name::new(format!("VRMC_vrm/bone/{name:?}")))
 }
-pub(crate) fn expression_target(name: &str) -> AnimationTargetId {
-    AnimationTargetId::from_name(&Name::new(format!("VRMC_vrm/expression/{name}")))
+pub(crate) fn expression_target(name: &ExpressionName) -> AnimationTargetId {
+    AnimationTargetId::from_name(&Name::new(format!("VRMC_vrm/expression/{name:?}")))
 }
 pub(crate) fn gaze_target() -> AnimationTargetId {
     AnimationTargetId::from_name(&Name::new("VRMC_vrm/lookAt"))
@@ -58,7 +61,8 @@ fn reset(
         }
     }
     for binds in &roots {
-        for &entity in &binds.targets {
+        for binding in &binds.bindings {
+            let entity = binding.target;
             if let Ok(mut transform) = transforms.get_mut(entity)
                 && transform.translation != Vec3::ZERO
             {
@@ -126,6 +130,44 @@ fn motion_targets(document: &gltf::Document) -> HashMap<usize, AnimationTargetId
     targets
 }
 
+fn motion_bones(motion: &schema::Motion) -> HashMap<usize, schema::HumanBoneName> {
+    motion
+        .humanoid
+        .iter()
+        .flat_map(|humanoid| humanoid.human_bones.0.iter())
+        .filter_map(|(name, bone)| {
+            let bone = bone.as_ref()?;
+            Some((schema::index(bone.node?), *name))
+        })
+        .collect()
+}
+
+fn motion_expressions(motion: &schema::Motion) -> HashMap<usize, ExpressionName> {
+    let mut expressions = HashMap::default();
+    let Some(definitions) = &motion.expressions else {
+        return expressions;
+    };
+    if let Some(preset) = &definitions.preset {
+        for (name, expression) in &preset.0 {
+            if let Some(node) = expression.node {
+                expressions
+                    .entry(schema::index(node))
+                    .or_insert(ExpressionName::Preset(*name));
+            }
+        }
+    }
+    if let Some(custom) = &definitions.custom {
+        for (name, expression) in custom {
+            if let Some(node) = expression.node {
+                expressions
+                    .entry(schema::index(node))
+                    .or_insert(ExpressionName::Custom(name.clone()));
+            }
+        }
+    }
+    expressions
+}
+
 pub(crate) fn retarget_motion(
     motion: &schema::Motion,
     source: &gltf::Document,
@@ -139,24 +181,34 @@ pub(crate) fn retarget_motion(
         .expect("native scene transform")
         .affine()
         .inverse();
-    let bones = motion.humanoid.as_ref().map(|h| &h.human_bones);
-    let height = motion
+    let hips = motion
         .humanoid
-        .as_ref()
-        .map_or(1., |h| h.hips_height(world, nodes, root_inv));
+        .iter()
+        .flat_map(|humanoid| humanoid.human_bones.0.get(&schema::HumanBoneName::Hips))
+        .next()
+        .and_then(|bone| bone.as_ref())
+        .and_then(|bone| bone.node)
+        .map(schema::index);
+    let height = crate::runtime::hips_height(world, nodes, root_inv, hips);
+    let bones = motion_bones(motion);
+    let expressions = motion_expressions(motion);
     let (rot_prop, trans_prop) = (
         animated_field!(Transform::rotation),
         animated_field!(Transform::translation),
     );
     let (rot_id, trans_id) = (rot_prop.evaluator_id(), trans_prop.evaluator_id());
-    let gaze_node = motion.look_at.as_ref().map(|l| l.node);
+    let gaze_node = motion
+        .look_at
+        .as_ref()
+        .and_then(|look_at| look_at.node)
+        .map(schema::index);
     let targets = motion_targets(source);
     let mut clips = Vec::new();
     for animation in source.animations() {
         let label = format!("Animation{}", animation.index());
         let native = context
             .get_labeled(&label)
-            .and_then(|x| x.get::<AnimationClip>())
+            .and_then(|asset| asset.get::<AnimationClip>())
             .ok_or_else(|| invalid("VRMA clip unavailable"))?;
         let mut clip = AnimationClip::default();
         clip.set_duration(native.duration());
@@ -169,17 +221,12 @@ pub(crate) fn retarget_motion(
         for channel in animation.channels() {
             let node = channel.target().node().index();
             let property = channel.target().property();
-            let bone =
-                bones.and_then(|b| b.iter().find_map(|(k, v)| (v.node == node).then_some(k)));
-            let expr = motion
-                .expressions
-                .iter()
-                .find_map(|(k, v)| (v.node == node).then_some(k));
-            let gaze = gaze_node == Some(node);
+            let bone = bones.get(&node).copied();
+            let expression = expressions.get(&node);
             let relevant = match property {
-                gltf::animation::Property::Rotation => bone.is_some() || gaze,
+                gltf::animation::Property::Rotation => bone.is_some() || gaze_node == Some(node),
                 gltf::animation::Property::Translation => {
-                    bone.is_some_and(|b| b == "hips") || expr.is_some()
+                    bone == Some(schema::HumanBoneName::Hips) || expression.is_some()
                 }
                 _ => false,
             };
@@ -235,36 +282,40 @@ pub(crate) fn retarget_motion(
             if eval == rot_id
                 && let Some(bone) = bone
             {
-                let c = Arc::new(curve.clone());
+                let curve = Arc::new(curve.clone());
                 clip.add_curve_to_target(
                     bone_target(bone),
                     AnimatableCurve::new(
-                        AnimatedField::new_unchecked("rotation", |p: &mut Pose| {
-                            p.rotation.get_or_insert(Quat::IDENTITY)
+                        AnimatedField::new_unchecked("rotation", |pose: &mut Pose| {
+                            pose.rotation.get_or_insert(Quat::IDENTITY)
                         }),
                         FunctionCurve::new(domain, move |t| {
                             normalize_rotation(
                                 local.rotation,
                                 global_rot,
-                                *c.0.sample_clamped(t)
+                                *curve
+                                    .0
+                                    .sample_clamped(t)
                                     .downcast::<Quat>()
                                     .expect("rotation curve"),
                             )
                         }),
                     ),
                 );
-            } else if eval == trans_id && bone.is_some_and(|b| b == "hips") {
-                let c = Arc::new(curve.clone());
+            } else if eval == trans_id && bone == Some(schema::HumanBoneName::Hips) {
+                let curve = Arc::new(curve.clone());
                 let parent = global.affine() * local.compute_affine().inverse();
                 clip.add_curve_to_target(
-                    bone_target("hips"),
+                    bone_target(schema::HumanBoneName::Hips),
                     AnimatableCurve::new(
-                        AnimatedField::new_unchecked("translation", |p: &mut Pose| {
-                            p.translation.get_or_insert(Vec3::ZERO)
+                        AnimatedField::new_unchecked("translation", |pose: &mut Pose| {
+                            pose.translation.get_or_insert(Vec3::ZERO)
                         }),
                         FunctionCurve::new(domain, move |t| {
                             parent.transform_vector3(
-                                *c.0.sample_clamped(t)
+                                *curve
+                                    .0
+                                    .sample_clamped(t)
                                     .downcast::<Vec3>()
                                     .expect("translation curve")
                                     - local.translation,
@@ -273,10 +324,10 @@ pub(crate) fn retarget_motion(
                     ),
                 );
             } else if eval == trans_id
-                && let Some(expr) = expr
+                && let Some(expression) = expression
             {
-                clip.add_variable_curve_to_target(expression_target(expr), curve.clone());
-            } else if eval == rot_id && motion.look_at.as_ref().map(|l| l.node) == Some(node) {
+                clip.add_variable_curve_to_target(expression_target(expression), curve.clone());
+            } else if eval == rot_id && gaze_node == Some(node) {
                 clip.add_variable_curve_to_target(gaze_target(), curve.clone());
             }
         }

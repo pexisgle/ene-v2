@@ -1,7 +1,8 @@
 use crate::{
     VrmSystems,
     animation::{self, RestPose},
-    expressions, schema,
+    expressions::{self, ExpressionName},
+    schema,
 };
 use bevy::{ecs::system::SystemChangeTick, prelude::*, transform::helper::TransformHelper};
 
@@ -13,9 +14,9 @@ pub struct LookAt {
 }
 
 #[derive(Component, Clone, Reflect)]
-#[reflect(Component, Clone)]
+#[reflect(Component, Clone, opaque)]
 pub(crate) struct Gaze {
-    pub(crate) definition: schema::Gaze,
+    pub(crate) definition: schema::LookAt,
     #[entities]
     pub(crate) input: Entity,
     pub(crate) active: bool,
@@ -37,7 +38,10 @@ fn reset_gaze(
         if !gaze.active {
             continue;
         }
-        for name in ["leftEye", "rightEye"] {
+        for name in [
+            schema::HumanBoneName::LeftEye,
+            schema::HumanBoneName::RightEye,
+        ] {
             if let Some(eye) = vrm.bone(name)
                 && let Ok((rest, mut t)) = transforms.get_mut(eye)
             {
@@ -46,6 +50,36 @@ fn reset_gaze(
         }
         gaze.active = false;
     }
+}
+
+/// Resolves a VRM range map with the three-vrm defaults.
+pub(crate) fn remap(
+    map: Option<&schema::LookAtRangeMap>,
+    kind: schema::LookAtType,
+    angle: f32,
+) -> f32 {
+    let default_scale = if matches!(kind, schema::LookAtType::Bone) {
+        10.
+    } else {
+        1.
+    };
+    let (input_max, output_scale) = map.map_or((90., default_scale), |map| {
+        (
+            map.input_max_value.unwrap_or(90.),
+            map.output_scale.unwrap_or(default_scale),
+        )
+    });
+    (angle.abs() / (input_max as f32).max(f32::EPSILON)).min(1.) * output_scale as f32
+}
+
+pub(crate) fn head_offset(definition: &schema::LookAt) -> Vec3 {
+    definition
+        .offset_from_head_bone
+        .as_deref()
+        .and_then(|offset| <[f64; 3]>::try_from(offset).ok())
+        .map_or(Vec3::new(0., 0.06, 0.), |[x, y, z]| {
+            Vec3::new(x as f32, y as f32, z as f32)
+        })
 }
 
 #[allow(clippy::type_complexity)]
@@ -66,7 +100,7 @@ fn look_at(
     ticks: SystemChangeTick,
 ) {
     for (vrm, look, mut gaze, manual, binds) in &mut roots {
-        let Some(head) = vrm.bone("head") else {
+        let Some(head) = vrm.bone(schema::HumanBoneName::Head) else {
             continue;
         };
         let angles = if let Some(target) = look.target {
@@ -77,7 +111,7 @@ fn look_at(
                 continue;
             };
             let dir = (head.rotation().normalize() * rest.global_rotation.inverse()).inverse()
-                * (target - head.transform_point(gaze.definition.offset_from_head_bone));
+                * (target - head.transform_point(head_offset(&gaze.definition)));
             Vec2::new(
                 dir.x.atan2(dir.z).to_degrees(),
                 dir.y.atan2(dir.xz().length()).to_degrees(),
@@ -95,66 +129,82 @@ fn look_at(
         // VRM 1.0 makes leftEye/rightEye optional. UniVRM falls back to
         // expression LookAt when a `bone` model has no eye bones; follow that
         // instead of silently doing nothing.
-        let has_eyes = vrm.bone("leftEye").is_some() && vrm.bone("rightEye").is_some();
-        let bone = matches!(gaze.definition.r#type, schema::GazeType::Bone) && has_eyes;
+        let kind = gaze
+            .definition
+            .look_at_type
+            .unwrap_or(schema::LookAtType::Bone);
+        let has_eyes = vrm.bone(schema::HumanBoneName::LeftEye).is_some()
+            && vrm.bone(schema::HumanBoneName::RightEye).is_some();
+        let bone = matches!(kind, schema::LookAtType::Bone) && has_eyes;
         gaze.active = bone;
-        let def = &gaze.definition;
+        let definition = &gaze.definition;
         let pitch = if angles.y > 0. {
-            def.vertical_up().map(angles.y)
+            remap(definition.range_map_vertical_up.as_ref(), kind, angles.y)
         } else {
-            -def.vertical_down().map(angles.y)
+            -remap(definition.range_map_vertical_down.as_ref(), kind, angles.y)
         };
-        match if bone {
-            schema::GazeType::Bone
-        } else {
-            schema::GazeType::Expression
-        } {
-            schema::GazeType::Bone => {
-                let p2 = transforms.p2();
-                let scale = binds.map_or(1., |b| {
-                    expressions::look_at_scale(
-                        &b.definitions,
-                        b.weight(manual, |e| p2.get(e).ok().map(|t| t.translation.x)),
-                    )
+        if bone {
+            let p2 = transforms.p2();
+            let scale = binds.map_or(1., |binds| {
+                let weights = binds.weight(manual, |entity| {
+                    p2.get(entity).ok().map(|transform| transform.translation.x)
                 });
-                let pitch = pitch * scale;
-                for (name, inner) in [("leftEye", angles.x < 0.), ("rightEye", angles.x > 0.)] {
-                    let map = if inner {
-                        def.horizontal_inner()
-                    } else {
-                        def.horizontal_outer()
-                    };
-                    let yaw = map.map(angles.x) * angles.x.signum() * scale;
-                    if let Some(eye) = vrm.bone(name)
-                        && let Ok(rest) = rests.get(eye)
-                        && let Ok(mut t) = transforms.p1().get_mut(eye)
-                    {
-                        t.rotation = animation::denormalize_rotation(
-                            rest.local.rotation,
-                            rest.global_rotation,
-                            Quat::from_euler(
-                                EulerRot::YXZ,
-                                yaw.to_radians(),
-                                -pitch.to_radians(),
-                                0.,
-                            ),
-                        );
-                    }
+                expressions::look_at_scale(binds, &weights)
+            });
+            let pitch = pitch * scale;
+            for (name, inner) in [
+                (schema::HumanBoneName::LeftEye, angles.x < 0.),
+                (schema::HumanBoneName::RightEye, angles.x > 0.),
+            ] {
+                let map = if inner {
+                    definition.range_map_horizontal_inner.as_ref()
+                } else {
+                    definition.range_map_horizontal_outer.as_ref()
+                };
+                let yaw = remap(map, kind, angles.x) * angles.x.signum() * scale;
+                if let Some(eye) = vrm.bone(name)
+                    && let Ok(rest) = rests.get(eye)
+                    && let Ok(mut t) = transforms.p1().get_mut(eye)
+                {
+                    t.rotation = animation::denormalize_rotation(
+                        rest.local.rotation,
+                        rest.global_rotation,
+                        Quat::from_euler(EulerRot::YXZ, yaw.to_radians(), -pitch.to_radians(), 0.),
+                    );
                 }
             }
-            schema::GazeType::Expression => {
-                let (h, v) = (def.horizontal_outer().map(angles.x), pitch.abs());
-                for (name, w) in [
-                    ("lookLeft", if angles.x > 0. { h } else { 0. }),
-                    ("lookRight", if angles.x < 0. { h } else { 0. }),
-                    ("lookUp", if angles.y > 0. { v } else { 0. }),
-                    ("lookDown", if angles.y < 0. { v } else { 0. }),
-                ] {
-                    if let Some(ch) = binds.and_then(|b| b.target(name))
-                        && let Ok(mut t) = transforms.p1().get_mut(ch)
-                    {
-                        t.translation.x = w;
-                    }
+        } else {
+            let (h, v) = (
+                remap(
+                    definition.range_map_horizontal_outer.as_ref(),
+                    kind,
+                    angles.x,
+                ),
+                pitch.abs(),
+            );
+            for (name, w) in [
+                (
+                    schema::ExpressionPresetName::LookLeft,
+                    if angles.x > 0. { h } else { 0. },
+                ),
+                (
+                    schema::ExpressionPresetName::LookRight,
+                    if angles.x < 0. { h } else { 0. },
+                ),
+                (
+                    schema::ExpressionPresetName::LookUp,
+                    if angles.y > 0. { v } else { 0. },
+                ),
+                (
+                    schema::ExpressionPresetName::LookDown,
+                    if angles.y < 0. { v } else { 0. },
+                ),
+            ] {
+                if let Some(channel) =
+                    binds.and_then(|binds| binds.target(&ExpressionName::Preset(name)))
+                    && let Ok(mut transform) = transforms.p1().get_mut(channel)
+                {
+                    transform.translation.x = w;
                 }
             }
         }

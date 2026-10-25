@@ -1,21 +1,26 @@
-//! Only VRMC extension schemas; core glTF data belongs to Bevy.
+//! VRMC extension data not covered by `vrm-spec`, plus shared conversions.
 
-mod animation;
 mod constraint;
-mod expressions;
-mod look_at;
 mod mtoon;
-mod spring;
 mod version;
-mod vrm;
 
-pub(crate) use animation::*;
 pub(crate) use constraint::*;
-pub(crate) use expressions::*;
-pub(crate) use look_at::*;
 pub(crate) use mtoon::*;
-pub(crate) use spring::*;
 #[cfg(test)]
 pub(crate) use version::Version;
-pub(crate) use vrm::*;
-pub use vrm::{AvatarPermission, CommercialUsage, CreditNotation, Modification, VrmMeta};
+pub use vrm_spec::vrmc_vrm_1_0::{ExpressionPresetName, HumanBoneName, Meta as VrmMeta};
+pub(crate) use vrm_spec::{
+    vrmc_spring_bone_1_0::VrmcSpringBoneSchema as Springs,
+    vrmc_vrm_1_0::{
+        Expression, ExpressionOverrideType, Expressions, LookAt, LookAtRangeMap, LookAtType,
+        MaterialColorType, VRMCVrmSchema as Model,
+    },
+    vrmc_vrm_animation_1_0::VRMCVrmAnimationSchema as Motion,
+};
+
+/// Index value as authored. `vrm-spec` types node/material references as
+/// `gltf::json::Index`, including `TextureTransformBind::material` which the
+/// spec classifies as a material but types as a node index.
+pub(crate) fn index<T>(index: gltf::json::Index<T>) -> usize {
+    index.value()
+}

@@ -325,8 +325,7 @@ fn loader_rejects_unusable_data_and_tolerates_spec_noise() {
     v["extensions"]["VRMC_vrm"]["meta"]["thumbnailImage"] = json!(0);
     push(v, false, false);
     let mut v = model.clone();
-    v["extensions"]["VRMC_vrm"]["expressions"]["preset"]["unknown"] = json!({});
-    v["extensions"]["VRMC_vrm"]["expressions"]["custom"] = json!({"aa":{}});
+    v["extensions"]["VRMC_vrm"]["expressions"]["custom"] = json!({"aa":{},"unknown":{}});
     v["extensions"]["VRMC_vrm"]["expressions"]["preset"]["aa"] = json!({"morphTargetBinds":[]});
     push(v, false, false);
     let mut v = model.clone();
@@ -466,13 +465,20 @@ fn vrma_neutral_and_zero_input_max_value_load() {
         );
     }
 
-    let gaze: schema::Gaze = serde_json::from_value(json!({
+    let gaze: schema::LookAt = serde_json::from_value(json!({
         "type":"bone",
         "rangeMapHorizontalOuter":{"inputMaxValue":0.,"outputScale":10.}
     }))
     .unwrap();
-    assert_eq!(gaze.horizontal_outer().map(0.), 0.);
-    assert_eq!(gaze.horizontal_outer().map(1.), 10.);
+    let kind = gaze.look_at_type.unwrap_or(schema::LookAtType::Bone);
+    assert_eq!(
+        runtime::look_at::remap(gaze.range_map_horizontal_outer.as_ref(), kind, 0.),
+        0.
+    );
+    assert_eq!(
+        runtime::look_at::remap(gaze.range_map_horizontal_outer.as_ref(), kind, 1.),
+        10.
+    );
 }
 
 #[test]
@@ -554,7 +560,7 @@ fn vrma_rejects_cross_scene_animation_target_reuse() {
     value["scenes"] = json!([{"nodes":[0, expr]}, {"nodes":[other]}]);
     value["scene"] = json!(0);
     value["extensions"]["VRMC_vrm_animation"]["expressions"] =
-        json!({"preset":{"smile":{"node":expr}}});
+        json!({"custom":{"smile":{"node":expr}}});
     std::fs::write(
         files.0.join("weight.bin"),
         [0.9f32, 0., 0., 0.1, 0., 0.]
@@ -763,7 +769,7 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
         .unwrap();
     assert!(
         rot_clip
-            .curves_for_target(animation::bone_target("hips"))
+            .curves_for_target(animation::bone_target(HumanBoneName::Hips))
             .unwrap()[0]
             .0
             .sample_clamped(0.5)
@@ -785,7 +791,7 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
     let same_curves = clips
         .get(&assets.get(&h_same).unwrap().animations[0])
         .unwrap()
-        .curves_for_target(animation::bone_target("hips"))
+        .curves_for_target(animation::bone_target(HumanBoneName::Hips))
         .unwrap();
     assert_eq!(same_curves.len(), 2);
 
@@ -794,7 +800,7 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
         .unwrap();
     assert_eq!(
         *step_clip
-            .curves_for_target(animation::bone_target("hips"))
+            .curves_for_target(animation::bone_target(HumanBoneName::Hips))
             .unwrap()[0]
             .0
             .sample_clamped(0.999)
@@ -804,7 +810,7 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
     );
     assert_eq!(
         *step_clip
-            .curves_for_target(animation::bone_target("hips"))
+            .curves_for_target(animation::bone_target(HumanBoneName::Hips))
             .unwrap()[0]
             .0
             .sample_clamped(1.)
@@ -818,7 +824,7 @@ fn vrma_curves_support_linear_step_cubic_and_scene_conversion() {
         .unwrap();
     assert!(
         cubic_clip
-            .curves_for_target(animation::bone_target("hips"))
+            .curves_for_target(animation::bone_target(HumanBoneName::Hips))
             .unwrap()[0]
             .0
             .sample_clamped(0.25)
@@ -888,10 +894,10 @@ fn vrma_skipped_channel_keeps_other_curves() {
         .get(&clip)
         .unwrap();
     let hips = clip
-        .curves_for_target(animation::bone_target("hips"))
+        .curves_for_target(animation::bone_target(HumanBoneName::Hips))
         .unwrap();
     let spine = clip
-        .curves_for_target(animation::bone_target("spine"))
+        .curves_for_target(animation::bone_target(HumanBoneName::Spine))
         .unwrap();
     assert_eq!(hips.len(), 1);
     assert_eq!(spine.len(), 1);
@@ -991,10 +997,10 @@ fn scene_instances_remap_bones_and_preserve_native_and_vrma_playback() {
         .map(|(e, v)| {
             (
                 e,
-                v.bone("hips").unwrap(),
-                v.bone("spine").unwrap(),
-                v.bone("head").unwrap(),
-                v.bone("leftEye").unwrap(),
+                v.bone(HumanBoneName::Hips).unwrap(),
+                v.bone(HumanBoneName::Spine).unwrap(),
+                v.bone(HumanBoneName::Head).unwrap(),
+                v.bone(HumanBoneName::LeftEye).unwrap(),
             )
         })
         .collect();
@@ -1016,7 +1022,7 @@ fn scene_instances_remap_bones_and_preserve_native_and_vrma_playback() {
     for &(root, hips, spine, head, left_eye) in &rigs {
         assert_eq!(
             app.world().get::<AnimationTargetId>(hips),
-            Some(&animation::bone_target("hips"))
+            Some(&animation::bone_target(HumanBoneName::Hips))
         );
         for bone in [hips, spine, head, left_eye] {
             assert!(app.world().get::<animation::Pose>(bone).is_some());
@@ -1105,7 +1111,7 @@ fn scene_instances_remap_bones_and_preserve_native_and_vrma_playback() {
     app.world_mut()
         .get_mut::<ExpressionWeights>(root)
         .unwrap()
-        .insert("blink".into(), 1.);
+        .insert(ExpressionName::Preset(ExpressionPresetName::Blink), 1.);
     app.update();
     assert!(
         app.world()
@@ -1199,14 +1205,17 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
         expressions::attach(
             app.world_mut(),
             root,
-            &definitions,
+            Some(&definitions),
             &HashMap::from_iter([(0, morph)]),
         )
         .unwrap();
         app.world_mut()
             .get_mut::<ExpressionWeights>(root)
             .unwrap()
-            .extend([("aa".into(), 1.), ("happy".into(), happy)]);
+            .extend([
+                (ExpressionName::Preset(ExpressionPresetName::Aa), 1.),
+                (ExpressionName::Preset(ExpressionPresetName::Happy), happy),
+            ]);
         let std_mesh = app
             .world_mut()
             .spawn((
@@ -1303,13 +1312,13 @@ fn expression_morphs_materials_and_vrma_blending_stay_isolated() {
     app.world_mut()
         .get_mut::<ExpressionWeights>(rigs[0].0)
         .unwrap()
-        .remove("happy");
+        .remove(&ExpressionName::Preset(ExpressionPresetName::Happy));
     app.update();
     let ch = app
         .world()
         .get::<expressions::Binds>(rigs[0].0)
         .unwrap()
-        .target("happy")
+        .target(&ExpressionName::Preset(ExpressionPresetName::Happy))
         .unwrap();
     assert_eq!(
         app.world().get::<Transform>(ch).unwrap().translation.x,
@@ -1354,14 +1363,17 @@ fn expression_morph_binds_accumulate_from_zero_without_clamping() {
     expressions::attach(
         app.world_mut(),
         root,
-        &definitions,
+        Some(&definitions),
         &HashMap::from_iter([(0, morph)]),
     )
     .unwrap();
     app.world_mut()
         .get_mut::<ExpressionWeights>(root)
         .unwrap()
-        .extend([("aa".into(), 1.), ("ih".into(), 1.)]);
+        .extend([
+            (ExpressionName::Preset(ExpressionPresetName::Aa), 1.),
+            (ExpressionName::Preset(ExpressionPresetName::Ih), 1.),
+        ]);
     app.update();
     assert_eq!(
         app.world().get::<MorphWeights>(morph).unwrap().weights(),
@@ -1389,30 +1401,44 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     assert_eq!(toon.outline_width_mode, schema::OutlineMode::None);
     assert_eq!(schema::ToonParams::min_size().get(), 416);
 
-    let gaze: schema::Gaze = serde_json::from_value(json!({"type":"expression"})).unwrap();
-    assert_eq!(gaze.horizontal_inner().output_scale, Some(1.0));
-    assert_eq!(gaze.offset_from_head_bone, Vec3::new(0., 0.06, 0.));
-    let expression_missing_scale: schema::Gaze = serde_json::from_value(json!({
+    let gaze: schema::LookAt = serde_json::from_value(json!({"type":"expression"})).unwrap();
+    assert_eq!(
+        runtime::look_at::remap(None, schema::LookAtType::Expression, 90.),
+        1.
+    );
+    assert_eq!(
+        runtime::look_at::head_offset(&gaze),
+        Vec3::new(0., 0.06, 0.)
+    );
+    let expression_missing_scale: schema::LookAt = serde_json::from_value(json!({
         "type":"expression",
         "rangeMapHorizontalOuter":{"inputMaxValue":90.}
     }))
     .unwrap();
     assert_eq!(
-        expression_missing_scale.horizontal_outer().output_scale,
-        Some(1.0)
+        runtime::look_at::remap(
+            expression_missing_scale.range_map_horizontal_outer.as_ref(),
+            schema::LookAtType::Expression,
+            90.
+        ),
+        1.
     );
-    let bone_missing_scale: schema::Gaze = serde_json::from_value(json!({
+    let bone_missing_scale: schema::LookAt = serde_json::from_value(json!({
         "type":"bone",
         "rangeMapHorizontalOuter":{"inputMaxValue":90.}
     }))
     .unwrap();
     assert_eq!(
-        bone_missing_scale.horizontal_outer().output_scale,
-        Some(10.0)
+        runtime::look_at::remap(
+            bone_missing_scale.range_map_horizontal_outer.as_ref(),
+            schema::LookAtType::Bone,
+            90.
+        ),
+        10.
     );
     let motion: schema::Motion =
         serde_json::from_value(json!({"specVersion":"1.0","lookAt":{"node":3}})).unwrap();
-    assert_eq!(motion.look_at.unwrap().node, 3);
+    assert_eq!(motion.look_at.unwrap().node.unwrap().value(), 3);
 
     let files = Files::new();
     let mut app = app();

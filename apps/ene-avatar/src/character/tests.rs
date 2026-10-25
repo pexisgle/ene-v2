@@ -3,14 +3,11 @@ use super::*;
 use crate::desktop::Output;
 use bevy::ecs::message::Messages;
 use bevy::ecs::system::RunSystemOnce;
-use ene_vrm::{SpringJointProps, SpringRig, Vrm, VrmMeta};
+use ene_vrm::{HumanBoneName, SpringJointProps, SpringRig, Vrm};
 use serde_json::json;
 
 fn ready() -> Vrm {
-    Vrm {
-        bones: vec![],
-        meta: VrmMeta::default(),
-    }
+    Vrm::default()
 }
 
 fn scene_app() -> App {
@@ -349,7 +346,7 @@ fn native_pause_holds_constraint_spring_pose() {
     let (root, head) = {
         let mut query = app.world_mut().query::<(Entity, &Vrm)>();
         let (root, vrm) = query.single(app.world()).unwrap();
-        (root, vrm.bone("head").expect("head bone"))
+        (root, vrm.bone(HumanBoneName::Head).expect("head bone"))
     };
     let mut simulated = Quat::IDENTITY;
     for _ in 0..120 {
