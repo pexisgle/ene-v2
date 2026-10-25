@@ -5,7 +5,6 @@ struct Toon {
     outline_color_factor: vec3<f32>,
     shading_shift_factor: f32,
     shading_toony_factor: f32,
-    gi_equalization_factor: f32,
     parametric_rim_fresnel_power_factor: f32,
     parametric_rim_lift_factor: f32,
     rim_lighting_mix_factor: f32,

@@ -18,7 +18,7 @@ Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する非公
 - MToonのテクスチャは用途別の色空間（数値用途は線形、色用途はsRGB）で読みます。コア材質と共有してBevyが逆向きの形式を選んだ場合は、`(texture index, color space)`ごとに画像を複製します。GLB埋め込み画像だけが対象です。
 - 表情の`emissionColor`はglTFの`emissiveFactor`として扱い、読み込み時の`KHR_materials_emissive_strength`倍率を目標値にも適用します。
 - 表情が材質に書き込むのは、その表情のバインドが指定する色・UV・MToonパラメータだけです。バインドされていない項目はアプリ側の変更を保持します。
-- MToonの`giEqualizationFactor`は、方向依存のGIを扱わないため結果に影響しません。
+- MToonの`giEqualizationFactor`は読み込みません（方向依存のGIを扱わないため）。
 - `normalTexture.scale`はBevyのglTFローダーが未実装のため反映されません。コア材質のテクスチャごとの`KHR_texture_transform`もBevyの単一`uv_transform`に合わせて対象外です。
 - glTFの構造検証はBevyのglTFローダーに任せます。`extensionsRequired`にあるVRMC拡張はこのクレートが対応済みとして受け入れますが、それ以外の未対応拡張、参照範囲、制約の循環、割り当てる曲線のターゲットを一意に決められないVRMAはロードエラーにします。JSON Schemaの完全検証はしません。
 - 仕様のデフォルトはthree-vrm互換です（`shadeColorFactor`は黒、`RangeMap.outputScale`の欠落はexpression=1／bone=10、`offsetFromHeadBone`は`[0, 0.06, 0]`）。

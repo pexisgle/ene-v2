@@ -371,6 +371,7 @@ fn loader_rejects_unusable_data_and_tolerates_spec_noise() {
     v["materials"] = json!([
         {"alphaMode":"OPAQUE","extensions":{"VRMC_materials_mtoon":{
             "specVersion":"1.0","renderQueueOffsetNumber":10.0,
+            "giEqualizationFactor":0.5,
             "shadingToonyFactor":2.0,"outlineWidthFactor":-1.0,
             "shadeMultiplyTexture":{"index":0}
         }}},
@@ -1459,7 +1460,7 @@ fn mtoon_materials_outlines_meta_and_schema_defaults() {
     assert_eq!(toon.params.shade_color_factor, Vec3::ZERO);
     assert_eq!(toon.params.shading_toony_factor, 0.9);
     assert_eq!(toon.outline_width_mode, schema::OutlineMode::None);
-    assert_eq!(schema::ToonParams::min_size().get(), 416);
+    assert_eq!(schema::ToonParams::min_size().get(), 400);
 
     let gaze: schema::LookAt = serde_json::from_value(json!({"type":"expression"})).unwrap();
     assert_eq!(

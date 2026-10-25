@@ -93,7 +93,18 @@ impl AssetLoader for VrmLoader {
         context: &mut LoadContext<'_>,
     ) -> Result<Gltf, GltfError> {
         let motion = context.path().path().extension().and_then(|x| x.to_str()) == Some("vrma");
-        let mut loader_settings = GltfLoaderSettings {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        if settings.validate {
+            // gltf-json rejects every `extensionsRequired` entry outside its
+            // own list, including the VRMC extensions handled above. Validate
+            // the document with just those entries removed; unrelated errors
+            // still fail the load.
+            validate_gltf(&bytes)?;
+        }
+        // Validation has already run above (or was explicitly disabled), so
+        // both paths hand the same byte slice to the glTF loader.
+        let loader_settings = GltfLoaderSettings {
             include_source: true,
             // VRM's glTF animations are unused and cameras are not
             // part of the avatar; VRMA needs its animation clips.
@@ -104,24 +115,12 @@ impl AssetLoader for VrmLoader {
             load_materials: settings.load_materials,
             load_lights: settings.load_lights,
             override_sampler: settings.override_sampler,
-            validate: settings.validate,
+            validate: false,
             convert_coordinates: settings.convert_coordinates,
             skinned_mesh_bounds_policy: settings.skinned_mesh_bounds_policy,
             mesh_compression: settings.mesh_compression.clone(),
         };
-        let mut asset = if settings.validate {
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).await?;
-            // gltf-json rejects every `extensionsRequired` entry outside its
-            // own list, including the VRMC extensions handled above. Validate
-            // the document with just those entries removed; unrelated errors
-            // still fail the load.
-            validate_gltf(&bytes)?;
-            loader_settings.validate = false;
-            GltfLoader::load_gltf(&self.0, &bytes, context, &loader_settings).await?
-        } else {
-            self.0.load(reader, &loader_settings, context).await?
-        };
+        let mut asset = GltfLoader::load_gltf(&self.0, &bytes, context, &loader_settings).await?;
         let source = asset.source.take().expect("native include_source setting");
         let scene_label = asset
             .default_scene
