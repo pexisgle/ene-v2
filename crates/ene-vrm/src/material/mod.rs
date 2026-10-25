@@ -110,7 +110,7 @@ impl MaterialExtension for MToonExtension {
     fn fragment_shader() -> ShaderRef {
         "embedded://ene_vrm/material/shaders/mtoon.wgsl".into()
     }
-    fn prepass_vertex_shader() -> ShaderRef {
+    fn prepass_fragment_shader() -> ShaderRef {
         "embedded://ene_vrm/material/shaders/mtoon_prepass.wgsl".into()
     }
     fn specialize(

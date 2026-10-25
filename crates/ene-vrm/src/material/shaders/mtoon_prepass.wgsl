@@ -1,5 +1,5 @@
-#import "embedded://bevy_pbr/prepass/prepass.wgsl" as native_prepass
-#import bevy_pbr::prepass_io::{Vertex, VertexOutput}
+#import "embedded://bevy_pbr/render/pbr_prepass.wgsl" as native_prepass
+#import bevy_pbr::prepass_io::{FragmentOutput, VertexOutput}
 #import bevy_render::globals::Globals
 #import ene_vrm::toon::animated_uvs
 
@@ -7,19 +7,11 @@
 // layout exposes it at binding 11 through mesh_view_bindings.
 @group(0) @binding(1) var<uniform> globals: Globals;
 
-@vertex
-fn vertex(input: Vertex) -> VertexOutput {
-    // Read builtins at the entry point so Naga applies DX12 base vertex/instance offsets.
-    var corrected = input;
-    corrected.instance_index = input.instance_index;
-#ifdef MORPH_TARGETS
-    corrected.index = input.index;
-#endif
-    var out = native_prepass::vertex(corrected);
-#ifdef MTOON_UVS
-    // The standard prepass fragment samples the base color texture with `in.uv`
-    // and the material's `uv_transform`; feed it the same animated UV as
-    // mtoon.wgsl so alpha masking matches the main pass.
+fn animated_output(input: VertexOutput) -> VertexOutput {
+    var out = input;
+    // The standard prepass vertex shader interpolates the raw UVs. Evaluate the
+    // mask and scroll/rotation per fragment, exactly like mtoon.wgsl, instead
+    // of interpolating a per-vertex UV transform.
 #ifdef VERTEX_UVS_A
     var raw_uv0 = out.uv;
 #else
@@ -36,17 +28,27 @@ fn vertex(input: Vertex) -> VertexOutput {
 #ifndef VERTEX_UVS_B
     raw_uv1 = raw_uv0;
 #endif
-    // ponytail: the mask and rotation are evaluated per vertex here, matching
-    // the outline path. A mask edge inside one triangle can differ from the
-    // per-fragment main pass; move this to a custom prepass fragment shader if
-    // that ever becomes visible.
-    let uvs = animated_uvs(raw_uv0, raw_uv1, globals.time);
+    let animated = animated_uvs(raw_uv0, raw_uv1, globals.time);
 #ifdef VERTEX_UVS_A
-    out.uv = uvs.xy;
+    out.uv = animated.xy;
 #endif
 #ifdef VERTEX_UVS_B
-    out.uv_b = uvs.zw;
-#endif
+    out.uv_b = animated.zw;
 #endif
     return out;
 }
+
+#ifdef PREPASS_FRAGMENT
+@fragment
+fn fragment(
+    in: VertexOutput,
+    @builtin(front_facing) is_front: bool,
+) -> FragmentOutput {
+    return native_prepass::fragment(animated_output(in), is_front);
+}
+#else
+@fragment
+fn fragment(in: VertexOutput) {
+    native_prepass::fragment(animated_output(in));
+}
+#endif

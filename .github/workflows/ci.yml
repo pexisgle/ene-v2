@@ -48,4 +48,6 @@ jobs:
       - name: MToon/prepass GPU smoke
         env:
           WGPU_BACKEND: vulkan
-        run: cargo test -p ene-vrm synthetic_mtoon --locked -- --ignored --nocapture
+        # The UV-mask pixel regression needs a hardware GPU; lavapipe crashes
+        # in its per-fragment prepass discard path.
+        run: cargo test -p ene-vrm synthetic_mtoon_uv1_outline_pipeline_smoke --locked -- --ignored --nocapture

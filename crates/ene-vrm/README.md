@@ -54,4 +54,4 @@ cargo test --locked -p ene-vrm -p ene-avatar
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
 
-GPUのスモークテストは通常のCIでは無効です。ライセンスを確認したモデルを`ENE_VRM_TEST_MODEL`へ指定し、`cargo test -p ene-vrm gpu_model -- --ignored --nocapture`で実行します。合成MToon/outlineテストは`cargo test -p ene-vrm synthetic_mtoon -- --ignored --nocapture`で実行でき、CIではlavapipe上で実行します。
+GPUのスモークテストは通常のCIでは無効です。ライセンスを確認したモデルを`ENE_VRM_TEST_MODEL`へ指定し、`cargo test -p ene-vrm gpu_model -- --ignored --nocapture`で実行します。合成MToon/outlineのパイプラインスモークは`cargo test -p ene-vrm synthetic_mtoon_uv1_outline_pipeline_smoke -- --ignored --nocapture`で実行し、CIではlavapipe上で実行します。UVアニメーションマスクのピクセル回帰`cargo test -p ene-vrm synthetic_mtoon_uv_alpha_shadow_matches_prepass -- --ignored --nocapture`はハードウェアGPUで実行してください。lavapipeはプリパス・フラグメントのdiscard経路でクラッシュするため、このテストはCIの対象外です。

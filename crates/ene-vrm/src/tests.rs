@@ -1863,7 +1863,7 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
 }
 
 #[test]
-#[ignore = "requires a GPU; runs in CI with lavapipe"]
+#[ignore = "requires a hardware GPU; lavapipe crashes in this per-fragment prepass discard path"]
 fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
     use bevy::mesh::{Indices, PrimitiveTopology};
     use bevy::render::{
@@ -1872,7 +1872,7 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
         render_resource::TextureUsages,
     };
 
-    fn quad(size: f32, uv: Vec2) -> Mesh {
+    fn quad(size: f32, uvs: [Vec2; 4]) -> Mesh {
         let h = size * 0.5;
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -1883,7 +1883,10 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
             vec![[-h, -h, 0.], [h, -h, 0.], [h, h, 0.], [-h, h, 0.]],
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 4]);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[uv.x, uv.y]; 4]);
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            uvs.into_iter().map(|uv| [uv.x, uv.y]).collect::<Vec<_>>(),
+        );
         mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
         mesh
     }
@@ -1918,13 +1921,13 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
     app.finish();
     app.cleanup();
 
-    // 16x16 texture: the first two columns are opaque, the rest transparent.
-    // All caster vertices start at u=0.05 and scroll by 0.25/s, so after a few
-    // seconds the main pass samples the transparent region.
+    // 16x16 color texture with alpha only in the middle columns. The caster has
+    // corner UVs, so its vertices sample transparent columns while the opaque
+    // column can only be reached from the triangle interior.
     let mut pixels = Vec::with_capacity(16 * 16 * 4);
     for _ in 0..16 {
         for x in 0..16 {
-            pixels.extend([255u8, 255, 255, if x < 2 { 255 } else { 0 }]);
+            pixels.extend([255u8, 255, 255, if (8..12).contains(&x) { 255 } else { 0 }]);
         }
     }
     let mut color_image = Image::new(
@@ -1944,9 +1947,36 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
         .resource_mut::<Assets<Image>>()
         .add(color_image);
 
+    // Mask B: 0 near the outer columns (all caster vertices) and 1 in the middle.
+    // A vertex-stage evaluation therefore leaves the interior UV unanimated,
+    // while a fragment-stage evaluation shifts it to the transparent column.
+    let mut mask_pixels = Vec::with_capacity(16 * 16 * 4);
+    for _ in 0..16 {
+        for x in 0..16 {
+            mask_pixels.extend([0u8, 0, if (4..12).contains(&x) { 255 } else { 0 }, 255]);
+        }
+    }
+    let mut mask_image = Image::new(
+        Extent3d {
+            width: 16,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        mask_pixels,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    mask_image.sampler = bevy::image::ImageSampler::nearest();
+    let mask_image = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(mask_image);
+
     let toon: schema::Toon = serde_json::from_value(json!({
         "specVersion":"1.0",
-        "uvAnimationScrollXSpeedFactor":0.25
+        "uvAnimationScrollXSpeedFactor":0.5,
+        "uvAnimationMaskTexture":{"index":0}
     }))
     .unwrap();
     let body_material =
@@ -1960,7 +1990,11 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
                     perceptual_roughness: 1.,
                     ..default()
                 },
-                extension: MToonExtension::new(&toon, &[], &Default::default()),
+                extension: MToonExtension::new(
+                    &toon,
+                    std::slice::from_ref(&mask_image),
+                    &Default::default(),
+                ),
             });
     let receiver_material = app
         .world_mut()
@@ -1973,11 +2007,16 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
     let receiver_mesh = app
         .world_mut()
         .resource_mut::<Assets<Mesh>>()
-        .add(quad(6., Vec2::splat(0.5)));
-    let caster_mesh = app
-        .world_mut()
-        .resource_mut::<Assets<Mesh>>()
-        .add(quad(1.5, Vec2::new(0.05, 0.5)));
+        .add(quad(6., [Vec2::splat(0.5); 4]));
+    let caster_mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(quad(
+        1.5,
+        [
+            Vec2::new(0., 0.),
+            Vec2::new(1., 0.),
+            Vec2::new(1., 1.),
+            Vec2::new(0., 1.),
+        ],
+    ));
 
     app.world_mut().spawn((
         Mesh3d(receiver_mesh),
@@ -2036,10 +2075,10 @@ fn synthetic_mtoon_uv_alpha_shadow_matches_prepass() {
         ))
         .id();
 
-    // Warm up assets, pipelines, and the UV animation. At ~2.5 s the main pass
-    // discards the caster but a prepass that samples the original UV still
-    // casts its shadow.
-    for _ in 0..150 {
+    // Warm up assets and pipelines. The scroll is 0.5/s; after the warmup the
+    // per-fragment mask evaluation moves every masked interior UV out of the
+    // opaque column, while a vertex-stage evaluation leaves it unanimated.
+    for _ in 0..120 {
         app.update();
     }
     let shadowed = latest.lock().unwrap().clone().expect("readback completed");
