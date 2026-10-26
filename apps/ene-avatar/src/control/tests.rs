@@ -772,6 +772,18 @@ fn native_asset_pipeline() {
         &mut states,
         &[("1", "ready"), ("3", "ready"), ("4", "ready")],
     );
+    let entity = harness.character("4");
+    let repaired = harness
+        .app
+        .world()
+        .get::<ModelAssets>(entity)
+        .unwrap()
+        .model_handle();
+    let server = harness.app.world().resource::<AssetServer>();
+    assert!(
+        server.is_loaded_with_dependencies(repaired.id()),
+        "the repaired model must be ready with its image dependency"
+    );
 
     states.remove("0");
     harness.send(request(json!({

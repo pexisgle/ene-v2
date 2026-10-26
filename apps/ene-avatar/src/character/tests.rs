@@ -2,6 +2,7 @@ use super::lifecycle::{notify_finished, update_avatars};
 use super::*;
 use crate::desktop::Output;
 use bevy::ecs::message::Messages;
+use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use ene_vrm::{SpringRig, Vrm};
 use serde_json::{Value, json};
@@ -10,6 +11,7 @@ use std::time::Duration;
 fn scene_app() -> (App, Entity) {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+        .init_asset::<Gltf>()
         .add_message::<Notification>()
         .add_systems(Update, update_avatars);
     let output = spawn_output(&mut app);
@@ -35,15 +37,35 @@ fn spawn_output(app: &mut App) -> Entity {
         .id()
 }
 
+fn loaded_model(app: &mut App) -> Handle<Gltf> {
+    app.world().resource::<AssetServer>().add(Gltf {
+        scenes: Vec::new(),
+        named_scenes: Default::default(),
+        meshes: Vec::new(),
+        named_meshes: Default::default(),
+        materials: Vec::new(),
+        named_materials: Default::default(),
+        nodes: Vec::new(),
+        named_nodes: Default::default(),
+        skins: Vec::new(),
+        named_skins: Default::default(),
+        default_scene: None,
+        animations: Vec::new(),
+        named_animations: Default::default(),
+        source: None,
+    })
+}
+
 /// Simulates the scene instance `load_scene` binds after a VRM spawns.
 fn bind(app: &mut App, avatar: Entity) -> Entity {
+    let model = loaded_model(app);
     let root = app
         .world_mut()
         .spawn((Vrm::default(), AnimationPlayer::default(), ChildOf(avatar)))
         .id();
     app.world_mut()
         .entity_mut(avatar)
-        .insert(ModelAssets::with_root(root));
+        .insert(ModelAssets::with_model(root, model));
     root
 }
 
@@ -97,6 +119,33 @@ fn state_transitions() {
         [json!({"event":"state","character":"a","status":"ready","error":null})]
     );
 
+    app.world_mut()
+        .get_mut::<ModelAssets>(avatar)
+        .unwrap()
+        .retrying_model_dependencies = true;
+    app.update();
+    assert_eq!(
+        app.world().get::<AvatarState>(avatar),
+        Some(&AvatarState::Loading)
+    );
+    assert_eq!(
+        drain_events(&mut app),
+        [json!({"event":"state","character":"a","status":"loading","error":null})]
+    );
+    app.world_mut()
+        .get_mut::<ModelAssets>(avatar)
+        .unwrap()
+        .retrying_model_dependencies = false;
+    app.update();
+    assert_eq!(
+        app.world().get::<AvatarState>(avatar),
+        Some(&AvatarState::Ready)
+    );
+    assert_eq!(
+        drain_events(&mut app),
+        [json!({"event":"state","character":"a","status":"ready","error":null})]
+    );
+
     app.world_mut().despawn(output);
     app.update();
     assert_eq!(
@@ -136,6 +185,7 @@ fn state_transitions() {
 #[test]
 fn pause_and_resume() {
     let (mut app, _) = scene_app();
+    let model = loaded_model(&mut app);
     let mut actors = Vec::new();
     for playing in [false, true] {
         let avatar = app
@@ -166,7 +216,7 @@ fn pause_and_resume() {
             .id();
         app.world_mut()
             .entity_mut(avatar)
-            .insert(ModelAssets::with_root(root));
+            .insert(ModelAssets::with_model(root, model.clone()));
         actors.push((avatar, root));
     }
 
@@ -223,6 +273,7 @@ fn finished_and_looping() {
     }
 
     let (mut app, _) = scene_app();
+    let model = loaded_model(&mut app);
     app.init_resource::<Assets<AnimationClip>>()
         .init_resource::<Assets<AnimationGraph>>()
         .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -281,7 +332,7 @@ fn finished_and_looping() {
             .id();
         app.world_mut()
             .entity_mut(root)
-            .insert(ModelAssets::with_root(instance));
+            .insert(ModelAssets::with_model(instance, model.clone()));
     }
 
     assert!(step(&mut app, 1).is_empty());

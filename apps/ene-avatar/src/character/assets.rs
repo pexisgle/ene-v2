@@ -17,7 +17,6 @@ pub(crate) struct ModelAssets {
     /// attached there by `ene-vrm`; the motion player is attached there too.
     root: Option<Entity>,
     pub(super) retrying_model_dependencies: bool,
-    pub(super) retrying_motion_dependencies: bool,
 }
 
 impl ModelAssets {
@@ -39,8 +38,14 @@ impl ModelAssets {
             scene: root,
             root: Some(root),
             retrying_model_dependencies: false,
-            retrying_motion_dependencies: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_model(root: Entity, model: Handle<Gltf>) -> Self {
+        let mut assets = Self::with_root(root);
+        assets.model = model;
+        assets
     }
 }
 
@@ -85,38 +90,23 @@ pub(crate) fn reload(
     if retrying_model_dependencies {
         server.reload(config.model.clone());
     }
-    let retrying_motion_dependencies = motion
-        .as_ref()
-        .is_some_and(|handle| dependencies_failed(&server, handle.id().untyped()));
-    if retrying_motion_dependencies && let Some(path) = &config.motion {
-        server.reload(path.clone());
-    }
     commands.entity(entity).insert(ModelAssets {
         model,
         motion,
         scene,
         root: None,
         retrying_model_dependencies,
-        retrying_motion_dependencies,
     });
     states.write(Notification::state(id, &AvatarState::Loading));
 }
 
-/// A reload is asynchronous. Wait for the owner asset to be written again
-/// before treating its old dependency failure as final.
+/// A reload is asynchronous. Wait for the owner asset to be written before
+/// letting the updated dependency graph decide success.
 pub(super) fn finish_retries(
     mut actors: Query<&mut ModelAssets>,
     mut models: MessageReader<AssetEvent<Gltf>>,
-    mut motions: MessageReader<AssetEvent<AnimationClip>>,
 ) {
     let models_modified = models
-        .read()
-        .filter_map(|event| match event {
-            AssetEvent::Modified { id } => Some(*id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let motions_modified = motions
         .read()
         .filter_map(|event| match event {
             AssetEvent::Modified { id } => Some(*id),
@@ -126,14 +116,6 @@ pub(super) fn finish_retries(
     for mut assets in &mut actors {
         if assets.retrying_model_dependencies && models_modified.contains(&assets.model.id()) {
             assets.retrying_model_dependencies = false;
-        }
-        if assets.retrying_motion_dependencies
-            && assets
-                .motion
-                .as_ref()
-                .is_some_and(|handle| motions_modified.contains(&handle.id()))
-        {
-            assets.retrying_motion_dependencies = false;
         }
     }
 }
@@ -154,7 +136,7 @@ pub(super) fn load_scene(
     mut graphs: ResMut<Assets<AnimationGraph>>,
 ) {
     for (mut assets, state) in &mut actors {
-        if *state != AvatarState::Loading {
+        if *state != AvatarState::Loading || assets.retrying_model_dependencies {
             continue;
         }
         let Some(model) = gltfs.get(&assets.model) else {

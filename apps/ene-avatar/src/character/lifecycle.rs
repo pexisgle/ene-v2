@@ -4,11 +4,25 @@ use super::assets::ModelAssets;
 use super::model::{AvatarState, CharacterId, Config, Notification};
 use crate::desktop::Output;
 use bevy::{
-    asset::{LoadState, RecursiveDependencyLoadState},
+    asset::{LoadState, RecursiveDependencyLoadState, UntypedAssetId},
     prelude::*,
 };
 use ene_vrm::SpringRig;
 use serde_json::json;
+
+fn load_error(
+    server: &AssetServer,
+    id: UntypedAssetId,
+    retrying_dependencies: bool,
+) -> Option<String> {
+    match server.get_load_states(id) {
+        Some((LoadState::Failed(error), _, _)) => Some(error.to_string()),
+        Some((_, _, RecursiveDependencyLoadState::Failed(error))) if !retrying_dependencies => {
+            Some(error.to_string())
+        }
+        _ => None,
+    }
+}
 
 /// The single place that decides an avatar's state and applies the transition.
 pub(super) fn update_avatars(
@@ -29,9 +43,13 @@ pub(super) fn update_avatars(
         let part = assets
             .and_then(ModelAssets::root)
             .and_then(|root| parts.get_mut(root).ok());
-        // A scene is ready once its VRM root is bound; the motion is ready once
-        // that root's player has the animation the loader attached.
+        // Ready requires a bound VRM root, a fully loaded model, and the
+        // requested motion wired into that root's player.
         let initialized = part.is_some();
+        let model_ready = assets.is_some_and(|assets| {
+            !assets.retrying_model_dependencies
+                && server.is_loaded_with_dependencies(assets.model.id())
+        });
         let motion_ready = config.motion.is_none()
             || part
                 .as_ref()
@@ -39,34 +57,24 @@ pub(super) fn update_avatars(
         let mut next = match &*state {
             // A load failure is sticky until the next reload.
             AvatarState::Error(_) => state.clone(),
-            _ if !initialized || !motion_ready => AvatarState::Loading,
+            _ if !initialized || !model_ready || !motion_ready => AvatarState::Loading,
             _ if outputs.is_empty() => AvatarState::Suspended,
             _ => AvatarState::Ready,
         };
         if !matches!(&*state, AvatarState::Error(_))
             && let Some(assets) = assets
         {
-            for (id, retrying) in std::iter::once((
+            let model_error = load_error(
+                &server,
                 assets.model.id().untyped(),
                 assets.retrying_model_dependencies,
-            ))
-            .chain(
-                assets
-                    .motion
-                    .iter()
-                    .map(|handle| (handle.id().untyped(), assets.retrying_motion_dependencies)),
-            ) {
-                match server.get_load_states(id) {
-                    Some((LoadState::Failed(error), _, _)) => {
-                        next = AvatarState::Error(error.to_string());
-                        break;
-                    }
-                    Some((_, _, RecursiveDependencyLoadState::Failed(error))) if !retrying => {
-                        next = AvatarState::Error(error.to_string());
-                        break;
-                    }
-                    _ => {}
-                }
+            );
+            let motion_error = assets
+                .motion
+                .iter()
+                .find_map(|handle| load_error(&server, handle.id().untyped(), false));
+            if let Some(error) = model_error.or(motion_error) {
+                next = AvatarState::Error(error);
             }
         }
         visibility.set_if_neq(if next == AvatarState::Ready {
