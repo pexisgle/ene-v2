@@ -1593,3 +1593,80 @@ fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
     assert_eq!(entities.len(), 2, "body and outline materials");
     assert_specialized_pipelines_ok(&app, &entities);
 }
+
+#[test]
+fn paused_spring_holds_last_pose() {
+    let files = Files::new();
+    let mut app = app();
+    let mut model = files.model();
+    let head = 3;
+    let tail = model["nodes"].as_array().unwrap().len();
+    model["nodes"][head]["children"] = json!([tail]);
+    model["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"translation":[0.2,0.0,0.0]}));
+    model["nodes"][head]["extensions"] = json!({
+        "VRMC_node_constraint": {
+            "specVersion":"1.0",
+            "constraint":{"rotation":{"source":2}}
+        }
+    });
+    model["extensions"]["VRMC_springBone"] = json!({
+        "specVersion":"1.0",
+        "springs":[{"joints":[
+            {"node":head,"gravityPower":1.0,"stiffness":0.5,"dragForce":0.4},
+            {"node":tail}
+        ]}]
+    });
+
+    let handle: Handle<Gltf> = app
+        .world()
+        .resource::<AssetServer>()
+        .load(files.write("pause.vrm", &model));
+    settle(&mut app, std::slice::from_ref(&handle));
+    let scene = app
+        .world()
+        .resource::<Assets<Gltf>>()
+        .get(&handle)
+        .unwrap()
+        .default_scene
+        .clone()
+        .unwrap();
+    app.world_mut()
+        .spawn((WorldAssetRoot(scene), Transform::default()));
+
+    let (root, head_entity) = loop {
+        app.update();
+        let mut query = app.world_mut().query::<(Entity, &Vrm)>();
+        if let Some((root, vrm)) = query.iter(app.world()).next() {
+            break (root, vrm.bone(HumanBoneName::Head).expect("head bone"));
+        }
+    };
+    let mut simulated = Quat::IDENTITY;
+    for _ in 0..120 {
+        app.update();
+        let rotation = app.world().get::<Transform>(head_entity).unwrap().rotation;
+        if rotation.angle_between(Quat::IDENTITY) > 0.01 {
+            simulated = rotation;
+            break;
+        }
+    }
+    assert!(
+        simulated.angle_between(Quat::IDENTITY) > 0.01,
+        "spring joint did not move"
+    );
+
+    app.world_mut().get_mut::<SpringRig>(root).unwrap().paused = true;
+    for _ in 0..10 {
+        app.update();
+        let held = app.world().get::<Transform>(head_entity).unwrap().rotation;
+        assert!(
+            held.abs_diff_eq(simulated, 1e-5),
+            "paused spring moved: {held:?} != {simulated:?}"
+        );
+    }
+    app.world_mut().get_mut::<SpringRig>(root).unwrap().paused = false;
+    app.update();
+    assert!(!app.world().get::<SpringRig>(root).unwrap().paused);
+}

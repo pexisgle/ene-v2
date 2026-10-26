@@ -4,7 +4,7 @@ use super::output::Output;
 use crate::character::{AvatarState, CharacterId};
 use bevy::{camera::primitives::Aabb, prelude::*};
 
-#[derive(Component, Default, PartialEq)]
+#[derive(Component, Default)]
 pub struct HitRegions(pub Vec<(Entity, Rect)>);
 
 pub(super) fn regions(
@@ -45,7 +45,7 @@ pub(super) fn regions(
         }
         // Clear the previous image once before disabling an empty camera.
         let active = had || !next.is_empty();
-        regions.set_if_neq(HitRegions(next));
+        regions.0 = next;
         if camera.is_active != active {
             camera.is_active = active;
         }

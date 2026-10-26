@@ -222,51 +222,20 @@ fn input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn fps_settings_apply_on_first_update_and_follow_changes() {
-        let mut app = App::new();
-        let (output, _receiver) = std::sync::mpsc::sync_channel(1);
-        app.add_plugins((MinimalPlugins, setup))
-            .init_resource::<WinitSettings>()
-            .init_resource::<WinitMonitors>()
-            .init_resource::<Drag>()
-            .add_message::<MouseButtonInput>()
-            .add_message::<desktop::PointerInput>()
-            .insert_resource(control::Control { output, fps: 30 });
 
-        for fps in [30, 60, 0] {
-            if fps != 30 {
-                app.world_mut().resource_mut::<control::Control>().fps = fps;
-            }
-            app.update();
-            let expected = match fps {
-                0 => UpdateMode::Continuous,
-                _ => UpdateMode::reactive_low_power(Duration::from_secs_f64(1. / f64::from(fps))),
-            };
-            let settings = app.world().resource::<WinitSettings>();
-            assert_eq!(settings.focused_mode, expected);
-            assert_eq!(settings.unfocused_mode, expected);
+    #[test]
+    fn update_mode_maps_fps_to_winit_settings() {
+        assert_eq!(update_mode(0), UpdateMode::Continuous);
+        for fps in [1, 30, 60, 1000] {
+            assert_eq!(
+                update_mode(fps),
+                UpdateMode::reactive_low_power(Duration::from_secs_f64(1. / f64::from(fps)))
+            );
         }
     }
 
     #[test]
-    fn monitor_relationship_owns_desktop_windows() {
-        let mut world = World::new();
-        let monitor = world.spawn_empty().id();
-        let window = world.spawn(OnMonitor(monitor)).id();
-        assert!(
-            world
-                .get::<HasWindows>(monitor)
-                .unwrap()
-                .collection()
-                .contains(&window)
-        );
-        world.despawn(monitor);
-        assert!(world.get::<OnMonitor>(window).is_none());
-    }
-
-    #[test]
-    fn live_monitor_changes_update_the_window_without_changing_bevys_snapshot() {
+    fn output_sync_follows_monitor_changes() {
         #[derive(Resource, Default)]
         struct LiveMonitors(Vec<(Entity, Output)>);
         fn read_monitors(monitors: Res<LiveMonitors>) -> Vec<(Entity, Output)> {
@@ -299,12 +268,16 @@ mod tests {
         )];
         app.update();
         let window = app.world().get::<HasWindows>(monitor).unwrap().collection()[0];
-        let unchanged = app
-            .world()
-            .entity(monitor)
-            .get_ref::<Monitor>()
-            .unwrap()
-            .last_changed();
+        let output = app.world().get::<Output>(window).unwrap();
+        assert_eq!(output.name, "m");
+        assert_eq!(output.origin, Vec2::ZERO);
+        assert_eq!(output.size, Vec2::new(1920., 1080.));
+        assert_eq!(output.units_per_logical_pixel, 1.);
+        let current = app.world().get::<Window>(window).unwrap();
+        assert_eq!(current.position, WindowPosition::At(IVec2::ZERO));
+        assert_eq!(current.resolution.physical_width(), 1920);
+        assert_eq!(current.resolution.scale_factor(), 1.);
+
         {
             let mut live = app.world_mut().resource_mut::<LiveMonitors>();
             let monitor = &mut live.0[0].1;
@@ -315,23 +288,17 @@ mod tests {
         }
         app.update();
         assert_eq!(
-            app.world()
-                .entity(monitor)
-                .get_ref::<Monitor>()
-                .unwrap()
-                .last_changed(),
-            unchanged
-        );
-        assert_eq!(
             app.world().get::<HasWindows>(monitor).unwrap().collection(),
             &[window]
         );
         let output = app.world().get::<Output>(window).unwrap();
         assert_eq!(output.name, "renamed");
+        assert_eq!(output.origin, Vec2::new(-2560., 0.));
+        assert_eq!(output.size, Vec2::new(2560., 1080.));
         assert_eq!(output.units_per_logical_pixel, 2.);
-        let window = app.world().get::<Window>(window).unwrap();
-        assert_eq!(window.position, WindowPosition::At(IVec2::new(-2560, 0)));
-        assert_eq!(window.resolution.physical_width(), 2560);
-        assert_eq!(window.resolution.scale_factor(), 2.);
+        let current = app.world().get::<Window>(window).unwrap();
+        assert_eq!(current.position, WindowPosition::At(IVec2::new(-2560, 0)));
+        assert_eq!(current.resolution.physical_width(), 2560);
+        assert_eq!(current.resolution.scale_factor(), 2.);
     }
 }

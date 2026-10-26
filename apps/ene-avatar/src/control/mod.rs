@@ -46,6 +46,26 @@ pub fn run(mut app: App) -> AppExit {
     }
 }
 
+/// Reads one bounded JSON line. The flag marks EOF, an overlong line, or an unreadable stream.
+fn read_request(input: &mut impl BufRead) -> (Result<Request, String>, bool) {
+    let mut line = String::new();
+    match (&mut *input).take(65_537).read_line(&mut line) {
+        Ok(0) => (
+            Ok(Request {
+                id: 0,
+                command: Command::Quit,
+            }),
+            true,
+        ),
+        Ok(n) if n <= 65_536 => (
+            serde_json::from_str(&line).map_err(|error| error.to_string()),
+            false,
+        ),
+        Ok(_) => (Err("input line exceeds 64 KiB".into()), true),
+        Err(error) => (Err(error.to_string()), true),
+    }
+}
+
 pub fn setup(app: &mut App) {
     let (input_tx, input) = mpsc::sync_channel(64);
     let (output, output_rx) = mpsc::sync_channel::<Value>(64);
@@ -59,17 +79,7 @@ pub fn setup(app: &mut App) {
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
         loop {
-            let mut line = String::new();
-            let result = (&mut stdin).take(65_537).read_line(&mut line);
-            let request = match result {
-                Ok(0) => Ok(Request {
-                    id: 0,
-                    command: Command::Quit,
-                }),
-                Ok(n) if n <= 65_536 => serde_json::from_str(&line).map_err(|e| e.to_string()),
-                _ => Err("input line exceeds 64 KiB or could not be read".into()),
-            };
-            let end = line.len() > 65_536 || line.is_empty();
+            let (request, end) = read_request(&mut stdin);
             if input_tx.send(request).is_err() {
                 break;
             }

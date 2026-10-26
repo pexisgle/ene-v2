@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Lifecycle phase and load error, derived from the scene and available outputs.
-#[derive(Component, Clone, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(tag = "status", content = "error", rename_all = "snake_case")]
+#[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
 pub enum AvatarState {
     #[default]
     Loading,
@@ -17,11 +16,12 @@ pub enum AvatarState {
 
 impl AvatarState {
     pub(crate) fn json(&self) -> Value {
-        let mut value = json!(self);
-        if !matches!(self, Self::Error(_)) {
-            value["error"] = Value::Null;
+        match self {
+            Self::Loading => json!({"status": "loading", "error": null}),
+            Self::Ready => json!({"status": "ready", "error": null}),
+            Self::Suspended => json!({"status": "suspended", "error": null}),
+            Self::Error(error) => json!({"status": "error", "error": error}),
         }
-        value
     }
 }
 
@@ -67,20 +67,22 @@ impl Config {
         for path in std::iter::once(&self.model).chain(self.motion.iter()) {
             bevy::asset::AssetPath::try_parse(path).map_err(|error| error.to_string())?;
         }
-        let invalid_size = !(50. ..=200.).contains(&self.size_percent)
+        if !(50. ..=200.).contains(&self.size_percent)
             || self
                 .position
-                .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.));
-        let invalid_path = !self.model.ends_with(".vrm")
+                .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.))
+        {
+            return Err("invalid size or position".into());
+        }
+        if !self.model.ends_with(".vrm")
             || self
                 .motion
                 .as_ref()
-                .is_some_and(|path| !path.ends_with(".vrma"));
-        match (invalid_size, invalid_path) {
-            (true, _) => Err("invalid size or position".into()),
-            (_, true) => Err("expected .vrm or .vrma path".into()),
-            _ => Ok(()),
+                .is_some_and(|path| !path.ends_with(".vrma"))
+        {
+            return Err("expected .vrm or .vrma path".into());
         }
+        Ok(())
     }
 }
 

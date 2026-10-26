@@ -11,7 +11,7 @@ mod tests;
 
 pub use hit_regions::HitRegions;
 pub use output::{Output, pick_output, resolved_position, window};
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(crate) use output::{bounds, desktop_position};
 pub use pointer::Drag;
 pub(crate) use pointer::{PointerInput, pointer};

@@ -51,16 +51,12 @@ pub(super) fn update_avatars(
             _ if outputs.is_empty() => AvatarState::Suspended,
             _ => AvatarState::Ready,
         };
-        if *state == AvatarState::Loading {
-            let handles = assets.into_iter().flat_map(|a| {
-                std::iter::once(a.model.id().untyped())
-                    .chain(a.motion.iter().map(|h| h.id().untyped()))
-            });
-            let paths = std::iter::once(&config.model)
-                .chain(config.motion.iter())
-                .filter(|_| assets.is_none())
-                .filter_map(|p| server.get_path_id(p.clone()));
-            for id in handles.chain(paths) {
+        if *state == AvatarState::Loading
+            && let Some(assets) = assets
+        {
+            for id in std::iter::once(assets.model.id().untyped())
+                .chain(assets.motion.iter().map(|handle| handle.id().untyped()))
+            {
                 if let Some(
                     (LoadState::Failed(error), _, _)
                     | (_, _, RecursiveDependencyLoadState::Failed(error)),
@@ -87,18 +83,13 @@ pub(super) fn update_avatars(
             .iter_many_mut(std::iter::once(root).chain(children.iter_descendants(root)))
             .matched();
         while let Some((_, (player, spring, _))) = parts.fetch_next() {
-            if let Some(mut player) = player
-                && player.playing_animations().any(|(_, animation)| {
-                    animation.is_paused() == running
-                        || config.looping != (animation.repeat_mode() == RepeatAnimation::Forever)
-                })
-            {
+            if let Some(mut player) = player {
+                if running {
+                    player.resume_all();
+                } else {
+                    player.pause_all();
+                }
                 for (_, animation) in player.playing_animations_mut() {
-                    if running {
-                        animation.resume();
-                    } else {
-                        animation.pause();
-                    }
                     if config.looping {
                         animation.set_repeat(RepeatAnimation::Forever);
                     } else if animation.repeat_mode() == RepeatAnimation::Forever {
@@ -112,10 +103,7 @@ pub(super) fn update_avatars(
             if let Some(mut spring) = spring {
                 // Keep the last simulated pose visible while paused; removing
                 // SpringJointProps here would also disable apply_spring_poses.
-                let paused = !running;
-                if spring.paused != paused {
-                    spring.paused = paused;
-                }
+                spring.paused = !running;
             }
         }
     }
