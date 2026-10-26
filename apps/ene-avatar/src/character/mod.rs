@@ -18,7 +18,7 @@ pub fn setup(app: &mut App) {
     app.add_message::<Notification>()
         .add_systems(
             PostUpdate,
-            assets::load_scene.before(lifecycle::update_avatars),
+            (assets::finish_retries, assets::load_scene).before(lifecycle::update_avatars),
         )
         .add_systems(
             PostUpdate,

@@ -8,6 +8,7 @@ use super::{
 use crate::character::{AvatarState, CharacterId, Config, ModelAssets, Notification};
 use crate::desktop::Output;
 use bevy::app::AppExit;
+use bevy::asset::{LoadState, RecursiveDependencyLoadState};
 use bevy::prelude::*;
 use ene_vrm::Vrm;
 use serde_json::{Value, json};
@@ -16,6 +17,7 @@ use std::{
     sync::mpsc::{self, Receiver, SyncSender},
     time::{Duration, Instant},
 };
+use tempfile::TempDir;
 
 struct Harness {
     app: App,
@@ -47,7 +49,10 @@ impl Harness {
         self.input.send(request).unwrap();
         self.app.update();
         loop {
-            let message = self.output.recv().unwrap();
+            let message = self
+                .output
+                .try_recv()
+                .expect("app.update() must produce a command reply");
             if message.get("id").is_some() {
                 return message;
             }
@@ -75,7 +80,10 @@ impl Harness {
         if let Some(event) = self.events.pop_front() {
             return event;
         }
-        let message = self.output.recv().unwrap();
+        let message = self
+            .output
+            .try_recv()
+            .expect("app.update() must produce a notification");
         assert!(message.get("id").is_none(), "unexpected reply: {message}");
         message
     }
@@ -88,6 +96,41 @@ impl Harness {
         let mut values: Vec<Value> = self.events.drain(..).collect();
         values.extend(self.output.try_iter());
         values
+    }
+
+    fn wait_for_states(&mut self, states: &mut HashMap<String, String>, expected: &[(&str, &str)]) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stable = 0;
+        loop {
+            for message in self.drain() {
+                if message["event"] != "state" {
+                    continue;
+                }
+                if message["status"] == "error" {
+                    assert!(message["error"].is_string(), "missing error: {message}");
+                }
+                states.insert(
+                    message["character"].as_str().unwrap().to_owned(),
+                    message["status"].as_str().unwrap().to_owned(),
+                );
+            }
+            if expected.iter().all(|(character, status)| {
+                states.get(*character).map(String::as_str) == Some(*status)
+            }) {
+                stable += 1;
+                if stable == 3 {
+                    return;
+                }
+            } else {
+                stable = 0;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "states did not settle: {states:?}"
+            );
+            self.app.update();
+            std::thread::yield_now();
+        }
     }
 
     fn character(&mut self, id: &str) -> Entity {
@@ -144,6 +187,9 @@ fn native_app() -> Harness {
         primary_window: None,
         ..default()
     }))
+    .register_asset_loader(bevy::image::ImageLoader::new(
+        bevy::image::CompressedImageFormats::NONE,
+    ))
     .add_plugins((
         bevy::extract::sync_world::SyncWorldPlugin::<bevy::render::RenderApp>::default(),
         ene_vrm::VrmPlugin,
@@ -212,25 +258,59 @@ fn command_contract() {
         harness.line(r#"{"id":1,"op":"add","character":"a","config":{"model":"a.vrm"}}"#),
         json!({"id": 1, "ok": null})
     );
-    let get = harness.line(r#"{"id":2,"op":"get"}"#);
-    assert_eq!(get["ok"]["characters"].as_array().unwrap().len(), 1);
-    assert_eq!(get["ok"]["characters"][0]["character"], "a");
-    assert_eq!(get["ok"]["characters"][0]["status"], "loading");
-    assert_eq!(get["ok"]["characters"][0]["error"], Value::Null);
-    assert_eq!(get["ok"]["characters"][0]["config"]["model"], "a.vrm");
-    assert_eq!(get["ok"]["characters"][0]["config"]["motion"], Value::Null);
-    assert_eq!(get["ok"]["characters"][0]["config"]["playing"], true);
-    assert_eq!(get["ok"]["characters"][0]["config"]["monitor"], "m");
     assert_eq!(
-        get["ok"]["characters"][0]["config"]["position"],
-        json!([50., 80.])
+        harness.line(r#"{"id":2,"op":"get"}"#),
+        json!({
+            "id": 2,
+            "ok": {
+                "characters": [{
+                    "character": "a",
+                    "status": "loading",
+                    "error": null,
+                    "config": {
+                        "model": "a.vrm",
+                        "motion": null,
+                        "playing": true,
+                        "looping": true,
+                        "monitor": "m",
+                        "position": [50., 80.],
+                        "size_percent": 100.
+                    },
+                    "animation_times": []
+                }],
+                "monitors": [{
+                    "name": "m",
+                    "origin": [0., 0.],
+                    "size": [100., 100.],
+                    "units_per_logical_pixel": 1.
+                }],
+                "fps": 30
+            }
+        })
     );
-    assert_eq!(get["ok"]["monitors"][0]["name"], "m");
-    assert_eq!(get["ok"]["fps"], 30);
+
+    let entity = harness.character("a");
+    let mut player = AnimationPlayer::default();
+    player
+        .play(AnimationNodeIndex::new(0))
+        .repeat()
+        .seek_to(1.25);
+    let root = harness
+        .app
+        .world_mut()
+        .spawn((player, ChildOf(entity)))
+        .id();
+    harness
+        .app
+        .world_mut()
+        .entity_mut(entity)
+        .insert(ModelAssets::with_root(root));
+    let get = harness.line(r#"{"id":17,"op":"get"}"#);
+    assert_eq!(get["ok"]["characters"][0]["animation_times"], json!([1.25]));
+    assert_eq!(get["ok"]["characters"][0].get("spring_paused"), None);
 
     harness
         .line(r#"{"id":3,"op":"set","character":"a","config":{"model":"a.vrm","playing":false}}"#);
-    let entity = harness.character("a");
     let config = harness.app.world().get::<Config>(entity).unwrap();
     assert_eq!(config.model, "a.vrm");
     assert!(!config.playing);
@@ -355,13 +435,13 @@ fn batch_order() {
         r#"{"id":7,"op":"get"}"#,
     ]);
     assert_eq!(messages.len(), 9);
-    for (index, id) in [1, 2, 3, 4, 5, 6, 7].into_iter().enumerate() {
-        assert_eq!(messages[index]["id"], id);
-        if !matches!(index, 2 | 3 | 6) {
-            assert_eq!(messages[index]["ok"], Value::Null);
-        }
-    }
+    assert_eq!(messages[0], json!({"id": 1, "ok": null}));
+    assert_eq!(messages[1], json!({"id": 2, "ok": null}));
+    assert_eq!(messages[2]["id"], 3);
     assert!(messages[3]["error"].is_string());
+    assert_eq!(messages[4], json!({"id": 5, "ok": null}));
+    assert_eq!(messages[5], json!({"id": 6, "ok": null}));
+    assert_eq!(messages[6]["id"], 7);
     assert_eq!(
         messages[2]["ok"]["characters"][0]["config"]["playing"],
         false
@@ -421,76 +501,6 @@ fn reload_policy() {
     assert_eq!(
         harness.app.world().get::<AvatarState>(entity),
         Some(&AvatarState::Loading)
-    );
-}
-
-#[test]
-fn get_and_notification_schema() {
-    let mut harness = control_app();
-    spawn_output(&mut harness.app, "m", Vec2::splat(100.), 1.);
-    harness.line(r#"{"id":1,"op":"add","character":"a","config":{"model":"a.vrm"}}"#);
-    assert_eq!(harness.event()["status"], "loading");
-
-    let get = harness.line(r#"{"id":2,"op":"get"}"#);
-    let ok = &get["ok"];
-    assert_eq!(ok["characters"].as_array().unwrap().len(), 1);
-    assert_eq!(ok["characters"][0]["character"], "a");
-    assert_eq!(ok["characters"][0]["config"]["model"], "a.vrm");
-    assert_eq!(ok["characters"][0]["config"]["monitor"], "m");
-    assert_eq!(ok["characters"][0]["config"]["position"], json!([50., 80.]));
-    assert_eq!(ok["monitors"][0]["name"], "m");
-    assert_eq!(ok["monitors"][0]["origin"], json!([0., 0.]));
-    assert_eq!(ok["monitors"][0]["size"], json!([100., 100.]));
-    assert_eq!(ok["monitors"][0]["units_per_logical_pixel"], 1.);
-    assert_eq!(ok["fps"], 30);
-
-    let entity = harness.character("a");
-    let mut player = AnimationPlayer::default();
-    player
-        .play(AnimationNodeIndex::new(0))
-        .repeat()
-        .seek_to(1.25);
-    let root = harness
-        .app
-        .world_mut()
-        .spawn((player, ChildOf(entity)))
-        .id();
-    harness
-        .app
-        .world_mut()
-        .entity_mut(entity)
-        .insert(ModelAssets::with_root(root));
-    let get = harness.line(r#"{"id":3,"op":"get"}"#);
-    assert_eq!(get["ok"]["characters"][0]["animation_times"], json!([1.25]));
-    assert!(get["ok"]["characters"][0].get("spring_paused").is_none());
-
-    let mut ready = AvatarState::Ready.json();
-    ready["event"] = "state".into();
-    ready["character"] = "a".into();
-    let mut error = AvatarState::Error("broken\"model".into()).json();
-    error["event"] = "state".into();
-    error["character"] = "a".into();
-    for notification in [
-        ready,
-        json!({"event": "finished", "character": "a"}),
-        json!({"event": "click", "character": "a"}),
-        error,
-    ] {
-        harness
-            .app
-            .world_mut()
-            .write_message(Notification(notification));
-    }
-    harness.app.update();
-    let events = harness.drain();
-    assert_eq!(
-        events,
-        vec![
-            json!({"event":"state","character":"a","status":"ready","error":null}),
-            json!({"event":"finished","character":"a"}),
-            json!({"event":"click","character":"a"}),
-            json!({"event":"state","character":"a","status":"error","error":"broken\"model"}),
-        ]
     );
 }
 
@@ -602,8 +612,14 @@ fn output_failure_exits() {
 
 #[test]
 fn native_asset_pipeline() {
-    let directory = std::env::temp_dir().join(format!("ene-avatar-native-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5,
+        0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64,
+        0xf8, 0x0f, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let directory = TempDir::new().unwrap();
     let nodes = vec![
         json!({"children":[1,3,6]}),
         json!({"children":[2,9,12]}),
@@ -639,7 +655,7 @@ fn native_asset_pipeline() {
     });
     let values: Vec<f32> = vec![0., 1., 0., 1., 0., 0., 1., 0.];
     std::fs::write(
-        directory.join("motion.bin"),
+        directory.path().join("motion.bin"),
         values
             .iter()
             .flat_map(|v| v.to_le_bytes())
@@ -661,17 +677,27 @@ fn native_asset_pipeline() {
         "samplers":[{"input":0,"output":1}],
         "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]
     }]);
+    let mut textured_model = model.clone();
+    textured_model["images"] = json!([{"uri":"skin.png"}]);
+    textured_model["textures"] = json!([{"source":0}]);
+    textured_model["materials"] = json!([{
+        "pbrMetallicRoughness":{"baseColorTexture":{"index":0}}
+    }]);
 
-    let good = directory.join("good.vrm");
-    let good2 = directory.join("good2.vrm");
-    let bad = directory.join("bad.vrm");
-    let motion = directory.join("motion.vrma");
-    let bad_motion = directory.join("bad.vrma");
+    let good = directory.path().join("good.vrm");
+    let good2 = directory.path().join("good2.vrm");
+    let bad = directory.path().join("bad.vrm");
+    let motion = directory.path().join("motion.vrma");
+    let bad_motion = directory.path().join("bad.vrma");
+    let textured = directory.path().join("textured.vrm");
+    let skin = directory.path().join("skin.png");
     std::fs::write(&good, model.to_string()).unwrap();
     std::fs::write(&good2, model.to_string()).unwrap();
     std::fs::write(&bad, "{}").unwrap();
     std::fs::write(&motion, motion_value.to_string()).unwrap();
     std::fs::write(&bad_motion, "{}").unwrap();
+    std::fs::write(&textured, textured_model.to_string()).unwrap();
+    std::fs::write(&skin, b"not a png").unwrap();
 
     let mut harness = native_app();
     spawn_output(&mut harness.app, "test", Vec2::splat(100.), 1.);
@@ -680,6 +706,7 @@ fn native_asset_pipeline() {
         (&bad, None),
         (&good, Some(&motion)),
         (&good2, Some(&bad_motion)),
+        (&textured, None),
     ];
     for (index, (model, motion)) in actors.iter().enumerate() {
         let reply = harness.send(request(json!({
@@ -691,42 +718,45 @@ fn native_asset_pipeline() {
                 "motion": motion.map(|path| path.to_str().unwrap()),
             }
         })));
-        assert_eq!(reply["ok"], Value::Null);
+        assert_eq!(reply, json!({"id": index + 1, "ok": null}));
     }
 
     let mut states = HashMap::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        for message in harness.drain() {
-            if message["event"] == "state" {
-                if message["status"] == "error" {
-                    assert!(message["error"].is_string());
-                }
-                states.insert(
-                    message["character"].as_str().unwrap().to_owned(),
-                    message["status"].as_str().unwrap().to_owned(),
-                );
-            }
-        }
-        let done = states.len() == 4
-            && states["0"] == "ready"
-            && states["1"] == "error"
-            && states["2"] == "ready"
-            && states["3"] == "error";
-        if done {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "states did not settle: {states:?}"
-        );
-        harness.app.update();
-        std::thread::yield_now();
-    }
+    harness.wait_for_states(
+        &mut states,
+        &[
+            ("0", "ready"),
+            ("1", "error"),
+            ("2", "ready"),
+            ("3", "error"),
+            ("4", "error"),
+        ],
+    );
+    let entity = harness.character("4");
+    let model_handle = harness
+        .app
+        .world()
+        .get::<ModelAssets>(entity)
+        .unwrap()
+        .model_handle();
+    let server = harness.app.world().resource::<AssetServer>();
+    assert!(
+        matches!(
+            server.get_load_states(model_handle.id()),
+            Some((
+                LoadState::Loaded,
+                _,
+                RecursiveDependencyLoadState::Failed(_)
+            ))
+        ),
+        "the textured model must fail through its broken image"
+    );
 
     std::fs::write(&bad, model.to_string()).unwrap();
     std::fs::write(&bad_motion, motion_value.to_string()).unwrap();
-    for index in [1, 3] {
+    std::fs::write(&skin, PNG).unwrap();
+    for index in [1, 3, 4] {
+        states.remove(&index.to_string());
         let (model, motion) = actors[index];
         harness.send(request(json!({
             "id": 10 + index,
@@ -738,24 +768,12 @@ fn native_asset_pipeline() {
             }
         })));
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        for message in harness.drain() {
-            if message["event"] == "state" {
-                states.insert(
-                    message["character"].as_str().unwrap().to_owned(),
-                    message["status"].as_str().unwrap().to_owned(),
-                );
-            }
-        }
-        if states["1"] == "ready" && states["3"] == "ready" {
-            break;
-        }
-        assert!(Instant::now() < deadline, "repaired assets did not load");
-        harness.app.update();
-        std::thread::yield_now();
-    }
+    harness.wait_for_states(
+        &mut states,
+        &[("1", "ready"), ("3", "ready"), ("4", "ready")],
+    );
 
+    states.remove("0");
     harness.send(request(json!({
         "id": 20,
         "op": "set",
@@ -765,23 +783,7 @@ fn native_asset_pipeline() {
             "motion": motion.to_str().unwrap(),
         }
     })));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        for message in harness.drain() {
-            if message["event"] == "state" {
-                states.insert(
-                    message["character"].as_str().unwrap().to_owned(),
-                    message["status"].as_str().unwrap().to_owned(),
-                );
-            }
-        }
-        if states["0"] == "ready" {
-            break;
-        }
-        assert!(Instant::now() < deadline, "replacement did not load");
-        harness.app.update();
-        std::thread::yield_now();
-    }
+    harness.wait_for_states(&mut states, &[("0", "ready")]);
     assert_eq!(
         harness
             .app
@@ -789,25 +791,25 @@ fn native_asset_pipeline() {
             .query::<&Vrm>()
             .iter(harness.app.world())
             .count(),
-        4
+        5
     );
 
     let get = harness.send(request(json!({"id": 30, "op": "get"})));
     let characters = get["ok"]["characters"].as_array().unwrap();
-    assert_eq!(characters.len(), 4);
+    assert_eq!(characters.len(), 5);
     assert!(
         characters
             .iter()
             .all(|character| character["status"] == "ready")
     );
 
-    for index in 0..4 {
+    for index in 0..5 {
         let reply = harness.send(request(json!({
             "id": 40 + index,
             "op": "remove",
             "character": index.to_string(),
         })));
-        assert_eq!(reply["ok"], Value::Null);
+        assert_eq!(reply, json!({"id": 40 + index, "ok": null}));
     }
     harness.app.update();
     assert_eq!(
@@ -821,5 +823,4 @@ fn native_asset_pipeline() {
     );
 
     drop(harness);
-    std::fs::remove_dir_all(directory).unwrap();
 }

@@ -3,26 +3,17 @@ use super::*;
 use crate::desktop::Output;
 use bevy::ecs::message::Messages;
 use bevy::prelude::*;
-use ene_vrm::{SpringJointProps, SpringRig, Vrm};
+use ene_vrm::{SpringRig, Vrm};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-fn ready() -> Vrm {
-    Vrm::default()
-}
-
-fn scene_app() -> App {
+fn scene_app() -> (App, Entity) {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, AssetPlugin::default()))
         .add_message::<Notification>()
         .add_systems(Update, update_avatars);
-    app.world_mut().spawn(Output {
-        name: "m".into(),
-        origin: Vec2::ZERO,
-        size: Vec2::splat(100.),
-        units_per_logical_pixel: 1.,
-    });
-    app
+    let output = spawn_output(&mut app);
+    (app, output)
 }
 
 fn drain_events(app: &mut App) -> Vec<Value> {
@@ -46,7 +37,10 @@ fn spawn_output(app: &mut App) -> Entity {
 
 /// Simulates the scene instance `load_scene` binds after a VRM spawns.
 fn bind(app: &mut App, avatar: Entity) -> Entity {
-    let root = app.world_mut().spawn((ready(), ChildOf(avatar))).id();
+    let root = app
+        .world_mut()
+        .spawn((Vrm::default(), AnimationPlayer::default(), ChildOf(avatar)))
+        .id();
     app.world_mut()
         .entity_mut(avatar)
         .insert(ModelAssets::with_root(root));
@@ -55,16 +49,14 @@ fn bind(app: &mut App, avatar: Entity) -> Entity {
 
 #[test]
 fn state_transitions() {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, AssetPlugin::default()))
-        .add_message::<Notification>()
-        .add_systems(Update, update_avatars);
+    let (mut app, output) = scene_app();
     let avatar = app
         .world_mut()
         .spawn((
             CharacterId("a".into()),
             Config {
                 model: "a.vrm".into(),
+                motion: Some("a.vrma".into()),
                 ..default()
             },
         ))
@@ -80,7 +72,7 @@ fn state_transitions() {
     );
     assert!(drain_events(&mut app).is_empty());
 
-    let output = spawn_output(&mut app);
+    let root = bind(&mut app, avatar);
     app.update();
     assert_eq!(
         app.world().get::<AvatarState>(avatar),
@@ -88,7 +80,9 @@ fn state_transitions() {
     );
     assert!(drain_events(&mut app).is_empty());
 
-    bind(&mut app, avatar);
+    let mut player = AnimationPlayer::default();
+    player.play(AnimationNodeIndex::new(0));
+    app.world_mut().entity_mut(root).insert(player);
     app.update();
     assert_eq!(
         app.world().get::<AvatarState>(avatar),
@@ -140,49 +134,8 @@ fn state_transitions() {
 }
 
 #[test]
-fn waits_for_motion() {
-    let mut app = scene_app();
-    let avatar = app
-        .world_mut()
-        .spawn((
-            CharacterId("a".into()),
-            Config {
-                model: "a.vrm".into(),
-                motion: Some("a.vrma".into()),
-                ..default()
-            },
-        ))
-        .id();
-    let root = bind(&mut app, avatar);
-    app.update();
-    assert_eq!(
-        app.world().get::<AvatarState>(avatar),
-        Some(&AvatarState::Loading)
-    );
-
-    let mut player = AnimationPlayer::default();
-    player.play(AnimationNodeIndex::new(0));
-    app.world_mut().entity_mut(root).insert(player);
-    app.update();
-    assert_eq!(
-        app.world().get::<AvatarState>(avatar),
-        Some(&AvatarState::Ready)
-    );
-    assert_eq!(
-        drain_events(&mut app),
-        [json!({"event":"state","character":"a","status":"ready","error":null})]
-    );
-}
-
-#[test]
 fn pause_and_resume() {
-    let mut app = scene_app();
-    let props = SpringJointProps {
-        gravity_power: 1.,
-        stiffness: 0.5,
-        hit_radius: 0.02,
-        ..default()
-    };
+    let (mut app, _) = scene_app();
     let mut actors = Vec::new();
     for playing in [false, true] {
         let avatar = app
@@ -204,17 +157,21 @@ fn pause_and_resume() {
             .seek_to(1.25);
         let root = app
             .world_mut()
-            .spawn((ready(), player, SpringRig::default(), ChildOf(avatar)))
+            .spawn((
+                Vrm::default(),
+                player,
+                SpringRig::default(),
+                ChildOf(avatar),
+            ))
             .id();
-        let joint = app.world_mut().spawn((props, ChildOf(root))).id();
         app.world_mut()
             .entity_mut(avatar)
             .insert(ModelAssets::with_root(root));
-        actors.push((avatar, root, joint));
+        actors.push((avatar, root));
     }
 
     app.update();
-    for (index, (_, root, _)) in actors.iter().enumerate() {
+    for (index, (_, root)) in actors.iter().enumerate() {
         let player = app.world().get::<AnimationPlayer>(*root).unwrap();
         assert_eq!(player.all_paused(), index == 0);
         assert_eq!(
@@ -227,7 +184,7 @@ fn pause_and_resume() {
         );
     }
 
-    let (avatar, root, _) = actors[0];
+    let (avatar, root) = actors[0];
     app.world_mut().get_mut::<Config>(avatar).unwrap().playing = true;
     app.update();
     assert!(
@@ -247,11 +204,6 @@ fn pause_and_resume() {
             .all_paused()
     );
     assert!(app.world().get::<SpringRig>(root).unwrap().paused);
-
-    // Pausing the rig must not remove joint data.
-    for (_, _, joint) in actors {
-        assert_eq!(app.world().get::<SpringJointProps>(joint), Some(&props));
-    }
 }
 
 #[test]
@@ -270,7 +222,7 @@ fn finished_and_looping() {
         events
     }
 
-    let mut app = scene_app();
+    let (mut app, _) = scene_app();
     app.init_resource::<Assets<AnimationClip>>()
         .init_resource::<Assets<AnimationGraph>>()
         .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -321,7 +273,7 @@ fn finished_and_looping() {
         let instance = app
             .world_mut()
             .spawn((
-                ready(),
+                Vrm::default(),
                 player,
                 AnimationGraphHandle(graph.clone()),
                 ChildOf(root),

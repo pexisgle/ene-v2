@@ -88,3 +88,12 @@ impl Config {
 
 #[derive(Message)]
 pub struct Notification(pub Value);
+
+impl Notification {
+    pub(crate) fn state(character: &CharacterId, state: &AvatarState) -> Self {
+        let mut event = state.json();
+        event["event"] = "state".into();
+        event["character"] = character.0.clone().into();
+        Self(event)
+    }
+}

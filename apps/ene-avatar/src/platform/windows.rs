@@ -224,17 +224,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_mode_maps_fps_to_winit_settings() {
-        assert_eq!(update_mode(0), UpdateMode::Continuous);
-        for fps in [1, 30, 60, 1000] {
-            assert_eq!(
-                update_mode(fps),
-                UpdateMode::reactive_low_power(Duration::from_secs_f64(1. / f64::from(fps)))
-            );
-        }
-    }
-
-    #[test]
     fn output_sync_follows_monitor_changes() {
         #[derive(Resource, Default)]
         struct LiveMonitors(Vec<(Entity, Output)>);

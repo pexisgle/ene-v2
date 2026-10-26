@@ -21,7 +21,7 @@ pub(super) fn update_avatars(
     )>,
     outputs: Query<&Output>,
     server: Res<AssetServer>,
-    mut parts: Query<(Option<&mut AnimationPlayer>, Option<&mut SpringRig>)>,
+    mut parts: Query<(&mut AnimationPlayer, Option<&mut SpringRig>)>,
     mut states: MessageWriter<Notification>,
 ) {
     use bevy::animation::RepeatAnimation;
@@ -33,11 +33,9 @@ pub(super) fn update_avatars(
         // that root's player has the animation the loader attached.
         let initialized = part.is_some();
         let motion_ready = config.motion.is_none()
-            || part.as_ref().is_some_and(|(player, _)| {
-                player
-                    .as_ref()
-                    .is_some_and(|player| player.playing_animations().next().is_some())
-            });
+            || part
+                .as_ref()
+                .is_some_and(|(player, _)| player.playing_animations().next().is_some());
         let mut next = match &*state {
             // A load failure is sticky until the next reload.
             AvatarState::Error(_) => state.clone(),
@@ -45,19 +43,29 @@ pub(super) fn update_avatars(
             _ if outputs.is_empty() => AvatarState::Suspended,
             _ => AvatarState::Ready,
         };
-        if *state == AvatarState::Loading
+        if !matches!(&*state, AvatarState::Error(_))
             && let Some(assets) = assets
         {
-            for id in std::iter::once(assets.model.id().untyped())
-                .chain(assets.motion.iter().map(|handle| handle.id().untyped()))
-            {
-                if let Some(
-                    (LoadState::Failed(error), _, _)
-                    | (_, _, RecursiveDependencyLoadState::Failed(error)),
-                ) = server.get_load_states(id)
-                {
-                    next = AvatarState::Error(error.to_string());
-                    break;
+            for (id, retrying) in std::iter::once((
+                assets.model.id().untyped(),
+                assets.retrying_model_dependencies,
+            ))
+            .chain(
+                assets
+                    .motion
+                    .iter()
+                    .map(|handle| (handle.id().untyped(), assets.retrying_motion_dependencies)),
+            ) {
+                match server.get_load_states(id) {
+                    Some((LoadState::Failed(error), _, _)) => {
+                        next = AvatarState::Error(error.to_string());
+                        break;
+                    }
+                    Some((_, _, RecursiveDependencyLoadState::Failed(error))) if !retrying => {
+                        next = AvatarState::Error(error.to_string());
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -67,30 +75,25 @@ pub(super) fn update_avatars(
             Visibility::Hidden
         });
         if state.set_if_neq(next) {
-            let mut event = state.json();
-            event["event"] = "state".into();
-            event["character"] = id.0.clone().into();
-            states.write(Notification(event));
+            states.write(Notification::state(id, &state));
         }
         let running = config.playing && *state == AvatarState::Ready;
-        let Some((player, spring)) = part else {
+        let Some((mut player, spring)) = part else {
             continue;
         };
-        if let Some(mut player) = player {
-            if running {
-                player.resume_all();
-            } else {
-                player.pause_all();
-            }
-            for (_, animation) in player.playing_animations_mut() {
-                if config.looping {
-                    animation.set_repeat(RepeatAnimation::Forever);
-                } else if animation.repeat_mode() == RepeatAnimation::Forever {
-                    // Finish the current cycle, even after earlier loop completions.
-                    animation.set_repeat(RepeatAnimation::Count(
-                        animation.completions().saturating_add(1),
-                    ));
-                }
+        if running {
+            player.resume_all();
+        } else {
+            player.pause_all();
+        }
+        for (_, animation) in player.playing_animations_mut() {
+            if config.looping {
+                animation.set_repeat(RepeatAnimation::Forever);
+            } else if animation.repeat_mode() == RepeatAnimation::Forever {
+                // Finish the current cycle, even after earlier loop completions.
+                animation.set_repeat(RepeatAnimation::Count(
+                    animation.completions().saturating_add(1),
+                ));
             }
         }
         if let Some(mut spring) = spring {
