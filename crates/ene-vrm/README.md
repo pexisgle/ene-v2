@@ -31,6 +31,6 @@ cargo test --locked -p ene-vrm -p ene-avatar
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
 
-GPUテストは`--ignored`です。合成シーンのパイプラインスモークと、スキン＋モーフ変形をCPU参照と画素比較するテストをlavapipe（CI）で実行します。実モデル（`ENE_VRM_TEST_MODEL`）とWindows／Wayland実機は未検証です。
+GPUテストは`--ignored`です。合成シーンのMToonパイプラインスモークをlavapipe（CI）で実行します。実モデルとWindows／Wayland実機は未検証です。
 
 姿勢・制約・SpringBoneの数式とMToon照明の一部はbevy_vrm1（MIT OR Apache-2.0、`LICENSE-bevy_vrm1-*`）を参照しています。

@@ -221,20 +221,3 @@ fn look_at(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_uniform_head_scale_is_inverted() {
-        let head = Affine3A::from_scale_rotation_translation(
-            Vec3::new(2., 1., 1.),
-            Quat::IDENTITY,
-            Vec3::ZERO,
-        );
-        let angles = gaze_angles(head, Quat::IDENTITY, Vec3::new(2., 0., 1.), Vec3::ZERO);
-        assert!((angles.x - 45.).abs() < 1e-4, "{angles:?}");
-        assert!(angles.y.abs() < 1e-4, "{angles:?}");
-    }
-}

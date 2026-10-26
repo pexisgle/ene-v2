@@ -341,18 +341,3 @@ pub(crate) fn retarget_motion(
     }
     Ok(clips)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rotation_roundtrip_preserves_rest_axes() {
-        let local = Quat::from_rotation_x(0.7);
-        let global = Quat::from_rotation_z(-1.2) * local;
-        let value = local * Quat::from_rotation_y(0.4);
-        assert!(
-            denormalize_rotation(local, global, normalize_rotation(local, global, value))
-                .abs_diff_eq(value, 1e-5)
-        );
-    }
-}

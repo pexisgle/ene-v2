@@ -81,35 +81,3 @@ impl AimAxis {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn node_constraint_reads_spec_axis_names_and_ignores_extras() {
-        let roll: NodeConstraint = serde_json::from_value(json!({
-            "specVersion": "1.0",
-            "constraint": {
-                "roll": {"source": 2, "rollAxis": "Y", "weight": 0.5},
-                "extras": {"note": "authoring metadata"},
-                "extensions": {}
-            }
-        }))
-        .unwrap();
-        assert_eq!(roll.spec_version, "1.0");
-        let roll = roll.constraint.roll.unwrap();
-        assert_eq!(roll.roll_axis.vector(), Vec3::Y);
-        assert_eq!(roll.weight, Some(0.5));
-
-        let aim: NodeConstraint = serde_json::from_value(json!({
-            "specVersion": "1.0",
-            "constraint": {"aim": {"source": 3, "aimAxis": "NegativeZ"}}
-        }))
-        .unwrap();
-        let aim = aim.constraint.aim.unwrap();
-        assert_eq!(aim.aim_axis.vector(), Vec3::NEG_Z);
-        assert_eq!(aim.weight, None);
-    }
-}

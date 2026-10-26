@@ -570,7 +570,7 @@ mod tests {
     use std::borrow::Cow;
 
     #[test]
-    fn validation_reads_only_the_glb_json_chunk() {
+    fn validation_accepts_a_glb_json_chunk() {
         let json = br#"{"asset":{"version":"2.0"}}"#;
         let bin = [0u8; 1024];
         let bytes = Glb {
