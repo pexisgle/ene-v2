@@ -7,7 +7,7 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use assets::reload;
+pub(crate) use assets::{ModelAssets, reload};
 pub(crate) use lifecycle::notify_finished;
 pub use model::{AvatarState, CharacterId, Config, Notification};
 

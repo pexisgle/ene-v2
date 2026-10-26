@@ -14,6 +14,26 @@ pub(crate) struct ModelAssets {
     pub(super) model: Handle<Gltf>,
     pub(super) motion: Option<Handle<AnimationClip>>,
     pub(super) scene: Entity,
+    /// The VRM instance root bound once per load. `Vrm` and the spring rig are
+    /// attached there by `ene-vrm`; the motion player is attached there too.
+    root: Option<Entity>,
+}
+
+impl ModelAssets {
+    /// The VRM instance root, once the spawned scene has been scanned.
+    pub(crate) fn root(&self) -> Option<Entity> {
+        self.root
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_root(root: Entity) -> Self {
+        Self {
+            model: Handle::default(),
+            motion: None,
+            scene: root,
+            root: Some(root),
+        }
+    }
 }
 
 pub(crate) fn reload(
@@ -50,16 +70,19 @@ pub(crate) fn reload(
             .as_ref()
             .map(|path| server.load(GltfAssetLabel::Animation(0).from_asset(path.clone()))),
         scene,
+        root: None,
     });
     states.write(Notification(
         json!({"event":"state", "character":id.0, "status":"loading", "error":null}),
     ));
 }
 
+/// One-time scene setup. The scene spawns asynchronously, so this keeps
+/// checking until the instance exists, then binds its root and player.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn load_scene(
     mut commands: Commands,
-    actors: Query<&ModelAssets>,
+    mut actors: Query<&mut ModelAssets>,
     gltfs: Res<Assets<Gltf>>,
     worlds: Res<Assets<WorldAsset>>,
     server: Res<AssetServer>,
@@ -69,7 +92,7 @@ pub(super) fn load_scene(
     graphs_present: Query<(), With<AnimationGraphHandle>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
 ) {
-    for assets in &actors {
+    for mut assets in &mut actors {
         let Some(model) = gltfs.get(&assets.model) else {
             continue;
         };
@@ -88,20 +111,28 @@ pub(super) fn load_scene(
                     .entity(assets.scene)
                     .insert(WorldAssetRoot(scene.clone()));
             }
-        } else if let Some(clip) = &assets.motion
-            && server.is_loaded_with_dependencies(clip.id())
-        {
-            for root in children
+            continue;
+        }
+        if assets.root.is_none() {
+            assets.root = children
                 .iter_descendants(assets.scene)
-                .filter(|e| rigs.contains(*e) && !graphs_present.contains(*e))
-            {
-                let (graph, node) = AnimationGraph::from_clip(clip.clone());
-                let mut player = AnimationPlayer::default();
-                player.play(node).repeat();
-                commands
-                    .entity(root)
-                    .insert((player, AnimationGraphHandle(graphs.add(graph))));
-            }
+                .find(|entity| rigs.contains(*entity));
+        }
+        let Some(root) = assets.root else {
+            continue;
+        };
+        // `ene-vrm` already puts an empty player on the root; the graph marks
+        // that the motion is wired up.
+        if let Some(clip) = &assets.motion
+            && server.is_loaded_with_dependencies(clip.id())
+            && !graphs_present.contains(root)
+        {
+            let (graph, node) = AnimationGraph::from_clip(clip.clone());
+            let mut player = AnimationPlayer::default();
+            player.play(node).repeat();
+            commands
+                .entity(root)
+                .insert((player, AnimationGraphHandle(graphs.add(graph))));
         }
     }
 }

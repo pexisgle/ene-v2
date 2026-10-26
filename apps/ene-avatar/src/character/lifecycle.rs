@@ -7,14 +7,12 @@ use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
     prelude::*,
 };
-use ene_vrm::{SpringRig, Vrm};
+use ene_vrm::SpringRig;
 use serde_json::json;
 
 /// The single place that decides an avatar's state and applies the transition.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn update_avatars(
     mut actors: Query<(
-        Entity,
         &CharacterId,
         &Config,
         &mut AvatarState,
@@ -23,27 +21,23 @@ pub(super) fn update_avatars(
     )>,
     outputs: Query<&Output>,
     server: Res<AssetServer>,
-    children: Query<&Children>,
-    mut parts: Query<(Entity, AnyOf<(&mut AnimationPlayer, &mut SpringRig, &Vrm)>)>,
+    mut parts: Query<(Option<&mut AnimationPlayer>, Option<&mut SpringRig>)>,
     mut states: MessageWriter<Notification>,
 ) {
     use bevy::animation::RepeatAnimation;
-    for (root, id, config, mut state, mut visibility, assets) in &mut actors {
-        // A scene is ready once its VRM rig exists; the rig is the library's own signal.
-        let subtree = assets.map_or(root, |assets| assets.scene);
-        let mut initialized = false;
-        let mut motion_ready = config.motion.is_none();
-        for (_, (player, _, rig)) in parts
-            .iter_many(std::iter::once(subtree).chain(children.iter_descendants(subtree)))
-            .matched()
-        {
-            initialized |= rig.is_some();
-            motion_ready |=
-                player.is_some_and(|player| player.playing_animations().next().is_some());
-            if initialized && motion_ready {
-                break;
-            }
-        }
+    for (id, config, mut state, mut visibility, assets) in &mut actors {
+        let part = assets
+            .and_then(ModelAssets::root)
+            .and_then(|root| parts.get_mut(root).ok());
+        // A scene is ready once its VRM root is bound; the motion is ready once
+        // that root's player has the animation the loader attached.
+        let initialized = part.is_some();
+        let motion_ready = config.motion.is_none()
+            || part.as_ref().is_some_and(|(player, _)| {
+                player
+                    .as_ref()
+                    .is_some_and(|player| player.playing_animations().next().is_some())
+            });
         let mut next = match &*state {
             // A load failure is sticky until the next reload.
             AvatarState::Error(_) => state.clone(),
@@ -79,54 +73,52 @@ pub(super) fn update_avatars(
             states.write(Notification(event));
         }
         let running = config.playing && *state == AvatarState::Ready;
-        let mut parts = parts
-            .iter_many_mut(std::iter::once(root).chain(children.iter_descendants(root)))
-            .matched();
-        while let Some((_, (player, spring, _))) = parts.fetch_next() {
-            if let Some(mut player) = player {
-                if running {
-                    player.resume_all();
-                } else {
-                    player.pause_all();
-                }
-                for (_, animation) in player.playing_animations_mut() {
-                    if config.looping {
-                        animation.set_repeat(RepeatAnimation::Forever);
-                    } else if animation.repeat_mode() == RepeatAnimation::Forever {
-                        // Finish the current cycle, even after earlier loop completions.
-                        animation.set_repeat(RepeatAnimation::Count(
-                            animation.completions().saturating_add(1),
-                        ));
-                    }
+        let Some((player, spring)) = part else {
+            continue;
+        };
+        if let Some(mut player) = player {
+            if running {
+                player.resume_all();
+            } else {
+                player.pause_all();
+            }
+            for (_, animation) in player.playing_animations_mut() {
+                if config.looping {
+                    animation.set_repeat(RepeatAnimation::Forever);
+                } else if animation.repeat_mode() == RepeatAnimation::Forever {
+                    // Finish the current cycle, even after earlier loop completions.
+                    animation.set_repeat(RepeatAnimation::Count(
+                        animation.completions().saturating_add(1),
+                    ));
                 }
             }
-            if let Some(mut spring) = spring {
-                // Keep the last simulated pose visible while paused; removing
-                // SpringJointProps here would also disable apply_spring_poses.
-                spring.paused = !running;
-            }
+        }
+        if let Some(mut spring) = spring {
+            // Keep the last simulated pose visible while paused; removing
+            // SpringJointProps here would also disable apply_spring_poses.
+            spring.paused = !running;
         }
     }
 }
 
 pub(crate) fn notify_finished(
-    avatars: Query<(Entity, &CharacterId, &Config, &AvatarState)>,
+    avatars: Query<(&CharacterId, &Config, &AvatarState, Option<&ModelAssets>)>,
     players: Query<&AnimationPlayer>,
-    children: Query<&Children>,
     mut finished: MessageWriter<Notification>,
 ) {
-    for (entity, id, control, state) in &avatars {
+    for (id, control, state, assets) in &avatars {
         if !control.playing || control.looping || *state != AvatarState::Ready {
             continue;
         }
-        let players = || {
-            players
-                .iter_many(std::iter::once(entity).chain(children.iter_descendants(entity)))
-                .matched()
+        let Some(player) = assets
+            .and_then(ModelAssets::root)
+            .and_then(|root| players.get(root).ok())
+        else {
+            continue;
         };
-        if players().all(AnimationPlayer::all_finished)
-            && players()
-                .flat_map(AnimationPlayer::playing_animations)
+        if player.all_finished()
+            && player
+                .playing_animations()
                 .any(|(_, animation)| !animation.is_paused() && animation.just_completed())
         {
             finished.write(Notification(json!({"event":"finished", "character":id.0})));

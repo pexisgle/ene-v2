@@ -5,7 +5,7 @@ use super::{
     read_request,
     session::requests,
 };
-use crate::character::{AvatarState, CharacterId, Config, Notification};
+use crate::character::{AvatarState, CharacterId, Config, ModelAssets, Notification};
 use crate::desktop::Output;
 use bevy::app::AppExit;
 use bevy::prelude::*;
@@ -450,7 +450,16 @@ fn get_and_notification_schema() {
         .play(AnimationNodeIndex::new(0))
         .repeat()
         .seek_to(1.25);
-    harness.app.world_mut().spawn((player, ChildOf(entity)));
+    let root = harness
+        .app
+        .world_mut()
+        .spawn((player, ChildOf(entity)))
+        .id();
+    harness
+        .app
+        .world_mut()
+        .entity_mut(entity)
+        .insert(ModelAssets::with_root(root));
     let get = harness.line(r#"{"id":3,"op":"get"}"#);
     assert_eq!(get["ok"]["characters"][0]["animation_times"], json!([1.25]));
     assert!(get["ok"]["characters"][0].get("spring_paused").is_none());

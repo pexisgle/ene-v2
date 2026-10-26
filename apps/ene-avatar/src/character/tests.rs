@@ -44,6 +44,15 @@ fn spawn_output(app: &mut App) -> Entity {
         .id()
 }
 
+/// Simulates the scene instance `load_scene` binds after a VRM spawns.
+fn bind(app: &mut App, avatar: Entity) -> Entity {
+    let root = app.world_mut().spawn((ready(), ChildOf(avatar))).id();
+    app.world_mut()
+        .entity_mut(avatar)
+        .insert(ModelAssets::with_root(root));
+    root
+}
+
 #[test]
 fn state_transitions() {
     let mut app = App::new();
@@ -79,7 +88,7 @@ fn state_transitions() {
     );
     assert!(drain_events(&mut app).is_empty());
 
-    app.world_mut().entity_mut(avatar).insert(ready());
+    bind(&mut app, avatar);
     app.update();
     assert_eq!(
         app.world().get::<AvatarState>(avatar),
@@ -131,7 +140,42 @@ fn state_transitions() {
 }
 
 #[test]
-fn pause_and_late_parts() {
+fn waits_for_motion() {
+    let mut app = scene_app();
+    let avatar = app
+        .world_mut()
+        .spawn((
+            CharacterId("a".into()),
+            Config {
+                model: "a.vrm".into(),
+                motion: Some("a.vrma".into()),
+                ..default()
+            },
+        ))
+        .id();
+    let root = bind(&mut app, avatar);
+    app.update();
+    assert_eq!(
+        app.world().get::<AvatarState>(avatar),
+        Some(&AvatarState::Loading)
+    );
+
+    let mut player = AnimationPlayer::default();
+    player.play(AnimationNodeIndex::new(0));
+    app.world_mut().entity_mut(root).insert(player);
+    app.update();
+    assert_eq!(
+        app.world().get::<AvatarState>(avatar),
+        Some(&AvatarState::Ready)
+    );
+    assert_eq!(
+        drain_events(&mut app),
+        [json!({"event":"state","character":"a","status":"ready","error":null})]
+    );
+}
+
+#[test]
+fn pause_and_resume() {
     let mut app = scene_app();
     let props = SpringJointProps {
         gravity_power: 1.,
@@ -141,13 +185,11 @@ fn pause_and_late_parts() {
     };
     let mut actors = Vec::new();
     for playing in [false, true] {
-        let root = app
+        let avatar = app
             .world_mut()
             .spawn((
                 CharacterId(playing.to_string()),
                 AvatarState::Ready,
-                ready(),
-                SpringRig::default(),
                 Config {
                     playing,
                     looping: true,
@@ -155,85 +197,60 @@ fn pause_and_late_parts() {
                 },
             ))
             .id();
-        let mut players = Vec::new();
-        for _ in 0..2 {
-            let mut player = AnimationPlayer::default();
-            player
-                .play(AnimationNodeIndex::new(0))
-                .repeat()
-                .seek_to(1.25);
-            players.push(app.world_mut().spawn((player, ChildOf(root))).id());
-        }
-        let spring = app.world_mut().spawn((props, ChildOf(root))).id();
-        actors.push((root, players, spring));
+        let mut player = AnimationPlayer::default();
+        player
+            .play(AnimationNodeIndex::new(0))
+            .repeat()
+            .seek_to(1.25);
+        let root = app
+            .world_mut()
+            .spawn((ready(), player, SpringRig::default(), ChildOf(avatar)))
+            .id();
+        let joint = app.world_mut().spawn((props, ChildOf(root))).id();
+        app.world_mut()
+            .entity_mut(avatar)
+            .insert(ModelAssets::with_root(root));
+        actors.push((avatar, root, joint));
     }
 
     app.update();
-    for (index, (root, players, _)) in actors.iter().enumerate() {
-        for &player in players {
-            let player = app.world().get::<AnimationPlayer>(player).unwrap();
-            assert_eq!(player.all_paused(), index == 0);
-            assert_eq!(
-                player.playing_animations().next().unwrap().1.seek_time(),
-                1.25
-            );
-        }
+    for (index, (_, root, _)) in actors.iter().enumerate() {
+        let player = app.world().get::<AnimationPlayer>(*root).unwrap();
+        assert_eq!(player.all_paused(), index == 0);
+        assert_eq!(
+            player.playing_animations().next().unwrap().1.seek_time(),
+            1.25
+        );
         assert_eq!(
             app.world().get::<SpringRig>(*root).unwrap().paused,
             index == 0
         );
     }
 
-    app.world_mut()
-        .get_mut::<Config>(actors[0].0)
-        .unwrap()
-        .playing = true;
+    let (avatar, root, _) = actors[0];
+    app.world_mut().get_mut::<Config>(avatar).unwrap().playing = true;
     app.update();
     assert!(
         !app.world()
-            .get::<AnimationPlayer>(actors[0].1[0])
+            .get::<AnimationPlayer>(root)
             .unwrap()
             .all_paused()
     );
-    assert!(!app.world().get::<SpringRig>(actors[0].0).unwrap().paused);
+    assert!(!app.world().get::<SpringRig>(root).unwrap().paused);
 
-    app.world_mut()
-        .get_mut::<Config>(actors[0].0)
-        .unwrap()
-        .playing = false;
-    app.update();
-    let mut late = AnimationPlayer::default();
-    late.play(AnimationNodeIndex::new(0)).repeat().seek_to(0.5);
-    let late = app.world_mut().spawn((late, ChildOf(actors[0].0))).id();
-    let late_rig = app
-        .world_mut()
-        .spawn((SpringRig::default(), ChildOf(actors[0].0)))
-        .id();
+    app.world_mut().get_mut::<Config>(avatar).unwrap().playing = false;
     app.update();
     assert!(
         app.world()
-            .get::<AnimationPlayer>(late)
+            .get::<AnimationPlayer>(root)
             .unwrap()
             .all_paused()
     );
-    assert!(app.world().get::<SpringRig>(late_rig).unwrap().paused);
+    assert!(app.world().get::<SpringRig>(root).unwrap().paused);
 
-    app.world_mut()
-        .entity_mut(late)
-        .insert(ChildOf(actors[1].0));
-    app.world_mut()
-        .entity_mut(late_rig)
-        .insert(ChildOf(actors[1].0));
-    app.update();
-    assert!(
-        !app.world()
-            .get::<AnimationPlayer>(late)
-            .unwrap()
-            .all_paused()
-    );
-    assert!(!app.world().get::<SpringRig>(late_rig).unwrap().paused);
-    for (_, _, spring) in actors {
-        assert_eq!(app.world().get::<SpringJointProps>(spring), Some(&props));
+    // Pausing the rig must not remove joint data.
+    for (_, _, joint) in actors {
+        assert_eq!(app.world().get::<SpringJointProps>(joint), Some(&props));
     }
 }
 
@@ -279,7 +296,6 @@ fn finished_and_looping() {
         .spawn((
             CharacterId("a".into()),
             AvatarState::Ready,
-            ready(),
             Config {
                 playing: true,
                 looping: false,
@@ -290,21 +306,33 @@ fn finished_and_looping() {
         .id();
     let other = app
         .world_mut()
-        .spawn((CharacterId("b".into()), AvatarState::Ready, ready()))
+        .spawn((
+            CharacterId("b".into()),
+            AvatarState::Ready,
+            Config {
+                motion: Some("test.vrma".into()),
+                ..default()
+            },
+        ))
         .id();
-    for (index, root) in [avatar, avatar, other].into_iter().enumerate() {
+    for root in [avatar, other] {
         let mut player = AnimationPlayer::default();
-        player
-            .play(node)
-            .set_speed(if index == 1 { 0.5 } else { 1. });
+        player.play(node);
+        let instance = app
+            .world_mut()
+            .spawn((
+                ready(),
+                player,
+                AnimationGraphHandle(graph.clone()),
+                ChildOf(root),
+            ))
+            .id();
         app.world_mut()
-            .spawn((player, AnimationGraphHandle(graph.clone()), ChildOf(root)));
+            .entity_mut(root)
+            .insert(ModelAssets::with_root(instance));
     }
-    app.world_mut()
-        .spawn((AnimationPlayer::default(), ChildOf(avatar)));
 
     assert!(step(&mut app, 1).is_empty());
-    assert!(step(&mut app, 4).is_empty());
     assert_eq!(step(&mut app, 4), ["a"]);
     assert!(step(&mut app, 4).is_empty());
     app.world_mut().get_mut::<Config>(avatar).unwrap().looping = true;

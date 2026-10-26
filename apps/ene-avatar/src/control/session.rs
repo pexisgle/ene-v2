@@ -5,7 +5,7 @@ use super::{
     protocol::{Command, Request},
 };
 use crate::{
-    character::{AvatarState, CharacterId, Config, reload},
+    character::{AvatarState, CharacterId, Config, ModelAssets, reload},
     desktop::Output,
 };
 use bevy::{app::AppExit, prelude::*};
@@ -107,17 +107,17 @@ pub(super) fn requests(
 
 #[allow(clippy::type_complexity)]
 fn snapshot(
-    views: Query<(Entity, &CharacterId, &Config, &AvatarState)>,
+    views: Query<(&CharacterId, &Config, &AvatarState, Option<&ModelAssets>)>,
     outputs: Query<&Output>,
-    children: Query<&Children>,
     players: Query<&AnimationPlayer>,
     control: Res<Control>,
 ) -> Value {
     let mut characters = Vec::new();
-    for (entity, id, config, state) in &views {
-        let animation_times: Vec<_> = players
-            .iter_many(std::iter::once(entity).chain(children.iter_descendants(entity)))
-            .matched()
+    for (id, config, state, assets) in &views {
+        let animation_times: Vec<_> = assets
+            .and_then(ModelAssets::root)
+            .and_then(|root| players.get(root).ok())
+            .into_iter()
             .flat_map(AnimationPlayer::playing_animations)
             .map(|(_, animation)| animation.seek_time())
             .collect();

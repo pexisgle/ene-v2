@@ -1,6 +1,6 @@
 use super::*;
 use super::{hit_regions::regions, placement::place_avatars, pointer::pointer};
-use crate::character::{AvatarState, CharacterId, Config, Notification};
+use crate::character::{AvatarState, CharacterId, Config, ModelAssets, Notification};
 use bevy::camera::primitives::Aabb;
 use bevy::ecs::message::{MessageCursor, Messages};
 use bevy::prelude::*;
@@ -366,10 +366,15 @@ fn low_fps_timing() {
                     looping: false,
                     ..default()
                 },
-                player,
-                AnimationGraphHandle(graph),
             ))
             .id();
+        let root = app
+            .world_mut()
+            .spawn((player, AnimationGraphHandle(graph), ChildOf(avatar)))
+            .id();
+        app.world_mut()
+            .entity_mut(avatar)
+            .insert(ModelAssets::with_root(root));
         let mut finished = MessageCursor::<Notification>::default();
         app.update();
         for _ in 0..fps {
@@ -377,7 +382,7 @@ fn low_fps_timing() {
         }
         let animation = app
             .world()
-            .get::<AnimationPlayer>(avatar)
+            .get::<AnimationPlayer>(root)
             .unwrap()
             .animation(node)
             .unwrap();
