@@ -1,5 +1,5 @@
 use crate::{
-    character::AvatarState,
+    character::{AvatarState, Character},
     control::Control,
     desktop::{self, Drag, HitRegions, Output},
 };
@@ -150,87 +150,87 @@ fn run(mut app: App) -> AppExit {
                     }
                 }
             }
-            ExWlShellEvent::NormalDispatch => {
-                if state.get_pointers_iter().next().is_none() {
-                    app.world_mut().resource_mut::<Drag>().entity = None;
-                }
-                if Instant::now() >= deadline {
-                    let started = Instant::now();
-                    for (&id, &window) in &windows {
-                        if let Some(unit) = state.get_unit_with_id(id) {
-                            let Some((x, y)) = state
-                                .get_output_info(id)
-                                .and_then(|info| info.logical_position)
-                            else {
-                                continue;
-                            };
-                            let (width, height) = unit.get_size();
-                            let scale = if unit
-                                .try_set_viewport_destination(width as i32, height as i32)
-                                .is_some()
-                            {
-                                unit.scale_float() as f32
-                            } else {
-                                unit.get_wlsurface()
-                                    .set_buffer_scale(unit.scale_float().ceil() as i32);
-                                unit.scale_float().ceil() as f32
-                            };
-                            let size = Vec2::new(width as f32, height as f32);
-                            let position = Vec2::new(x as f32, y as f32);
-                            if let Some(mut output) = app.world_mut().get_mut::<Output>(window)
-                                && (output.origin != position || output.size != size)
-                            {
-                                output.origin = position;
-                                output.size = size;
-                            }
-                            let mut window = app.world_mut().get_mut::<Window>(window).unwrap();
-                            window.resolution.set_scale_factor(scale);
-                            window.resolution.set(width as f32, height as f32);
-                        }
-                    }
-                    app.update();
-                    if windows.is_empty() && {
-                        let mut query = app.world_mut().query::<&AvatarState>();
-                        query
-                            .iter(app.world())
-                            .any(|state| *state == AvatarState::Loading)
-                    } {
-                        // Without surfaces, only unfinished scene loading needs another frame.
-                        let _ = app.world().resource::<Control>().wake_tx.send(());
-                    }
-                    if let Some(exit) = app.should_exit() {
-                        let _ = exit_tx.try_send(exit);
-                        return ReturnData::RequestExit;
-                    }
-                    if let Some((compositor, qh)) = &compositor {
-                        for (&id, &window) in &windows {
-                            if let Some(unit) = state.get_unit_with_id(id) {
-                                let region = compositor.create_region(qh, ());
-                                if let Some(regions) = app.world().get::<HitRegions>(window) {
-                                    for (_, r) in &regions.0 {
-                                        let min = r.min.floor().as_ivec2();
-                                        let max = r.max.ceil().as_ivec2();
-                                        region.add(min.x, min.y, max.x - min.x, max.y - min.y);
-                                    }
-                                }
-                                unit.get_wlsurface().set_input_region(Some(&region));
-                                region.destroy();
-                                unit.get_wlsurface().commit();
-                            }
-                        }
-                    }
-                    let fps = app.world().resource::<Control>().fps;
-                    deadline = started
-                        + if fps == 0 {
-                            Duration::ZERO
-                        } else {
-                            Duration::from_secs_f64(1. / f64::from(fps))
-                        };
-                    state.request_refresh_all(RefreshRequest::At(deadline));
-                }
+            ExWlShellEvent::NormalDispatch if state.get_pointers_iter().next().is_none() => {
+                app.world_mut().resource_mut::<Drag>().entity = None;
             }
             _ => {}
         }
+
+        if Instant::now() >= deadline {
+            let started = Instant::now();
+            for (&id, &window) in &windows {
+                if let Some(unit) = state.get_unit_with_id(id) {
+                    let Some((x, y)) = state
+                        .get_output_info(id)
+                        .and_then(|info| info.logical_position)
+                    else {
+                        continue;
+                    };
+                    let (width, height) = unit.get_size();
+                    let scale = if unit
+                        .try_set_viewport_destination(width as i32, height as i32)
+                        .is_some()
+                    {
+                        unit.scale_float() as f32
+                    } else {
+                        unit.get_wlsurface()
+                            .set_buffer_scale(unit.scale_float().ceil() as i32);
+                        unit.scale_float().ceil() as f32
+                    };
+                    let size = Vec2::new(width as f32, height as f32);
+                    let position = Vec2::new(x as f32, y as f32);
+                    if let Some(mut output) = app.world_mut().get_mut::<Output>(window)
+                        && (output.origin != position || output.size != size)
+                    {
+                        output.origin = position;
+                        output.size = size;
+                    }
+                    let mut window = app.world_mut().get_mut::<Window>(window).unwrap();
+                    window.resolution.set_scale_factor(scale);
+                    window.resolution.set(width as f32, height as f32);
+                }
+            }
+            app.update();
+            if windows.is_empty() && {
+                let mut query = app.world_mut().query::<&Character>();
+                query
+                    .iter(app.world())
+                    .any(|character| character.state == AvatarState::Loading)
+            } {
+                // Without surfaces, only unfinished scene loading needs another frame.
+                let _ = app.world().resource::<Control>().wake_tx.send(());
+            }
+            if let Some(exit) = app.should_exit() {
+                let _ = exit_tx.try_send(exit);
+                return ReturnData::RequestExit;
+            }
+            if let Some((compositor, qh)) = &compositor {
+                for (&id, &window) in &windows {
+                    if let Some(unit) = state.get_unit_with_id(id) {
+                        let region = compositor.create_region(qh, ());
+                        if let Some(regions) = app.world().get::<HitRegions>(window) {
+                            for (_, r) in &regions.0 {
+                                let min = r.min.floor().as_ivec2();
+                                let max = r.max.ceil().as_ivec2();
+                                region.add(min.x, min.y, max.x - min.x, max.y - min.y);
+                            }
+                        }
+                        unit.get_wlsurface().set_input_region(Some(&region));
+                        region.destroy();
+                        unit.get_wlsurface().commit();
+                    }
+                }
+            }
+            let fps = app.world().resource::<Control>().fps;
+            deadline = started
+                + if fps == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs_f64(1. / f64::from(fps))
+                };
+        }
+        // RequestRefresh consumes its timer even when this frame is not due yet.
+        state.request_refresh_all(RefreshRequest::At(deadline));
         ReturnData::None
     });
     if let Err(error) = result {

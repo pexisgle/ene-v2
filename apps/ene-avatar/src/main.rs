@@ -49,10 +49,7 @@ fn main() -> bevy::app::AppExit {
     app.add_plugins(platform::windows::setup);
     #[cfg(target_os = "linux")]
     app.add_plugins(platform::wayland::setup);
-    // A resident desktop mascot cares more about CPU than parallel dispatch.
-    // Interleaved A/B (2 avatars, 30-60fps) measured ~5-7% lower process CPU
-    // with serial PostUpdate; the systems still keep disjoint borrows so this
-    // can be revisited if the scene grows.
+    // Serial PostUpdate used ~5–7% less CPU in A/B runs with two avatars at 30–60 FPS.
     app.edit_schedule(PostUpdate, |schedule| {
         schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
     });

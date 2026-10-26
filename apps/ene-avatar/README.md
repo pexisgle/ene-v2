@@ -75,9 +75,20 @@ Windowsのパスは`C:/models/model.vrm`のように書けます。
 出力キューが満杯または切断された場合は失敗終了します。
 終了時の送信待ちは最大2秒で、送信失敗・タイムアウトも失敗終了として返します。
 
+## 構成
+
+- `character.rs`: 1体分の設定・状態・アセットを`Character`へまとめ、Bevyのシーン生成完了通知でモーションを接続する。
+- `control.rs`: JSON Linesの読み書きと操作。受信した操作は順番にその場で反映する。
+- `desktop/`: モニター配置、カメラ、描画境界による入力領域、ドラッグ。
+- `platform/`: WaylandとWindowsのウィンドウ・入力・更新頻度の調整。
+
 ## 検証
 
 ```sh
 cargo test --locked -p ene-avatar
 cargo clippy --locked -p ene-avatar --all-targets --all-features -- -D warnings
 ```
+
+テストは操作結果、実際のVRM/VRMA読み込みと失敗からの復旧、再生・停止、
+配置・クリック・モニター間ドラッグを確認します。Windowsの入力順序と出力管理は
+Linuxでも検査し、ネイティブAPIと実際の透過表示は対象OS上で確認します。

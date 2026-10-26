@@ -1,8 +1,7 @@
 //! Pointer drag and click handling.
 
-use super::hit_regions::HitRegions;
-use super::output::{Output, bounds, desktop_position};
-use crate::character::{AvatarState, CharacterId, Config, Notification};
+use super::{HitRegions, Output, bounds, desktop_position};
+use crate::character::{AvatarState, Character, Notification};
 use bevy::prelude::*;
 use serde_json::json;
 
@@ -27,7 +26,7 @@ pub(crate) fn pointer(
     mut messages: MessageReader<PointerInput>,
     outputs: Query<&Output>,
     regions: Query<&HitRegions>,
-    mut actors: Query<(&CharacterId, &mut Config, &Transform, &AvatarState)>,
+    mut actors: Query<(&mut Character, &Transform)>,
     mut drag: ResMut<Drag>,
     mut clicks: MessageWriter<Notification>,
 ) {
@@ -46,8 +45,8 @@ pub(crate) fn pointer(
                     .map(|(id, _)| *id)
             });
             if let Some(entity) = hit
-                && let Ok((_, _, transform, state)) = actors.get(entity)
-                && *state == AvatarState::Ready
+                && let Ok((character, transform)) = actors.get(entity)
+                && character.state == AvatarState::Ready
             {
                 let anchor = Vec2::new(transform.translation.x, -transform.translation.y);
                 *drag = Drag {
@@ -67,23 +66,25 @@ pub(crate) fn pointer(
                 .iter()
                 .find(|output| bounds(output).contains(position))
                 .unwrap_or(screen);
-            if let Ok((_, mut placement, _, state)) = actors.get_mut(entity)
-                && *state == AvatarState::Ready
+            if let Ok((mut character, _)) = actors.get_mut(entity)
+                && character.state == AvatarState::Ready
             {
-                placement.position = Some(
+                character.config.position = Some(
                     ((position - destination.origin) / destination.units_per_logical_pixel
                         + drag.offset)
                         .to_array(),
                 );
-                placement.monitor = Some(destination.name.clone());
+                character.config.monitor = Some(destination.name.clone());
             }
         }
         if input.button == Some(false) {
             if !drag.moved
-                && let Ok((id, _, _, state)) = actors.get(entity)
-                && *state == AvatarState::Ready
+                && let Ok((character, _)) = actors.get(entity)
+                && character.state == AvatarState::Ready
             {
-                clicks.write(Notification(json!({"event":"click", "character":id.0})));
+                clicks.write(Notification(
+                    json!({"event":"click", "character":character.id}),
+                ));
             }
             drag.entity = None;
         }
