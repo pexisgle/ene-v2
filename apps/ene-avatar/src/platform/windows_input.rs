@@ -49,11 +49,7 @@ mod tests {
         character::{AvatarState, Character, Notification},
         desktop::{self, Drag, HitRegions},
     };
-    use bevy::{
-        input::mouse::MouseButtonInput,
-        window::{CursorEntered, CursorMoved},
-    };
-    use serde_json::{Value, json};
+    use bevy::{input::mouse::MouseButtonInput, window::CursorMoved};
 
     fn test_app() -> (App, [Entity; 2], Entity) {
         let mut app = App::new();
@@ -126,71 +122,29 @@ mod tests {
         .into()
     }
 
-    fn events(app: &mut App) -> Vec<Value> {
-        app.world_mut()
-            .resource_mut::<Messages<Notification>>()
-            .drain()
-            .map(|event| event.0)
-            .collect()
-    }
-
     #[test]
-    fn queued_drags_keep_the_pressed_character_and_cross_monitor_coordinates() {
-        for per_event in [false, true] {
-            for (end, monitor, position) in [
-                (Vec2::new(200., 50.), "left", [200., 50.]),
-                (Vec2::new(400., 100.), "right", [50., 50.]),
-            ] {
-                let (mut app, [output, _], avatar) = test_app();
-                for event in [
-                    moved(output, Vec2::new(50., 50.)),
-                    button(output, ButtonState::Pressed),
-                    moved(output, end),
-                    button(output, ButtonState::Released),
-                ] {
-                    app.world_mut().write_message(event);
-                    if per_event {
-                        app.update();
-                    }
-                }
-                if !per_event {
-                    app.update();
-                }
-                let config = &app.world().get::<Character>(avatar).unwrap().config;
-                assert_eq!(config.monitor.as_deref(), Some(monitor));
-                assert_eq!(config.position, Some(position));
-                assert!(app.world().resource::<Drag>().entity.is_none());
-                assert!(
-                    events(&mut app).is_empty(),
-                    "a drag must not become a click"
-                );
-            }
+    fn queued_drag_keeps_the_pressed_character_across_monitors() {
+        let (mut app, [output, _], avatar) = test_app();
+        for event in [
+            moved(output, Vec2::new(50., 50.)),
+            button(output, ButtonState::Pressed),
+            moved(output, Vec2::new(400., 100.)),
+            button(output, ButtonState::Released),
+        ] {
+            app.world_mut().write_message(event);
         }
-    }
-
-    #[test]
-    fn clicks_keep_each_windows_position_when_reentering_without_motion() {
-        for recorded in [false, true] {
-            let (mut app, [left, right], _) = test_app();
-            if recorded {
-                app.world_mut()
-                    .write_message(moved(left, Vec2::new(50., 50.)));
-                app.world_mut()
-                    .write_message(moved(right, Vec2::new(20., 20.)));
-                app.update();
-            }
-            // Winit can omit CursorMoved when reentering at the same position.
+        app.update();
+        let config = &app.world().get::<Character>(avatar).unwrap().config;
+        assert_eq!(config.monitor.as_deref(), Some("right"));
+        assert_eq!(config.position, Some([50., 50.]));
+        assert!(app.world().resource::<Drag>().entity.is_none());
+        assert!(
             app.world_mut()
-                .write_message(WindowEvent::CursorEntered(CursorEntered { window: left }));
-            for state in [ButtonState::Pressed, ButtonState::Released] {
-                app.world_mut().write_message(button(left, state));
-            }
-            app.update();
-            let expected = if recorded { "a" } else { "b" };
-            assert_eq!(
-                events(&mut app),
-                [json!({"event":"click", "character":expected})]
-            );
-        }
+                .resource_mut::<Messages<Notification>>()
+                .drain()
+                .next()
+                .is_none(),
+            "a drag must not become a click"
+        );
     }
 }

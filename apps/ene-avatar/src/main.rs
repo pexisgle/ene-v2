@@ -1,12 +1,13 @@
 use bevy::prelude::*;
 use bevy::render::settings::{MemoryHints, WgpuSettings};
-use bevy::render::{RenderPlugin, settings::RenderCreation};
+use bevy::render::{Render, RenderApp, RenderPlugin, settings::RenderCreation};
 use ene_vrm::VrmPlugin;
 
 mod character;
 mod control;
 mod desktop;
 mod platform;
+mod rendering;
 
 fn main() -> bevy::app::AppExit {
     // DXGI HWND swapchains do not support desktop alpha composition.
@@ -38,20 +39,27 @@ fn main() -> bevy::app::AppExit {
                 ..default()
             }),
     );
-    app.add_plugins((VrmPlugin, control::setup, character::setup, desktop::setup));
-    app.add_systems(Startup, |mut commands: Commands| {
-        commands.spawn((
-            DirectionalLight::default(),
-            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
-        ));
-    });
+    app.add_plugins((
+        VrmPlugin,
+        control::setup,
+        character::setup,
+        desktop::setup,
+        rendering::setup,
+    ));
     #[cfg(windows)]
     app.add_plugins(platform::windows::setup);
     #[cfg(target_os = "linux")]
     app.add_plugins(platform::wayland::setup);
-    // Serial PostUpdate used ~5–7% less CPU in A/B runs with two avatars at 30–60 FPS.
+    // Avoid dispatch overhead between the dependency-ordered VRM systems.
     app.edit_schedule(PostUpdate, |schedule| {
         schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
     });
+    // Small avatar scenes spend more CPU dispatching render systems than they
+    // save by running them concurrently. Pipelined rendering and parallel work
+    // inside individual systems still use their own threads.
+    app.sub_app_mut(RenderApp)
+        .edit_schedule(Render, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
     control::run(app)
 }

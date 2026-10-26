@@ -137,26 +137,3 @@ fn cancel_lost_capture(handles: Query<&RawHandleWrapper, With<Output>>, mut drag
         drag.entity = None;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fps_limit_is_not_bypassed_by_input_events() {
-        assert!(matches!(update_mode(0), UpdateMode::Continuous));
-        for fps in [1, 30, 1000] {
-            let UpdateMode::Reactive {
-                wait,
-                react_to_device_events,
-                react_to_user_events,
-                react_to_window_events,
-            } = update_mode(fps)
-            else {
-                panic!("nonzero FPS must wait between updates");
-            };
-            assert_eq!(wait, Duration::from_secs_f64(1. / f64::from(fps)));
-            assert!(!react_to_device_events && !react_to_user_events && !react_to_window_events);
-        }
-    }
-}

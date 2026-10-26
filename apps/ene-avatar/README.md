@@ -10,6 +10,57 @@ WindowsはBevy/winit、LinuxはWaylandのlayer-shellとxdg-outputを使います
 cargo run --release --locked -p ene-avatar
 ```
 
+## 対話式 CLI の example
+
+JSON を手で書かずに操作する Rust example です。本体を子プロセスとして起動します。
+
+```sh
+just fetch-assets
+just run-avatar-cli
+```
+
+本体のビルドも自動で行います。Cargo から直接実行する場合は次のとおりです。
+
+```sh
+cargo build --release --locked -p ene-avatar
+cargo run --release --locked -p ene-avatar --example control
+```
+
+```text
+> add ene
+> motion ene ./wave.vrma
+> pause ene
+> move ene 800 600
+> size ene 120
+> play ene
+> loop ene off
+> center ene
+> list
+> quit
+```
+
+`help` で全コマンドを確認できます。`list` はキャラクター・モニター・FPSを表示し、
+読み込み完了やクリックなどの通知は操作中も表示します。
+`motion ene none` でモーションを解除できます。
+`add ene` は取得済みの Seed-san モデルと three-vrm サンプルモーションを使います。
+`model ene` / `motion ene` でもそれぞれの既定アセットへ戻せます。
+`add ene ./model.vrm ./wave.vrma` で両方を指定でき、
+`add ene ./model.vrm none` ならモーションなしで追加します。
+モデルだけ指定した場合も既定モーションを使います。
+既定アセットは取得スクリプトと同じキャッシュから探します
+（Linux: `$XDG_CACHE_HOME/ene` または `~/.cache/ene`、Windows: `%LOCALAPPDATA%/ene/cache`）。
+未取得の場合は取得コマンドを案内します。
+部分変更は毎回 `get` した設定を引き継いで `set` します。
+そのため、位置・モニターは `get` が返した解決済みの値になります。
+
+空白を含むパスや名前は `add ene "./my models/model.vrm"` のように引用符で囲みます。
+バックスラッシュはそのまま扱い、シェルの変数展開などは行いません。
+ファイルの相対パスは CLI の作業ディレクトリを基準に絶対パスへ変換します。
+
+本体の実行ファイルは、既定では example と同じビルドプロファイルの出力先から探します。
+別の実行ファイルを使う場合は、`--example control -- /path/to/ene-avatar` と指定します。
+`quit` または標準入力の EOF で本体も終了します。
+
 ## JSON Linesによる操作
 
 標準入力へ1行につき1つのJSONを送り、標準出力を継続して読み取ってください。
@@ -47,9 +98,14 @@ Windowsのパスは`C:/models/model.vrm`のように書けます。
 
 `position`はモニター左上から足元までの論理ピクセル座標`[x,y]`です。
 `null`はモニター幅の50%、高さの80%に配置します。`size_percent`は50～200で、
-100ではモデルの1mを160論理ピクセルとして描きます。
+100ではモデルの1mを320論理ピクセルとして描きます。
+50を指定すると従来の100と同じ大きさになります。
 未知のモニター名は最初の出力へフォールバックします。
 `get`の設定には解決後のモニター名と位置が入ります。
+
+照明は白色の平行光80%と環境光20%を基準に、カメラの露出と合わせて設定します。
+MToonの拡散反射はthree-vrmと同じく平行光の照度をπで割り、
+線形出力からsRGBへ変換することで、肌や白い服の色・陰影を保ちます。
 
 `playing`はVRMAの再生とSpringBoneの進行を制御します。停止中は最後にシミュレーションしたSpringBoneの姿勢を保持し、再開すると続きから進みます。MToonのUVアニメーションは材質のグローバル時計で進むため、`playing=false`でも継続します。
 
@@ -89,6 +145,6 @@ cargo test --locked -p ene-avatar
 cargo clippy --locked -p ene-avatar --all-targets --all-features -- -D warnings
 ```
 
-テストは操作結果、実際のVRM/VRMA読み込みと失敗からの復旧、再生・停止、
-配置・クリック・モニター間ドラッグを確認します。Windowsの入力順序と出力管理は
+テストは入力制限、操作順序と不正な変更時の状態保全、応答の出力・終了処理、
+モニター間ドラッグと削除・画面切断時の後始末を確認します。Windowsの入力順序と出力管理は
 Linuxでも検査し、ネイティブAPIと実際の透過表示は対象OS上で確認します。

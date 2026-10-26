@@ -74,14 +74,16 @@ fn reset(
 
 fn apply(mut poses: Query<(&Pose, &RestPose, &mut Transform)>) {
     for (pose, rest, mut transform) in &mut poses {
+        let mut next = *transform;
         if let Some(rotation) = pose.rotation {
-            transform.rotation =
+            next.rotation =
                 denormalize_rotation(rest.local.rotation, rest.global_rotation, rotation);
         }
         if let Some(translation) = pose.translation {
-            transform.translation =
+            next.translation =
                 rest.local.translation + rest.translation_from_normalized * translation;
         }
+        transform.set_if_neq(next);
     }
 }
 

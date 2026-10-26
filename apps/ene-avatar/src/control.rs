@@ -13,10 +13,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(test)]
-#[path = "control/tests.rs"]
-mod tests;
-
 #[derive(Resource)]
 pub struct Control {
     pub output: SyncSender<Value>,
@@ -276,5 +272,177 @@ fn publish(
             exit.write(AppExit::error());
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Harness {
+        app: App,
+        input: SyncSender<Result<Request, String>>,
+        output: Receiver<Value>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let plugins = DefaultPlugins
+                .build()
+                .disable::<AssetPlugin>()
+                .disable::<bevy::render::RenderPlugin>()
+                .disable::<bevy::log::LogPlugin>();
+            #[cfg(windows)]
+            let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+            let mut app = App::new();
+            app.add_plugins(AssetPlugin {
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                ..default()
+            })
+            .init_asset::<Shader>()
+            .init_asset_loader::<bevy::shader::ShaderLoader>()
+            .add_plugins(plugins.set(WindowPlugin {
+                primary_window: None,
+                ..default()
+            }))
+            .register_asset_loader(bevy::image::ImageLoader::new(
+                bevy::image::CompressedImageFormats::NONE,
+            ))
+            .add_plugins((
+                bevy::extract::sync_world::SyncWorldPlugin::<bevy::render::RenderApp>::default(),
+                ene_vrm::VrmPlugin,
+                crate::character::setup,
+                crate::desktop::setup,
+            ))
+            .add_systems(PreUpdate, requests)
+            .add_systems(PostUpdate, publish.after(crate::character::notify_finished));
+            let (input, rx) = mpsc::sync_channel(64);
+            let (tx, output) = mpsc::sync_channel(64);
+            app.insert_non_send(rx).insert_resource(Control {
+                output: tx,
+                fps: 30,
+                #[cfg(target_os = "linux")]
+                wake_tx: exwlshellev::calloop::channel::channel().0,
+            });
+            app.world_mut().spawn(Output {
+                name: "screen".into(),
+                origin: Vec2::ZERO,
+                size: Vec2::splat(100.),
+                units_per_logical_pixel: 1.,
+            });
+            app.finish();
+            app.cleanup();
+            Self { app, input, output }
+        }
+
+        fn batch(&mut self, commands: &[Value]) -> Vec<Value> {
+            for command in commands {
+                self.input
+                    .send(serde_json::from_value(command.clone()).map_err(|e| e.to_string()))
+                    .unwrap();
+            }
+            self.app.update();
+            self.output.try_iter().collect()
+        }
+    }
+
+    #[test]
+    fn input_is_bounded_and_validated() {
+        for (line, valid, end) in [
+            ("{\"id\":1,\"op\":\"get\"}".to_owned(), true, false),
+            ("".to_owned(), true, true),
+            ("{".to_owned(), false, false),
+            (" ".repeat(65_537), false, true),
+            (
+                format!("{{\"id\":1,\"op\":\"get\"}}{}", " ".repeat(65_517)),
+                true,
+                false,
+            ),
+            (
+                "{\"id\":1,\"op\":\"get\",\"typo\":true}".to_owned(),
+                false,
+                false,
+            ),
+        ] {
+            let (request, stopped) = read_request(&mut line.as_bytes());
+            assert_eq!((request.is_ok(), stopped), (valid, end));
+        }
+    }
+
+    #[test]
+    fn commands_are_ordered_and_invalid_changes_are_atomic() {
+        let mut h = Harness::new();
+        let messages = h.batch(&[
+            json!({"id":1,"op":"add","character":"a","config":{"model":"a.vrm"}}),
+            json!({"id":2,"op":"set","character":"a","config":{"model":"a.vrm","playing":false}}),
+            json!({"id":3,"op":"get"}),
+            json!({"id":4,"op":"set","character":"a","config":{"model":"bad"}}),
+            json!({"id":5,"op":"get"}),
+            json!({"id":6,"op":"remove","character":"a"}),
+            json!({"id":7,"op":"get"}),
+        ]);
+        assert_eq!(
+            messages[..7]
+                .iter()
+                .map(|v| v["id"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            (1..=7).collect::<Vec<_>>()
+        );
+        let config = &messages[2]["ok"]["characters"][0]["config"];
+        assert_eq!(config["playing"], false);
+        assert_eq!(config["monitor"], "screen");
+        assert_eq!(config["position"], json!([50., 80.]));
+        assert!(messages[3]["error"].is_string());
+        assert_eq!(messages[2]["ok"], messages[4]["ok"]);
+        assert_eq!(messages[6]["ok"]["characters"], json!([]));
+        assert_eq!(messages[7]["status"], "loading");
+    }
+
+    #[test]
+    fn output_failures_exit_and_shutdown_drains_replies() {
+        for disconnected in [false, true] {
+            let mut h = Harness::new();
+            if disconnected {
+                drop(h.output);
+            } else {
+                for _ in 0..64 {
+                    h.app
+                        .world()
+                        .resource::<Control>()
+                        .output
+                        .try_send(Value::Null)
+                        .unwrap();
+                }
+            }
+            h.input
+                .send(Ok(Request {
+                    id: 1,
+                    command: Command::Get {},
+                }))
+                .unwrap();
+            h.app.update();
+            assert_eq!(h.app.should_exit(), Some(AppExit::error()));
+        }
+        let mut app = App::new();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let (done, completion) = mpsc::channel();
+        app.insert_non_send(completion).set_runner(move |_| {
+            tx.send(json!({"id":1,"ok":null})).unwrap();
+            AppExit::Success
+        });
+        let writer = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            done.send(write_output(&mut bytes, rx)).unwrap();
+            bytes
+        });
+        assert_eq!(run(app), AppExit::Success);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&writer.join().unwrap()).unwrap(),
+            json!({"id":1,"ok":null})
+        );
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Value::Null).unwrap();
+        drop(tx);
+        assert!(write_output(std::io::Cursor::new(&mut [][..]), rx).is_err());
     }
 }

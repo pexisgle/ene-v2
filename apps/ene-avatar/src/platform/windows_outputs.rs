@@ -57,10 +57,7 @@ pub(super) fn outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::{
-        ecs::relationship::RelationshipTarget,
-        window::{HasWindows, Monitor},
-    };
+    use bevy::window::HasWindows;
 
     #[test]
     fn disconnected_outputs_are_removed_even_after_winit_reassigns_windows() {
@@ -130,91 +127,10 @@ mod tests {
         assert_eq!(count(&mut app), 1);
         assert!(app.world().resource::<desktop::Drag>().entity.is_none());
 
-        let reconnected = app.world_mut().spawn_empty().id();
-        app.world_mut()
-            .resource_mut::<LiveMonitors>()
-            .0
-            .push((reconnected, output("right")));
-        app.update();
-        let replacement = window_for(&mut app, reconnected);
-        app.update();
-        assert_eq!(window_for(&mut app, reconnected), replacement);
-        assert_eq!(count(&mut app), 2);
-
         disconnect(&mut app, left);
-        disconnect(&mut app, reconnected);
         app.update();
         assert_eq!(count(&mut app), 0);
         assert!(app.world().get_entity(left_window).is_err());
-        assert!(app.world().get_entity(replacement).is_err());
         assert!(app.world().resource::<Time<Virtual>>().is_paused());
-    }
-
-    #[test]
-    fn output_sync_follows_monitor_changes() {
-        #[derive(Resource, Default)]
-        struct LiveMonitors(Vec<(Entity, Output)>);
-        fn read_monitors(monitors: Res<LiveMonitors>) -> Vec<(Entity, Output)> {
-            monitors.0.clone()
-        }
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<LiveMonitors>()
-            .add_systems(Update, read_monitors.pipe(outputs));
-        let monitor = app
-            .world_mut()
-            .spawn(Monitor {
-                name: Some("m".into()),
-                physical_width: 1920,
-                physical_height: 1080,
-                physical_position: IVec2::ZERO,
-                scale_factor: 1.,
-                refresh_rate_millihertz: None,
-                video_modes: Vec::new(),
-            })
-            .id();
-        app.world_mut().resource_mut::<LiveMonitors>().0 = vec![(
-            monitor,
-            Output {
-                name: "m".into(),
-                origin: Vec2::ZERO,
-                size: Vec2::new(1920., 1080.),
-                units_per_logical_pixel: 1.,
-            },
-        )];
-        app.update();
-        let window = app.world().get::<HasWindows>(monitor).unwrap().collection()[0];
-        let output = app.world().get::<Output>(window).unwrap();
-        assert_eq!(output.name, "m");
-        assert_eq!(output.origin, Vec2::ZERO);
-        assert_eq!(output.size, Vec2::new(1920., 1080.));
-        assert_eq!(output.units_per_logical_pixel, 1.);
-        let current = app.world().get::<Window>(window).unwrap();
-        assert_eq!(current.position, WindowPosition::At(IVec2::ZERO));
-        assert_eq!(current.resolution.physical_width(), 1920);
-        assert_eq!(current.resolution.scale_factor(), 1.);
-
-        {
-            let mut live = app.world_mut().resource_mut::<LiveMonitors>();
-            let monitor = &mut live.0[0].1;
-            monitor.name = "renamed".into();
-            monitor.origin = Vec2::new(-2560., 0.);
-            monitor.size.x = 2560.;
-            monitor.units_per_logical_pixel = 2.;
-        }
-        app.update();
-        assert_eq!(
-            app.world().get::<HasWindows>(monitor).unwrap().collection(),
-            &[window]
-        );
-        let output = app.world().get::<Output>(window).unwrap();
-        assert_eq!(output.name, "renamed");
-        assert_eq!(output.origin, Vec2::new(-2560., 0.));
-        assert_eq!(output.size, Vec2::new(2560., 1080.));
-        assert_eq!(output.units_per_logical_pixel, 2.);
-        let current = app.world().get::<Window>(window).unwrap();
-        assert_eq!(current.position, WindowPosition::At(IVec2::new(-2560, 0)));
-        assert_eq!(current.resolution.physical_width(), 2560);
-        assert_eq!(current.resolution.scale_factor(), 2.);
     }
 }

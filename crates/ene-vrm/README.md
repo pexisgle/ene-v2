@@ -31,6 +31,8 @@ cargo test --locked -p ene-vrm -p ene-avatar
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
 
-GPUテストは`--ignored`です。合成シーンのMToonパイプラインスモークをlavapipe（CI）で実行します。実モデルとWindows／Wayland実機は未検証です。
+内部テストは各実装ファイル末尾の `#[cfg(test)] mod tests` に置きます。複数機能にまたがる読み込み・シーン・再生の検証は `lib.rs` にまとめ、補助コードもそのモジュール内に閉じ込めます。読み込み失敗、モデル間の参照分離、再生・停止、制約・物理の不変条件、表情による意図しない材質変更を重点的に確認します。
+
+GPUテストは`--ignored`です。合成シーンのMToonパイプラインスモークと、平行光・環境光・併用時に材質色と透過背景を保つ描画テストをlavapipe（CI）で実行します。Windows／Wayland実機の透過表示は未検証です。
 
 姿勢・制約・SpringBoneの数式とMToon照明の一部はbevy_vrm1（MIT OR Apache-2.0、`LICENSE-bevy_vrm1-*`）を参照しています。

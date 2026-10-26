@@ -3,9 +3,6 @@
 mod pointer;
 pub(crate) use pointer::{Drag, PointerInput, pointer};
 
-#[cfg(test)]
-mod tests;
-
 use crate::character::{AvatarState, Character, Config};
 use bevy::{camera::visibility::VisibilitySystems, prelude::*};
 use bevy::{
@@ -120,7 +117,7 @@ fn place_avatars(
             )
         });
         let next = Transform::from_xyz(position.x, -position.y, index as f32 * 1000.).with_scale(
-            Vec3::splat(160. * placement.size_percent / 100. * units_per_logical_pixel),
+            Vec3::splat(320. * placement.size_percent / 100. * units_per_logical_pixel),
         );
         transform.set_if_neq(next);
     }
@@ -143,6 +140,7 @@ fn cameras(mut commands: Commands, outputs: Query<(Entity, &Output), Changed<Out
             RenderTarget::Window(WindowRef::Entity(entity)),
             Transform::from_xyz(center.x, -center.y, 50_000.0),
             Msaa::Off,
+            crate::rendering::EXPOSURE,
             bevy::core_pipeline::tonemapping::Tonemapping::Linear,
         ));
     }
@@ -181,28 +179,32 @@ fn regions(
     avatars: Query<(Entity, &Character)>,
     parents: Query<&ChildOf>,
     meshes: Query<(Entity, &Aabb, &GlobalTransform, &InheritedVisibility), With<Mesh3d>>,
+    mut geometry: Local<Vec<(Entity, Vec2, Vec2)>>,
+    mut next: Local<Vec<(Entity, Rect)>>,
 ) {
-    let geometry: Vec<_> = meshes
-        .iter()
-        .filter_map(|(entity, aabb, transform, visible)| {
-            let (owner, character) = avatars
-                .iter_many(std::iter::once(entity).chain(parents.iter_ancestors(entity)))
-                .matched()
-                .next()?;
-            if character.state != AvatarState::Ready || !visible.get() {
-                return None;
-            }
-            // shortcut: mesh bounds include gaps and omit morph deformation; refine if input misses are observed.
-            let matrix = transform.to_matrix();
-            let center = matrix.transform_point3(aabb.center.into());
-            let half = Mat3::from_mat4(matrix).abs() * Vec3::from(aabb.half_extents);
-            Some((owner, Vec2::new(center.x, -center.y), half.truncate()))
-        })
-        .collect();
+    geometry.clear();
+    geometry.extend(
+        meshes
+            .iter()
+            .filter_map(|(entity, aabb, transform, visible)| {
+                let (owner, character) = avatars
+                    .iter_many(std::iter::once(entity).chain(parents.iter_ancestors(entity)))
+                    .matched()
+                    .next()?;
+                if character.state != AvatarState::Ready || !visible.get() {
+                    return None;
+                }
+                // shortcut: mesh bounds include gaps and omit morph deformation; refine if input misses are observed.
+                let matrix = transform.to_matrix();
+                let center = matrix.transform_point3(aabb.center.into());
+                let half = Mat3::from_mat4(matrix).abs() * Vec3::from(aabb.half_extents);
+                Some((owner, Vec2::new(center.x, -center.y), half.truncate()))
+            }),
+    );
     for (output, mut camera, mut regions) in &mut outputs {
         let had = !regions.0.is_empty();
-        let mut next = Vec::new();
-        for &(actor, center, half) in &geometry {
+        next.clear();
+        for &(actor, center, half) in geometry.iter() {
             let center = (center - output.origin) / output.units_per_logical_pixel;
             let half = half / output.units_per_logical_pixel + Vec2::splat(2.);
             let limit = output.size / output.units_per_logical_pixel;
@@ -214,9 +216,119 @@ fn regions(
         }
         // Clear the previous image once before disabling an empty camera.
         let active = had || !next.is_empty();
-        regions.0 = next;
+        if regions.0 != *next {
+            std::mem::swap(&mut regions.0, &mut next);
+        }
         if camera.is_active != active {
             camera.is_active = active;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Notification;
+
+    fn output(app: &mut App, name: &str, origin: Vec2, scale: f32) -> Entity {
+        app.world_mut()
+            .spawn(Output {
+                name: name.into(),
+                origin,
+                size: Vec2::splat(100. * scale),
+                units_per_logical_pixel: scale,
+            })
+            .id()
+    }
+
+    #[test]
+    fn regions_clear_the_last_frame_and_reactivate_when_an_avatar_returns() {
+        let mut app = App::new();
+        app.add_systems(Update, regions);
+        let screen = app
+            .world_mut()
+            .spawn((
+                Output {
+                    name: "test".into(),
+                    origin: Vec2::ZERO,
+                    size: Vec2::splat(100.),
+                    units_per_logical_pixel: 1.,
+                },
+                Camera::default(),
+            ))
+            .id();
+        let mut character = Character::new("a".into(), Config::default());
+        character.state = AvatarState::Ready;
+        let actor = app.world_mut().spawn(character).id();
+        app.world_mut().spawn((
+            Mesh3d::default(),
+            Aabb::from_min_max(Vec3::ZERO, Vec3::ONE),
+            GlobalTransform::from_translation(Vec3::new(50., -50., 0.)),
+            InheritedVisibility::VISIBLE,
+            ChildOf(actor),
+        ));
+        app.update();
+        assert!(!app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+        app.world_mut().get_mut::<Character>(actor).unwrap().state = AvatarState::Suspended;
+        app.update();
+        assert!(app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+        assert!(
+            app.world().get::<Camera>(screen).unwrap().is_active,
+            "clear the previous image once"
+        );
+        app.update();
+        assert!(!app.world().get::<Camera>(screen).unwrap().is_active);
+        app.world_mut().get_mut::<Character>(actor).unwrap().state = AvatarState::Ready;
+        app.update();
+        assert!(app.world().get::<Camera>(screen).unwrap().is_active);
+        assert!(!app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn dragging_preserves_logical_offset_across_dpi_and_cancels_on_removal() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, setup))
+            .add_message::<Notification>();
+        let left = output(&mut app, "left", Vec2::ZERO, 1.);
+        let right = output(&mut app, "right", Vec2::new(100., 0.), 2.);
+        let mut character = Character::new(
+            "a".into(),
+            Config {
+                position: Some([50., 50.]),
+                ..default()
+            },
+        );
+        character.state = AvatarState::Ready;
+        let actor = app.world_mut().spawn(character).id();
+        app.update();
+        app.world_mut().get_mut::<HitRegions>(left).unwrap().0 =
+            vec![(actor, Rect::from_corners(Vec2::ZERO, Vec2::splat(100.)))];
+        for (screen, local, button) in [
+            (left, Vec2::new(10., 20.), true),
+            (right, Vec2::new(5., 10.), false),
+        ] {
+            app.world_mut().write_message(PointerInput {
+                output: screen,
+                local,
+                button: Some(button),
+            });
+            app.update();
+        }
+        let config = &app.world().get::<Character>(actor).unwrap().config;
+        assert_eq!(config.monitor.as_deref(), Some("right"));
+        assert_eq!(config.position, Some([45., 40.]));
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<Notification>>()
+                .drain()
+                .next()
+                .is_none()
+        );
+        assert!(app.world().resource::<Drag>().entity.is_none());
+        for entity in [right, actor] {
+            app.world_mut().resource_mut::<Drag>().entity = Some(actor);
+            app.world_mut().despawn(entity);
+            assert!(app.world().resource::<Drag>().entity.is_none());
         }
     }
 }

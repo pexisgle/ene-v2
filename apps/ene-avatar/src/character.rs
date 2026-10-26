@@ -56,7 +56,7 @@ pub struct Config {
     pub monitor: Option<String>,
     /// Foot position in logical pixels from the monitor's top-left corner.
     pub position: Option<[f32; 2]>,
-    /// 100 draws 1 m as 160 logical pixels.
+    /// 100 draws 1 m as 320 logical pixels.
     pub size_percent: f32,
 }
 

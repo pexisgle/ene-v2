@@ -55,6 +55,9 @@ fn run(mut app: App) -> AppExit {
     app.finish();
     app.cleanup();
     let mut windows = HashMap::<Id, Entity>::new();
+    let mut surface_sizes = HashMap::new();
+    let mut surface_regions = HashMap::<Id, Vec<(IVec2, IVec2)>>::new();
+    let mut next_region = Vec::new();
     let mut compositor = None;
     let mut cursor = Vec2::ZERO;
     let mut deadline = Instant::now();
@@ -83,6 +86,10 @@ fn run(mut app: App) -> AppExit {
             ExWlShellEvent::RequestMessages(DispatchMessage::Closed) => {
                 if let Some(entity) = id.and_then(|id| windows.remove(&id)) {
                     app.world_mut().despawn(entity);
+                    if let Some(id) = id {
+                        surface_sizes.remove(&id);
+                        surface_regions.remove(&id);
+                    }
                 }
                 deadline = Instant::now();
             }
@@ -167,16 +174,25 @@ fn run(mut app: App) -> AppExit {
                         continue;
                     };
                     let (width, height) = unit.get_size();
-                    let scale = if unit
-                        .try_set_viewport_destination(width as i32, height as i32)
-                        .is_some()
-                    {
-                        unit.scale_float() as f32
-                    } else {
-                        unit.get_wlsurface()
-                            .set_buffer_scale(unit.scale_float().ceil() as i32);
-                        unit.scale_float().ceil() as f32
-                    };
+                    let size_key = (width, height, unit.scale_float());
+                    if surface_sizes.get(&id) != Some(&size_key) {
+                        let scale = if unit
+                            .try_set_viewport_destination(width as i32, height as i32)
+                            .is_some()
+                        {
+                            unit.scale_float() as f32
+                        } else {
+                            unit.get_wlsurface()
+                                .set_buffer_scale(unit.scale_float().ceil() as i32);
+                            unit.scale_float().ceil() as f32
+                        };
+                        let mut window = app.world_mut().get_mut::<Window>(window).unwrap();
+                        window.resolution.set_scale_factor(scale);
+                        window.resolution.set(width as f32, height as f32);
+                        surface_sizes.insert(id, size_key);
+                        // Also commit geometry changes on an empty, inactive surface.
+                        surface_regions.remove(&id);
+                    }
                     let size = Vec2::new(width as f32, height as f32);
                     let position = Vec2::new(x as f32, y as f32);
                     if let Some(mut output) = app.world_mut().get_mut::<Output>(window)
@@ -185,9 +201,6 @@ fn run(mut app: App) -> AppExit {
                         output.origin = position;
                         output.size = size;
                     }
-                    let mut window = app.world_mut().get_mut::<Window>(window).unwrap();
-                    window.resolution.set_scale_factor(scale);
-                    window.resolution.set(width as f32, height as f32);
                 }
             }
             app.update();
@@ -207,17 +220,29 @@ fn run(mut app: App) -> AppExit {
             if let Some((compositor, qh)) = &compositor {
                 for (&id, &window) in &windows {
                     if let Some(unit) = state.get_unit_with_id(id) {
-                        let region = compositor.create_region(qh, ());
+                        next_region.clear();
                         if let Some(regions) = app.world().get::<HitRegions>(window) {
-                            for (_, r) in &regions.0 {
-                                let min = r.min.floor().as_ivec2();
-                                let max = r.max.ceil().as_ivec2();
+                            next_region.extend(
+                                regions.0.iter().map(|(_, r)| {
+                                    (r.min.floor().as_ivec2(), r.max.ceil().as_ivec2())
+                                }),
+                            );
+                        }
+                        // Surface input regions are persistent. Only send a new
+                        // one when its integer pixel coverage changes.
+                        if surface_regions.get(&id) != Some(&next_region) {
+                            let region = compositor.create_region(qh, ());
+                            for &(min, max) in &next_region {
                                 region.add(min.x, min.y, max.x - min.x, max.y - min.y);
                             }
+                            unit.get_wlsurface().set_input_region(Some(&region));
+                            region.destroy();
+                            unit.get_wlsurface().commit();
+                            std::mem::swap(
+                                surface_regions.entry(id).or_default(),
+                                &mut next_region,
+                            );
                         }
-                        unit.get_wlsurface().set_input_region(Some(&region));
-                        region.destroy();
-                        unit.get_wlsurface().commit();
                     }
                 }
             }

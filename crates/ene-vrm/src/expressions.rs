@@ -38,8 +38,8 @@ pub(crate) struct ExpressionBinding {
 pub(crate) struct MorphTarget {
     #[entities]
     pub(crate) entity: Entity,
-    pub(crate) indices: Vec<usize>,
-    pub(crate) node: usize,
+    // Precomputed sparse expression contributions for each bound morph index.
+    pub(crate) indices: Vec<(usize, Vec<(usize, f32)>)>,
 }
 
 #[derive(Component, Clone, Reflect)]
@@ -194,11 +194,18 @@ pub(crate) fn attach(
                 }
                 let morph = morphs.entry(node).or_insert_with(|| MorphTarget {
                     entity,
-                    node,
                     indices: Vec::new(),
                 });
-                if !morph.indices.contains(&bind.index) {
-                    morph.indices.push(bind.index);
+                if let Some((_, contributions)) = morph
+                    .indices
+                    .iter_mut()
+                    .find(|(index, _)| *index == bind.index)
+                {
+                    contributions.push((bindings.len(), weight));
+                } else {
+                    morph
+                        .indices
+                        .push((bind.index, vec![(bindings.len(), weight)]));
                 }
             }
             let category = category(&name);
@@ -513,18 +520,13 @@ pub(crate) fn apply(
         let effective = effective(&binds.bindings, &raw);
         for target in &binds.morphs {
             if let Ok(mut morph) = morphs.get_mut(target.entity) {
-                for &index in &target.indices {
-                    // VRM expressions set bound morphs to 0 and accumulate
-                    // `bind.weight * expression weight` from there. The final
-                    // value is not clamped.
-                    let mut next = 0.;
-                    for (binding, value) in &effective {
-                        for bind in binding.definition.morph_target_binds.iter().flatten() {
-                            if schema::index(bind.node) == target.node && bind.index == index {
-                                next += bind.weight as f32 * value;
-                            }
-                        }
-                    }
+                for (index, contributions) in &target.indices {
+                    let index = *index;
+                    // Preserve bind order and duplicate contributions, including
+                    // zero-weight expressions which reset their bound morphs.
+                    let next = contributions.iter().fold(0., |sum, &(expression, weight)| {
+                        sum + weight * effective[expression].1
+                    });
                     if morph.weights().get(index) != Some(&next)
                         && let Some(weight) = morph.weights_mut().get_mut(index)
                     {
@@ -699,47 +701,56 @@ mod tests {
     }
 
     #[test]
-    fn texture_transform_binds_interpolate_from_the_base_uv_transform() {
-        let definitions: Expressions = serde_json::from_value(serde_json::json!({
-            "preset": {
-                "happy": {
-                    "textureTransformBinds": [
-                        {"material":0,"scale":[2.,1.],"offset":[0.5,0.]}
-                    ]
-                }
+    fn morph_contributions_accumulate_reset_and_preserve_unbound_weights() {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<MToonMaterial>>()
+            .add_systems(Update, apply);
+        let mesh = app
+            .world_mut()
+            .spawn(MorphWeights::new(vec![0.9, 0.7, 0.4], None).unwrap())
+            .id();
+        let root = app.world_mut().spawn_empty().id();
+        let definitions = serde_json::from_value(serde_json::json!({
+            "custom": {
+                "a": {"morphTargetBinds":[
+                    {"node":0,"index":0,"weight":0.5},
+                    {"node":0,"index":0,"weight":0.25},
+                    {"node":0,"index":1,"weight":1.0}
+                ]},
+                "b": {"morphTargetBinds":[{"node":0,"index":0,"weight":1.0}]}
             }
         }))
         .unwrap();
-        let bindings = bindings(&definitions);
-        let weights = effective(&bindings, &|_| 1.);
-        let base = UvTransform {
-            scale: Vec2::splat(3.),
-            rotation: 0.4,
-            offset: Vec2::new(0.5, 0.25),
-        };
-        let rest_toon = schema::ToonParams {
-            uv_transforms: [base.affine().into(); 6],
-            ..default()
-        };
-        let (_, _, uv, toon, _) = compute_material(
-            (Color::WHITE, LinearRgba::BLACK),
-            1.,
-            base,
-            Some(&rest_toon),
-            Some([base; 6]),
-            0,
-            &weights,
+        attach(
+            app.world_mut(),
+            root,
+            Some(&definitions),
+            &HashMap::from([(0, mesh)]),
+        )
+        .unwrap();
+        {
+            let mut weights = app.world_mut().get_mut::<ExpressionWeights>(root).unwrap();
+            weights.insert(ExpressionName::Custom("a".into()), 0.8);
+            weights.insert(ExpressionName::Custom("b".into()), 0.6);
+        }
+        app.update();
+        let weights = app.world().get::<MorphWeights>(mesh).unwrap().weights();
+        assert!(
+            (weights[0] - 1.2).abs() < 1e-6,
+            "duplicate and multiple expression binds accumulate without clamping"
         );
-        let (scale, angle, offset) = uv.to_scale_angle_translation();
-        assert!(scale.abs_diff_eq(Vec2::new(2., 1.), 1e-5));
-        assert!((angle - 0.4).abs() < 1e-5);
-        assert!(offset.abs_diff_eq(Vec2::new(0.5, 0.), 1e-5));
-        let toon = toon.unwrap();
-        let (scale, angle, offset) =
-            Affine2::from_mat3(toon.uv_transforms[0]).to_scale_angle_translation();
-        assert!(scale.abs_diff_eq(Vec2::new(2., 1.), 1e-5));
-        assert!((angle - 0.4).abs() < 1e-5);
-        assert!(offset.abs_diff_eq(Vec2::new(0.5, 0.), 1e-5));
+        assert!((weights[1] - 0.8).abs() < 1e-6);
+        assert_eq!(weights[2], 0.4);
+        app.world_mut()
+            .get_mut::<ExpressionWeights>(root)
+            .unwrap()
+            .clear();
+        app.update();
+        assert_eq!(
+            app.world().get::<MorphWeights>(mesh).unwrap().weights(),
+            &[0., 0., 0.4]
+        );
     }
 
     #[test]

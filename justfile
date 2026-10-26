@@ -42,3 +42,8 @@ run-desktop:
 # Control the transparent renderer using JSON Lines on stdin.
 run-avatar:
     cargo run --release --locked -p ene-avatar
+
+# Build the renderer and launch its interactive CLI example.
+run-avatar-cli:
+    cargo build --release --locked -p ene-avatar --bin ene-avatar
+    cargo run --release --locked -p ene-avatar --example control

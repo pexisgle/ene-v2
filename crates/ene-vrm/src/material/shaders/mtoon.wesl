@@ -63,11 +63,14 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) front: bool) -> Fragmen
     var direct_lighting = vec3(0.);
     for (var i = 0u; i < lights.n_directional_lights; i++) {
         let light = lights.directional_lights[i];
+        // Bevy supplies illuminance. Match the Lambert BRDF used by PBR and
+        // three-vrm instead of treating lux as reflected radiance.
+        let light_color = light.color.rgb / 3.141592653589793;
         let ndotl = dot(pbr.N, light.direction_to_light);
         let edge = max(1. - toon.shading_toony_factor, 0.00001);
         let shading = saturate((ndotl + shift + edge) / (2. * edge));
-        direct += mix(shade, lit.rgb, shading) * light.color.rgb;
-        direct_lighting += light.color.rgb * shading;
+        direct += mix(shade, lit.rgb, shading) * light_color;
+        direct_lighting += light_color * shading;
     }
     direct *= view.exposure;
     direct_lighting *= view.exposure;

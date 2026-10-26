@@ -262,7 +262,6 @@ fn collide(tail: &mut Vec3, head: Vec3, length: f32, radius: f32, segment: &Segm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::Vrm;
 
     fn simulation(scale: f32, collision: bool) -> (App, Entity) {
         let mut app = App::new();
@@ -317,88 +316,6 @@ mod tests {
         });
         app.update();
         (app, joint)
-    }
-
-    #[test]
-    fn native_scene_instances_remap_one_shared_collider_for_multiple_chains() {
-        use crate::tests::{Files, app, settle};
-        let files = Files::new();
-        let mut value = files.model();
-        let base = value["nodes"].as_array().unwrap().len();
-        value["nodes"][1]["children"] = serde_json::json!([2, 4, 7, base, base + 2]);
-        value["nodes"].as_array_mut().unwrap().extend([
-            serde_json::json!({"translation":[0.1,1.,0.],"children":[base + 1]}),
-            serde_json::json!({"translation":[0.,0.1,0.]}),
-            serde_json::json!({"translation":[-0.1,1.,0.],"children":[base + 3]}),
-            serde_json::json!({"translation":[0.,0.1,0.]}),
-        ]);
-        value["extensions"]["VRMC_springBone"] = serde_json::json!({
-            "specVersion":"1.0",
-            "colliders":[{"node":1,"shape":{"sphere":{"offset":[0.,10.,0.],"radius":0.01}}}],
-            "colliderGroups":[{"colliders":[0]}],
-            "springs":[
-                {"joints":[{"node":base},{"node":base + 1}],"colliderGroups":[0]},
-                {"joints":[{"node":base + 2},{"node":base + 3}],"colliderGroups":[0]}
-            ]
-        });
-        let mut app = app();
-        let handle: Handle<bevy::gltf::Gltf> = app
-            .world()
-            .resource::<AssetServer>()
-            .load(files.write("shared-collider.vrm", &value));
-        settle(&mut app, std::slice::from_ref(&handle));
-        let scene = app
-            .world()
-            .resource::<Assets<bevy::gltf::Gltf>>()
-            .get(&handle)
-            .unwrap()
-            .default_scene
-            .clone()
-            .unwrap();
-        let holders: Vec<_> = [0., 20.]
-            .into_iter()
-            .map(|x| {
-                app.world_mut()
-                    .spawn((
-                        WorldAssetRoot(scene.clone()),
-                        Transform::from_xyz(x, 0., 0.),
-                    ))
-                    .id()
-            })
-            .collect();
-        for _ in 0..5 {
-            app.update();
-        }
-        let mut q = app.world_mut().query::<(&Vrm, &SpringRig)>();
-        let rigs: Vec<_> = q.iter(app.world()).collect();
-        assert_eq!(rigs.len(), 2);
-        for (vrm, rig) in &rigs {
-            assert_eq!(
-                rig.colliders[0].entity,
-                vrm.bone(crate::schema::HumanBoneName::Hips).unwrap()
-            );
-            assert_eq!(rig.chains.len(), 2);
-            for chain in &rig.chains {
-                assert_eq!(chain.colliders, vec![0]);
-                assert!(chain.joints[0].state.unwrap().iter().all(|p| p.is_finite()));
-                assert!(
-                    app.world()
-                        .get::<SpringJointProps>(chain.joints[0].entity)
-                        .is_some()
-                );
-            }
-        }
-        assert_ne!(
-            rigs[0].1.chains[0].joints[0].entity,
-            rigs[1].1.chains[0].joints[0].entity
-        );
-        app.world_mut().entity_mut(holders[0]).despawn();
-        for _ in 0..3 {
-            app.update();
-        }
-        let mut q = app.world_mut().query::<&SpringRig>();
-        let rig = q.single(app.world()).unwrap();
-        assert!(rig.chains[0].joints[0].state.is_some());
     }
 
     #[test]

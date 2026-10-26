@@ -21,6 +21,3 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsA
 
 [target.'cfg(target_os = "linux")'.dependencies]
 exwlshellev = "=0.20.1"
-
-[dev-dependencies]
-tempfile = "3"

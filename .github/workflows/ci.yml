@@ -49,4 +49,4 @@ jobs:
         env:
           WGPU_BACKEND: vulkan
         run: |
-          cargo test -p ene-vrm synthetic_mtoon_uv1_outline_pipeline_smoke --locked -- --ignored --nocapture
+          cargo test -p ene-vrm material::tests --locked -- --ignored --nocapture --test-threads=1
