@@ -15,8 +15,8 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 | AI接続 | Rig | プロバイダー接続、ストリーミング、ツール呼び出しの受け渡しを利用する |
 | タスク制御 | ene自身の実行ループ | 権限、停止、操作の直列化、記録、結果確認をモデル接続から独立して管理する |
 | 会話・設定UI | Slint＋Winit＋FemtoVG/WGPU | 宣言的なUIと独自コンポーネントで外観を作り、WebViewを使わない |
-| キャラクター描画 | 別プロセスのBevy＋bevy_vrm1 | VRM 1.0の描画・モーションに既存基盤を利用し、UIのイベントループから分離する |
-| Linux常駐ウィンドウ | Smithay Client Toolkit＋wlr layer-shell | ネイティブWayland上の配置・入力領域をOS連携側で扱う |
+| キャラクター描画 | 別プロセスのBevy＋ene-vrm | glTFの読み込み・シーン・描画・補間はBevy標準、VRM拡張のみene-vrmで扱い、UIのイベントループから分離する |
+| Linux常駐ウィンドウ | layershellev＋wlr layer-shell | ネイティブWaylandのsurfaceをBevy標準描画へ接続する |
 | 永続化 | SQLite＋rusqlite | 単一ホストのデータを管理し、別DBサーバーを常駐させない |
 | 認証情報 | keyring-core＋OSの資格情報ストア | APIキーなどを通常の設定や履歴から分離する |
 | 音声 | 外部の音声合成エンジン＋rodio | アダプターで接続差を吸収し、逐次合成・配信・再生を優先する。エンジンとコーデックは接続・遅延の検証で選定する |
@@ -89,7 +89,7 @@ UIのメインスレッドはSlintのイベントループを担当します。�
 
 会話・設定は通常のウィンドウ、キャラクターは別の透明な常駐ウィンドウとして表示します。LinuxはネイティブWaylandを使い、最初の実機検証環境をKDE/KWinとします。XWaylandへの切り替えを前提にしません。
 
-キャラクターのLinuxウィンドウはSmithay Client Toolkitとwlr layer-shellで扱います。画面の作業領域を占有せず、キーボードフォーカスを奪わない配置にし、描画の透明度だけでなくWaylandの入力領域で透明部分のクリック透過を実現します。位置は出力とアンカー・余白で管理し、ドラッグ、DPI、モニターの追加・取り外しに対応させます。描画プロセス内でネイティブウィンドウをBevyへ接続し、描画資源が使っている間はウィンドウの寿命を維持します。この接続は先行試作が必要です。
+キャラクター描画は一つのBevy Appを共有し、モニターごとの固定透過ウィンドウへGPUで直接描きます。WindowsはBevy/winit、Waylandはlayershellevのlayer-shell surfaceを使います。入力領域は現在の姿勢の関節境界で近似し、表示画像をCPUに読み戻しません。各個体の停止・時計とモニター間ドラッグを独立して扱います。描画プロセスの操作は標準入出力のJSON Linesです。現行の操作と通知は[ene-avatarのREADME](../apps/ene-avatar/README.md)を参照してください。
 
 | OS別に分離する領域 | LinuxのMVP | 将来のWindows・macOS |
 | --- | --- | --- |

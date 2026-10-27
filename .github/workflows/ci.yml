@@ -23,9 +23,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --all-features --locked
+
+  gpu-smoke:
+    name: GPU smoke (lavapipe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Install software Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev libvulkan1 mesa-vulkan-drivers
+      - name: MToon GPU smoke
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          cargo test -p ene-vrm material::tests --locked -- --ignored --nocapture --test-threads=1
