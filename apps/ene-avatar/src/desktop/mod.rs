@@ -320,13 +320,14 @@ mod tests {
         let config = &app.world().get::<Character>(actor).unwrap().config;
         assert_eq!(config.monitor.as_deref(), Some("right"));
         assert_eq!(config.position, Some([45., 40.]));
-        assert!(
-            app.world_mut()
-                .resource_mut::<Messages<Notification>>()
-                .drain()
-                .next()
-                .is_none()
-        );
+        let notifications: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<Notification>>()
+            .drain()
+            .collect();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].0["event"], "moved");
+        assert_eq!(notifications[0].0["monitor"], "right");
         assert!(app.world().resource::<Drag>().entity.is_none());
         for entity in [right, actor] {
             app.world_mut().resource_mut::<Drag>().entity = Some(actor);
