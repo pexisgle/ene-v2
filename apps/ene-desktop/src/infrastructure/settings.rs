@@ -1,7 +1,7 @@
 //! Client preferences and serial, debounced persistence.
+use super::avatar::{AvatarConfig, AvatarPlacement};
 #[cfg(unix)]
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
-use ene_ipc::renderer::{AvatarConfig, AvatarPlacement};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -328,7 +328,7 @@ mod tests {
         let mut expected = ClientSettings::default();
         for size in 50..=200 {
             expected.avatar.config.size_percent = size;
-            expected.placement.x = size as i32;
+            expected.placement.position = Some([size as i32, size as i32]);
             saver.update(expected.clone());
         }
         saver.shutdown();

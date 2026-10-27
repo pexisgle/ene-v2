@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(errors.len(), 2);
         assert_eq!(live.theme_index, 2);
         assert_eq!(live.avatar.config.size_percent, 100);
-        live.placement.x = 80;
+        live.placement.position = Some([80, 90]);
         state.accept_live(live);
         assert_eq!(state.draft.size_text, "2");
         assert_eq!(state.draft.font_family, "");
@@ -188,7 +188,7 @@ mod tests {
         let (live, errors) = state.live_values();
         assert!(errors.is_empty());
         assert_eq!(live.avatar.config.size_percent, 170);
-        assert_eq!(live.placement.x, 80);
+        assert_eq!(live.placement.position, Some([80, 90]));
         state.accept_live(live);
         assert!(!state.dirty());
     }

@@ -3,10 +3,12 @@ use crate::infrastructure::settings::Saver;
 use crate::{
     AppWindow, ChatEntry, ProviderField, SettingsDraft, Theme, UiState,
     application::demo::Mode,
-    infrastructure::{avatar, tray},
+    infrastructure::{
+        avatar::{self, AvatarEvent, MotionState},
+        tray,
+    },
     settings,
 };
-use ene_ipc::renderer::{AvatarEvent, MotionState};
 use slint::{ComponentHandle, Model, VecModel};
 use std::sync::Arc;
 use std::{

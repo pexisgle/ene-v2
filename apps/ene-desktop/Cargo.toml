@@ -20,8 +20,6 @@ tokio = { workspace = true, default-features = true, features = ["rt", "rt-multi
 tokio-util = { workspace = true, features = ["codec"] }
 futures-util = { workspace = true, features = ["sink"] }
 
-ene-ipc = { workspace = true, features = ["renderer"] }
-remoc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slint = { workspace = true, features = ["std", "compat-1-2", "renderer-femtovg-wgpu", "unstable-fontique-011"] }
