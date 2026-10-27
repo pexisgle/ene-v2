@@ -6,7 +6,6 @@ Host は Extism 1.41.0、mlua 0.11.6＋mlua-luau-scheduler 0.2.4を利用しま�
 
 - `ene-plugin`：Luau／Extismのmanifest、worker・サービス・拡張API契約。互換性は `CONTRACT_VERSION = 1` と `contract_version` で管理する。
 - `ene-rpc`：host.protoの生成RPC型。Model等を共有するが、プラグイン管理のRPCとworker通信は別の契約。
-- `ene-ipc`：描画専用データ契約。チャネルとRemoc接続はavatar／desktop側で定義する。
 - `ene-plugin-runtime`：コードの検証・取り込み、worker の世代・通信・終了状態の検証、監督。Extism／mlua に依存しない。
 - `ene-platform`：Linuxのbubblewrap、WindowsのAppContainer＋Job Objectによる共通の隔離起動。ネットワーク権限を与えず、起動失敗時は拒否する。
 - `ene-plugin-sdk`：Extism Rust PDK の薄いラッパー。`sdk/luau/ene.d.luau` は他言語向けの契約。

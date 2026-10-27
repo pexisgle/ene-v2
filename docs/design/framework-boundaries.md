@@ -40,14 +40,14 @@ SDKの `SyncedSession` が、Connect購読の先頭snapshot→通知のバッフ
 
 ## アバターと検証
 
-`LeasedFrame` は画像、入力領域、サイズ、scale、生成世代、連番、ring leaseを分離できない値。画面側はその内部を取り出せない。`AvatarPresenter` が現在の表示条件に一致する最新のフレームを選び、画像と入力領域を同じ提示で反映し、そのleaseを次の提示まで保持する。取得に失敗した場合は表示と入力領域を更新しない。マスクの容量超過時も、再計算に使う画像はキャプチャ済みの同じtextureである。
+desktopの`Controller`は子プロセスと有限の通知キューを所有する。設定は`AvatarPreferences`としてdesktopが持ち、要求は常に設定全体を送る。描画プロセスは配置と実行状態の正本で、desktopは`moved`と`get`で解決された配置だけを端末設定へ反映する。削除したIDのイベントは取り込まず、再表示は新しいIDで行う。書き込み失敗と子プロセスの終了はエラーとしてUIへ渡し、表示状態を成功として扱わない。
 
-通常の検証は `just verify`、`just test`、`just build`。Vulkanを使うring・マスク再試行のテストは、GPUがある環境で次を明示的に実行する。
+通常の検証は `just verify`、`just test`、`just build`。MToonのGPUスモークはlavapipeを使うCIのgpu-smokeジョブが、次を明示的に実行する。
 
 ```sh
-cargo test -p ene-avatar --locked gpu_overflow_preserves_captured_masks_and_leases_prevent_ring_reuse -- --ignored
+cargo test -p ene-vrm material::tests --locked -- --ignored --test-threads=1
 ```
 
 回帰テストでは、待ち手の破棄、停止と受付の競合、許可取り消し、provider panic、receipt不一致、Unicode位置、複数コンパニオンの同期、同期中断・通知あふれ・番号欠落、編集状態の競合、リダイレクト、資格情報の秘匿、受信途中の認可変更、SSEの容量を検証する。実際のWayland提示とVRM/VRMAの動作は、ネイティブ環境でも確認する。
 
-生成契約、端末操作のreceipt、表示lease、音声の取消世代とキューの上限は[Connectの境界](connect-rpc.md)に記す。新しい通信DTOをSerdeで重複定義せず、保存とプラグインとの変換を境界に限定する。
+生成契約、端末操作のreceipt、描画プロセスの通知と設定、音声の取消世代とキューの上限は[Connectの境界](connect-rpc.md)に記す。新しい通信DTOをSerdeで重複定義せず、保存とプラグインとの変換を境界に限定する。

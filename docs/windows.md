@@ -30,7 +30,7 @@ cargo run --locked -p ene-desktop -- --demo
 
 APIキーはWindows Credential Managerへ保存します。利用できない場合は現在のホストセッション内だけに保持し、その状態を画面へ表示します。ファイル選択はWindows標準ダイアログ、トレイはWindows通知領域を利用します。Explorerが再起動するとアイコンを再登録します。
 
-アバターはDX12/DirectCompositionでGPU画像を提示します。描画と輪郭入力のHWNDを分け、GPUから取得した輪郭座標だけを入力領域に反映します。DPIはウィンドウごとに扱い、配置はモニター左上を原点とする96DPI基準の論理座標、描画と入力領域は物理ピクセルです。
+アバターはモニターごとの透過Bevyウィンドウへ直接描きます。入力は現在の姿勢のメッシュ境界から求めた領域でヒットテストし、透明部分のクリックを下のウィンドウへ通します。DPIはウィンドウごとに扱い、配置はモニター左上を原点とする96DPI基準の論理座標です。
 
 ## プラグイン
 
@@ -43,6 +43,6 @@ Luau／Extismのmanifestは `contract_version: 1` を使います。
 
 ## 検証範囲
 
-`.github/workflows/windows.yml` はMSVCでworkspaceのコンパイル・Clippy・テストを実行します。`ene-platform` は実AppContainerの秘密ファイル拒否、ネットワーク拒否、子プロセス停止、ネイティブIPCと異常終了を検証します。DX12画像提示はグラフィックスセッションで `cargo test -p ene-avatar -- --ignored` を明示実行します。実機のIME、ドラッグ、DPI変更、Explorer再起動、ファイル選択は別途手動確認が必要です。
+`.github/workflows/windows.yml` はMSVCでworkspaceのコンパイル・Clippy・テストを実行します。`ene-platform` は実AppContainerの秘密ファイル拒否、ネットワーク拒否、子プロセス停止、ネイティブIPCと異常終了を検証します。MToonのGPUスモークはlavapipeでLinux CIが実行し、DX12の透過表示はこの経路では確認しません。実機のIME、ドラッグ、DPI変更、Explorer再起動、ファイル選択は別途手動確認が必要です。
 
 Wasm PDKは `cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown` 後、`python scripts/check-wasm-plugin.py` で合成HTTPのモデル一覧、UTF-8分割生成、終了を実runnerのRemoc通信で検証します。

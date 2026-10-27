@@ -316,6 +316,8 @@ SlintのRoyalty-free LicenseにはSlintの利用表示が必要です。eneは�
 
 ### Rust実行基盤とVRM描画
 
+現在の実装は[ene-vrm](../../crates/ene-vrm/README.md)を使い、glTF共通処理をBevy標準へ委譲します。以下のbevy_vrm1の記述は初期選定時の参考資料です。
+
 [Tokio](https://tokio.rs/tokio/tutorial)は非同期処理、[Axum](https://docs.rs/axum/latest/axum/)はConnect RPCと音声WebSocketのホスト入口に用います。[Rig](https://rig.rs/docs/)は組込OpenAI接続とストリーミングに利用します。拡張LLMサービスはLuau／Extismプラグインとして実行し、ene-pluginの契約とホストのHTTP brokerを使います。モデルとプラグイン管理の公開RPCデータにはene-rpcの生成型を共有し、worker通信のRemoc接続はene-plugin-runtimeとrunnerが所有します。権限、停止、バックアップ、ファイル変更の成否確認はeneの責務として残します。
 
 [bevy_vrm1の固定コミットのREADME](https://github.com/not-elm/bevy_vrm1/blob/c8601e2854bd9c6cce0f6d282c7d90a65a895fb7/README.md)はVRM 1.0のみを対象とし、Spring Bone、Look At、VRMAなどの対応を示しています。同時に開発初期で破壊的変更があり得ることを明記しています。[同コミットのCargo.toml](https://github.com/not-elm/bevy_vrm1/blob/c8601e2854bd9c6cce0f6d282c7d90a65a895fb7/Cargo.toml)はパッケージ0.9.5、Bevy 0.19系、MIT／Apache-2.0を示し、[MToonの実装](https://github.com/not-elm/bevy_vrm1/blob/c8601e2854bd9c6cce0f6d282c7d90a65a895fb7/src/vrm/mtoon/material.rs)も参照できます。これは確認したソースの組み合わせであり、eneでのモデル互換性や公開パッケージの採用バージョンを検証した記録ではありません。
@@ -358,20 +360,20 @@ eneでは通常のSlint画面とキャラクターの常駐ウィンドウを分
 <a id="internal-ipc"></a>
 ### 内部IPCの比較と採否
 
-2026年10月10日に、描画プロセスとLuau／Extism runnerを管理するRust製runtimeの内部IPC基盤としてRemocを選びました。型付きの操作・通知に加えてRPC、上限付きキュー、最新状態配信を同じ接続で扱え、現在のTokio中心の構成を拡張しやすいことが理由です。Connectによる公開ホストAPIは維持します。
+2026年10月10日に、Luau／Extism runnerを管理するRust製runtimeの内部IPC基盤としてRemocを選びました。型付きの操作・通知に加えてRPC、上限付きキュー、最新状態配信を同じ接続で扱え、現在のTokio中心の構成を拡張しやすいことが理由です。描画プロセスは2026年10月27日に標準入出力のJSON Linesへ切り替え、Remocはrunnerの通信に限定します。Connectによる公開ホストAPIは維持します。
 
 | 候補・一次資料 | 得意な機能 | eneでの判断 |
 | --- | --- | --- |
-| [Remoc](https://docs.rs/remoc/0.20.4/remoc/) | RPC、remote MPSC・watch・oneshot、接続内の多重化 | 内部IPCの共通基盤に採用する |
+| [Remoc](https://docs.rs/remoc/0.20.4/remoc/) | RPC、remote MPSC・watch・oneshot、接続内の多重化 | プラグインruntimeとrunnerの内部IPCに採用する |
 | [ipc-channel](https://docs.rs/ipc-channel/0.23.0/ipc_channel/) | 型付きチャネル、チャネル・OS資源の受け渡し | キューが無制限でアプリ側の上限管理が必要。共有メモリ等の資源転送が必要になれば再評価する |
 | [tarpc](https://docs.rs/tarpc/0.38.0/tarpc/) | RustのtraitからRPC生成、期限・取消伝播 | 要求・応答には適するが、状態・イベント配信を含む集約ではRemocを選ぶ |
 | [channels](https://docs.rs/channels/0.13.0/channels/) | 任意のI/O上の型付き送受信とフレーミング | transportの置換には適するが、RPC・状態配信までの集約を優先する |
 | [interprocess](https://docs.rs/interprocess/2.4.4/interprocess/) | OSをまたぐローカル通信路 | プロトコル層とは分け、他OSの通信路が必要になれば検討する |
-| 旧描画NDJSON＋Tokio（比較対象） | 小さな制御メッセージ、可読性、少ない依存 | 描画には十分だが、共通基盤の機能を独自実装で増やす負担を避ける |
+| 描画のJSON Lines | 小さな制御メッセージ、可読性、少ない依存 | 描画の制御は要求と通知だけで足りるため採用する |
 
-描画IPCはRemoc標準のPostbagバイナリcodecを使い、framingと接続管理をRemocへ任せます。`provide`／`consume` でnativeチャネルを持つ `RendererClient` を渡します。要求とイベント・エラーはremote MPSC、共通設定とIDごとの最新状態は `RendererState` としてremote watchで配信し、別チャネル間の到着順には依存しません。`ene-ipc`には描画契約型を置き、Remocの直接依存と具体的なRendererClientチャネル型はavatar／desktopが所有します。描画プロセスはTokioのUnix pipe APIで標準入出力のパイプを扱います。`tokio::io::stdin()`のキャンセルできない読み取りを避け、接続を保持した相手からの `Shutdown` でもプロセスを終了できます。アバターの管理はBevyのEntity／Component、共通設定の配信はResourceの変更検知で行います。Wayland固有のスレッドと描画資源の解放、親側のプロセス監視はアプリが担います。
+描画プロセスとの操作は標準入出力のJSON Linesとし、`add`・`set`・`get`・`center`・`fps`・`remove`・`quit`の要求と、`state`・`finished`・`click`・`moved`の通知だけを扱います。行は64KiBに制限し、要求は到着順に反映します。desktopが`AvatarId`を発行し、desktop側の型は`apps/ene-desktop/src/infrastructure/avatar`が所有します。プロトコルの詳細は[ene-avatarのREADME](../../apps/ene-avatar/README.md#json-linesによる操作)に定めます。プラグインruntimeとrunnerの通信はRemoc標準のMessagePack codecを使い、上限付きキューとworkerの寿命をruntimeが管理します。
 
-比較は設計適合性に基づき、性能向上を採用理由にはしていません。RemocはRust製runtimeとrunnerの通信を担い、Luauの拡張APIやExtismゲストのPDK JSON入出力はene-pluginの契約で扱います。画像の共有メモリ転送は今回の選定に含めません。[remote channelの上限と送信の意味](https://docs.rs/remoc/0.20.4/remoc/rch/)、[RPCの取消](https://docs.rs/remoc/0.20.4/remoc/rtc/#cancellation)を実装時の参照資料とします。
+比較は設計適合性に基づき、性能向上を採用理由にはしていません。Remocはプラグインruntimeとrunnerの通信を担い、Luauの拡張APIやExtismゲストのPDK JSON入出力はene-pluginの契約で扱います。[remote channelの上限と送信の意味](https://docs.rs/remoc/0.20.4/remoc/rch/)、[RPCの取消](https://docs.rs/remoc/0.20.4/remoc/rtc/#cancellation)を実装時の参照資料とします。
 
 ### AIと音声の確認用構成
 

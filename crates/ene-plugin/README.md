@@ -2,7 +2,6 @@
 
 プラグインシステムの共通契約を提供します。manifest、拡張API、ホストとworker間の
 通信契約をここにまとめ、runtime・runner・SDKから同じ型を使います。
-avatar–desktop間の描画通信は [`ene-ipc`](../ene-ipc/) が担当します。
 
 定義は内部の `manifest.rs`、`api.rs`、`protocol.rs` にまとめ、`lib.rs` から再公開します。
 パッケージmanifest、拡張の要求・イベント、ホストサービス、`HostMessage`／`WorkerMessage` は

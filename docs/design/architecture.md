@@ -12,7 +12,7 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 
 ## 実装の責務
 
-`ene-rpc`はhost.protoから生成するRPC型、`ene-ipc`は描画専用データ契約、`ene-plugin`はLuau／Extismのmanifest・拡張API・worker契約を持ちます。3クレートは通信の目的ごとに責務を分けます。Remocの接続と具体的なチャネルはruntime／avatar／desktopが所有します。`ene-api-client`は生成クライアント、通知同期と設定保存の進捗、`ene-outbound`は認可付き外部HTTPを担当します。`ene-core`は生成RPC型を直接使い、会話・設定・認可・保存の処理手順とportを持ちます。Axum、SQLite、Rig、keyring、OSパスや子プロセスの実装はホスト側のアダプターに置きます。
+`ene-rpc`はhost.protoから生成するRPC型、`ene-plugin`はLuau／Extismのmanifest・拡張API・worker契約を持ちます。2クレートは通信の目的ごとに責務を分けます。描画プロセスの操作は標準入出力のJSON Linesとし、型と接続はdesktopの`infrastructure/avatar`が所有します。Remocはプラグインruntimeとrunnerの内部通信に限定し、接続と具体的なチャネルは実行側が所有します。`ene-api-client`は生成クライアント、通知同期と設定保存の進捗、`ene-outbound`は認可付き外部HTTPを担当します。`ene-core`は生成RPC型を直接使い、会話・設定・認可・保存の処理手順とportを持ちます。Axum、SQLite、Rig、keyring、OSパスや子プロセスの実装はホスト側のアダプターに置きます。
 
 ホストの`bootstrap.rs`でportの実装を組み立て、`infrastructure/`にSQLite・資格情報・実行領域・プロバイダー接続を配置します。APIはリソース別Routerを`nest`で組み立て、application経由で操作します。DB確定後の通知とスナップショットの境界、冪等受付と保存のトランザクション、許可解除と生成開始の競合制御は分離後も維持します。デスクトップは端末設定とXDGパス解決、HTTP、通知・再接続、設定操作、描画プロセスの監督を担当し、アバターは読込・描画・Wayland操作に限定します。
 
@@ -28,8 +28,9 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 | `apps/ene-desktop/src/application/` | 画面操作の登録、会話、端末設定、アバター操作、終了・トレイのライフサイクル。`host/`は接続操作、AI設定、イベント処理、スナップショットの画面反映 |
 | `apps/ene-desktop/src/infrastructure/` | アバタープロセス監督、ファイル選択、XDG、トレイ。`host/`はHTTP・通知・再接続とホスト起動・監視 |
 | `apps/ene-desktop/src/settings/`・`presentation/` | 設定の永続化と編集状態、検索セレクターと画面の回帰テスト |
-| `apps/ene-avatar/src/render/` | モデル検証、モーション、Bevyシーン。`gpu/`はフレーム転送・入力マスクと表示、`renderer/`は初期化・モデルとカメラ・アニメーション |
-| `apps/ene-avatar/src/wayland/` | layer-shellの状態と配置、出力イベント、ポインター入力、ネイティブハンドル |
+| `apps/ene-avatar/src/character.rs`・`control.rs` | 1体分の設定・状態・アセット、JSON Linesの読み書きと操作 |
+| `apps/ene-avatar/src/desktop/`・`platform/` | モニター配置、カメラ、入力領域、ドラッグ。WaylandとWindowsのウィンドウ・入力・FPS調整 |
+| `apps/ene-avatar/src/rendering.rs`・`crates/ene-vrm/` | Bevyの描画設定と、VRM拡張（MToon、SpringBone、Look At、VRMA） |
 | `apps/ene-host/src/api/`・`infrastructure/` | リソース別HTTPルートと、保存・実行領域・資格情報・LLMの実装。`sqlite/`は接続実行、スキーマと復旧、読み出し、repository port、設定・受付・メッセージのトランザクション |
 | `crates/ene-core/src/application/` | `operations/`は設定変更・許可・送信受付・接続確認・プロバイダー操作。`generation/`は実行状態、資格情報の復旧、送信時の認可、ストリーミング。`runtime`は受付・所有権・終了待ち、`commit`は保存と通知の共通境界 |
 | `crates/ene-api-client/src/` | 通信とレスポンス境界、リソース別操作、通知同期セッション、設定保存の進捗、エラー、冪等キー |
@@ -39,7 +40,7 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 
 ## スタックの依存順序
 
-#1 contracts → #2 avatar → #9 client → #13 ene-plugin／Luau・Extism SDK → #10 core → #12 runtime → #4 host → #5 desktop の順に構築します。Coreのplugin portは#13のene-pluginを参照し、RPCのModelや管理データはene-rpcの生成型を使います。Desktopサービス、音声エンジン、タスクの実アダプターは既存のportと契約を拡張して追加します。
+契約 → 描画 → Connectクライアント → プラグイン／Luau・Extism SDK → core → runtime → host → desktop の順に積み上げます。Coreのplugin portはene-pluginを参照し、RPCのModelや管理データはene-rpcの生成型を使います。Desktopサービス、音声エンジン、タスクの実アダプターは既存のportと契約を拡張して追加します。
 
 ## 採用する技術
 
@@ -50,8 +51,8 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 | AI接続 | Rig | プロバイダー接続、ストリーミング、ツール呼び出しの受け渡しを利用する |
 | タスク制御 | ene自身の実行ループ | 権限、停止、操作の直列化、記録、結果確認をモデル接続から独立して管理する |
 | 会話・設定UI | Slint＋Winit＋FemtoVG/WGPU | 宣言的なUIと独自コンポーネントで外観を作り、WebViewを使わない |
-| キャラクター描画 | 別プロセスのBevy＋bevy_vrm1 | VRM 1.0の描画・モーションに既存基盤を利用し、UIのイベントループから分離する |
-| Linux常駐ウィンドウ | Smithay Client Toolkit＋wlr layer-shell | ネイティブWayland上の配置・入力領域をOS連携側で扱う |
+| キャラクター描画 | 別プロセスのBevy＋ene-vrm | glTFの読み込み・シーン・描画・補間はBevy標準、VRM拡張のみene-vrmで扱い、UIのイベントループから分離する |
+| Linux常駐ウィンドウ | layershellev＋wlr layer-shell | ネイティブWaylandのsurfaceをBevy標準描画へ接続する |
 | 永続化 | SQLite＋rusqlite | 単一ホストのデータを管理し、別DBサーバーを常駐させない |
 | 認証情報 | keyring-core＋OSの資格情報ストア | APIキーなどを通常の設定や履歴から分離する |
 | 音声 | 外部の音声合成エンジン＋rodio | アダプターで接続差を吸収し、逐次合成・配信・再生を優先する。エンジンとコーデックは接続・遅延の検証で選定する |
@@ -93,21 +94,21 @@ Linuxのホストはsystemdのユーザーサービスとして稼働させま�
 
 UIのメインスレッドはSlintのイベントループを担当します。通信、合成、DB処理、ファイル処理をそこで待たず、非同期処理からの更新はSlintのイベントループへ渡します。キャラクター描画とのIPCで画像フレームを転送せず、モデル指定、位置、表示状態、モーション制御、入力・エラー通知を受け渡します。APIキーや作業対象資料は描画プロセスへ渡しません。
 
-`ene-avatar`と`ene-desktop`は`ene-ipc`の`renderer` featureと直接のRemoc依存を使います。描画プロセスはIDごとに専用ワーカー、Wayland接続・イベントループ、Bevy描画資源を管理します。共通FPSは全ワーカーへ適用し、削除は対象ワーカーの終了と資源解放を待って通知します。設定UIは1体を操作し、表示切替を追加・削除へ、30/60fpsの選択を共通描画設定へ接続します。
+`ene-desktop`は子プロセスの`ene-avatar`を監督します。描画プロセスは1つのBevy Appを共有し、モニターごとの固定透過ウィンドウへGPUで直接描きます。WindowsはBevy/winit、Waylandはlayer-shellのsurfaceを使います。キャラクターはIDで識別し、共通FPSは全ウィンドウへ、モデル・モーション・配置・サイズは個別の設定で適用します。設定UIは1体を操作し、表示切替を追加・削除へ、30/60fpsの選択を共通FPSへ接続します。削除は対象のEntityとウィンドウを解放し、再表示は保持した設定と最新配置で新しいIDを追加します。
 
-Rust製の親子プロセス間IPCはRemocを共通基盤とします。`ene-ipc`は描画契約型を提供します。具体的なRendererClientのチャネル型とRemoc接続はavatar／desktopが所有します。AvatarIdはdesktopが単調増加するu64を発行し、削除や描画プロセス再起動をまたいでも再使用しません。標準入出力上で `remoc::Connect::io` の `provide`／`consume` を使い、要求・通知・状態のチャネルを持つ `RendererClient` を一度渡します。通信タスクの駆動と終了はRemocへ任せます。要求と通知はremote MPSC、共通設定とIDごとの最新状態は `RendererState` にまとめてremote watchで扱います。別チャネル間の到着順には依存せず、状態の正本はwatchのスナップショットです。BevyのPluginにアバター管理をまとめ、Entity／Componentで寿命、Resourceと変更検知で共通設定を管理します。メインスレッドのcustom runnerはpluginのfinish／cleanupを行い、登録済みシステムへ要求を直接渡します。非同期通信はTokio runtimeが担当します。接続設定・codec・項目上限・バッファはRemoc標準を使います。
+親子プロセスの操作は標準入出力のJSON Linesです。desktopは1行1要求を書き、rendererは要求ID付きの応答とIDを持たないイベントを返します。ログは標準エラーへ出し、標準出力は応答とイベントだけに使います。行は64KiBに制限し、受信した要求は到着順に反映します。操作と通知の正本は[ene-avatarのREADME](../../apps/ene-avatar/README.md#json-linesによる操作)です。
 
-将来のワーカー・内部プラグインは、Luau／Extismの拡張APIとサービス契約をene-pluginに追加します。通信の具体的なRemocチャネル、実行の寿命、取消とworker回収はene-plugin-runtime／runnerが所有します。ene-ipcは描画専用のまま維持します。取消や切断を、適用済みファイル変更の取り消しとは扱いません。端末・公開ホストAPIはene-rpcの生成Connect契約を使います。
+desktopは追加時に単調増加のu64から`AvatarId`を発行し、文字列として渡します。削除後や描画プロセスの再起動後も同じdesktopセッションでは再使用しません。名前やモデルを変更してもIDは変えません。人格・会話などの永続データを識別する`CompanionId`とは分離し、同じコンパニオンの複数表示も別のIDで扱います。OSのウィンドウIDは公開しません。desktopは削除済みのIDに対するイベントを取り込みません。
+
+`add`・`set`・`get`・`center`・`fps`・`remove`・`quit`を要求として扱います。`set`は設定全体を置き換え、省略した項目は既定値に戻るため、desktopは常に全体を送ります。設定は`model`・`motion`・`playing`・`looping`・`monitor`・`position`・`size_percent`を持ちます。`model`は`.vrm`、`motion`は`.vrma`のパスです。`position`はモニター左上から足元までの論理ピクセル座標で、`null`はモニター幅の50%・高さの80%へ配置します。`monitor`が未知の場合は最初の出力へフォールバックします。`size_percent`は50〜200で、100はモデルの1mを320論理ピクセルとして描きます。`get`は解決後のモニターと位置を含む状態を返します。
+
+rendererは`state`で`loading`・`ready`・`suspended`・`error`を、ループしないモーションの終了を`finished`で、ドラッグなしのクリックを`click`で、ドラッグで確定した配置を`moved`で通知します。`moved`は解決後の`monitor`と`position`を含み、desktopは端末設定の配置として保存します。`center`の後は`get`で解決後の配置を取得します。エラーの対象IDがない場合はプロセス全体のエラーです。要求IDと設定は受信時に検証し、不正な入力を状態変更前に拒否します。
+
+desktopの終了・再起動は要求より優先し、標準入力を閉じて子プロセスの終了を待ちます。期限を過ぎた場合は停止させます。再起動では旧プロセスの通知を破棄し、最新の設定と配置で新しい子プロセスを起動します。アバターが非表示でもプロセスは稼働中として扱います。
+
+将来のワーカー・内部プラグインは、Luau／Extismの拡張APIとサービス契約をene-pluginに追加します。通信の具体的なRemocチャネル、実行の寿命、取消とworker回収はene-plugin-runtime／runnerが所有します。取消や切断を、適用済みファイル変更の取り消しとは扱いません。端末・公開ホストAPIはene-rpcの生成Connect契約を使います。
 
 採用理由と比較は[内部IPCの比較と採否](../research/references.md#internal-ipc)を参照してください。
-
-MVPの表示は1体ですが、`ene-ipc::renderer`の共有契約は同じ描画プロセス内の複数アバターを扱える形にします。各アバターは専用の透明な常駐ウィンドウを持ち、共通の`RendererConfig`と個別の`AvatarConfig`を分離します。desktopが追加時に発行する単調増加のu64を`AvatarId(pub u64)`で包み、個別操作・状態・イベントを識別します。削除するまで同じIDを保持し、削除後や描画プロセスの再起動後も同じ描画セッションでは再使用しません。名前やモデルを変更してもIDは変えません。人格・会話などの永続データを識別する`CompanionId`とは分離し、同じコンパニオンの複数表示も別の`AvatarId`で扱います。OSのウィンドウIDはIPCに公開しません。
-
-`RendererRequest`は共通設定と初期アバター一覧による初期化（空一覧も可）、共通描画設定の更新、個別アバターの追加・削除・設定更新・再配置、全体終了を提供します。初期アバターは`AvatarInstance`にID・設定・配置をまとめます。`AvatarId`はu64として送受信します。`validate()`を呼び、初期一覧の重複IDと不正な表示サイズを状態変更前に拒否します。追加時の既存IDと個別操作の未知IDは描画実装が実行時にエラーとして扱い、既存アバターを上書きしません。追加・削除は対象ウィンドウとその資源に適用し、個別設定の更新は配置を変更しません。`Recenter`は対象アバターの表示先モニターを維持し、ウィンドウをそのモニター全体の中央へ移動します。論理サイズを使って`x = (モニター幅 - ウィンドウ幅) / 2`、`y = (モニター高さ - ウィンドウ高さ) / 2`を計算し、移動後の配置を`AvatarState`で通知します。`Shutdown`は全ウィンドウを解放してプロセスを終了します。子側ではTokioのUnix pipe APIを使い、親が接続を保持していても終了できるようにします。終了完了はクライアントが子プロセスの終了と終了コードで確認し、IPCの状態に停止フラグは設けません。アバター一覧が空でもプロセスは稼働中として扱います。
-
-`AvatarPlacement`はアバターウィンドウの左上位置を`x / y`で保持します。原点は`monitor`で指定したモニターの左上、単位は論理ピクセルとし、右方向に`x`、下方向に`y`が増えます。負の座標も扱い、出力端をまたぐ配置を表現できます。`monitor`がない場合はクライアントが選ぶ既定出力を使います。型の既定値は左上から`(24, 24)`です。初回に右下へ配置する場合は、クライアントが出力とウィンドウの論理サイズから`x = max(0, 出力幅 - ウィンドウ幅 - 24)`、`y = max(0, 出力高さ - ウィンドウ高さ - 24)`を計算します。実装は左上アンカーと上・左の余白で座標を適用します。
-
-`RendererState`は共通描画設定とIDごとの個別状態をまとめてremote watchで配信します。初期化前の共通設定は `None` です。`RendererMessage`は`MotionFinished`イベント、資源解放後の削除完了、任意のアバターIDと説明を持つエラーを通知します。アバターの表示は追加・削除で管理し、追加されたアバターは表示対象とします。一時的な非表示設定は設けず、削除時にウィンドウと描画資源を解放します。再表示に必要な設定はクライアント側で保持し、再追加時に読み込み直します。`AvatarState`は読み込み中かどうかとエラーを通知します。`AvatarConfig.motion_playing`は選択したモーションの再生・一時停止を指定し、`motion_loop`で繰り返しを指定します。モーションの状態は未選択・読み込み中・再生中・一時停止中・完了・失敗を扱います。モーションの読み込み・再生に失敗した場合は`MotionState::Failed { message }`で説明を通知し、独立した`motion_error`フィールドは設けません。失敗後に以前のモーションの再生を継続する動作は想定しません。モデルの読み込み状態とエラーは`AvatarState.loading`と`error`で別に扱います。今後、操作や振る舞いの実装に伴って多数のアバターイベントが追加される可能性がありますが、追加のイベント型と通知は対応する機能の導入時に定義します。エラーのIDがない場合はプロセス全体のエラーです。受信した要求のIDと設定を検証し、デコードや通信の失敗は接続を終了して通知します。
 
 出典：[ホストと接続の設計](../research/references.md#mvp-host)、[既存製品から採用する構造](../research/references.md#mvp-products)。
 
@@ -142,7 +143,7 @@ MVPの表示は1体ですが、`ene-ipc::renderer`の共有契約は同じ描画
 
 会話・設定は1つの通常ウィンドウ内で切り替え、キャラクターは別の透明な常駐ウィンドウとして表示します。画面構成、レスポンシブ配置、設定の所有者と保存操作は[デスクトップUI設計](desktop-ui.md)に定めます。LinuxはネイティブWaylandを使い、最初の実機検証環境をKDE/KWinとします。XWaylandへの切り替えを前提にしません。
 
-キャラクターのLinuxウィンドウはSmithay Client Toolkitとwlr layer-shellで扱います。画面の作業領域を占有せず、キーボードフォーカスを奪わない配置にし、描画の透明度だけでなくWaylandの入力領域で透明部分のクリック透過を実現します。位置は出力とアンカー・余白で管理し、ドラッグ、DPI、モニターの追加・取り外しに対応させます。Bevyのオフスクリーン画像を同じWGPUデバイスからSCTKのWayland surfaceへ表示します。通常動作では画像をCPUへ戻さず、最終画像をGPUで走査してalpha由来の水平区間だけを取得します。3枠のGPU画像と座標バッファを再利用し、フレーム番号・世代・寸法・DPIが一致する画像と入力領域を一つのWayland commitで反映します。容量不足は同じ画像から再生成し、リサイズ中も表示中の画像と領域の対応を維持します。[描画設計](avatar-gpu-rendering.md)を参照してください。UIと描画プロセスのIPCでは画像を転送しません。VRMAの骨の互換変換とアプリの配置を分離し、腰の静止位置をカメラの軸とします。足の接地を崩さないよう腰の水平・上下移動と回転を保持し、ウィンドウの配置やカメラをモーションに追従させません。
+キャラクターのLinuxウィンドウはlayershellevとwlr layer-shellで扱います。画面の作業領域を占有せず、キーボードフォーカスを奪わない配置にし、描画の透明度だけでなくWaylandの入力領域で透明部分のクリック透過を実現します。位置は出力とアンカー・余白で管理し、ドラッグ、DPI、モニターの追加・取り外しに対応させます。Bevyはモニターごとのsurfaceへ直接描き、表示画像をCPUへ戻しません。入力領域は現在の姿勢のメッシュ境界から近似して同じcommitで反映します。UIと描画プロセスのIPCでは画像を転送しません。VRMAの骨の互換変換とアプリの配置を分離し、腰の静止位置をカメラの軸とします。足の接地を崩さないよう腰の水平・上下移動と回転を保持し、ウィンドウの配置やカメラをモーションに追従させません。
 
 | OS別に分離する領域 | LinuxのMVP | 将来のWindows・macOS |
 | --- | --- | --- |
@@ -224,7 +225,7 @@ SQLiteは同時に1つの書き込みを扱うため、ホストが保存を一�
 
 消費資源はリリースビルドで測定します。ホスト・UI・描画・動作中のワーカーを含むアプリ全体の合計PSS、GPUメモリ、CPU使用量、配布サイズを、モデルと環境を記録して比較します。表示待機の30／60fps、非表示、会話、作業中を測定対象とし、外部の音声合成エンジンやローカルLLMは別計測にします。メモリ上限は実測後に決め、未計測の数値を採用理由にしません。
 
-Slintと描画プロセスの制御、BevyとWayland常駐ウィンドウの連携、日本語IME、入力領域、総メモリ使用量を実装前の先行試作で確認します。ライブラリの対応表だけで合格としません。実装では[MVPの機能完成条件と3日・5件の利用検証](../product/mvp.md#6-完了条件)を別に満たす必要があります。
+Slintと描画プロセスの制御、BevyとWayland常駐ウィンドウの連携、日本語IME、入力領域、総メモリ使用量は、実装した経路を実機で確認します。ライブラリの対応表だけで合格としません。実装では[MVPの機能完成条件と3日・5件の利用検証](../product/mvp.md#6-完了条件)を別に満たす必要があります。
 
 ## MVPとの対応と文書の完成条件
 

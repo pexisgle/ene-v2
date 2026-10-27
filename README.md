@@ -53,9 +53,8 @@ DBは `$XDG_STATE_HOME/ene/host.sqlite3`（既定 `~/.local/state/ene/host.sqlit
 | パッケージ | 役割 |
 | --- | --- |
 | `apps/ene-desktop` | 共通UI、ホスト管理・対話、端末設定と描画プロセスの管理 |
-| `apps/ene-avatar` | ID付きの複数Wayland／Win32ウィンドウ、VRM/VRMA、GPU画像と入力領域 |
+| `apps/ene-avatar` | 単一Bevy AppでのVRM描画、モニターごとの透過ウィンドウ、JSON Linesによる表示制御 |
 | `apps/ene-host` | 認証付きConnectサービス、SQLite、プロバイダー、端末・音声セッション |
-| `crates/ene-ipc` | 描画専用データ契約。Remocの接続はavatar／desktopが所有 |
 | `crates/ene-rpc` | host.protoから生成するRPCメッセージとサービス |
 | `crates/ene-plugin` | Luau／Extismのmanifest、拡張API、worker契約 |
 | `crates/ene-api-client` | Connect操作、snapshot・通知の同期、設定保存と端末・音声のSDK |
@@ -69,11 +68,14 @@ SDKは `/rpc` のConnect v1と初期snapshot付き通知ストリームを利用
 利用方法は [Connect契約](docs/design/connect-rpc.md)、機能追加時の不変条件は
 [共通境界](docs/design/framework-boundaries.md) を参照してください。
 
-描画プロセスは空一覧から複数ウィンドウを追加・削除できます。UIは1体を操作します。
+描画プロセスは1つのBevy Appで複数ウィンドウを追加・削除できます。UIは1体を操作します。
 非表示は削除、再表示は新しいIDで保持した設定と最新配置を再追加します。
 AvatarIdはdesktopが単調増加するu64を発行し、削除やrenderer再起動をまたいでも同じdesktopセッション内で再使用しません。
-個別設定は左上基準の配置を上書きせず、FPSは全体のRendererConfigで指定します。
-GPU画像とその入力領域は同じWayland commitで提示します。
+操作は標準入出力のJSON Linesです。`add`・`set`・`get`・`center`・`fps`・`remove`・`quit` と、
+`state`・`finished`・`click`・`moved` の通知は
+[ene-avatarのREADME](apps/ene-avatar/README.md#json-linesによる操作)に定めます。
+FPSは全体、モデル・モーション・配置は個別の設定で指定します。
+入力領域は現在の姿勢のメッシュ境界から決め、表示画像をCPUへ戻しません。
 
 ## プラグイン
 

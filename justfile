@@ -1,3 +1,6 @@
+[windows]
+set shell := ["powershell.exe", "-NoLogo", "-Command"]
+
 default:
     @just --list
 
@@ -39,13 +42,23 @@ run-demo:
     cargo build --locked -p ene-avatar -p ene-host -p ene-plugin-runner
     cargo run --locked -p ene-desktop -- --demo
 
+[windows]
+fetch-assets asset="all":
+    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/fetch-assets.py "{{ asset }}" } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/fetch-assets.py "{{ asset }}" } else { python scripts/fetch-assets.py "{{ asset }}" }
+
+[unix]
 fetch-assets asset="all":
     python3 scripts/fetch-assets.py "{{ asset }}"
 
+# Control the transparent renderer using JSON Lines on stdin.
 run-avatar:
-    cargo run --locked -p ene-avatar -- --standalone --model "${XDG_CACHE_HOME:-$HOME/.cache}/ene/models/Seed-san.vrm"
+    cargo run --release --locked -p ene-avatar
 
-# Stack: #1 contracts -> #2 avatar -> #9 client -> #13 plugin/SDK -> #10 core -> #12 runtime -> #4 host -> #5 desktop.
-# ene-rpc: generated RPC; ene-ipc: renderer data; ene-plugin: Luau/Extism contracts.
+# Build the renderer and launch its interactive CLI example.
+run-avatar-cli:
+    cargo build --release --locked -p ene-avatar --bin ene-avatar
+    cargo run --release --locked -p ene-avatar --example control
+
+# ene-rpc: generated Connect RPC; ene-plugin: Luau/Extism contracts.
 validate-plugin package="examples/plugins/reference":
     cargo run --locked -p ene-plugin-runner -- --package "{{ package }}" --validate
