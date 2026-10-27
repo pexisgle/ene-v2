@@ -13,14 +13,20 @@ pub fn setup(app: &mut App) {
         brightness: 0.2 / EXPOSURE.exposure(),
         ..default()
     })
-    .add_systems(Startup, |mut commands: Commands| {
-        commands.spawn((
-            DirectionalLight {
-                color: Color::WHITE,
-                illuminance: 0.8 * std::f32::consts::PI / EXPOSURE.exposure(),
-                ..default()
-            },
-            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
-        ));
-    });
+    .add_systems(
+        Startup,
+        |mut commands: Commands,
+         mut clusters: ResMut<bevy::light::cluster::GlobalClusterSettings>| {
+            // Directional and ambient lighting do not need GPU light clustering.
+            clusters.gpu_clustering = None;
+            commands.spawn((
+                DirectionalLight {
+                    color: Color::WHITE,
+                    illuminance: 0.8 * std::f32::consts::PI / EXPOSURE.exposure(),
+                    ..default()
+                },
+                Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.4, -0.3, 0.)),
+            ));
+        },
+    );
 }

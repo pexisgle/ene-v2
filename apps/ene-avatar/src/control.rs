@@ -91,7 +91,7 @@ pub fn setup(app: &mut App) {
         .insert_non_send(input)
         .insert_resource(Control {
             output,
-            fps: 30,
+            fps: 60,
             #[cfg(target_os = "linux")]
             wake_tx,
         })
@@ -320,7 +320,7 @@ mod tests {
             let (tx, output) = mpsc::sync_channel(64);
             app.insert_non_send(rx).insert_resource(Control {
                 output: tx,
-                fps: 30,
+                fps: 60,
                 #[cfg(target_os = "linux")]
                 wake_tx: exwlshellev::calloop::channel::channel().0,
             });

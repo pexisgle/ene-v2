@@ -1,3 +1,4 @@
+use bevy::app::{TaskPoolOptions, TaskPoolPlugin};
 use bevy::prelude::*;
 use bevy::render::settings::{MemoryHints, WgpuSettings};
 use bevy::render::{Render, RenderApp, RenderPlugin, settings::RenderCreation};
@@ -17,8 +18,12 @@ fn main() -> bevy::app::AppExit {
     }
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::NONE));
+    // Avoid spreading tiny per-frame jobs across compute workers.
+    let mut task_pool_options = TaskPoolOptions::default();
+    task_pool_options.compute.max_threads = 1;
     app.add_plugins(
         DefaultPlugins
+            .set(TaskPoolPlugin { task_pool_options })
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,
@@ -55,8 +60,7 @@ fn main() -> bevy::app::AppExit {
         schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
     });
     // Small avatar scenes spend more CPU dispatching render systems than they
-    // save by running them concurrently. Pipelined rendering and parallel work
-    // inside individual systems still use their own threads.
+    // save by running them concurrently. Pipelined rendering stays enabled.
     app.sub_app_mut(RenderApp)
         .edit_schedule(Render, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());

@@ -128,6 +128,9 @@ fn cameras(mut commands: Commands, outputs: Query<(Entity, &Output), Changed<Out
         let center = output.origin + output.size * 0.5;
         commands.entity(entity).insert((
             Camera3d::default(),
+            // Small avatar scenes do not amortize indirect draw preparation.
+            bevy::render::view::NoIndirectDrawing,
+            bevy::light::cluster::ClusterConfig::Single,
             Projection::Orthographic(OrthographicProjection {
                 scaling_mode: ScalingMode::Fixed {
                     width: output.size.x,
