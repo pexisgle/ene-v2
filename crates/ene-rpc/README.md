@@ -23,3 +23,7 @@ JSONの`null`は省略と同じで、解除には`clear`を使います。空パ
 設定値は非nullのJSONオブジェクトで、体は`format`・`environment_id`・`model`、
 声は`connection_id`・`voice_id`を持ちます。体の所在環境と形式、声の接続参照をホストが検証し、
 体のファイル存在と描画可否はクライアントが検証します。
+
+Wasmゲストは同じ `host.proto` のメッセージ型をBuffaの公式ビルダーで生成します。
+Connect RPCのブラウザー用runtimeをExtismへ持ち込まないよう、Wasmではサービスを
+生成せず、`connectrpc` を実行時依存に含めません。nativeのclient・server APIはそのままです。
