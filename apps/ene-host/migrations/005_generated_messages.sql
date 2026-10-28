@@ -1,0 +1,1 @@
+-- The migration hook preserves extension JSON when upgrading stored RPC messages.
