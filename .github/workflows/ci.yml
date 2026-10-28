@@ -29,15 +29,21 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev
+          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev bubblewrap
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Build Wasm plugin
         run: cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown
+      - name: Build plugin runner
+        run: cargo build --locked -p ene-plugin-runner
       - name: Tests
         run: cargo test --workspace --all-features --locked
+      - name: Test Wasm plugin with runner
+        env:
+          ENE_TEST_PDK_WASM: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm
+        run: cargo test --locked -p ene-plugin-runner --test pdk -- --ignored
       - name: Check Wasm RPC messages
         if: runner.os == 'Linux'
         run: |
