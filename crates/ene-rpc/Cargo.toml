@@ -22,5 +22,6 @@ webpki-roots = { version = "1", optional = true }
 connectrpc.workspace = true
 
 [build-dependencies]
+buffa-build = "0.9"
 connectrpc-build = "0.9"
 protoc-bin-vendored = "3"

@@ -1619,6 +1619,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "buffa-build"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eee6b6b4a8d23f1f98a043f188f4d9d2ef8bee43191f42e93ac577f3c3b0f334"
+dependencies = [
+ "buffa",
+ "buffa-codegen",
+ "tempfile",
+]
+
+[[package]]
 name = "buffa-codegen"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2189,6 +2200,7 @@ name = "ene-rpc"
 version = "0.1.0"
 dependencies = [
  "buffa",
+ "buffa-build",
  "connectrpc",
  "connectrpc-build",
  "http",
