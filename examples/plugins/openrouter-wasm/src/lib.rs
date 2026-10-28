@@ -54,7 +54,7 @@ mod guest {
         let mut chunk = http_open(request)?;
         let mut pending = Vec::new();
         let mut reason = None;
-        loop {
+        'response: loop {
             if !(200..300).contains(&chunk.status) {
                 return Err(extism_pdk::Error::msg("HTTP failure").into());
             }
@@ -67,8 +67,13 @@ mod guest {
                     let line = std::str::from_utf8(&pending[..end])?;
                     if let Some(data) = line.strip_prefix("data:").map(str::trim)
                         && !data.is_empty()
-                        && data != "[DONE]"
                     {
+                        if data == "[DONE]" {
+                            if !chunk.done {
+                                http_close(chunk.handle)?;
+                            }
+                            break 'response;
+                        }
                         let value: Value = serde_json::from_str(data)?;
                         if value.get("error").is_some() {
                             return Err(extism_pdk::Error::msg("upstream failure").into());
