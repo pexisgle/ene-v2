@@ -19,7 +19,7 @@ pub struct RequestContext {
     pub draft: crate::host_model::DraftStamp,
     pub resource: Option<crate::host_model::DraftResource>,
     pub saved_resource: Option<crate::host_model::DraftResource>,
-    pub session: ene_api_client::SessionIdentity,
+    pub session: crate::infrastructure::host::SessionIdentity,
     pub id: String,
     pub target: OperationTarget,
 }
@@ -231,7 +231,7 @@ impl Request {
 }
 pub enum Event {
     Action(Box<ActionResultEnvelope>),
-    Session(ene_api_client::SessionIdentity),
+    Session(crate::infrastructure::host::SessionIdentity),
     Runtime(RuntimeStatus),
     RetryIn(i32),
     View(Box<Snapshot>, Vec<Message>),
@@ -250,7 +250,7 @@ pub enum ActionEvent {
     Error(String),
     ConnectionSaved(String),
     Done(String, bool, Option<String>),
-    Older(ene_api_client::session::HistoryApplied),
+    Older(super::sync::HistoryApplied),
     Models(String, Vec<ene_rpc::Model>),
     Availability(ene_rpc::Availability),
 }

@@ -57,7 +57,6 @@ DBは `$XDG_STATE_HOME/ene/host.sqlite3`（既定 `~/.local/state/ene/host.sqlit
 | `apps/ene-host` | 認証付きConnectサービス、SQLite、プロバイダー、端末・音声セッション |
 | `crates/ene-rpc` | host.protoから生成するRPCメッセージとサービス |
 | `crates/ene-plugin` | Luau／Extismのmanifest、拡張API、worker契約 |
-| `crates/ene-api-client` | Connect操作、snapshot・通知の同期、設定保存と端末・音声のSDK |
 | `crates/ene-core` | 会話・設定・認可・取消・保存の処理手順とport |
 | `crates/ene-outbound` | 認可済み送信先へのHTTP、資格情報付与、本文・SSE容量制限 |
 

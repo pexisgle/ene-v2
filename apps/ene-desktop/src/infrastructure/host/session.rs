@@ -1,7 +1,7 @@
 use super::mutations::{MutationQueue, is_mutation};
 use super::*;
-fn projection(session: &ene_api_client::SyncedSession) -> Event {
-    let mut snapshot = session.view();
+fn projection(session: &super::sync::SyncedSession) -> Event {
+    let mut snapshot = session.snapshot();
     let messages = std::mem::take(&mut snapshot.messages);
     Event::View(Box::new(snapshot), messages)
 }
@@ -22,32 +22,27 @@ impl From<&str> for SessionFailure {
         reason.to_owned().into()
     }
 }
-impl From<ene_api_client::Error> for SessionFailure {
-    fn from(error: ene_api_client::Error) -> Self {
+impl From<connectrpc::ConnectError> for SessionFailure {
+    fn from(error: connectrpc::ConnectError) -> Self {
+        use connectrpc::ErrorCode;
         let retry = matches!(
-            error,
-            ene_api_client::Error::Transport
-                | ene_api_client::Error::Unauthorized
-                | ene_api_client::Error::ResyncRequired
+            error.code,
+            ErrorCode::Unavailable
+                | ErrorCode::DeadlineExceeded
+                | ErrorCode::Unauthenticated
+                | ErrorCode::FailedPrecondition
         );
-        let reason = match error {
-            ene_api_client::Error::ResourceLimit => {
-                "会話の読み込み量が上限を超えました。再接続して必要な履歴だけを読み込んでください。"
-                    .into()
-            }
-            ene_api_client::Error::Api(error) if error.body.error.code == "resource_limit" => {
-                "ホストの読み込み上限を超えています。保存内容を確認してから再接続してください。"
-                    .into()
-            }
-            error => error.to_string(),
+        let reason = match super::transport::Error::from(error) {
+            super::transport::Error::Api(message) => message,
+            super::transport::Error::Unauthorized => "authentication required".into(),
+            _ => "request transport failed".into(),
         };
         Self { reason, retry }
     }
 }
+
 struct Pending {
-    text: String,
-    key: IdempotencyKey,
-    companion: String,
+    request: ene_rpc::SendMessageRequest,
     host: String,
 }
 pub(super) async fn run(commands: channel::Receiver<Request>, emit: &(impl Fn(Event) + Sync)) {
@@ -153,15 +148,21 @@ async fn session(
     path: &Path,
     mutations: &MutationQueue,
 ) -> Result<(), SessionFailure> {
-    let http = Http::new(&descriptor(path).map_err(SessionFailure::from)?)
+    let http =
+        connect(&descriptor(path).map_err(SessionFailure::from)?).map_err(SessionFailure::from)?;
+    let mut synced = super::sync::SyncedSession::connect(http.clone())
+        .await
         .map_err(SessionFailure::from)?;
-    let mut synced = http.synced_session().await.map_err(SessionFailure::from)?;
     let result = async {
         *attempt = 0;
         emit(Event::Session(synced.identity().clone()));
         emit(projection(&synced));
         emit(Event::Connection(ConnectionPhase::Connected, "このPCのホストに接続しました。".into()));
-        if let Ok(list)=http.providers().await {emit(Event::Providers(list));}
+        if let Ok(response) = http.list_providers_with_options(
+                                ene_rpc::Empty::default(), crate::infrastructure::host::call_options(5),
+                            ).await {
+                                emit(Event::Providers(response.into_owned().items));
+                            }
         if pending.as_ref().is_some_and(|p| p.host != synced.snapshot().host_id) {
             pending.take();
             emit(Event::SendFailed("接続先ホストが変わったため、未確認の送信を停止しました".into()));
@@ -181,7 +182,11 @@ async fn session(
                 },
                 event = synced.next() => {
                     let notification = event.map_err(SessionFailure::from)?;
-                    if matches!(notification.event.as_ref(), Some(ene_rpc::notification::Event::SettingsUpdated(_) | ene_rpc::notification::Event::CompanionUpdated(_) | ene_rpc::notification::Event::GrantsUpdated(_))) && let Ok(list)=http.providers().await {emit(Event::Providers(list));}
+                    if matches!(notification.event.as_ref(), Some(ene_rpc::notification::Event::SettingsUpdated(_) | ene_rpc::notification::Event::CompanionUpdated(_) | ene_rpc::notification::Event::GrantsUpdated(_))) && let Ok(response) = http.list_providers_with_options(
+                            ene_rpc::Empty::default(), crate::infrastructure::host::call_options(5),
+                        ).await {
+                            emit(Event::Providers(response.into_owned().items));
+                        }
                     if matches!(notification.event.as_ref(), Some(ene_rpc::notification::Event::HostStorageFailed(_))) {
                         emit(Event::Error("保存に失敗したためホストを実行できません。ホストの保存先を確認してください".into()));
                     } else if matches!(notification.event.as_ref(), Some(ene_rpc::notification::Event::GenerationPersistenceFailed(_))) {
@@ -202,19 +207,24 @@ async fn session(
                                 emit(Event::SendFailed("会話相手が見つかりません。選び直してください。".into()));
                                 continue;
                             }
-                            *pending = Some(Pending { text, key: IdempotencyKey::new(Uuid::new_v4().to_string()).expect("UUID key"), companion, host: synced.snapshot().host_id.clone() });
+                            *pending = Some(Pending { request: ene_rpc::SendMessageRequest { text, request_key: Uuid::new_v4().to_string(), companion_id: companion, ..Default::default() }, host: synced.snapshot().host_id.clone() });
                             spawn_send(&mut jobs, &http, pending.as_ref().unwrap());
                         }
                         Command::History => {
                             let Some(context) = context else { continue; };
                             let request = synced.history_request(&companion);
-                            if request.expected_before.is_none() {
+                            if request.request.cursor.is_none() {
                                 emit_action(emit, context, ActionEvent::Done("過去の履歴はすべて表示しています".into(), false, None));
                                 continue;
                             }
                             let http = http.clone();
                             jobs.spawn(async move {
-                                let result = http.messages(&request.companion, request.expected_before.as_deref(), None).await.map_err(Error::from);
+                                let result = http.get_history_with_options(
+                                    request.request.clone(),
+                                    crate::infrastructure::host::call_options(5),
+                                ).await
+                                    .map(|response| response.into_owned())
+                                    .map_err(Error::from);
                                 Job::History(Box::new(context), request, result)
                             });
                         }
@@ -228,7 +238,7 @@ async fn session(
                     match job {
                         Some(Ok(Job::Sent(result))) => match result {
                             Ok(_) => {
-                                if let Some(p) = pending.take() { emit(Event::Accepted(p.text)); }
+                                if let Some(p) = pending.take() { emit(Event::Accepted(p.request.text)); }
                             }
                             Err(Error::Transport | Error::Unauthorized) => {
                                 return Err("送信の受付を確認できません。同じキーで再確認します".into());
@@ -241,7 +251,11 @@ async fn session(
                         },
                         Some(Ok(Job::Action(request, Ok(ActionResult::Done(text,committed,connection))))) => {
                             emit_action(emit, *request, ActionEvent::Done(text,committed,connection));
-                            if let Ok(list)=http.providers().await {emit(Event::Providers(list));}
+                            if let Ok(response) = http.list_providers_with_options(
+                                ene_rpc::Empty::default(), crate::infrastructure::host::call_options(5),
+                            ).await {
+                                emit(Event::Providers(response.into_owned().items));
+                            }
                             synced.refresh().await.map_err(SessionFailure::from)?;
                                 emit(projection(&synced));
                         }
@@ -285,7 +299,7 @@ pub(super) enum Job {
     Action(Box<RequestContext>, Result<ActionResult, Error>),
     History(
         Box<RequestContext>,
-        ene_api_client::session::HistoryRequest,
+        super::sync::HistoryRequest,
         Result<ene_rpc::History, Error>,
     ),
 }
@@ -299,7 +313,7 @@ pub(super) fn spawn_action(
     context: RequestContext,
 ) {
     if is_mutation(&command) {
-        let key = IdempotencyKey::new(context.id.clone()).expect("controller request key");
+        let key = context.id.clone();
         let result = mutations.submit(
             http,
             companion,
@@ -315,7 +329,7 @@ pub(super) fn spawn_action(
         });
     } else {
         jobs.spawn(async move {
-            let key = IdempotencyKey::new(context.id.clone()).expect("controller request key");
+            let key = context.id.clone();
             Job::Action(
                 Box::new(context),
                 action_with_key(http, snapshot, companion, command, key).await,
@@ -325,23 +339,12 @@ pub(super) fn spawn_action(
 }
 fn spawn_send(jobs: &mut tokio::task::JoinSet<Job>, http: &Http, p: &Pending) {
     let http = http.clone();
-    let companion = p.companion.clone();
-    let key = p.key.clone();
-    let text = p.text.clone();
+    let request = p.request.clone();
     jobs.spawn(async move {
         let result = http
-            .send_message(
-                &companion,
-                &ene_rpc::SendMessageRequest {
-                    text,
-                    resources: vec![],
-                    question_id: None,
-                    decision: None,
-                    ..Default::default()
-                },
-                &key,
-            )
+            .send_message_with_options(request, crate::infrastructure::host::call_options(10))
             .await
+            .map(|response| response.into_owned())
             .map_err(Error::from);
         Job::Sent(result)
     });

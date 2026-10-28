@@ -1,15 +1,18 @@
 //! One subscription owns buffering, snapshots, event ordering and history reconciliation.
-use super::*;
+use super::{Http, call_options};
+use connectrpc::ConnectError as Error;
+use ene_rpc::{self as types, *};
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicBool, Ordering},
 };
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, watch};
 
 struct Reader {
     stop: watch::Sender<bool>,
     job: Option<tokio::task::JoinHandle<()>>,
-    events: mpsc::Receiver<ServerEvent>,
+    events: mpsc::Receiver<HostEvent>,
     overflow: Arc<AtomicBool>,
     terminal: Arc<std::sync::Mutex<Option<Error>>>,
 }
@@ -19,7 +22,7 @@ impl Drop for Reader {
     }
 }
 impl Reader {
-    fn start(mut stream: EventStream) -> Self {
+    fn start(mut stream: RpcStream) -> Self {
         let (sender, events) = mpsc::channel(256);
         let (stop, mut stopping) = watch::channel(false);
         let overflow = Arc::new(AtomicBool::new(false));
@@ -30,22 +33,25 @@ impl Reader {
             loop {
                 let event = tokio::select! { biased;
                     _ = stopping.changed() => break,
-                    event = stream.next() => event,
+                    event = stream.message::<HostEvent>() => event,
                 };
                 let event = match event {
-                    Ok(Some(event)) => event,
+                    Ok(Some(event)) => event.to_owned_message(),
                     Ok(None) => break,
                     Err(error) => {
                         *terminal_error.lock().expect("reader terminal") = Some(error);
                         break;
                     }
                 };
+                let resync = matches!(event.event, Some(host_event::Event::ResyncRequired(_)));
                 if sender.try_send(event).is_err() {
                     exceeded.store(true, Ordering::Release);
                     break;
                 }
+                if resync {
+                    break;
+                }
             }
-            let _ = stream.close().await;
         });
         Self {
             stop,
@@ -79,15 +85,21 @@ impl SessionState {
         let cursor = notification
             .cursor
             .as_option()
-            .ok_or(Error::ResyncRequired)?;
+            .ok_or(Error::failed_precondition(
+                "subscription must be resynchronized",
+            ))?;
         if cursor.epoch != self.cursor.epoch {
-            return Err(Error::ResyncRequired);
+            return Err(Error::failed_precondition(
+                "subscription must be resynchronized",
+            ));
         }
         if cursor.seq <= self.cursor.seq {
             return Ok(false);
         }
         if self.cursor.seq.checked_add(1) != Some(cursor.seq) {
-            return Err(Error::ResyncRequired);
+            return Err(Error::failed_precondition(
+                "subscription must be resynchronized",
+            ));
         }
         use types::notification::Event;
         match notification.event.as_ref() {
@@ -97,21 +109,27 @@ impl SessionState {
                 | Event::MessageUpdated(message),
             ) => {
                 if notification.companion_id.as_deref() != Some(&message.companion_id) {
-                    return Err(Error::ResyncRequired);
+                    return Err(Error::failed_precondition(
+                        "subscription must be resynchronized",
+                    ));
                 }
                 self.messages
                     .insert(message.id.clone(), (**message).clone());
             }
             Some(Event::MessageDelta(delta)) => {
-                let message = self
-                    .messages
-                    .get_mut(&delta.message_id)
-                    .ok_or(Error::ResyncRequired)?;
+                let message =
+                    self.messages
+                        .get_mut(&delta.message_id)
+                        .ok_or(Error::failed_precondition(
+                            "subscription must be resynchronized",
+                        ))?;
                 if notification.companion_id.as_deref() != Some(&message.companion_id)
                     || message.status != "streaming"
                     || u64::try_from(message.text.chars().count()).ok() != Some(delta.offset)
                 {
-                    return Err(Error::ResyncRequired);
+                    return Err(Error::failed_precondition(
+                        "subscription must be resynchronized",
+                    ));
                 }
                 message.text.push_str(&delta.delta);
             }
@@ -136,8 +154,7 @@ struct SessionView {
 /// Capture this together with the paging cursor before starting the HTTP request.
 #[derive(Clone, Debug)]
 pub struct HistoryRequest {
-    pub companion: String,
-    pub expected_before: Option<String>,
+    pub request: types::HistoryRequest,
     generation: u64,
     identity: SessionIdentity,
 }
@@ -150,7 +167,7 @@ pub struct HistoryApplied {
 enum SyncCommand {
     Refresh(tokio::sync::oneshot::Sender<Result<(), Error>>),
     History(
-        HistoryRequest,
+        Box<HistoryRequest>,
         History,
         tokio::sync::oneshot::Sender<Result<HistoryApplied, Error>>,
     ),
@@ -171,16 +188,34 @@ impl Drop for SyncedSession {
         self.stop.send_replace(true);
     }
 }
-impl ApiClient {
-    pub async fn synced_session(&self) -> Result<SyncedSession, Error> {
-        let mut stream = self.subscribe().await?;
-        let snapshot = stream.take_initial_snapshot().ok_or(Error::Protocol)?;
-        let subscription = stream.ready().connection_id.clone();
-        let epoch = stream.ready().cursor.epoch.clone();
-        let reader = Reader::start(stream);
-        if snapshot.cursor.epoch != epoch || reader.overflow.load(Ordering::Acquire) {
-            return Err(Error::ResyncRequired);
+impl SyncedSession {
+    pub async fn connect(http: Http) -> Result<SyncedSession, Error> {
+        let mut stream = timeout(Duration::from_secs(5), http.subscribe(Empty::default()))
+            .await
+            .map_err(|_| Error::unavailable("request transport failed"))??;
+        let first = timeout(Duration::from_secs(5), stream.message::<HostEvent>())
+            .await
+            .map_err(|_| Error::unavailable("request transport failed"))??
+            .ok_or(Error::internal("invalid API response"))?
+            .to_owned_message();
+        let Some(host_event::Event::Initial(initial)) = first.event else {
+            return Err(Error::internal("invalid API response"));
+        };
+        if initial.subscription_id.is_empty() {
+            return Err(Error::internal("invalid API response"));
         }
+        let subscription = initial.subscription_id;
+        let snapshot = initial
+            .snapshot
+            .into_option()
+            .ok_or(Error::internal("invalid API response"))?;
+        let epoch = snapshot
+            .cursor
+            .as_option()
+            .ok_or(Error::internal("invalid API response"))?
+            .epoch
+            .clone();
+        let reader = Reader::start(stream);
         let identity = SessionIdentity {
             host_id: snapshot.host_id.clone(),
             epoch,
@@ -196,7 +231,7 @@ impl ApiClient {
         let (failure, failed) = watch::channel(None);
         let (stop, stopping) = watch::channel(false);
         let worker_view = view.clone();
-        let http = self.clone();
+
         let worker = tokio::spawn(async move {
             let result = run_worker(
                 http,
@@ -232,14 +267,14 @@ impl SyncedSession {
     pub fn snapshot(&self) -> Snapshot {
         self.view.lock().expect("session view").snapshot.clone()
     }
-    pub fn view(&self) -> Snapshot {
-        self.snapshot()
-    }
     pub fn history_request(&self, companion: &str) -> HistoryRequest {
         let view = self.view.lock().expect("session view");
         HistoryRequest {
-            companion: companion.into(),
-            expected_before: history_cursor(&view.snapshot, companion),
+            request: types::HistoryRequest {
+                companion_id: companion.into(),
+                cursor: history_cursor(&view.snapshot, companion),
+                ..Default::default()
+            },
             generation: view.generation,
             identity: self.identity.clone(),
         }
@@ -252,9 +287,9 @@ impl SyncedSession {
             biased;
             changed = self.failure.changed() => {
                 let _ = changed;
-                Err(self.failure.borrow().clone().unwrap_or(Error::Transport))
+                Err(self.failure.borrow().clone().unwrap_or(Error::unavailable("request transport failed")))
             }
-            notice = self.notices.recv() => notice.ok_or(Error::Transport),
+            notice = self.notices.recv() => notice.ok_or(Error::unavailable("request transport failed")),
         }
     }
     pub async fn refresh(&self) -> Result<(), Error> {
@@ -262,7 +297,9 @@ impl SyncedSession {
         self.commands
             .try_send(SyncCommand::Refresh(reply))
             .map_err(command_error)?;
-        result.await.map_err(|_| Error::Transport)?
+        result
+            .await
+            .map_err(|_| Error::unavailable("request transport failed"))?
     }
     pub async fn insert_history(
         &self,
@@ -270,13 +307,17 @@ impl SyncedSession {
         page: History,
     ) -> Result<HistoryApplied, Error> {
         if request.identity != self.identity {
-            return Err(Error::ResyncRequired);
+            return Err(Error::failed_precondition(
+                "subscription must be resynchronized",
+            ));
         }
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
-            .try_send(SyncCommand::History(request, page, reply))
+            .try_send(SyncCommand::History(Box::new(request), page, reply))
             .map_err(command_error)?;
-        result.await.map_err(|_| Error::Transport)?
+        result
+            .await
+            .map_err(|_| Error::unavailable("request transport failed"))?
     }
     pub async fn close(mut self) {
         self.stop.send_replace(true);
@@ -287,8 +328,10 @@ impl SyncedSession {
 }
 fn command_error(error: mpsc::error::TrySendError<SyncCommand>) -> Error {
     match error {
-        mpsc::error::TrySendError::Full(_) => Error::Busy,
-        _ => Error::Transport,
+        mpsc::error::TrySendError::Full(_) => {
+            Error::resource_exhausted("client command queue is full")
+        }
+        _ => Error::unavailable("request transport failed"),
     }
 }
 fn history_cursor(snapshot: &Snapshot, companion: &str) -> Option<String> {
@@ -300,7 +343,7 @@ fn history_cursor(snapshot: &Snapshot, companion: &str) -> Option<String> {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_worker(
-    http: ApiClient,
+    http: Http,
     subscription: String,
     mut snapshot: Snapshot,
     mut reader: Reader,
@@ -318,7 +361,9 @@ async fn run_worker(
     frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if reader.overflow.load(Ordering::Acquire) {
-            return Err(Error::ResyncRequired);
+            return Err(Error::failed_precondition(
+                "subscription must be resynchronized",
+            ));
         }
         tokio::select! {
             biased;
@@ -327,7 +372,7 @@ async fn run_worker(
                 publish_view(&view, &snapshot, &state, generation);
                 dirty = false;
                 for notice in pending_notices.drain(..) {
-                    notices.try_send(notice).map_err(|_| Error::ResyncRequired)?;
+                    notices.try_send(notice).map_err(|_| Error::failed_precondition("subscription must be resynchronized"))?;
                 }
             },
             command = commands.recv() => match command {
@@ -343,15 +388,15 @@ async fn run_worker(
                     failed?;
                 }
                 Some(SyncCommand::History(request, page, reply)) => {
-                    let companion = request.companion;
+                    let companion = request.request.companion_id;
                     let result = if !snapshot.companions.iter().any(|value| value.id == companion)
                         || page.items.iter().any(|message| message.companion_id != companion) {
-                        Err(Error::Protocol)
+                        Err(Error::internal("invalid API response"))
                     } else {
                         let before = state.messages.len();
                         for message in page.items { state.messages.entry(message.id.clone()).or_insert(message); }
                         if generation == request.generation
-                            && history_cursor(&snapshot, &companion) == request.expected_before {
+                            && history_cursor(&snapshot, &companion) == request.request.cursor {
                             snapshot.message_cursors.insert(companion.clone(), HistoryCursor {
                                 value: page.next_cursor, ..Default::default()
                             });
@@ -368,11 +413,12 @@ async fn run_worker(
                 None => break,
             },
             event = reader.events.recv() => {
-                let event = event.ok_or_else(|| reader.terminal.lock().expect("reader terminal").clone().unwrap_or(Error::Transport))?;
-                if reader.overflow.load(Ordering::Acquire) { return Err(Error::ResyncRequired); }
-                let notification = match event {
-                    ServerEvent::Notification(notification) => notification,
-                    ServerEvent::ResyncRequired => return Err(Error::ResyncRequired),
+                let event = event.ok_or_else(|| reader.terminal.lock().expect("reader terminal").clone().unwrap_or(Error::unavailable("request transport failed")))?;
+                if reader.overflow.load(Ordering::Acquire) { return Err(Error::failed_precondition("subscription must be resynchronized")); }
+                let notification = match event.event {
+                    Some(host_event::Event::Notification(notification)) => *notification,
+                    Some(host_event::Event::ResyncRequired(_)) => return Err(Error::failed_precondition("subscription must be resynchronized")),
+                    _ => return Err(Error::internal("invalid API response")),
                 };
                 if !state.apply(&notification)? { continue; }
                 use types::notification::Event;
@@ -390,9 +436,9 @@ async fn run_worker(
                             let mut availability: serde_json::Value = if json.is_empty() {
                                 serde_json::json!({})
                             } else {
-                                serde_json::from_str(json).map_err(|_| Error::Protocol)?
+                                serde_json::from_str(json).map_err(|_| Error::internal("invalid API response"))?
                             };
-                            let object = availability.as_object_mut().ok_or(Error::Protocol)?;
+                            let object = availability.as_object_mut().ok_or(Error::internal("invalid API response"))?;
                             object.insert("chat".into(), serde_json::json!({"ready":false,"reasons":[{"code":"storage_error"}]}));
                             companion.availability = JsonDocument { json: availability.to_string(), ..Default::default() }.into();
                         }
@@ -400,7 +446,7 @@ async fn run_worker(
                     _ => {}
                 }
                 dirty = true;
-                if pending_notices.len() >= 256 { return Err(Error::ResyncRequired); }
+                if pending_notices.len() >= 256 { return Err(Error::failed_precondition("subscription must be resynchronized")); }
                 pending_notices.push(notification);
             }
         }
@@ -432,18 +478,29 @@ fn published_view(snapshot: &Snapshot, state: &SessionState, generation: u64) ->
     }
 }
 async fn refresh_state(
-    http: &ApiClient,
+    http: &Http,
     subscription: &str,
     snapshot: &mut Snapshot,
     state: &mut SessionState,
 ) -> Result<(), Error> {
-    let mut fresh = http.snapshot(Some(subscription)).await?;
+    let mut fresh = http
+        .get_snapshot_with_options(
+            ene_rpc::SnapshotRequest {
+                subscription_id: Some(subscription.into()),
+                ..Default::default()
+            },
+            call_options(5),
+        )
+        .await?
+        .into_owned();
     if fresh.host_id != snapshot.host_id
         || fresh.cursor.is_unset()
         || fresh.cursor.epoch != state.cursor.epoch
         || fresh.cursor.seq < state.cursor.seq
     {
-        return Err(Error::ResyncRequired);
+        return Err(Error::failed_precondition(
+            "subscription must be resynchronized",
+        ));
     }
     let merged = merge_state(http, &fresh, state).await?;
     fresh.messages.clear();
@@ -452,23 +509,8 @@ async fn refresh_state(
     Ok(())
 }
 
-/// Reconcile a new snapshot with retained history from the same host session.
-/// Missing queued/streaming rows are resolved before the merged state is published.
-pub async fn merge_snapshot(
-    http: &ApiClient,
-    snapshot: &Snapshot,
-    previous: &Snapshot,
-) -> Result<Snapshot, Error> {
-    if snapshot.host_id != previous.host_id || previous.cursor.is_unset() {
-        return Err(Error::ResyncRequired);
-    }
-    let state = SessionState::from_snapshot(previous);
-    let merged = merge_state(http, snapshot, &state).await?;
-    Ok(published_view(snapshot, &merged, 0).snapshot)
-}
-
 async fn merge_state(
-    http: &ApiClient,
+    http: &Http,
     snapshot: &Snapshot,
     state: &SessionState,
 ) -> Result<SessionState, Error> {
@@ -476,7 +518,9 @@ async fn merge_state(
         || snapshot.cursor.epoch != state.cursor.epoch
         || snapshot.cursor.seq < state.cursor.seq
     {
-        return Err(Error::ResyncRequired);
+        return Err(Error::failed_precondition(
+            "subscription must be resynchronized",
+        ));
     }
     let mut merged = SessionState::from_snapshot(snapshot);
     for (id, previous) in &state.messages {
@@ -490,15 +534,38 @@ async fn merge_state(
         }
         let mut message = previous.clone();
         if matches!(message.status.as_str(), "queued" | "streaming") {
-            message = http.message(&message.companion_id, &message.id).await?;
+            message = http
+                .get_message_with_options(
+                    ene_rpc::MessageRequest {
+                        companion_id: message.companion_id.clone(),
+                        message_id: message.id.clone(),
+                        ..Default::default()
+                    },
+                    call_options(5),
+                )
+                .await?
+                .into_owned();
             if message.id != *id || message.companion_id != previous.companion_id {
-                return Err(Error::Protocol);
+                return Err(Error::internal("invalid API response"));
             }
             if matches!(message.status.as_str(), "queued" | "streaming") {
-                return Err(Error::ResyncRequired);
+                return Err(Error::failed_precondition(
+                    "subscription must be resynchronized",
+                ));
             }
         }
         merged.messages.insert(id.clone(), message);
     }
     Ok(merged)
 }
+
+use tokio::time::timeout;
+
+type RpcStream = connectrpc::client::ServerStream<
+    <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
+    ene_rpc::__buffa::view::HostEventView<'static>,
+>;
+
+#[cfg(test)]
+#[path = "sync_tests.rs"]
+mod tests;

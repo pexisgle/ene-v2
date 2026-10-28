@@ -1,9 +1,12 @@
 use super::transport::Error;
-use super::{Command, CredentialEdit, Http, IdempotencyKey};
+use super::{Command, CredentialEdit, Http};
+use connectrpc::ConnectError as ClientError;
 use ene_rpc::{
-    CheckRequest, Connection, CreateGrantRequest, CredentialRequest, Snapshot,
-    UpdateCompanionRequest,
+    AssignmentPatch, CheckRequest, CheckResult, Connection, ConnectionInput, ConnectionInputs,
+    CreateGrantRequest, CredentialRequest, JsonDocument, ModelAssignment, Snapshot,
+    UpdateCompanionRequest, UpdateSettingsRequest,
 };
+use std::time::Duration;
 #[cfg(test)]
 use uuid::Uuid;
 
@@ -25,14 +28,13 @@ pub(super) async fn action_with_key(
     snapshot: Snapshot,
     companion: String,
     command: Command,
-    key: IdempotencyKey,
+    key: String,
 ) -> Result<ActionResult, Error> {
     let c = snapshot
         .companions
         .iter()
         .find(|c| c.id == companion)
         .ok_or_else(|| Error::Api("コンパニオンがありません".into()))?;
-    let key = key.as_str().to_owned();
     let committed = matches!(
         &command,
         Command::Configure { .. }
@@ -55,65 +57,244 @@ pub(super) async fn action_with_key(
             update_connection,
             credential,
         } => {
-            use ene_api_client::{ConfigurationIntent, ConfigurationTarget, CredentialChange};
-            let target = match connection_id {
-                Some(id) => ConfigurationTarget::Existing(id),
-                None => ConfigurationTarget::Create(creation_id.ok_or(Error::Transport)?),
-            };
-            let result = http
-                .configure(
-                    &snapshot,
-                    &companion,
-                    ConfigurationIntent {
-                        settings_revision,
-                        companion_revision,
-                        target,
-                        provider,
-                        endpoint,
-                        model,
-                        options,
-                        update_connection,
-                        credential: credential.map(|credential| match credential {
-                            CredentialEdit::Secret(secret) => CredentialChange::Secret(secret),
-                            CredentialEdit::Environment => CredentialChange::Environment,
-                            CredentialEdit::Revoke => CredentialChange::Revoke,
-                        }),
-                    },
-                )
-                .await
-                .map_err(|failure| {
-                    let connection = failure.progress.confirmed_connection().map(str::to_owned);
-                    let error = Error::from(*failure.error);
-                    if let Some(connection) = connection {
-                        Error::PartialConfiguration {
-                            connection,
-                            error: Box::new(error),
-                        }
+            let create = connection_id.is_none();
+            let target = connection_id.or(creation_id).ok_or(Error::Transport)?;
+            let mut connection_confirmed = false;
+            let credential_state = async {
+                if target.is_empty() {
+                    return Err(ClientError::invalid_argument("invalid connection"));
+                }
+                if update_connection {
+                    let providers = http
+                        .list_providers_with_options(
+                            ene_rpc::Empty::default(),
+                            crate::infrastructure::host::call_options(5),
+                        )
+                        .await?
+                        .into_owned()
+                        .items;
+                    let descriptor = providers
+                        .iter()
+                        .find(|candidate| candidate.id == provider && candidate.state == "ready")
+                        .ok_or(ClientError::internal("invalid API response"))?;
+                    let defaults: serde_json::Value = if descriptor.options.json.is_empty() {
+                        serde_json::json!({})
                     } else {
-                        error
+                        serde_json::from_str(&descriptor.options.json)
+                            .map_err(|_| ClientError::internal("invalid API response"))?
+                    };
+                    let overrides: serde_json::Value = serde_json::from_str(&options.json)
+                        .map_err(|_| ClientError::internal("invalid API response"))?;
+                    let mut options = defaults.as_object().cloned().unwrap_or_default();
+                    options.extend(
+                        overrides
+                            .as_object()
+                            .cloned()
+                            .ok_or(ClientError::internal("invalid API response"))?,
+                    );
+                    let options = JsonDocument {
+                        json: serde_json::Value::Object(options).to_string(),
+                        ..Default::default()
+                    };
+                    let mut connections: Vec<_> = snapshot
+                        .settings
+                        .connections
+                        .iter()
+                        .map(|connection| ConnectionInput {
+                            id: Some(connection.id.clone()),
+                            create: false,
+                            kind: connection.kind.clone(),
+                            adapter: connection.adapter.clone(),
+                            endpoint: connection.endpoint.clone(),
+                            options: connection.options.clone(),
+                            ..Default::default()
+                        })
+                        .collect();
+                    if let Some(connection) = connections
+                        .iter_mut()
+                        .find(|connection| connection.id.as_deref() == Some(&target))
+                    {
+                        connection.adapter = provider;
+                        connection.endpoint = endpoint;
+                        connection.options = options.into();
+                    } else if create {
+                        connections.push(ConnectionInput {
+                            id: Some(target.clone()),
+                            create: true,
+                            kind: "llm".into(),
+                            adapter: provider,
+                            endpoint,
+                            options: options.into(),
+                            ..Default::default()
+                        });
+                    } else {
+                        return Err(ClientError::internal("invalid API response"));
                     }
-                })?;
-            selected_connection = Some(result.connection);
-            if result.credential_state.as_deref() == Some("session_only") {
+                    let saved = http
+                        .update_settings_with_options(
+                            UpdateSettingsRequest {
+                                revision: settings_revision,
+                                connections: ConnectionInputs {
+                                    items: connections,
+                                    ..Default::default()
+                                }
+                                .into(),
+                                ..Default::default()
+                            },
+                            crate::infrastructure::host::call_options(10),
+                        )
+                        .await?
+                        .into_owned();
+                    if !saved
+                        .connections
+                        .iter()
+                        .any(|connection| connection.id == target)
+                    {
+                        return Err(ClientError::internal("invalid API response"));
+                    }
+                } else if !snapshot
+                    .settings
+                    .connections
+                    .iter()
+                    .any(|connection| connection.id == target)
+                {
+                    return Err(ClientError::internal("invalid API response"));
+                }
+                connection_confirmed = true;
+                if !model.trim().is_empty()
+                    && c.model_assignments
+                        .companion
+                        .as_option()
+                        .is_none_or(|assignment| {
+                            assignment.connection_id != target || assignment.model_id != model
+                        })
+                {
+                    http.update_companion_with_options(
+                        UpdateCompanionRequest {
+                            id: c.id.clone(),
+                            revision: companion_revision,
+                            companion_assignment: AssignmentPatch {
+                                change: Some(ene_rpc::assignment_patch::Change::Set(Box::new(
+                                    ModelAssignment {
+                                        connection_id: target.clone(),
+                                        model_id: model,
+                                        ..Default::default()
+                                    },
+                                ))),
+                                ..Default::default()
+                            }
+                            .into(),
+                            ..Default::default()
+                        },
+                        crate::infrastructure::host::call_options(10),
+                    )
+                    .await?;
+                }
+                let credential_state = match credential {
+                    Some(CredentialEdit::Secret(secret)) => Some(
+                        http.register_credentials_with_options(
+                            CredentialRequest {
+                                id: target.clone(),
+                                secret: Some(secret),
+                                ..Default::default()
+                            },
+                            crate::infrastructure::host::call_options(10),
+                        )
+                        .await?
+                        .into_owned()
+                        .credential_state,
+                    ),
+                    Some(CredentialEdit::Environment) => Some(
+                        http.register_credentials_with_options(
+                            CredentialRequest {
+                                id: target.clone(),
+                                source: Some("environment".into()),
+                                ..Default::default()
+                            },
+                            crate::infrastructure::host::call_options(10),
+                        )
+                        .await?
+                        .into_owned()
+                        .credential_state,
+                    ),
+                    Some(CredentialEdit::Revoke) => {
+                        http.revoke_credentials_with_options(
+                            ene_rpc::Id {
+                                id: target.clone(),
+                                ..Default::default()
+                            },
+                            crate::infrastructure::host::call_options(10),
+                        )
+                        .await?;
+                        Some("missing".into())
+                    }
+                    None => None,
+                };
+                Ok::<_, ClientError>(credential_state)
+            }
+            .await
+            .map_err(|error| {
+                let error = Error::from(error);
+                if connection_confirmed {
+                    Error::PartialConfiguration {
+                        connection: target.clone(),
+                        error: Box::new(error),
+                    }
+                } else {
+                    error
+                }
+            })?;
+            selected_connection = Some(target);
+            if credential_state.as_deref() == Some("session_only") {
                 feedback = "保存しました。APIキーは今回のホスト起動中のみ有効です。";
             }
         }
         Command::ReloadProviders => {
-            http.reload_providers().await?;
+            http.reload_providers_with_options(
+                ene_rpc::Empty::default(),
+                crate::infrastructure::host::call_options(10),
+            )
+            .await?;
         }
         Command::EnableProvider { provider, enabled } => {
-            http.enable_provider(&provider, enabled).await?;
+            http.enable_provider_with_options(
+                ene_rpc::EnableProviderRequest {
+                    id: provider.clone(),
+                    enabled,
+                    ..Default::default()
+                },
+                crate::infrastructure::host::call_options(10),
+            )
+            .await?;
         }
         Command::Models(id) => {
             return Ok(ActionResult::Models(
                 id.clone(),
-                http.models(&connection(&snapshot, &id)?.id, Some(&c.id))
-                    .await?,
+                http.list_models_with_options(
+                    ene_rpc::ModelsRequest {
+                        id: (&connection(&snapshot, &id)?.id).into(),
+                        companion_id: Some(c.id.clone()),
+                        ..Default::default()
+                    },
+                    crate::infrastructure::host::call_options(35),
+                )
+                .await?
+                .into_owned()
+                .items,
             ));
         }
         Command::Availability(id) => {
             return Ok(ActionResult::Availability(
-                http.availability(&id, &companion).await?,
+                http.get_availability_with_options(
+                    ene_rpc::AvailabilityRequest {
+                        connection_id: id.clone(),
+                        companion_id: companion.clone(),
+                        ..Default::default()
+                    },
+                    crate::infrastructure::host::call_options(5),
+                )
+                .await?
+                .into_owned(),
             ));
         }
         Command::Companion {
@@ -123,9 +304,9 @@ pub(super) async fn action_with_key(
             body,
             voice,
         } => {
-            http.patch_companion(
-                &c.id,
-                &UpdateCompanionRequest {
+            http.update_companion_with_options(
+                UpdateCompanionRequest {
+                    id: c.id.clone(),
                     revision,
                     name: Some(name),
                     mind: Some(mind),
@@ -133,18 +314,35 @@ pub(super) async fn action_with_key(
                     voice: voice.into(),
                     ..Default::default()
                 },
+                crate::infrastructure::host::call_options(10),
             )
             .await?;
         }
         Command::RevokePermissions(id) => {
             connection(&snapshot, &id)?;
             for grant in http
-                .grants(Some(&c.id))
+                .list_grants_with_options(
+                    ene_rpc::GrantsRequest {
+                        companion_id: Some(c.id.clone()),
+                        ..Default::default()
+                    },
+                    crate::infrastructure::host::call_options(5),
+                )
                 .await?
+                .into_owned()
+                .items
                 .into_iter()
                 .filter(|g| g.connection_id == id && g.status == "active")
             {
-                http.revoke_grant(&grant.id).await?;
+                http.revoke_grant_with_options(
+                    ene_rpc::Id {
+                        id: grant.id.clone(),
+                        ..Default::default()
+                    },
+                    crate::infrastructure::host::call_options(10),
+                )
+                .await
+                .map(|_| ())?;
             }
             feedback = "送信許可を解除しました";
         }
@@ -171,7 +369,17 @@ pub(super) async fn action_with_key(
                             && g.status == "active"
                     })
                     .collect();
-                let availability = http.availability(&p.id, &c.id).await?;
+                let availability = http
+                    .get_availability_with_options(
+                        ene_rpc::AvailabilityRequest {
+                            connection_id: p.id.clone(),
+                            companion_id: c.id.clone(),
+                            ..Default::default()
+                        },
+                        crate::infrastructure::host::call_options(5),
+                    )
+                    .await?
+                    .into_owned();
                 let required = availability
                     .operations
                     .iter()
@@ -180,8 +388,9 @@ pub(super) async fn action_with_key(
                     .clone()
                     .all(|operation| operation.authorization == "granted");
                 if enabled && !fully_granted {
-                    http.create_grant(
-                        &CreateGrantRequest {
+                    http.create_grant_with_options(
+                        CreateGrantRequest {
+                            request_key: format!("{key}-{purpose}"),
                             companion_id: c.id.clone(),
                             kind: "data_transfer".into(),
                             connection_id: p.id.clone(),
@@ -195,13 +404,21 @@ pub(super) async fn action_with_key(
                             consent: consent.clone().into(),
                             ..Default::default()
                         },
-                        &IdempotencyKey::new(format!("{key}-{purpose}")).map_err(Error::from)?,
+                        crate::infrastructure::host::call_options(10),
                     )
                     .await?;
                 }
                 if !enabled {
                     for g in grants {
-                        http.revoke_grant(&g.id).await?;
+                        http.revoke_grant_with_options(
+                            ene_rpc::Id {
+                                id: g.id.clone(),
+                                ..Default::default()
+                            },
+                            crate::infrastructure::host::call_options(10),
+                        )
+                        .await
+                        .map(|_| ())?;
                     }
                 }
             }
@@ -211,15 +428,17 @@ pub(super) async fn action_with_key(
             Command::Credential(id, secret) => {
                 let pid = &connection(&snapshot, &id)?.id;
                 let result = http
-                    .register_credentials(
-                        pid,
-                        &CredentialRequest {
+                    .register_credentials_with_options(
+                        CredentialRequest {
+                            id: pid.into(),
                             secret: Some(secret),
                             source: None,
                             ..Default::default()
                         },
+                        crate::infrastructure::host::call_options(10),
                     )
-                    .await?;
+                    .await?
+                    .into_owned();
                 feedback = if result.credential_state == "stored" {
                     "APIキーを資格情報ストアに保存しました"
                 } else {
@@ -228,28 +447,39 @@ pub(super) async fn action_with_key(
             }
             Command::EnvironmentCredential(id) => {
                 let pid = &connection(&snapshot, &id)?.id;
-                http.register_credentials(
-                    pid,
-                    &CredentialRequest {
+                http.register_credentials_with_options(
+                    CredentialRequest {
+                        id: pid.into(),
                         secret: None,
                         source: Some("environment".into()),
                         ..Default::default()
                     },
+                    crate::infrastructure::host::call_options(10),
                 )
                 .await?;
                 feedback = "ホストの環境変数からAPIキーを登録しました";
             }
             Command::RevokeCredential(id) => {
                 let pid = &connection(&snapshot, &id)?.id;
-                http.revoke_credentials(pid).await?;
+                http.revoke_credentials_with_options(
+                    ene_rpc::Id {
+                        id: pid.into(),
+                        ..Default::default()
+                    },
+                    crate::infrastructure::host::call_options(10),
+                )
+                .await
+                .map(|_| ())?;
                 feedback = "資格情報を解除し、生成を停止しました";
             }
             Command::Check(id) => {
                 let pid = &connection(&snapshot, &id)?.id;
-                http.confirm_check(
+                confirm_check(
+                    &http,
                     &snapshot.host_id,
-                    pid,
-                    &CheckRequest {
+                    CheckRequest {
+                        id: pid.clone(),
+                        request_key: key,
                         companion_id: c.id.clone(),
                         purpose: "companion".into(),
                         model_id: c
@@ -260,7 +490,6 @@ pub(super) async fn action_with_key(
                             .map(|a| a.model_id.clone()),
                         ..Default::default()
                     },
-                    &IdempotencyKey::new(key).map_err(Error::from)?,
                 )
                 .await?;
                 feedback = "実モデルの逐次応答を確認しました";
@@ -275,6 +504,59 @@ pub(super) async fn action_with_key(
     ))
 }
 
+/// Confirmation reuses the exact receipt identity and never replays on a new host.
+async fn confirm_check(
+    http: &Http,
+    host: &str,
+    input: CheckRequest,
+) -> Result<CheckResult, ClientError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let result = tokio::time::timeout_at(
+            deadline,
+            http.check_connection_with_options(
+                input.clone(),
+                crate::infrastructure::host::call_options(95),
+            ),
+        )
+        .await
+        .map_err(|_| ClientError::unavailable("request transport failed"))?
+        .map(|response| response.into_owned());
+        match result {
+            Err(error)
+                if matches!(
+                    error.code,
+                    connectrpc::ErrorCode::Unavailable | connectrpc::ErrorCode::DeadlineExceeded
+                ) => {}
+            Err(error)
+                if super::transport::api_failure(&error)
+                    .is_some_and(|failure| failure.error.code == "request_in_progress") => {}
+            result => return result,
+        }
+        let snapshot = tokio::time::timeout_at(
+            deadline,
+            http.get_snapshot_with_options(
+                ene_rpc::SnapshotRequest {
+                    subscription_id: None,
+                    ..Default::default()
+                },
+                crate::infrastructure::host::call_options(5),
+            ),
+        )
+        .await
+        .map_err(|_| ClientError::unavailable("request transport failed"))??
+        .into_owned();
+        if snapshot.host_id != host {
+            return Err(ClientError::failed_precondition(
+                "subscription must be resynchronized",
+            ));
+        }
+        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(200)))
+            .await
+            .map_err(|_| ClientError::unavailable("request transport failed"))?;
+    }
+}
+
 #[cfg(test)]
 pub(super) async fn action(
     http: Http,
@@ -287,14 +569,14 @@ pub(super) async fn action(
         snapshot,
         companion,
         command,
-        IdempotencyKey::new(Uuid::new_v4().to_string()).expect("test key"),
+        Uuid::new_v4().to_string(),
     )
     .await
 }
 #[cfg(test)]
 mod identity_tests {
     use super::*;
-    use ene_api_client::RuntimeConnection;
+    use crate::infrastructure::host::transport::RuntimeConnection;
     use ene_rpc::UpdateSettingsRequest;
     #[tokio::test]
     async fn configure_updates_selected_connection_and_only_conversation_assignment() {
@@ -337,7 +619,7 @@ mod identity_tests {
                 }
             }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let http = Http::new(&RuntimeConnection {
+        let http = crate::infrastructure::host::connect(&RuntimeConnection {
             endpoint: format!("http://{}/rpc", listener.local_addr().unwrap()),
             token: "fixture".into(),
         })
@@ -420,7 +702,7 @@ mod identity_tests {
                     }
                 }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let http = Http::new(&RuntimeConnection {
+            let http = crate::infrastructure::host::connect(&RuntimeConnection {
                 endpoint: format!("http://{}/rpc", listener.local_addr().unwrap()),
                 token: "fixture".into(),
             })

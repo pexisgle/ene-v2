@@ -67,7 +67,7 @@ WindowsでもLuau／Extism runnerをAppContainerとJob Objectで隔離します�
 
 ## 管理・開発・移行
 
-認証済みの Connect `/rpc/ene.host.v1.PluginService/` に `List`、`Get`、`Reload`、`Enable`、`ListBindings`、`Bind`、`Invoke` を用意しました。公開契約は `host.proto`、生成型を `ene-rpc` が提供し、`ene-api-client` が型付き操作を提供します。有効化は現在の `revision` を要求し、更新前の許可を再利用しません。LLM用Provider APIの有効化も同じプラグイン実装へ接続します。
+認証済みの Connect `/rpc/ene.host.v1.PluginService/` に `List`、`Get`、`Reload`、`Enable`、`ListBindings`、`Bind`、`Invoke` を用意しました。公開契約は `host.proto`、生成型と生成クライアントを `ene-rpc` が提供します。有効化は現在の `revision` を要求し、更新前の許可を再利用しません。LLM用Provider APIの有効化も同じプラグイン実装へ接続します。
 
 `ene-plugin-runner` は Host と同じバイナリディレクトリへ配置するか、`ENE_PLUGIN_RUNNER_BIN` を指定します。
 

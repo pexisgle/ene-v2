@@ -1,6 +1,6 @@
 //! Pure host form state. Slint projects this model and only reports edits/results.
+use crate::infrastructure::host::SessionIdentity;
 use crate::infrastructure::host::{ActionEvent, Feedback, OperationTarget, RequestContext};
-use ene_api_client::SessionIdentity;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

@@ -63,17 +63,55 @@ pub(super) enum Error {
         error: Box<Error>,
     },
 }
-impl From<ene_api_client::Error> for Error {
-    fn from(error: ene_api_client::Error) -> Self {
-        match error {
-            ene_api_client::Error::Unauthorized => Self::Unauthorized,
-            ene_api_client::Error::Api(error) if error.body.error.code == "revision_conflict" => {
+
+pub struct RuntimeConnection {
+    pub endpoint: String,
+    pub token: String,
+}
+pub(super) fn connect(connection: &RuntimeConnection) -> Result<Http, connectrpc::ConnectError> {
+    let (transport, config) = ene_rpc::connect(&connection.endpoint, &connection.token)?;
+    Ok(ene_rpc::HostServiceClient::new(transport, config))
+}
+pub(super) fn api_failure(error: &connectrpc::ConnectError) -> Option<ene_rpc::ApiFailure> {
+    use base64::Engine;
+    error.details.iter().find_map(|detail| {
+        if !detail.type_url.ends_with("ene.host.v1.ApiFailure") {
+            return None;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(detail.value.as_ref()?)
+            .ok()?;
+        let failure = <ene_rpc::ApiFailure as buffa::Message>::decode_from_slice(&bytes).ok()?;
+        failure.error.is_set().then_some(failure)
+    })
+}
+impl From<connectrpc::ConnectError> for Error {
+    fn from(error: connectrpc::ConnectError) -> Self {
+        use connectrpc::ErrorCode;
+        if error.code == ErrorCode::Unauthenticated {
+            return Self::Unauthorized;
+        }
+        if let Some(failure) = api_failure(&error) {
+            return if failure.error.code == "revision_conflict" {
                 Self::Api("設定が変わったため保存を完了できませんでした。「元に戻す」で最新の設定と送信先を確認し、編集・許可をやり直してください。".into())
+            } else {
+                Self::Api(format!(
+                    "{} ({})",
+                    failure.error.message, failure.error.code
+                ))
+            };
+        }
+        match error.code {
+            ErrorCode::ResourceExhausted => Self::Api(
+                "要求または読み込み量が上限を超えました。再接続して再試行してください。".into(),
+            ),
+            ErrorCode::FailedPrecondition => {
+                Self::Api("接続先または状態が変わりました。取得し直してください。".into())
             }
-            ene_api_client::Error::Api(error) => Self::Api(error.to_string()),
-            ene_api_client::Error::ResourceLimit => Self::Api("会話の読み込み量が上限を超えました。再接続して必要な履歴だけを読み込んでください。".into()),
-            ene_api_client::Error::Busy => Self::Api("要求が多すぎます。処理の完了後に再試行してください。".into()),
-            ene_api_client::Error::ResyncRequired => Self::Api("接続先が変わりました。再接続して内容を確認してください。".into()),
+            ErrorCode::PermissionDenied => Self::Api("操作への許可が必要です".into()),
+            ErrorCode::NotFound => Self::Api("対象が見つかりません".into()),
+            ErrorCode::InvalidArgument => Self::Api("要求の形式が正しくありません".into()),
+            ErrorCode::Unimplemented => Self::Api("この機能を利用できません".into()),
             _ => Self::Transport,
         }
     }

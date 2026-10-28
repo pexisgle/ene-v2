@@ -16,7 +16,7 @@ fn snapshot() -> Snapshot {
 }
 async fn serve(router: Router) -> (Http, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let http = Http::new(&ene_api_client::RuntimeConnection {
+    let http = connect(&crate::infrastructure::host::transport::RuntimeConnection {
         endpoint: format!("http://{}/rpc", listener.local_addr().unwrap()),
         token: "fixture".into(),
     })
@@ -62,7 +62,7 @@ async fn companion_draft_keeps_its_revision_when_the_queue_refreshes() {
                 body: None,
                 voice: None,
             },
-            IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+            Uuid::new_v4().to_string(),
             "h".into(),
         )
         .await
@@ -122,7 +122,7 @@ async fn connection_draft_keeps_its_revision_when_the_queue_refreshes() {
                 update_connection: true,
                 credential: None,
             },
-            IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+            Uuid::new_v4().to_string(),
             "h".into(),
         )
         .await
@@ -166,7 +166,7 @@ async fn permission_save_sends_only_the_scope_presented_to_the_user() {
                 conversation: true,
                 check: false,
             },
-            IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+            Uuid::new_v4().to_string(),
             "h".into(),
         )
         .await
@@ -240,7 +240,7 @@ async fn model_assignment_conflicts_preserve_remote_changes_and_applied_retries_
                     update_connection: true,
                     credential: None,
                 },
-                IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+                Uuid::new_v4().to_string(),
                 "h".into(),
             )
             .await
@@ -383,7 +383,7 @@ async fn credential_revoke_follows_admitted_save_even_when_its_waiter_is_dropped
             update_connection: true,
             credential: Some(CredentialEdit::Secret("pending-key".into())),
         },
-        IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+        Uuid::new_v4().to_string(),
         "h".into(),
     );
     tokio::time::timeout(Duration::from_secs(2), entered.acquire())
@@ -398,7 +398,7 @@ async fn credential_revoke_follows_admitted_save_even_when_its_waiter_is_dropped
         http,
         "c".into(),
         Command::RevokeCredential("p".into()),
-        IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+        Uuid::new_v4().to_string(),
         "h".into(),
     );
     let premature = tokio::time::timeout(Duration::from_millis(100), &mut revoking)
@@ -494,7 +494,7 @@ async fn permission_revoke_observes_grant_created_by_an_earlier_pending_save() {
             conversation: true,
             check: false,
         },
-        IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+        Uuid::new_v4().to_string(),
         "h".into(),
     );
     tokio::time::timeout(Duration::from_secs(2), entered.acquire())
@@ -506,7 +506,7 @@ async fn permission_revoke_observes_grant_created_by_an_earlier_pending_save() {
         http,
         "c".into(),
         Command::RevokePermissions("p".into()),
-        IdempotencyKey::new(Uuid::new_v4().to_string()).unwrap(),
+        Uuid::new_v4().to_string(),
         "h".into(),
     );
     let premature = tokio::time::timeout(Duration::from_millis(100), &mut revoking)
@@ -614,13 +614,15 @@ async fn snapshot_refresh_restarts_pagination_without_hiding_missing_intervals()
         )
         .merge(super::connect_fixture::router(router));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let http = Http::new(&ene_api_client::RuntimeConnection {
+    let http = connect(&crate::infrastructure::host::transport::RuntimeConnection {
         endpoint: format!("http://{}/rpc", listener.local_addr().unwrap()),
         token: "fixture".into(),
     })
     .unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let synced = http.synced_session().await.unwrap();
+    let synced = super::sync::SyncedSession::connect(http.clone())
+        .await
+        .unwrap();
     let request = synced.history_request("c");
     synced
         .insert_history(
@@ -642,9 +644,17 @@ async fn snapshot_refresh_restarts_pagination_without_hiding_missing_intervals()
     assert_eq!(current.messages.len(), 100);
     // History requests use the snapshot frontier through the session transport,
     // rather than the settings mutation handler.
-    http.messages("c", current.message_cursors["c"].value.as_deref(), None)
-        .await
-        .unwrap();
+    http.get_history_with_options(
+        ene_rpc::HistoryRequest {
+            companion_id: "c".into(),
+            cursor: (current.message_cursors["c"].value.as_deref()).map(Into::into),
+            limit: None,
+            ..Default::default()
+        },
+        crate::infrastructure::host::call_options(5),
+    )
+    .await
+    .unwrap();
     assert_eq!(*observed.lock().unwrap(), Some("101:c".into()));
     synced.close().await;
     server.abort();
@@ -778,7 +788,7 @@ fn context(command: Command) -> RequestContext {
         draft: crate::host_model::DraftStamp::default(),
         resource: policy.resource,
         saved_resource: policy.saved_resource,
-        session: ene_api_client::SessionIdentity {
+        session: crate::infrastructure::host::SessionIdentity {
             host_id: "h".into(),
             epoch: "e".into(),
             subscription: "s".into(),

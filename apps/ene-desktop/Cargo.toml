@@ -11,8 +11,10 @@ workspace = true
 
 [dependencies]
 ene-platform.workspace = true
-ene-rpc.workspace = true
-ene-api-client.workspace = true
+ene-rpc = { workspace = true, features = ["client"] }
+connectrpc.workspace = true
+buffa.workspace = true
+base64.workspace = true
 uuid.workspace = true
 url.workspace = true
 clap.workspace = true
@@ -29,8 +31,7 @@ lucide-slint = "1"
 slint-build = { version = "1", default-features = false, features = ["compat-1-18"] }
 
 [dev-dependencies]
-buffa.workspace = true
-connectrpc.workspace = true
+async-stream.workspace = true
 axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-std"] }

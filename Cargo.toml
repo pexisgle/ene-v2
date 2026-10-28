@@ -12,7 +12,6 @@ publish = false
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.dependencies]
-ene-api-client = { path = "crates/ene-api-client" }
 ene-rpc = { path = "crates/ene-rpc" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-core = { path = "crates/ene-core" }

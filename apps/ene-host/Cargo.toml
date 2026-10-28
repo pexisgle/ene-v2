@@ -48,7 +48,8 @@ reqwest.workspace = true
 tokio-tungstenite = "0.30"
 tokio = { workspace = true, default-features = true, features = ["test-util"] }
 ene-core = { workspace = true, features = ["test-support"] }
-ene-api-client.workspace = true
+ene-rpc = { workspace = true, features = ["client"] }
+http.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]

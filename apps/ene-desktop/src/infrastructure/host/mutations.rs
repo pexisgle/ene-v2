@@ -2,7 +2,6 @@ use super::{
     Admission, Command, Http, channel, settings::ActionResult, settings::action_with_key,
     transport::Error,
 };
-use ene_api_client::IdempotencyKey;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
@@ -10,7 +9,7 @@ struct Mutation {
     http: Http,
     companion: String,
     command: Command,
-    key: IdempotencyKey,
+    key: String,
     host: String,
     result: oneshot::Sender<Result<ActionResult, Error>>,
     _permit: OwnedSemaphorePermit,
@@ -51,7 +50,7 @@ impl MutationQueue {
         http: Http,
         companion: String,
         command: Command,
-        key: IdempotencyKey,
+        key: String,
         host: String,
     ) -> oneshot::Receiver<Result<ActionResult, Error>> {
         let (result, receiver) = oneshot::channel();
@@ -79,7 +78,17 @@ impl MutationQueue {
 }
 async fn execute(mutation: Mutation) {
     let result = async {
-        let snapshot = mutation.http.snapshot(None).await?;
+        let snapshot = mutation
+            .http
+            .get_snapshot_with_options(
+                ene_rpc::SnapshotRequest {
+                    subscription_id: None,
+                    ..Default::default()
+                },
+                crate::infrastructure::host::call_options(5),
+            )
+            .await?
+            .into_owned();
         if snapshot.host_id != mutation.host {
             return Err(Error::Api(
                 "接続先ホストが変わったため操作を停止しました。設定を確認して再実行してください。"

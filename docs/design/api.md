@@ -8,7 +8,7 @@
 - `ene.host.v1.DeviceService`が端末登録、承認、権限、端末操作、表示先の管理を提供します。
 - 通知はConnectのサーバーストリームです。購読の先頭でsnapshotを取得し、その後の通知を順番に適用します。
 - 音声の双方向通信は`/audio`のWebSocket、Webクライアント向けのログイン・ログアウトは`/session`です。
-- Rustクライアントは`ene-api-client`を使います。RPCと保存には`ene-rpc`の生成型を直接使い、プラグイン実行契約は`ene-plugin`で管理します。
+- Rustクライアントは`ene-rpc`の生成クライアントと生成型を直接使います。`ene-rpc`の`client` featureは接続先検証・TLS・Bearer認証設定だけを提供し、プラグイン実行契約は`ene-plugin`で管理します。
 
 ## 更新と失敗
 

@@ -1,6 +1,13 @@
 //! Authenticated local transport. No UI object or provider credential lives here.
-use ene_api_client::RuntimeConnection;
-use ene_api_client::{ApiClient as Http, IdempotencyKey};
+use connectrpc::client::{CallOptions, HttpClient};
+use transport::{RuntimeConnection, connect};
+type Http = ene_rpc::HostServiceClient<HttpClient>;
+pub use sync::SessionIdentity;
+pub(crate) mod sync;
+fn call_options(seconds: u64) -> CallOptions {
+    CallOptions::default().with_timeout(Duration::from_secs(seconds))
+}
+
 use ene_rpc::{Message, Snapshot};
 use std::{fs, path::Path, sync::mpsc, time::Duration};
 use tokio::sync::mpsc as channel;
@@ -25,7 +32,7 @@ pub struct Controller {
         std::cell::RefCell<std::collections::BTreeMap<(String, OperationTarget), RequestContext>>,
     latest_view: std::sync::Arc<std::sync::Mutex<Option<Event>>>,
     creation_ids: std::cell::RefCell<std::collections::BTreeMap<String, ConnectionDraft>>,
-    session: std::sync::Arc<std::sync::Mutex<Option<ene_api_client::SessionIdentity>>>,
+    session: std::sync::Arc<std::sync::Mutex<Option<crate::infrastructure::host::SessionIdentity>>>,
     stop: CancellationToken,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -42,7 +49,7 @@ impl Controller {
                 latest_view: Default::default(),
                 creation_ids: Default::default(),
                 session: std::sync::Arc::new(std::sync::Mutex::new(Some(
-                    ene_api_client::SessionIdentity {
+                    crate::infrastructure::host::SessionIdentity {
                         host_id: "fixture".into(),
                         epoch: "fixture".into(),
                         subscription: "fixture".into(),
@@ -200,7 +207,7 @@ impl Controller {
             .find(|context| context.id == id)
             .cloned()
     }
-    pub fn session_identity(&self) -> Option<ene_api_client::SessionIdentity> {
+    pub fn session_identity(&self) -> Option<crate::infrastructure::host::SessionIdentity> {
         self.session.lock().expect("session lock").clone()
     }
     pub fn request(&self, companion: &str, command: Command) -> bool {
@@ -236,7 +243,6 @@ mod tests;
 
 #[cfg(test)]
 #[allow(dead_code)]
-#[path = "../../../../../crates/ene-api-client/tests/support/mod.rs"]
 mod connect_fixture;
 
 #[cfg(unix)]

@@ -12,7 +12,7 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 
 ## 実装の責務
 
-`ene-rpc`はhost.protoから生成するRPC型、`ene-plugin`はLuau／Extismのmanifest・拡張API・worker契約を持ちます。2クレートは通信の目的ごとに責務を分けます。描画プロセスの操作は標準入出力のJSON Linesとし、型と接続はdesktopの`infrastructure/avatar`が所有します。Remocはプラグインruntimeとrunnerの内部通信に限定し、接続と具体的なチャネルは実行側が所有します。`ene-api-client`は生成クライアント、通知同期と設定保存の進捗、`ene-outbound`は認可付き外部HTTPを担当します。`ene-core`は生成RPC型を直接使い、会話・設定・認可・保存の処理手順とportを持ちます。Axum、SQLite、Rig、keyring、OSパスや子プロセスの実装はホスト側のアダプターに置きます。
+`ene-rpc`はhost.protoから生成するRPC型とクライアント、`ene-plugin`はLuau／Extismのmanifest・拡張API・worker契約を持ちます。2クレートは通信の目的ごとに責務を分けます。描画プロセスの操作は標準入出力のJSON Linesとし、型と接続はdesktopの`infrastructure/avatar`が所有します。Remocはプラグインruntimeとrunnerの内部通信に限定し、接続と具体的なチャネルは実行側が所有します。`ene-rpc`の`client` featureは接続先検証・TLS・Bearer認証設定だけを担当し、通知同期と設定保存の進捗はdesktopが所有します。`ene-outbound`は認可付き外部HTTPを担当します。`ene-core`は生成RPC型を直接使い、会話・設定・認可・保存の処理手順とportを持ちます。Axum、SQLite、Rig、keyring、OSパスや子プロセスの実装はホスト側のアダプターに置きます。
 
 ホストの`bootstrap.rs`でportの実装を組み立て、`infrastructure/`にSQLite・資格情報・実行領域・プロバイダー接続を配置します。APIはリソース別Routerを`nest`で組み立て、application経由で操作します。DB確定後の通知とスナップショットの境界、冪等受付と保存のトランザクション、許可解除と生成開始の競合制御は分離後も維持します。デスクトップは端末設定とXDGパス解決、HTTP、通知・再接続、設定操作、描画プロセスの監督を担当し、アバターは読込・描画・Wayland操作に限定します。
 
@@ -33,7 +33,6 @@ Linuxの単一PC上で、ホスト、会話・設定UI、キャラクター描�
 | `apps/ene-avatar/src/rendering.rs`・`crates/ene-vrm/` | Bevyの描画設定と、VRM拡張（MToon、SpringBone、Look At、VRMA） |
 | `apps/ene-host/src/api/`・`infrastructure/` | リソース別HTTPルートと、保存・実行領域・資格情報・LLMの実装。`sqlite/`は接続実行、スキーマと復旧、読み出し、repository port、設定・受付・メッセージのトランザクション |
 | `crates/ene-core/src/application/` | `operations/`は設定変更・許可・送信受付・接続確認・プロバイダー操作。`generation/`は実行状態、資格情報の復旧、送信時の認可、ストリーミング。`runtime`は受付・所有権・終了待ち、`commit`は保存と通知の共通境界 |
-| `crates/ene-api-client/src/` | 通信とレスポンス境界、リソース別操作、通知同期セッション、設定保存の進捗、エラー、冪等キー |
 | `crates/ene-outbound/src/` | 外部HTTPの認可、資格情報の付与、転送・再送禁止、受信・SSE容量の制限、Rigへの接続 |
 
 テストは対象モジュールの配下へ置き、デスクトップの画面テストはナビゲーション、返信表示、AI設定、コンパニオン、ホスト管理に分けます。

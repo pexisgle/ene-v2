@@ -36,3 +36,6 @@ pub(crate) fn router(app: App) -> Router {
         .with_state(app.clone())
         .merge(web::router(app))
 }
+
+#[cfg(test)]
+pub(crate) mod test_client;

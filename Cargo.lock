@@ -3205,28 +3205,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
-name = "ene-api-client"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "axum",
- "base64 0.23.1",
- "buffa",
- "connectrpc",
- "ene-rpc",
- "futures-util",
- "http",
- "rustls",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "url",
- "webpki-roots",
-]
-
-[[package]]
 name = "ene-avatar"
 version = "0.1.0"
 dependencies = [
@@ -3264,12 +3242,13 @@ name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
  "ashpd",
+ "async-stream",
  "atomic-write-file",
  "axum",
+ "base64 0.23.1",
  "buffa",
  "clap",
  "connectrpc",
- "ene-api-client",
  "ene-platform",
  "ene-rpc",
  "futures-util",
@@ -3302,7 +3281,6 @@ dependencies = [
  "bytes",
  "clap",
  "connectrpc",
- "ene-api-client",
  "ene-core",
  "ene-outbound",
  "ene-platform",
@@ -3310,6 +3288,7 @@ dependencies = [
  "ene-plugin-runtime",
  "ene-rpc",
  "futures-util",
+ "http",
  "keyring",
  "reqwest",
  "rig-core",
@@ -3438,8 +3417,12 @@ dependencies = [
  "buffa-build",
  "connectrpc",
  "connectrpc-build",
+ "http",
  "protoc-bin-vendored",
+ "rustls",
  "serde",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -8850,11 +8833,7 @@ checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
  "tokio",
- "tokio-rustls",
  "tungstenite 0.30.0",
 ]
 
@@ -9132,8 +9111,6 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.10.3",
- "rustls",
- "rustls-pki-types",
  "sha1 0.11.0",
  "thiserror 2.0.21",
 ]

@@ -1,11 +1,9 @@
+use super::super::{connect, connect_fixture, transport::RuntimeConnection};
 use super::*;
 use axum::{Json, Router, routing::post};
 use buffa::Message as _;
 use ene_rpc as w;
 use tokio::sync::{Semaphore, mpsc};
-#[allow(dead_code)]
-#[path = "../tests/support/mod.rs"]
-mod connect_fixture;
 
 fn snapshot(seq: u64, text: &str) -> Snapshot {
     Snapshot {
@@ -56,7 +54,7 @@ fn snapshot(seq: u64, text: &str) -> Snapshot {
     }
 }
 struct Fixture {
-    client: ApiClient,
+    client: Http,
     events: mpsc::Sender<Notification>,
     snapshots: Arc<Semaphore>,
     release: Arc<Semaphore>,
@@ -134,7 +132,7 @@ async fn fixture(current: Snapshot) -> Fixture {
             Json(History { items: (1..52).map(|seq| history_message(seq,0)).collect(), ..Default::default() })
         }))));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = ApiClient::new(&RuntimeConnection {
+    let client = connect(&RuntimeConnection {
         endpoint: format!("http://{}/rpc", listener.local_addr().unwrap()),
         token: "fixture".into(),
     })
@@ -198,14 +196,14 @@ fn settings(seq: u64) -> Notification {
 async fn subscription_buffers_snapshot_overlap_and_cancelled_waiters_cannot_interrupt_refresh() {
     let fixture = fixture(snapshot(1, "日")).await;
     let client = fixture.client.clone();
-    let starting = tokio::spawn(async move { client.synced_session().await });
+    let starting = tokio::spawn(async move { SyncedSession::connect(client.clone()).await });
     entered(&fixture.snapshots).await;
     fixture.events.send(delta(1, 999, "covered")).await.unwrap();
     fixture.events.send(delta(2, 1, "🙂")).await.unwrap();
     fixture.release.add_permits(1);
     let mut session = starting.await.unwrap().unwrap();
     assert_eq!(session.next().await.unwrap().cursor.seq, 2);
-    assert_eq!(session.view().messages[0].text, "日🙂");
+    assert_eq!(session.snapshot().messages[0].text, "日🙂");
     let applied = session.snapshot();
     assert_eq!(applied.cursor.seq, 2);
     assert_eq!(applied.messages[0].text, "日🙂");
@@ -231,7 +229,7 @@ async fn subscription_buffers_snapshot_overlap_and_cancelled_waiters_cannot_inte
     assert_eq!(session.next().await.unwrap().cursor.seq, 4);
     assert_eq!(session.snapshot().settings.revision, 2);
     assert_eq!(session.next().await.unwrap().cursor.seq, 5);
-    assert_eq!(session.view().messages[0].text, "日🙂。e\u{301}");
+    assert_eq!(session.snapshot().messages[0].text, "日🙂。e\u{301}");
     assert_eq!(session.snapshot().cursor.seq, 5);
     let mut changed = snapshot(6, "日🙂。e\u{301}");
     changed.host_id = "replacement".into();
@@ -239,14 +237,18 @@ async fn subscription_buffers_snapshot_overlap_and_cancelled_waiters_cannot_inte
     fixture.events.send(settings(6)).await.unwrap();
     entered(&fixture.snapshots).await;
     fixture.release.add_permits(1);
-    assert!(matches!(session.next().await, Err(Error::ResyncRequired)));
+    assert!(
+        matches!(session.next().await, Err(error) if error.code == connectrpc::ErrorCode::FailedPrecondition)
+    );
     session.close().await;
 }
 #[tokio::test]
 async fn notification_overflow_during_refresh_requires_a_new_subscription() {
     let fixture = fixture(snapshot(0, "")).await;
     fixture.release.add_permits(1);
-    let mut session = fixture.client.synced_session().await.unwrap();
+    let mut session = SyncedSession::connect(fixture.client.clone())
+        .await
+        .unwrap();
     entered(&fixture.snapshots).await;
     fixture.events.send(settings(1)).await.unwrap();
     entered(&fixture.snapshots).await;
@@ -255,7 +257,9 @@ async fn notification_overflow_during_refresh_requires_a_new_subscription() {
     }
     entered(&fixture.closed).await;
     fixture.release.add_permits(1);
-    assert!(matches!(session.next().await, Err(Error::ResyncRequired)));
+    assert!(
+        matches!(session.next().await, Err(error) if error.code == connectrpc::ErrorCode::FailedPrecondition)
+    );
     session.close().await;
 }
 #[tokio::test]
@@ -275,10 +279,14 @@ async fn broken_notifications_reject_the_session_without_applying_the_delta() {
     ] {
         let fixture = fixture(snapshot(0, "日")).await;
         fixture.release.add_permits(1);
-        let mut session = fixture.client.synced_session().await.unwrap();
+        let mut session = SyncedSession::connect(fixture.client.clone())
+            .await
+            .unwrap();
         let before = session.snapshot();
         fixture.events.send(event).await.unwrap();
-        assert!(matches!(session.next().await, Err(Error::ResyncRequired)));
+        assert!(
+            matches!(session.next().await, Err(error) if error.code == connectrpc::ErrorCode::FailedPrecondition)
+        );
         assert_eq!(session.snapshot(), before);
         session.close().await;
     }
@@ -299,7 +307,9 @@ fn history_message(sequence: u64, bytes: usize) -> Message {
 async fn review_host_storage_failure_is_applied_before_delivering_notice() {
     let fixture = fixture(snapshot(0, "before")).await;
     fixture.release.add_permits(1);
-    let mut session = fixture.client.synced_session().await.unwrap();
+    let mut session = SyncedSession::connect(fixture.client.clone())
+        .await
+        .unwrap();
     fixture
         .events
         .send(Notification {
@@ -339,7 +349,9 @@ async fn review_refresh_keeps_gaps_reachable_after_exhausted_history() {
     initial.messages = vec![history_message(1, 0)];
     let fixture = fixture(initial).await;
     fixture.release.add_permits(1);
-    let session = fixture.client.synced_session().await.unwrap();
+    let session = SyncedSession::connect(fixture.client.clone())
+        .await
+        .unwrap();
     session
         .insert_history(
             session.history_request("c"),
@@ -364,9 +376,18 @@ async fn review_refresh_keeps_gaps_reachable_after_exhausted_history() {
     assert_eq!(merged.message_cursors["c"].value.as_deref(), Some("52:c"));
     let page = fixture
         .client
-        .messages("c", merged.message_cursors["c"].value.as_deref(), None)
+        .get_history_with_options(
+            ene_rpc::HistoryRequest {
+                companion_id: "c".into(),
+                cursor: (merged.message_cursors["c"].value.as_deref()).map(Into::into),
+                limit: None,
+                ..Default::default()
+            },
+            call_options(5),
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .into_owned();
     session
         .insert_history(session.history_request("c"), page)
         .await
@@ -401,7 +422,9 @@ async fn delayed_history_after_refresh_preserves_the_new_frontier() {
     initial.message_cursors.get_mut("c").unwrap().value = Some("101:c".into());
     let fixture = fixture(initial).await;
     fixture.release.add_permits(1);
-    let session = fixture.client.synced_session().await.unwrap();
+    let session = SyncedSession::connect(fixture.client.clone())
+        .await
+        .unwrap();
     let old = session.history_request("c");
     let mut fresh = snapshot(1, "");
     fresh.messages = (201..=250)
@@ -472,14 +495,14 @@ async fn delayed_history_after_refresh_preserves_the_new_frontier() {
 async fn history_requests_cannot_cross_host_sessions() {
     let first = fixture(snapshot(0, "first")).await;
     first.release.add_permits(1);
-    let original = first.client.synced_session().await.unwrap();
+    let original = SyncedSession::connect(first.client.clone()).await.unwrap();
     let request = original.history_request("c");
     original.close().await;
     let mut changed = snapshot(0, "second");
     changed.host_id = "another-host".into();
     let second = fixture(changed).await;
     second.release.add_permits(1);
-    let current = second.client.synced_session().await.unwrap();
+    let current = SyncedSession::connect(second.client.clone()).await.unwrap();
     assert!(matches!(
         current
             .insert_history(
@@ -491,7 +514,7 @@ async fn history_requests_cannot_cross_host_sessions() {
                 }
             )
             .await,
-        Err(Error::ResyncRequired)
+        Err(error) if error.code == connectrpc::ErrorCode::FailedPrecondition
     ));
     assert_eq!(current.snapshot().messages.len(), 1);
     assert_eq!(current.snapshot().messages[0].text, "second");

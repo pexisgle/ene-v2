@@ -116,7 +116,7 @@ pub(super) async fn probe(path: &Path) -> Result<Probe, String> {
     // Keep the existing owner, permissions, symlink and endpoint checks before
     // probing. An unsafe descriptor must never trigger another host process.
     let connection = descriptor(path)?;
-    let http = Http::new(&connection).map_err(|_| "接続情報が不正です")?;
+    let http = connect(&connection).map_err(|_| "接続情報が不正です")?;
     let url = url::Url::parse(&connection.endpoint).map_err(|_| "接続先が不正です")?;
     let address = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, url.port().unwrap());
     match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(address)).await {
@@ -133,7 +133,15 @@ pub(super) async fn probe(path: &Path) -> Result<Probe, String> {
     // A reused port, a rejected stale token, and an unrelated HTTP server do
     // not identify this host. Only an authenticated, typed API response does.
     Ok(
-        match tokio::time::timeout(Duration::from_secs(1), http.settings()).await {
+        match tokio::time::timeout(
+            Duration::from_secs(1),
+            http.get_settings_with_options(
+                ene_rpc::Empty::default(),
+                crate::infrastructure::host::call_options(5),
+            ),
+        )
+        .await
+        {
             Ok(Ok(_)) => Probe::Ready(connection),
             _ => Probe::Unverified(
                 "ホストに接続できません。接続情報やホストの状態を確認してください。".into(),
