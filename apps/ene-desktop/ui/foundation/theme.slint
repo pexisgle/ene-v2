@@ -1,0 +1,15 @@
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    // Palette.color-scheme remains unknown in system mode; use its resolved surface.
+    private property <bool> dark: Palette.background.red + Palette.background.green + Palette.background.blue < 384;
+    out property <color> muted: self.dark ? #b8c3ce : #526170;
+    out property <color> message: self.dark ? #244e49 : #dceee9;
+    out property <color> message-text: self.dark ? #effaf6 : #163e37;
+    out property <color> danger: self.dark ? #ffb4ab : #a52a26;
+    out property <color> success: self.dark ? #93d8b1 : #21643e;
+
+    public function apply(index: int) {
+        Palette.color-scheme = index == 2 ? ColorScheme.dark : index == 1 ? ColorScheme.light : ColorScheme.unknown;
+    }
+}

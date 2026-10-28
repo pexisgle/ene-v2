@@ -124,11 +124,14 @@ MToonの拡散反射はthree-vrmと同じく平行光の照度をπで割り、
 {"event":"state","character":"ene","status":"error","error":"読み込み失敗の理由"}
 {"event":"finished","character":"ene"}
 {"event":"click","character":"ene"}
+{"event":"moved","character":"ene","monitor":"DP-1","position":[960.0,864.0]}
 ```
 
 状態は`loading`、`ready`、`suspended`（出力なし）、`error`です。
 失敗したファイルを修復した後は同じ設定を`set`すると再試行します。
 `finished`はループしないモーションの終了、`click`はドラッグせずにクリックした通知です。
+`moved`はドラッグで確定した配置で、解決後のモニター名と足元の論理座標を返します。
+呼び出し側は端末設定の配置として保存し、`center`の後は`get`で解決後の値を読みます。
 
 入力は1行64KiB以内です。不正なJSONなど要求IDを取得できない入力のエラーは`id:0`で返します。
 標準入力のEOFでも終了します。終了時も標準出力を読み続けてください。

@@ -9,4 +9,4 @@ Web上の情報や手元の資料など、複数の情報源を横断してリ�
 3. 収集した情報から要点を整理・比較分析し、出典や参照元を明記したレポートや比較表として調査結果をまとめます。
 4. 調査結果の報告、詳しい説明や追加の深掘りリサーチの依頼などは、[作業の依頼](request.md)と共通の対話フローで行えます。ファイルを作成した場合の保存先と、別端末からの最終報告の閲覧も同じ方針に従います。
 
-参考：[Claude Cowork](../../references.md#claude-cowork) のWeb・資料横断リサーチ、および [ChatGPT Work](../../references.md#chatgpt-work) の比較レポート作成機能。
+参考：[Claude Cowork](../../research/references.md#claude-cowork) のWeb・資料横断リサーチ、および [ChatGPT Work](../../research/references.md#chatgpt-work) の比較レポート作成機能。

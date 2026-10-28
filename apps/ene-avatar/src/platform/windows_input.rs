@@ -138,12 +138,14 @@ mod tests {
         assert_eq!(config.monitor.as_deref(), Some("right"));
         assert_eq!(config.position, Some([50., 50.]));
         assert!(app.world().resource::<Drag>().entity.is_none());
-        assert!(
-            app.world_mut()
-                .resource_mut::<Messages<Notification>>()
-                .drain()
-                .next()
-                .is_none(),
+        let notifications: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<Notification>>()
+            .drain()
+            .collect();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0].0["event"], "moved",
             "a drag must not become a click"
         );
     }

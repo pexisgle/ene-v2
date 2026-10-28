@@ -1,83 +1,102 @@
 # ene
 
-デスクトップに常駐するキャラクターとの対話から、PC内の作業を任せるAIコンパニオンです。[構想](docs/vision.md)、[MVP](docs/mvp.md)、[アーキテクチャ](docs/architecture.md)に実装方針をまとめています。
+デスクトップに常駐するキャラクターとの対話から、PC内の作業を任せるAIコンパニオンです。
+[構想](docs/product/vision.md)、[MVP](docs/product/mvp.md)、[アーキテクチャ](docs/design/architecture.md)、
+[文書案内](docs/README.md)に方針をまとめています。
 
-## ワークスペース
+## 起動と動作確認
 
-実行プロセスのパッケージは`apps/`、内部ライブラリは`crates/`に配置します。
-
-| パッケージ | 今後の役割 |
-| --- | --- |
-| [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
-| [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
-| [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
-
-## Nixで開発する
-
-現在の開発シェルは`x86_64-linux`向けです。Nixのflakesとnix-commandを有効にした環境で、リポジトリのルートから実行します。
+LinuxのWaylandセッションとWindows 11で、Slintの単一ウィンドウ、表示設定、トレイ、VRM 1.0とVRMAを利用できます。
+デモは日本語・改行・絵文字の入力に固定の仮応答を返し、外部へ送信しません。
+実ホストとの対話はConnect v1で逐次表示し、会話と設定をSQLiteへ保存します。
+外観は即時反映し、変更から300ms後と終了時に端末設定を原子的に保存します。
+不正なサイズ入力は他の設定・配置の保存を妨げません。保存失敗は画面から再試行できます。
 
 ```sh
 nix develop
 just verify
-just run-host
+just test
+just fetch-assets
+just run-demo
+# 実ホストへ接続する場合
 just run-desktop
 ```
 
-direnvを使う場合は、リポジトリのルートで一度`direnv allow`を実行すると、ディレクトリへ入るたびに開発環境が有効になります。
+Nixを使わない場合は `rust-toolchain.toml` のnightlyとClang・LLDを用意します。
+Debian系では `pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers fonts-noto-cjk bubblewrap` も必要です。
+開発用サンプルは固定URL・SHA-256・出典・ライセンスを [取得スクリプト](scripts/fetch-assets.py) で管理し、キャッシュへ保存します。
+Slint等のライブラリ通知は [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) を参照してください。
 
-## Nixを使わずに開発する
+非公開の `XDG_RUNTIME_DIR` を用意してください。起動画面の「起動」でローカルホストを起動し、
+「接続」で利用します。既存ホストは接続情報から検出し、アプリ終了でホストを停止しません。
+独立起動は `just run-host` です。接続情報は `$XDG_RUNTIME_DIR/ene-host/connection.json`、
+DBは `$XDG_STATE_HOME/ene/host.sqlite3`（既定 `~/.local/state/ene/host.sqlite3`）です。
+`ENE_HOST_STATE_DIR` で保存先を変更できます。systemd用の [テンプレート](packaging/systemd/ene-host.service) もあります。
 
-rustupと、そのOSでRustプログラムをリンクするための開発ツールを用意します。Linux（x86_64）ではClangとLLD、WindowsではMSVCのC++ビルドツールが必要です。
+## ホスト設定と対話
 
-リポジトリのルートでnightlyツールチェーンをインストールし、通常のCargoで検査できます。
+設定の「コンパニオン」「AIサービス」「送信許可」を順に設定します。
+組込OpenAIは公式 `https://api.openai.com/v1` のResponses APIを使います。
+接続先とモデルを保存し、APIキーを登録します。ホストの `OPENAI_API_KEY` を使う操作もあります。
+環境変数のキーは起動中だけ保持し、手入力のキーはOSのSecret Service／Credential Managerへ保存します。
+ストアが使えない場合は起動中だけ保持する状態を画面へ表示します。
+キーをクライアント設定・DB・取得API・ログへ保存しません。
 
-```sh
-rustup toolchain install nightly-2026-10-07 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src --component rustc-codegen-cranelift-preview
-cargo fmt --all -- --check
-cargo check --workspace --all-targets --all-features --locked
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
-cargo build --workspace --all-targets --all-features --locked
-cargo run --locked -p ene-host
-cargo run --locked -p ene-desktop
-```
+会話送信と疎通確認・モデル情報の送受信は別々に許可します。
+「モデル一覧を取得」で選択し、許可後の「疎通確認」で実モデルの逐次応答を確認できます。
+会話は生成途中から表示し、再接続とクライアント再起動後の履歴取得に対応します。
+受付が不明な操作は同じ入力とrequest keyで確認し、別ホストへ再送しません。
+許可・資格情報を解除すると生成を中断して保存します。再起動時に未完了の生成を自動再実行しません。
 
-`just verify`は整形とClippy（テストを含む型検査）を実行します。テストは対象の挙動を変更したときに`just test`で実行し、変更していない合格済みのテストを繰り返す必要はありません。成果物が必要なときは`just build`を実行します。
+## パッケージと通信
 
-## ビルド高速化
-
-[Bevyのセットアップガイド](https://bevy.org/learn/quick-start/getting-started/setup/)に沿って、nightlyと次の設定を使います。
-
-- Linux（x86_64）ではClang＋LLDでリンクし、`-Zshare-generics=y`でジェネリックのインスタンス化を共有します。
-- 開発ビルドのワークスペース内クレートはCranelift、依存ライブラリはLLVMでコンパイルします。releaseビルドはLLVMを使います。
-- 開発時の最適化はワークスペース内クレートを`opt-level = 1`、依存ライブラリを`opt-level = 3`に設定しています。
-
-Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じnightlyを使うため、日付を`nightly-2026-10-07`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドの日付を揃えて変更します。
-
-ツールチェーンとビルド設定の変更後は初回に再コンパイルが発生します。キャラクター描画はBevyの必要な機能のみ有効にし、`dynamic_linking`は使っていません。
-
-## テストの方針
-
-- 内部テストは、対象の実装ファイル末尾の `#[cfg(test)] mod tests` に置きます。複数モジュールの連携を検証する内部テストは、構成を担う `lib.rs` などにまとめます。
-- 重大な失敗、状態破壊、参照の混線、数値計算の不変条件を重点的に検証します。設定値の写し合わせや、依存ライブラリの仕様を網羅するためだけのテストは増やしません。
-- 補助コードは利用するテストモジュール内に置きます。テストの配置のために実装を公開したり、Cargoの自動検出を無効にしたりしません。
-- `tests/` は公開APIや実行ファイルへの入出力を外部から検証する結合テストに使います。
-- シェーダーなど通常のCPUテストで確認できない重要な処理は、環境依存のテストとして分け、対応するCIで実行します。
-
-## 開発コマンド
-
-| コマンド | 処理 |
+| パッケージ | 役割 |
 | --- | --- |
-| `just` | 利用可能なレシピの一覧 |
-| `just fmt` | ワークスペース全体のRustコードを整形 |
-| `just fmt-check` | 整形済みかを確認 |
-| `just check` | 全クレート・ターゲット・機能を型検査 |
-| `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
-| `just test` | ワークスペースのテストを実行 |
-| `just build` | 全クレート・ターゲット・機能をビルド |
-| `just fetch-assets [asset]` | 開発用VRM・VRMAを取得（省略時は全件、`vrma`でモーションのみ、個別名も指定可能） |
-| `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
-| `just run-host` | ホストの骨組みを起動 |
-| `just run-desktop` | デスクトップの骨組みを起動 |
-| `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |
-| `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |
+| `apps/ene-desktop` | 共通UI、ホスト管理・対話、端末設定と描画プロセスの管理 |
+| `apps/ene-avatar` | 単一Bevy AppでのVRM描画、モニターごとの透過ウィンドウ、JSON Linesによる表示制御 |
+| `apps/ene-host` | 認証付きConnectサービス、SQLite、プロバイダー、端末・音声セッション |
+| `crates/ene-rpc` | host.protoから生成するRPCメッセージとサービス |
+| `crates/ene-plugin` | Luau／Extismのmanifest、拡張API、worker契約 |
+| `crates/ene-core` | 会話・設定・認可・取消・保存の処理手順とport |
+| `crates/ene-outbound` | 認可済み送信先へのHTTP、資格情報付与、本文・SSE容量制限 |
+
+公開APIの正本は [`host.proto`](crates/ene-rpc/proto/host.proto) です。
+Cargoが `ene.host.v1.HostService` と `DeviceService` と `PluginService` を生成します。
+SDKは `/rpc` のConnect v1と初期snapshot付き通知ストリームを利用します。
+旧REST・OpenAPI・旧通知WebSocketは提供しません。音声は生成AudioFrameの `/audio` WebSocketです。
+利用方法は [Connect契約](docs/design/connect-rpc.md)、機能追加時の不変条件は
+[共通境界](docs/design/framework-boundaries.md) を参照してください。
+
+描画プロセスは1つのBevy Appで複数ウィンドウを追加・削除できます。UIは1体を操作します。
+非表示は削除、再表示は新しいIDで保持した設定と最新配置を再追加します。
+AvatarIdはdesktopが単調増加するu64を発行し、削除やrenderer再起動をまたいでも同じdesktopセッション内で再使用しません。
+操作は標準入出力のJSON Linesです。`add`・`set`・`get`・`center`・`fps`・`remove`・`quit` と、
+`state`・`finished`・`click`・`moved` の通知は
+[ene-avatarのREADME](apps/ene-avatar/README.md#json-linesによる操作)に定めます。
+FPSは全体、モデル・モーション・配置は個別の設定で指定します。
+入力領域は現在の姿勢のメッシュ境界から決め、表示画像をCPUへ戻しません。
+
+## プラグイン
+
+Luau／ExtismパッケージでLLM、character、harness、speechを提供します。
+配置先はENE_PLUGIN_DIR、管理はHostのConnect PluginServiceです。
+発見だけでは実行せず、現在のrevisionを確認して有効化します。
+LLMの接続設定・APIキー・送信許可は「AIサービス」「送信許可」画面で管理します。
+HTTPと資格情報はホストのbrokerが扱い、runnerを隔離して実行します。
+実装・manifest・接続条件・送信先を変更した場合は送信許可を設定し直します。
+[実行契約と限界](docs/features/extensions/plugin-runtime.md)、[Windows手順](docs/windows.md)を参照してください。
+
+## 検証と実装範囲
+
+`just verify` は整形とClippy、`just test` は既存の回帰テストを実行します。
+SDK・ホストの結合試験は実Connect通信とfixtureで動作を確認でき、実APIキーは不要です。
+デモで送信・設定変更・表示オフ／再表示・中央配置・終了後の復元を確認してください。
+IMEの候補操作・実機のドラッグ・ファイル選択ポータルはWayland実機で確認してください。
+Webクライアント、本番STT/TTS、ファイル作業、タスク・記憶・スケジュールは未実装です。
+音声WSのセッション制御と端末・表示leaseの契約はありますが、表示権移動UIは後続の実装です。
+
+## Plugin runnerの検証
+
+Hostの結合テストの前に `cargo build --locked -p ene-plugin-runner` を実行します。
+Wasm PDKは `cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown` と
+`python scripts/check-wasm-plugin.py` で検証します。

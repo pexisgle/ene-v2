@@ -78,13 +78,20 @@ pub(crate) fn pointer(
             }
         }
         if input.button == Some(false) {
-            if !drag.moved
-                && let Ok((character, _)) = actors.get(entity)
-                && character.state == AvatarState::Ready
-            {
-                clicks.write(Notification(
-                    json!({"event":"click", "character":character.id}),
-                ));
+            if let Ok((character, _)) = actors.get(entity) {
+                if drag.moved {
+                    // The client persists the placement the renderer resolved.
+                    clicks.write(Notification(json!({
+                        "event": "moved",
+                        "character": character.id,
+                        "monitor": character.config.monitor,
+                        "position": character.config.position,
+                    })));
+                } else if character.state == AvatarState::Ready {
+                    clicks.write(Notification(
+                        json!({"event":"click", "character":character.id}),
+                    ));
+                }
             }
             drag.entity = None;
         }

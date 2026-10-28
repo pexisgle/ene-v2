@@ -1,0 +1,87 @@
+import { IconData } from "../foundation/icons.slint";
+import { Icon } from "../foundation/icons.slint";
+import { UiState } from "../state/ui-state.slint";
+import { Button, Palette } from "std-widgets.slint";
+
+export component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <string> hint: root.text;
+    in property <IconData> icon;
+    in property <bool> icon-only;
+    private property <bool> has-icon: root.icon.paths.length > 0;
+    private property <length> icon-size: 16px * UiState.scale;
+    private property <length> tool-size: UiState.control-height;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+    in property <bool> checkable;
+    in-out property <bool> checked;
+    in property <bool> scroll-to-focus;
+    in property <bool> fill-width;
+    out property <bool> has-focus: control.has-focus;
+    callback clicked;
+    forward-focus: control;
+    changed has-focus => {
+        if self.has-focus && root.scroll-to-focus {
+            UiState.reveal-settings-item(self.absolute-position.y, self.height);
+        }
+    }
+    min-width: root.icon-only ? root.tool-size : 0px;
+    max-width: root.icon-only ? root.tool-size : root.fill-width ? 100000px : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
+    preferred-width: root.icon-only ? root.tool-size : measure.preferred-width + 24px + (root.has-icon ? root.icon-size + 8px : 0px);
+    horizontal-stretch: !root.icon-only && root.fill-width ? 1 : 0;
+    measure := Text { visible: false; text: root.text; }
+    min-height: root.icon-only ? root.tool-size : max(UiState.control-height, label-layout.min-height);
+    max-height: self.min-height;
+    vertical-stretch: 0;
+    control := Button {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.enabled;
+        primary: root.primary;
+        checked <=> root.checked;
+        accessible-label: root.text;
+        accessible-checkable: root.checkable;
+        accessible-checked: root.checked;
+        clicked => {
+            root.clicked();
+        }
+    }
+    label-layout := HorizontalLayout {
+        spacing: 0px;
+        padding-left: root.icon-only ? (root.tool-size - root.icon-size) / 2 : 12px;
+        padding-right: self.padding-left;
+        padding-top: root.icon-only ? (root.tool-size - root.icon-size) / 2 : 6px;
+        padding-bottom: self.padding-top;
+        if !root.icon-only : Rectangle { horizontal-stretch: 1; min-width: 0px; }
+        if root.has-icon : Rectangle {
+            width: root.icon-size;
+            min-height: root.icon-size;
+            horizontal-stretch: 0;
+            vertical-stretch: 1;
+            // Center inside the layout's content area, after its vertical padding.
+            Icon {
+                source: root.icon;
+                width: root.icon-size;
+                height: root.icon-size;
+                y: (parent.height - self.height) / 2;
+                colorize: root.primary || root.checked ? Palette.accent-foreground : Palette.foreground;
+                opacity: root.enabled ? 1 : 0.5;
+            }
+        }
+        if root.has-icon && !root.icon-only : Rectangle { width: 8px; horizontal-stretch: 0; }
+        if !root.icon-only : Text {
+            text: root.text;
+            wrap: word-wrap;
+            min-width: 0px;
+            max-width: measure.preferred-width;
+            horizontal-stretch: 0;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            color: root.primary || root.checked ? Palette.accent-foreground : Palette.foreground;
+            opacity: root.enabled ? 1 : 0.5;
+            accessible-role: none;
+        }
+        if !root.icon-only : Rectangle { horizontal-stretch: 1; min-width: 0px; }
+    }
+    if root.icon-only || root.hint != root.text : Tooltip { text: @markdown("\{root.hint}"); }
+}

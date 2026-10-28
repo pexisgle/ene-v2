@@ -1,0 +1,48 @@
+# Windows 11 x64
+
+Windows版はMSVCでソースからビルドします。ホスト、会話・設定、アバター、Luau/WASM runnerを別プロセスとして扱います。配布パッケージ、インストーラー、ログイン時の自動起動、Windowsサービス登録は提供しません。
+
+## ビルドと起動
+
+Rustup、Visual Studioの「C++によるデスクトップ開発」（MSVC x64とWindows SDK）、CMakeを用意します。Rustはリポジトリの `rust-toolchain.toml` に合わせます。Pythonはサンプルアセットの取得時だけ必要です。通常起動にPythonやWebViewは不要です。
+
+PowerShellから次を実行します。`just` は任意です。
+
+```powershell
+cargo build --locked -p ene-plugin-runner
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo build --workspace --all-targets --all-features --locked
+python scripts/fetch-assets.py
+cargo build --release --locked -p ene-avatar
+$env:ENE_AVATAR_BIN = "$PWD/target/release/ene-avatar.exe"
+cargo run --locked -p ene-desktop -- --demo
+```
+
+実ホストへの接続では、端末を2つ開いて `cargo run --locked -p ene-host` と `cargo run --locked -p ene-desktop` を起動します。`ENE_AVATAR_BIN` はデスクトップを起動する端末で設定します。`just verify`、`just run-host`、`just run-desktop` も利用できます。デスクトップの終了はホストを終了しません。
+
+## 保存とOS連携
+
+保存先は `%LOCALAPPDATA%\ene` 配下です。`config/client.json`、`cache/models`、`cache/motions`、`state/host.sqlite3`、`runtime/ene-host/connection.json`、`plugins`、`plugin-code` を使います。`ENE_HOST_STATE_DIR`、`ENE_PLUGIN_DIR`、`ENE_PLUGIN_CACHE_DIR`、`ENE_PLUGIN_RUNNER_BIN`、`ENE_AVATAR_BIN` は引き続き指定できます。
+
+ホスト実行領域、DB、設定はユーザーとSYSTEMだけに許可したDACLで作成します。接続情報は開いたハンドルで所有者、ACL、reparse point、リンク数、サイズを検証します。危険な既存ファイルやフォルダの権限を自動で緩めません。共有フォルダやディレクトリジャンクションは実行領域に指定しないでください。
+
+APIキーはWindows Credential Managerへ保存します。利用できない場合は現在のホストセッション内だけに保持し、その状態を画面へ表示します。ファイル選択はWindows標準ダイアログ、トレイはWindows通知領域を利用します。Explorerが再起動するとアイコンを再登録します。
+
+アバターはモニターごとの透過Bevyウィンドウへ直接描きます。入力は現在の姿勢のメッシュ境界から求めた領域でヒットテストし、透明部分のクリックを下のウィンドウへ通します。DPIはウィンドウごとに扱い、配置はモニター左上を原点とする96DPI基準の論理座標です。
+
+## プラグイン
+
+Luau／ExtismパッケージはワーカーごとのAppContainerで実行します。直接ネットワークへの権限を与えず、Host brokerで通信します。Job Objectでプロセスツリーを管理し、取消・Host終了時に停止します。隔離に失敗した場合は利用不可になります。
+
+Luau／Extismのmanifestは `contract_version: 1` を使います。
+`ENE_PLUGIN_DIR` 以下へ参照LuauパッケージまたはWasmパッケージとビルド済みモジュールを配置します。
+設定で再走査・有効化した後、LLMの接続、APIキーと送信許可を登録します。
+パッケージ内のパスは `/` 区切りの相対パスです。予約名、代替データストリーム、大文字小文字だけの重複を拒否します。
+
+## 検証範囲
+
+`.github/workflows/windows.yml` はMSVCでworkspaceのコンパイル・Clippy・テストを実行します。`ene-platform` は実AppContainerの秘密ファイル拒否、ネットワーク拒否、子プロセス停止、ネイティブIPCと異常終了を検証します。MToonのGPUスモークはlavapipeでLinux CIが実行し、DX12の透過表示はこの経路では確認しません。実機のIME、ドラッグ、DPI変更、Explorer再起動、ファイル選択は別途手動確認が必要です。
+
+Wasm PDKは `cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown` 後、`python scripts/check-wasm-plugin.py` で合成HTTPのモデル一覧、UTF-8分割生成、終了を実runnerのRemoc通信で検証します。

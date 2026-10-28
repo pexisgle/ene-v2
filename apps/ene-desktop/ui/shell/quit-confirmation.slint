@@ -1,0 +1,50 @@
+import { UiState } from "../state/ui-state.slint";
+import { ActionButton } from "../widgets/action-button.slint";
+import { BodyText } from "../widgets/typography.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
+
+export component QuitConfirmation inherits Rectangle {
+    in property <bool> active;
+    background: Palette.background;
+    accessible-role: region;
+    accessible-label: "終了確認";
+    public function focus-return() {
+        return-button.focus();
+    }
+    dialog := VerticalLayout {
+        width: min(parent.width, 600px * UiState.scale);
+        height: min(parent.height, min(440px * UiState.scale, copy.min-height + actions.min-height + 56px));
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        padding: 20px;
+        spacing: 16px;
+        ScrollView {
+            min-height: 0px;
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: always-off;
+            copy := VerticalLayout {
+                alignment: start;
+                spacing: 12px;
+                BodyText { text: "未保存の変更があります"; font-weight: 600; }
+                BodyText {
+                    text: "未保存の設定と未送信の文章を破棄して終了しますか？受付確認中の送信がある場合、再接続後に履歴を確認してください。ホストは稼働を続けます。";
+                }
+            }
+        }
+        actions := HorizontalLayout {
+            spacing: 8px;
+            Rectangle { horizontal-stretch: 1; }
+            return-button := ActionButton {
+                text: "キャンセル";
+                enabled: root.active;
+                clicked => { UiState.cancel-quit(); }
+            }
+            ActionButton {
+                text: "破棄して終了";
+                enabled: root.active;
+                clicked => { UiState.discard-and-quit(); }
+            }
+        }
+    }
+}
