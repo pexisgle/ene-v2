@@ -1,6 +1,7 @@
 use super::*;
+use crate::api::test_client::{ApiClient, initial};
 use crate::infrastructure::sqlite::Store;
-use ene_api_client::{ApiClient, Error};
+use connectrpc::ErrorCode;
 use ene_core::ports::{ConfigurationCommit, Repository};
 use ene_rpc as w;
 use serde_json::json;
@@ -29,11 +30,7 @@ impl Host {
     async fn serve(mut app: App, temp: tempfile::TempDir) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let client = ApiClient::new(&ene_api_client::RuntimeConnection {
-            endpoint: format!("{url}/rpc"),
-            token: "private-token".into(),
-        })
-        .unwrap();
+        let client = ApiClient::new(&format!("{url}/rpc"), "private-token").unwrap();
         app.web_origin = Some(url.clone().into());
         let router = router(app.clone());
         let server = tokio::spawn(async move {
@@ -48,7 +45,7 @@ impl Host {
         }
     }
     async fn device(&self, caps: &[&str]) -> (w::Device, ApiClient) {
-        let client = self.client.device_rpc();
+        let client = &self.client.devices;
         let registration = client
             .register_device(w::RegisterDeviceRequest {
                 name: "fixture".into(),
@@ -77,40 +74,56 @@ impl Host {
                 .await
                 .unwrap();
         }
-        let connected = ApiClient::new(&ene_api_client::RuntimeConnection {
-            endpoint: format!("{}/rpc", self.url),
-            token: registration.token,
-        })
-        .unwrap();
+        let connected = ApiClient::new(&format!("{}/rpc", self.url), &registration.token).unwrap();
         (d, connected)
     }
 }
 #[tokio::test]
 async fn connect_unary_streaming_and_sdk_share_a_committed_snapshot() {
     let host = Host::new().await;
-    let mut events = host.client.subscribe().await.unwrap();
-    let subscription = events.ready().connection_id.clone();
-    let snapshot = host.client.snapshot(Some(&subscription)).await.unwrap();
+    let mut events = host
+        .client
+        .host
+        .subscribe(w::Empty::default())
+        .await
+        .unwrap();
+    let subscription = initial(&mut events).await.subscription_id;
+    let snapshot = host
+        .client
+        .host
+        .get_snapshot_with_options(
+            ene_rpc::SnapshotRequest {
+                subscription_id: Some(subscription.clone()),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     let c = &snapshot.companions[0];
     let updated = host
         .client
-        .patch_companion(
-            &c.id,
-            &w::UpdateCompanionRequest {
+        .host
+        .update_companion_with_options(
+            w::UpdateCompanionRequest {
+                id: c.id.clone(),
                 revision: c.revision,
                 name: Some("Connect日本語".into()),
                 mind: None,
                 ..Default::default()
             },
+            crate::api::test_client::call_options(10),
         )
         .await
-        .unwrap();
-    let event = timeout(Duration::from_secs(2), events.next())
+        .unwrap()
+        .into_owned();
+    let event = timeout(Duration::from_secs(2), events.message::<w::HostEvent>())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    let ene_api_client::ServerEvent::Notification(event) = event else {
+    let Some(w::host_event::Event::Notification(event)) = event.to_owned_message().event else {
         panic!("expected notification");
     };
     assert!(matches!(
@@ -129,24 +142,25 @@ async fn connect_unary_streaming_and_sdk_share_a_committed_snapshot() {
     );
     let conflict = host
         .client
-        .patch_companion(
-            &c.id,
-            &w::UpdateCompanionRequest {
+        .host
+        .update_companion_with_options(
+            w::UpdateCompanionRequest {
+                id: c.id.clone(),
                 revision: c.revision,
                 name: Some("stale".into()),
                 mind: None,
                 ..Default::default()
             },
+            crate::api::test_client::call_options(10),
         )
         .await
+        .map(|response| response.into_owned())
         .unwrap_err();
-    let Error::Api(failure) = conflict else {
-        panic!("expected typed error detail");
-    };
-    assert_eq!(failure.status, 409);
-    assert_eq!(failure.body.error.code, "revision_conflict");
-    assert!(!failure.body.request_id.is_empty());
-    events.close().await.unwrap();
+    let failure = crate::api::test_client::failure(&conflict);
+    assert_eq!(failure.http_status, 409);
+    assert_eq!(failure.error.code, "revision_conflict");
+    assert!(!failure.request_id.is_empty());
+    drop(events);
     timeout(Duration::from_secs(2), async {
         while host
             .app
@@ -160,21 +174,51 @@ async fn connect_unary_streaming_and_sdk_share_a_committed_snapshot() {
     })
     .await
     .unwrap();
-    let session = host.client.synced_session().await.unwrap();
-    assert_eq!(session.snapshot().companions[0].name, updated.name);
-    let wrong = ApiClient::new(&ene_api_client::RuntimeConnection {
-        endpoint: format!("{}/rpc", host.url),
-        token: "wrong".into(),
-    })
-    .unwrap();
-    assert!(matches!(wrong.settings().await, Err(Error::Unauthorized)));
-    assert!(matches!(wrong.subscribe().await, Err(Error::Unauthorized)));
+    let mut session = host
+        .client
+        .host
+        .subscribe(w::Empty::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        initial(&mut session).await.snapshot.companions[0].name,
+        updated.name
+    );
+    let wrong = ApiClient::new(&format!("{}/rpc", host.url), "wrong").unwrap();
+    assert!(matches!(
+        wrong
+            .host
+            .get_settings_with_options(
+                ene_rpc::Empty::default(),
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .map(|response| response.into_owned())
+            ,
+        Err(error) if error.code == ErrorCode::Unauthenticated
+    ));
+    let mut unauthorized = wrong.host.subscribe(w::Empty::default()).await.unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), unauthorized.message::<w::HostEvent>()).await.unwrap(),
+        Err(error) if error.code == ErrorCode::Unauthenticated
+    ));
 }
 #[tokio::test]
 async fn updates_during_subscribe_are_either_in_snapshot_or_following_events() {
     let host = Host::new().await;
     for index in 0..12 {
-        let companion = host.client.companions().await.unwrap().remove(0);
+        let companion = host
+            .client
+            .host
+            .list_companions_with_options(
+                ene_rpc::Empty::default(),
+                crate::api::test_client::call_options(5),
+            )
+            .await
+            .unwrap()
+            .into_owned()
+            .items
+            .remove(0);
         let name = format!("update-{index}");
         let input = w::UpdateCompanionRequest {
             revision: companion.revision,
@@ -182,19 +226,30 @@ async fn updates_during_subscribe_are_either_in_snapshot_or_following_events() {
             mind: None,
             ..Default::default()
         };
-        let (stream, update) = tokio::join!(
-            host.client.subscribe(),
-            host.client.patch_companion(&companion.id, &input)
-        );
+        let (stream, update) =
+            tokio::join!(host.client.host.subscribe(w::Empty::default()), async {
+                host.client
+                    .host
+                    .update_companion_with_options(
+                        ene_rpc::UpdateCompanionRequest {
+                            id: companion.id.clone(),
+                            ..input.clone()
+                        },
+                        crate::api::test_client::call_options(10),
+                    )
+                    .await
+                    .map(|response| response.into_owned())
+            });
         update.unwrap();
         let mut stream = stream.unwrap();
-        let snapshot = stream.take_initial_snapshot().unwrap();
+        let snapshot = initial(&mut stream).await.snapshot.into_option().unwrap();
         if snapshot.companions[0].name != name {
-            let Some(ene_api_client::ServerEvent::Notification(event)) =
-                timeout(Duration::from_secs(2), stream.next())
+            let Some(w::host_event::Event::Notification(event)) =
+                timeout(Duration::from_secs(2), stream.message::<w::HostEvent>())
                     .await
                     .unwrap()
                     .unwrap()
+                    .and_then(|message| message.to_owned_message().event)
             else {
                 panic!("update lost");
             };
@@ -210,16 +265,18 @@ async fn updates_during_subscribe_are_either_in_snapshot_or_following_events() {
                 name
             );
         }
-        stream.close().await.unwrap();
+        drop(stream);
     }
 }
 #[tokio::test]
 async fn device_operations_are_scoped_durable_and_never_requeued() {
     let host = Host::new().await;
     let (device, client) = host.device(&["tools.test"]).await;
-    let controller = host.client.device_rpc();
-    let native = client.device_rpc();
-    assert!(matches!(client.settings().await, Err(Error::Api(error)) if error.status==403));
+    let controller = &host.client.devices;
+    let native = &client.devices;
+    assert!(
+        matches!(client.host.get_settings_with_options(ene_rpc::Empty::default(), crate::api::test_client::call_options(5)).await.map(|response| response.into_owned()), Err(error) if error.code == ErrorCode::PermissionDenied)
+    );
     let mut stream = native
         .subscribe(w::Id {
             id: device.id.clone(),
@@ -273,7 +330,7 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
     let (_, other_client) = host.device(&["tools.test"]).await;
     assert_eq!(
         other_client
-            .device_rpc()
+            .devices
             .complete_operation(result.clone())
             .await
             .err()
@@ -369,7 +426,7 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
         .unwrap();
     assert!(fresh.message::<w::DeviceEvent>().await.unwrap().is_none());
     assert!(
-        matches!(client.device_rpc().list(w::Empty::default()).await,Err(error) if error.code==connectrpc::ErrorCode::Unauthenticated)
+        matches!(client.devices.list(w::Empty::default()).await,Err(error) if error.code==connectrpc::ErrorCode::Unauthenticated)
     );
 }
 #[tokio::test]
@@ -519,39 +576,82 @@ async fn omitted_settings_preserve_connections_credentials_grants_and_notificati
         temp,
     )
     .await;
-    let mut events = host.client.subscribe().await.unwrap();
-    let before = host.client.snapshot(None).await.unwrap();
-    let unchanged = host
+    let mut events = host
         .client
-        .patch_settings(&w::UpdateSettingsRequest {
-            revision: before.settings.revision,
-            ..Default::default()
-        })
+        .host
+        .subscribe(w::Empty::default())
         .await
         .unwrap();
+    initial(&mut events).await;
+    let before = host
+        .client
+        .host
+        .get_snapshot_with_options(
+            ene_rpc::SnapshotRequest {
+                subscription_id: None,
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
+    let unchanged = host
+        .client
+        .host
+        .update_settings_with_options(
+            w::UpdateSettingsRequest {
+                revision: before.settings.revision,
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(10),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     assert_eq!(unchanged, *before.settings);
     assert_eq!(
         serde_json::to_value(store.configuration().await.unwrap()).unwrap(),
         serde_json::to_value(config).unwrap()
     );
     assert_eq!(
-        host.client.snapshot(None).await.unwrap().cursor,
+        host.client
+            .host
+            .get_snapshot_with_options(
+                ene_rpc::SnapshotRequest {
+                    subscription_id: None,
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .unwrap()
+            .into_owned()
+            .cursor,
         before.cursor
     );
     assert!(
-        timeout(Duration::from_millis(50), events.next())
+        timeout(Duration::from_millis(50), events.message::<w::HostEvent>())
             .await
             .is_err()
     );
     let error = host
         .client
-        .patch_settings(&w::UpdateSettingsRequest {
-            revision: before.settings.revision + 1,
-            ..Default::default()
-        })
+        .host
+        .update_settings_with_options(
+            w::UpdateSettingsRequest {
+                revision: before.settings.revision + 1,
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(10),
+        )
         .await
+        .map(|response| response.into_owned())
         .unwrap_err();
-    assert!(matches!(error, Error::Api(e) if e.body.error.code == "revision_conflict"));
+    assert_eq!(
+        crate::api::test_client::failure(&error).error.code,
+        "revision_conflict"
+    );
     // The retired repeated-list tag must fail rather than masquerade as omission.
     use buffa::Message;
     let mut legacy = w::UpdateSettingsRequest {
@@ -562,12 +662,29 @@ async fn omitted_settings_preserve_connections_credentials_grants_and_notificati
     legacy.extend_from_slice(&[0x12, 0x00]);
     let error = host
         .client
-        .patch_settings(&w::UpdateSettingsRequest::decode_from_slice(&legacy).unwrap())
+        .host
+        .update_settings_with_options(
+            w::UpdateSettingsRequest::decode_from_slice(&legacy).unwrap(),
+            crate::api::test_client::call_options(10),
+        )
         .await
+        .map(|response| response.into_owned())
         .unwrap_err();
-    assert!(matches!(error, Error::Api(e) if e.body.error.code == "invalid_request"));
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
     assert_eq!(
-        host.client.snapshot(None).await.unwrap().cursor,
+        host.client
+            .host
+            .get_snapshot_with_options(
+                ene_rpc::SnapshotRequest {
+                    subscription_id: None,
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .unwrap()
+            .into_owned()
+            .cursor,
         before.cursor
     );
 }
@@ -596,8 +713,26 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
         temp,
     )
     .await;
-    let mut events = host.client.subscribe().await.unwrap();
-    let before = host.client.snapshot(None).await.unwrap();
+    let mut events = host
+        .client
+        .host
+        .subscribe(w::Empty::default())
+        .await
+        .unwrap();
+    initial(&mut events).await;
+    let before = host
+        .client
+        .host
+        .get_snapshot_with_options(
+            ene_rpc::SnapshotRequest {
+                subscription_id: None,
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     let original = before.companions[0].clone();
     let stored_original = store.snapshot().await.unwrap().companions[0].clone();
     let body =
@@ -633,33 +768,74 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
     for invalid in [bad_voice, bad_body, empty_patch, bad_assignment] {
         assert!(
             host.client
-                .patch_companion(&original.id, &invalid)
+                .host
+                .update_companion_with_options(
+                    ene_rpc::UpdateCompanionRequest {
+                        id: original.id.clone(),
+                        ..invalid.clone()
+                    },
+                    crate::api::test_client::call_options(10)
+                )
                 .await
+                .map(|response| response.into_owned())
                 .is_err()
         );
-        assert_eq!(host.client.companions().await.unwrap()[0], original);
+        assert_eq!(
+            host.client
+                .host
+                .list_companions_with_options(
+                    ene_rpc::Empty::default(),
+                    crate::api::test_client::call_options(5)
+                )
+                .await
+                .unwrap()
+                .into_owned()
+                .items[0],
+            original
+        );
         assert_eq!(
             store.snapshot().await.unwrap().companions[0],
             stored_original
         );
         assert_eq!(
-            host.client.snapshot(None).await.unwrap().cursor,
+            host.client
+                .host
+                .get_snapshot_with_options(
+                    ene_rpc::SnapshotRequest {
+                        subscription_id: None,
+                        ..Default::default()
+                    },
+                    crate::api::test_client::call_options(5)
+                )
+                .await
+                .unwrap()
+                .into_owned()
+                .cursor,
             before.cursor
         );
     }
     let saved = host
         .client
-        .patch_companion(&original.id, &valid)
+        .host
+        .update_companion_with_options(
+            ene_rpc::UpdateCompanionRequest {
+                id: original.id.clone(),
+                ..valid.clone()
+            },
+            crate::api::test_client::call_options(10),
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .into_owned();
     assert_eq!(saved.revision, original.revision + 1);
     assert_eq!(saved.body, document(body).into());
     assert_eq!(saved.voice, document(voice).into());
-    let Some(ene_api_client::ServerEvent::Notification(event)) =
-        timeout(Duration::from_secs(2), events.next())
+    let Some(w::host_event::Event::Notification(event)) =
+        timeout(Duration::from_secs(2), events.message::<w::HostEvent>())
             .await
             .unwrap()
             .unwrap()
+            .and_then(|message| message.to_owned_message().event)
     else {
         panic!("companion event missing")
     };
@@ -682,10 +858,21 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
     );
     let stale = host
         .client
-        .patch_companion(&original.id, &valid)
+        .host
+        .update_companion_with_options(
+            ene_rpc::UpdateCompanionRequest {
+                id: original.id.clone(),
+                ..valid.clone()
+            },
+            crate::api::test_client::call_options(10),
+        )
         .await
+        .map(|response| response.into_owned())
         .unwrap_err();
-    assert!(matches!(stale, Error::Api(e) if e.body.error.code == "revision_conflict"));
+    assert_eq!(
+        crate::api::test_client::failure(&stale).error.code,
+        "revision_conflict"
+    );
     // JSON null is omission, so a name-only edit cannot erase the documents.
     let rename: w::UpdateCompanionRequest = serde_json::from_value(
         json!({"revision":saved.revision, "name":"renamed", "body":null, "voice":null}),
@@ -693,38 +880,66 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
     .unwrap();
     let renamed = host
         .client
-        .patch_companion(&saved.id, &rename)
+        .host
+        .update_companion_with_options(
+            ene_rpc::UpdateCompanionRequest {
+                id: saved.id.clone(),
+                ..rename.clone()
+            },
+            crate::api::test_client::call_options(10),
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .into_owned();
     assert_eq!(renamed.body, saved.body);
     assert_eq!(renamed.voice, saved.voice);
-    let settings = host.client.settings().await.unwrap();
+    let settings = host
+        .client
+        .host
+        .get_settings_with_options(
+            ene_rpc::Empty::default(),
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     let remove = w::UpdateSettingsRequest {
         revision: settings.revision,
         connections: w::ConnectionInputs::default().into(),
         ..Default::default()
     };
-    let error = host.client.patch_settings(&remove).await.unwrap_err();
-    assert!(matches!(error, Error::Api(e) if e.body.error.code == "state_conflict"));
+    let error = host
+        .client
+        .host
+        .update_settings_with_options(remove.clone(), crate::api::test_client::call_options(10))
+        .await
+        .map(|response| response.into_owned())
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::FailedPrecondition);
     let cleared = host
         .client
-        .patch_companion(
-            &saved.id,
-            &w::UpdateCompanionRequest {
+        .host
+        .update_companion_with_options(
+            w::UpdateCompanionRequest {
+                id: saved.id.clone(),
                 revision: renamed.revision,
                 body: clear_document().into(),
                 voice: clear_document().into(),
                 ..Default::default()
             },
+            crate::api::test_client::call_options(10),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .into_owned();
     assert!(!cleared.body.is_set() && !cleared.voice.is_set());
     assert!(
         host.client
-            .patch_settings(&remove)
+            .host
+            .update_settings_with_options(remove.clone(), crate::api::test_client::call_options(10))
             .await
             .unwrap()
+            .into_owned()
             .connections
             .is_empty()
     );
@@ -763,48 +978,173 @@ impl crate::audio::Engine for TestAudioEngine {
 }
 #[tokio::test]
 async fn audio_is_duplex_and_stop_or_revocation_fences_old_sessions() {
+    use crate::api::test_client::audio::{recv, send};
+    use futures_util::StreamExt;
+    use w::audio_frame::Frame;
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let mut app = crate::bootstrap::application(store, "private-token".into());
     app.audio = crate::audio::Audio::with_engine(std::sync::Arc::new(TestAudioEngine));
     let host = Host::serve(app, temp).await;
     let (device, native) = host.device(&["audio.input", "audio.output"]).await;
-    let companion = host.client.companions().await.unwrap().remove(0).id;
-    let start = native.prepare_audio(&companion, &device.id).await.unwrap();
-    let mut stream = native.start_audio(start.clone()).await.unwrap();
-    stream.send_chunk(vec![1, 2, 3, 4]).await.unwrap();
-    let Some(ene_api_client::AudioEvent::Chunk(chunk)) =
-        timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-    else {
+    let companion = host
+        .client
+        .host
+        .list_companions_with_options(
+            ene_rpc::Empty::default(),
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned()
+        .items
+        .remove(0)
+        .id;
+    let start = native
+        .host
+        .prepare_audio_with_options(
+            ene_rpc::PrepareAudioRequest {
+                codec: "pcm_s16le".into(),
+                sample_rate: 24_000,
+                channels: 1,
+                companion_id: (&companion).into(),
+                device_id: (&device.id).into(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
+    let mut stream = native.audio_socket().await;
+    send(
+        &mut stream,
+        w::AudioFrame {
+            frame: Some(Frame::Start(Box::new(start.clone()))),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Some(Frame::Start(Box::new(start.clone())))
+    );
+    send(
+        &mut stream,
+        w::AudioFrame {
+            frame: Some(Frame::Chunk(Box::new(w::AudioChunk {
+                session_id: start.session_id.clone(),
+                sequence: 0,
+                data: vec![1, 2, 3, 4],
+                ..Default::default()
+            }))),
+            ..Default::default()
+        },
+    )
+    .await;
+    let Some(Frame::Chunk(chunk)) = recv(&mut stream).await else {
         panic!("audio output missing");
     };
     assert_eq!(&*chunk.data, &[1, 2, 3, 4]);
     assert_eq!(chunk.session_id, start.session_id);
-    let pending = native.prepare_audio(&companion, &device.id).await.unwrap();
-    timeout(Duration::from_secs(1), host.client.stop(&companion))
+    assert_eq!(chunk.sequence, 0);
+    let pending = native
+        .host
+        .prepare_audio_with_options(
+            ene_rpc::PrepareAudioRequest {
+                codec: "pcm_s16le".into(),
+                sample_rate: 24_000,
+                channels: 1,
+                companion_id: (&companion).into(),
+                device_id: (&device.id).into(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
         .await
         .unwrap()
-        .unwrap();
-    let Some(ene_api_client::AudioEvent::Failed(failure)) =
-        timeout(Duration::from_secs(2), stream.next())
+        .into_owned();
+    timeout(Duration::from_secs(1), async {
+        host.client
+            .host
+            .stop_with_options(
+                ene_rpc::StopRequest {
+                    companion_id: companion.clone(),
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5),
+            )
             .await
-            .unwrap()
-            .unwrap()
-    else {
+            .map(|_| ())
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let Some(Frame::Failure(failure)) = recv(&mut stream).await else {
         panic!("cancel missing");
     };
     assert_eq!(failure.code, "cancelled");
-    assert!(stream.next().await.unwrap().is_none());
-    assert!(native.start_audio(pending).await.is_err());
-    let start = native.prepare_audio(&companion, &device.id).await.unwrap();
+    assert_eq!(failure.session_id, start.session_id);
+    assert!(recv(&mut stream).await.is_none());
+    let mut rejected = native.audio_socket().await;
+    send(
+        &mut rejected,
+        w::AudioFrame {
+            frame: Some(Frame::Start(Box::new(pending.clone()))),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(matches!(recv(&mut rejected).await, Some(Frame::Failure(f))
+        if f.session_id == pending.session_id && f.code == "invalid_audio_session"));
+    let start = native
+        .host
+        .prepare_audio_with_options(
+            ene_rpc::PrepareAudioRequest {
+                codec: "pcm_s16le".into(),
+                sample_rate: 24_000,
+                channels: 1,
+                companion_id: (&companion).into(),
+                device_id: (&device.id).into(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     assert_eq!(start.generation, 1);
-    let pending_revoke = native.prepare_audio(&companion, &device.id).await.unwrap();
-    let mut stream = native.start_audio(start).await.unwrap();
+    let pending_revoke = native
+        .host
+        .prepare_audio_with_options(
+            ene_rpc::PrepareAudioRequest {
+                codec: "pcm_s16le".into(),
+                sample_rate: 24_000,
+                channels: 1,
+                companion_id: (&companion).into(),
+                device_id: (&device.id).into(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
+    let mut stream = native.audio_socket().await;
+    send(
+        &mut stream,
+        w::AudioFrame {
+            frame: Some(Frame::Start(Box::new(start.clone()))),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Some(Frame::Start(Box::new(start.clone())))
+    );
     host.client
-        .device_rpc()
+        .devices
         .set_permission(w::DevicePermissionRequest {
             device_id: device.id.clone(),
             capability: "audio.input".into(),
@@ -813,17 +1153,13 @@ async fn audio_is_duplex_and_stop_or_revocation_fences_old_sessions() {
         })
         .await
         .unwrap();
-    let Some(ene_api_client::AudioEvent::Failed(failure)) =
-        timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-    else {
+    let Some(Frame::Failure(failure)) = recv(&mut stream).await else {
         panic!("revoke missing");
     };
     assert_eq!(failure.code, "permission_required");
+    assert_eq!(failure.session_id, start.session_id);
     host.client
-        .device_rpc()
+        .devices
         .set_permission(w::DevicePermissionRequest {
             device_id: device.id.clone(),
             capability: "audio.input".into(),
@@ -832,37 +1168,153 @@ async fn audio_is_duplex_and_stop_or_revocation_fences_old_sessions() {
         })
         .await
         .unwrap();
-    assert!(native.start_audio(pending_revoke).await.is_err());
-    let start = native.prepare_audio(&companion, &device.id).await.unwrap();
-    let (mut input, mut output) = native.start_audio(start).await.unwrap().into_split();
+    let mut rejected = native.audio_socket().await;
+    send(
+        &mut rejected,
+        w::AudioFrame {
+            frame: Some(Frame::Start(Box::new(pending_revoke.clone()))),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(matches!(recv(&mut rejected).await, Some(Frame::Failure(f))
+        if f.session_id == pending_revoke.session_id && f.code == "invalid_audio_session"));
+    let start = native
+        .host
+        .prepare_audio_with_options(
+            ene_rpc::PrepareAudioRequest {
+                codec: "pcm_s16le".into(),
+                sample_rate: 24_000,
+                channels: 1,
+                companion_id: (&companion).into(),
+                device_id: (&device.id).into(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
+    let mut stream = native.audio_socket().await;
+    send(
+        &mut stream,
+        w::AudioFrame {
+            frame: Some(Frame::Start(Box::new(start.clone()))),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Some(Frame::Start(Box::new(start.clone())))
+    );
+    let (mut input, mut output) = stream.split();
     // More than both bounded engine queues can hold: input and output must
     // progress simultaneously, and output must drain after microphone EOF.
     timeout(Duration::from_secs(3), async {
         let sending = async {
-            for _ in 0..40 {
-                input.send_chunk(vec![3, 4]).await.unwrap();
+            for sequence in 0..40 {
+                send(
+                    &mut input,
+                    w::AudioFrame {
+                        frame: Some(Frame::Chunk(Box::new(w::AudioChunk {
+                            session_id: start.session_id.clone(),
+                            sequence,
+                            data: vec![3, 4],
+                            ..Default::default()
+                        }))),
+                        ..Default::default()
+                    },
+                )
+                .await;
             }
-            input.end_input().await.unwrap();
+            send(
+                &mut input,
+                w::AudioFrame {
+                    frame: Some(Frame::End(Box::new(w::AudioEnd {
+                        session_id: start.session_id.clone(),
+                        ..Default::default()
+                    }))),
+                    ..Default::default()
+                },
+            )
+            .await;
             drop(input);
         };
         let receiving = async {
             for sequence in 0..40 {
-                let Some(ene_api_client::AudioEvent::Chunk(chunk)) = output.next().await.unwrap()
-                else {
+                let Some(Frame::Chunk(chunk)) = recv(&mut output).await else {
                     panic!("audio output missing");
                 };
                 assert_eq!(chunk.sequence, sequence);
+                assert_eq!(chunk.session_id, start.session_id);
                 assert_eq!(&*chunk.data, &[3, 4]);
             }
             assert!(matches!(
-                output.next().await.unwrap(),
-                Some(ene_api_client::AudioEvent::Ended)
+                recv(&mut output).await,
+                Some(Frame::End(end)) if end.session_id == start.session_id
             ));
         };
         tokio::join!(sending, receiving);
     })
     .await
     .unwrap();
+
+    // Send invalid generated messages directly so client validation cannot mask host bugs.
+    for (wrong_session, sequence, data) in [
+        (true, 0, vec![1, 2]),
+        (false, 1, vec![1, 2]),
+        (false, 0, vec![]),
+        (false, 0, vec![1]),
+        (false, 0, vec![0; 16 * 1024 + 2]),
+    ] {
+        let start = native
+            .host
+            .prepare_audio(w::PrepareAudioRequest {
+                companion_id: companion.clone(),
+                device_id: device.id.clone(),
+                codec: "pcm_s16le".into(),
+                sample_rate: 24_000,
+                channels: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        let mut stream = native.audio_socket().await;
+        send(
+            &mut stream,
+            w::AudioFrame {
+                frame: Some(Frame::Start(Box::new(start.clone()))),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            recv(&mut stream).await,
+            Some(Frame::Start(Box::new(start.clone())))
+        );
+        send(
+            &mut stream,
+            w::AudioFrame {
+                frame: Some(Frame::Chunk(Box::new(w::AudioChunk {
+                    session_id: if wrong_session {
+                        "old-session".into()
+                    } else {
+                        start.session_id.clone()
+                    },
+                    sequence,
+                    data,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(matches!(recv(&mut stream).await, Some(Frame::Failure(f))
+            if f.session_id == start.session_id && f.code == "invalid_request"));
+        assert!(recv(&mut stream).await.is_none());
+    }
 }
 #[tokio::test]
 async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
@@ -921,7 +1373,19 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
         w::OperationStatus::Revoked
     );
     drop(subscription);
-    let companion = host.client.companions().await.unwrap().remove(0).id;
+    let companion = host
+        .client
+        .host
+        .list_companions_with_options(
+            ene_rpc::Empty::default(),
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned()
+        .items
+        .remove(0)
+        .id;
     let first = host
         .app
         .devices
@@ -984,7 +1448,19 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
 async fn speech_is_not_advertised_without_an_engine() {
     let host = Host::new().await;
     let (device, native) = host.device(&["audio.input", "audio.output"]).await;
-    let snapshot = host.client.snapshot(None).await.unwrap();
+    let snapshot = host
+        .client
+        .host
+        .get_snapshot_with_options(
+            ene_rpc::SnapshotRequest {
+                subscription_id: None,
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&snapshot.capabilities.json).unwrap()["transport"]
             ["audio_available"],
@@ -992,8 +1468,20 @@ async fn speech_is_not_advertised_without_an_engine() {
     );
     assert!(
         native
-            .prepare_audio(&snapshot.companions[0].id, &device.id)
+            .host
+            .prepare_audio_with_options(
+                ene_rpc::PrepareAudioRequest {
+                    codec: "pcm_s16le".into(),
+                    sample_rate: 24_000,
+                    channels: 1,
+                    companion_id: (&snapshot.companions[0].id).into(),
+                    device_id: (&device.id).into(),
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5)
+            )
             .await
+            .map(|response| response.into_owned())
             .is_err()
     );
 }
@@ -1002,14 +1490,40 @@ async fn speech_is_not_advertised_without_an_engine() {
 async fn approved_native_devices_can_sync_and_stop_but_revocation_closes_their_host_stream() {
     let host = Host::new().await;
     let (device, native) = host.device(&[]).await;
-    assert!(matches!(native.settings().await, Err(Error::Api(error)) if error.status==403));
-    let mut stream = native.subscribe().await.unwrap();
-    let snapshot = stream.take_initial_snapshot().unwrap();
+    assert!(
+        matches!(native.host.get_settings_with_options(ene_rpc::Empty::default(), crate::api::test_client::call_options(5)).await.map(|response| response.into_owned()), Err(error) if error.code == ErrorCode::PermissionDenied)
+    );
+    let mut stream = native.host.subscribe(w::Empty::default()).await.unwrap();
+    let snapshot = initial(&mut stream).await.snapshot.into_option().unwrap();
     let companion = &snapshot.companions[0];
-    assert_eq!(native.companions().await.unwrap()[0].id, companion.id);
-    native.stop(&companion.id).await.unwrap();
+    assert_eq!(
+        native
+            .host
+            .list_companions_with_options(
+                ene_rpc::Empty::default(),
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .unwrap()
+            .into_owned()
+            .items[0]
+            .id,
+        companion.id
+    );
+    native
+        .host
+        .stop_with_options(
+            ene_rpc::StopRequest {
+                companion_id: companion.id.clone(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .map(|_| ())
+        .unwrap();
     host.client
-        .device_rpc()
+        .devices
         .revoke(w::Id {
             id: device.id,
             ..Default::default()
@@ -1017,14 +1531,25 @@ async fn approved_native_devices_can_sync_and_stop_but_revocation_closes_their_h
         .await
         .unwrap();
     assert!(
-        timeout(Duration::from_secs(2), stream.next())
+        timeout(Duration::from_secs(2), stream.message::<w::HostEvent>())
             .await
             .unwrap()
             .unwrap()
             .is_none()
     );
     assert!(matches!(
-        native.snapshot(None).await,
-        Err(Error::Unauthorized)
+        native
+            .host
+            .get_snapshot_with_options(
+                ene_rpc::SnapshotRequest {
+                    subscription_id: None,
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .map(|response| response.into_owned())
+            ,
+        Err(error) if error.code == ErrorCode::Unauthenticated
     ));
 }

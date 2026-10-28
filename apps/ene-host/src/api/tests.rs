@@ -1325,22 +1325,43 @@ async fn client_can_reconnect_and_page_escaped_history_without_truncation() {
         }
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = ene_api_client::ApiClient::new(&ene_api_client::RuntimeConnection {
-        endpoint: format!("http://{}/rpc", listener.local_addr().unwrap()),
-        token: "private-token".into(),
-    })
+    let client = crate::api::test_client::ApiClient::new(
+        &format!("http://{}/rpc", listener.local_addr().unwrap()),
+        "private-token",
+    )
     .unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
-    let snapshot = client.snapshot(None).await.unwrap();
+    let snapshot = client
+        .host
+        .get_snapshot_with_options(
+            ene_rpc::SnapshotRequest {
+                subscription_id: None,
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     assert!(snapshot.messages.len() == 50);
     let mut seen: std::collections::BTreeSet<_> =
         snapshot.messages.iter().map(|m| m.sequence).collect();
     let mut cursor = snapshot.message_cursors[&companion].value.clone();
     while let Some(before) = cursor {
         let history = client
-            .messages(&companion, Some(&before), Some(100))
+            .host
+            .get_history_with_options(
+                ene_rpc::HistoryRequest {
+                    companion_id: (&companion).into(),
+                    cursor: Some((&before).into()),
+                    limit: Some(100),
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .into_owned();
         assert!(!history.items.is_empty());
         for message in history.items {
             assert_eq!(message.text, "\0".repeat(1000));
@@ -1350,7 +1371,18 @@ async fn client_can_reconnect_and_page_escaped_history_without_truncation() {
     }
     assert_eq!(seen, (1..=75).collect());
     assert!(
-        client.snapshot(None).await.is_ok(),
+        client
+            .host
+            .get_snapshot_with_options(
+                ene_rpc::SnapshotRequest {
+                    subscription_id: None,
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .map(|response| response.into_owned())
+            .is_ok(),
         "reconnect must remain possible"
     );
     server.abort();
@@ -1745,27 +1777,28 @@ async fn review_configuration_storage_failure_notifies_without_publishing_unsave
 
 #[tokio::test]
 async fn connect_disconnect_keeps_accepted_generation_and_explicit_stop_cancels_queue() {
-    use ene_api_client::ApiClient;
+    use crate::api::test_client::ApiClient;
     use ene_rpc as w;
     let mut f = ConversationFixture::new().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = ApiClient::new(&ene_api_client::RuntimeConnection {
-        endpoint: format!("http://{}/rpc", listener.local_addr().unwrap()),
-        token: "private-token".into(),
-    })
+    let client = ApiClient::new(
+        &format!("http://{}/rpc", listener.local_addr().unwrap()),
+        "private-token",
+    )
     .unwrap();
     let routes = router(f.app.clone());
     let server = tokio::spawn(async move {
         axum::serve(listener, routes).await.unwrap();
     });
-    let subscription = client.subscribe().await.unwrap();
+    let mut subscription = client.host.subscribe(w::Empty::default()).await.unwrap();
+    crate::api::test_client::initial(&mut subscription).await;
     let companion = f.companion.clone();
     let send = |key: &'static str| {
         let client = client.clone();
         let companion = companion.clone();
         async move {
             client
-                .host_rpc()
+                .host
                 .send_message(w::SendMessageRequest {
                     companion_id: companion,
                     request_key: key.into(),
@@ -1779,7 +1812,7 @@ async fn connect_disconnect_keeps_accepted_generation_and_explicit_stop_cancels_
     };
     let accepted = send("connect-detached").await;
     f.started().await;
-    subscription.close().await.unwrap();
+    drop(subscription);
     f.finish.add_permits(1);
     assert_eq!(f.terminal(&accepted.response_message_id).await, "completed");
     // The same generated request reuses the receipt, even after completion.
@@ -1788,7 +1821,18 @@ async fn connect_disconnect_keeps_accepted_generation_and_explicit_stop_cancels_
     let active = send("connect-stop-active").await;
     f.started().await;
     let queued = send("connect-stop-queued").await;
-    client.stop(&f.companion).await.unwrap();
+    client
+        .host
+        .stop_with_options(
+            ene_rpc::StopRequest {
+                companion_id: (&f.companion).into(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .map(|_| ())
+        .unwrap();
     for id in [active.response_message_id, queued.response_message_id] {
         assert_eq!(f.terminal(&id).await, "cancelled");
     }

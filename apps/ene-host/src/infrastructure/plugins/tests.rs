@@ -709,7 +709,8 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
 
 #[tokio::test]
 async fn connect_management_invokes_the_isolated_harness_and_enforces_host_authentication() {
-    use ene_api_client::{ApiClient, Error};
+    use crate::api::test_client::ApiClient;
+    use connectrpc::ErrorCode;
     let (manager, temp, companion) = manager().await;
     let store = manager.store.clone();
     let manager = Arc::new(manager);
@@ -723,59 +724,89 @@ async fn connect_management_invokes_the_isolated_harness_and_enforces_host_authe
     let endpoint = format!("http://{}/rpc", listener.local_addr().unwrap());
     let router = crate::api::router(app.clone());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let client = ApiClient::new(&ene_api_client::RuntimeConnection {
-        endpoint: endpoint.clone(),
-        token: "private-token".into(),
-    })
-    .unwrap();
-    let unauthorized = ApiClient::new(&ene_api_client::RuntimeConnection {
-        endpoint,
-        token: "wrong".into(),
-    })
-    .unwrap();
+    let client = ApiClient::new(&endpoint, "private-token").unwrap();
+    let unauthorized = ApiClient::new(&endpoint, "wrong").unwrap();
     assert!(matches!(
-        unauthorized.plugins().await,
-        Err(Error::Unauthorized)
+        unauthorized
+            .plugins
+            .list_with_options(
+                ene_rpc::Empty::default(),
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .map(|response| response.into_owned().items)
+            ,
+        Err(error) if error.code == ErrorCode::Unauthenticated
     ));
     assert!(
         client
-            .plugins()
+            .plugins
+            .list_with_options(
+                ene_rpc::Empty::default(),
+                crate::api::test_client::call_options(5)
+            )
             .await
             .unwrap()
+            .into_owned()
+            .items
             .iter()
             .any(|p| p.id == "reference" && p.state == "disabled")
     );
     client
-        .enable_plugin(
-            "reference",
-            &EnablePluginRequest {
+        .plugins
+        .enable_with_options(
+            EnablePluginRequest {
+                id: "reference".into(),
                 enabled: true,
                 revision,
                 ..Default::default()
             },
+            crate::api::test_client::call_options(60),
         )
         .await
         .unwrap();
     let bound = binding(&manager, &companion, "connect-task", "harness", vec![]);
-    client.bind_plugin(&bound).await.unwrap();
-    let result = client
-        .invoke_plugin(&PluginInvocation {
-            binding_id: bound.id,
-            operation: document(
-                json!({"type":"harness","input":{"type":"start","instruction":"日本語🙂"}}),
-            )
-            .into(),
-            ..Default::default()
-        })
+    client
+        .plugins
+        .bind_with_options(bound.clone(), crate::api::test_client::call_options(10))
         .await
         .unwrap();
+    let result = client
+        .plugins
+        .invoke_with_options(
+            PluginInvocation {
+                binding_id: bound.id,
+                operation: document(
+                    json!({"type":"harness","input":{"type":"start","instruction":"日本語🙂"}}),
+                )
+                .into(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(190),
+        )
+        .await
+        .unwrap()
+        .into_owned();
     assert!(
         result
             .events
             .iter()
             .any(|e| serde_json::from_str::<Value>(&e.json).unwrap()["type"] == "harness")
     );
-    assert_eq!(client.plugin_bindings().await.unwrap().len(), 1);
+    assert_eq!(
+        client
+            .plugins
+            .list_bindings_with_options(
+                ene_rpc::Empty::default(),
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .unwrap()
+            .into_owned()
+            .items
+            .len(),
+        1
+    );
     app.application.stop().await.unwrap();
     server.abort();
     drop(temp);

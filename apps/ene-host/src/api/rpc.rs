@@ -33,13 +33,14 @@ fn receipt<T: serde::de::DeserializeOwned>(
 ) -> Result<T, ConnectError> {
     use ene_core::ports::Outcome;
     if matches!(outcome, Outcome::Pending | Outcome::Unavailable) {
-        let body: w::ApiFailure = serde_json::from_value(value)
+        let mut body: w::ApiFailure = serde_json::from_value(value)
             .map_err(|_| ConnectError::internal("応答を変換できません"))?;
         let status = if matches!(outcome, Outcome::Pending) {
             409
         } else {
             503
         };
+        body.http_status = status;
         return Err(ConnectError::new(
             if status == 409 {
                 ErrorCode::FailedPrecondition
@@ -50,12 +51,7 @@ fn receipt<T: serde::de::DeserializeOwned>(
         )
         .with_detail(connectrpc::ErrorDetail::from_message(
             "ene.host.v1.ApiFailure",
-            &w::ApiFailure {
-                error: body.error,
-                request_id: body.request_id,
-                http_status: status,
-                ..Default::default()
-            },
+            &body,
         )));
     }
     serde_json::from_value::<T>(value).map_err(|_| ConnectError::internal("応答を読み取れません"))

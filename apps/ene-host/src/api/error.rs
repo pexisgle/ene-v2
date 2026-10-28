@@ -8,17 +8,28 @@ use uuid::Uuid;
 
 pub(crate) struct ApiError {
     status: StatusCode,
-    code: &'static str,
-    message: &'static str,
-    reason: Option<&'static str>,
+    body: Box<ene_rpc::ApiFailure>,
 }
 impl ApiError {
     pub(crate) fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
         Self {
             status,
-            code,
-            message,
-            reason: None,
+            body: Box::new(ene_rpc::ApiFailure {
+                error: ene_rpc::Failure {
+                    code: code.into(),
+                    message: message.into(),
+                    details: ene_rpc::JsonDocument {
+                        json: "{}".into(),
+                        ..Default::default()
+                    }
+                    .into(),
+                    ..Default::default()
+                }
+                .into(),
+                request_id: Uuid::new_v4().to_string(),
+                http_status: u32::from(status.as_u16()),
+                ..Default::default()
+            }),
         }
     }
     pub(crate) fn unavailable() -> Self {
@@ -41,30 +52,7 @@ impl ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(ene_rpc::ApiFailure {
-                error: ene_rpc::Failure {
-                    code: self.code.into(),
-                    message: self.message.into(),
-                    details: ene_rpc::JsonDocument {
-                        json: self
-                            .reason
-                            .map(|r| json!({"reason": r}))
-                            .unwrap_or(json!({}))
-                            .to_string(),
-                        ..Default::default()
-                    }
-                    .into(),
-                    ..Default::default()
-                }
-                .into(),
-                request_id: Uuid::new_v4().to_string(),
-                http_status: u32::from(self.status.as_u16()),
-                ..Default::default()
-            }),
-        )
-            .into_response()
+        (self.status, Json(self.body)).into_response()
     }
 }
 
@@ -121,7 +109,15 @@ impl From<ene_core::domain::Error> for ApiError {
             ),
             _ => Self::unavailable(),
         };
-        result.reason = error.reason;
+        if let Some(reason) = error.reason {
+            result
+                .body
+                .error
+                .get_or_insert_default()
+                .details
+                .get_or_insert_default()
+                .json = json!({"reason": reason}).to_string();
+        }
         result
     }
 }
@@ -136,30 +132,8 @@ impl ApiError {
             409 => ErrorCode::FailedPrecondition,
             _ => ErrorCode::Unavailable,
         };
-        let failure = ene_rpc::Failure {
-            code: self.code.into(),
-            message: self.message.into(),
-            details: ene_rpc::JsonDocument {
-                json: self
-                    .reason
-                    .map(|r| json!({"reason":r}))
-                    .unwrap_or(json!({}))
-                    .to_string(),
-                ..Default::default()
-            }
-            .into(),
-            ..Default::default()
-        };
-        connectrpc::ConnectError::new(code, self.message).with_detail(
-            connectrpc::ErrorDetail::from_message(
-                "ene.host.v1.ApiFailure",
-                &ene_rpc::rpc::ApiFailure {
-                    error: failure.into(),
-                    request_id: Uuid::new_v4().to_string(),
-                    http_status: u32::from(self.status.as_u16()),
-                    ..Default::default()
-                },
-            ),
+        connectrpc::ConnectError::new(code, self.body.error.message.clone()).with_detail(
+            connectrpc::ErrorDetail::from_message("ene.host.v1.ApiFailure", &*self.body),
         )
     }
 }
