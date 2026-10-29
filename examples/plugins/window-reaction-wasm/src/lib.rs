@@ -2,7 +2,7 @@
 #[cfg(target_family = "wasm")]
 #[allow(unused_braces)]
 mod guest {
-    use ene_plugin_sdk::*;
+    use ene_plugin::*;
     use serde_json::{Value, json};
 
     #[plugin_fn]

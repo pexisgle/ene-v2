@@ -1,4 +1,4 @@
-//! Host integration: ownership and permissions belong to ene, execution to the runner.
+//! Host integration: ownership and permissions belong to ene, execution to the embedded runtime.
 mod harness;
 mod provider;
 use super::{
@@ -13,8 +13,8 @@ use ene_plugin::{CharacterAction, Event, Failure, Operation, ServiceRequest};
 use ene_plugin::{Extension, Target};
 use ene_plugin_runtime::{
     Package,
+    instance::{Instance, Services, Supervisor},
     limits::{MAX_EVENTS, MAX_MESSAGE_BYTES},
-    worker::{Services, Supervisor, Worker},
 };
 use ene_rpc::{
     EnablePluginRequest, Plugin, PluginBinding, PluginEntry, PluginInvocation, PluginResult,
@@ -40,17 +40,17 @@ struct Entry {
     generation: u64,
     capabilities: BTreeMap<String, Value>,
 }
-type SharedWorker = Arc<Mutex<Option<Worker>>>;
-type Sessions = Arc<std::sync::Mutex<BTreeMap<String, SharedWorker>>>;
-type Registration = (Manager, String, SharedWorker);
+type SharedInstance = Arc<Mutex<Option<Instance>>>;
+type Sessions = Arc<std::sync::Mutex<BTreeMap<String, SharedInstance>>>;
+type Registration = (Manager, String, SharedInstance);
 struct Session<'a> {
-    guard: tokio::sync::MutexGuard<'a, Option<Worker>>,
+    guard: tokio::sync::MutexGuard<'a, Option<Instance>>,
     retain: bool,
     registration: Option<Registration>,
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl std::ops::Deref for Session<'_> {
-    type Target = Option<Worker>;
+    type Target = Option<Instance>;
     fn deref(&self) -> &Self::Target {
         &self.guard
     }
@@ -112,8 +112,6 @@ impl Drop for ActiveInvocation {
 #[derive(Clone)]
 pub struct Manager {
     root: PathBuf,
-    cache: PathBuf,
-    runner: PathBuf,
     store: Store,
     entries: Arc<RwLock<BTreeMap<String, Entry>>>,
     sessions: Sessions,
@@ -140,16 +138,8 @@ impl Manager {
         let root = std::env::var_os("ENE_PLUGIN_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data.join("plugins"));
-        let cache = std::env::var_os("ENE_PLUGIN_CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data.join("plugin-code"));
-        let runner = std::env::var_os("ENE_PLUGIN_RUNNER_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ene_platform::sibling_executable("ene-plugin-runner"));
         let manager = Self {
             root,
-            cache,
-            runner,
             store,
             entries: Arc::new(RwLock::new(BTreeMap::new())),
             sessions: Arc::default(),
@@ -356,11 +346,10 @@ impl Manager {
                     .iter()
                     .filter(|e| e.target == Target::Host)
                 {
-                    let installed = package.install(&self.cache).map_err(failure)?;
-                    let mut worker = Worker::start(
-                        installed,
+                    let verified = package.clone();
+                    let mut worker = Instance::load(
+                        verified,
                         entry.id.clone(),
-                        &self.runner,
                         Target::Host,
                         generation,
                         &cancel,
@@ -388,7 +377,7 @@ impl Manager {
                 }
                 Err(_) => {
                     e.state = "failed".into();
-                    e.error = Some("隔離環境の起動または初期化に失敗しました".into());
+                    e.error = Some("Wasmプラグインの読み込みまたは初期化に失敗しました".into());
                     e.cancellation.cancel();
                 }
             }
@@ -548,12 +537,11 @@ impl Manager {
         let mut failure_reason = "startup_failed";
         let outcome = async {
             if session.is_none() {
-                let installed = entry.package.install(&self.cache).map_err(failure)?;
+                let verified = entry.package.clone();
                 *session = Some(
-                    Worker::start(
-                        installed,
+                    Instance::load(
+                        verified,
                         binding.entrypoint.clone(),
-                        &self.runner,
                         Target::Host,
                         self.generations.fetch_add(1, Ordering::Relaxed),
                         &cancel,
@@ -585,13 +573,7 @@ impl Manager {
             let validation = services.clone();
             let worker = session.as_mut().unwrap();
             let generation = worker.generation();
-            let work = worker.invoke(
-                uuid::Uuid::new_v4().to_string(),
-                operation,
-                services,
-                tx,
-                &cancel,
-            );
+            let work = worker.invoke(operation, services, tx, &cancel);
             let (result, events) = tokio::join!(work, collect);
             let result = result.map_err(failure)?;
             let events = events?;

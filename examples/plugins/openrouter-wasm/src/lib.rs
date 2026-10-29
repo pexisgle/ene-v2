@@ -3,7 +3,7 @@
 #[allow(unused_braces)]
 mod guest {
     use base64::{Engine, engine::general_purpose::STANDARD};
-    use ene_plugin_sdk::*;
+    use ene_plugin::*;
     use serde_json::{Value, json};
     #[plugin_fn]
     pub fn ene_initialize() -> FnResult<Json<Value>> {

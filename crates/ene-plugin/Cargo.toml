@@ -1,6 +1,6 @@
 [package]
 name = "ene-plugin"
-description = "Plugin manifests, extension APIs and worker communication contracts"
+description = "Plugin manifests, extension APIs and Extism guest SDK"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,6 @@ workspace = true
 ene-rpc = { path = "../ene-rpc" }
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+extism-pdk = { version = "=1.4.1", default-features = false }

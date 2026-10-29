@@ -11,9 +11,10 @@
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
 | [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
-| [`ene-plugin-runner`](apps/ene-plugin-runner/) | ホストから隔離したプロセスでLuau・Wasmプラグインを実行 |
+| [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK |
+| [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | Extismの組み込み実行、検証、実行制限 |
 
-ホストのアプリケーション処理、許可付きHTTP通信、Connect API、SQLite保存は `ene-host` にまとめています。起動・接続方法と内部構成は [ene-host のREADME](apps/ene-host/README.md) を参照してください。プラグインの隔離実行は `ene-plugin-runtime` と `ene-platform` をホスト・runnerで共有します。
+ホストのアプリケーション処理、許可付きHTTP通信、Connect API、SQLite保存は `ene-host` にまとめています。起動・接続方法と内部構成は [ene-host のREADME](apps/ene-host/README.md) を参照してください。Wasmプラグインは `ene-plugin-runtime` からExtismを直接呼び出します。専用runner・自己再起動・Luau実行はありません。
 
 ## Nixで開発する
 
@@ -39,7 +40,7 @@ rustup toolchain install nightly-2026-10-07 --profile minimal --component rustfm
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo build --locked -p ene-plugin-runner
+cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
 cargo test --workspace --all-features --locked
 cargo build --workspace --all-targets --all-features --locked
 cargo run --locked -p ene-host
@@ -58,7 +59,7 @@ cargo run --locked -p ene-desktop
 
 Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じnightlyを使うため、日付を`nightly-2026-10-07`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドの日付を揃えて変更します。
 
-Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設定に含めます。Nix開発シェルでは、隔離runnerが環境変数なしでLuauのC++ランタイムを読めるよう、リンク時にライブラリの場所を埋め込みます。
+Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設定に含めます。プラグイン実行にbubblewrapは不要です。
 
 ツールチェーンとビルド設定の変更後は初回に再コンパイルが発生します。キャラクター描画はBevyの必要な機能のみ有効にし、`dynamic_linking`は使っていません。
 
@@ -79,12 +80,12 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just fmt-check` | 整形済みかを確認 |
 | `just check` | 全クレート・ターゲット・機能を型検査 |
 | `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
-| `just test` | プラグインrunnerをビルドし、ワークスペースのテストを実行 |
+| `just test` | テスト用Wasmをビルドし、ワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
 | `just fetch-assets [asset]` | 開発用VRM・VRMAを取得（省略時は全件、`vrma`でモーションのみ、個別名も指定可能） |
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
-| `just build-plugin-runner` | 隔離実行と結合テスト用のrunnerをビルド |
-| `just run-host` | runnerをビルドし、認証付きホストAPIを起動 |
+| `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |
+| `just run-host` | 認証付きホストAPIを起動 |
 | `just run-desktop` | デスクトップの骨組みを起動 |
 | `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |
 | `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |

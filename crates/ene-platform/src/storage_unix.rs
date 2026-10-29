@@ -2,7 +2,7 @@ use rustix::fs::{Mode, OFlags};
 use std::{
     fs::{self, File},
     io::{self, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::Path,
 };
 pub fn check(path: &Path, directory: bool, private: bool) -> io::Result<()> {
@@ -59,10 +59,6 @@ pub fn private_file(path: &Path) -> io::Result<File> {
         .open(path)?;
     check(path, false, true)?;
     Ok(file)
-}
-pub fn freeze(path: &Path, directory: bool) -> io::Result<()> {
-    let _ = directory;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o500))
 }
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path

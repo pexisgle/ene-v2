@@ -1,9 +1,9 @@
-//! The compiled Extism PDK reference executes through typed Remoc worker channels.
+//! The compiled Extism PDK reference executes through the embedded Extism Host SDK.
 use base64::Engine;
 use ene_plugin::*;
 use ene_plugin_runtime::{
     Package,
-    worker::{Services, Worker},
+    instance::{Instance, Services},
 };
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
@@ -52,21 +52,11 @@ async fn reference_pdk_models_split_utf8_streaming_and_shutdown() {
     )
     .unwrap();
     ene_platform::storage::write_atomic(&root.join("provider.wasm"), &wasm).unwrap();
-    let package = Package::load(&root)
-        .unwrap()
-        .install(&temp.path().join("cache"))
-        .unwrap();
+    let package = Package::load(&root).unwrap();
     let cancel = CancellationToken::new();
-    let mut worker = Worker::start(
-        package,
-        "llm".into(),
-        std::path::Path::new(env!("CARGO_BIN_EXE_ene-plugin-runner")),
-        Target::Host,
-        7,
-        &cancel,
-    )
-    .await
-    .unwrap();
+    let mut worker = Instance::load(package, "llm".into(), Target::Host, 7, &cancel)
+        .await
+        .unwrap();
     for models in [true, false] {
         let endpoint = "https://openrouter.ai/api/v1".to_string();
         let (operation, payload) = if models {
@@ -108,13 +98,7 @@ async fn reference_pdk_models_split_utf8_streaming_and_shutdown() {
         let services = Arc::new(HttpFixture(Mutex::new(chunks)));
         let (events, mut received) = tokio::sync::mpsc::channel(64);
         worker
-            .invoke(
-                if models { "models" } else { "generate" }.into(),
-                operation,
-                services.clone(),
-                events,
-                &cancel,
-            )
+            .invoke(operation, services.clone(), events, &cancel)
             .await
             .unwrap();
         assert!(services.0.lock().await.is_empty());

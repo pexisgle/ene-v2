@@ -6,9 +6,7 @@ pub(crate) mod os;
 #[cfg(unix)]
 #[path = "storage_unix.rs"]
 mod os;
-#[cfg(windows)]
-pub use os::open_snapshot;
-pub use os::{check, create_private_dir_all, freeze, open, private_file, write_atomic};
+pub use os::{check, create_private_dir_all, open, private_file, write_atomic};
 
 pub fn read(path: &Path, limit: u64, private: bool) -> io::Result<Vec<u8>> {
     use std::io::Read;

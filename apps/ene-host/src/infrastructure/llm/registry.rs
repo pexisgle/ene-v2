@@ -1,4 +1,4 @@
-//! Builtin and reviewed Luau/Extism providers share the host authorization port.
+//! Builtin and reviewed Wasm providers share the host authorization port.
 use super::openai;
 use crate::{
     domain::{Connection, Error, ErrorKind},

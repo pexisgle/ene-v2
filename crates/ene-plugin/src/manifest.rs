@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Shared compatibility version for manifests, extension APIs and worker messages.
+/// Shared compatibility version for manifests, extension APIs.
 pub const CONTRACT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -17,7 +17,6 @@ pub enum Target {
 #[serde(rename_all = "snake_case")]
 pub enum Runtime {
     Extism,
-    Luau,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

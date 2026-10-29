@@ -1,6 +1,5 @@
 //! Extism owns the guest ABI; these wrappers expose ene's typed service contract.
-pub use ene_plugin::provider::{Model, ModelMetadata};
-pub use ene_plugin::*;
+use crate::*;
 #[cfg(target_family = "wasm")]
 pub use extism_pdk::{self, FnResult, Json, plugin_fn};
 #[cfg(target_family = "wasm")]

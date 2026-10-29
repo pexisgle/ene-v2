@@ -1,6 +1,5 @@
 [workspace]
 members = ["apps/*", "crates/*", "examples/plugins/*"]
-exclude = ["examples/plugins/reference"]
 resolver = "3"
 
 [workspace.package]
@@ -18,7 +17,6 @@ ene-plugin = { path = "crates/ene-plugin" }
 ene-platform = { path = "crates/ene-platform" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 atomic-write-file = { version = "0.3", features = ["unnamed-tmpfile"] }
-remoc = { version = "0.20", default-features = false, features = ["rch", "codec-message-pack"] }
 tempfile = "3"
 xdg = "3"
 async-stream = "0.3"

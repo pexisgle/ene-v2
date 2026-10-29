@@ -1,14 +1,14 @@
 # ene-plugin
 
-プラグインのmanifest、拡張API、ホストサービスとworker通信の契約を提供します。
-Rust用SDKは `ene-plugin-sdk`、Luau用型定義は `sdk/luau/ene.d.luau` にあります。
+プラグイン作者向けの型定義とRust SDKをまとめています。manifest、拡張API、ホストサービスの契約に加え、WasmビルドではExtism PDKと `emit` / `service` / HTTPヘルパーを提供します。
+旧 `ene-plugin-sdk` はこのパッケージへ統合しました。`use ene_plugin::*;` で利用できます。
 モデル情報・設定項目は `ene-rpc` の生成型を共有しますが、プラグイン通信にConnect RPCを使う意味ではありません。
 
 ## 現在の実装範囲
 
-このクレートは型を定義し、実行器や権限管理を実装しません。
-現在の `ene-host` と `ene-desktop` は雛形です。OSイベント取得、購読の認可と配送、
-プラグイン起動、キャンセル、アバターへの動作反映は次段階の実装です。
+実行と検証は `ene-plugin-runtime`、アプリ固有の認可は各アプリが担当します。
+`ene-host` はExtismをプロセス内に組み込んで実行します。`ene-desktop` はまだ雛形で、
+OSイベント取得、購読の認可と配送、アバターへの動作反映は未実装です。
 `ene-avatar` は `apps/ene-avatar/src/control.rs` のJSON行通信を持ちますが、
 プラグインイベントからその通信への変換はまだありません。
 
@@ -21,14 +21,13 @@ Rust用SDKは `ene-plugin-sdk`、Luau用型定義は `sdk/luau/ene.d.luau` に�
 | `Event` | プラグインからの結果・途中経過 |
 | `ServiceRequest` | プラグインからホストへの機能利用依頼 |
 | `Failure` | ホストサービス呼び出しの失敗 |
-| `HostMessage` / `WorkerMessage` | workerの初期化、呼び出し、サービス応答、キャンセル・終了 |
 
-runtimeは `extism` と `luau` を宣言できます。WasmのABIはExtismが担当します。
-共通型はクレート直下から利用できます。内部ファイルは `manifest.rs`、`api.rs`、`window.rs`、`protocol.rs` です。
+runtimeは `extism` のみ対応します。Luauスクリプトは受け付けません。WasmのABIはExtismが担当します。
+共通型はクレート直下から利用できます。内部ファイルは `manifest.rs`、`api.rs`、`window.rs`、`failure.rs`、`sdk.rs` です。
 `provider` は認証方式、ルーティング設定、チャットメッセージを提供します。
 HTTPは `HttpOpen` / `HttpRead` / `HttpClose` で依頼し、認証情報と通信の認可はホスト側で管理する設計です。
-manifestの参照ファイル検証、通信の接続・codec・サイズ制限も実行基盤の責務です。
-worker通信のメッセージ型は定義済みで、実際の送受信は実行基盤が担当します。
+manifestの参照ファイル検証と入出力のサイズ制限も実行基盤の責務です。
+子プロセスの起動やworker用IPCはありません。
 現在のWasmサンプルはExtismの関数呼び出しと `ene_service` / `ene_emit` を使います。
 
 ## 他アプリのウィンドウイベント
@@ -99,20 +98,20 @@ Wayland等で非対応の場合は明示的に利用不可とし、黙って別�
 
 ## バージョンと移行
 
-`CONTRACT_VERSION` は **2** です。manifest、拡張API、worker通信の共通互換性番号で、
-プラグイン自身の `Manifest.version` とは独立しています。実行基盤は読込時と接続時に一致を検証してください。
+`CONTRACT_VERSION` は **2** です。manifestと拡張APIの共通互換性番号で、
+プラグイン自身の `Manifest.version` とは独立しています。実行基盤は読込時に一致を検証してください。
 
 バージョン1からは、manifestの `contract_version` を2にし、上記四つのキャラクター関連メッセージに
 `target` を追加してください。対象を推測する互換フォールバックは設けません。
 LLMの要求・イベント形状は変更していませんが、共通契約番号は更新します。
 新しい購読宣言は省略可能で、既存プラグインを勝手に購読させません。
-音声・ハーネス・デスクトップ操作やworker通信の型も維持しています。
+音声・ハーネス・デスクトップ操作の型も維持しています。worker用IPC型は削除しました。
 型の定義と実行機能の完成は別です。未実装の機能を利用可能と扱わないでください。
 
 モデル情報は引き続きprotobuf JSON形式です。メタデータのフィールド名はcamelCase、
 64ビット整数は文字列、任意のリストは `{"values": [...]}` です。
 ウィンドウ契約は通常のSerde JSONで、フィールド名はsnake_case、整数はJSON数値です。
-Luau/JavaScriptでも扱えるよう、実行基盤は世代・シーケンス値を安全な整数範囲内に保ってください。
+JavaScriptでも扱えるよう、実行基盤は世代・シーケンス値を安全な整数範囲内に保ってください。
 
 ## サンプルと検証
 
@@ -121,6 +120,6 @@ Luau/JavaScriptでも扱えるよう、実行基盤は世代・シーケンス�
 [OpenRouterサンプル](../../examples/plugins/openrouter-wasm/) はHTTPとストリーミングの例です。
 
 ```sh
-cargo check --locked -p ene-plugin -p ene-plugin-sdk --all-targets --all-features
-cargo clippy --locked -p ene-plugin -p ene-plugin-sdk -p ene-window-reaction-wasm --all-targets --all-features -- -D warnings
+cargo check --locked -p ene-plugin --all-targets --all-features
+cargo clippy --locked -p ene-plugin -p ene-window-reaction-wasm --all-targets --all-features -- -D warnings
 ```

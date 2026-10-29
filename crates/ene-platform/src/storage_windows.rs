@@ -292,38 +292,6 @@ pub fn open(path: &Path, directory: bool, private: bool) -> io::Result<File> {
 pub fn check(path: &Path, directory: bool, private: bool) -> io::Result<()> {
     open(path, directory, private).map(drop)
 }
-/// Inspect an already isolated snapshot, holding every directory beneath its root.
-/// Its AppContainer deliberately cannot inspect the host's ancestors above this root.
-pub fn open_snapshot(root: &Path, relative: Option<&str>) -> io::Result<File> {
-    let root_handle = handle(root, true, 0, OPEN_EXISTING, None)?;
-    validate(&root_handle, true, false)?;
-    let Some(relative) = relative else {
-        return Ok(root_handle);
-    };
-    if !crate::relative(relative) {
-        return Err(denied());
-    }
-    let mut guards = vec![root_handle];
-    let mut path = root.to_path_buf();
-    let mut parts = relative.split('/').peekable();
-    while let Some(part) = parts.next() {
-        path.push(part);
-        let directory = parts.peek().is_some();
-        let file = handle(
-            &path,
-            directory,
-            if directory { 0 } else { GENERIC_READ },
-            OPEN_EXISTING,
-            None,
-        )?;
-        validate(&file, directory, false)?;
-        if !directory {
-            return Ok(file);
-        }
-        guards.push(file);
-    }
-    Err(denied())
-}
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     if path.exists() {
         return check(path, true, true);
@@ -360,9 +328,6 @@ pub fn private_file(path: &Path) -> io::Result<File> {
     )?;
     validate(&file, false, true)?;
     Ok(file)
-}
-pub fn freeze(path: &Path, _directory: bool) -> io::Result<()> {
-    check(path, path.is_dir(), false)
 }
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(denied)?;

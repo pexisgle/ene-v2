@@ -9,7 +9,7 @@ nix develop
 just run-host
 ```
 
-`just run-host` は先に `ene-plugin-runner` をビルドします。Linuxではbubblewrapとユーザー名前空間が必要です。Nix開発シェルはbubblewrapを提供し、隔離プロセスには実行に必要な読み取り専用のシステム領域・Nixストア、読み取り専用のプラグイン、専用の一時領域を公開します。ネットワークとホストの環境変数は共有しません。
+ExtismのHost SDKをホストプロセス内に組み込んで実行します。専用runner、自己再起動、bubblewrapは不要です。WASIを無効にし、プラグインの通信や状態変更は認可済みのホスト関数を経由させます。
 
 ホストは `127.0.0.1` の空きポートで待ち受け、Linuxでは `$XDG_RUNTIME_DIR/ene-host/connection.json` に `endpoint` と `token` を書きます。ディレクトリは0700、ファイルは0600です。トークンは起動ごとに更新し、終了時に接続ファイルを削除します。同じランタイムディレクトリでの二重起動は拒否します。
 
@@ -20,8 +20,6 @@ just run-host
 | `ENE_HOST_STATE_DIR` | SQLite保存先。Linuxの既定値はXDG stateディレクトリ内の `ene` |
 | `ENE_HOST_SESSION_CREDENTIALS` | 設定するとAPIキーをセッション中だけ保持 |
 | `ENE_PLUGIN_DIR` | プラグインの検索ディレクトリ。既定値はアプリのdataディレクトリ内の `plugins` |
-| `ENE_PLUGIN_CACHE_DIR` | 検証したプラグインコードの保存先 |
-| `ENE_PLUGIN_RUNNER_BIN` | 隔離実行するrunner。既定ではホストと同じ配布先・Cargoプロファイル内を探索 |
 | `ENE_WEB_ORIGIN` | ブラウザーセッションで許可するorigin。省略時はホスト自身のorigin |
 
 初期コンパニオンと空の接続設定をSQLiteへ作成します。生成するには接続・資格情報・モデル割当・データ送信許可をAPIで登録します。組み込みプロバイダーはOpenAI Responses APIです。OpenRouter用Wasmは `examples/plugins/openrouter-wasm` をビルドし、manifestと `provider.wasm` をプラグインディレクトリのパッケージに配置します。資格情報はホスト側で付与し、ゲストには渡しません。
@@ -60,16 +58,18 @@ Rig との接続は通信実装の子モジュールに置き、ストリーミ�
 ## 検証
 
 ```sh
-cargo build -p ene-plugin-runner --locked
-cargo test -p ene-host -p ene-platform -p ene-plugin-runtime -p ene-plugin-runner --locked
-cargo clippy -p ene-host -p ene-platform -p ene-plugin-runtime -p ene-plugin-runner --all-targets --all-features --locked -- -D warnings
+cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
+cargo test -p ene-host -p ene-platform -p ene-plugin-runtime --locked
+cargo clippy -p ene-host -p ene-platform -p ene-plugin-runtime --all-targets --all-features --locked -- -D warnings
 ```
 
 実際のRust製Wasmプラグインも検証する場合は、次を追加で実行します。
 
 ```sh
 cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown
-ENE_TEST_PDK_WASM="$PWD/target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm" cargo test --locked -p ene-plugin-runner --test pdk -- --ignored
+ENE_TEST_PDK_WASM="$PWD/target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm" cargo test --locked -p ene-plugin-runtime --test pdk -- --ignored
 ```
 
-会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、隔離runner、ローカルHTTPサーバーを使って認証・取り消し・停止・サイズ制限を検証します。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。有料の外部APIや実機音声エンジンはテストから呼びません。
+会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、組み込みExtism、ローカルHTTPサーバーを使って認証・取り消し・停止・サイズ制限を検証します。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。有料の外部APIや実機音声エンジンはテストから呼びません。
+
+旧Luauプラグインは非対応です。Rust製プラグインは `ene-plugin-sdk` への依存を `ene-plugin` に変更します。既存のExtism/WasmプラグインのJSON契約とエクスポート関数名は維持しています。旧 `ENE_PLUGIN_RUNNER_BIN` / `ENE_PLUGIN_CACHE_DIR` は不要で、旧コードキャッシュを実行時に読みません。

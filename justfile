@@ -16,7 +16,7 @@ check:
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-test: build-plugin-runner
+test: build-test-plugins
     cargo test --workspace --all-features --locked
 
 build:
@@ -33,10 +33,10 @@ fetch-assets asset="all":
 # Re-run tests only when the behavior under test changes.
 verify: fmt-check clippy
 
-build-plugin-runner:
-    cargo build --locked -p ene-plugin-runner
+build-test-plugins:
+    cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
 
-run-host: build-plugin-runner
+run-host:
     cargo run --locked -p ene-host
 
 run-desktop:

@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 #[derive(Parser)]
 #[command(
     about = "ene local host",
-    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. ENE_PLUGIN_DIR overrides the runtime-installable plugin directory. ENE_PLUGIN_RUNNER_BIN overrides the isolated plugin runner executable."
+    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. ENE_PLUGIN_DIR overrides the runtime-installable plugin directory."
 )]
 struct Args {}
 

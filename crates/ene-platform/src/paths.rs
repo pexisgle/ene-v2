@@ -82,6 +82,3 @@ pub fn providers() -> PathBuf {
 pub fn plugins() -> PathBuf {
     data().join("plugins")
 }
-pub fn plugin_code() -> PathBuf {
-    data().join("plugin-code")
-}

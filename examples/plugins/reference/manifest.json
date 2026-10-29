@@ -3,10 +3,43 @@
   "id": "reference",
   "name": "ene reference extensions",
   "version": "1.0.0",
-  "code_files": ["character.luau", "harness.luau", "speech.luau"],
+  "code_files": [
+    "reference.wasm"
+  ],
   "entrypoints": [
-    {"id":"behavior","target":"host","runtime":"luau","file":"character.luau","provides":["character"],"uses":["state","configuration"]},
-    {"id":"harness","target":"host","runtime":"luau","file":"harness.luau","provides":["harness"],"uses":[]},
-    {"id":"speech","target":"host","runtime":"luau","file":"speech.luau","provides":["tts","stt"],"uses":[]}
+    {
+      "id": "behavior",
+      "target": "host",
+      "runtime": "extism",
+      "file": "reference.wasm",
+      "provides": [
+        "character"
+      ],
+      "uses": [
+        "state",
+        "configuration"
+      ]
+    },
+    {
+      "id": "harness",
+      "target": "host",
+      "runtime": "extism",
+      "file": "reference.wasm",
+      "provides": [
+        "harness"
+      ],
+      "uses": []
+    },
+    {
+      "id": "speech",
+      "target": "host",
+      "runtime": "extism",
+      "file": "reference.wasm",
+      "provides": [
+        "tts",
+        "stt"
+      ],
+      "uses": []
+    }
   ]
 }

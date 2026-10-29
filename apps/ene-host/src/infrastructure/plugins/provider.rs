@@ -1,4 +1,4 @@
-//! Reviewed plugin runners use the invocation-scoped host HTTP broker.
+//! Wasm plugins use the invocation-scoped host HTTP broker.
 use super::*;
 use crate::infrastructure::llm::plugin::broker;
 use crate::{
@@ -272,18 +272,14 @@ impl Provider {
             }),
             streams: Mutex::new(BTreeMap::new()),
         });
-        let installed = entry
-            .package
-            .install(&self.manager.cache)
-            .map_err(failure)?;
-        let runner = self.manager.runner.clone();
+        let package = entry.package.clone();
         let cancel = entry.cancellation.child_token();
         let (out, mut output) = mpsc::channel(16);
         self.manager.supervisor.spawn(async move {
             let run=async {
-                let mut worker=Worker::start(installed,entrypoint,&runner,Target::Host,entry.generation,&cancel).await.map_err(failure)?;
+                let mut worker=Instance::load(package,entrypoint,Target::Host,entry.generation,&cancel).await.map_err(failure)?;
                 let (tx,mut rx)=mpsc::channel(16);
-                let execute=worker.invoke(input.id().into(),operation,services.clone(),tx,&cancel);
+                let execute=worker.invoke(operation,services.clone(),tx,&cancel);
                 let forward=async {while let Some(event)=rx.recv().await {out.send(Ok(event)).await.map_err(|_|Error::unavailable())?;}Ok::<_,Error>(())};
                 let (result,forward)=tokio::join!(execute,forward);
                 worker.stop().await;

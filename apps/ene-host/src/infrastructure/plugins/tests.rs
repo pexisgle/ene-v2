@@ -7,26 +7,26 @@ pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
     let package = root.join("reference");
     ene_platform::storage::create_private_dir_all(&package).unwrap();
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/reference");
-    for file in [
-        "manifest.json",
-        "character.luau",
-        "harness.luau",
-        "speech.luau",
-    ] {
-        ene_platform::storage::write_atomic(
-            &package.join(file),
-            &std::fs::read(source.join(file)).unwrap(),
-        )
-        .unwrap();
-    }
+    ene_platform::storage::write_atomic(
+        &package.join("manifest.json"),
+        &std::fs::read(source.join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let wasm = std::env::var_os("ENE_TEST_REFERENCE_WASM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            source.join("../../../target/wasm32-unknown-unknown/release/ene_reference_wasm.wasm")
+        });
+    ene_platform::storage::write_atomic(
+        &package.join("reference.wasm"),
+        &std::fs::read(wasm)
+            .expect("build ene-reference-wasm for wasm32-unknown-unknown before host tests"),
+    )
+    .unwrap();
     let store = Store::open(temp.path().join("host.sqlite3")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
     let mut manager = Manager::discover(store);
     manager.root = root;
-    manager.cache = temp.path().join("cache");
-    manager.runner = std::env::var_os("ENE_PLUGIN_RUNNER_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| ene_platform::sibling_executable("ene-plugin-runner"));
     manager.entries.write().unwrap().clear();
     manager.scan().unwrap();
     (manager, temp, companion)
@@ -54,7 +54,7 @@ fn binding(
     }
 }
 #[tokio::test]
-async fn isolated_character_state_permissions_updates_and_disable() {
+async fn embedded_character_state_permissions_updates_and_disable() {
     let (manager, _temp, companion) = manager().await;
     let revision = manager.entries.read().unwrap()["reference"]
         .package
@@ -171,7 +171,7 @@ async fn isolated_character_state_permissions_updates_and_disable() {
         .await
         .unwrap();
     assert!(manager.invoke(invoke()).await.is_err());
-    assert_eq!(std::fs::read_dir(&manager.cache).unwrap().count(), 0);
+    assert!(manager.sessions.lock().unwrap().is_empty());
 }
 #[tokio::test]
 async fn stale_revisions_undeclared_grants_and_missing_targets_are_rejected() {
@@ -219,7 +219,7 @@ async fn stale_revisions_undeclared_grants_and_missing_targets_are_rejected() {
     b.revision = "old".into();
     assert!(manager.bind(b).await.is_err());
     let package = manager.entries.read().unwrap()["reference"].package.clone();
-    crate::test_support::write(package.root.join("character.luau"), "return {}").unwrap();
+    crate::test_support::write(package.root.join("reference.wasm"), "return {}").unwrap();
     assert_eq!(
         manager
             .list()
@@ -232,7 +232,7 @@ async fn stale_revisions_undeclared_grants_and_missing_targets_are_rejected() {
     assert!(manager.ready("reference", None).is_err());
 }
 #[tokio::test]
-async fn harness_and_speech_share_the_isolated_contract() {
+async fn harness_and_speech_share_the_wasm_contract() {
     let (manager, _temp, companion) = manager().await;
     let revision = manager.entries.read().unwrap()["reference"]
         .package
@@ -449,7 +449,13 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
 
 #[tokio::test]
 async fn failed_starts_release_single_use_and_persistent_slots() {
-    let (mut manager, _temp, companion) = manager().await;
+    let (manager, _temp, companion) = manager().await;
+    ene_platform::storage::write_atomic(
+        &manager.root.join("reference/reference.wasm"),
+        b"invalid wasm",
+    )
+    .unwrap();
+    manager.scan().unwrap();
     manager
         .entries
         .write()
@@ -457,7 +463,7 @@ async fn failed_starts_release_single_use_and_persistent_slots() {
         .get_mut("reference")
         .unwrap()
         .state = "ready".into();
-    manager.runner = PathBuf::from("/missing/ene-plugin-runner");
+
     manager
         .bind(binding(&manager, &companion, "speech", "speech", vec![]))
         .await
@@ -640,8 +646,7 @@ async fn old_invocation_drop_preserves_replacement_cancel_registration() {
 #[cfg(unix)]
 #[tokio::test]
 async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempotent() {
-    use std::os::unix::fs::PermissionsExt;
-    let (mut manager, temp, companion) = manager().await;
+    let (manager, _temp, companion) = manager().await;
     manager
         .entries
         .write()
@@ -649,11 +654,22 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
         .get_mut("reference")
         .unwrap()
         .state = "ready".into();
-    // A real isolated child that consumes Initialize but never sends Ready.
-    let runner = temp.path().join("waiting-runner");
-    crate::test_support::write(&runner, "#!/bin/sh\nread request\nread shutdown\n").unwrap();
-    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
-    manager.runner = runner;
+    let wasm = wat::parse_str(
+        r#"(module
+        (func (export "ene_initialize") (result i32) (loop $forever br $forever) i32.const 0)
+        (func (export "ene_invoke") (result i32) i32.const 0))"#,
+    )
+    .unwrap();
+    ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
+        .unwrap();
+    manager.scan().unwrap();
+    manager
+        .entries
+        .write()
+        .unwrap()
+        .get_mut("reference")
+        .unwrap()
+        .state = "ready".into();
     let binding = binding(&manager, &companion, "task", "harness", vec![]);
     manager.bind(binding.clone()).await.unwrap();
     let other = manager.clone();
@@ -682,7 +698,6 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
                 .await
                 .unwrap()["status"]
                 == "running"
-                && manager.cache.exists()
             {
                 break;
             }
@@ -738,7 +753,7 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
 }
 
 #[tokio::test]
-async fn connect_management_invokes_the_isolated_harness_and_enforces_host_authentication() {
+async fn connect_management_invokes_the_wasm_harness_and_enforces_host_authentication() {
     use crate::api::test_client::ApiClient;
     use connectrpc::ErrorCode;
     let (manager, temp, companion) = manager().await;

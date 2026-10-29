@@ -1,7 +1,6 @@
+pub mod instance;
 pub mod limits;
 pub mod package;
-pub mod transport;
-pub mod worker;
 pub use package::Package;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -13,13 +12,15 @@ pub enum Error {
     Unsupported,
     #[error("permission_required")]
     Denied,
-    #[error("worker_unavailable")]
+    #[error("plugin_unavailable")]
     Unavailable,
-    #[error("invalid_worker_protocol")]
+    #[error("plugin_execution_failed")]
+    Execution,
+    #[error("invalid_plugin_contract")]
     Protocol,
     #[error("cancelled")]
     Cancelled,
-    #[error("worker_deadline_exceeded")]
+    #[error("plugin_deadline_exceeded")]
     Timeout,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

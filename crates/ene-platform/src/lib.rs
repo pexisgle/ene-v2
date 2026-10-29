@@ -1,33 +1,6 @@
 //! Platform boundaries shared by the host, desktop and plugin supervisor.
 pub mod paths;
-pub mod sandbox;
 pub mod storage;
-
-pub fn executable(name: &str) -> String {
-    if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.into()
-    }
-}
-
-/// Locate a sibling in an installed bundle or Cargo's target profile directory.
-pub fn sibling_executable(name: &str) -> std::path::PathBuf {
-    let executable = std::env::current_exe().unwrap_or_default();
-    let sibling = executable.with_file_name(self::executable(name));
-    if sibling.is_file() {
-        return sibling;
-    }
-    executable
-        .ancestors()
-        .find(|path| {
-            path.file_name()
-                .is_some_and(|n| n == "debug" || n == "release")
-        })
-        .map(|path| path.join(self::executable(name)))
-        .filter(|path| path.is_file())
-        .unwrap_or(sibling)
-}
 
 /// Portable package paths use forward slashes, never native device paths.
 pub fn relative(path: &str) -> bool {
@@ -93,6 +66,6 @@ mod tests {
         ] {
             assert!(!super::relative(path), "{path}");
         }
-        assert!(super::relative("日本語/main.luau"));
+        assert!(super::relative("日本語/main.wasm"));
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "ene-plugin-runtime"
-description = "Verified plugin packages and isolated worker supervision"
+description = "Verified WebAssembly plugins embedded through the Extism Host SDK"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,20 +10,16 @@ workspace = true
 [dependencies]
 ene-platform = { path = "../ene-platform" }
 ene-plugin.workspace = true
-remoc.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-util.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 base64 = "0.22"
-uuid = { version = "1", features = ["v4"] }
+extism = { version = "=1.41.0", default-features = false }
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-std", "rt"] }
 tempfile = "3"
 
-[[test]]
-name = "native_process"
-harness = false
+wat = "1"

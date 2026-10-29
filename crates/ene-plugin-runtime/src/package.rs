@@ -1,5 +1,5 @@
 //! Packages are read without executing code. Executable files are captured and installed
-//! into a private, read-only snapshot; large assets are not mounted into workers.
+//! in memory; plugins receive no filesystem access to code or assets.
 use crate::{
     Error, Result,
     limits::{MAX_ASSET_BYTES, MAX_CODE},
@@ -18,34 +18,6 @@ pub struct Package {
     pub manifest: Manifest,
     pub revision: String,
     files: Arc<BTreeMap<String, Vec<u8>>>,
-}
-#[derive(Clone, Debug)]
-pub struct Installed {
-    pub package: Package,
-    pub root: PathBuf,
-    _owner: Arc<SnapshotOwner>,
-}
-#[derive(Debug)]
-struct SnapshotOwner(PathBuf);
-impl Drop for SnapshotOwner {
-    fn drop(&mut self) {
-        fn writable(path: &Path) {
-            if let Ok(items) = std::fs::read_dir(path) {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-                }
-                for item in items.flatten() {
-                    if item.path().is_dir() {
-                        writable(&item.path());
-                    }
-                }
-            }
-        }
-        writable(&self.0);
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 pub fn relative(path: &str) -> bool {
     ene_platform::relative(path)
@@ -83,11 +55,11 @@ fn portable_name(names: &mut BTreeMap<String, (String, bool)>, path: &str) -> Re
     }
     Ok(())
 }
-fn read(root: &Path, path: &str, limit: u64, snapshot: bool) -> Result<Vec<u8>> {
+fn read(root: &Path, path: &str, limit: u64) -> Result<Vec<u8>> {
     if !relative(path) {
         return Err(Error::Invalid);
     }
-    let file = open_code(root, path, snapshot)?;
+    let file = open_code(root, path)?;
     let m = file.metadata()?;
     if !m.is_file() || m.len() > limit {
         return Err(Error::Invalid);
@@ -99,12 +71,7 @@ fn read(root: &Path, path: &str, limit: u64, snapshot: bool) -> Result<Vec<u8>> 
     }
     Ok(bytes)
 }
-fn open_code(root: &Path, path: &str, snapshot: bool) -> Result<std::fs::File> {
-    #[cfg(windows)]
-    if snapshot {
-        return Ok(ene_platform::storage::open_snapshot(root, Some(path))?);
-    }
-    let _ = snapshot;
+fn open_code(root: &Path, path: &str) -> Result<std::fs::File> {
     let mut parent = root.to_path_buf();
     let components: Vec<_> = Path::new(path).components().collect();
     for part in &components[..components.len() - 1] {
@@ -115,21 +82,8 @@ fn open_code(root: &Path, path: &str, snapshot: bool) -> Result<std::fs::File> {
 }
 impl Package {
     pub fn load(root: &Path) -> Result<Self> {
-        Self::load_inner(root, true)
-    }
-    pub fn load_snapshot(root: &Path) -> Result<Self> {
-        Self::load_inner(root, false)
-    }
-    fn load_inner(root: &Path, check_assets: bool) -> Result<Self> {
-        #[cfg(windows)]
-        if !check_assets {
-            ene_platform::storage::open_snapshot(root, None)?;
-        } else {
-            owned(root, true)?;
-        }
-        #[cfg(unix)]
         owned(root, true)?;
-        let raw = read(root, "manifest.json", 65536, !check_assets)?;
+        let raw = read(root, "manifest.json", 65536)?;
         let manifest: Manifest = serde_json::from_slice(&raw)?;
         if manifest.contract_version != CONTRACT_VERSION
             || !identifier(&manifest.id)
@@ -184,7 +138,7 @@ impl Package {
                 return Err(Error::Invalid);
             }
             portable_name(&mut portable_names, path)?;
-            let data = read(root, path, MAX_CODE, !check_assets)?;
+            let data = read(root, path, MAX_CODE)?;
             total += data.len() as u64;
             if total > MAX_CODE {
                 return Err(Error::Invalid);
@@ -200,7 +154,7 @@ impl Package {
             {
                 return Err(Error::Invalid);
             }
-            if check_assets {
+            {
                 let m = std::fs::symlink_metadata(root.join(&asset.path))?;
                 if !m.is_file() || m.file_type().is_symlink() || m.len() != asset.size {
                     return Err(Error::Invalid);
@@ -234,47 +188,6 @@ impl Package {
             .find(|e| e.id == id)
             .ok_or(Error::Unsupported)
     }
-    pub fn install(&self, cache: &Path) -> Result<Installed> {
-        self.verify()?;
-        // Older Linux installations created the cache parent with mode 0755;
-        // individual snapshots still get private directories and frozen code.
-        if cache.exists() {
-            owned(cache, true)?;
-        } else {
-            ene_platform::storage::create_private_dir_all(cache)?;
-        }
-        owned(cache, true)?;
-        let root = cache.join(uuid::Uuid::new_v4().to_string());
-        ene_platform::storage::create_private_dir_all(&root)?;
-        let owner = Arc::new(SnapshotOwner(root.clone()));
-        for (path, data) in self.files.iter() {
-            let file = root.join(path);
-            if let Some(parent) = file.parent() {
-                ene_platform::storage::create_private_dir_all(parent)?;
-            }
-            ene_platform::storage::write_atomic(&file, data)?;
-            ene_platform::storage::freeze(&file, false)?;
-        }
-        fn freeze(path: &Path) -> std::io::Result<()> {
-            for item in std::fs::read_dir(path)? {
-                let p = item?.path();
-                if p.is_dir() {
-                    freeze(&p)?;
-                }
-            }
-            ene_platform::storage::freeze(path, true)
-        }
-        freeze(&root)?;
-        // Verify the bytes that will actually be executed, not just their source names.
-        if Self::load_snapshot(&root)?.revision != self.revision {
-            return Err(Error::Changed);
-        }
-        Ok(Installed {
-            package: self.clone(),
-            root,
-            _owner: owner,
-        })
-    }
     pub fn code(&self, path: &str) -> Result<&[u8]> {
         self.files
             .get(path)
@@ -288,16 +201,16 @@ mod tests {
     #[test]
     fn package_components_reject_case_aliases_and_file_directory_collisions() {
         let mut names = BTreeMap::new();
-        portable_name(&mut names, "code/a.luau").unwrap();
-        portable_name(&mut names, "code/b.luau").unwrap();
-        for path in ["Code/c.luau", "code/A.luau", "code/a.luau/child", "code"] {
+        portable_name(&mut names, "code/a.wasm").unwrap();
+        portable_name(&mut names, "code/b.wasm").unwrap();
+        for path in ["Code/c.wasm", "code/A.wasm", "code/a.wasm/child", "code"] {
             assert!(portable_name(&mut names.clone(), path).is_err(), "{path}");
         }
     }
     fn fixture(dir: &Path) {
         ene_platform::storage::create_private_dir_all(dir).unwrap();
-        ene_platform::storage::write_atomic(&dir.join("main.luau"), b"return {}").unwrap();
-        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":2,"id":"sample","name":"Sample","version":"1","code_files":["main.luau"],"entrypoints":[{"id":"behavior","target":"host","runtime":"luau","file":"main.luau","provides":["character"]}]}).to_string().as_bytes()).unwrap();
+        ene_platform::storage::write_atomic(&dir.join("main.wasm"), b"return {}").unwrap();
+        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":2,"id":"sample","name":"Sample","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"behavior","target":"host","runtime":"extism","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes()).unwrap();
     }
     #[test]
     fn window_subscriptions_require_a_desktop_character_entrypoint_and_service() {
@@ -330,20 +243,11 @@ mod tests {
     fn snapshots_capture_code_and_source_changes_invalidate_revision() {
         let source = tempfile::tempdir().unwrap();
         let source_root = source.path().join("package");
-        let cache_base = tempfile::tempdir().unwrap();
-        let cache = cache_base.path().join("cache");
         fixture(&source_root);
         let package = Package::load(&source_root).unwrap();
-        let installed = package.install(&cache).unwrap();
-        std::fs::write(source_root.join("main.luau"), "return {changed=true}").unwrap();
+        std::fs::write(source_root.join("main.wasm"), "return {changed=true}").unwrap();
         assert!(matches!(package.verify(), Err(Error::Changed)));
-        assert_eq!(
-            Package::load(&installed.root).unwrap().revision,
-            package.revision
-        );
-        let path = installed.root.clone();
-        drop(installed);
-        assert!(!path.exists());
+        assert_eq!(package.code("main.wasm").unwrap(), b"return {}");
     }
     #[test]
     fn module_traversal_and_links_are_rejected() {
@@ -353,13 +257,13 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let source_root = source.path().join("package");
         fixture(&source_root);
-        std::fs::remove_file(source_root.join("main.luau")).unwrap();
+        std::fs::remove_file(source_root.join("main.wasm")).unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink("/etc/passwd", source_root.join("main.luau")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", source_root.join("main.wasm")).unwrap();
         #[cfg(windows)]
         std::fs::hard_link(
             source_root.join("manifest.json"),
-            source_root.join("main.luau"),
+            source_root.join("main.wasm"),
         )
         .unwrap();
         assert!(Package::load(&source_root).is_err());

@@ -1,4 +1,4 @@
-//! Shared LLM configuration and message types for Luau and Wasm plugins.
+//! Shared LLM configuration and message types for Wasm plugins.
 //! The host owns credentials and authorizes every HTTP exchange. Plugins receive
 //! no credential values and cannot choose the grant/purpose attached to a job.
 use serde::{Deserialize, Serialize};

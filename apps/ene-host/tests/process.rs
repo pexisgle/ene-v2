@@ -11,7 +11,6 @@ fn command(root: &Path) -> Command {
         .env("XDG_RUNTIME_DIR", root)
         .env("ENE_HOST_STATE_DIR", root.join("state"))
         .env("ENE_PLUGIN_DIR", root.join("plugins"))
-        .env("ENE_PLUGIN_CACHE_DIR", root.join("cache"))
         .env("ENE_HOST_SESSION_CREDENTIALS", "1")
         .env_remove("ENE_WEB_ORIGIN")
         .stdin(Stdio::null())

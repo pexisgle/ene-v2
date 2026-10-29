@@ -1,5 +1,9 @@
-# Reference plugin fixtures
+# 参照Wasmプラグイン
 
-ホスト・runnerの結合テストで使うLuauプラグインです。キャラクターの状態保存、タスクの要求・結果の受け渡し、音声イベントの順序と契約を検証します。
+状態保存付きキャラクター動作、モデル→ツール→質問のハーネス、音声プロトコルの結合テスト用です。本番の音声認識・合成や自律タスクエンジンではありません。旧Luauの3実装を、同じ操作・イベント契約を持つRust製Extismプラグインへ移しました。
 
-実用の自律エージェントや音声認識・合成エンジンではありません。音声データなどは契約確認用の固定値です。ホストに自動インストール・有効化はされません。
+```sh
+cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
+```
+
+`target/wasm32-unknown-unknown/release/ene_reference_wasm.wasm` を `reference.wasm` としてmanifestの隣に置くと読み込めます。ホストのテストは生成されたWasmを一時パッケージへコピーします。別の出力先を使う場合は `ENE_TEST_REFERENCE_WASM` で指定します。`just test` はこのWasmを先にビルドします。
