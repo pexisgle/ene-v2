@@ -1,0 +1,15 @@
+[package]
+name = "ene-plugin-sdk"
+description = "Typed ene host services for Extism guests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[dependencies]
+ene-plugin.workspace = true
+[target.'cfg(target_family = "wasm")'.dependencies]
+serde = "1"
+serde_json = "1"
+extism-pdk = { version = "=1.4.1", default-features = false }

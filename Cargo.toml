@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/*", "crates/*"]
+members = ["apps/*", "crates/*", "examples/plugins/*"]
 resolver = "3"
 
 [workspace.package]
@@ -13,6 +13,7 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.dependencies]
 ene-rpc = { path = "crates/ene-rpc" }
+ene-plugin = { path = "crates/ene-plugin" }
 async-stream = "0.3"
 axum = "0.8"
 base64 = "0.23"

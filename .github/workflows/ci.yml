@@ -23,6 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          targets: wasm32-unknown-unknown
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -32,6 +34,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Build Wasm plugin
+        run: cargo build --release --locked -p ene-openrouter-wasm -p ene-window-reaction-wasm --target wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test Wasm plugins
+        run: |
+          npm install --no-save --package-lock=false @extism/extism@2.0.0-rc13
+          node examples/plugins/openrouter-wasm/test.cjs target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm
+          node examples/plugins/window-reaction-wasm/test.cjs target/wasm32-unknown-unknown/release/ene_window_reaction_wasm.wasm
       - name: Tests
         run: cargo test --workspace --all-features --locked
       - name: Check Wasm RPC messages
