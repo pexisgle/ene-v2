@@ -24,14 +24,15 @@ mod guest {
                 if !request.preamble.is_empty() {
                     messages.insert(0, json!({"role":"system","content":request.preamble}));
                 }
+                let mut body =
+                    json!({"model":request.model,"stream":true,"max_tokens":request.max_tokens});
+                body["messages"] = Value::Array(messages);
                 (
                     format!(
                         "{}/chat/completions",
                         request.endpoint.trim_end_matches('/')
                     ),
-                    Some(
-                        json!({"model":request.model,"messages":messages,"stream":true,"max_tokens":request.max_tokens}),
-                    ),
+                    Some(body),
                     false,
                 )
             }
@@ -58,13 +59,18 @@ mod guest {
             if !(200..300).contains(&chunk.status) {
                 return Err(extism_pdk::Error::msg("HTTP failure").into());
             }
-            pending.extend(STANDARD.decode(&chunk.data_base64)?);
+            STANDARD.decode_vec(&chunk.data_base64, &mut pending)?;
             if pending.len() > 8 * 1024 * 1024 {
                 return Err(extism_pdk::Error::msg("response limit").into());
             }
             if !models {
-                while let Some(end) = pending.iter().position(|b| *b == b'\n') {
-                    let line = std::str::from_utf8(&pending[..end])?;
+                let mut consumed = 0;
+                while let Some(end) = pending[consumed..].iter().position(|b| *b == b'\n') {
+                    if end > 1024 * 1024 {
+                        return Err(extism_pdk::Error::msg("SSE line limit").into());
+                    }
+                    let end = consumed + end;
+                    let line = std::str::from_utf8(&pending[consumed..end])?;
                     if let Some(data) = line.strip_prefix("data:").map(str::trim)
                         && !data.is_empty()
                     {
@@ -90,8 +96,10 @@ mod guest {
                             }
                         }
                     }
-                    pending.drain(..=end);
+                    consumed = end + 1;
                 }
+                // Compact once per chunk, not once per SSE line.
+                pending.drain(..consumed);
                 if pending.len() > 1024 * 1024 {
                     return Err(extism_pdk::Error::msg("SSE line limit").into());
                 }

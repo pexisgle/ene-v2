@@ -5,14 +5,19 @@ mod api;
 mod manifest;
 mod protocol;
 pub mod provider;
+mod window;
 
 pub use api::{
-    AudioChunk, CharacterAction, CharacterEvent, DesktopCapabilities, DesktopOperation, Event,
-    GenerationRequest, HarnessEvent, HarnessInput, HttpChunk, HttpRequest, LlmCapabilities,
-    Operation, ResourceHandle, ServiceRequest, SpeechInput, ToolDefinition,
+    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, DesktopCapabilities,
+    DesktopOperation, Event, GenerationRequest, HarnessEvent, HarnessInput, HttpChunk, HttpRequest,
+    LlmCapabilities, Operation, ResourceHandle, ServiceRequest, SpeechInput, ToolDefinition,
 };
 pub use manifest::{
     Asset, CONTRACT_VERSION, EntryPoint, Extension, Manifest, ProviderConfiguration, Runtime,
     Service, Target,
 };
 pub use protocol::{Call, Failure, HostMessage, WorkerMessage};
+pub use window::{
+    WindowBounds, WindowCapabilities, WindowEvent, WindowEventKind, WindowId, WindowInfo,
+    WindowSubscription,
+};

@@ -1,48 +1,126 @@
 # ene-plugin
 
-プラグインシステムの共通契約を提供します。manifest、拡張API、ホストとworker間の
-通信契約をここにまとめ、runtime・runner・SDKから同じ型を使います。
-avatar–desktop間の描画通信は [`ene-ipc`](../ene-ipc/) が担当します。
+プラグインのmanifest、拡張API、ホストサービスとworker通信の契約を提供します。
+Rust用SDKは `ene-plugin-sdk`、Luau用型定義は `sdk/luau/ene.d.luau` にあります。
+モデル情報・設定項目は `ene-rpc` の生成型を共有しますが、プラグイン通信にConnect RPCを使う意味ではありません。
 
-定義は内部の `manifest.rs`、`api.rs`、`protocol.rs` にまとめ、`lib.rs` から再公開します。
-パッケージmanifest、拡張の要求・イベント、ホストサービス、`HostMessage`／`WorkerMessage` は
-従来どおりクレート直下から利用できます。`provider` モジュールは認証・ルーティング設定、
-チャットメッセージと共通の生成型を提供します。生成要求はクレート直下の `GenerationRequest` を使います。
+## 現在の実装範囲
 
-このクレートは共通契約型を提供します。実際の通信処理とRemocへの依存は
-プラグインruntime側にまとめ、接続・codec選択・チャネル・送受信を実装します。
-メッセージサイズ、HTTP・音声のチャンクサイズ、イベント数・キュー容量などの制限も
-runtime側で定義・適用し、runnerは同じ設定を使います。
-Rust製runnerもruntime側の通信処理を利用し、SDKは共通契約型を利用します。
-Luau／Wasmのプラグイン本体は実行器のAPIを使います。Luauの実行はmlua、WasmのABIはExtismに任せます。
-manifestのruntimeは `luau` と `extism` の2種類です。このクレートは実行器を実装しません。
+このクレートは型を定義し、実行器や権限管理を実装しません。
+現在の `ene-host` と `ene-desktop` は雛形です。OSイベント取得、購読の認可と配送、
+プラグイン起動、キャンセル、アバターへの動作反映は次段階の実装です。
+`ene-avatar` は `apps/ene-avatar/src/control.rs` のJSON行通信を持ちますが、
+プラグインイベントからその通信への変換はまだありません。
 
-モデル情報・設定項目・Provider能力は [`ene-rpc`](../ene-rpc/) の生成型を直接使います。
-この依存は `host.proto` の共通データ型を共有するためのものです。プラグインruntimeとSDKは
-モデル情報などをそのまま使い、プラグイン通信でConnect RPCのクライアントやサービスを呼び出しません。
-共通型の定義は `host.proto` に一元管理し、別クレートへの切り出しや重複DTO・変換処理を設けません。
-manifestに埋め込むモデル情報もprotobuf JSON形式です。メタデータのフィールド名は
-camelCase、64ビット整数は文字列、任意のリストは `{"values": [...]}` のメッセージで表します。
+## 共通契約
 
-manifestはプラグインシステムの読み込み時にSerdeで契約型へデシリアライズします。
-バージョン、識別子、entrypointの整合性、ファイル参照などの検証はプラグインシステムが担当します。
-検証用のJSON Schemaは生成・出力しません。
+| 定義 | 用途 |
+| --- | --- |
+| `Manifest` / `EntryPoint` | 実行入口、提供する拡張、利用するサービス |
+| `Operation` | ホストからプラグインへの依頼 |
+| `Event` | プラグインからの結果・途中経過 |
+| `ServiceRequest` | プラグインからホストへの機能利用依頼 |
+| `Failure` | ホストサービス呼び出しの失敗 |
+| `HostMessage` / `WorkerMessage` | workerの初期化、呼び出し、サービス応答、キャンセル・終了 |
 
-manifest、拡張API、runner通信の互換性は `CONTRACT_VERSION` の1つで管理します。
-`Manifest`、`HostMessage::Initialize`、`WorkerMessage::Ready` は共通の `contract_version` を使い、
-runtimeはmanifestの読み込み時とrunner接続時に対応する値との一致を検証します。
-互換性を壊す契約変更ではこの番号を更新します。`Manifest.version` はプラグイン自体の
-リリース番号として別に管理します。
+runtimeは `extism` と `luau` を宣言できます。WasmのABIはExtismが担当します。
+共通型はクレート直下から利用できます。内部ファイルは `manifest.rs`、`api.rs`、`window.rs`、`protocol.rs` です。
+`provider` は認証方式、ルーティング設定、チャットメッセージを提供します。
+HTTPは `HttpOpen` / `HttpRead` / `HttpClose` で依頼し、認証情報と通信の認可はホスト側で管理する設計です。
+manifestの参照ファイル検証、通信の接続・codec・サイズ制限も実行基盤の責務です。
+worker通信のメッセージ型は定義済みで、実際の送受信は実行基盤が担当します。
+現在のWasmサンプルはExtismの関数呼び出しと `ene_service` / `ene_emit` を使います。
 
-runnerの制御は `HostMessage`、イベント・サービス要求・完了通知は `WorkerMessage` で渡します。
-HTTPは `ServiceRequest` の `HttpOpen`／`HttpRead`／`HttpClose` を使い、認可と資格情報は
-ホストが管理します。キャンセルと終了は `HostMessage::Cancel`／`Shutdown` で要求します。
+## 他アプリのウィンドウイベント
 
-manifestの読み込み・検証、権限の判定、Luau／Wasmの実行、runner通信、キャンセル・終了の
-実際の振る舞いはプラグインruntime側でテストします。この共通契約クレートでは、
-SerdeやRemocの動作を再確認する単体テストを持ちません。
+購読はentrypointの `window_events` に宣言します。
+
+```json
+{
+  "id": "character",
+  "target": "desktop",
+  "runtime": "extism",
+  "file": "reaction.wasm",
+  "provides": ["character"],
+  "uses": ["window_events"],
+  "window_events": [{
+    "applications": ["Code.exe"],
+    "events": ["focused"],
+    "include_title": false
+  }]
+}
+```
+
+`applications` は端末アダプターが示すアプリ識別子の完全一致です。タイトルの部分一致や
+ワイルドカードではありません。空配列は購読なしです。複数の購読はOR条件、同じ購読内の
+アプリ条件とイベント条件はAND条件で、同一バインディングへの重複配送はしません。
+
+`WindowEventKind` は出現・終了・フォーカス取得／喪失・移動・サイズ変更・最小化・復元を表します。
+アプリ内部のボタンクリックやファイル保存は対象外です。
+購読開始前の状態の再送は要求せず、開始後の変化を通知します。
+
+イベントは `Operation::Character { target, event: CharacterEvent::Window { event } }` で渡します。
+`WindowId` の `device_id`、`generation`、`id` を合わせて識別し、ネイティブハンドルは渡しません。
+同じ接続世代内で終了済みウィンドウのIDを再利用しないことをアダプターに要求します。
+`sequence` は端末の接続世代内で単調増加し、配送側が古い世代・重複・逆順の通知を破棄します。
+購読による絞り込みで番号が飛ぶことは正常です。切断・権限取消・無効化時は購読と待機中の配送を停止します。
+
+`WindowInfo.bounds` はデスクトップ全体を基準とする物理ピクセルです。左側のモニター等では負座標になり得ます。
+ene-avatarの論理座標へそのまま渡さず、対象モニターの原点とDPIを使って変換します。
+取得不能な座標・タイトルは `None`（JSONでは省略）です。終了イベントは最後に確認した情報でも構いません。
+
+`DesktopCapabilities.windows` は実際に取得できるイベント、タイトル、座標の有無を示します。
+未指定時はすべて未対応です。OS名だけで対応を仮定せず、能力情報を用いて購読可否を判断します。
+Wayland等で非対応の場合は明示的に利用不可とし、黙って別の監視手段へ切り替えません。
+
+## 動作の対象と認可
+
+`CharacterTarget { device_id, character_id }` で動作対象を明示します。
+`Operation::Character`、`Event::Character`、`ServiceRequest::Character`、`DesktopOperation::Avatar`
+が同じ対象型を使います。拡張の出力は `emit(Event::Character { target, action })`、
+ホストへ依頼して結果・失敗を受け取る場合は `service(ServiceRequest::Character { target, action })`、
+端末サービスとしての操作は `ServiceRequest::Desktop` 内の `DesktopOperation::Avatar` を使います。
+通知・要求応答・端末サービスの契約は異なります。実際の動作の実装まで三重に持つ意味ではありません。
+表情・モーション・発話の定義があっても、レンダラーがすべてを実行できるという意味ではありません。
+
+実行基盤は次を検証する必要があります。このクレートやSDKが自動で強制するものではありません。
+
+- `window_events` は `target: desktop`、`provides: character`、`uses: window_events` の入口に限定する。
+- manifestの宣言は要求であり許可ではない。端末とバインディングに対する許可を別途検証する。
+- アプリ・イベントの購読条件と実際のOS能力を検証してから配送する。タイトルは要求と許可の両方がある場合だけ渡す。
+- `target` は許可されたバインディングから決める。返された対象も照合し、別端末・別キャラクターへの操作を拒否する。
+- 世代・呼び出しの有効性を確認し、終了済み・取り消し済みの呼び出しからの動作を実行しない。
+- モーションのassetは検証済みmanifest内の資産へ解決し、任意ホストパスとして開かない。
+- 移動等の大量イベントに対するキュー上限・集約は実行基盤で設ける。
+
+ウィンドウを見る権限は `window_events` です。クリップボードや画面取得の権限を含みません。
+ホストサービス経由では `character_actions` または `desktop` の許可も確認します。
+キャラクター拡張の結果としての動作は、許可されたバインディングの対象に限ります。
+
+## バージョンと移行
+
+`CONTRACT_VERSION` は **2** です。manifest、拡張API、worker通信の共通互換性番号で、
+プラグイン自身の `Manifest.version` とは独立しています。実行基盤は読込時と接続時に一致を検証してください。
+
+バージョン1からは、manifestの `contract_version` を2にし、上記四つのキャラクター関連メッセージに
+`target` を追加してください。対象を推測する互換フォールバックは設けません。
+LLMの要求・イベント形状は変更していませんが、共通契約番号は更新します。
+新しい購読宣言は省略可能で、既存プラグインを勝手に購読させません。
+音声・ハーネス・デスクトップ操作やworker通信の型も維持しています。
+型の定義と実行機能の完成は別です。未実装の機能を利用可能と扱わないでください。
+
+モデル情報は引き続きprotobuf JSON形式です。メタデータのフィールド名はcamelCase、
+64ビット整数は文字列、任意のリストは `{"values": [...]}` です。
+ウィンドウ契約は通常のSerde JSONで、フィールド名はsnake_case、整数はJSON数値です。
+Luau/JavaScriptでも扱えるよう、実行基盤は世代・シーケンス値を安全な整数範囲内に保ってください。
+
+## サンプルと検証
+
+[ウィンドウ反応サンプル](../../examples/plugins/window-reaction-wasm/) は模擬入力から
+実際のWasm・SDKを通じて対象付き表情イベントを返します。Extismの結合テストをCIで実行します。
+[OpenRouterサンプル](../../examples/plugins/openrouter-wasm/) はHTTPとストリーミングの例です。
 
 ```sh
-cargo check --locked -p ene-plugin --all-targets --all-features
-cargo clippy --locked -p ene-plugin --all-targets --all-features -- -D warnings
+cargo check --locked -p ene-plugin -p ene-plugin-sdk --all-targets --all-features
+cargo clippy --locked -p ene-plugin -p ene-plugin-sdk -p ene-window-reaction-wasm --all-targets --all-features -- -D warnings
 ```

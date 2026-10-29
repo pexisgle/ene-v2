@@ -7,30 +7,32 @@ pub use extism_pdk::{self, FnResult, Json, plugin_fn};
 mod guest {
     use super::*;
     use extism_pdk::*;
+    use serde::de::DeserializeOwned;
     use serde_json::Value;
     #[host_fn]
     extern "ExtismHost" {
-        fn ene_service(request: String) -> String;
-        fn ene_emit(event: String);
+        fn ene_service<T: DeserializeOwned>(
+            request: Json<ServiceRequest>,
+        ) -> Json<Result<T, Failure>>;
+        fn ene_emit(event: Json<Event>);
+    }
+    /// Decode the host response directly into its expected type.
+    fn service_result<T: DeserializeOwned>(request: ServiceRequest) -> FnResult<T> {
+        let Json(result) = unsafe { ene_service(Json(request))? };
+        Ok(result.map_err(|e| extism_pdk::Error::msg(format!("{}: {}", e.code, e.message)))?)
     }
     pub fn service(request: ServiceRequest) -> FnResult<Value> {
-        let result = unsafe { ene_service(serde_json::to_string(&request)?)? };
-        let result: Result<Value, Failure> = serde_json::from_str(&result)?;
-        Ok(result.map_err(|e| extism_pdk::Error::msg(e.code))?)
+        service_result(request)
     }
     pub fn emit(event: Event) -> FnResult<()> {
-        unsafe { ene_emit(serde_json::to_string(&event)?)? };
+        unsafe { ene_emit(Json(event))? };
         Ok(())
     }
     pub fn http_open(request: HttpRequest) -> FnResult<HttpChunk> {
-        Ok(serde_json::from_value(service(
-            ServiceRequest::HttpOpen { request },
-        )?)?)
+        service_result(ServiceRequest::HttpOpen { request })
     }
     pub fn http_read(handle: String) -> FnResult<HttpChunk> {
-        Ok(serde_json::from_value(service(
-            ServiceRequest::HttpRead { handle },
-        )?)?)
+        service_result(ServiceRequest::HttpRead { handle })
     }
     pub fn http_close(handle: String) -> FnResult<Value> {
         service(ServiceRequest::HttpClose { handle })

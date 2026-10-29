@@ -2253,6 +2253,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-window-reaction-wasm"
+version = "0.1.0"
+dependencies = [
+ "ene-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
