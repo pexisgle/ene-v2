@@ -8,7 +8,7 @@ return {
             if type(count) ~= "number" then count = 0 end
             count += 1
             ene.service({type="state_write", key="visits", value=count})
-            ene.emit({type="character", action={type="expression", name="happy", duration_ms=1500}})
+            ene.emit({type="character", target=operation.target, action={type="expression", name="happy", duration_ms=1500}})
             return {visits=count}
         end
         return {}

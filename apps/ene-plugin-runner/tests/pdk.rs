@@ -17,6 +17,13 @@ impl Services for HttpFixture {
     }
     fn handle(&self, request: ServiceRequest) -> BoxFuture<'_, Result<Value, Failure>> {
         Box::pin(async move {
+            if let ServiceRequest::HttpClose { handle } = &request {
+                assert_eq!(handle, "stream");
+                let mut chunks = self.0.lock().await;
+                assert_eq!(*chunks, VecDeque::from([vec![]]));
+                chunks.clear();
+                return Ok(json!({}));
+            }
             assert!(matches!(
                 request,
                 ServiceRequest::HttpOpen { .. } | ServiceRequest::HttpRead { .. }
@@ -104,12 +111,13 @@ async fn reference_pdk_models_split_utf8_streaming_and_shutdown() {
             .invoke(
                 if models { "models" } else { "generate" }.into(),
                 operation,
-                services,
+                services.clone(),
                 events,
                 &cancel,
             )
             .await
             .unwrap();
+        assert!(services.0.lock().await.is_empty());
         let mut output = Vec::new();
         while let Some(event) = received.recv().await {
             output.push(event)

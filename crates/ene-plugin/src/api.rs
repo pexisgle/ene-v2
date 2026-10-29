@@ -36,11 +36,23 @@ pub struct LlmCapabilities {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    ListModels { endpoint: String, options: Value },
-    Generate { request: GenerationRequest },
-    Character { event: CharacterEvent },
-    Harness { input: HarnessInput },
-    Speech { input: SpeechInput },
+    ListModels {
+        endpoint: String,
+        options: Value,
+    },
+    Generate {
+        request: GenerationRequest,
+    },
+    Character {
+        target: CharacterTarget,
+        event: CharacterEvent,
+    },
+    Harness {
+        input: HarnessInput,
+    },
+    Speech {
+        input: SpeechInput,
+    },
 }
 impl Operation {
     pub fn extension(&self) -> Extension {
@@ -64,6 +76,7 @@ pub enum CharacterEvent {
     ConversationFinished { text: String },
     TaskChanged { task_id: String, state: String },
     Timer { id: String },
+    Window { event: crate::WindowEvent },
     Custom { name: String, data: Value },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,6 +85,13 @@ pub enum CharacterAction {
     Speak { text: String },
     Expression { name: String, duration_ms: u32 },
     Motion { asset: String, duration_ms: u32 },
+}
+/// Explicit routing target; the host must authorize it against the binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterTarget {
+    pub device_id: String,
+    pub character_id: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -153,6 +173,7 @@ pub enum Event {
         reason: String,
     },
     Character {
+        target: CharacterTarget,
         action: CharacterAction,
     },
     Harness {
@@ -201,17 +222,40 @@ pub struct HttpChunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServiceRequest {
-    Log { message: String },
+    Log {
+        message: String,
+    },
     Configuration,
-    StateRead { key: String },
-    StateWrite { key: String, value: Value },
-    HttpOpen { request: HttpRequest },
-    HttpRead { handle: String },
-    HttpClose { handle: String },
-    Models { request: GenerationRequest },
-    Tool { name: String, arguments: Value },
-    Character { action: CharacterAction },
-    Desktop { operation: DesktopOperation },
+    StateRead {
+        key: String,
+    },
+    StateWrite {
+        key: String,
+        value: Value,
+    },
+    HttpOpen {
+        request: HttpRequest,
+    },
+    HttpRead {
+        handle: String,
+    },
+    HttpClose {
+        handle: String,
+    },
+    Models {
+        request: GenerationRequest,
+    },
+    Tool {
+        name: String,
+        arguments: Value,
+    },
+    Character {
+        target: CharacterTarget,
+        action: CharacterAction,
+    },
+    Desktop {
+        operation: DesktopOperation,
+    },
 }
 impl ServiceRequest {
     pub fn service(&self) -> Service {
@@ -241,6 +285,7 @@ pub enum DesktopOperation {
     SelectFile,
     CaptureScreen,
     Avatar {
+        target: CharacterTarget,
         action: CharacterAction,
     },
     ReadResource {
@@ -266,4 +311,6 @@ pub struct DesktopCapabilities {
     pub device_id: String,
     pub generation: u64,
     pub services: Vec<String>,
+    #[serde(default)]
+    pub windows: crate::WindowCapabilities,
 }

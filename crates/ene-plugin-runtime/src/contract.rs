@@ -20,6 +20,7 @@ pub struct Events {
     terminal: bool,
     count: u64,
     speech: Option<(String, u64)>,
+    character: Option<CharacterTarget>,
     audio_sequence: u64,
 }
 impl Events {
@@ -47,6 +48,10 @@ impl Events {
             terminal: false,
             count: 0,
             speech,
+            character: match operation {
+                Operation::Character { target, .. } => Some(target.clone()),
+                _ => None,
+            },
             audio_sequence: 0,
         }
     }
@@ -58,6 +63,9 @@ impl Events {
             return Err(Error::Protocol);
         }
         match event {
+            Event::Character { target, .. } if self.character.as_ref() != Some(target) => {
+                return Err(Error::Protocol);
+            }
             Event::Finished { reason } => {
                 if reason.is_empty() || reason.len() > 128 {
                     return Err(Error::Protocol);
@@ -110,6 +118,37 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn character_events_cannot_change_the_authorized_target() {
+        let target = CharacterTarget {
+            device_id: "device".into(),
+            character_id: "character".into(),
+        };
+        let mut events = Events::new(&Operation::Character {
+            target: target.clone(),
+            event: CharacterEvent::Activated,
+        });
+        let event = |target| Event::Character {
+            target,
+            action: CharacterAction::Speak {
+                text: "hello".into(),
+            },
+        };
+        for other in [
+            CharacterTarget {
+                device_id: "other".into(),
+                ..target.clone()
+            },
+            CharacterTarget {
+                character_id: "other".into(),
+                ..target.clone()
+            },
+        ] {
+            assert!(events.accept(&event(other)).is_err());
+        }
+        events.accept(&event(target)).unwrap();
+    }
+
     #[test]
     fn speech_generations_sequences_and_terminal_state_are_checked() {
         let operation = Operation::Speech {

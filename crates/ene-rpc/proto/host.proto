@@ -138,6 +138,8 @@ message EnablePluginRequest { string id = 1; bool enabled = 2; string revision =
 message PluginBinding {
   string id = 1; string plugin_id = 2; string entrypoint = 3; string revision = 4;
   string companion_id = 5; repeated string services = 6; JsonDocument configuration = 7;
+  // Required for character entrypoints; actions are scoped to this device and companion_id.
+  string device_id = 8;
 }
 message PluginBindings { repeated PluginBinding items = 1; }
 message PluginInvocation { string binding_id = 1; JsonDocument operation = 2; }

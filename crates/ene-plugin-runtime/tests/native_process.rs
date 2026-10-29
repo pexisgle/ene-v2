@@ -75,6 +75,10 @@ async fn verify() {
     .await
     .unwrap();
     let operation = Operation::Character {
+        target: CharacterTarget {
+            device_id: "device".into(),
+            character_id: "character".into(),
+        },
         event: CharacterEvent::Custom {
             name: "echo".into(),
             data: json!({"text": "日本語🙂"}),
@@ -103,6 +107,10 @@ async fn verify() {
         worker.invoke(
             "blocked".into(),
             Operation::Character {
+                target: CharacterTarget {
+                    device_id: "device".into(),
+                    character_id: "character".into(),
+                },
                 event: CharacterEvent::Custom {
                     name: "wait".into(),
                     data: json!({}),

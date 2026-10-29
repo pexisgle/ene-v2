@@ -9,8 +9,8 @@ use crate::{
     domain::{Error, ErrorKind},
     ports::{Result, plugin::Plugins},
 };
-use ene_plugin::Target;
 use ene_plugin::{CharacterAction, Event, Failure, Operation, ServiceRequest};
+use ene_plugin::{Extension, Target};
 use ene_plugin_runtime::{
     Package,
     limits::{MAX_EVENTS, MAX_MESSAGE_BYTES},
@@ -417,8 +417,20 @@ impl Manager {
         ) {
             return Err(unsupported());
         }
+        if let Operation::Character { target, event } = &operation {
+            if target.device_id != binding.device_id
+                || target.character_id != binding.companion_id
+                || !ene_plugin_runtime::package::identifier(&target.device_id)
+            {
+                return Err(Error::new(ErrorKind::PermissionRequired));
+            }
+            if matches!(event, ene_plugin::CharacterEvent::Window { .. }) {
+                return Err(unsupported());
+            }
+        }
         if let Operation::Character {
             event: ene_plugin::CharacterEvent::Custom { name, .. },
+            ..
         } = &operation
             && (!name.starts_with(&format!("{}:", binding.plugin_id)) || name.len() > 160)
         {
@@ -527,7 +539,8 @@ impl Manager {
         let stopping = matches!(
             operation,
             Operation::Character {
-                event: ene_plugin::CharacterEvent::Deactivated
+                event: ene_plugin::CharacterEvent::Deactivated,
+                ..
             } | Operation::Harness {
                 input: ene_plugin::HarnessInput::Cancel
             }
@@ -742,6 +755,8 @@ impl Plugins for Manager {
             let endpoint = entry.package.entry(&input.entrypoint).map_err(failure)?;
             if !ene_plugin_runtime::package::identifier(&input.id)
                 || endpoint.target != Target::Host
+                || endpoint.provides.contains(&Extension::Character)
+                    && !ene_plugin_runtime::package::identifier(&input.device_id)
                 || input
                     .services
                     .iter()
@@ -883,6 +898,7 @@ fn validate_event(event: &Event) -> Result<()> {
     match event {
         Event::Character {
             action: CharacterAction::Speak { text },
+            ..
         } if text.len() > 16384 => Err(Error::invalid()),
         Event::Character {
             action:
@@ -891,6 +907,7 @@ fn validate_event(event: &Event) -> Result<()> {
                     asset: name,
                     duration_ms,
                 },
+            ..
         } if name.len() > 128 || *duration_ms > 60000 => Err(Error::invalid()),
         Event::Audio { chunk }
             if chunk.channels == 0

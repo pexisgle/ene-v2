@@ -137,6 +137,10 @@ impl HostApplication {
                                 operation: ene_rpc::JsonDocument {
                                     json: serde_json::to_string(
                                         &ene_plugin::Operation::Character {
+                                            target: ene_plugin::CharacterTarget {
+                                                device_id: binding.device_id.clone(),
+                                                character_id: binding.companion_id.clone(),
+                                            },
                                             event: event.clone(),
                                         },
                                     )

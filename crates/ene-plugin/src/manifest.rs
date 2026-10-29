@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Shared compatibility version for manifests, extension APIs and worker messages.
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +34,7 @@ pub enum Extension {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Service {
+    WindowEvents,
     Log,
     Configuration,
     State,
@@ -71,6 +72,9 @@ pub struct EntryPoint {
     pub provides: Vec<Extension>,
     #[serde(default)]
     pub uses: Vec<Service>,
+    /// Desktop character entrypoints only; requires the WindowEvents service grant.
+    #[serde(default)]
+    pub window_events: Vec<crate::WindowSubscription>,
     #[serde(default)]
     pub provider: Option<ProviderConfiguration>,
 }

@@ -1,5 +1,5 @@
 use super::*;
-use ene_plugin::{CharacterEvent, HarnessInput, Service};
+use ene_plugin::{CharacterEvent, CharacterTarget, HarnessInput, Service};
 pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("plugins");
@@ -47,6 +47,7 @@ fn binding(
             .revision
             .clone(),
         companion_id: companion.into(),
+        device_id: "device".into(),
         services: services.into_iter().map(name).collect(),
         configuration: document(json!({})).into(),
         ..Default::default()
@@ -91,6 +92,10 @@ async fn isolated_character_state_permissions_updates_and_disable() {
         binding_id: b.id.clone(),
         operation: document(
             serde_json::to_value(Operation::Character {
+                target: CharacterTarget {
+                    device_id: "device".into(),
+                    character_id: companion.clone(),
+                },
                 event: CharacterEvent::Activated,
             })
             .unwrap(),
@@ -98,6 +103,30 @@ async fn isolated_character_state_permissions_updates_and_disable() {
         .into(),
         ..Default::default()
     };
+    for target in [
+        CharacterTarget {
+            device_id: "other".into(),
+            character_id: companion.clone(),
+        },
+        CharacterTarget {
+            device_id: "device".into(),
+            character_id: "other".into(),
+        },
+    ] {
+        let mut request = invoke();
+        request.operation = document(
+            serde_json::to_value(Operation::Character {
+                target,
+                event: CharacterEvent::Activated,
+            })
+            .unwrap(),
+        )
+        .into();
+        assert_eq!(
+            manager.invoke(request).await.err().unwrap().kind,
+            ErrorKind::PermissionRequired
+        );
+    }
     assert_eq!(
         serde_json::from_str::<Value>(manager.invoke(invoke()).await.unwrap().result.json.as_str())
             .unwrap()["visits"],
@@ -346,7 +375,7 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
         let package = manager.root.join("wasm");
         crate::test_support::create_directory(&package).unwrap();
         crate::test_support::write(package.join("main.wasm"), code).unwrap();
-        crate::test_support::write(package.join("manifest.json"),json!({"contract_version":1,"id":"wasm-fixture","name":"Wasm fixture","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"llm","target":"host","runtime":"extism","file":"main.wasm","provides":["llm"],"uses":["http"],"provider":{"id":"wasm-fixture","endpoint":endpoint,"auth":{"type":"none"},"destinations":[endpoint]}}]}).to_string()).unwrap();
+        crate::test_support::write(package.join("manifest.json"),json!({"contract_version":2,"id":"wasm-fixture","name":"Wasm fixture","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"llm","target":"host","runtime":"extism","file":"main.wasm","provides":["llm"],"uses":["http"],"provider":{"id":"wasm-fixture","endpoint":endpoint,"auth":{"type":"none"},"destinations":[endpoint]}}]}).to_string()).unwrap();
         manager.scan().unwrap();
         let revision = manager.entries.read().unwrap()["wasm-fixture"]
             .package
@@ -465,6 +494,7 @@ async fn failed_starts_release_single_use_and_persistent_slots() {
             PluginInvocation {
                 binding_id: "behavior".into(),
                 operation: document(serde_json::to_value(Operation::Character {
+                target: CharacterTarget { device_id: "device".into(), character_id: companion.clone() },
                     event: CharacterEvent::Activated,
                 })
                 .unwrap()).into(),

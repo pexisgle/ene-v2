@@ -25,7 +25,7 @@ impl Runner {
             "main.wasm"
         };
         ene_platform::storage::write_atomic(&root.join(file), code).unwrap();
-        ene_platform::storage::write_atomic(&root.join("manifest.json"),json!({"contract_version":1,"id":"test","name":"Test","version":"1","code_files":[file],"entrypoints":[{"id":"main","file":file,"runtime":runtime,"target":"host","provides":["character","harness","tts","stt"],"uses":["state","http"]}]}).to_string().as_bytes()).unwrap();
+        ene_platform::storage::write_atomic(&root.join("manifest.json"),json!({"contract_version":2,"id":"test","name":"Test","version":"1","code_files":[file],"entrypoints":[{"id":"main","file":file,"runtime":runtime,"target":"host","provides":["character","harness","tts","stt"],"uses":["state","http"]}]}).to_string().as_bytes()).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_ene-plugin-runner"))
             .arg("--package")
             .arg(root)
@@ -94,15 +94,19 @@ impl Runner {
 }
 fn character() -> Operation {
     Operation::Character {
+        target: CharacterTarget {
+            device_id: "device".into(),
+            character_id: "character".into(),
+        },
         event: CharacterEvent::Activated,
     }
 }
 #[tokio::test]
 async fn luau_awaits_service_and_resumes_ordered_events() {
     let code = br#"return {initialize=function() return {} end,invoke=function(op)
-        assert(ene.contract_version == 1)
+        assert(ene.contract_version == 2)
         local visits=ene.service({type="state_read",key="visits"})
-        ene.emit({type="character",action={type="speak",text=tostring(visits)}})
+        ene.emit({type="character",target=op.target,action={type="speak",text=tostring(visits)}})
         return {visits=visits}
     end}"#;
     let mut r = Runner::start(code, Runtime::Luau).await;
@@ -124,7 +128,7 @@ async fn luau_awaits_service_and_resumes_ordered_events() {
         .await
         .unwrap();
     assert!(
-        matches!(r.receive().await,WorkerMessage::Event {sequence:0,event:Event::Character {action:CharacterAction::Speak {text}},..} if text=="7")
+        matches!(r.receive().await,WorkerMessage::Event {sequence:0,event:Event::Character {action:CharacterAction::Speak {text},..},..} if text=="7")
     );
     assert!(matches!(r.receive().await,WorkerMessage::Complete {result,..} if result["visits"]==7));
     r.stop().await;
@@ -254,8 +258,8 @@ async fn harness_reference_retains_task_state_and_checks_operation_ids() {
 
 #[tokio::test]
 async fn output_backpressure_preserves_event_order() {
-    let code = br#"return {initialize=function() return {} end,invoke=function()
-        for i=1,1000 do ene.emit({type="character",action={type="speak",text=tostring(i)}}) end
+    let code = br#"return {initialize=function() return {} end,invoke=function(op)
+        for i=1,1000 do ene.emit({type="character",target=op.target,action={type="speak",text=tostring(i)}}) end
         return {}
     end}"#;
     let mut r = Runner::start(code, Runtime::Luau).await;

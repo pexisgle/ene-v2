@@ -154,6 +154,10 @@ impl Package {
                 || e.provides.is_empty()
                 || e.provides.len() > 6
                 || e.uses.len() > 8
+                || (!e.window_events.is_empty() || e.uses.contains(&Service::WindowEvents))
+                    && (e.target != Target::Desktop
+                        || !e.provides.contains(&Extension::Character)
+                        || !e.uses.contains(&Service::WindowEvents))
                 || e.provides.iter().collect::<BTreeSet<_>>().len() != e.provides.len()
                 || e.uses.iter().collect::<BTreeSet<_>>().len() != e.uses.len()
             {
@@ -293,8 +297,35 @@ mod tests {
     fn fixture(dir: &Path) {
         ene_platform::storage::create_private_dir_all(dir).unwrap();
         ene_platform::storage::write_atomic(&dir.join("main.luau"), b"return {}").unwrap();
-        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":1,"id":"sample","name":"Sample","version":"1","code_files":["main.luau"],"entrypoints":[{"id":"behavior","target":"host","runtime":"luau","file":"main.luau","provides":["character"]}]}).to_string().as_bytes()).unwrap();
+        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":2,"id":"sample","name":"Sample","version":"1","code_files":["main.luau"],"entrypoints":[{"id":"behavior","target":"host","runtime":"luau","file":"main.luau","provides":["character"]}]}).to_string().as_bytes()).unwrap();
     }
+    #[test]
+    fn window_subscriptions_require_a_desktop_character_entrypoint_and_service() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        fixture(&root);
+        let path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["entrypoints"][0]["window_events"] = serde_json::json!([{
+            "applications": ["editor"], "events": ["focused"]
+        }]);
+        let write = |manifest: &serde_json::Value| {
+            ene_platform::storage::write_atomic(&path, manifest.to_string().as_bytes()).unwrap();
+        };
+        write(&manifest);
+        assert!(Package::load(&root).is_err());
+        manifest["entrypoints"][0]["uses"] = serde_json::json!(["window_events"]);
+        write(&manifest);
+        assert!(Package::load(&root).is_err());
+        manifest["entrypoints"][0]["target"] = serde_json::json!("desktop");
+        write(&manifest);
+        Package::load(&root).unwrap();
+        manifest["entrypoints"][0]["provides"] = serde_json::json!(["harness"]);
+        write(&manifest);
+        assert!(Package::load(&root).is_err());
+    }
+
     #[test]
     fn snapshots_capture_code_and_source_changes_invalidate_revision() {
         let source = tempfile::tempdir().unwrap();
