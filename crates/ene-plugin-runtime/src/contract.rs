@@ -4,10 +4,9 @@ use crate::{
     limits::{MAX_CHUNK, MAX_STREAM_EVENTS},
 };
 use ene_plugin::*;
-/// Bound guest service payloads and resource reads before invoking host services.
+/// Bound resource reads; the Wasm boundary checks serialized payload sizes.
 pub fn service_request(request: &ServiceRequest) -> Result<()> {
-    if serde_json::to_vec(request)?.len() > MAX_CHUNK
-        || matches!(request, ServiceRequest::Desktop {
+    if matches!(request, ServiceRequest::Desktop {
             operation: DesktopOperation::ReadResource { length, .. }
         } if *length as usize > MAX_CHUNK)
     {
@@ -56,9 +55,6 @@ impl Events {
         }
     }
     pub fn accept(&mut self, event: &Event) -> Result<()> {
-        if serde_json::to_vec(event)?.len() > MAX_CHUNK {
-            return Err(Error::Protocol);
-        }
         if self.terminal || self.count >= MAX_STREAM_EVENTS || event.extension() != self.extension {
             return Err(Error::Protocol);
         }
@@ -66,6 +62,19 @@ impl Events {
             Event::Character { target, .. } if self.character.as_ref() != Some(target) => {
                 return Err(Error::Protocol);
             }
+            Event::Character {
+                action: CharacterAction::Speak { text },
+                ..
+            } if text.len() > 16384 => return Err(Error::Protocol),
+            Event::Character {
+                action:
+                    CharacterAction::Expression { name, duration_ms }
+                    | CharacterAction::Motion {
+                        asset: name,
+                        duration_ms,
+                    },
+                ..
+            } if name.len() > 128 || *duration_ms > 60000 => return Err(Error::Protocol),
             Event::Finished { reason } => {
                 if reason.is_empty() || reason.len() > 128 {
                     return Err(Error::Protocol);
@@ -118,6 +127,56 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn character_action_limits_are_enforced_by_the_runtime() {
+        let target = CharacterTarget {
+            device_id: "device".into(),
+            character_id: "character".into(),
+        };
+        let mut events = Events::new(&Operation::Character {
+            target: target.clone(),
+            event: CharacterEvent::Activated,
+        });
+        for action in [
+            CharacterAction::Speak {
+                text: "a".repeat(16385),
+            },
+            CharacterAction::Expression {
+                name: "a".repeat(129),
+                duration_ms: 1,
+            },
+            CharacterAction::Motion {
+                asset: "a".repeat(129),
+                duration_ms: 1,
+            },
+            CharacterAction::Expression {
+                name: "happy".into(),
+                duration_ms: 60001,
+            },
+            CharacterAction::Motion {
+                asset: "wave".into(),
+                duration_ms: 60001,
+            },
+        ] {
+            assert!(
+                events
+                    .accept(&Event::Character {
+                        target: target.clone(),
+                        action
+                    })
+                    .is_err()
+            );
+        }
+        events
+            .accept(&Event::Character {
+                target,
+                action: CharacterAction::Expression {
+                    name: "a".repeat(128),
+                    duration_ms: 60000,
+                },
+            })
+            .unwrap();
+    }
     #[test]
     fn character_events_cannot_change_the_authorized_target() {
         let target = CharacterTarget {

@@ -1,16 +1,17 @@
 use crate::{
     api::state::App,
     infrastructure::{
+        paths,
         runtime::{self, Runtime},
         sqlite::Store,
     },
 };
 use std::{error::Error, path::PathBuf};
 pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
-    let runtime = Runtime::acquire(&runtime::paths::runtime()?)?;
+    let runtime = Runtime::acquire(&paths::runtime()?)?;
     let state = std::env::var_os("ENE_HOST_STATE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(runtime::paths::state);
+        .unwrap_or_else(paths::state);
     if let Some(base) = state.parent() {
         std::fs::create_dir_all(base)?;
     }

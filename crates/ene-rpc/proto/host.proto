@@ -126,7 +126,9 @@ message Provider {
 }
 message Providers { repeated Provider items = 1; }
 message PluginEntry {
-  string id = 1; string target = 2; string runtime = 3;
+  string id = 1; string target = 2;
+  reserved 3;
+  reserved "runtime";
   repeated string provides = 4; repeated string uses = 5;
 }
 message Plugin {

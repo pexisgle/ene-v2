@@ -4,19 +4,13 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Shared compatibility version for manifests, extension APIs.
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Host,
     Desktop,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Runtime {
-    Extism,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -55,8 +49,6 @@ pub struct Manifest {
     #[serde(default)]
     pub description: String,
     pub entrypoints: Vec<EntryPoint>,
-    /// All executable modules, including each entrypoint; assets have a separate budget.
-    pub code_files: Vec<String>,
     #[serde(default)]
     pub assets: BTreeMap<String, Asset>,
 }
@@ -65,7 +57,6 @@ pub struct Manifest {
 pub struct EntryPoint {
     pub id: String,
     pub target: Target,
-    pub runtime: Runtime,
     /// Relative file inside the verified code snapshot; not a host path.
     pub file: String,
     pub provides: Vec<Extension>,

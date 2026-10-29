@@ -1,9 +1,4 @@
-pub mod paths;
-#[cfg(unix)]
-mod unix;
-#[cfg(unix)]
-pub use unix::*;
-#[cfg(windows)]
-mod windows;
-#[cfg(windows)]
-pub use windows::*;
+#[cfg_attr(unix, path = "unix.rs")]
+#[cfg_attr(windows, path = "windows.rs")]
+mod os;
+pub use os::{Runtime, private_directory, private_file};

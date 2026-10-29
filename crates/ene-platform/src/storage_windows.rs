@@ -15,16 +15,16 @@ use windows_sys::Win32::{
     System::Threading::*,
 };
 
-pub(crate) fn wide(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
+fn wide(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
     value.as_ref().encode_wide().chain(Some(0)).collect()
 }
-pub(crate) fn denied() -> io::Error {
+fn denied() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         "unsafe ene owner, ACL, reparse point or hardlink",
     )
 }
-pub(crate) struct Local(pub *mut std::ffi::c_void);
+struct Local(*mut std::ffi::c_void);
 impl Drop for Local {
     fn drop(&mut self) {
         unsafe {
@@ -32,7 +32,7 @@ impl Drop for Local {
         }
     }
 }
-pub(crate) fn user_sid() -> io::Result<String> {
+fn user_sid() -> io::Result<String> {
     unsafe {
         let mut token = ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
@@ -82,7 +82,7 @@ unsafe fn sid_string(sid: PSID) -> io::Result<String> {
     drop(allocation);
     Ok(value)
 }
-pub(crate) fn descriptor(sddl: &str) -> io::Result<Local> {
+fn descriptor(sddl: &str) -> io::Result<Local> {
     let mut sd = ptr::null_mut();
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -96,61 +96,6 @@ pub(crate) fn descriptor(sddl: &str) -> io::Result<Local> {
         return Err(io::Error::last_os_error());
     }
     Ok(Local(sd))
-}
-pub(crate) fn apply_acl(path: &Path, extra: Option<(&str, bool)>, _frozen: bool) -> io::Result<()> {
-    let user = user_sid()?;
-    let extra = extra
-        .map(|(sid, write)| format!("(A;OICI;{};;;{sid})", if write { "FA" } else { "GRGX" }))
-        .unwrap_or_default();
-    let sddl = format!(
-        "O:{user}D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY){extra}{}",
-        if extra.is_empty() {
-            ""
-        } else {
-            "S:(ML;OICI;NW;;;LW)"
-        }
-    );
-    let sd = descriptor(&sddl)?;
-    unsafe {
-        let mut dacl = ptr::null_mut();
-        let mut present = 0;
-        let mut defaulted = 0;
-        if GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let err = SetNamedSecurityInfoW(
-            wide(path).as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            dacl,
-            ptr::null_mut(),
-        );
-        if err != 0 {
-            return Err(io::Error::from_raw_os_error(err as i32));
-        }
-        if !extra.is_empty() {
-            let mut sacl = ptr::null_mut();
-            if GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let err = SetNamedSecurityInfoW(
-                wide(path).as_ptr(),
-                SE_FILE_OBJECT,
-                LABEL_SECURITY_INFORMATION,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                sacl,
-            );
-            if err != 0 {
-                return Err(io::Error::from_raw_os_error(err as i32));
-            }
-        }
-    }
-    // Frozen code is read/execute for the sandbox SID; the owner retains cleanup rights.
-    Ok(())
 }
 fn validate(file: &File, directory: bool, private: bool) -> io::Result<()> {
     unsafe {

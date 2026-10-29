@@ -22,7 +22,7 @@ OSイベント取得、購読の認可と配送、アバターへの動作反映
 | `ServiceRequest` | プラグインからホストへの機能利用依頼 |
 | `Failure` | ホストサービス呼び出しの失敗 |
 
-runtimeは `extism` のみ対応します。Luauスクリプトは受け付けません。WasmのABIはExtismが担当します。
+実行方式はExtism固定で、manifestに `runtime` は指定しません。Luauスクリプトは受け付けません。WasmのABIはExtismが担当します。
 共通型はクレート直下から利用できます。内部ファイルは `manifest.rs`、`api.rs`、`window.rs`、`failure.rs`、`sdk.rs` です。
 `provider` は認証方式、ルーティング設定、チャットメッセージを提供します。
 HTTPは `HttpOpen` / `HttpRead` / `HttpClose` で依頼し、認証情報と通信の認可はホスト側で管理する設計です。
@@ -38,7 +38,6 @@ manifestの参照ファイル検証と入出力のサイズ制限も実行基盤
 {
   "id": "character",
   "target": "desktop",
-  "runtime": "extism",
   "file": "reaction.wasm",
   "provides": ["character"],
   "uses": ["window_events"],
@@ -98,14 +97,16 @@ Wayland等で非対応の場合は明示的に利用不可とし、黙って別�
 
 ## バージョンと移行
 
-`CONTRACT_VERSION` は **2** です。manifestと拡張APIの共通互換性番号で、
+`CONTRACT_VERSION` は **3** です。manifestと拡張APIの共通互換性番号で、
 プラグイン自身の `Manifest.version` とは独立しています。実行基盤は読込時に一致を検証してください。
 
-バージョン1からは、manifestの `contract_version` を2にし、上記四つのキャラクター関連メッセージに
-`target` を追加してください。対象を推測する互換フォールバックは設けません。
-LLMの要求・イベント形状は変更していませんが、共通契約番号は更新します。
-新しい購読宣言は省略可能で、既存プラグインを勝手に購読させません。
-音声・ハーネス・デスクトップ操作の型も維持しています。worker用IPC型は削除しました。
+バージョン3ではmanifestの `runtime` と `code_files` を削除しました。実行コードは
+`entrypoints[].file` の重複を除いた一覧から読み込み、サイズ制限とrevision計算に含めます。
+同じWasmを複数の入口から参照できます。操作・イベントの形と公開関数名は維持しています。
+旧manifestは受け付けません。`contract_version` を3にして不要なフィールドを削除してください。
+
+manifestの変更でrevisionも変わるため、更新後は再有効化とバインディングの再設定が必要です。
+旧revisionを自動承認する処理や保存データの削除は行いません。
 型の定義と実行機能の完成は別です。未実装の機能を利用可能と扱わないでください。
 
 モデル情報は引き続きprotobuf JSON形式です。メタデータのフィールド名はcamelCase、

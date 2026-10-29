@@ -375,7 +375,7 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
         let package = manager.root.join("wasm");
         crate::test_support::create_directory(&package).unwrap();
         crate::test_support::write(package.join("main.wasm"), code).unwrap();
-        crate::test_support::write(package.join("manifest.json"),json!({"contract_version":2,"id":"wasm-fixture","name":"Wasm fixture","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"llm","target":"host","runtime":"extism","file":"main.wasm","provides":["llm"],"uses":["http"],"provider":{"id":"wasm-fixture","endpoint":endpoint,"auth":{"type":"none"},"destinations":[endpoint]}}]}).to_string()).unwrap();
+        crate::test_support::write(package.join("manifest.json"),json!({"contract_version":ene_plugin::CONTRACT_VERSION,"id":"wasm-fixture","name":"Wasm fixture","version":"1","entrypoints":[{"id":"llm","target":"host","file":"main.wasm","provides":["llm"],"uses":["http"],"provider":{"id":"wasm-fixture","endpoint":endpoint,"auth":{"type":"none"},"destinations":[endpoint]}}]}).to_string()).unwrap();
         manager.scan().unwrap();
         let revision = manager.entries.read().unwrap()["wasm-fixture"]
             .package
@@ -508,8 +508,6 @@ async fn failed_starts_release_single_use_and_persistent_slots() {
         ] {
             assert!(manager.invoke(input).await.is_err());
             assert!(manager.sessions.lock().unwrap().is_empty());
-            assert!(manager.binding_tokens.lock().unwrap().is_empty());
-            assert!(manager.invocation_tokens.lock().unwrap().is_empty());
             assert_eq!(manager.invocation_slots.available_permits(), 16);
         }
     }
@@ -545,25 +543,16 @@ async fn cancel_waiter(abort_waiter: bool) {
         .plugin_set("harness".into(), "task".into(), json!(journal))
         .await
         .unwrap();
-    let worker = Arc::new(Mutex::new(None));
+    let lifetime = CancellationToken::new();
+    let worker = Arc::new(SessionState::new("reference".into(), lifetime.clone()));
     manager
         .sessions
         .lock()
         .unwrap()
         .insert("task".into(), worker.clone());
-    let lifetime = CancellationToken::new();
-    manager
-        .binding_tokens
-        .lock()
-        .unwrap()
-        .insert("task".into(), ("reference".into(), lifetime.clone()));
     let active = lifetime.child_token();
-    manager
-        .invocation_tokens
-        .lock()
-        .unwrap()
-        .insert("task".into(), (uuid::Uuid::new_v4(), active.clone()));
-    let held = worker.lock().await;
+    let _invocation = ActiveInvocation::new(worker.clone(), active.clone());
+    let held = worker.worker.lock().await;
     let other = manager.clone();
     let cancel = tokio::spawn(async move {
         other
@@ -626,21 +615,88 @@ async fn cancel_waiter(abort_waiter: bool) {
 
 #[tokio::test]
 async fn old_invocation_drop_preserves_replacement_cancel_registration() {
-    let (manager, _temp, _) = manager().await;
+    let session = Arc::new(SessionState::new(
+        "reference".into(),
+        CancellationToken::new(),
+    ));
     let old_token = CancellationToken::new();
     let new_token = CancellationToken::new();
-    let old = ActiveInvocation::new(manager.clone(), "task".into(), old_token.clone());
-    let new = ActiveInvocation::new(manager.clone(), "task".into(), new_token.clone());
+    let old = ActiveInvocation::new(session.clone(), old_token.clone());
+    let new = ActiveInvocation::new(session.clone(), new_token.clone());
     drop(old);
     assert!(old_token.is_cancelled());
-    let tokens = manager.invocation_tokens.lock().unwrap();
-    let (id, token) = &tokens["task"];
+    let active = session.active.lock().unwrap();
+    let (id, token) = active.as_ref().unwrap();
     assert_eq!(*id, new.id);
     token.cancel();
     assert!(new_token.is_cancelled());
-    drop(tokens);
+    drop(active);
     drop(new);
-    assert!(manager.invocation_tokens.lock().unwrap().is_empty());
+    assert!(session.active.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn rebind_cancels_before_waiting_and_old_session_drop_preserves_replacement() {
+    let (manager, _temp, companion) = manager().await;
+    manager
+        .entries
+        .write()
+        .unwrap()
+        .get_mut("reference")
+        .unwrap()
+        .state = "ready".into();
+    let binding = binding(
+        &manager,
+        &companion,
+        "behavior",
+        "behavior",
+        vec![Service::State],
+    );
+    manager.bind(binding.clone()).await.unwrap();
+    let old = Arc::new(SessionState::new(
+        "reference".into(),
+        CancellationToken::new(),
+    ));
+    manager
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(binding.id.clone(), old.clone());
+    let held = Session {
+        guard: old.worker.lock().await,
+        retain: false,
+        registration: Some((manager.clone(), binding.id.clone(), old.clone())),
+        _permit: None,
+    };
+    let cancel = old.lifetime.child_token();
+    let _invocation = ActiveInvocation::new(old.clone(), cancel.clone());
+    let other = manager.clone();
+    let input = binding.clone();
+    let rebind = tokio::spawn(async move { other.bind(input).await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), cancel.cancelled())
+        .await
+        .unwrap();
+    assert!(!rebind.is_finished());
+    let replacement = Arc::new(SessionState::new(
+        "reference".into(),
+        CancellationToken::new(),
+    ));
+    manager
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(binding.id.clone(), replacement.clone());
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(1), rebind)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &manager.sessions.lock().unwrap()[&binding.id],
+        &replacement
+    ));
+    assert!(!replacement.lifetime.is_cancelled());
 }
 
 #[cfg(unix)]

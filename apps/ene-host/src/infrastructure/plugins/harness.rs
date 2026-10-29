@@ -7,7 +7,7 @@ pub(super) struct Journal {
     status: String,
     pending: Option<String>,
     question: bool,
-    events: Vec<Value>,
+    events: Vec<Event>,
     report: Option<String>,
 }
 impl Manager {
@@ -55,7 +55,7 @@ impl Manager {
         &self,
         binding: &PluginBinding,
         journal: Journal,
-        events: &[Value],
+        events: &[Event],
     ) -> Result<String> {
         if journal.status == "cancelled" {
             return Ok(journal.task_id);
@@ -81,25 +81,19 @@ impl Manager {
                 reason: failure_reason.into(),
             }
         };
-        self.harness_commit(
-            binding,
-            journal,
-            &[serde_json::to_value(Event::Harness { event }).map_err(failure)?],
-        )
-        .await
+        self.harness_commit(binding, journal, &[Event::Harness { event }])
+            .await
     }
     pub(super) async fn harness_commit(
         &self,
         binding: &PluginBinding,
         mut journal: Journal,
-        events: &[Value],
+        events: &[Event],
     ) -> Result<String> {
         journal.pending = None;
         journal.question = false;
         for value in events {
-            let Event::Harness { event } =
-                serde_json::from_value::<Event>(value.clone()).map_err(failure)?
-            else {
+            let Event::Harness { event } = value else {
                 return Err(Error::invalid());
             };
             if matches!(
@@ -111,13 +105,13 @@ impl Manager {
             match event {
                 HarnessEvent::ModelRequest { operation_id, .. }
                 | HarnessEvent::ToolRequest { operation_id, .. } => {
-                    if journal.pending.replace(operation_id).is_some() {
+                    if journal.pending.replace(operation_id.clone()).is_some() {
                         return Err(conflict());
                     }
                     journal.status = "waiting_operation".into();
                 }
                 HarnessEvent::Question { question_id, .. } => {
-                    if journal.pending.replace(question_id).is_some() {
+                    if journal.pending.replace(question_id.clone()).is_some() {
                         return Err(conflict());
                     }
                     journal.question = true;
@@ -125,11 +119,11 @@ impl Manager {
                 }
                 HarnessEvent::Completed { report } => {
                     journal.status = "completed".into();
-                    journal.report = Some(report);
+                    journal.report = Some(report.clone());
                 }
                 HarnessEvent::Failed { reason } => {
                     journal.status = "failed".into();
-                    journal.report = Some(reason);
+                    journal.report = Some(reason.clone());
                 }
                 HarnessEvent::Cancelled => journal.status = "cancelled".into(),
                 HarnessEvent::Progress { .. } => {}

@@ -34,7 +34,7 @@ fn package(code: &[u8], target: Target, services: &[Service]) -> (Package, tempf
     let root = temp.path().join("plugin");
     ene_platform::storage::create_private_dir_all(&root).unwrap();
     ene_platform::storage::write_atomic(&root.join("main.wasm"), code).unwrap();
-    ene_platform::storage::write_atomic(&root.join("manifest.json"), json!({"contract_version":CONTRACT_VERSION,"id":"test","name":"Test","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"main","file":"main.wasm","runtime":"extism","target":target,"provides":["character","harness","tts","stt"],"uses":services}]}).to_string().as_bytes()).unwrap();
+    ene_platform::storage::write_atomic(&root.join("manifest.json"), json!({"contract_version":CONTRACT_VERSION,"id":"test","name":"Test","version":"1","entrypoints":[{"id":"main","file":"main.wasm","target":target,"provides":["character","harness","tts","stt"],"uses":services}]}).to_string().as_bytes()).unwrap();
     (Package::load(&root).unwrap(), temp)
 }
 fn character() -> Operation {
@@ -185,6 +185,7 @@ async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
         "i32.const 7 return".to_string(),
         bad_event,
         format!("i64.const {} call $alloc call $emit", MAX_CHUNK+1),
+        format!("i64.const {} call $alloc call $service drop", MAX_CHUNK+1),
         format!("{} local.get $p call $service drop",write(&json!({"type":"desktop","operation":{"type":"read_resource","handle":"x","offset":0,"length":MAX_CHUNK+1}}).to_string())),
     ] {
         let (package,_temp)=package(&wasm(&body),Target::Host,&[Service::Desktop]);

@@ -41,7 +41,7 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     }
     check(path, true, true)
 }
-pub fn private_file(path: &Path) -> io::Result<File> {
+fn private_file(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     check(
         path.parent()

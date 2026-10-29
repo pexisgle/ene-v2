@@ -308,13 +308,13 @@ impl LlmProvider for Provider {
             Ok(Box::pin(async_stream::try_stream! {
                 let mut finished=false;
                 while let Some(event)=stream.next().await {
-                    if finished {Err(Error::new(ErrorKind::ExternalFailure))?;}
                     match event? {
                         Event::Delta{text}=>yield llm::Event::Delta(text),
                         Event::Finished{reason}=>{finished=true;yield llm::Event::Finished(reason);},
                         _=>Err(unsupported())?,
                     }
                 }
+                // An aborted forwarding task can close the channel before runtime validation finishes.
                 if !finished {Err(Error::new(ErrorKind::ExternalFailure))?;}
             }) as _)
         })

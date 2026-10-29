@@ -13,8 +13,8 @@ pub use api::{
 };
 pub use failure::Failure;
 pub use manifest::{
-    Asset, CONTRACT_VERSION, EntryPoint, Extension, Manifest, ProviderConfiguration, Runtime,
-    Service, Target,
+    Asset, CONTRACT_VERSION, EntryPoint, Extension, Manifest, ProviderConfiguration, Service,
+    Target,
 };
 pub use provider::{Model, ModelMetadata};
 #[cfg(target_family = "wasm")]

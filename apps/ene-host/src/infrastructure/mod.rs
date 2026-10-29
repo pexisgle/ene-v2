@@ -1,3 +1,4 @@
+pub(crate) mod paths;
 pub mod runtime;
 pub mod sqlite;
 

@@ -9,7 +9,7 @@ use crate::{
     domain::{Error, ErrorKind},
     ports::{Result, plugin::Plugins},
 };
-use ene_plugin::{CharacterAction, Event, Failure, Operation, ServiceRequest};
+use ene_plugin::{Event, Failure, HarnessEvent, Operation, ServiceRequest};
 use ene_plugin::{Extension, Target};
 use ene_plugin_runtime::{
     Package,
@@ -40,9 +40,24 @@ struct Entry {
     generation: u64,
     capabilities: BTreeMap<String, Value>,
 }
-type SharedInstance = Arc<Mutex<Option<Instance>>>;
-type Sessions = Arc<std::sync::Mutex<BTreeMap<String, SharedInstance>>>;
-type Registration = (Manager, String, SharedInstance);
+struct SessionState {
+    package_id: String,
+    lifetime: CancellationToken,
+    worker: Mutex<Option<Instance>>,
+    active: std::sync::Mutex<Option<(uuid::Uuid, CancellationToken)>>,
+}
+impl SessionState {
+    fn new(package_id: String, lifetime: CancellationToken) -> Self {
+        Self {
+            package_id,
+            lifetime,
+            worker: Mutex::new(None),
+            active: std::sync::Mutex::new(None),
+        }
+    }
+}
+type Sessions = Arc<std::sync::Mutex<BTreeMap<String, Arc<SessionState>>>>;
+type Registration = (Manager, String, Arc<SessionState>);
 struct Session<'a> {
     guard: tokio::sync::MutexGuard<'a, Option<Instance>>,
     retain: bool,
@@ -71,40 +86,29 @@ impl Drop for Session<'_> {
                     .is_some_and(|current| Arc::ptr_eq(current, worker))
                 {
                     sessions.remove(key);
-                    manager.binding_tokens.lock().unwrap().remove(key);
                 }
             }
         }
     }
 }
 struct ActiveInvocation {
-    manager: Manager,
-    key: String,
+    session: Arc<SessionState>,
     token: CancellationToken,
     id: uuid::Uuid,
 }
 impl ActiveInvocation {
-    fn new(manager: Manager, key: String, token: CancellationToken) -> Self {
+    fn new(session: Arc<SessionState>, token: CancellationToken) -> Self {
         let id = uuid::Uuid::new_v4();
-        manager
-            .invocation_tokens
-            .lock()
-            .unwrap()
-            .insert(key.clone(), (id, token.clone()));
-        Self {
-            manager,
-            key,
-            token,
-            id,
-        }
+        *session.active.lock().unwrap() = Some((id, token.clone()));
+        Self { session, token, id }
     }
 }
 impl Drop for ActiveInvocation {
     fn drop(&mut self) {
         // This guard is dropped before releasing the worker lock.
-        let mut tokens = self.manager.invocation_tokens.lock().unwrap();
-        if tokens.get(&self.key).is_some_and(|(id, _)| *id == self.id) {
-            tokens.remove(&self.key);
+        let mut active = self.session.active.lock().unwrap();
+        if active.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *active = None;
         }
         self.token.cancel();
     }
@@ -119,8 +123,6 @@ pub struct Manager {
     pub(crate) supervisor: Supervisor,
     stopped: CancellationToken,
     discovery_error: Arc<RwLock<Option<String>>>,
-    binding_tokens: Arc<std::sync::Mutex<BTreeMap<String, (String, CancellationToken)>>>,
-    invocation_tokens: Arc<std::sync::Mutex<BTreeMap<String, (uuid::Uuid, CancellationToken)>>>,
     invocation_slots: Arc<tokio::sync::Semaphore>,
 }
 pub(crate) fn failure(_: impl std::fmt::Display) -> Error {
@@ -134,7 +136,7 @@ fn unsupported() -> Error {
 }
 impl Manager {
     pub fn discover(store: Store) -> Self {
-        let data = ene_platform::paths::data();
+        let data = super::paths::data();
         let root = std::env::var_os("ENE_PLUGIN_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data.join("plugins"));
@@ -147,8 +149,6 @@ impl Manager {
             supervisor: Supervisor::default(),
             stopped: CancellationToken::new(),
             discovery_error: Arc::default(),
-            binding_tokens: Arc::default(),
-            invocation_tokens: Arc::default(),
             invocation_slots: Arc::new(tokio::sync::Semaphore::new(16)),
         };
         // Malformed packages are reported by reload; no code is executed during discovery.
@@ -272,32 +272,25 @@ impl Manager {
             .unwrap_or_default()
     }
     async fn stop_sessions(&self, package: Option<&str>) {
-        let keys = {
-            let mut tokens = self.binding_tokens.lock().unwrap();
-            let keys: Vec<String> = tokens
+        let sessions = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let keys: Vec<_> = sessions
                 .iter()
-                .filter(|(_, (id, _))| package.is_none_or(|p| p == id))
+                .filter(|(_, session)| package.is_none_or(|p| p == session.package_id))
                 .map(|(key, _)| key.clone())
                 .collect();
-            for key in &keys {
-                if let Some((_, token)) = tokens.remove(key) {
-                    token.cancel();
-                }
-            }
-            keys
-        };
-        let workers = {
-            let mut sessions = self.sessions.lock().unwrap();
-            keys.iter()
-                .filter_map(|key| sessions.remove(key))
+            keys.into_iter()
+                .map(|key| {
+                    let session = sessions.remove(&key).unwrap();
+                    session.lifetime.cancel();
+                    (key, session)
+                })
                 .collect::<Vec<_>>()
         };
-        for worker in workers {
-            if let Some(mut worker) = worker.lock().await.take() {
+        for (key, session) in sessions {
+            if let Some(mut worker) = session.worker.lock().await.take() {
                 worker.stop().await;
             }
-        }
-        for key in keys {
             if let Ok(mut journal) = self.store.plugin_get("harness".into(), key.clone()).await
                 && journal.is_object()
                 && !matches!(
@@ -437,7 +430,8 @@ impl Manager {
             }
         );
         if cancelling
-            && let Some((_, token)) = self.invocation_tokens.lock().unwrap().get(&binding.id)
+            && let Some(session) = self.sessions.lock().unwrap().get(&binding.id)
+            && let Some((_, token)) = session.active.lock().unwrap().as_ref()
         {
             token.cancel();
         }
@@ -451,31 +445,30 @@ impl Manager {
                     .map_err(|_| Error::unavailable())?,
             )
         };
-        let key = if persistent {
-            binding.id.clone()
-        } else {
-            uuid::Uuid::new_v4().to_string()
-        };
-        let (worker, lifetime) = if persistent {
+        let key = binding.id.clone();
+        let worker = if persistent {
             let mut sessions = self.sessions.lock().unwrap();
             if sessions.len() >= 16 && !sessions.contains_key(&key) {
                 return Err(Error::unavailable());
             }
-            let worker = sessions.entry(key.clone()).or_default().clone();
-            let lifetime = self
-                .binding_tokens
-                .lock()
-                .unwrap()
+            sessions
                 .entry(key.clone())
-                .or_insert_with(|| (binding.plugin_id.clone(), entry.cancellation.child_token()))
-                .1
-                .clone();
-            (worker, lifetime)
+                .or_insert_with(|| {
+                    Arc::new(SessionState::new(
+                        binding.plugin_id.clone(),
+                        entry.cancellation.child_token(),
+                    ))
+                })
+                .clone()
         } else {
-            (Arc::new(Mutex::new(None)), entry.cancellation.child_token())
+            Arc::new(SessionState::new(
+                binding.plugin_id.clone(),
+                entry.cancellation.child_token(),
+            ))
         };
+        let lifetime = &worker.lifetime;
         let mut session = Session {
-            guard: worker.lock().await,
+            guard: worker.worker.lock().await,
             retain: false,
             registration: persistent.then(|| (self.clone(), key.clone(), worker.clone())),
             _permit: permit,
@@ -495,25 +488,25 @@ impl Manager {
             let journal = self
                 .harness_begin(&binding, &ene_plugin::HarnessInput::Cancel)
                 .await?;
-            let events = vec![
-                serde_json::to_value(Event::Harness {
-                    event: ene_plugin::HarnessEvent::Cancelled,
-                })
-                .map_err(failure)?,
-            ];
+            let events = vec![Event::Harness {
+                event: HarnessEvent::Cancelled,
+            }];
             let task_id = self.harness_cancel(&binding, journal, &events).await?;
             if let Some(mut worker) = session.take() {
                 worker.stop().await;
             }
             return Ok(PluginResult {
                 generation: entry.generation,
-                events: events.into_iter().map(document).collect(),
+                events: events
+                    .into_iter()
+                    .map(|event| serde_json::to_value(event).map(document).map_err(failure))
+                    .collect::<Result<_>>()?,
                 result: document(json!({"task_id": task_id})).into(),
                 ..Default::default()
             });
         }
         let cancel = lifetime.child_token();
-        let _invocation = ActiveInvocation::new(self.clone(), key.clone(), cancel.clone());
+        let _invocation = ActiveInvocation::new(worker.clone(), cancel.clone());
         let journal = if let Operation::Harness { input } = &operation {
             Some(self.harness_begin(&binding, input).await?)
         } else {
@@ -565,8 +558,7 @@ impl Manager {
                     if events.len() >= MAX_EVENTS || bytes > MAX_MESSAGE_BYTES {
                         return Err(Error::invalid());
                     }
-                    validate_event(&event)?;
-                    events.push(serde_json::to_value(event).map_err(failure)?);
+                    events.push(event);
                 }
                 Ok::<_, Error>(events)
             };
@@ -594,8 +586,12 @@ impl Manager {
         let terminal = outcome.as_ref().is_ok_and(|(_, events, _)| {
             events.iter().any(|e| {
                 matches!(
-                    e["event"]["type"].as_str(),
-                    Some("completed" | "failed" | "cancelled")
+                    e,
+                    Event::Harness {
+                        event: HarnessEvent::Completed { .. }
+                            | HarnessEvent::Failed { .. }
+                            | HarnessEvent::Cancelled
+                    }
                 )
             })
         });
@@ -607,7 +603,7 @@ impl Manager {
         // One Host-owned path classifies and persists every unsuccessful Harness call.
         if outcome.is_err() || cancel.is_cancelled() {
             if let Some(journal) = journal {
-                self.harness_finish(&binding, journal, &cancel, &lifetime, failure_reason)
+                self.harness_finish(&binding, journal, &cancel, lifetime, failure_reason)
                     .await?;
             }
             return Err(outcome.err().unwrap_or_else(conflict));
@@ -620,7 +616,10 @@ impl Manager {
         session.retain = persistent && !stopping && !terminal;
         Ok(PluginResult {
             generation: instance_generation,
-            events: events.into_iter().map(document).collect(),
+            events: events
+                .into_iter()
+                .map(|event| serde_json::to_value(event).map(document).map_err(failure))
+                .collect::<Result<_>>()?,
             result: document(result).into(),
             ..Default::default()
         })
@@ -680,7 +679,6 @@ impl Plugins for Manager {
                             .map(|p| PluginEntry {
                                 id: p.id.clone(),
                                 target: name(p.target),
-                                runtime: name(p.runtime),
                                 provides: p.provides.iter().copied().map(name).collect(),
                                 uses: p.uses.iter().copied().map(name).collect(),
                                 ..Default::default()
@@ -764,10 +762,10 @@ impl Plugins for Manager {
             {
                 return Err(Error::new(ErrorKind::NotFound));
             }
-            if let Some((_, token)) = self.binding_tokens.lock().unwrap().remove(&input.id) {
-                token.cancel();
+            let session = self.sessions.lock().unwrap().remove(&input.id);
+            if let Some(session) = &session {
+                session.lifetime.cancel();
             }
-            let session = { self.sessions.lock().unwrap().remove(&input.id) };
             self.store
                 .plugin_set(
                     "bindings".into(),
@@ -777,7 +775,7 @@ impl Plugins for Manager {
                 .await
                 .map_err(failure)?;
             if let Some(session) = session
-                && let Some(mut worker) = session.lock().await.take()
+                && let Some(mut worker) = session.worker.lock().await.take()
             {
                 worker.stop().await;
             }
@@ -875,32 +873,6 @@ impl Services for LocalServices {
 }
 fn valid_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= 128 && !key.chars().any(char::is_control)
-}
-fn validate_event(event: &Event) -> Result<()> {
-    match event {
-        Event::Character {
-            action: CharacterAction::Speak { text },
-            ..
-        } if text.len() > 16384 => Err(Error::invalid()),
-        Event::Character {
-            action:
-                CharacterAction::Expression { name, duration_ms }
-                | CharacterAction::Motion {
-                    asset: name,
-                    duration_ms,
-                },
-            ..
-        } if name.len() > 128 || *duration_ms > 60000 => Err(Error::invalid()),
-        Event::Audio { chunk }
-            if chunk.channels == 0
-                || chunk.channels > 8
-                || chunk.sample_rate < 8000
-                || chunk.sample_rate > 192000 =>
-        {
-            Err(Error::invalid())
-        }
-        _ => Ok(()),
-    }
 }
 
 #[cfg(test)]

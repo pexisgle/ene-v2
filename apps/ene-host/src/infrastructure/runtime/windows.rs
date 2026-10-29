@@ -1,9 +1,15 @@
-pub use ene_platform::storage::{private_directory, private_file};
+use ene_platform::storage;
+pub use ene_platform::storage::private_file;
 use std::{
     fs::{self, File},
     io,
     path::{Path, PathBuf},
 };
+pub fn private_directory(path: &Path) -> io::Result<File> {
+    storage::create_private_dir_all(path)?;
+    storage::open(path, true, true)
+}
+
 pub struct Runtime {
     _directory: File,
     _lock: File,
@@ -67,9 +73,12 @@ mod tests {
         runtime.publish("http://127.0.0.1:1234/v1".into()).unwrap();
         let path = root.join("ene-host/connection.json");
         assert!(
-            !ene_platform::storage::read(&path, 8192, true)
+            storage::open(&path, false, true)
                 .unwrap()
-                .is_empty()
+                .metadata()
+                .unwrap()
+                .len()
+                > 0
         );
         drop(runtime);
         assert!(!path.exists());

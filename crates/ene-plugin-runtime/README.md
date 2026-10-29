@@ -2,11 +2,11 @@
 
 アプリ側のWasm実行ライブラリです。Extism公式Host SDKの `PluginBuilder` / `Plugin::call` を直接使い、同一プロセス内で実行します。`ene-plugin` はプラグイン作者向けの型・SDK、このパッケージは実行側です。
 
-`Package::load` でmanifestとコードを検証し、`Instance::load(package, entrypoint, target, generation, cancel)` で読み込みます。`invoke` には操作、アプリが実装する `Services`、出力イベントの送信先、キャンセルトークンを渡します。Host/Desktopの対象は読み込み時に照合します。同期的なWasm実行はTokioのblocking poolに移すため、アプリのイベントループを塞ぎません。
+`Package::load` でmanifestと各入口の `file` が参照するコードを検証し、`Instance::load(package, entrypoint, target, generation, cancel)` で読み込みます。`invoke` には操作、アプリが実装する `Services`、出力イベントの送信先、キャンセルトークンを渡します。Host/Desktopの対象は読み込み時に照合します。同期的なWasm実行はTokioのblocking poolに移すため、アプリのイベントループを塞ぎません。
 
 - WASIは無効。Extismの直接HTTPアクセス先を設定せず、通信は認可済みホストサービスに限定します。
 - Wasmメモリは64MiB、呼び出しfuel・時間・イベント数・サービス回数・JSONサイズに上限を設定します。
-- ホスト関数呼び出し前後の権限確認、manifestでのサービス宣言、返却イベントの拡張種別・対象・終端を検証します。
+- ホスト関数呼び出し前後の権限確認、manifestでのサービス宣言、返却イベントの拡張種別・対象・終端・動作上限・音声形式を検証します。JSONのバイト数はWasm境界で制限します。
 - キャンセル時はExtismのCancelHandleとホスト関数の待機を停止します。呼び出しFutureが破棄された場合も停止を要求します。
 - コードは検証時にメモリへ取り込み、呼び出し前にrevisionを照合します。OSサンドボックス用のディスクコピー、Remoc IPC、専用runnerはありません。
 

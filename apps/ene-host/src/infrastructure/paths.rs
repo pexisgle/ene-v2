@@ -8,33 +8,7 @@ fn home() -> PathBuf {
         .expect("LOCALAPPDATA must name an absolute user directory")
         .join("ene")
 }
-pub fn config() -> PathBuf {
-    #[cfg(windows)]
-    {
-        home().join("config")
-    }
-    #[cfg(unix)]
-    {
-        xdg::BaseDirectories::new()
-            .get_config_home()
-            .expect("XDG config home")
-            .join("ene")
-    }
-}
-pub fn cache() -> PathBuf {
-    #[cfg(windows)]
-    {
-        home().join("cache")
-    }
-    #[cfg(unix)]
-    {
-        xdg::BaseDirectories::new()
-            .get_cache_home()
-            .expect("XDG cache home")
-            .join("ene")
-    }
-}
-pub fn state() -> PathBuf {
+pub(crate) fn state() -> PathBuf {
     #[cfg(windows)]
     {
         home().join("state")
@@ -47,7 +21,7 @@ pub fn state() -> PathBuf {
             .join("ene")
     }
 }
-pub fn data() -> PathBuf {
+pub(crate) fn data() -> PathBuf {
     #[cfg(windows)]
     {
         home()
@@ -60,12 +34,12 @@ pub fn data() -> PathBuf {
             .join("ene")
     }
 }
-pub fn runtime() -> io::Result<PathBuf> {
+pub(crate) fn runtime() -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
         let home = home();
         let root = home.join("runtime");
-        super::storage::create_private_dir_all(&root)?;
+        ene_platform::storage::create_private_dir_all(&root)?;
         Ok(root)
     }
     #[cfg(unix)]
@@ -75,10 +49,4 @@ pub fn runtime() -> io::Result<PathBuf> {
             .cloned()
             .map_err(io::Error::other)
     }
-}
-pub fn providers() -> PathBuf {
-    data().join("providers")
-}
-pub fn plugins() -> PathBuf {
-    data().join("plugins")
 }

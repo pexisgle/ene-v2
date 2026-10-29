@@ -1,6 +1,6 @@
 [package]
 name = "ene-platform"
-description = "OS paths and protected storage"
+description = "Protected filesystem access"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,6 @@ workspace = true
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-xdg = "3"
 rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]

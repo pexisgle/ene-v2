@@ -19,8 +19,58 @@ pub struct Package {
     pub revision: String,
     files: Arc<BTreeMap<String, Vec<u8>>>,
 }
-pub fn relative(path: &str) -> bool {
-    ene_platform::relative(path)
+/// Portable package paths use forward slashes, never native device paths.
+fn relative(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.contains(':')
+                && !part.contains(['<', '>', '"', '|', '?', '*'])
+                && !part.ends_with(['.', ' '])
+                && !matches!(
+                    part.split('.')
+                        .next()
+                        .unwrap_or_default()
+                        .trim_end_matches(' ')
+                        .to_ascii_uppercase()
+                        .as_str(),
+                    "CON"
+                        | "PRN"
+                        | "AUX"
+                        | "NUL"
+                        | "COM1"
+                        | "COM2"
+                        | "COM3"
+                        | "COM4"
+                        | "COM5"
+                        | "COM6"
+                        | "COM7"
+                        | "COM8"
+                        | "COM9"
+                        | "LPT1"
+                        | "LPT2"
+                        | "LPT3"
+                        | "LPT4"
+                        | "LPT5"
+                        | "LPT6"
+                        | "LPT7"
+                        | "LPT8"
+                        | "LPT9"
+                        | "CONIN$"
+                        | "CONOUT$"
+                        | "COM¹"
+                        | "COM²"
+                        | "COM³"
+                        | "LPT¹"
+                        | "LPT²"
+                        | "LPT³"
+                )
+        })
 }
 pub fn identifier(id: &str) -> bool {
     !id.is_empty()
@@ -92,8 +142,6 @@ impl Package {
             || manifest.version.is_empty()
             || manifest.entrypoints.is_empty()
             || manifest.entrypoints.len() > 32
-            || manifest.code_files.is_empty()
-            || manifest.code_files.len() > 256
             || manifest.assets.len() > 256
         {
             return Err(Error::Invalid);
@@ -104,7 +152,6 @@ impl Package {
             if !identifier(&e.id)
                 || !ids.insert(&e.id)
                 || !relative(&e.file)
-                || !manifest.code_files.contains(&e.file)
                 || e.provides.is_empty()
                 || e.provides.len() > 6
                 || e.uses.len() > 8
@@ -133,7 +180,12 @@ impl Package {
         let mut portable_names = BTreeMap::new();
         portable_name(&mut portable_names, "manifest.json")?;
         let mut total = files["manifest.json"].len() as u64;
-        for path in &manifest.code_files {
+        for path in manifest
+            .entrypoints
+            .iter()
+            .map(|e| &e.file)
+            .collect::<BTreeSet<_>>()
+        {
             if files.contains_key(path) {
                 return Err(Error::Invalid);
             }
@@ -197,6 +249,16 @@ impl Package {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn package_paths_cannot_name_devices_or_streams() {
+        for path in [
+            "../x", "/x", "C:/x", "x:stream", "x\\y", "a/./b", "a//b", "NUL.txt", "com1", "a.",
+            "a ",
+        ] {
+            assert!(!super::relative(path), "{path}");
+        }
+        assert!(super::relative("日本語/main.wasm"));
+    }
     use super::*;
     #[test]
     fn package_components_reject_case_aliases_and_file_directory_collisions() {
@@ -210,7 +272,7 @@ mod tests {
     fn fixture(dir: &Path) {
         ene_platform::storage::create_private_dir_all(dir).unwrap();
         ene_platform::storage::write_atomic(&dir.join("main.wasm"), b"return {}").unwrap();
-        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":2,"id":"sample","name":"Sample","version":"1","code_files":["main.wasm"],"entrypoints":[{"id":"behavior","target":"host","runtime":"extism","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes()).unwrap();
+        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":ene_plugin::CONTRACT_VERSION,"id":"sample","name":"Sample","version":"1","entrypoints":[{"id":"behavior","target":"host","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes()).unwrap();
     }
     #[test]
     fn window_subscriptions_require_a_desktop_character_entrypoint_and_service() {
@@ -248,6 +310,53 @@ mod tests {
         std::fs::write(source_root.join("main.wasm"), "return {changed=true}").unwrap();
         assert!(matches!(package.verify(), Err(Error::Changed)));
         assert_eq!(package.code("main.wasm").unwrap(), b"return {}");
+    }
+    #[test]
+    fn entrypoints_share_a_single_code_snapshot_and_budget() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        fixture(&root);
+        let path = root.join("manifest.json");
+        let mut manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut entry = manifest.entrypoints[0].clone();
+        entry.id = "second".into();
+        manifest.entrypoints.push(entry);
+        ene_platform::storage::write_atomic(&path, &serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        let code = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("main.wasm"))
+            .unwrap();
+        code.set_len(MAX_CODE / 2 + 1).unwrap();
+        let package = Package::load(&root).unwrap();
+        assert_eq!(package.files.len(), 2);
+        assert_eq!(
+            package.code("main.wasm").unwrap().len() as u64,
+            MAX_CODE / 2 + 1
+        );
+        code.set_len(MAX_CODE).unwrap();
+        assert!(matches!(Package::load(&root), Err(Error::Invalid)));
+    }
+    #[test]
+    fn legacy_manifests_are_rejected() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        fixture(&root);
+        let path = root.join("manifest.json");
+        let current: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for field in ["contract_version", "runtime", "code_files"] {
+            let mut manifest = current.clone();
+            match field {
+                "contract_version" => manifest[field] = 2.into(),
+                "runtime" => manifest["entrypoints"][0][field] = "extism".into(),
+                _ => manifest[field] = serde_json::json!(["main.wasm"]),
+            }
+            ene_platform::storage::write_atomic(&path, &serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+            assert!(Package::load(&root).is_err(), "{field}");
+        }
     }
     #[test]
     fn module_traversal_and_links_are_rejected() {
