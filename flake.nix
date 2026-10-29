@@ -39,6 +39,8 @@
           buildInputs = desktopLibraries;
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          # Luau needs libstdc++ after the sandbox clears the host environment.
+          NIX_LDFLAGS = "-rpath ${pkgs.stdenv.cc.cc.lib}/lib";
 
           # Winit and WGPU load some libraries dynamically; use the host GPU driver.
           shellHook = ''

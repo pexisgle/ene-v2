@@ -14,7 +14,12 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.dependencies]
 ene-rpc = { path = "crates/ene-rpc" }
 ene-plugin = { path = "crates/ene-plugin" }
-ene-core = { path = "crates/ene-core" }
+ene-platform = { path = "crates/ene-platform" }
+ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
+atomic-write-file = { version = "0.3", features = ["unnamed-tmpfile"] }
+remoc = { version = "0.20", default-features = false, features = ["rch", "codec-message-pack"] }
+tempfile = "3"
+xdg = "3"
 async-stream = "0.3"
 axum = "0.8"
 base64 = "0.23"

@@ -1,3 +1,3 @@
-fn main() {
-    println!("ene-host: development scaffold (host functionality is not implemented yet).");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ene_host::run()
 }
