@@ -43,20 +43,35 @@ struct Entry {
     generation: u64,
     capabilities: BTreeMap<String, Value>,
 }
+#[derive(PartialEq, Eq)]
+struct SessionBinding {
+    plugin_id: String,
+    entrypoint: String,
+    revision: String,
+}
 struct SessionState {
-    package_id: String,
+    binding: SessionBinding,
     lifetime: CancellationToken,
     worker: Mutex<Option<Instance>>,
-    active: std::sync::Mutex<Option<(uuid::Uuid, CancellationToken)>>,
+    active: std::sync::Mutex<Option<CancellationToken>>,
 }
 impl SessionState {
-    fn new(package_id: String, lifetime: CancellationToken) -> Self {
+    fn new(binding: &PluginBinding, lifetime: CancellationToken) -> Self {
         Self {
-            package_id,
+            binding: SessionBinding {
+                plugin_id: binding.plugin_id.clone(),
+                entrypoint: binding.entrypoint.clone(),
+                revision: binding.revision.clone(),
+            },
             lifetime,
             worker: Mutex::new(None),
             active: std::sync::Mutex::new(None),
         }
+    }
+    fn matches(&self, binding: &PluginBinding) -> bool {
+        self.binding.plugin_id == binding.plugin_id
+            && self.binding.entrypoint == binding.entrypoint
+            && self.binding.revision == binding.revision
     }
 }
 type Sessions = Arc<std::sync::Mutex<BTreeMap<String, Arc<SessionState>>>>;
@@ -96,22 +111,17 @@ impl Drop for Session<'_> {
 struct ActiveInvocation {
     session: Arc<SessionState>,
     token: CancellationToken,
-    id: uuid::Uuid,
 }
 impl ActiveInvocation {
     fn new(session: Arc<SessionState>, token: CancellationToken) -> Self {
-        let id = uuid::Uuid::new_v4();
-        *session.active.lock().unwrap() = Some((id, token.clone()));
-        Self { session, token, id }
+        *session.active.lock().unwrap() = Some(token.clone());
+        Self { session, token }
     }
 }
 impl Drop for ActiveInvocation {
     fn drop(&mut self) {
         // This guard is dropped before releasing the worker lock.
-        let mut active = self.session.active.lock().unwrap();
-        if active.as_ref().is_some_and(|(id, _)| *id == self.id) {
-            *active = None;
-        }
+        *self.session.active.lock().unwrap() = None;
         self.token.cancel();
     }
 }
@@ -123,6 +133,8 @@ pub struct Manager {
     sessions: Sessions,
     // Serializes the start and the persisted commit of enable/disable, not their work.
     commit: Arc<Mutex<()>>,
+    // Serializes binding replacement with the binding read and session creation.
+    binding: Arc<Mutex<()>>,
     generations: Arc<AtomicU64>,
     pub(crate) supervisor: Supervisor,
     stopped: CancellationToken,
@@ -175,6 +187,7 @@ impl Manager {
             entries: Arc::new(RwLock::new(BTreeMap::new())),
             sessions: Arc::default(),
             commit: Arc::default(),
+            binding: Arc::default(),
             generations: Arc::new(AtomicU64::new(1)),
             supervisor: Supervisor::default(),
             stopped: CancellationToken::new(),
@@ -382,7 +395,7 @@ impl Manager {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, session)| package.is_none_or(|p| p == session.package_id))
+            .filter(|(_, session)| package.is_none_or(|p| p == session.binding.plugin_id))
             .map(|(key, session)| {
                 session.lifetime.cancel();
                 (key.clone(), session.clone())
@@ -452,7 +465,7 @@ impl Manager {
                     )
                     .await
                     .map_err(failure)?;
-                    capabilities.insert(entry.id.clone(), worker.capabilities.clone());
+                    capabilities.insert(entry.id.clone(), worker.capabilities);
                 }
             }
             Ok::<_, Error>(capabilities)
@@ -491,6 +504,8 @@ impl Manager {
         input: PluginInvocation,
         mutations: Arc<dyn Mutations>,
     ) -> Result<PluginResult> {
+        // The binding read and the session it produces must not straddle a rebind.
+        let binding_lock = self.binding.lock().await;
         let binding: PluginBinding = serde_json::from_value(
             self.store
                 .plugin_get("bindings".into(), input.binding_id)
@@ -539,7 +554,7 @@ impl Manager {
         );
         if cancelling
             && let Some(session) = self.sessions.lock().unwrap().get(&binding.id)
-            && let Some((_, token)) = session.active.lock().unwrap().as_ref()
+            && let Some(token) = session.active.lock().unwrap().as_ref()
         {
             token.cancel();
         }
@@ -556,19 +571,27 @@ impl Manager {
         let key = binding.id.clone();
         let worker = {
             let mut sessions = self.sessions.lock().unwrap();
-            if sessions.len() >= MAX_SESSIONS && !sessions.contains_key(&key) {
-                return Err(Error::unavailable());
-            }
-            sessions
-                .entry(key.clone())
-                .or_insert_with(|| {
+            let reusable = sessions.get(&key).is_some_and(|session| {
+                session.matches(&binding) && !session.lifetime.is_cancelled()
+            });
+            if !reusable {
+                if let Some(stale) = sessions.remove(&key) {
+                    stale.lifetime.cancel();
+                }
+                if sessions.len() >= MAX_SESSIONS {
+                    return Err(Error::unavailable());
+                }
+                sessions.insert(
+                    key.clone(),
                     Arc::new(SessionState::new(
-                        binding.plugin_id.clone(),
+                        &binding,
                         entry.cancellation.child_token(),
-                    ))
-                })
-                .clone()
+                    )),
+                );
+            }
+            sessions[&key].clone()
         };
+        drop(binding_lock);
         let lifetime = &worker.lifetime;
         let guard = worker.worker.lock().await;
         let mut session = Session {
@@ -908,6 +931,8 @@ impl Plugins for Manager {
             {
                 return Err(Error::new(ErrorKind::NotFound));
             }
+            // Stop the old session and store the new binding as one step for invocations.
+            let _binding = self.binding.lock().await;
             let session = self.sessions.lock().unwrap().get(&input.id).cloned();
             if let Some(session) = session {
                 self.stop_session(&input.id, &session).await?;

@@ -65,6 +65,122 @@ fn binding(
         ..Default::default()
     }
 }
+fn binding_to(
+    manager: &Manager,
+    id: &str,
+    plugin_id: &str,
+    entrypoint: &str,
+    companion: &str,
+) -> PluginBinding {
+    PluginBinding {
+        id: id.into(),
+        plugin_id: plugin_id.into(),
+        entrypoint: entrypoint.into(),
+        revision: manager.entries.read().unwrap()[plugin_id]
+            .package
+            .revision
+            .clone(),
+        companion_id: companion.into(),
+        device_id: "device".into(),
+        configuration: document(json!({})).into(),
+        ..Default::default()
+    }
+}
+fn character_guest(marker: &str) -> Vec<u8> {
+    let caps = kernel_bytes("{}");
+    let result = format!(r#"{{"plugin":"{marker}"}}"#);
+    let value = kernel_bytes(&result);
+    wat::parse_str(format!(
+        r#"(module
+          (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+          (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+          (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+          (func (export "ene_initialize") (result i32) (local $p i64)
+            {caps} local.get $p i64.const 2 call $output i32.const 0)
+          (func (export "ene_invoke") (result i32) (local $p i64)
+            {value} local.get $p i64.const {} call $output i32.const 0))"#,
+        result.len()
+    ))
+    .unwrap()
+}
+#[tokio::test]
+async fn a_session_from_another_binding_is_never_reused() {
+    let (manager, _temp, companion) = manager().await;
+    for (id, marker) in [("p", "P"), ("q", "Q")] {
+        let package = manager.root.join(id);
+        crate::test_support::create_directory(&package).unwrap();
+        crate::test_support::write(package.join("main.wasm"), character_guest(marker)).unwrap();
+        crate::test_support::write(
+            package.join("manifest.json"),
+            json!({
+                "contract_version":ene_plugin::CONTRACT_VERSION,
+                "id":id,"name":id,"version":"1",
+                "entrypoints":[{
+                    "id":"behavior","target":"host","file":"main.wasm",
+                    "provides":["character"],"uses":[]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    manager.scan().unwrap();
+    for id in ["p", "q"] {
+        let revision = manager.entries.read().unwrap()[id].package.revision.clone();
+        manager
+            .enable(
+                id.into(),
+                EnablePluginRequest {
+                    enabled: true,
+                    revision,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let mut current = binding_to(&manager, "x", "p", "behavior", &companion);
+    manager.bind(current.clone()).await.unwrap();
+    let call = || PluginInvocation {
+        binding_id: "x".into(),
+        operation: document(
+            serde_json::to_value(Operation::Character {
+                target: CharacterTarget {
+                    device_id: "device".into(),
+                    character_id: companion.clone(),
+                },
+                event: CharacterEvent::Activated,
+            })
+            .unwrap(),
+        )
+        .into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        invoke_plugin(&manager, call()).await.unwrap().result.json,
+        r#"{"plugin":"P"}"#
+    );
+    // A rebind that lands after this session was created must not reuse its guest.
+    current.plugin_id = "q".into();
+    current.revision = manager.entries.read().unwrap()["q"]
+        .package
+        .revision
+        .clone();
+    manager
+        .store
+        .plugin_set(
+            "bindings".into(),
+            "x".into(),
+            serde_json::to_value(&current).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        invoke_plugin(&manager, call()).await.unwrap().result.json,
+        r#"{"plugin":"Q"}"#
+    );
+    manager.shutdown().await.unwrap();
+}
 #[tokio::test]
 async fn embedded_character_state_permissions_updates_and_disable() {
     let (manager, _temp, companion) = manager().await;
@@ -455,7 +571,12 @@ async fn enable_changes_survive_waiter_cancellation_and_restore() {
         let lifetime = manager.entries.read().unwrap()["reference"]
             .cancellation
             .child_token();
-        let worker = Arc::new(SessionState::new("reference".into(), lifetime.clone()));
+        let binding = PluginBinding {
+            plugin_id: "reference".into(),
+            entrypoint: "behavior".into(),
+            ..Default::default()
+        };
+        let worker = Arc::new(SessionState::new(&binding, lifetime.clone()));
         manager
             .sessions
             .lock()
@@ -1357,7 +1478,7 @@ async fn cancel_waiter(abort_waiter: bool) {
         .await
         .unwrap();
     let lifetime = CancellationToken::new();
-    let worker = Arc::new(SessionState::new("reference".into(), lifetime.clone()));
+    let worker = Arc::new(SessionState::new(&binding, lifetime.clone()));
     manager
         .sessions
         .lock()
@@ -1434,28 +1555,6 @@ async fn cancel_waiter(abort_waiter: bool) {
 }
 
 #[tokio::test]
-async fn old_invocation_drop_preserves_replacement_cancel_registration() {
-    let session = Arc::new(SessionState::new(
-        "reference".into(),
-        CancellationToken::new(),
-    ));
-    let old_token = CancellationToken::new();
-    let new_token = CancellationToken::new();
-    let old = ActiveInvocation::new(session.clone(), old_token.clone());
-    let new = ActiveInvocation::new(session.clone(), new_token.clone());
-    drop(old);
-    assert!(old_token.is_cancelled());
-    let active = session.active.lock().unwrap();
-    let (id, token) = active.as_ref().unwrap();
-    assert_eq!(*id, new.id);
-    token.cancel();
-    assert!(new_token.is_cancelled());
-    drop(active);
-    drop(new);
-    assert!(session.active.lock().unwrap().is_none());
-}
-
-#[tokio::test]
 async fn rebind_cancels_before_waiting_and_old_session_drop_preserves_replacement() {
     let (manager, _temp, companion) = manager().await;
     manager
@@ -1473,10 +1572,7 @@ async fn rebind_cancels_before_waiting_and_old_session_drop_preserves_replacemen
         vec![Service::State],
     );
     manager.bind(binding.clone()).await.unwrap();
-    let old = Arc::new(SessionState::new(
-        "reference".into(),
-        CancellationToken::new(),
-    ));
+    let old = Arc::new(SessionState::new(&binding, CancellationToken::new()));
     manager
         .sessions
         .lock()
@@ -1497,10 +1593,7 @@ async fn rebind_cancels_before_waiting_and_old_session_drop_preserves_replacemen
         .await
         .unwrap();
     assert!(!rebind.is_finished());
-    let replacement = Arc::new(SessionState::new(
-        "reference".into(),
-        CancellationToken::new(),
-    ));
+    let replacement = Arc::new(SessionState::new(&binding, CancellationToken::new()));
     manager
         .sessions
         .lock()

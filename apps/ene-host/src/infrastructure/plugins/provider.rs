@@ -83,7 +83,7 @@ struct HttpStream {
     _permit: tokio::sync::OwnedSemaphorePermit,
     status: u16,
     headers: BTreeMap<String, String>,
-    pending: std::collections::VecDeque<u8>,
+    pending: bytes::Bytes,
 }
 struct ProviderServices {
     input: Arc<Invocation>,
@@ -107,7 +107,7 @@ impl ProviderServices {
                     .map_err(|_| Failure::new("http_failed"))?
                 {
                     Some(data) => {
-                        stream.pending.extend(data);
+                        stream.pending = data;
                         if !stream.pending.is_empty() {
                             break false;
                         }
@@ -119,10 +119,7 @@ impl ProviderServices {
             false
         };
         self.check().await?;
-        let data: Vec<_> = stream
-            .pending
-            .drain(..stream.pending.len().min(64 * 1024))
-            .collect();
+        let data = stream.pending.split_to(stream.pending.len().min(64 * 1024));
         let chunk = HttpChunk {
             handle: handle.clone(),
             status: stream.status,
@@ -140,9 +137,6 @@ impl ProviderServices {
         let handle = uuid::Uuid::new_v4().to_string();
         {
             let mut streams = self.streams.lock().await;
-            if streams.len() >= 8 {
-                return Err(Failure::new("stream_limit"));
-            }
             let (response, permit) = self.broker.request(request).await.map_err(|error| {
                 Failure::new(match error.kind {
                     ErrorKind::PermissionRequired => "permission_required",
