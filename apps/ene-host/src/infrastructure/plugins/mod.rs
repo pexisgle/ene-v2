@@ -7,19 +7,22 @@ use super::{
 };
 use crate::{
     domain::{Error, ErrorKind},
-    ports::{Result, plugin::Plugins},
+    ports::{
+        Result,
+        plugin::{Mutations, Plugins},
+    },
 };
 use ene_plugin::{Event, Failure, HarnessEvent, Operation, ServiceRequest};
 use ene_plugin::{Extension, Target};
 use ene_plugin_runtime::{
     Package,
     instance::{Instance, Services, Supervisor},
-    limits::{MAX_EVENTS, MAX_MESSAGE_BYTES},
+    limits::{MAX_EVENTS, MAX_INSTANCES, MAX_MESSAGE_BYTES, MAX_SESSIONS},
 };
 use ene_rpc::{
     EnablePluginRequest, Plugin, PluginBinding, PluginEntry, PluginInvocation, PluginResult,
 };
-use futures_util::future::BoxFuture;
+use futures_util::{TryFutureExt, future::BoxFuture};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -57,6 +60,12 @@ impl SessionState {
     }
 }
 type Sessions = Arc<std::sync::Mutex<BTreeMap<String, Arc<SessionState>>>>;
+pub(super) struct ProviderSession {
+    package_id: String,
+    pub(super) lifetime: CancellationToken,
+    pub(super) worker: Mutex<Option<Instance>>,
+}
+type ProviderSessions = Arc<std::sync::Mutex<BTreeMap<String, Arc<ProviderSession>>>>;
 type Registration = (Manager, String, Arc<SessionState>);
 struct Session<'a> {
     guard: tokio::sync::MutexGuard<'a, Option<Instance>>,
@@ -119,14 +128,28 @@ pub struct Manager {
     store: Store,
     entries: Arc<RwLock<BTreeMap<String, Entry>>>,
     sessions: Sessions,
+    provider_sessions: ProviderSessions,
     generations: Arc<AtomicU64>,
     pub(crate) supervisor: Supervisor,
     stopped: CancellationToken,
     discovery_error: Arc<RwLock<Option<String>>>,
     invocation_slots: Arc<tokio::sync::Semaphore>,
 }
-pub(crate) fn failure(_: impl std::fmt::Display) -> Error {
+pub(crate) fn failure(error: impl std::fmt::Display) -> Error {
+    eprintln!("ene-host plugin: {error:#}");
     Error::new(ErrorKind::ExternalFailure)
+}
+fn invocation_failure(error: ene_plugin_runtime::Error) -> Error {
+    if matches!(&error, ene_plugin_runtime::Error::Service(failure) if failure.code == "state_unavailable")
+    {
+        Error::new(ErrorKind::StorageFailure)
+    } else {
+        failure(error)
+    }
+}
+fn storage_failure(error: impl std::fmt::Display) -> Error {
+    eprintln!("ene-host plugin storage: {error:#}");
+    Error::new(ErrorKind::StorageFailure)
 }
 fn conflict() -> Error {
     Error::new(ErrorKind::StateConflict)
@@ -145,11 +168,12 @@ impl Manager {
             store,
             entries: Arc::new(RwLock::new(BTreeMap::new())),
             sessions: Arc::default(),
+            provider_sessions: Arc::default(),
             generations: Arc::new(AtomicU64::new(1)),
             supervisor: Supervisor::default(),
             stopped: CancellationToken::new(),
             discovery_error: Arc::default(),
-            invocation_slots: Arc::new(tokio::sync::Semaphore::new(16)),
+            invocation_slots: Arc::new(tokio::sync::Semaphore::new(MAX_INSTANCES)),
         };
         // Malformed packages are reported by reload; no code is executed during discovery.
         if manager.scan().is_err() {
@@ -162,33 +186,69 @@ impl Manager {
         let old = self.entries.read().map_err(failure)?.clone();
         let mut next = BTreeMap::new();
         let mut provider_ids = std::collections::BTreeSet::new();
+        let mut errors = Vec::new();
         if self.root.exists() {
-            for path in std::fs::read_dir(&self.root).map_err(failure)? {
-                let package = Package::load(&path.map_err(failure)?.path()).map_err(failure)?;
+            let mut paths = std::fs::read_dir(&self.root)
+                .map_err(failure)?
+                .map(|entry| entry.map(|entry| entry.path()).map_err(failure))
+                .collect::<Result<Vec<_>>>()?;
+            paths.sort();
+            for path in paths {
+                if !std::fs::symlink_metadata(&path).map_err(failure)?.is_dir() {
+                    continue;
+                }
+                let package = match Package::load(&path) {
+                    Ok(package) => package,
+                    Err(error) => {
+                        errors.push(format!(
+                            "{}: {error}",
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("package")
+                        ));
+                        continue;
+                    }
+                };
+                let mut package_providers = Vec::new();
+                let mut provider_error = false;
                 for entry in &package.manifest.entrypoints {
                     if let Some(provider) = &entry.provider {
-                        manifest::validate(provider)?;
-                        if !provider_ids.insert(provider.id.clone()) {
-                            return Err(conflict());
+                        if manifest::validate(provider).is_err()
+                            || provider_ids.contains(&provider.id)
+                        {
+                            provider_error = true;
+                            break;
                         }
+                        package_providers.push(provider.id.clone());
                     }
                 }
+                if provider_error {
+                    errors.push(format!("{}: provider", package.manifest.id));
+                    continue;
+                }
                 let id = package.manifest.id.clone();
+                if next.contains_key(&id) {
+                    errors.push(format!("{id}: duplicate package id"));
+                    continue;
+                }
                 let entry = old
                     .get(&id)
-                    .filter(|e| e.package.revision == package.revision)
+                    .filter(|e| {
+                        e.package.root == package.root && e.package.revision == package.revision
+                    })
                     .cloned()
                     .unwrap_or_else(|| Entry {
                         package,
                         state: "disabled".into(),
                         error: None,
-                        cancellation: CancellationToken::new(),
+                        cancellation: self.stopped.child_token(),
                         generation: self.generations.fetch_add(1, Ordering::Relaxed),
                         capabilities: BTreeMap::new(),
                     });
-                if next.insert(id, entry).is_some() {
-                    return Err(conflict());
+                for provider in package_providers {
+                    provider_ids.insert(provider);
                 }
+                next.insert(id, entry);
             }
         }
         let mut entries = self.entries.write().map_err(failure)?;
@@ -201,6 +261,11 @@ impl Manager {
             }
         }
         *entries = next;
+        *self.discovery_error.write().map_err(failure)? = if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        };
         Ok(())
     }
     fn ready(&self, id: &str, revision: Option<&str>) -> Result<Entry> {
@@ -220,7 +285,6 @@ impl Manager {
         if revision.is_some_and(|r| e.package.revision != r) {
             return Err(conflict());
         }
-        e.package.verify().map_err(|_| conflict())?;
         Ok(e)
     }
     pub(crate) fn provider_entry(&self, id: &str) -> Option<(String, String)> {
@@ -236,74 +300,124 @@ impl Manager {
                 .map(|entry| (package.clone(), entry.id.clone()))
         })
     }
+    pub(super) fn provider_session(
+        &self,
+        package_id: &str,
+        entrypoint: &str,
+        lifetime: CancellationToken,
+    ) -> Arc<ProviderSession> {
+        let key = format!("{package_id}:{entrypoint}");
+        let mut sessions = self.provider_sessions.lock().unwrap();
+        if let Some(current) = sessions.get(&key) {
+            if !current.lifetime.is_cancelled() {
+                return current.clone();
+            }
+            sessions.remove(&key);
+        }
+        let session = Arc::new(ProviderSession {
+            package_id: package_id.into(),
+            lifetime,
+            worker: Mutex::new(None),
+        });
+        sessions.insert(key, session.clone());
+        session
+    }
+    async fn stop_provider_sessions(&self, package: Option<&str>) {
+        let sessions: Vec<_> = self
+            .provider_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, session)| package.is_none_or(|id| id == session.package_id))
+            .map(|(key, session)| (key.clone(), session.clone()))
+            .collect();
+        for (key, session) in sessions {
+            session.lifetime.cancel();
+            let mut worker = session.worker.lock().await;
+            worker.take();
+            if self
+                .provider_sessions
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                self.provider_sessions.lock().unwrap().remove(&key);
+            }
+        }
+    }
     pub(crate) fn provider_bundle(&self, id: &str) -> Result<Bundle> {
         let (package, entrypoint) = self.provider_entry(id).ok_or_else(unsupported)?;
         let entry = self.ready(&package, None)?;
         bundle(&entry.package, &entrypoint)
     }
     pub(crate) fn descriptors(&self) -> Vec<crate::llm::Descriptor> {
-        self.entries
+        let entries: Vec<Entry> = self
+            .entries
             .read()
-            .map(|entries| {
-                entries
-                    .values()
-                    .flat_map(|e| {
-                        e.package.manifest.entrypoints.iter().filter_map(|entry| {
-                            if entry.target != Target::Host {
-                                return None;
-                            }
-                            let b = bundle(&e.package, &entry.id).ok()?;
-                            let state = if e.package.verify().is_ok() {
-                                &e.state
-                            } else {
-                                "changed"
-                            };
-                            let capabilities = e
-                                .capabilities
-                                .get(&entry.id)
-                                .cloned()
-                                .and_then(|c| serde_json::from_value(c).ok())
-                                .unwrap_or_default();
-                            Some(b.descriptor(state, capabilities, e.error.clone()))
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-    async fn stop_sessions(&self, package: Option<&str>) {
-        let sessions = {
-            let mut sessions = self.sessions.lock().unwrap();
-            let keys: Vec<_> = sessions
-                .iter()
-                .filter(|(_, session)| package.is_none_or(|p| p == session.package_id))
-                .map(|(key, _)| key.clone())
-                .collect();
-            keys.into_iter()
-                .map(|key| {
-                    let session = sessions.remove(&key).unwrap();
-                    session.lifetime.cancel();
-                    (key, session)
+            .map(|entries| entries.values().cloned().collect())
+            .unwrap_or_default();
+        entries
+            .iter()
+            .flat_map(|e| {
+                e.package.manifest.entrypoints.iter().filter_map(|entry| {
+                    if entry.target != Target::Host {
+                        return None;
+                    }
+                    let b = bundle(&e.package, &entry.id).ok()?;
+                    let state = if e.package.verify().is_ok() {
+                        &e.state
+                    } else {
+                        "changed"
+                    };
+                    let capabilities = e
+                        .capabilities
+                        .get(&entry.id)
+                        .cloned()
+                        .and_then(|c| serde_json::from_value(c).ok())
+                        .unwrap_or_default();
+                    Some(b.descriptor(state, capabilities, e.error.clone()))
                 })
-                .collect::<Vec<_>>()
-        };
+            })
+            .collect()
+    }
+    async fn stop_session(&self, key: &str, session: &Arc<SessionState>) -> Result<()> {
+        session.lifetime.cancel();
+        let mut worker = session.worker.lock().await;
+        worker.take();
+        if self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            // Keep the stopped registration until its terminal journal is durable.
+            self.harness_stop(key, "plugin_stopped").await?;
+            self.sessions.lock().unwrap().remove(key);
+        }
+        Ok(())
+    }
+    async fn stop_sessions(&self, package: Option<&str>) -> Result<()> {
+        let sessions: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, session)| package.is_none_or(|p| p == session.package_id))
+            .map(|(key, session)| {
+                session.lifetime.cancel();
+                (key.clone(), session.clone())
+            })
+            .collect();
+        let mut result = Ok(());
         for (key, session) in sessions {
-            if let Some(mut worker) = session.worker.lock().await.take() {
-                worker.stop().await;
-            }
-            if let Ok(mut journal) = self.store.plugin_get("harness".into(), key.clone()).await
-                && journal.is_object()
-                && !matches!(
-                    journal["status"].as_str(),
-                    Some("completed" | "failed" | "cancelled")
-                )
-            {
-                journal["status"] = json!("failed");
-                journal["report"] = json!("plugin_stopped");
-                journal["pending"] = Value::Null;
-                let _ = self.store.plugin_set("harness".into(), key, journal).await;
+            let stopped = self.stop_session(&key, &session).await;
+            if result.is_ok() {
+                result = stopped;
             }
         }
+        result
     }
     async fn change_enabled(&self, id: String, input: EnablePluginRequest) -> Result<()> {
         let (package, generation, cancel) = {
@@ -315,7 +429,9 @@ impl Manager {
             if e.package.revision != input.revision {
                 return Err(conflict());
             }
-            e.package.verify().map_err(failure)?;
+            if input.enabled {
+                e.package.verify().map_err(failure)?;
+            }
             e.cancellation.cancel();
             e.cancellation = self.stopped.child_token();
             e.generation = self.generations.fetch_add(1, Ordering::Relaxed);
@@ -329,7 +445,8 @@ impl Manager {
             (e.package.clone(), e.generation, e.cancellation.clone())
         };
         // Cancelling old generations releases service waits before collecting workers.
-        self.stop_sessions(Some(&id)).await;
+        self.stop_sessions(Some(&id)).await?;
+        self.stop_provider_sessions(Some(&id)).await;
         let result = async {
             let mut capabilities = BTreeMap::new();
             if input.enabled {
@@ -379,24 +496,31 @@ impl Manager {
         self.store
             .plugin_set("enabled".into(), id.clone(), json!({"id":id,"input":input}))
             .await
-            .map_err(failure)?;
+            .map_err(storage_failure)?;
         Ok(())
     }
-    async fn invoke_owned(&self, input: PluginInvocation) -> Result<PluginResult> {
+    async fn invoke_inner(
+        &self,
+        input: PluginInvocation,
+        mutations: Arc<dyn Mutations>,
+    ) -> Result<PluginResult> {
         let binding: PluginBinding = serde_json::from_value(
             self.store
                 .plugin_get("bindings".into(), input.binding_id)
                 .await
-                .map_err(failure)?,
+                .map_err(storage_failure)?,
         )
         .map_err(failure)?;
         let entry = self.ready(&binding.plugin_id, Some(&binding.revision))?;
         let operation: Operation =
             serde_json::from_str(&input.operation.json).map_err(|_| Error::invalid())?;
-        if matches!(
-            operation,
-            Operation::Generate { .. } | Operation::ListModels { .. }
-        ) {
+        let endpoint = entry.package.entry(&binding.entrypoint).map_err(failure)?;
+        if !endpoint.provides.contains(&operation.extension())
+            || matches!(
+                operation,
+                Operation::Generate { .. } | Operation::ListModels { .. }
+            )
+        {
             return Err(unsupported());
         }
         if let Operation::Character { target, event } = &operation {
@@ -407,6 +531,7 @@ impl Manager {
                 return Err(Error::new(ErrorKind::PermissionRequired));
             }
             if matches!(event, ene_plugin::CharacterEvent::Window { .. }) {
+                // Window observation belongs to the desktop adapter, not host bindings.
                 return Err(unsupported());
             }
         }
@@ -420,7 +545,7 @@ impl Manager {
         }
         let persistent = matches!(
             operation,
-            Operation::Character { .. } | Operation::Harness { .. }
+            Operation::Character { .. } | Operation::Harness { .. } | Operation::Speech { .. }
         );
         // Cancel reaches the active invocation before waiting for its worker lock.
         let cancelling = matches!(
@@ -448,7 +573,7 @@ impl Manager {
         let key = binding.id.clone();
         let worker = if persistent {
             let mut sessions = self.sessions.lock().unwrap();
-            if sessions.len() >= 16 && !sessions.contains_key(&key) {
+            if sessions.len() >= MAX_SESSIONS && !sessions.contains_key(&key) {
                 return Err(Error::unavailable());
             }
             sessions
@@ -467,12 +592,16 @@ impl Manager {
             ))
         };
         let lifetime = &worker.lifetime;
+        let guard = worker.worker.lock().await;
         let mut session = Session {
-            guard: worker.worker.lock().await,
-            retain: false,
+            retain: persistent && (guard.is_some() || lifetime.is_cancelled()),
+            guard,
             registration: persistent.then(|| (self.clone(), key.clone(), worker.clone())),
             _permit: permit,
         };
+        if lifetime.is_cancelled() && !cancelling {
+            return Err(Error::unavailable());
+        }
         if persistent
             && !cancelling
             && !self
@@ -491,7 +620,17 @@ impl Manager {
             let events = vec![Event::Harness {
                 event: HarnessEvent::Cancelled,
             }];
-            let task_id = self.harness_cancel(&binding, journal, &events).await?;
+            let task_id = self
+                .harness_cancel(&binding, journal, &events)
+                .await
+                .inspect_err(|error| {
+                    if error.kind == ErrorKind::StorageFailure {
+                        session.take();
+                        lifetime.cancel();
+                        session.retain = true;
+                    }
+                })?;
+            session.retain = false;
             if let Some(mut worker) = session.take() {
                 worker.stop().await;
             }
@@ -516,8 +655,9 @@ impl Manager {
             self.store
                 .plugin_set("harness".into(), binding.id.clone(), json!(journal))
                 .await
-                .map_err(failure)?;
+                .map_err(storage_failure)?;
         }
+        session.retain = false;
         let stopping = matches!(
             operation,
             Operation::Character {
@@ -529,6 +669,14 @@ impl Manager {
         );
         let mut failure_reason = "startup_failed";
         let outcome = async {
+            if session.is_some() && matches!(&operation, Operation::Speech { .. }) {
+                session
+                    .as_mut()
+                    .unwrap()
+                    .reset(&cancel)
+                    .await
+                    .map_err(failure)?;
+            }
             if session.is_none() {
                 let verified = entry.package.clone();
                 *session = Some(
@@ -548,9 +696,10 @@ impl Manager {
                 manager: self.clone(),
                 binding: binding.clone(),
                 cancel: cancel.clone(),
+                mutations,
             });
             let (tx, mut rx) = mpsc::channel(16);
-            let collect = async {
+            let collect = async move {
                 let mut events = Vec::new();
                 let mut bytes = 0;
                 while let Some(event) = rx.recv().await {
@@ -565,20 +714,30 @@ impl Manager {
             let validation = services.clone();
             let worker = session.as_mut().unwrap();
             let generation = worker.generation();
-            let work = worker.invoke(operation, services, tx, &cancel);
-            let (result, events) = tokio::join!(work, collect);
-            let result = result.map_err(failure)?;
-            let events = events?;
-            validation
-                .check()
-                .await
-                .map_err(|_| Error::new(ErrorKind::PermissionRequired))?;
+            let work = worker
+                .invoke(operation, services, tx, &cancel)
+                .map_err(invocation_failure);
+            let (events, mut result) = tokio::try_join!(collect, work)?;
+            validation.check().await.map_err(|failure| {
+                if failure.code == "state_unavailable" {
+                    Error::new(ErrorKind::StorageFailure)
+                } else {
+                    Error::new(ErrorKind::PermissionRequired)
+                }
+            })?;
             if self
                 .ready(&binding.plugin_id, Some(&binding.revision))?
                 .generation
                 != entry.generation
             {
                 return Err(conflict());
+            }
+            if let Some(journal) = &journal {
+                failure_reason = "commit_failed";
+                let task_id = self
+                    .harness_commit(&binding.id, journal.clone(), &events)
+                    .await?;
+                result = json!({"task_id":task_id,"output":result});
             }
             Ok((generation, events, result))
         }
@@ -604,15 +763,15 @@ impl Manager {
         if outcome.is_err() || cancel.is_cancelled() {
             if let Some(journal) = journal {
                 self.harness_finish(&binding, journal, &cancel, lifetime, failure_reason)
-                    .await?;
+                    .await
+                    .inspect_err(|_| {
+                        lifetime.cancel();
+                        session.retain = true;
+                    })?;
             }
             return Err(outcome.err().unwrap_or_else(conflict));
         }
-        let (instance_generation, events, mut result) = outcome?;
-        if let Some(journal) = journal {
-            let task_id = self.harness_commit(&binding, journal, &events).await?;
-            result = json!({"task_id":task_id,"output":result});
-        }
+        let (instance_generation, events, result) = outcome?;
         session.retain = persistent && !stopping && !terminal;
         Ok(PluginResult {
             generation: instance_generation,
@@ -624,19 +783,29 @@ impl Manager {
             ..Default::default()
         })
     }
-    pub async fn restore(&self) {
-        if let Ok(records) = self.store.plugin_list("enabled".into()).await {
-            // Saved identity includes the package ID; changed code never auto-enables.
-            for record in records {
-                if let (Some(id), Some(input)) = (
-                    record.get("id").and_then(Value::as_str),
-                    record.get("input"),
-                ) && let Ok(input) = serde_json::from_value::<EnablePluginRequest>(input.clone())
-                {
-                    let _ = self.change_enabled(id.into(), input).await;
-                }
+    pub async fn restore(&self) -> Result<()> {
+        // Guest memory cannot survive a host restart; finalize its saved tasks first.
+        for binding in self.bindings().await? {
+            self.harness_stop(&binding.id, "host_interrupted").await?;
+        }
+        let records = self
+            .store
+            .plugin_list("enabled".into())
+            .await
+            .map_err(storage_failure)?;
+        // Saved identity includes the package ID; changed code never auto-enables.
+        for record in records {
+            if let (Some(id), Some(input)) = (
+                record.get("id").and_then(Value::as_str),
+                record.get("input"),
+            ) && let Ok(input) = serde_json::from_value::<EnablePluginRequest>(input.clone())
+                && let Err(error) = self.change_enabled(id.into(), input).await
+                && error.kind == ErrorKind::StorageFailure
+            {
+                return Err(error);
             }
         }
+        Ok(())
     }
 }
 fn bundle(package: &Package, entrypoint: &str) -> Result<Bundle> {
@@ -654,41 +823,40 @@ fn bundle(package: &Package, entrypoint: &str) -> Result<Bundle> {
 }
 impl Plugins for Manager {
     fn list(&self) -> Vec<Plugin> {
-        let mut result: Vec<Plugin> = self
+        let entries: Vec<Entry> = self
             .entries
             .read()
-            .map(|entries| {
-                entries
-                    .values()
-                    .map(|e| Plugin {
-                        id: e.package.manifest.id.clone(),
-                        name: e.package.manifest.name.clone(),
-                        version: e.package.manifest.version.clone(),
-                        revision: e.package.revision.clone(),
-                        state: if e.package.verify().is_ok() {
-                            e.state.clone()
-                        } else {
-                            "changed".into()
-                        },
-                        error: e.error.clone(),
-                        entrypoints: e
-                            .package
-                            .manifest
-                            .entrypoints
-                            .iter()
-                            .map(|p| PluginEntry {
-                                id: p.id.clone(),
-                                target: name(p.target),
-                                provides: p.provides.iter().copied().map(name).collect(),
-                                uses: p.uses.iter().copied().map(name).collect(),
-                                ..Default::default()
-                            })
-                            .collect(),
+            .map(|entries| entries.values().cloned().collect())
+            .unwrap_or_default();
+        let mut result: Vec<Plugin> = entries
+            .iter()
+            .map(|e| Plugin {
+                id: e.package.manifest.id.clone(),
+                name: e.package.manifest.name.clone(),
+                version: e.package.manifest.version.clone(),
+                revision: e.package.revision.clone(),
+                state: if e.package.verify().is_ok() {
+                    e.state.clone()
+                } else {
+                    "changed".into()
+                },
+                error: e.error.clone(),
+                entrypoints: e
+                    .package
+                    .manifest
+                    .entrypoints
+                    .iter()
+                    .map(|p| PluginEntry {
+                        id: p.id.clone(),
+                        target: name(p.target),
+                        provides: p.provides.iter().copied().map(name).collect(),
+                        uses: p.uses.iter().copied().map(name).collect(),
                         ..Default::default()
                     })
-                    .collect()
+                    .collect(),
+                ..Default::default()
             })
-            .unwrap_or_default();
+            .collect();
         if let Some(error) = self.discovery_error.read().ok().and_then(|e| e.clone()) {
             result.push(Plugin {
                 id: "plugin-discovery".into(),
@@ -705,13 +873,16 @@ impl Plugins for Manager {
     }
     fn reload(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async {
-            let result = self.scan();
-            *self.discovery_error.write().map_err(failure)? = result
-                .as_ref()
-                .err()
-                .map(|_| "invalid_manifest_or_duplicate_id".into());
-            result?;
-            self.stop_sessions(None).await;
+            if self.stopped.is_cancelled() {
+                return Err(Error::unavailable());
+            }
+            if let Err(error) = self.scan() {
+                *self.discovery_error.write().map_err(failure)? =
+                    Some("invalid_manifest_or_duplicate_id".into());
+                return Err(error);
+            }
+            self.stop_sessions(None).await?;
+            self.stop_provider_sessions(None).await;
             Ok(())
         })
     }
@@ -723,7 +894,7 @@ impl Plugins for Manager {
             self.store
                 .plugin_list("bindings".into())
                 .await
-                .map_err(failure)?
+                .map_err(storage_failure)?
                 .into_iter()
                 .map(|v| serde_json::from_value(v).map_err(failure))
                 .collect()
@@ -732,6 +903,13 @@ impl Plugins for Manager {
     fn bind(&self, input: PluginBinding) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let entry = self.ready(&input.plugin_id, Some(&input.revision))?;
+            entry.package.verify().map_err(|error| {
+                if matches!(error, ene_plugin_runtime::Error::Changed) {
+                    conflict()
+                } else {
+                    failure(error)
+                }
+            })?;
             let endpoint = entry.package.entry(&input.entrypoint).map_err(failure)?;
             if !ene_plugin_runtime::package::identifier(&input.id)
                 || endpoint.target != Target::Host
@@ -754,7 +932,7 @@ impl Plugins for Manager {
             }
             serde_json::from_str::<Value>(&input.configuration.json)
                 .map_err(|_| Error::invalid())?;
-            let snapshot = self.store.snapshot().await.map_err(failure)?;
+            let snapshot = self.store.snapshot().await.map_err(storage_failure)?;
             if !snapshot
                 .companions
                 .iter()
@@ -762,9 +940,11 @@ impl Plugins for Manager {
             {
                 return Err(Error::new(ErrorKind::NotFound));
             }
-            let session = self.sessions.lock().unwrap().remove(&input.id);
-            if let Some(session) = &session {
-                session.lifetime.cancel();
+            let session = self.sessions.lock().unwrap().get(&input.id).cloned();
+            if let Some(session) = session {
+                self.stop_session(&input.id, &session).await?;
+            } else {
+                self.harness_stop(&input.id, "plugin_stopped").await?;
             }
             self.store
                 .plugin_set(
@@ -773,32 +953,30 @@ impl Plugins for Manager {
                     serde_json::to_value(input).map_err(failure)?,
                 )
                 .await
-                .map_err(failure)?;
-            if let Some(session) = session
-                && let Some(mut worker) = session.worker.lock().await.take()
-            {
-                worker.stop().await;
-            }
+                .map_err(storage_failure)?;
             Ok(())
         })
     }
-    fn invoke(&self, input: PluginInvocation) -> BoxFuture<'_, Result<PluginResult>> {
-        let manager = self.clone();
-        Box::pin(async move {
-            // Once dispatched, cancellation and journal persistence outlive the RPC waiter.
-            tokio::spawn(async move { manager.invoke_owned(input).await })
-                .await
-                .map_err(failure)?
-        })
+    fn invoke(
+        &self,
+        input: PluginInvocation,
+        mutations: Arc<dyn Mutations>,
+    ) -> BoxFuture<'_, Result<PluginResult>> {
+        Box::pin(self.invoke_inner(input, mutations))
     }
-    fn restore(&self) -> BoxFuture<'_, ()> {
+    fn restore(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(Manager::restore(self))
     }
-    fn shutdown(&self) -> BoxFuture<'_, ()> {
+    fn cancel(&self) {
+        self.stopped.cancel();
+    }
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async {
-            self.stopped.cancel();
-            self.stop_sessions(None).await;
+            self.cancel();
+            let result = self.stop_sessions(None).await;
+            self.stop_provider_sessions(None).await;
             self.supervisor.shutdown().await;
+            result
         })
     }
 }
@@ -806,6 +984,7 @@ struct LocalServices {
     manager: Manager,
     binding: PluginBinding,
     cancel: CancellationToken,
+    mutations: Arc<dyn Mutations>,
 }
 impl Services for LocalServices {
     fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
@@ -844,7 +1023,10 @@ impl Services for LocalServices {
                 self.binding.plugin_id, self.binding.entrypoint, self.binding.companion_id
             );
             match request {
-                ServiceRequest::Log { message } if message.len() <= 4096 => Ok(Value::Null),
+                ServiceRequest::Log { message } if message.len() <= 4096 => {
+                    eprintln!("ene-host plugin [{}]: {message:?}", self.binding.plugin_id);
+                    Ok(Value::Null)
+                }
                 ServiceRequest::Configuration => {
                     serde_json::from_str(&self.binding.configuration.json)
                         .map_err(|_| Failure::new("invalid_configuration"))
@@ -859,9 +1041,14 @@ impl Services for LocalServices {
                     if valid_key(&key)
                         && serde_json::to_vec(&value).is_ok_and(|v| v.len() <= 65536) =>
                 {
-                    self.manager
-                        .store
-                        .plugin_set(namespace, key, value)
+                    let store = self.manager.store.clone();
+                    self.mutations
+                        .submit(Box::pin(async move {
+                            store
+                                .plugin_set(namespace, key, value)
+                                .await
+                                .map_err(super::sqlite::core_error)
+                        }))
                         .await
                         .map_err(|_| Failure::new("state_unavailable"))?;
                     Ok(Value::Null)

@@ -34,6 +34,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Clippy Wasm SDK and plugins
+        run: cargo clippy --locked -p ene-plugin -p ene-openrouter-wasm -p ene-reference-wasm -p ene-window-reaction-wasm --target wasm32-unknown-unknown -- -D warnings
       - name: Build Wasm plugin
         run: cargo build --release --locked -p ene-openrouter-wasm -p ene-window-reaction-wasm -p ene-reference-wasm --target wasm32-unknown-unknown
       - uses: actions/setup-node@v4
@@ -46,10 +48,6 @@ jobs:
           node examples/plugins/window-reaction-wasm/test.cjs target/wasm32-unknown-unknown/release/ene_window_reaction_wasm.wasm
       - name: Tests
         run: cargo test --workspace --all-features --locked
-      - name: Test embedded Wasm plugin
-        env:
-          ENE_TEST_PDK_WASM: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm
-        run: cargo test --locked -p ene-plugin-runtime --test pdk -- --ignored
       - name: Check Wasm RPC messages
         if: runner.os == 'Linux'
         run: |

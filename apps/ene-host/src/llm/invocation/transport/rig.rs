@@ -174,6 +174,13 @@ mod tests {
             .body(Bytes::new())
             .unwrap()
     }
+    fn post(url: String) -> http::Request<Bytes> {
+        http::Request::builder()
+            .method("POST")
+            .uri(url)
+            .body(Bytes::new())
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn redirects_never_forward_credentials_and_query_failures_are_redacted() {
@@ -288,8 +295,8 @@ mod tests {
         let (origin, task) = server(
             Router::new()
                 .route(
-                    "/api/models",
-                    get(|| async {
+                    "/api/chat/completions",
+                    axum::routing::post(|| async {
                         axum::body::Body::from_stream(futures_util::stream::iter((0..9).map(
                             |_| {
                                 Ok::<_, std::convert::Infallible>(Bytes::from(vec![
@@ -301,8 +308,8 @@ mod tests {
                     }),
                 )
                 .route(
-                    "/api/stream",
-                    get(|| async {
+                    "/api/responses",
+                    axum::routing::post(|| async {
                         axum::body::Body::from_stream(futures_util::stream::iter((0..17).map(
                             |_| {
                                 Ok::<_, std::convert::Infallible>(Bytes::from(vec![
@@ -323,7 +330,7 @@ mod tests {
         );
         assert_eq!(
             transport
-                .send(request(format!("{origin}/api/models")))
+                .send(post(format!("{origin}/api/chat/completions")))
                 .await
                 .unwrap()
                 .bytes()
@@ -333,7 +340,7 @@ mod tests {
             ErrorKind::ProviderFailure
         );
         let response = transport
-            .send_streaming(request(format!("{origin}/api/stream")))
+            .send_streaming(post(format!("{origin}/api/responses")))
             .await
             .unwrap();
         let mut body = response.into_body();

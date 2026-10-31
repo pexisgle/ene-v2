@@ -37,25 +37,20 @@ pub async fn send(
     input.authorization().check().await?;
     let base = url::Url::parse(&input.connection().endpoint).map_err(|_| denied())?;
     let target = url::Url::parse(&url).map_err(|_| denied())?;
-    let public = target.origin() != base.origin();
-    if !target.username().is_empty()
+    if target.origin() != base.origin()
+        || !target.username().is_empty()
         || target.password().is_some()
         || target.fragment().is_some()
         || !bundle
             .manifest
             .destinations
             .contains(&target.origin().ascii_serialization())
-        || !public
-            && !(target.path() == base.path().trim_end_matches('/')
-                || target
-                    .path()
-                    .starts_with(&format!("{}/", base.path().trim_end_matches('/'))))
     {
         return Err(denied());
     }
     // Metadata authorization never admits a generation POST, even to the
     // credential-bearing origin. Keep this boundary common to all adapters.
-    if models && (method != "GET" || body.is_some()) || public && !models {
+    if models && (method != "GET" || body.is_some()) || !models && method != "POST" {
         return Err(denied());
     }
     if !["POST", "GET"].contains(&method.as_str()) || method == "GET" && body.is_some() {
@@ -72,13 +67,11 @@ pub async fn send(
             http::header::HeaderValue::from_str(&value).map_err(|_| denied())?,
         );
     }
-    if !public {
-        for (name, value) in &bundle.manifest.headers {
-            map.insert(
-                http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| denied())?,
-                http::header::HeaderValue::from_str(value).map_err(|_| denied())?,
-            );
-        }
+    for (name, value) in &bundle.manifest.headers {
+        map.insert(
+            http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| denied())?,
+            http::header::HeaderValue::from_str(value).map_err(|_| denied())?,
+        );
     }
 
     let mut body = body.unwrap_or_default();
@@ -87,7 +80,7 @@ pub async fn send(
         error.reason = Some("input_limit");
         return Err(error);
     }
-    if !public && let BrokerRouting::OpenRouter { only } = &bundle.manifest.routing {
+    if let BrokerRouting::OpenRouter { only } = &bundle.manifest.routing {
         if !models && method == "POST" && target.path() == "/api/v1/chat/completions" {
             let mut request: serde_json::Value =
                 serde_json::from_slice(&body).map_err(|_| denied())?;

@@ -1,13 +1,17 @@
 //! Extism PDK example. HTTP and credentials remain owned by the ene broker.
 #[cfg(target_family = "wasm")]
-#[allow(unused_braces)]
 mod guest {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use ene_plugin::*;
     use serde_json::{Value, json};
     #[plugin_fn]
-    pub fn ene_initialize() -> FnResult<Json<Value>> {
-        Ok(Json(json!({"streaming_text":true,"model_list":true})))
+    pub fn ene_initialize() -> FnResult<Json<LlmCapabilities>> {
+        Ok(Json(LlmCapabilities {
+            streaming_text: true,
+            model_list: true,
+            tools: false,
+            cancellation: true,
+        }))
     }
     #[plugin_fn]
     pub fn ene_invoke(Json(operation): Json<Operation>) -> FnResult<Json<Value>> {
@@ -36,8 +40,9 @@ mod guest {
                     false,
                 )
             }
+            // Match the single upstream approved by this sample's manifest.
             Operation::ListModels { endpoint, .. } => (
-                format!("{}/models", endpoint.trim_end_matches('/')),
+                format!("{}/models?providers=openai", endpoint.trim_end_matches('/')),
                 None,
                 true,
             ),

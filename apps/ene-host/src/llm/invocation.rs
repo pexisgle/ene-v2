@@ -57,6 +57,11 @@ pub enum CredentialPlacement {
     Header(String),
     Query(String),
 }
+#[derive(Clone)]
+pub(crate) enum TransportScope {
+    Provider,
+    Catalog(url::Url),
+}
 
 impl Invocation {
     pub(crate) fn new(
@@ -118,6 +123,7 @@ impl Invocation {
         &self,
         request: &mut http::Request<bytes::Bytes>,
         placement: &CredentialPlacement,
+        scope: &TransportScope,
     ) -> Result<()> {
         self.authorization.check().await?;
         let denied = || Error::new(ErrorKind::PermissionRequired);
@@ -133,29 +139,45 @@ impl Invocation {
         {
             return Err(denied());
         }
-        let primary = base.origin() == target.origin();
-        if primary
-            && !(target.path() == base.path().trim_end_matches('/')
-                || target
-                    .path()
-                    .starts_with(&format!("{}/", base.path().trim_end_matches('/'))))
-        {
-            return Err(denied());
-        }
-        if !matches!(*request.method(), http::Method::GET | http::Method::POST)
-            || (*request.method() == http::Method::GET && !request.body().is_empty())
-            || (self.operation() == OperationKind::ModelList
-                && *request.method() != http::Method::GET)
-            || (!primary
-                && (self.operation() != OperationKind::ModelList
+        match scope {
+            TransportScope::Catalog(source) => {
+                if target.as_str() != source.as_str()
                     || *request.method() != http::Method::GET
-                    || !request.body().is_empty()))
-        {
-            return Err(denied());
+                    || !request.body().is_empty()
+                    || !self
+                        .policy()
+                        .destinations
+                        .contains(&source.origin().ascii_serialization())
+                {
+                    return Err(denied());
+                }
+            }
+            TransportScope::Provider => {
+                if target.origin() != base.origin() {
+                    return Err(denied());
+                }
+                let base_path = base.path().trim_end_matches('/');
+                let path = target.path();
+                let allowed = match self.operation() {
+                    OperationKind::ModelList => {
+                        *request.method() == http::Method::GET
+                            && request.body().is_empty()
+                            && path == format!("{base_path}/models")
+                    }
+                    OperationKind::Conversation | OperationKind::ConnectionCheck => {
+                        *request.method() == http::Method::POST
+                            && (path == format!("{base_path}/chat/completions")
+                                || path == format!("{base_path}/responses"))
+                    }
+                };
+                if !allowed {
+                    return Err(denied());
+                }
+            }
         }
         // SDK-generated auth is replaced; it can never be forwarded to a public catalog.
         request.headers_mut().remove(http::header::AUTHORIZATION);
-        if !primary {
+        if matches!(scope, TransportScope::Catalog(_)) {
             return Ok(());
         }
         let secret = || self.secret.as_ref().ok_or_else(denied);

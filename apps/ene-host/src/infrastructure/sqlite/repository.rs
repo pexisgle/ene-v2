@@ -130,7 +130,7 @@ impl crate::ports::Repository for Store {
         })
     }
 }
-fn core_error(error: Error) -> crate::domain::Error {
+pub(crate) fn core_error(error: Error) -> crate::domain::Error {
     use crate::domain::{Error as CoreError, ErrorKind};
     match error {
         Error::InvalidCursor => CoreError::invalid(),

@@ -16,6 +16,7 @@ pub fn service_request(request: &ServiceRequest) -> Result<()> {
 }
 pub struct Events {
     extension: Extension,
+    models: bool,
     terminal: bool,
     count: u64,
     speech: Option<(String, u64)>,
@@ -44,6 +45,7 @@ impl Events {
         };
         Self {
             extension: operation.extension(),
+            models: matches!(operation, Operation::ListModels { .. }),
             terminal: false,
             count: 0,
             speech,
@@ -55,7 +57,12 @@ impl Events {
         }
     }
     pub fn accept(&mut self, event: &Event) -> Result<()> {
-        if self.terminal || self.count >= MAX_STREAM_EVENTS || event.extension() != self.extension {
+        if self.terminal
+            || self.count >= MAX_STREAM_EVENTS
+            || event.extension() != self.extension
+            || self.extension == Extension::Llm
+                && matches!(event, Event::Models { .. }) != self.models
+        {
             return Err(Error::Protocol);
         }
         match event {
@@ -112,13 +119,18 @@ impl Events {
                     | HarnessEvent::Failed { .. }
                     | HarnessEvent::Cancelled,
             } => self.terminal = true,
+            Event::Transcript { .. } => self.terminal = true,
             _ => {}
         }
         self.count += 1;
         Ok(())
     }
     pub fn finish(&self) -> Result<()> {
-        if matches!(self.extension, Extension::Llm | Extension::Tts) && !self.terminal {
+        if matches!(
+            self.extension,
+            Extension::Llm | Extension::Tts | Extension::Stt
+        ) && !self.terminal
+        {
             return Err(Error::Protocol);
         }
         Ok(())
@@ -127,6 +139,71 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn operation_specific_results_require_the_correct_terminal_event() {
+        let generate = Operation::Generate {
+            request: GenerationRequest {
+                endpoint: String::new(),
+                options: serde_json::json!({}),
+                model: "fixture".into(),
+                preamble: String::new(),
+                messages: vec![],
+                max_tokens: 1,
+                tools: vec![],
+            },
+        };
+        let list = Operation::ListModels {
+            endpoint: String::new(),
+            options: serde_json::json!({}),
+        };
+        let transcribe = Operation::Speech {
+            input: SpeechInput::Transcribe {
+                utterance_id: "u".into(),
+                audio: AudioChunk {
+                    utterance_id: "u".into(),
+                    generation: 1,
+                    sequence: 0,
+                    format: "pcm_s16le".into(),
+                    sample_rate: 16000,
+                    channels: 1,
+                    data_base64: "AAA=".into(),
+                    done: true,
+                },
+            },
+        };
+        for (operation, terminal, wrong) in [
+            (
+                generate,
+                Event::Finished {
+                    reason: "stop".into(),
+                },
+                Event::Models { models: vec![] },
+            ),
+            (
+                list,
+                Event::Models { models: vec![] },
+                Event::Delta {
+                    text: "wrong".into(),
+                },
+            ),
+            (
+                transcribe,
+                Event::Transcript {
+                    text: String::new(),
+                },
+                Event::Finished {
+                    reason: "stop".into(),
+                },
+            ),
+        ] {
+            let mut events = Events::new(&operation);
+            assert!(events.finish().is_err());
+            assert!(events.accept(&wrong).is_err());
+            events.accept(&terminal).unwrap();
+            events.finish().unwrap();
+            assert!(events.accept(&terminal).is_err());
+        }
+    }
     #[test]
     fn character_action_limits_are_enforced_by_the_runtime() {
         let target = CharacterTarget {

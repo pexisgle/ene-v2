@@ -6,11 +6,14 @@ use crate::{
 };
 use ene_plugin::*;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
     sync::Arc,
+    time::SystemTime,
 };
 #[derive(Clone, Debug)]
 pub struct Package {
@@ -18,6 +21,52 @@ pub struct Package {
     pub manifest: Manifest,
     pub revision: String,
     files: Arc<BTreeMap<String, Vec<u8>>>,
+    stamps: Arc<BTreeMap<String, Stamp>>,
+}
+#[derive(Clone, Debug)]
+struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+}
+#[cfg(unix)]
+fn stamp(metadata: &std::fs::Metadata) -> Stamp {
+    Stamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    }
+}
+#[cfg(not(unix))]
+fn stamp(metadata: &std::fs::Metadata) -> Stamp {
+    Stamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    }
+}
+#[cfg(unix)]
+fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
+    metadata.is_file()
+        && metadata.len() == stamp.len
+        && metadata.modified().ok() == stamp.modified
+        && metadata.dev() == stamp.dev
+        && metadata.ino() == stamp.ino
+        && metadata.ctime() == stamp.ctime
+        && metadata.ctime_nsec() == stamp.ctime_nsec
+}
+#[cfg(not(unix))]
+fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
+    metadata.is_file() && metadata.len() == stamp.len && metadata.modified().ok() == stamp.modified
 }
 /// Portable package paths use forward slashes, never native device paths.
 fn relative(path: &str) -> bool {
@@ -105,7 +154,7 @@ fn portable_name(names: &mut BTreeMap<String, (String, bool)>, path: &str) -> Re
     }
     Ok(())
 }
-fn read(root: &Path, path: &str, limit: u64) -> Result<Vec<u8>> {
+fn read(root: &Path, path: &str, limit: u64) -> Result<(Vec<u8>, Stamp)> {
     if !relative(path) {
         return Err(Error::Invalid);
     }
@@ -119,7 +168,7 @@ fn read(root: &Path, path: &str, limit: u64) -> Result<Vec<u8>> {
     if bytes.len() as u64 > limit {
         return Err(Error::Invalid);
     }
-    Ok(bytes)
+    Ok((bytes, stamp(&m)))
 }
 fn open_code(root: &Path, path: &str) -> Result<std::fs::File> {
     let mut parent = root.to_path_buf();
@@ -130,10 +179,31 @@ fn open_code(root: &Path, path: &str) -> Result<std::fs::File> {
     }
     Ok(ene_platform::storage::open(&root.join(path), false, false)?)
 }
+fn hash_file(mut file: std::fs::File, limit: u64) -> Result<(String, Stamp)> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(Error::Invalid);
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > limit {
+            return Err(Error::Invalid);
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok((format!("{:x}", digest.finalize()), stamp(&metadata)))
+}
 impl Package {
     pub fn load(root: &Path) -> Result<Self> {
         owned(root, true)?;
-        let raw = read(root, "manifest.json", 65536)?;
+        let (raw, manifest_stamp) = read(root, "manifest.json", 65536)?;
         let manifest: Manifest = serde_json::from_slice(&raw)?;
         if manifest.contract_version != CONTRACT_VERSION
             || !identifier(&manifest.id)
@@ -177,6 +247,7 @@ impl Package {
             }
         }
         let mut files = BTreeMap::from([("manifest.json".to_string(), raw)]);
+        let mut stamps = BTreeMap::from([("manifest.json".to_string(), manifest_stamp)]);
         let mut portable_names = BTreeMap::new();
         portable_name(&mut portable_names, "manifest.json")?;
         let mut total = files["manifest.json"].len() as u64;
@@ -190,12 +261,13 @@ impl Package {
                 return Err(Error::Invalid);
             }
             portable_name(&mut portable_names, path)?;
-            let data = read(root, path, MAX_CODE)?;
+            let (data, stamp) = read(root, path, MAX_CODE)?;
             total += data.len() as u64;
             if total > MAX_CODE {
                 return Err(Error::Invalid);
             }
             files.insert(path.clone(), data);
+            stamps.insert(path.clone(), stamp);
         }
         for asset in manifest.assets.values() {
             portable_name(&mut portable_names, &asset.path)?;
@@ -206,12 +278,11 @@ impl Package {
             {
                 return Err(Error::Invalid);
             }
-            {
-                let m = std::fs::symlink_metadata(root.join(&asset.path))?;
-                if !m.is_file() || m.file_type().is_symlink() || m.len() != asset.size {
-                    return Err(Error::Invalid);
-                }
+            let (digest, stamp) = hash_file(open_code(root, &asset.path)?, MAX_ASSET_BYTES)?;
+            if stamp.len != asset.size || digest != asset.sha256.to_ascii_lowercase() {
+                return Err(Error::Invalid);
             }
+            stamps.insert(asset.path.clone(), stamp);
         }
         let mut hash = Sha256::new();
         for (path, bytes) in &files {
@@ -220,14 +291,35 @@ impl Package {
             hash.update((bytes.len() as u64).to_le_bytes());
             hash.update(bytes);
         }
+        for (name, asset) in &manifest.assets {
+            hash.update((name.len() as u64).to_le_bytes());
+            hash.update(name.as_bytes());
+            hash.update((asset.path.len() as u64).to_le_bytes());
+            hash.update(asset.path.as_bytes());
+            hash.update(asset.size.to_le_bytes());
+            hash.update(asset.sha256.to_ascii_lowercase().as_bytes());
+        }
         Ok(Self {
             root: root.to_path_buf(),
             manifest,
             revision: format!("{:x}", hash.finalize()),
             files: Arc::new(files),
+            stamps: Arc::new(stamps),
         })
     }
     pub fn verify(&self) -> Result<()> {
+        let same = self.stamps.iter().all(|(path, stamp)| {
+            std::fs::symlink_metadata(self.root.join(path))
+                .is_ok_and(|metadata| unchanged(&metadata, stamp))
+        });
+        // ctime/inode make the fast path content-sensitive on Unix. Windows has
+        // no equivalent std metadata, so always re-read and hash there.
+        #[cfg(unix)]
+        if same {
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        let _ = same;
         if Self::load(&self.root)?.revision != self.revision {
             return Err(Error::Changed);
         }
@@ -310,6 +402,44 @@ mod tests {
         std::fs::write(source_root.join("main.wasm"), "return {changed=true}").unwrap();
         assert!(matches!(package.verify(), Err(Error::Changed)));
         assert_eq!(package.code("main.wasm").unwrap(), b"return {}");
+    }
+    #[test]
+    fn asset_contents_are_hashed_not_only_sized() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        fixture(&root);
+        std::fs::write(root.join("voice.bin"), b"hello").unwrap();
+        let path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["assets"] = serde_json::json!({
+            "voice": {
+                "path": "voice.bin",
+                "sha256": format!("{:x}", Sha256::digest(b"hello")),
+                "size": 5
+            }
+        });
+        ene_platform::storage::write_atomic(&path, manifest.to_string().as_bytes()).unwrap();
+        Package::load(&root).unwrap();
+        std::fs::write(root.join("voice.bin"), b"world").unwrap();
+        assert!(matches!(Package::load(&root), Err(Error::Invalid)));
+    }
+    #[test]
+    fn same_size_and_restored_mtime_still_invalidates_verification() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        fixture(&root);
+        let package = Package::load(&root).unwrap();
+        let file = root.join("main.wasm");
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::fs::write(&file, b"return {x").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert!(matches!(package.verify(), Err(Error::Changed)));
     }
     #[test]
     fn entrypoints_share_a_single_code_snapshot_and_budget() {

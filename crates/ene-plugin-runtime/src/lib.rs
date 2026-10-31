@@ -14,8 +14,10 @@ pub enum Error {
     Denied,
     #[error("plugin_unavailable")]
     Unavailable,
-    #[error("plugin_execution_failed")]
-    Execution,
+    #[error("plugin_execution_failed: {0:#}")]
+    Execution(#[source] extism::Error),
+    #[error("host_service_failed: {0}")]
+    Service(#[from] ene_plugin::Failure),
     #[error("invalid_plugin_contract")]
     Protocol,
     #[error("cancelled")]

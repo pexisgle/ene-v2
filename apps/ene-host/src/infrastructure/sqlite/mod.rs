@@ -2,6 +2,7 @@
 mod plugins;
 mod queries;
 mod repository;
+pub(crate) use repository::core_error;
 mod schema;
 #[cfg(test)]
 mod tests;

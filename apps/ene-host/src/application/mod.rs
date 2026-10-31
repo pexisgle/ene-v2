@@ -97,11 +97,17 @@ impl HostApplication {
             }),
         }))
     }
-    pub async fn stop(&self) -> Result<(), Error> {
+    pub(crate) fn begin_shutdown(&self) {
         self.0.plugin_tasks.close();
         self.0.stops.close();
         self.0.mutations.close();
         self.0.shutdown.send_replace(true);
+        if let Some(plugins) = &self.0.plugins {
+            plugins.cancel();
+        }
+    }
+    pub async fn stop(&self) -> Result<(), Error> {
+        self.begin_shutdown();
         {
             let controls = self.0.controls.lock().await;
             self.0.generations.close();
@@ -112,9 +118,10 @@ impl HostApplication {
         self.0.stops.wait().await;
         self.0.mutations.wait().await;
         self.0.providers.shutdown().await;
-        if let Some(plugins) = &self.0.plugins {
-            plugins.shutdown().await;
-        }
+        let plugin_shutdown = match &self.0.plugins {
+            Some(plugins) => plugins.shutdown().await,
+            None => Ok(()),
+        };
         self.0.plugin_tasks.wait().await;
         // Cancellation only signals generation. Its terminal database write
         // and persistence-failure handling must finish before the runtime exits.
@@ -136,6 +143,7 @@ impl HostApplication {
         }
         self.0.cleanups.close();
         self.0.cleanups.wait().await;
+        plugin_shutdown?;
         if self.0.controls.lock().await.failed() {
             return Err(Error::new(ErrorKind::StorageFailure));
         }

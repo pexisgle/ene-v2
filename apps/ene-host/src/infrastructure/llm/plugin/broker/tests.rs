@@ -238,43 +238,21 @@ async fn broker_rejects_revoked_context_other_origins_and_credential_headers() {
     }
 }
 #[tokio::test]
-async fn public_model_metadata_get_is_scoped_and_does_not_forward_credentials() {
-    use axum::{Router, http::HeaderMap, routing::get};
+async fn plugin_broker_rejects_public_destinations() {
     use ene_plugin::provider::AuthProfile;
 
-    let app = Router::new().route(
-        "/catalog",
-        get(|headers: HeaderMap| async move {
-            assert!(headers.get("authorization").is_none());
-            assert!(headers.get("x-api-version").is_none());
-            assert!(headers.get("cookie").is_none());
-            r#"{"models":[{"id":"local-model","context_window":4096}]}"#
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let origin = "https://public.example";
     let mut b = bundle();
     b.manifest.auth = AuthProfile::Bearer;
     b.manifest
         .headers
         .insert("x-api-version".into(), "example".into());
-    b.manifest.destinations.push(origin.clone());
+    b.manifest.destinations.push(origin.into());
     let (_cancel, mut input) = invocation(Arc::new(Permit(AtomicBool::new(true))));
     input.secret = Some(crate::ports::Secret {
         value: "fixture-secret".into(),
         nonce: "fixture".into(),
     });
-    let conversation = InvocationFixture {
-        id: input.id.clone(),
-        connection: input.connection.clone(),
-        request: input.request.clone(),
-        secret: None,
-        authorization: input.authorization.clone(),
-        cancel: input.cancel.clone(),
-        operation: OperationKind::Conversation,
-    }
-    .with_destinations(b.manifest.destinations.clone());
     input.operation = OperationKind::ModelList;
     input.request = None;
     let input = Arc::new(input.with_destinations(b.manifest.destinations.clone()));
@@ -285,39 +263,28 @@ async fn public_model_metadata_get_is_scoped_and_does_not_forward_credentials() 
         body_base64: None,
     };
     assert_eq!(
-        broker::send(b.clone(), Arc::new(conversation), request.clone())
-            .await
-            .err()
-            .unwrap()
-            .kind,
-        ErrorKind::PermissionRequired
+        broker::send(b, input, request).await.err().unwrap().kind,
+        ErrorKind::PermissionRequired,
+        "a provider plugin must not read public catalogs"
     );
-    let mut undeclared = b.clone();
-    undeclared.manifest.destinations.pop();
+}
+
+#[tokio::test]
+async fn same_origin_requests_are_bound_to_the_operation_path() {
+    let b = bundle();
+    let (_cancel, mut input) = invocation(Arc::new(Permit(AtomicBool::new(true))));
+    input.operation = OperationKind::ModelList;
+    input.request = None;
+    let input = Arc::new(input.with_destinations(b.manifest.destinations.clone()));
+    let request = HttpRequest {
+        method: "GET".into(),
+        url: "https://example.com/api/v1/keys".into(),
+        headers: Default::default(),
+        body_base64: None,
+    };
     assert_eq!(
-        broker::send(undeclared, input.clone(), request.clone())
-            .await
-            .err()
-            .unwrap()
-            .kind,
-        ErrorKind::PermissionRequired
+        broker::send(b, input, request).await.err().unwrap().kind,
+        ErrorKind::PermissionRequired,
+        "the model list operation may only read its configured /models path"
     );
-    let mut post = request.clone();
-    post.method = "POST".into();
-    assert_eq!(
-        broker::send(b.clone(), input.clone(), post)
-            .await
-            .err()
-            .unwrap()
-            .kind,
-        ErrorKind::PermissionRequired
-    );
-    let response = broker::send(b, input, request).await.unwrap();
-    assert_eq!(response.status().as_u16(), 200);
-    let bytes = response.bytes().await.unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["models"][0]["context_window"],
-        4096
-    );
-    server.abort();
 }

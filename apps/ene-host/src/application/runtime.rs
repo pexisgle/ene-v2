@@ -79,7 +79,7 @@ impl MutationExecutor {
 }
 
 impl HostApplication {
-    async fn owned<T: Send + 'static>(
+    pub(super) async fn owned<T: Send + 'static>(
         &self,
         operation: impl Future<Output = Result<T, Error>> + Send + 'static,
     ) -> Result<T, Error> {

@@ -26,6 +26,12 @@ ExtismのHost SDKをホストプロセス内に組み込んで実行します。
 
 SQLiteには設定・会話・操作の受付記録・プラグイン状態を保存します。OSの資格情報ストアへのアクセス失敗を永続保存成功として扱いません。停止時は新しい処理を受け付けず、実行中の生成・プラグイン・通知を終了し、保存処理を待ちます。
 
+プラグインの変更・呼び出しとゲストからの状態保存は、既存の `MutationExecutor` が所有します。RPCの切断やゲストのキャンセル後も、受理済みの状態保存は完了まで継続し、保存障害はホスト側に通知します。ホスト終了時は受付を閉じ、プラグインへ停止を通知してから、受理済み処理の保存完了を待ちます。
+
+Harnessは再バインド・無効化・再読み込み・終了で旧タスクを終端状態として保存します。Cancelの保存に失敗しても、DB復旧後に再送するとゲストを再開せず保存だけ再試行できます。起動時は、プラグイン有効化より先に未完了タスクを `host_interrupted` として終了し、完了済みの記録は保持します。復旧保存に失敗した場合は起動を成功扱いにしません。未対応の操作種別や不正な継続入力では、保存済みタスクとゲストの状態を維持します。
+
+LLM実行は無効化・生成キャンセル・実行失敗で出力転送も終了し、受信が止まっていても実行管理枠を解放します。完了イベントなしで閉じたストリームは失敗として扱います。
+
 プラグイン契約はv2です。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。ウィンドウ監視はデスクトップ専用のため、ホストでは実行しません。
 
 音声通信の認可・セッション管理は実装済みですが、本番用の音声認識・合成エンジンは接続していません。エンジンがない状態では音声利用可能と通知しません。デスクトップUI、ファイル操作ワーカー、完成版の自律タスクループはこのホストの実装完了範囲に含みません。
@@ -58,17 +64,13 @@ Rig との接続は通信実装の子モジュールに置き、ストリーミ�
 ## 検証
 
 ```sh
-cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
+cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
 cargo test -p ene-host -p ene-platform -p ene-plugin-runtime --locked
 cargo clippy -p ene-host -p ene-platform -p ene-plugin-runtime --all-targets --all-features --locked -- -D warnings
 ```
 
-実際のRust製Wasmプラグインも検証する場合は、次を追加で実行します。
-
-```sh
-cargo build --release --locked -p ene-openrouter-wasm --target wasm32-unknown-unknown
-ENE_TEST_PDK_WASM="$PWD/target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm" cargo test --locked -p ene-plugin-runtime --test pdk -- --ignored
-```
+通常のホストテストに、実際のPDK製WasmとHTTPブローカーの結合検証を含みます。
+別のWasm出力先を使う場合は `ENE_TEST_REFERENCE_WASM` / `ENE_TEST_PDK_WASM` で指定します。
 
 会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、組み込みExtism、ローカルHTTPサーバーを使って認証・取り消し・停止・サイズ制限を検証します。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。有料の外部APIや実機音声エンジンはテストから呼びません。
 

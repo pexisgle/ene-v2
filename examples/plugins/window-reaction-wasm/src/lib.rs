@@ -1,6 +1,5 @@
-﻿//! React to a synthetic desktop event; OS observation and avatar delivery are external.
+//! React to a synthetic desktop event; OS observation and avatar delivery are external.
 #[cfg(target_family = "wasm")]
-#[allow(unused_braces)]
 mod guest {
     use ene_plugin::*;
     use serde_json::{Value, json};

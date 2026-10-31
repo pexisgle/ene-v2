@@ -9,6 +9,9 @@ use base64::Engine;
 use ene_plugin::{HttpChunk, HttpRequest};
 use futures_util::{StreamExt, stream::BoxStream};
 
+#[cfg(test)]
+mod tests;
+
 pub struct Provider {
     pub manager: Manager,
     pub id: String,
@@ -45,10 +48,11 @@ impl Manager {
             .package
             .revision
             .clone();
+        let package_id = package.clone();
         self.change_enabled(
             package,
             EnablePluginRequest {
-                id: id.into(),
+                id: package_id,
                 enabled,
                 revision,
                 ..Default::default()
@@ -82,9 +86,6 @@ struct HttpStream {
     pending: std::collections::VecDeque<u8>,
 }
 struct ProviderServices {
-    manager: Manager,
-    package_id: String,
-    revision: String,
     input: Arc<Invocation>,
     broker: Arc<broker::Broker>,
     streams: Mutex<BTreeMap<String, HttpStream>>,
@@ -176,9 +177,6 @@ impl ProviderServices {
 impl Services for ProviderServices {
     fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
         Box::pin(async {
-            self.manager
-                .ready(&self.package_id, Some(&self.revision))
-                .map_err(|_| Failure::new("revoked"))?;
             if *self.input.cancellation().borrow() {
                 return Err(Failure::new("cancelled"));
             }
@@ -206,7 +204,13 @@ impl Services for ProviderServices {
                     serde_json::from_str(&self.input.connection().options.json)
                         .map_err(|_| Failure::new("invalid_configuration"))
                 }
-                ServiceRequest::Log { message } if message.len() <= 4096 => Ok(Value::Null),
+                ServiceRequest::Log { message } if message.len() <= 4096 => {
+                    eprintln!(
+                        "ene-host plugin [{}]: {message:?}",
+                        self.broker.bundle.manifest.id
+                    );
+                    Ok(Value::Null)
+                }
                 _ => Err(Failure::new("unsupported_service")),
             }
         })
@@ -260,9 +264,6 @@ impl Provider {
             }
         };
         let services = Arc::new(ProviderServices {
-            manager: self.manager.clone(),
-            package_id,
-            revision: entry.package.revision.clone(),
             input: input.clone(),
             broker: Arc::new(broker::Broker {
                 bundle,
@@ -272,24 +273,85 @@ impl Provider {
             }),
             streams: Mutex::new(BTreeMap::new()),
         });
-        let package = entry.package.clone();
-        let cancel = entry.cancellation.child_token();
+        let generation = entry.generation;
+        let session = self.manager.provider_session(
+            &package_id,
+            &entrypoint,
+            entry.cancellation.child_token(),
+        );
+        let package = entry.package;
         let (out, mut output) = mpsc::channel(16);
-        self.manager.supervisor.spawn(async move {
-            let run=async {
-                let mut worker=Instance::load(package,entrypoint,Target::Host,entry.generation,&cancel).await.map_err(failure)?;
-                let (tx,mut rx)=mpsc::channel(16);
-                let execute=worker.invoke(operation,services.clone(),tx,&cancel);
-                let forward=async {while let Some(event)=rx.recv().await {out.send(Ok(event)).await.map_err(|_|Error::unavailable())?;}Ok::<_,Error>(())};
-                let (result,forward)=tokio::join!(execute,forward);
-                worker.stop().await;
-                result.map_err(failure)?;forward?;Ok::<_,Error>(())
-            };
-            let cancellation=async {if !*watch.borrow() {let _=watch.wait_for(|v|*v).await;}cancel.cancel();};
-            let result=tokio::select! {biased;_ = cancellation=>Err(Error::new(ErrorKind::ExternalFailure)),_ = out.closed()=>Err(Error::unavailable()),result=run=>result};
-            cancel.cancel();
-            if let Err(error)=result {let _=out.send(Err(error)).await;}
-        }).map_err(failure)?;
+        self.manager
+            .supervisor
+            .spawn(async move {
+                let cancel = session.lifetime.child_token();
+                let run = async {
+                    let mut guard = session.worker.lock().await;
+                    let worker = if let Some(worker) = guard.as_mut() {
+                        worker
+                            .reset(&session.lifetime.child_token())
+                            .await
+                            .map_err(failure)?;
+                        worker
+                    } else {
+                        let worker = Instance::load(
+                            package,
+                            entrypoint,
+                            Target::Host,
+                            generation,
+                            &session.lifetime,
+                        )
+                        .await
+                        .map_err(failure)?;
+                        *guard = Some(worker);
+                        guard.as_mut().unwrap()
+                    };
+                    let (tx, mut rx) = mpsc::channel(16);
+                    let execute = worker
+                        .invoke(operation, services, tx, &cancel)
+                        .map_err(failure);
+                    let forward = async {
+                        let mut terminal = None;
+                        while let Some(event) = rx.recv().await {
+                            if matches!(event, Event::Finished { .. } | Event::Models { .. }) {
+                                terminal = Some(event);
+                            } else {
+                                out.send(Ok(event))
+                                    .await
+                                    .map_err(|_| Error::unavailable())?;
+                            }
+                        }
+                        Ok::<_, Error>(terminal)
+                    };
+                    let (_, terminal) = tokio::try_join!(execute, forward)?;
+                    // Publish completion only after execution and final authorization succeed.
+                    let terminal =
+                        terminal.ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
+                    out.send(Ok(terminal))
+                        .await
+                        .map_err(|_| Error::unavailable())
+                };
+                let cancellation = async {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {},
+                        _ = watch.wait_for(|v| *v) => {},
+                    }
+                };
+                let result = tokio::select! { biased;
+                    _ = cancellation => Err(Error::new(ErrorKind::ExternalFailure)),
+                    _ = out.closed() => Err(Error::unavailable()),
+                    result = run => result,
+                };
+                cancel.cancel();
+                if result.is_err() {
+                    session.worker.lock().await.take();
+                }
+                if let Err(error) = result {
+                    // Never wait on a full queue; EOF without completion is also an error.
+                    let _ = out.try_send(Err(error));
+                }
+            })
+            .map_err(failure)?;
         Ok(Box::pin(
             async_stream::stream! {while let Some(event)=output.recv().await {yield event;}},
         ))
@@ -314,7 +376,7 @@ impl LlmProvider for Provider {
                         _=>Err(unsupported())?,
                     }
                 }
-                // An aborted forwarding task can close the channel before runtime validation finishes.
+                // An aborted forwarding task can close the channel without a result.
                 if !finished {Err(Error::new(ErrorKind::ExternalFailure))?;}
             }) as _)
         })

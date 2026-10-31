@@ -4,6 +4,7 @@ use ene_plugin::*;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::{
+    cell::RefCell,
     future::Future,
     sync::{
         Arc, LazyLock, Mutex,
@@ -31,11 +32,62 @@ impl Services for DenyServices {
 
 // A cancelled compilation still holds its slot until the native compiler returns.
 static SLOTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(MAX_INSTANCES)));
-type ActiveCall = Arc<Mutex<Option<Arc<Invocation>>>>;
+thread_local! {
+    static ACTIVE: RefCell<Option<Arc<Invocation>>> = const { RefCell::new(None) };
+}
+fn active() -> Result<Arc<Invocation>> {
+    ACTIVE
+        .with(|slot| slot.borrow().clone())
+        .ok_or(Error::Denied)
+}
+struct ActiveGuard(Option<Arc<Invocation>>);
+impl ActiveGuard {
+    fn set(value: Option<Arc<Invocation>>) -> Self {
+        Self(ACTIVE.with(|slot| slot.replace(value)))
+    }
+}
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        ACTIVE.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
+}
+fn ene_service(
+    plugin: &mut extism::CurrentPlugin,
+    input: &[extism::Val],
+    output: &mut [extism::Val],
+    _: extism::UserData<()>,
+) -> std::result::Result<(), extism::Error> {
+    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+    if raw.len() > MAX_MESSAGE_BYTES {
+        return Err(Error::Protocol.into());
+    }
+    let request = serde_json::from_slice(raw)?;
+    let result = active()?.service(request)?;
+    let bytes = serde_json::to_vec(&result)?;
+    if bytes.len() > MAX_CHUNK {
+        return Err(Error::Protocol.into());
+    }
+    plugin.memory_set_val(&mut output[0], bytes)
+}
+fn ene_emit(
+    plugin: &mut extism::CurrentPlugin,
+    input: &[extism::Val],
+    _: &mut [extism::Val],
+    _: extism::UserData<()>,
+) -> std::result::Result<(), extism::Error> {
+    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+    if raw.len() > MAX_CHUNK {
+        return Err(Error::Protocol.into());
+    }
+    active()?.emit(serde_json::from_slice(raw)?)?;
+    Ok(())
+}
 struct Invocation {
     services: Arc<dyn Services>,
     declared: Vec<Service>,
     calls: AtomicUsize,
+    bytes: AtomicUsize,
+    stream_bytes: AtomicUsize,
     events: mpsc::Sender<Event>,
     validator: Mutex<Events>,
     cancel: CancellationToken,
@@ -53,35 +105,55 @@ impl Invocation {
     }
     fn service(&self, request: ServiceRequest) -> Result<std::result::Result<Value, Failure>> {
         crate::contract::service_request(&request)?;
+        self.charge(
+            &self.bytes,
+            serde_json::to_vec(&request)?.len(),
+            MAX_SERVICE_BYTES,
+        )?;
         if self.calls.fetch_add(1, Ordering::Relaxed) >= MAX_SERVICE_CALLS {
             return Err(Error::Protocol);
         }
-        self.wait(async {
-            self.services.check().await.map_err(|_| Error::Denied)?;
+        let result = self.wait(async {
+            self.services.check().await?;
             if !self.declared.contains(&request.service()) {
                 return Ok(Err(Failure::new("undeclared_service")));
             }
             let result = self.services.handle(request).await;
-            self.services.check().await.map_err(|_| Error::Denied)?;
+            self.services.check().await?;
             Ok(result)
-        })
+        })?;
+        self.charge(
+            &self.bytes,
+            serde_json::to_vec(&result)?.len(),
+            MAX_SERVICE_BYTES,
+        )?;
+        Ok(result)
     }
     fn emit(&self, event: Event) -> Result<()> {
+        self.charge(
+            &self.stream_bytes,
+            serde_json::to_vec(&event)?.len(),
+            MAX_STREAM_BYTES,
+        )?;
         self.validator
             .lock()
             .map_err(|_| Error::Unavailable)?
             .accept(&event)?;
         self.wait(async {
-            self.services.check().await.map_err(|_| Error::Denied)?;
+            self.services.check().await?;
             self.events.send(event).await.map_err(|_| Error::Cancelled)
         })
     }
-}
-fn active(slot: &ActiveCall) -> Result<Arc<Invocation>> {
-    slot.lock()
-        .map_err(|_| Error::Unavailable)?
-        .clone()
-        .ok_or(Error::Denied)
+    fn charge(&self, total: &AtomicUsize, bytes: usize, limit: usize) -> Result<()> {
+        let total = total
+            .fetch_add(bytes, Ordering::Relaxed)
+            .checked_add(bytes)
+            .ok_or(Error::Protocol)?;
+        if total > limit {
+            return Err(Error::Protocol);
+        }
+        Ok(())
+    }
 }
 struct Cancellation {
     token: CancellationToken,
@@ -99,12 +171,53 @@ impl Drop for Cancellation {
 
 pub struct Instance {
     plugin: Option<extism::Plugin>,
-    active: ActiveCall,
     package: Package,
     entrypoint: String,
     generation: u64,
     permit: Arc<OwnedSemaphorePermit>,
     pub capabilities: Value,
+}
+fn build(package: &Package, file: &str) -> Result<extism::Plugin> {
+    let code = package.code(file)?.to_vec();
+    let mut manifest = extism::Manifest::new([extism::Wasm::data(code)])
+        .with_allowed_hosts(std::iter::empty())
+        .with_memory_max(WASM_MEMORY_PAGES)
+        .with_timeout(EXECUTION_TIMEOUT);
+    // Extism vars are not part of the manifest capability; disable writes.
+    manifest.memory.max_var_bytes = Some(0);
+    // Extism instantiates the kernel, the linked guest and the callable guest.
+    let mut allocation = wasmtime::PoolingAllocationConfig::default();
+    allocation
+        .total_core_instances(3)
+        .total_memories(4) // The store's GC heap also occupies a memory slot.
+        .total_tables(3)
+        .total_gc_heaps(1)
+        .max_tables_per_module(1)
+        .table_elements(WASM_TABLE_ELEMENTS)
+        .max_memory_size(WASM_MEMORY_PAGES as usize * 65536);
+    let mut config = wasmtime::Config::new();
+    config.allocation_strategy(allocation);
+    extism::PluginBuilder::new(manifest)
+        .with_wasmtime_config(config)
+        .with_wasi(false)
+        .with_fuel_limit(WASM_FUEL)
+        .with_initialization_fuel_limit(WASM_INITIALIZATION_FUEL)
+        .with_function(
+            "ene_service",
+            [extism::ValType::I64],
+            [extism::ValType::I64],
+            extism::UserData::new(()),
+            ene_service,
+        )
+        .with_function(
+            "ene_emit",
+            [extism::ValType::I64],
+            [],
+            extism::UserData::new(()),
+            ene_emit,
+        )
+        .build()
+        .map_err(Error::Execution)
 }
 impl Instance {
     pub async fn load(
@@ -117,12 +230,11 @@ impl Instance {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        package.verify()?;
         let entry = package.entry(&entrypoint)?;
         if entry.target != target {
             return Err(Error::Unsupported);
         }
-        let code = package.code(&entry.file)?.to_vec();
+        let file = entry.file.clone();
         let permit = SLOTS
             .clone()
             .try_acquire_owned()
@@ -133,58 +245,13 @@ impl Instance {
             if token.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let slot: ActiveCall = Arc::default();
-            let service = slot.clone();
-            let emit = slot.clone();
-            let manifest = extism::Manifest::new([extism::Wasm::data(code)])
-                .with_allowed_hosts(std::iter::empty())
-                .with_memory_max(WASM_MEMORY_PAGES)
-                .with_timeout(EXECUTION_TIMEOUT);
-            let plugin = extism::PluginBuilder::new(manifest)
-                .with_wasi(false)
-                .with_fuel_limit(WASM_FUEL)
-                .with_initialization_fuel_limit(WASM_INITIALIZATION_FUEL)
-                .with_function(
-                    "ene_service",
-                    [extism::ValType::I64],
-                    [extism::ValType::I64],
-                    extism::UserData::new(()),
-                    move |plugin, input, output, _| {
-                        let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-                        if raw.len() > MAX_CHUNK {
-                            return Err(Error::Protocol.into());
-                        }
-                        let request = serde_json::from_slice(raw)?;
-                        let result = active(&service)?.service(request)?;
-                        let bytes = serde_json::to_vec(&result)?;
-                        if bytes.len() > MAX_CHUNK {
-                            return Err(Error::Protocol.into());
-                        }
-                        plugin.memory_set_val(&mut output[0], bytes)
-                    },
-                )
-                .with_function(
-                    "ene_emit",
-                    [extism::ValType::I64],
-                    [],
-                    extism::UserData::new(()),
-                    move |plugin, input, _, _| {
-                        let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-                        if raw.len() > MAX_CHUNK {
-                            return Err(Error::Protocol.into());
-                        }
-                        active(&emit)?.emit(serde_json::from_slice(raw)?)?;
-                        Ok(())
-                    },
-                )
-                .build()
-                .map_err(|_| Error::Execution)?;
+            package.verify()?;
+            let plugin = build(&package, &file)?;
             if token.is_cancelled() {
                 return Err(Error::Cancelled);
             }
             Ok(Self {
                 plugin: Some(plugin),
-                active: slot,
                 package,
                 entrypoint,
                 generation,
@@ -194,7 +261,7 @@ impl Instance {
         });
         let mut instance = tokio::select! { biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            result = tokio::time::timeout(INITIALIZE_TIMEOUT, build) => result.map_err(|_| Error::Timeout)?.map_err(|_| Error::Execution)??,
+            result = tokio::time::timeout(INITIALIZE_TIMEOUT, build) => result.map_err(|_| Error::Timeout)?.map_err(|e| Error::Execution(e.into()))??,
         };
         drop(stop);
         instance.capabilities = instance
@@ -244,7 +311,6 @@ impl Instance {
             interrupt: plugin.cancel_handle(),
             armed: true,
         };
-        let active = self.active.clone();
         let permit = self.permit.clone();
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -252,23 +318,20 @@ impl Instance {
                 if token.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                *active.lock().map_err(|_| Error::Unavailable)? = invocation;
+                let _active = ActiveGuard::set(invocation);
                 let raw = plugin
                     .call::<_, &[u8]>(function, input)
-                    .map_err(|_| Error::Execution)?;
+                    .map_err(Error::Execution)?;
                 if raw.len() > MAX_CHUNK {
                     return Err(Error::Protocol);
                 }
                 Ok(serde_json::from_slice(raw)?)
             })();
-            if let Ok(mut active) = active.lock() {
-                *active = None;
-            }
             (plugin, result)
         });
         let (plugin, result) = tokio::select! { biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            result = tokio::time::timeout(timeout, task) => result.map_err(|_| Error::Timeout)?.map_err(|_| Error::Execution)?,
+            result = tokio::time::timeout(timeout, task) => result.map_err(|_| Error::Timeout)?.map_err(|e| Error::Execution(e.into()))?,
         };
         guard.armed = false;
         if result.is_ok() {
@@ -283,7 +346,6 @@ impl Instance {
         events: mpsc::Sender<Event>,
         cancel: &CancellationToken,
     ) -> Result<Value> {
-        self.package.verify()?;
         let entry = self.package.entry(&self.entrypoint)?;
         if !entry.provides.contains(&operation.extension()) {
             return Err(Error::Unsupported);
@@ -297,13 +359,15 @@ impl Instance {
         tokio::select! { biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             _ = events.closed() => return Err(Error::Cancelled),
-            result = tokio::time::timeout(EXECUTION_TIMEOUT, services.check()) => result.map_err(|_| Error::Timeout)?.map_err(|_| Error::Denied)?,
+            result = tokio::time::timeout(EXECUTION_TIMEOUT, services.check()) => result.map_err(|_| Error::Timeout)??,
         }
         let input = serde_json::to_vec(&operation)?;
         let context = Arc::new(Invocation {
             services,
             declared: entry.uses.clone(),
             calls: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            stream_bytes: AtomicUsize::new(0),
             events,
             validator: Mutex::new(Events::new(&operation)),
             cancel: cancel.child_token(),
@@ -318,7 +382,7 @@ impl Instance {
             context.validator.lock().map_err(|_| Error::Unavailable)?.finish()?;
             tokio::select! { biased;
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
-                result = tokio::time::timeout(EXECUTION_TIMEOUT, context.services.check()) => result.map_err(|_| Error::Timeout)?.map_err(|_| Error::Denied)?,
+                result = tokio::time::timeout(EXECUTION_TIMEOUT, context.services.check()) => result.map_err(|_| Error::Timeout)??,
             }
             Ok(value)
         }.await;
@@ -330,6 +394,30 @@ impl Instance {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    /// Re-run the plugin's initialization hook before a stateless reuse.
+    pub async fn reset(&mut self, cancel: &CancellationToken) -> Result<()> {
+        self.capabilities = self
+            .call(
+                "ene_initialize",
+                b"{}".to_vec(),
+                None,
+                cancel,
+                INITIALIZE_TIMEOUT,
+            )
+            .await?;
+        if self
+            .package
+            .entry(&self.entrypoint)?
+            .provides
+            .contains(&Extension::Llm)
+        {
+            let capabilities: LlmCapabilities = serde_json::from_value(self.capabilities.clone())?;
+            if !capabilities.streaming_text {
+                return Err(Error::Unsupported);
+            }
+        }
+        Ok(())
     }
     pub async fn stop(&mut self) {
         self.plugin = None;

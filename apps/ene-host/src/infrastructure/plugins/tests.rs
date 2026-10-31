@@ -1,5 +1,17 @@
+mod lifecycle;
 use super::*;
 use ene_plugin::{CharacterEvent, CharacterTarget, HarnessInput, Service};
+fn application(manager: &Manager) -> crate::application::HostApplication {
+    crate::bootstrap::application_with_plugins(
+        manager.store.clone(),
+        "private-token".into(),
+        Arc::new(manager.clone()),
+    )
+    .application
+}
+async fn invoke_plugin(manager: &Manager, input: PluginInvocation) -> Result<PluginResult> {
+    application(manager).invoke_plugin(input).await
+}
 pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("plugins");
@@ -123,18 +135,32 @@ async fn embedded_character_state_permissions_updates_and_disable() {
         )
         .into();
         assert_eq!(
-            manager.invoke(request).await.err().unwrap().kind,
+            invoke_plugin(&manager, request).await.err().unwrap().kind,
             ErrorKind::PermissionRequired
         );
     }
     assert_eq!(
-        serde_json::from_str::<Value>(manager.invoke(invoke()).await.unwrap().result.json.as_str())
-            .unwrap()["visits"],
+        serde_json::from_str::<Value>(
+            invoke_plugin(&manager, invoke())
+                .await
+                .unwrap()
+                .result
+                .json
+                .as_str()
+        )
+        .unwrap()["visits"],
         1
     );
     assert_eq!(
-        serde_json::from_str::<Value>(manager.invoke(invoke()).await.unwrap().result.json.as_str())
-            .unwrap()["visits"],
+        serde_json::from_str::<Value>(
+            invoke_plugin(&manager, invoke())
+                .await
+                .unwrap()
+                .result
+                .json
+                .as_str()
+        )
+        .unwrap()["visits"],
         2
     );
     let mut foreign = b.clone();
@@ -147,6 +173,7 @@ async fn embedded_character_state_permissions_updates_and_disable() {
         .unwrap();
     let services = LocalServices {
         manager: manager.clone(),
+        mutations: Arc::new(application(&manager)),
         binding: foreign,
         cancel: CancellationToken::new(),
     };
@@ -170,9 +197,156 @@ async fn embedded_character_state_permissions_updates_and_disable() {
         )
         .await
         .unwrap();
-    assert!(manager.invoke(invoke()).await.is_err());
+    assert!(invoke_plugin(&manager, invoke()).await.is_err());
     assert!(manager.sessions.lock().unwrap().is_empty());
 }
+#[tokio::test]
+async fn changed_or_missing_code_can_be_disabled_and_stays_disabled() {
+    for remove in [false, true] {
+        let (manager, _temp, companion) = manager().await;
+        let revision = manager.entries.read().unwrap()["reference"]
+            .package
+            .revision
+            .clone();
+        manager
+            .enable(
+                "reference".into(),
+                EnablePluginRequest {
+                    enabled: true,
+                    revision: revision.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let b = binding(
+            &manager,
+            &companion,
+            "behavior",
+            "behavior",
+            vec![Service::State],
+        );
+        manager.bind(b.clone()).await.unwrap();
+        invoke_plugin(&manager, PluginInvocation {
+            binding_id: b.id,
+            operation: document(json!({"type":"character","target":{"device_id":"device","character_id":companion},"event":{"type":"activated"}})).into(),
+            ..Default::default()
+        }).await.unwrap();
+        let entry = manager.entries.read().unwrap()["reference"].clone();
+        let file = entry.package.root.join("reference.wasm");
+        let original = std::fs::read(&file).unwrap();
+        if remove {
+            std::fs::remove_file(&file).unwrap();
+        } else {
+            ene_platform::storage::write_atomic(&file, b"changed").unwrap();
+        }
+        manager
+            .enable(
+                "reference".into(),
+                EnablePluginRequest {
+                    enabled: false,
+                    revision,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(entry.cancellation.is_cancelled());
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        assert!(manager.ready("reference", None).is_err());
+        let saved = manager
+            .store
+            .plugin_get("enabled".into(), "reference".into())
+            .await
+            .unwrap();
+        let saved: EnablePluginRequest = serde_json::from_value(saved["input"].clone()).unwrap();
+        assert!(!saved.enabled);
+        ene_platform::storage::write_atomic(&file, &original).unwrap();
+        manager.restore().await.unwrap();
+        assert!(manager.ready("reference", None).is_err());
+    }
+}
+
+#[tokio::test]
+async fn enable_changes_survive_waiter_cancellation_and_restore() {
+    use std::time::Duration;
+    for enabled in [false, true] {
+        let (manager, _temp, _) = manager().await;
+        let revision = manager.entries.read().unwrap()["reference"]
+            .package
+            .revision
+            .clone();
+        manager
+            .enable(
+                "reference".into(),
+                EnablePluginRequest {
+                    enabled: !enabled,
+                    revision: revision.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let lifetime = manager.entries.read().unwrap()["reference"]
+            .cancellation
+            .child_token();
+        let worker = Arc::new(SessionState::new("reference".into(), lifetime.clone()));
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("held".into(), worker.clone());
+        let held = worker.worker.lock().await;
+        let app = crate::bootstrap::application_with_plugins(
+            manager.store.clone(),
+            "private-token".into(),
+            Arc::new(manager.clone()),
+        )
+        .application;
+        let other = app.clone();
+        let waiter = tokio::spawn(async move {
+            other
+                .enable_plugin(
+                    "reference".into(),
+                    EnablePluginRequest {
+                        enabled,
+                        revision,
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), lifetime.cancelled())
+            .await
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let saved = manager
+                    .store
+                    .plugin_get("enabled".into(), "reference".into())
+                    .await
+                    .unwrap();
+                let saved: EnablePluginRequest =
+                    serde_json::from_value(saved["input"].clone()).unwrap();
+                if saved.enabled == enabled {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the dispatched change must finish saving without its waiter");
+        assert_eq!(manager.ready("reference", None).is_ok(), enabled);
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        manager.restore().await.unwrap();
+        assert_eq!(manager.ready("reference", None).is_ok(), enabled);
+        app.stop().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn stale_revisions_undeclared_grants_and_missing_targets_are_rejected() {
     let (manager, _temp, companion) = manager().await;
@@ -229,7 +403,48 @@ async fn stale_revisions_undeclared_grants_and_missing_targets_are_rejected() {
             .state,
         "changed"
     );
-    assert!(manager.ready("reference", None).is_err());
+    // Authorization uses the captured revision; executable verification happens at invocation boundaries.
+    assert!(manager.ready("reference", None).is_ok());
+    assert!(matches!(
+        Instance::load(
+            package,
+            "behavior".into(),
+            Target::Host,
+            1,
+            &CancellationToken::new()
+        )
+        .await,
+        Err(ene_plugin_runtime::Error::Changed)
+    ));
+}
+
+#[tokio::test]
+async fn moved_packages_use_the_new_root_and_bad_packages_do_not_hide_good_ones() {
+    let (manager, _temp, _) = manager().await;
+    let old = manager.root.join("reference");
+    let moved = manager.root.join("moved");
+    std::fs::rename(&old, &moved).unwrap();
+    manager.scan().unwrap();
+    let entry = manager.entries.read().unwrap()["reference"].clone();
+    assert_eq!(entry.package.root, moved);
+    assert_eq!(entry.state, "disabled");
+
+    let bad = manager.root.join("bad");
+    crate::test_support::create_directory(&bad).unwrap();
+    crate::test_support::write(
+        bad.join("manifest.json"),
+        r#"{"contract_version":3,"id":"bad","name":"Bad","version":"1","entrypoints":[]}"#,
+    )
+    .unwrap();
+    manager.scan().unwrap();
+    assert!(manager.entries.read().unwrap().contains_key("reference"));
+    assert!(manager.discovery_error.read().unwrap().is_some());
+    assert!(
+        manager
+            .list()
+            .iter()
+            .any(|plugin| plugin.id == "plugin-discovery" && plugin.state == "failed")
+    );
 }
 #[tokio::test]
 async fn harness_and_speech_share_the_wasm_contract() {
@@ -270,22 +485,52 @@ async fn harness_and_speech_share_the_wasm_contract() {
             answer: "done".into(),
         },
     ] {
-        let result = manager
-            .invoke(PluginInvocation {
+        if matches!(input, HarnessInput::Answer { .. }) {
+            let mut journal = manager
+                .store
+                .plugin_get("harness".into(), "task".into())
+                .await
+                .unwrap();
+            journal["events"] = json!(vec![
+                Event::Harness {
+                    event: HarnessEvent::Progress {
+                        text: "step".into()
+                    }
+                };
+                MAX_EVENTS
+            ]);
+            manager
+                .store
+                .plugin_set("harness".into(), "task".into(), journal)
+                .await
+                .unwrap();
+        }
+        let result = invoke_plugin(
+            &manager,
+            PluginInvocation {
                 binding_id: "task".into(),
                 operation: document(serde_json::to_value(Operation::Harness { input }).unwrap())
                     .into(),
                 ..Default::default()
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(result.events.len(), 1);
     }
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "completed");
+    assert_eq!(journal["report"], "done");
+    assert_eq!(journal["events"].as_array().unwrap().len(), MAX_EVENTS);
     manager
         .bind(binding(&manager, &companion, "speech", "speech", vec![]))
         .await
         .unwrap();
-    let result=manager.invoke(PluginInvocation {binding_id:"speech".into(),operation:document(json!({"type":"speech","input":{"type":"synthesize","utterance_id":"u","text":"test","voice":"reference"}})).into(), ..Default::default() }).await.unwrap();
+    let result=invoke_plugin(&manager, PluginInvocation {binding_id:"speech".into(),operation:document(json!({"type":"speech","input":{"type":"synthesize","utterance_id":"u","text":"test","voice":"reference"}})).into(), ..Default::default() }).await.unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&result.events[0].json).unwrap()["chunk"]["sequence"],
         0
@@ -294,7 +539,98 @@ async fn harness_and_speech_share_the_wasm_contract() {
         serde_json::from_str::<Value>(&result.events[0].json).unwrap()["chunk"]["done"],
         true
     );
-    manager.shutdown().await;
+    let before = manager
+        .sessions
+        .lock()
+        .unwrap()
+        .get("speech")
+        .cloned()
+        .unwrap();
+    let second=invoke_plugin(&manager, PluginInvocation {binding_id:"speech".into(),operation:document(json!({"type":"speech","input":{"type":"synthesize","utterance_id":"v","text":"again","voice":"reference"}})).into(), ..Default::default() }).await.unwrap();
+    assert_eq!(second.generation, result.generation);
+    let after = manager
+        .sessions
+        .lock()
+        .unwrap()
+        .get("speech")
+        .cloned()
+        .unwrap();
+    assert!(Arc::ptr_eq(&before, &after));
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn harness_commit_failure_is_terminal_and_allows_a_new_task() {
+    let (manager, _temp, companion) = manager().await;
+    manager
+        .entries
+        .write()
+        .unwrap()
+        .get_mut("reference")
+        .unwrap()
+        .state = "ready".into();
+    manager
+        .bind(binding(&manager, &companion, "task", "harness", vec![]))
+        .await
+        .unwrap();
+    let invoke = |input| {
+        invoke_plugin(
+            &manager,
+            PluginInvocation {
+                binding_id: "task".into(),
+                operation: document(serde_json::to_value(Operation::Harness { input }).unwrap())
+                    .into(),
+                ..Default::default()
+            },
+        )
+    };
+    invoke(HarnessInput::Start {
+        instruction: "test".into(),
+    })
+    .await
+    .unwrap();
+    let mut journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    journal["events"] = json!(vec![
+        Event::Harness {
+            event: HarnessEvent::Progress {
+                text: "step".into()
+            }
+        };
+        MAX_EVENTS
+    ]);
+    manager
+        .store
+        .plugin_set("harness".into(), "task".into(), journal)
+        .await
+        .unwrap();
+    assert!(
+        invoke(HarnessInput::Result {
+            operation_id: "model-1".into(),
+            result: Value::Null
+        })
+        .await
+        .is_err()
+    );
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "failed");
+    assert_eq!(journal["report"], "commit_failed");
+    assert_eq!(journal["events"].as_array().unwrap().len(), MAX_EVENTS);
+    assert!(manager.sessions.lock().unwrap().is_empty());
+    invoke(HarnessInput::Start {
+        instruction: "retry".into(),
+    })
+    .await
+    .unwrap();
+    invoke(HarnessInput::Cancel).await.unwrap();
+    manager.shutdown().await.unwrap();
 }
 
 fn kernel_bytes(value: &str) -> String {
@@ -304,12 +640,270 @@ fn kernel_bytes(value: &str) -> String {
     }
     code
 }
-struct Permit;
+
+#[tokio::test]
+async fn backpressured_provider_releases_slots_on_disable_cancel_and_trap() {
+    use crate::{
+        domain::OperationKind,
+        llm::{ProviderBinding, test_support::InvocationFixture},
+    };
+    use ene_plugin_runtime::limits::MAX_INSTANCES;
+    use futures_util::StreamExt;
+    use std::time::Duration;
+
+    for ending in ["disable", "cancel", "trap"] {
+        let (manager, _temp, _) = manager().await;
+        let saturated = Arc::new(tokio::sync::Notify::new());
+        let reached = saturated.clone();
+        let release = CancellationToken::new();
+        let wait = release.clone();
+        let router = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(move || async move {
+                reached.notify_one();
+                wait.cancelled().await;
+                ""
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let caps_text = r#"{"streaming_text":true,"model_list":false}"#;
+        let caps = kernel_bytes(caps_text);
+        let delta = kernel_bytes(r#"{"type":"delta","text":"x"}"#);
+        let open = kernel_bytes(
+            &json!({"type":"http_open","request":{
+                "method":"POST","url":format!("{endpoint}/chat/completions"),"headers":{},"body_base64":null
+            }})
+            .to_string(),
+        );
+        // With no reader, 33 events fill both 16-item queues and the forwarder's send.
+        let code = wat::parse_str(format!(
+            r#"(module
+          (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+          (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+          (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+          (import "extism:host/user" "ene_emit" (func $emit (param i64)))
+          (import "extism:host/user" "ene_service" (func $service (param i64) (result i64)))
+          (func (export "ene_initialize") (result i32) (local $p i64)
+            {caps} local.get $p i64.const {} call $output i32.const 0)
+          (func (export "ene_invoke") (result i32) (local $p i64) (local $i i32)
+            (loop $again
+              {delta} local.get $p call $emit
+              local.get $i i32.const 1 i32.add local.tee $i i32.const 33 i32.lt_u br_if $again)
+            {open} local.get $p call $service drop unreachable))"#,
+            caps_text.len()
+        ))
+        .unwrap();
+        let package = manager.root.join("backpressure");
+        crate::test_support::create_directory(&package).unwrap();
+        crate::test_support::write(package.join("main.wasm"), code).unwrap();
+        crate::test_support::write(package.join("manifest.json"), json!({
+            "contract_version":ene_plugin::CONTRACT_VERSION,"id":"backpressure","name":"Backpressure","version":"1",
+            "entrypoints":[{"id":"llm","target":"host","file":"main.wasm","provides":["llm"],"uses":["http"],
+            "provider":{"id":"backpressure","endpoint":endpoint,"auth":{"type":"none"},"destinations":[endpoint]}}]
+        }).to_string()).unwrap();
+        manager.scan().unwrap();
+        manager.enable_provider("backpressure", true).await.unwrap();
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let fixture = InvocationFixture {
+            operation: OperationKind::Conversation,
+            id: "backpressure".into(),
+            connection: crate::domain::Connection {
+                id: "connection".into(),
+                kind: "llm".into(),
+                adapter: "backpressure".into(),
+                endpoint,
+                options: document(json!({})).into(),
+                ..Default::default()
+            },
+            request: None,
+            secret: None,
+            authorization: Arc::new(Permit),
+            cancel: receiver,
+        };
+        let provider = manager.provider("backpressure").unwrap();
+        let binding = ProviderBinding::resolve(provider.clone(), &fixture.connection).unwrap();
+        let mut stream = provider.generate(fixture.build(binding)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), saturated.notified())
+            .await
+            .unwrap();
+        let hold = CancellationToken::new();
+        for _ in 1..MAX_INSTANCES {
+            let hold = hold.clone();
+            manager
+                .supervisor
+                .spawn(async move { hold.cancelled().await })
+                .unwrap();
+        }
+        match ending {
+            "disable" => manager
+                .enable_provider("backpressure", false)
+                .await
+                .unwrap(),
+            "cancel" => {
+                stop.send_replace(true);
+            }
+            "trap" => release.cancel(),
+            _ => unreachable!(),
+        }
+        let freed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hold = hold.clone();
+                if manager
+                    .supervisor
+                    .spawn(async move { hold.cancelled().await })
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        hold.cancel();
+        release.cancel();
+        let mut failed = false;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(crate::llm::Event::Delta(_)) => {}
+                    Err(_) => failed = true,
+                    _ => panic!("a stopped invocation must not report completion"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        manager.shutdown().await.unwrap();
+        server.abort();
+        assert!(
+            freed.is_ok(),
+            "{ending} retained the supervisor slot until output was read"
+        );
+        assert!(
+            failed,
+            "{ending} must remain an error even when its final error could not be queued"
+        );
+    }
+}
+
+pub(super) struct Permit;
 impl crate::llm::Authorization for Permit {
     fn check(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
+
+#[tokio::test]
+async fn provider_reuses_one_worker_between_generations() {
+    use crate::llm::{Generation, ProviderBinding, test_support::InvocationFixture};
+    use futures_util::StreamExt;
+
+    let (manager, _temp, _) = manager().await;
+    let caps_text = r#"{"streaming_text":true,"model_list":false}"#;
+    let caps = kernel_bytes(caps_text);
+    let finished = kernel_bytes(r#"{"type":"finished","reason":"stop"}"#);
+    let empty = kernel_bytes("{}");
+    let code = wat::parse_str(format!(
+        r#"(module
+          (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+          (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+          (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+          (import "extism:host/user" "ene_emit" (func $emit (param i64)))
+          (func (export "ene_initialize") (result i32) (local $p i64)
+            {caps} local.get $p i64.const {} call $output i32.const 0)
+          (func (export "ene_invoke") (result i32) (local $p i64)
+            {finished} local.get $p call $emit
+            {empty} local.get $p i64.const 2 call $output i32.const 0))"#,
+        caps_text.len()
+    ))
+    .unwrap();
+    let package = manager.root.join("reuse");
+    crate::test_support::create_directory(&package).unwrap();
+    crate::test_support::write(package.join("main.wasm"), code).unwrap();
+    crate::test_support::write(
+        package.join("manifest.json"),
+        json!({
+            "contract_version":ene_plugin::CONTRACT_VERSION,
+            "id":"reuse",
+            "name":"Reuse",
+            "version":"1",
+            "entrypoints":[{
+                "id":"llm","target":"host","file":"main.wasm","provides":["llm"],"uses":[],
+                "provider":{
+                    "id":"reuse","endpoint":"https://example.com/api",
+                    "auth":{"type":"none"},"destinations":["https://example.com"]
+                }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    manager.scan().unwrap();
+    manager.enable_provider("reuse", true).await.unwrap();
+    let provider = manager.provider("reuse").unwrap();
+    let connection = crate::domain::Connection {
+        id: "connection".into(),
+        kind: "llm".into(),
+        adapter: "reuse".into(),
+        endpoint: "https://example.com/api".into(),
+        options: document(json!({})).into(),
+        ..Default::default()
+    };
+    let make = |cancel| InvocationFixture {
+        operation: crate::domain::OperationKind::Conversation,
+        id: "generation".into(),
+        connection: connection.clone(),
+        request: Some(Generation::for_test(
+            connection.endpoint.clone(),
+            json!({}),
+            "model".into(),
+            String::new(),
+            vec![],
+            8,
+        )),
+        secret: None,
+        authorization: Arc::new(Permit),
+        cancel,
+    };
+    let (_first_stop, first_cancel) = tokio::sync::watch::channel(false);
+    let binding = ProviderBinding::resolve(provider.clone(), &connection).unwrap();
+    let mut first = provider
+        .generate(make(first_cancel).build(binding))
+        .await
+        .unwrap();
+    while let Some(event) = first.next().await {
+        event.unwrap();
+    }
+    let before = manager
+        .provider_sessions
+        .lock()
+        .unwrap()
+        .get("reuse:llm")
+        .cloned()
+        .unwrap();
+    let (_second_stop, second_cancel) = tokio::sync::watch::channel(false);
+    let binding = ProviderBinding::resolve(provider.clone(), &connection).unwrap();
+    let mut second = provider
+        .generate(make(second_cancel).build(binding))
+        .await
+        .unwrap();
+    while let Some(event) = second.next().await {
+        event.unwrap();
+    }
+    let after = manager
+        .provider_sessions
+        .lock()
+        .unwrap()
+        .get("reuse:llm")
+        .cloned()
+        .unwrap();
+    assert!(Arc::ptr_eq(&before, &after));
+    assert_eq!(manager.provider_sessions.lock().unwrap().len(), 1);
+    manager.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
     use crate::domain::OperationKind;
@@ -318,12 +912,15 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
     };
     use futures_util::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for cancelled in [false, true] {
+    for outcome in ["complete", "cancel", "trap", "abort"] {
+        let aborted = outcome == "abort";
         let (manager, _temp, _) = manager().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let second = Arc::new(tokio::sync::Notify::new());
         let release = second.clone();
+        let opened = Arc::new(tokio::sync::Notify::new());
+        let request_seen = opened.clone();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -334,14 +931,34 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
                     break;
                 }
             }
-            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n5\r\nfirst\r\n").await.unwrap();
+            request_seen.notify_one();
+            if !aborted {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n5\r\nfirst\r\n").await.unwrap();
+            }
             release.notified().await;
             let _ = socket.write_all(b"6\r\nsecond\r\n0\r\n\r\n").await;
         });
         let caps = kernel_bytes(r#"{"streaming_text":true,"model_list":false}"#);
-        let open=kernel_bytes(&json!({"type":"http_open","request":{"method":"GET","url":endpoint,"headers":{},"body_base64":null}}).to_string());
-        let first = kernel_bytes(r#"{"type":"delta","text":"first"}"#);
-        let finished = kernel_bytes(r#"{"type":"finished","reason":"stop"}"#);
+        let open=kernel_bytes(&json!({"type":"http_open","request":{"method":"POST","url":format!("{endpoint}/chat/completions"),"headers":{},"body_base64":null}}).to_string());
+        let mut first = format!(
+            "{} local.get $p call $emit",
+            kernel_bytes(r#"{"type":"delta","text":"first"}"#)
+        );
+        let mut finished = format!(
+            "{} local.get $p call $emit",
+            kernel_bytes(r#"{"type":"finished","reason":"stop"}"#)
+        );
+        // Receiving this HTTP request proves the guest emitted completion before blocking.
+        let before_open = if aborted {
+            format!(
+                "{} {}",
+                std::mem::take(&mut first),
+                std::mem::take(&mut finished)
+            )
+        } else {
+            String::new()
+        };
+        let after_finished = if outcome == "trap" { "unreachable" } else { "" };
         let prefix = r#"{"type":"http_read","handle":""#;
         let read = kernel_bytes(&format!("{prefix}{}\"}}", "0".repeat(36)));
         let mut copy = String::new();
@@ -360,15 +977,15 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
           (import "extism:host/user" "ene_emit" (func $emit (param i64)))
           (func (export "ene_initialize") (result i32) (local $p i64) {caps} local.get $p i64.const 42 call $output i32.const 0)
           (func (export "ene_invoke") (result i32) (local $p i64) (local $handle i64)
-            {open} local.get $p call $service local.set $handle
+            {before_open} {open} local.get $p call $service local.set $handle
             (loop $scan
                 local.get $handle call $load i32.const 104 i32.ne
                 local.get $handle i64.const 1 i64.add call $load i32.const 97 i32.ne i32.or
                 local.get $handle i64.const 2 i64.add call $load i32.const 110 i32.ne i32.or
                 if local.get $handle i64.const 1 i64.add local.set $handle br $scan end)
             local.get $handle i64.const 9 i64.add local.set $handle
-            {first} local.get $p call $emit
-            {read} {copy} local.get $p call $service drop {finished} local.get $p call $emit
+            {first}
+            {read} {copy} local.get $p call $service drop {finished} {after_finished}
             i64.const 2 call $alloc local.set $p local.get $p i32.const 123 call $store
             local.get $p i64.const 1 i64.add i32.const 125 call $store
             local.get $p i64.const 2 call $output i32.const 0))"#)).unwrap();
@@ -426,7 +1043,17 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
         assert!(
             matches!(tokio::time::timeout(ene_plugin_runtime::limits::INITIALIZE_TIMEOUT + std::time::Duration::from_secs(10),stream.next()).await.unwrap().unwrap().unwrap(),LlmEvent::Delta(text) if text=="first")
         );
-        if cancelled {
+        if aborted {
+            tokio::time::timeout(std::time::Duration::from_secs(4), opened.notified())
+                .await
+                .unwrap();
+            manager.supervisor.shutdown().await;
+            assert!(
+                stream.next().await.unwrap().is_err(),
+                "an aborted forwarder must never publish completion"
+            );
+            server.abort();
+        } else if outcome == "cancel" {
             stop.send_replace(true);
             assert!(
                 tokio::time::timeout(std::time::Duration::from_secs(4), stream.next())
@@ -439,11 +1066,20 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
         } else {
             second.notify_one();
             server.await.unwrap();
-            assert!(
-                matches!(tokio::time::timeout(std::time::Duration::from_secs(4),stream.next()).await.unwrap().unwrap().unwrap(),LlmEvent::Finished(reason) if reason=="stop")
-            );
+            let next = tokio::time::timeout(std::time::Duration::from_secs(4), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
+            if outcome == "trap" {
+                assert!(
+                    next.is_err(),
+                    "a failed guest must never publish completion"
+                );
+            } else {
+                assert!(matches!(next.unwrap(), LlmEvent::Finished(reason) if reason == "stop"));
+            }
         }
-        manager.shutdown().await;
+        manager.shutdown().await.unwrap();
     }
 }
 
@@ -506,7 +1142,7 @@ async fn failed_starts_release_single_use_and_persistent_slots() {
                 .unwrap()).into(),
              ..Default::default() },
         ] {
-            assert!(manager.invoke(input).await.is_err());
+            assert!(invoke_plugin(&manager, input).await.is_err());
             assert!(manager.sessions.lock().unwrap().is_empty());
             assert_eq!(manager.invocation_slots.available_permits(), 16);
         }
@@ -539,8 +1175,23 @@ async fn cancel_waiter(abort_waiter: bool) {
         .await
         .unwrap();
     manager
-        .store
-        .plugin_set("harness".into(), "task".into(), json!(journal))
+        .harness_commit(&binding.id, journal, &{
+            let mut events = vec![Event::Harness {
+                event: HarnessEvent::Question {
+                    question_id: "q".into(),
+                    text: "?".into(),
+                },
+            }];
+            events.extend(std::iter::repeat_n(
+                Event::Harness {
+                    event: HarnessEvent::Progress {
+                        text: "step".into(),
+                    },
+                },
+                MAX_EVENTS - 1,
+            ));
+            events
+        })
         .await
         .unwrap();
     let lifetime = CancellationToken::new();
@@ -553,10 +1204,16 @@ async fn cancel_waiter(abort_waiter: bool) {
     let active = lifetime.child_token();
     let _invocation = ActiveInvocation::new(worker.clone(), active.clone());
     let held = worker.worker.lock().await;
-    let other = manager.clone();
+    let app = crate::bootstrap::application_with_plugins(
+        manager.store.clone(),
+        "private-token".into(),
+        Arc::new(manager.clone()),
+    )
+    .application;
+    let other = app.clone();
     let cancel = tokio::spawn(async move {
         other
-            .invoke(PluginInvocation {
+            .invoke_plugin(PluginInvocation {
                 binding_id: "task".into(),
                 operation: document(
                     serde_json::to_value(Operation::Harness {
@@ -611,6 +1268,7 @@ async fn cancel_waiter(abort_waiter: bool) {
     );
     assert!(manager.sessions.lock().unwrap().is_empty());
     assert!(!lifetime.child_token().is_cancelled());
+    app.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -702,110 +1360,151 @@ async fn rebind_cancels_before_waiting_and_old_session_drop_preserves_replacemen
 #[cfg(unix)]
 #[tokio::test]
 async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempotent() {
-    let (manager, _temp, companion) = manager().await;
-    manager
-        .entries
-        .write()
-        .unwrap()
-        .get_mut("reference")
-        .unwrap()
-        .state = "ready".into();
-    let wasm = wat::parse_str(
-        r#"(module
+    for stop_host in [false, true] {
+        let (manager, _temp, companion) = manager().await;
+        manager
+            .entries
+            .write()
+            .unwrap()
+            .get_mut("reference")
+            .unwrap()
+            .state = "ready".into();
+        let wasm = wat::parse_str(
+            r#"(module
         (func (export "ene_initialize") (result i32) (loop $forever br $forever) i32.const 0)
         (func (export "ene_invoke") (result i32) i32.const 0))"#,
-    )
-    .unwrap();
-    ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
+        )
         .unwrap();
-    manager.scan().unwrap();
-    manager
-        .entries
-        .write()
-        .unwrap()
-        .get_mut("reference")
-        .unwrap()
-        .state = "ready".into();
-    let binding = binding(&manager, &companion, "task", "harness", vec![]);
-    manager.bind(binding.clone()).await.unwrap();
-    let other = manager.clone();
-    let start = tokio::spawn(async move {
-        other
-            .invoke(PluginInvocation {
-                binding_id: "task".into(),
-                operation: document(
-                    serde_json::to_value(Operation::Harness {
-                        input: HarnessInput::Start {
-                            instruction: "test".into(),
-                        },
-                    })
-                    .unwrap(),
-                )
-                .into(),
-                ..Default::default()
-            })
-            .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if manager
+        ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
+            .unwrap();
+        manager.scan().unwrap();
+        manager
+            .entries
+            .write()
+            .unwrap()
+            .get_mut("reference")
+            .unwrap()
+            .state = "ready".into();
+        let binding = binding(&manager, &companion, "task", "harness", vec![]);
+        manager.bind(binding.clone()).await.unwrap();
+        let app = crate::bootstrap::application_with_plugins(
+            manager.store.clone(),
+            "private-token".into(),
+            Arc::new(manager.clone()),
+        )
+        .application;
+        let other = app.clone();
+        let start = tokio::spawn(async move {
+            other
+                .invoke_plugin(PluginInvocation {
+                    binding_id: "task".into(),
+                    operation: document(
+                        serde_json::to_value(Operation::Harness {
+                            input: HarnessInput::Start {
+                                instruction: "test".into(),
+                            },
+                        })
+                        .unwrap(),
+                    )
+                    .into(),
+                    ..Default::default()
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if manager
+                    .store
+                    .plugin_get("harness".into(), "task".into())
+                    .await
+                    .unwrap()["status"]
+                    == "running"
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if stop_host {
+            app.begin_shutdown();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), start)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(3), app.stop())
+                .await
+                .unwrap()
+                .unwrap();
+            let journal = manager
                 .store
                 .plugin_get("harness".into(), "task".into())
                 .await
-                .unwrap()["status"]
-                == "running"
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
+                .unwrap();
+            assert_eq!(journal["status"], "failed");
+            assert_eq!(journal["report"], "plugin_stopped");
+            assert!(manager.sessions.lock().unwrap().is_empty());
+            continue;
         }
-    })
-    .await
-    .unwrap();
-    let cancel = || PluginInvocation {
-        binding_id: "task".into(),
-        operation: document(
-            serde_json::to_value(Operation::Harness {
-                input: HarnessInput::Cancel,
-            })
-            .unwrap(),
+        let cancel = || PluginInvocation {
+            binding_id: "task".into(),
+            operation: document(
+                serde_json::to_value(Operation::Harness {
+                    input: HarnessInput::Cancel,
+                })
+                .unwrap(),
+            )
+            .into(),
+            ..Default::default()
+        };
+        let confirmed = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            invoke_plugin(&manager, cancel()),
         )
-        .into(),
-        ..Default::default()
-    };
-    let confirmed =
-        tokio::time::timeout(std::time::Duration::from_secs(3), manager.invoke(cancel()))
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(start.await.unwrap().is_err());
+        let journal = manager
+            .store
+            .plugin_get("harness".into(), "task".into())
             .await
-            .unwrap()
             .unwrap();
-    assert!(start.await.unwrap().is_err());
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "cancelled");
-    assert_eq!(journal["events"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        serde_json::from_str::<Value>(confirmed.result.json.as_str()).unwrap()["task_id"],
-        journal["task_id"]
-    );
-    assert_eq!(
-        serde_json::from_str::<Value>(manager.invoke(cancel()).await.unwrap().result.json.as_str())
+        assert_eq!(journal["status"], "cancelled");
+        assert_eq!(journal["events"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(confirmed.result.json.as_str()).unwrap()["task_id"],
+            journal["task_id"]
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                invoke_plugin(&manager, cancel())
+                    .await
+                    .unwrap()
+                    .result
+                    .json
+                    .as_str()
+            )
             .unwrap()["task_id"],
-        journal["task_id"]
-    );
-    manager
-        .harness_begin(
-            &binding,
-            &HarnessInput::Start {
-                instruction: "again".into(),
-            },
-        )
-        .await
-        .unwrap();
-    assert!(manager.sessions.lock().unwrap().is_empty());
-    assert_eq!(manager.invocation_slots.available_permits(), 16);
+            journal["task_id"]
+        );
+        manager
+            .harness_begin(
+                &binding,
+                &HarnessInput::Start {
+                    instruction: "again".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        assert_eq!(manager.invocation_slots.available_permits(), 16);
+        app.stop().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -911,4 +1610,67 @@ async fn connect_management_invokes_the_wasm_harness_and_enforces_host_authentic
     app.application.stop().await.unwrap();
     server.abort();
     drop(temp);
+}
+
+#[tokio::test]
+async fn event_count_and_byte_overflow_stop_the_invocation_promptly() {
+    for (count, text) in [(300, "x".into()), (100, "x".repeat(16384))] {
+        let (manager, _temp, companion) = manager().await;
+        let root = manager.entries.read().unwrap()["reference"]
+            .package
+            .root
+            .clone();
+        let empty = kernel_bytes("{}");
+        let event = kernel_bytes(&json!({"type":"character","target":{"device_id":"device","character_id":companion},"action":{"type":"speak","text":text}}).to_string());
+        let code = wat::parse_str(format!(
+            r#"(module
+          (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+          (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+          (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+          (import "extism:host/user" "ene_emit" (func $emit (param i64)))
+          (func (export "ene_initialize") (result i32) (local $p i64)
+            {empty} local.get $p i64.const 2 call $output i32.const 0)
+          (func (export "ene_invoke") (result i32) (local $p i64) (local $i i32)
+            {event}
+            (loop $next local.get $p call $emit
+              local.get $i i32.const 1 i32.add local.tee $i i32.const {count} i32.lt_u br_if $next)
+            {empty} local.get $p i64.const 2 call $output i32.const 0))"#
+        ))
+        .unwrap();
+        ene_platform::storage::write_atomic(&root.join("reference.wasm"), &code).unwrap();
+        manager.scan().unwrap();
+        let revision = manager.entries.read().unwrap()["reference"]
+            .package
+            .revision
+            .clone();
+        manager
+            .enable(
+                "reference".into(),
+                EnablePluginRequest {
+                    enabled: true,
+                    revision,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let b = binding(&manager, &companion, "overflow", "behavior", vec![]);
+        manager.bind(b.clone()).await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), invoke_plugin(&manager, PluginInvocation {
+            binding_id: b.id,
+            operation: document(json!({"type":"character","target":{"device_id":"device","character_id":companion},"event":{"type":"activated"}})).into(),
+            ..Default::default()
+        })).await;
+        manager.entries.read().unwrap()["reference"]
+            .cancellation
+            .cancel();
+        assert_eq!(
+            result
+                .expect("event overflow must stop immediately")
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidRequest
+        );
+        assert!(manager.sessions.lock().unwrap().is_empty());
+    }
 }

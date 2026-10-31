@@ -30,7 +30,7 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
         .initialize()
         .await
         .map_err(|_| "device initialization failed")?;
-    app.application.restore_plugins().await;
+    app.application.restore_plugins().await?;
     Ok((runtime, app))
 }
 
@@ -54,8 +54,8 @@ pub(crate) fn application_with_plugins(
         std::sync::Arc::new(store),
         providers,
         std::sync::Arc::new(super::infrastructure::credentials::Store::default()),
-        shutdown.clone(),
+        shutdown,
         Some(plugins),
     );
-    App::new(application, token, shutdown).with_device_store(devices)
+    App::new(application, token).with_device_store(devices)
 }

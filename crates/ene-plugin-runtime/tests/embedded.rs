@@ -2,7 +2,7 @@ use ene_plugin::*;
 use ene_plugin_runtime::{
     Package,
     instance::{DenyServices, Instance, Services},
-    limits::MAX_CHUNK,
+    limits::{MAX_CHUNK, MAX_MESSAGE_BYTES, WASM_TABLE_ELEMENTS},
 };
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
@@ -185,7 +185,7 @@ async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
         "i32.const 7 return".to_string(),
         bad_event,
         format!("i64.const {} call $alloc call $emit", MAX_CHUNK+1),
-        format!("i64.const {} call $alloc call $service drop", MAX_CHUNK+1),
+        format!("i64.const {} call $alloc call $service drop", MAX_MESSAGE_BYTES+1),
         format!("{} local.get $p call $service drop",write(&json!({"type":"desktop","operation":{"type":"read_resource","handle":"x","offset":0,"length":MAX_CHUNK+1}}).to_string())),
     ] {
         let (package,_temp)=package(&wasm(&body),Target::Host,&[Service::Desktop]);
@@ -216,7 +216,7 @@ async fn guest_memory_is_bounded_and_wasi_is_unavailable() {
         .await;
     assert!(
         matches!(result, Ok(ref value) if *value == json!({}))
-            || matches!(result, Err(ene_plugin_runtime::Error::Execution))
+            || matches!(result, Err(ene_plugin_runtime::Error::Execution(_)))
     );
     let wasi=wat::parse_str(r#"(module (import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32))))"#).unwrap();
     let (package, _temp) = self::package(&wasi, Target::Host, &[]);
@@ -225,6 +225,52 @@ async fn guest_memory_is_bounded_and_wasi_is_unavailable() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn table_limits_cover_initial_size_count_and_growth() {
+    let grow = format!(
+        r#"
+        ref.null func i32.const {WASM_TABLE_ELEMENTS} table.grow i32.eqz if else unreachable end
+        table.size i32.const {WASM_TABLE_ELEMENTS} i32.eq if else unreachable end
+        ref.null func i32.const 1 table.grow i32.const -1 i32.eq if else unreachable end
+    "#
+    );
+    for (tables, body, allowed) in [
+        ("(table 10000000 funcref)", "", false),
+        ("(table 0 funcref) (table 0 funcref)", "", false),
+        ("(table 0 funcref)", grow.as_str(), true),
+        ("(table 0 10000000 funcref)", grow.as_str(), true),
+    ] {
+        let empty = write("{}");
+        let code = wat::parse_str(format!(
+            r#"(module
+            (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+            (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+            (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+            {tables}
+            (func $ok (export "ene_initialize") (result i32) (local $p i64)
+                {empty} local.get $p i64.const 2 call $output i32.const 0)
+            (func (export "ene_invoke") (result i32) {body} call $ok))"#
+        ))
+        .unwrap();
+        let (package, _temp) = package(&code, Target::Host, &[]);
+        let cancel = CancellationToken::new();
+        let result = Instance::load(package, "main".into(), Target::Host, 1, &cancel).await;
+        if allowed {
+            let mut instance = result.unwrap();
+            let (tx, _rx) = mpsc::channel(1);
+            instance
+                .invoke(character(), Arc::new(DenyServices), tx, &cancel)
+                .await
+                .unwrap();
+        } else {
+            assert!(
+                matches!(result, Err(ene_plugin_runtime::Error::Execution(_))),
+                "{tables}"
+            );
+        }
+    }
 }
 
 struct Revoking(std::sync::atomic::AtomicBool);
@@ -258,16 +304,15 @@ async fn revocation_during_a_host_function_prevents_subsequent_guest_output() {
         .await
         .unwrap();
     let (tx, mut rx) = mpsc::channel(1);
-    assert!(
-        instance
-            .invoke(
-                character(),
-                Arc::new(Revoking(std::sync::atomic::AtomicBool::new(false))),
-                tx,
-                &cancel
-            )
-            .await
-            .is_err()
-    );
+    let error = instance
+        .invoke(
+            character(),
+            Arc::new(Revoking(std::sync::atomic::AtomicBool::new(false))),
+            tx,
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("revoked"), "{error:#}");
     assert!(rx.recv().await.is_none());
 }

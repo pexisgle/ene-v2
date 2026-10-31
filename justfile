@@ -34,7 +34,7 @@ fetch-assets asset="all":
 verify: fmt-check clippy
 
 build-test-plugins:
-    cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
+    cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
 
 run-host:
     cargo run --locked -p ene-host

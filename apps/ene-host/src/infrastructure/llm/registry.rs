@@ -80,12 +80,4 @@ impl ProviderRegistry for Registry {
             self.plugins()?.enable_provider(&id, enabled).await
         })
     }
-    fn shutdown(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async {
-            if let Some(plugins) = &self.plugins {
-                use crate::ports::plugin::Plugins;
-                plugins.shutdown().await;
-            }
-        })
-    }
 }

@@ -40,7 +40,7 @@ rustup toolchain install nightly-2026-10-07 --profile minimal --component rustfm
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
+cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
 cargo test --workspace --all-features --locked
 cargo build --workspace --all-targets --all-features --locked
 cargo run --locked -p ene-host

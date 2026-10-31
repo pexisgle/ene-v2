@@ -18,6 +18,7 @@ serde_json = "1"
 sha2 = "0.10"
 base64 = "0.22"
 extism = { version = "=1.41.0", default-features = false }
+wasmtime = { version = "49", default-features = false, features = ["pooling-allocator"] }
 
 [dev-dependencies]
 tempfile = "3"

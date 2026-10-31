@@ -56,10 +56,9 @@ async fn same_key_retries_storage_and_honors_environment_lifetime() {
             Arc::new(store.clone()),
             Arc::new(crate::infrastructure::llm::registry::Registry::discover()),
             credentials.clone(),
-            shutdown.clone(),
+            shutdown,
         ),
         "private-token".into(),
-        shutdown,
     );
     let (status, settings) = mutate(&app, "PATCH", "Settings", serde_json::json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
     assert_eq!(status, StatusCode::OK);

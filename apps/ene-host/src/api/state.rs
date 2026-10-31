@@ -1,6 +1,5 @@
 use crate::application::HostApplication;
 use std::sync::Arc;
-use tokio::sync::watch;
 #[derive(Clone)]
 pub struct App {
     pub(crate) devices: crate::devices::Devices,
@@ -9,14 +8,13 @@ pub struct App {
     pub application: HostApplication,
     pub(crate) token: Arc<str>,
     pub(crate) web_origin: Option<Arc<str>>,
-    pub shutdown: watch::Sender<bool>,
 }
 impl App {
     pub fn with_device_store(mut self, store: crate::infrastructure::sqlite::Store) -> Self {
         self.devices = crate::devices::Devices::new(Some(store));
         self
     }
-    pub fn new(application: HostApplication, token: String, shutdown: watch::Sender<bool>) -> Self {
+    pub fn new(application: HostApplication, token: String) -> Self {
         Self {
             devices: crate::devices::Devices::new(None),
             audio: crate::audio::Audio::default(),
@@ -24,7 +22,6 @@ impl App {
             application,
             token: token.into(),
             web_origin: None,
-            shutdown,
         }
     }
 }

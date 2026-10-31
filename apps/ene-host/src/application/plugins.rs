@@ -1,9 +1,10 @@
 use super::*;
 impl HostApplication {
-    pub async fn restore_plugins(&self) {
+    pub async fn restore_plugins(&self) -> Result<(), Error> {
         if let Some(plugins) = &self.0.plugins {
-            plugins.restore().await;
+            plugins.restore().await?;
         }
+        Ok(())
     }
     fn plugin_port(&self) -> Result<&dyn crate::ports::plugin::Plugins, Error> {
         self.0
@@ -19,14 +20,18 @@ impl HostApplication {
             .unwrap_or_default()
     }
     pub async fn reload_plugins(&self) -> Result<(), Error> {
-        self.plugin_port()?.reload().await
+        let app = self.clone();
+        self.owned(async move { app.plugin_port()?.reload().await })
+            .await
     }
     pub async fn enable_plugin(
         &self,
         id: String,
         input: ene_rpc::EnablePluginRequest,
     ) -> Result<(), Error> {
-        self.plugin_port()?.enable(id, input).await
+        let app = self.clone();
+        self.owned(async move { app.plugin_port()?.enable(id, input).await })
+            .await
     }
     pub async fn plugin_bindings(&self) -> Result<Vec<ene_rpc::PluginBinding>, Error> {
         match &self.0.plugins {
@@ -35,6 +40,11 @@ impl HostApplication {
         }
     }
     pub async fn bind_plugin(&self, input: ene_rpc::PluginBinding) -> Result<(), Error> {
+        let app = self.clone();
+        self.owned(async move { app.bind_plugin_inner(input).await })
+            .await
+    }
+    async fn bind_plugin_inner(&self, input: ene_rpc::PluginBinding) -> Result<(), Error> {
         let companion = input.companion_id.clone();
         let id = input.id.clone();
         self.plugin_port()?.bind(input).await?;
@@ -49,12 +59,23 @@ impl HostApplication {
         &self,
         input: ene_rpc::PluginInvocation,
     ) -> Result<ene_rpc::PluginResult, Error> {
+        let app = self.clone();
+        self.owned(async move { app.invoke_plugin_inner(input).await })
+            .await
+    }
+    async fn invoke_plugin_inner(
+        &self,
+        input: ene_rpc::PluginInvocation,
+    ) -> Result<ene_rpc::PluginResult, Error> {
         let bindings = self.plugin_port()?.bindings().await?;
         let binding = bindings
             .iter()
             .find(|b| b.id == input.binding_id)
             .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
-        let result = self.plugin_port()?.invoke(input).await?;
+        let result = self
+            .plugin_port()?
+            .invoke(input, Arc::new(self.clone()))
+            .await?;
         if !self
             .plugin_port()?
             .bindings()
@@ -155,5 +176,14 @@ impl HostApplication {
                 }
             }
         });
+    }
+}
+
+impl crate::ports::plugin::Mutations for HostApplication {
+    fn submit(
+        &self,
+        operation: futures_util::future::BoxFuture<'static, Result<(), Error>>,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), Error>> {
+        Box::pin(self.owned(operation))
     }
 }

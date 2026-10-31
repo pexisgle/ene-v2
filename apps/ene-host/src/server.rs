@@ -41,7 +41,7 @@ async fn serve() -> Result<(), Box<dyn Error>> {
     app.web_origin = Some(web_origin.into());
     runtime.publish(format!("http://{}/rpc", listener.local_addr()?))?;
     eprintln!("ene-host: authenticated loopback service ready");
-    let shutdown = app.shutdown.clone();
+    let shutdown = app.application.clone();
     let application = app.application.clone();
     let devices = app.devices.clone();
     let audio = app.audio.clone();
@@ -53,12 +53,12 @@ async fn serve() -> Result<(), Box<dyn Error>> {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 {
                     tokio::select! {_=tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{}}
-                    shutdown.send_replace(true);
+                    shutdown.begin_shutdown();
                     return;
                 }
             }
             let _ = tokio::signal::ctrl_c().await;
-            shutdown.send_replace(true);
+            shutdown.begin_shutdown();
         })
         .await?;
     audio.shutdown().await;

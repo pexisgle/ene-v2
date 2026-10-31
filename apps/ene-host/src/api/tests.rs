@@ -149,7 +149,7 @@ impl crate::llm::LlmProvider for FixtureProvider {
             if self.send_outbound {
                 let request = http::Request::builder()
                     .method("POST")
-                    .uri(format!("{}/chat", input.connection().endpoint))
+                    .uri(format!("{}/chat/completions", input.connection().endpoint))
                     .body(bytes::Bytes::new())
                     .unwrap();
                 crate::llm::AuthorizedTransport::new(
@@ -326,10 +326,9 @@ impl ConversationFixture {
                     finish: finish.clone(),
                 }),
                 std::sync::Arc::new(TestCredentials),
-                shutdown.clone(),
+                shutdown,
             ),
             "private-token".into(),
-            shutdown,
         );
         let (status, settings) = mutate(&app, "PATCH", "Settings", json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -685,10 +684,9 @@ mod grant_consent_tests {
                     revision: AtomicU64::new(1),
                 }),
                 Arc::new(TestCredentials),
-                shutdown.clone(),
+                shutdown,
             ),
             "private-token".into(),
-            shutdown,
         );
         let (status, settings) = mutate(
             &app,
@@ -895,14 +893,17 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         let wire_origin = destination.clone();
         let wire_tx = tx.clone();
         let service = axum::Router::new().route(
-            "/{service}/v1/chat",
+            "/{service}/v1/chat/completions",
             axum::routing::post(
                 move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
                     let origin = wire_origin.clone();
                     let tx = wire_tx.clone();
                     async move {
                         tx.send((
-                            format!("{origin}{}", uri.path().trim_end_matches("/chat")),
+                            format!(
+                                "{origin}{}",
+                                uri.path().trim_end_matches("/chat/completions")
+                            ),
                             headers["authorization"]
                                 .to_str()
                                 .unwrap()
@@ -927,10 +928,9 @@ async fn changing_service_clears_credentials_before_new_authorization() {
                 std::sync::Arc::new(store.clone()),
                 std::sync::Arc::new(RoutedRegistry),
                 credentials.clone(),
-                shutdown.clone(),
+                shutdown,
             ),
             "private-token".into(),
-            shutdown,
         );
         let (status, saved) = mutate(
             &app,

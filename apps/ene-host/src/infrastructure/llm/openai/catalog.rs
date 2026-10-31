@@ -46,7 +46,7 @@ async fn enrich_from(
     }
     let failure = || Error::new(ErrorKind::ExternalFailure);
     input.authorization().check().await?;
-    let transport = crate::llm::AuthorizedTransport::public_catalog(input)?;
+    let transport = crate::llm::AuthorizedTransport::public_catalog(input, source)?;
     let request = http::Request::get(source)
         .body(bytes::Bytes::new())
         .map_err(|_| failure())?;

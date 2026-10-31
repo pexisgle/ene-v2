@@ -12,6 +12,11 @@ OSイベント取得、購読の認可と配送、アバターへの動作反映
 `ene-avatar` は `apps/ene-avatar/src/control.rs` のJSON行通信を持ちますが、
 プラグインイベントからその通信への変換はまだありません。
 
+Extism の組み込み `extism:host/env`（alloc/store/load、config、log）は
+PDK の都合で残ります。実行基盤は `max_var_bytes = 0` にして var 書き込みを
+無効化しますが、`log_*` は manifest の `log` サービスとは別に host の stderr へ
+出る点に注意してください。
+
 ## 共通契約
 
 | 定義 | 用途 |
@@ -26,6 +31,15 @@ OSイベント取得、購読の認可と配送、アバターへの動作反映
 共通型はクレート直下から利用できます。内部ファイルは `manifest.rs`、`api.rs`、`window.rs`、`failure.rs`、`sdk.rs` です。
 `provider` は認証方式、ルーティング設定、チャットメッセージを提供します。
 HTTPは `HttpOpen` / `HttpRead` / `HttpClose` で依頼し、認証情報と通信の認可はホスト側で管理する設計です。
+プラグイン provider の通信は同一 origin に限定し、Generate / ConnectionCheck は
+`POST <endpoint>/chat/completions` または `POST <endpoint>/responses`、
+ListModels は `GET <endpoint>/models` だけを許可します。公開カタログの取得は
+ホスト専用の catalog transport が行います。
+`service::<T>` は応答を直接 `T` に復号します。戻り値が不要な操作は `service::<()>`、未保存ならnullを返す状態読取は `service::<Option<T>>` を使います。`http_close` の戻り値は `()` です。
+SDKのヘルパーは `Result<T, extism_pdk::Error>` を返します。サービスの `Failure` はPDKエラーの原因として保持され、`error.downcast_ref::<Failure>()` でコードを取得できます。`FnResult` は `#[plugin_fn]` のエントリポイントで使い、ヘルパーのエラーは `?` で変換します。
+ProviderとSpeechは同一package/entrypoint（Speechはbinding）のInstanceを再利用し、再利用前に `ene_initialize` を再実行します。`ene_initialize` は再入可能にし、guest globalへ前回リクエスト固有の会話・音声・認証情報を残さないでください。
+`HarnessEvent::ModelRequest` と `ToolRequest` はクライアントへの提案です。endpoint/optionsやtool名をそのまま信頼せず、ホスト側の接続設定とtool allowlistで必ず上書き・認可してください。
+`Log` サービスは認可後、plugin/provider IDを添えてホストの標準エラー出力へ記録します。メッセージは4096バイトまでで、改行・制御文字はエスケープします。
 manifestの参照ファイル検証と入出力のサイズ制限も実行基盤の責務です。
 子プロセスの起動やworker用IPCはありません。
 現在のWasmサンプルはExtismの関数呼び出しと `ene_service` / `ene_emit` を使います。
@@ -122,5 +136,5 @@ JavaScriptでも扱えるよう、実行基盤は世代・シーケンス値を�
 
 ```sh
 cargo check --locked -p ene-plugin --all-targets --all-features
-cargo clippy --locked -p ene-plugin -p ene-window-reaction-wasm --all-targets --all-features -- -D warnings
+cargo clippy --locked -p ene-plugin -p ene-window-reaction-wasm -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown -- -D warnings
 ```

@@ -2898,7 +2898,7 @@ dependencies = [
 name = "ene-openrouter-wasm"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "ene-plugin",
  "serde_json",
 ]
@@ -2938,6 +2938,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "wasmtime",
  "wat",
 ]
 

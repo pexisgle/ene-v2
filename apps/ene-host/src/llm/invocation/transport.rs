@@ -1,5 +1,5 @@
 //! Authorization, credential attachment and sending share one private boundary.
-use super::{CredentialPlacement, Invocation};
+use super::{CredentialPlacement, Invocation, TransportScope};
 use crate::{
     domain::{Error, ErrorKind},
     ports::Result,
@@ -15,6 +15,7 @@ pub struct AuthorizedTransport {
     client: reqwest::Client,
     invocation: Arc<Invocation>,
     placement: CredentialPlacement,
+    scope: TransportScope,
     max_response_bytes: usize,
     timeout: Duration,
 }
@@ -28,13 +29,16 @@ impl AuthorizedTransport {
             timeout,
             invocation,
             placement,
+            scope: TransportScope::Provider,
             max_response_bytes: MAX_RESPONSE_BYTES,
         })
     }
 
     /// Public metadata has a separate limit and cannot carry credentials or a body.
-    pub fn public_catalog(invocation: Arc<Invocation>) -> Result<Self> {
+    pub fn public_catalog(invocation: Arc<Invocation>, source: &str) -> Result<Self> {
         let mut transport = Self::new(invocation, CredentialPlacement::None)?;
+        transport.scope =
+            TransportScope::Catalog(url::Url::parse(source).map_err(|_| Error::invalid())?);
         transport.timeout = Duration::from_secs(10);
         transport.max_response_bytes = 16 * 1024 * 1024;
         Ok(transport)
@@ -48,7 +52,7 @@ impl AuthorizedTransport {
             });
         }
         self.invocation
-            .authorize_outbound(&mut request, &self.placement)
+            .authorize_outbound(&mut request, &self.placement, &self.scope)
             .await?;
         let (parts, body) = request.into_parts();
         // This is the actual send boundary, including Rig's lazy streaming requests.

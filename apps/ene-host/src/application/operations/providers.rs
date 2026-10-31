@@ -30,11 +30,7 @@ impl HostApplication {
                 }
             }
         }
-        let mut shutdown = self.shutdown();
-        if *shutdown.borrow() {
-            return Err(Error::unavailable());
-        }
-        tokio::select! {biased;_=shutdown.changed()=>return Err(Error::unavailable()),r=self.0.providers.enable(id,enabled)=>r?};
+        self.0.providers.enable(id, enabled).await?;
         let mut controls = self.0.controls.lock().await;
         let c = config(self, &mut controls).await?;
         commit(self, &mut controls, c).await

@@ -16,7 +16,7 @@ struct Host {
 }
 impl Drop for Host {
     fn drop(&mut self) {
-        self.app.shutdown.send_replace(true);
+        self.app.application.begin_shutdown();
         self.server.abort();
     }
 }
