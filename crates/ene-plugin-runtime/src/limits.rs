@@ -15,7 +15,7 @@ pub const MAX_SERVICE_BYTES: usize = 16 * 1024 * 1024;
 /// Aggregate event budget for one invocation, including provider streams.
 pub const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INSTANCES: usize = 16;
-/// Persistent guests hold instance slots; leave room for one-shot providers.
+/// Persistent guests hold instance slots; leave room for provider generations.
 pub const MAX_SESSIONS: usize = MAX_INSTANCES / 2;
 pub const MAX_CODE: u64 = 32 * 1024 * 1024;
 pub const MAX_ASSET_BYTES: u64 = 4 * 1024 * 1024 * 1024;

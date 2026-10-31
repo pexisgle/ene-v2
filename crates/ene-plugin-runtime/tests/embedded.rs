@@ -50,6 +50,31 @@ fn emit(text: &str) -> String {
     format!("{} local.get $p call $emit",write(&json!({"type":"character","target":{"device_id":"device","character_id":"character"},"action":{"type":"speak","text":text}}).to_string()))
 }
 #[tokio::test]
+async fn service_budget_counts_received_json_bytes() {
+    // Trailing whitespace is legal JSON that re-encoding would hide.
+    let request = format!(
+        r#"{{"type":"state_read","key":"visits"}}{}"#,
+        " ".repeat(8 * 1024)
+    );
+    let code = wasm(&format!(
+        "{} (loop $next local.get $p call $service drop local.get $i i32.const 1 i32.add local.tee $i i32.const 2100 i32.lt_u br_if $next)",
+        write(&request)
+    ));
+    let (package, _temp) = package(&code, Target::Host, &[Service::State]);
+    let cancel = CancellationToken::new();
+    let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    let result = instance
+        .invoke(character(), Arc::new(DenyServices), tx, &cancel)
+        .await;
+    assert!(
+        result.is_err(),
+        "2100 requests of 8 KiB must exceed the 16 MiB service budget"
+    );
+}
+#[tokio::test]
 async fn embedded_host_and_desktop_instances_preserve_event_order_under_backpressure() {
     for target in [Target::Host, Target::Desktop] {
         let code = wasm(&format!(

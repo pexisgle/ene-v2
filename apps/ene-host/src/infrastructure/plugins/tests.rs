@@ -796,15 +796,18 @@ impl crate::llm::Authorization for Permit {
 }
 
 #[tokio::test]
-async fn provider_reuses_one_worker_between_generations() {
+async fn concurrent_provider_generations_do_not_share_a_worker() {
     use crate::llm::{Generation, ProviderBinding, test_support::InvocationFixture};
     use futures_util::StreamExt;
+    use std::time::Duration;
 
     let (manager, _temp, _) = manager().await;
     let caps_text = r#"{"streaming_text":true,"model_list":false}"#;
     let caps = kernel_bytes(caps_text);
+    let delta = kernel_bytes(r#"{"type":"delta","text":"x"}"#);
     let finished = kernel_bytes(r#"{"type":"finished","reason":"stop"}"#);
     let empty = kernel_bytes("{}");
+    // With no reader, 33 events fill both 16-item queues and block the guest.
     let code = wat::parse_str(format!(
         r#"(module
           (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
@@ -813,7 +816,10 @@ async fn provider_reuses_one_worker_between_generations() {
           (import "extism:host/user" "ene_emit" (func $emit (param i64)))
           (func (export "ene_initialize") (result i32) (local $p i64)
             {caps} local.get $p i64.const {} call $output i32.const 0)
-          (func (export "ene_invoke") (result i32) (local $p i64)
+          (func (export "ene_invoke") (result i32) (local $p i64) (local $i i32)
+            (loop $again
+              {delta} local.get $p call $emit
+              local.get $i i32.const 1 i32.add local.tee $i i32.const 33 i32.lt_u br_if $again)
             {finished} local.get $p call $emit
             {empty} local.get $p i64.const 2 call $output i32.const 0))"#,
         caps_text.len()
@@ -873,34 +879,25 @@ async fn provider_reuses_one_worker_between_generations() {
         .generate(make(first_cancel).build(binding))
         .await
         .unwrap();
-    while let Some(event) = first.next().await {
-        event.unwrap();
-    }
-    let before = manager
-        .provider_sessions
-        .lock()
-        .unwrap()
-        .get("reuse:llm")
-        .cloned()
-        .unwrap();
+    // One event proves the guest owns an instance and is now blocked on backpressure.
+    first.next().await.unwrap().unwrap();
     let (_second_stop, second_cancel) = tokio::sync::watch::channel(false);
     let binding = ProviderBinding::resolve(provider.clone(), &connection).unwrap();
     let mut second = provider
         .generate(make(second_cancel).build(binding))
         .await
         .unwrap();
-    while let Some(event) = second.next().await {
-        event.unwrap();
-    }
-    let after = manager
-        .provider_sessions
-        .lock()
-        .unwrap()
-        .get("reuse:llm")
-        .cloned()
-        .unwrap();
-    assert!(Arc::ptr_eq(&before, &after));
-    assert_eq!(manager.provider_sessions.lock().unwrap().len(), 1);
+    let completed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut finished = false;
+        while let Some(event) = second.next().await {
+            finished = matches!(event.unwrap(), crate::llm::Event::Finished(_));
+        }
+        finished
+    })
+    .await
+    .expect("a second generation must not wait for a blocked instance");
+    assert!(completed);
+    drop(first);
     manager.shutdown().await.unwrap();
 }
 
@@ -1084,7 +1081,7 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
 }
 
 #[tokio::test]
-async fn failed_starts_release_single_use_and_persistent_slots() {
+async fn failed_starts_release_instance_slots() {
     let (manager, _temp, companion) = manager().await;
     ene_platform::storage::write_atomic(
         &manager.root.join("reference/reference.wasm"),
@@ -1323,7 +1320,7 @@ async fn rebind_cancels_before_waiting_and_old_session_drop_preserves_replacemen
     let held = Session {
         guard: old.worker.lock().await,
         retain: false,
-        registration: Some((manager.clone(), binding.id.clone(), old.clone())),
+        registration: (manager.clone(), binding.id.clone(), old.clone()),
         _permit: None,
     };
     let cancel = old.lifetime.child_token();

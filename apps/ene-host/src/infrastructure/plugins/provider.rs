@@ -274,38 +274,18 @@ impl Provider {
             streams: Mutex::new(BTreeMap::new()),
         });
         let generation = entry.generation;
-        let session = self.manager.provider_session(
-            &package_id,
-            &entrypoint,
-            entry.cancellation.child_token(),
-        );
+        // Providers are stateless: one instance per generation owns its slot and dies with it.
+        let cancel = entry.cancellation.child_token();
         let package = entry.package;
         let (out, mut output) = mpsc::channel(16);
         self.manager
             .supervisor
             .spawn(async move {
-                let cancel = session.lifetime.child_token();
                 let run = async {
-                    let mut guard = session.worker.lock().await;
-                    let worker = if let Some(worker) = guard.as_mut() {
-                        worker
-                            .reset(&session.lifetime.child_token())
+                    let mut worker =
+                        Instance::load(package, entrypoint, Target::Host, generation, &cancel)
                             .await
                             .map_err(failure)?;
-                        worker
-                    } else {
-                        let worker = Instance::load(
-                            package,
-                            entrypoint,
-                            Target::Host,
-                            generation,
-                            &session.lifetime,
-                        )
-                        .await
-                        .map_err(failure)?;
-                        *guard = Some(worker);
-                        guard.as_mut().unwrap()
-                    };
                     let (tx, mut rx) = mpsc::channel(16);
                     let execute = worker
                         .invoke(operation, services, tx, &cancel)
@@ -343,9 +323,6 @@ impl Provider {
                     result = run => result,
                 };
                 cancel.cancel();
-                if result.is_err() {
-                    session.worker.lock().await.take();
-                }
                 if let Err(error) = result {
                     // Never wait on a full queue; EOF without completion is also an error.
                     let _ = out.try_send(Err(error));

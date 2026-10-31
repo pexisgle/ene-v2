@@ -307,19 +307,22 @@ impl Package {
             stamps: Arc::new(stamps),
         })
     }
-    pub fn verify(&self) -> Result<()> {
-        let same = self.stamps.iter().all(|(path, stamp)| {
+    /// Metadata-only check for listings; enforcement uses `verify`.
+    pub fn current(&self) -> bool {
+        self.stamps.iter().all(|(path, stamp)| {
             std::fs::symlink_metadata(self.root.join(path))
                 .is_ok_and(|metadata| unchanged(&metadata, stamp))
-        });
+        })
+    }
+    pub fn verify(&self) -> Result<()> {
         // ctime/inode make the fast path content-sensitive on Unix. Windows has
         // no equivalent std metadata, so always re-read and hash there.
         #[cfg(unix)]
-        if same {
-            return Ok(());
+        {
+            if self.current() {
+                return Ok(());
+            }
         }
-        #[cfg(not(unix))]
-        let _ = same;
         if Self::load(&self.root)?.revision != self.revision {
             return Err(Error::Changed);
         }

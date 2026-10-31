@@ -61,12 +61,16 @@ fn ene_service(
     if raw.len() > MAX_MESSAGE_BYTES {
         return Err(Error::Protocol.into());
     }
+    let invocation = active()?;
+    // Charge the bytes actually received and sent, not their re-encoded form.
+    invocation.charge(&invocation.bytes, raw.len(), MAX_SERVICE_BYTES)?;
     let request = serde_json::from_slice(raw)?;
-    let result = active()?.service(request)?;
+    let result = invocation.service(request)?;
     let bytes = serde_json::to_vec(&result)?;
     if bytes.len() > MAX_CHUNK {
         return Err(Error::Protocol.into());
     }
+    invocation.charge(&invocation.bytes, bytes.len(), MAX_SERVICE_BYTES)?;
     plugin.memory_set_val(&mut output[0], bytes)
 }
 fn ene_emit(
@@ -79,7 +83,9 @@ fn ene_emit(
     if raw.len() > MAX_CHUNK {
         return Err(Error::Protocol.into());
     }
-    active()?.emit(serde_json::from_slice(raw)?)?;
+    let invocation = active()?;
+    invocation.charge(&invocation.stream_bytes, raw.len(), MAX_STREAM_BYTES)?;
+    invocation.emit(serde_json::from_slice(raw)?)?;
     Ok(())
 }
 struct Invocation {
@@ -105,15 +111,10 @@ impl Invocation {
     }
     fn service(&self, request: ServiceRequest) -> Result<std::result::Result<Value, Failure>> {
         crate::contract::service_request(&request)?;
-        self.charge(
-            &self.bytes,
-            serde_json::to_vec(&request)?.len(),
-            MAX_SERVICE_BYTES,
-        )?;
         if self.calls.fetch_add(1, Ordering::Relaxed) >= MAX_SERVICE_CALLS {
             return Err(Error::Protocol);
         }
-        let result = self.wait(async {
+        self.wait(async {
             self.services.check().await?;
             if !self.declared.contains(&request.service()) {
                 return Ok(Err(Failure::new("undeclared_service")));
@@ -121,20 +122,9 @@ impl Invocation {
             let result = self.services.handle(request).await;
             self.services.check().await?;
             Ok(result)
-        })?;
-        self.charge(
-            &self.bytes,
-            serde_json::to_vec(&result)?.len(),
-            MAX_SERVICE_BYTES,
-        )?;
-        Ok(result)
+        })
     }
     fn emit(&self, event: Event) -> Result<()> {
-        self.charge(
-            &self.stream_bytes,
-            serde_json::to_vec(&event)?.len(),
-            MAX_STREAM_BYTES,
-        )?;
         self.validator
             .lock()
             .map_err(|_| Error::Unavailable)?
@@ -264,27 +254,7 @@ impl Instance {
             result = tokio::time::timeout(INITIALIZE_TIMEOUT, build) => result.map_err(|_| Error::Timeout)?.map_err(|e| Error::Execution(e.into()))??,
         };
         drop(stop);
-        instance.capabilities = instance
-            .call(
-                "ene_initialize",
-                b"{}".to_vec(),
-                None,
-                cancel,
-                INITIALIZE_TIMEOUT,
-            )
-            .await?;
-        if instance
-            .package
-            .entry(&instance.entrypoint)?
-            .provides
-            .contains(&Extension::Llm)
-        {
-            let capabilities: LlmCapabilities =
-                serde_json::from_value(instance.capabilities.clone())?;
-            if !capabilities.streaming_text {
-                return Err(Error::Unsupported);
-            }
-        }
+        instance.initialize(cancel).await?;
         Ok(instance)
     }
     async fn call(
@@ -395,8 +365,8 @@ impl Instance {
     pub fn generation(&self) -> u64 {
         self.generation
     }
-    /// Re-run the plugin's initialization hook before a stateless reuse.
-    pub async fn reset(&mut self, cancel: &CancellationToken) -> Result<()> {
+    /// Run the guest's initialization hook and validate its declared capabilities.
+    pub async fn initialize(&mut self, cancel: &CancellationToken) -> Result<()> {
         self.capabilities = self
             .call(
                 "ene_initialize",

@@ -37,7 +37,7 @@ ListModels は `GET <endpoint>/models` だけを許可します。公開カタ�
 ホスト専用の catalog transport が行います。
 `service::<T>` は応答を直接 `T` に復号します。戻り値が不要な操作は `service::<()>`、未保存ならnullを返す状態読取は `service::<Option<T>>` を使います。`http_close` の戻り値は `()` です。
 SDKのヘルパーは `Result<T, extism_pdk::Error>` を返します。サービスの `Failure` はPDKエラーの原因として保持され、`error.downcast_ref::<Failure>()` でコードを取得できます。`FnResult` は `#[plugin_fn]` のエントリポイントで使い、ヘルパーのエラーは `?` で変換します。
-ProviderとSpeechは同一package/entrypoint（Speechはbinding）のInstanceを再利用し、再利用前に `ene_initialize` を再実行します。`ene_initialize` は再入可能にし、guest globalへ前回リクエスト固有の会話・音声・認証情報を残さないでください。
+Providerは生成ごとに新しいInstanceで実行します。Speechはbinding単位でInstanceを再利用し、再利用前に `ene_initialize` を再実行します。`ene_initialize` は再入可能にし、guest globalへ前回リクエスト固有の会話・音声・認証情報を残さないでください。
 `HarnessEvent::ModelRequest` と `ToolRequest` はクライアントへの提案です。endpoint/optionsやtool名をそのまま信頼せず、ホスト側の接続設定とtool allowlistで必ず上書き・認可してください。
 `Log` サービスは認可後、plugin/provider IDを添えてホストの標準エラー出力へ記録します。メッセージは4096バイトまでで、改行・制御文字はエスケープします。
 manifestの参照ファイル検証と入出力のサイズ制限も実行基盤の責務です。

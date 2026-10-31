@@ -60,17 +60,11 @@ impl SessionState {
     }
 }
 type Sessions = Arc<std::sync::Mutex<BTreeMap<String, Arc<SessionState>>>>;
-pub(super) struct ProviderSession {
-    package_id: String,
-    pub(super) lifetime: CancellationToken,
-    pub(super) worker: Mutex<Option<Instance>>,
-}
-type ProviderSessions = Arc<std::sync::Mutex<BTreeMap<String, Arc<ProviderSession>>>>;
 type Registration = (Manager, String, Arc<SessionState>);
 struct Session<'a> {
     guard: tokio::sync::MutexGuard<'a, Option<Instance>>,
     retain: bool,
-    registration: Option<Registration>,
+    registration: Registration,
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl std::ops::Deref for Session<'_> {
@@ -88,14 +82,13 @@ impl Drop for Session<'_> {
     fn drop(&mut self) {
         if !self.retain {
             self.guard.take();
-            if let Some((manager, key, worker)) = &self.registration {
-                let mut sessions = manager.sessions.lock().unwrap();
-                if sessions
-                    .get(key)
-                    .is_some_and(|current| Arc::ptr_eq(current, worker))
-                {
-                    sessions.remove(key);
-                }
+            let (manager, key, worker) = &self.registration;
+            let mut sessions = manager.sessions.lock().unwrap();
+            if sessions
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, worker))
+            {
+                sessions.remove(key);
             }
         }
     }
@@ -128,7 +121,6 @@ pub struct Manager {
     store: Store,
     entries: Arc<RwLock<BTreeMap<String, Entry>>>,
     sessions: Sessions,
-    provider_sessions: ProviderSessions,
     generations: Arc<AtomicU64>,
     pub(crate) supervisor: Supervisor,
     stopped: CancellationToken,
@@ -138,6 +130,18 @@ pub struct Manager {
 pub(crate) fn failure(error: impl std::fmt::Display) -> Error {
     eprintln!("ene-host plugin: {error:#}");
     Error::new(ErrorKind::ExternalFailure)
+}
+async fn verify(package: Package) -> Result<()> {
+    tokio::task::spawn_blocking(move || package.verify())
+        .await
+        .map_err(failure)?
+        .map_err(|error| {
+            if matches!(error, ene_plugin_runtime::Error::Changed) {
+                conflict()
+            } else {
+                failure(error)
+            }
+        })
 }
 fn invocation_failure(error: ene_plugin_runtime::Error) -> Error {
     if matches!(&error, ene_plugin_runtime::Error::Service(failure) if failure.code == "state_unavailable")
@@ -168,7 +172,6 @@ impl Manager {
             store,
             entries: Arc::new(RwLock::new(BTreeMap::new())),
             sessions: Arc::default(),
-            provider_sessions: Arc::default(),
             generations: Arc::new(AtomicU64::new(1)),
             supervisor: Supervisor::default(),
             stopped: CancellationToken::new(),
@@ -300,52 +303,6 @@ impl Manager {
                 .map(|entry| (package.clone(), entry.id.clone()))
         })
     }
-    pub(super) fn provider_session(
-        &self,
-        package_id: &str,
-        entrypoint: &str,
-        lifetime: CancellationToken,
-    ) -> Arc<ProviderSession> {
-        let key = format!("{package_id}:{entrypoint}");
-        let mut sessions = self.provider_sessions.lock().unwrap();
-        if let Some(current) = sessions.get(&key) {
-            if !current.lifetime.is_cancelled() {
-                return current.clone();
-            }
-            sessions.remove(&key);
-        }
-        let session = Arc::new(ProviderSession {
-            package_id: package_id.into(),
-            lifetime,
-            worker: Mutex::new(None),
-        });
-        sessions.insert(key, session.clone());
-        session
-    }
-    async fn stop_provider_sessions(&self, package: Option<&str>) {
-        let sessions: Vec<_> = self
-            .provider_sessions
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, session)| package.is_none_or(|id| id == session.package_id))
-            .map(|(key, session)| (key.clone(), session.clone()))
-            .collect();
-        for (key, session) in sessions {
-            session.lifetime.cancel();
-            let mut worker = session.worker.lock().await;
-            worker.take();
-            if self
-                .provider_sessions
-                .lock()
-                .unwrap()
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
-            {
-                self.provider_sessions.lock().unwrap().remove(&key);
-            }
-        }
-    }
     pub(crate) fn provider_bundle(&self, id: &str) -> Result<Bundle> {
         let (package, entrypoint) = self.provider_entry(id).ok_or_else(unsupported)?;
         let entry = self.ready(&package, None)?;
@@ -360,24 +317,25 @@ impl Manager {
         entries
             .iter()
             .flat_map(|e| {
-                e.package.manifest.entrypoints.iter().filter_map(|entry| {
-                    if entry.target != Target::Host {
-                        return None;
-                    }
-                    let b = bundle(&e.package, &entry.id).ok()?;
-                    let state = if e.package.verify().is_ok() {
-                        &e.state
-                    } else {
-                        "changed"
-                    };
-                    let capabilities = e
-                        .capabilities
-                        .get(&entry.id)
-                        .cloned()
-                        .and_then(|c| serde_json::from_value(c).ok())
-                        .unwrap_or_default();
-                    Some(b.descriptor(state, capabilities, e.error.clone()))
-                })
+                let current = e.package.current();
+                e.package
+                    .manifest
+                    .entrypoints
+                    .iter()
+                    .filter_map(move |entry| {
+                        if entry.target != Target::Host {
+                            return None;
+                        }
+                        let b = bundle(&e.package, &entry.id).ok()?;
+                        let state = if current { &e.state } else { "changed" };
+                        let capabilities = e
+                            .capabilities
+                            .get(&entry.id)
+                            .cloned()
+                            .and_then(|c| serde_json::from_value(c).ok())
+                            .unwrap_or_default();
+                        Some(b.descriptor(state, capabilities, e.error.clone()))
+                    })
             })
             .collect()
     }
@@ -420,6 +378,17 @@ impl Manager {
         result
     }
     async fn change_enabled(&self, id: String, input: EnablePluginRequest) -> Result<()> {
+        if input.enabled {
+            let package = self
+                .entries
+                .read()
+                .map_err(failure)?
+                .get(&id)
+                .ok_or_else(unsupported)?
+                .package
+                .clone();
+            verify(package).await?;
+        }
         let (package, generation, cancel) = {
             let mut entries = self.entries.write().map_err(failure)?;
             let e = entries.get_mut(&id).ok_or_else(unsupported)?;
@@ -428,9 +397,6 @@ impl Manager {
             }
             if e.package.revision != input.revision {
                 return Err(conflict());
-            }
-            if input.enabled {
-                e.package.verify().map_err(failure)?;
             }
             e.cancellation.cancel();
             e.cancellation = self.stopped.child_token();
@@ -446,7 +412,6 @@ impl Manager {
         };
         // Cancelling old generations releases service waits before collecting workers.
         self.stop_sessions(Some(&id)).await?;
-        self.stop_provider_sessions(Some(&id)).await;
         let result = async {
             let mut capabilities = BTreeMap::new();
             if input.enabled {
@@ -543,10 +508,6 @@ impl Manager {
         {
             return Err(Error::invalid());
         }
-        let persistent = matches!(
-            operation,
-            Operation::Character { .. } | Operation::Harness { .. } | Operation::Speech { .. }
-        );
         // Cancel reaches the active invocation before waiting for its worker lock.
         let cancelling = matches!(
             &operation,
@@ -571,7 +532,7 @@ impl Manager {
             )
         };
         let key = binding.id.clone();
-        let worker = if persistent {
+        let worker = {
             let mut sessions = self.sessions.lock().unwrap();
             if sessions.len() >= MAX_SESSIONS && !sessions.contains_key(&key) {
                 return Err(Error::unavailable());
@@ -585,25 +546,19 @@ impl Manager {
                     ))
                 })
                 .clone()
-        } else {
-            Arc::new(SessionState::new(
-                binding.plugin_id.clone(),
-                entry.cancellation.child_token(),
-            ))
         };
         let lifetime = &worker.lifetime;
         let guard = worker.worker.lock().await;
         let mut session = Session {
-            retain: persistent && (guard.is_some() || lifetime.is_cancelled()),
+            retain: guard.is_some() || lifetime.is_cancelled(),
             guard,
-            registration: persistent.then(|| (self.clone(), key.clone(), worker.clone())),
+            registration: (self.clone(), key.clone(), worker.clone()),
             _permit: permit,
         };
         if lifetime.is_cancelled() && !cancelling {
             return Err(Error::unavailable());
         }
-        if persistent
-            && !cancelling
+        if !cancelling
             && !self
                 .sessions
                 .lock()
@@ -673,7 +628,7 @@ impl Manager {
                 session
                     .as_mut()
                     .unwrap()
-                    .reset(&cancel)
+                    .initialize(&cancel)
                     .await
                     .map_err(failure)?;
             }
@@ -754,7 +709,7 @@ impl Manager {
                 )
             })
         });
-        if (!persistent || stopping || terminal || outcome.is_err() || cancel.is_cancelled())
+        if (stopping || terminal || outcome.is_err() || cancel.is_cancelled())
             && let Some(mut worker) = session.take()
         {
             worker.stop().await;
@@ -772,7 +727,7 @@ impl Manager {
             return Err(outcome.err().unwrap_or_else(conflict));
         }
         let (instance_generation, events, result) = outcome?;
-        session.retain = persistent && !stopping && !terminal;
+        session.retain = !stopping && !terminal;
         Ok(PluginResult {
             generation: instance_generation,
             events: events
@@ -835,7 +790,7 @@ impl Plugins for Manager {
                 name: e.package.manifest.name.clone(),
                 version: e.package.manifest.version.clone(),
                 revision: e.package.revision.clone(),
-                state: if e.package.verify().is_ok() {
+                state: if e.package.current() {
                     e.state.clone()
                 } else {
                     "changed".into()
@@ -876,13 +831,16 @@ impl Plugins for Manager {
             if self.stopped.is_cancelled() {
                 return Err(Error::unavailable());
             }
-            if let Err(error) = self.scan() {
+            let manager = self.clone();
+            let scan = tokio::task::spawn_blocking(move || manager.scan())
+                .await
+                .map_err(failure)?;
+            if let Err(error) = scan {
                 *self.discovery_error.write().map_err(failure)? =
                     Some("invalid_manifest_or_duplicate_id".into());
                 return Err(error);
             }
             self.stop_sessions(None).await?;
-            self.stop_provider_sessions(None).await;
             Ok(())
         })
     }
@@ -903,13 +861,7 @@ impl Plugins for Manager {
     fn bind(&self, input: PluginBinding) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let entry = self.ready(&input.plugin_id, Some(&input.revision))?;
-            entry.package.verify().map_err(|error| {
-                if matches!(error, ene_plugin_runtime::Error::Changed) {
-                    conflict()
-                } else {
-                    failure(error)
-                }
-            })?;
+            verify(entry.package.clone()).await?;
             let endpoint = entry.package.entry(&input.entrypoint).map_err(failure)?;
             if !ene_plugin_runtime::package::identifier(&input.id)
                 || endpoint.target != Target::Host
@@ -974,7 +926,6 @@ impl Plugins for Manager {
         Box::pin(async {
             self.cancel();
             let result = self.stop_sessions(None).await;
-            self.stop_provider_sessions(None).await;
             self.supervisor.shutdown().await;
             result
         })
