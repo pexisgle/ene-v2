@@ -121,6 +121,8 @@ pub struct Manager {
     store: Store,
     entries: Arc<RwLock<BTreeMap<String, Entry>>>,
     sessions: Sessions,
+    // Serializes the start and the persisted commit of enable/disable, not their work.
+    commit: Arc<Mutex<()>>,
     generations: Arc<AtomicU64>,
     pub(crate) supervisor: Supervisor,
     stopped: CancellationToken,
@@ -172,6 +174,7 @@ impl Manager {
             store,
             entries: Arc::new(RwLock::new(BTreeMap::new())),
             sessions: Arc::default(),
+            commit: Arc::default(),
             generations: Arc::new(AtomicU64::new(1)),
             supervisor: Supervisor::default(),
             stopped: CancellationToken::new(),
@@ -407,6 +410,7 @@ impl Manager {
             verify(package).await?;
         }
         let (package, generation, cancel) = {
+            let _commit = self.commit.lock().await;
             let mut entries = self.entries.write().map_err(failure)?;
             let e = entries.get_mut(&id).ok_or_else(unsupported)?;
             if e.state == "unavailable" {
@@ -439,7 +443,7 @@ impl Manager {
                     .filter(|e| e.target == Target::Host)
                 {
                     let verified = package.clone();
-                    let mut worker = Instance::load(
+                    let worker = Instance::load(
                         verified,
                         entry.id.clone(),
                         Target::Host,
@@ -449,12 +453,12 @@ impl Manager {
                     .await
                     .map_err(failure)?;
                     capabilities.insert(entry.id.clone(), worker.capabilities.clone());
-                    worker.stop().await;
                 }
             }
             Ok::<_, Error>(capabilities)
         }
         .await;
+        let _commit = self.commit.lock().await;
         {
             let mut entries = self.entries.write().map_err(failure)?;
             let e = entries.get_mut(&id).ok_or_else(unsupported)?;
@@ -474,12 +478,13 @@ impl Manager {
                 }
             }
         }
-        result?;
-        self.store
-            .plugin_set("enabled".into(), id.clone(), json!({"id":id,"input":input}))
-            .await
-            .map_err(storage_failure)?;
-        Ok(())
+        if result.is_ok() {
+            self.store
+                .plugin_set("enabled".into(), id.clone(), json!({"id":id,"input":input}))
+                .await
+                .map_err(storage_failure)?;
+        }
+        result.map(|_| ())
     }
     async fn invoke_inner(
         &self,
@@ -603,9 +608,7 @@ impl Manager {
                     }
                 })?;
             session.retain = false;
-            if let Some(mut worker) = session.take() {
-                worker.stop().await;
-            }
+            session.take();
             return Ok(PluginResult {
                 generation: entry.generation,
                 events: events
@@ -635,8 +638,6 @@ impl Manager {
             Operation::Character {
                 event: ene_plugin::CharacterEvent::Deactivated,
                 ..
-            } | Operation::Harness {
-                input: ene_plugin::HarnessInput::Cancel
             }
         );
         let mut failure_reason = "startup_failed";
@@ -726,10 +727,8 @@ impl Manager {
                 )
             })
         });
-        if (stopping || terminal || outcome.is_err() || cancel.is_cancelled())
-            && let Some(mut worker) = session.take()
-        {
-            worker.stop().await;
+        if stopping || terminal || outcome.is_err() || cancel.is_cancelled() {
+            session.take();
         }
         // One Host-owned path classifies and persists every unsuccessful Harness call.
         if outcome.is_err() || cancel.is_cancelled() {

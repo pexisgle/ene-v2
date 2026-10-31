@@ -389,9 +389,6 @@ impl Instance {
         }
         Ok(())
     }
-    pub async fn stop(&mut self) {
-        self.plugin = None;
-    }
 }
 #[derive(Clone, Default)]
 pub struct Supervisor {

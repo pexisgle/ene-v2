@@ -202,6 +202,101 @@ async fn embedded_character_state_permissions_updates_and_disable() {
 }
 
 #[tokio::test]
+async fn a_finished_enable_cannot_persist_over_a_later_disable() {
+    let (manager, _temp, _) = manager().await;
+    let revision = manager.entries.read().unwrap()["reference"]
+        .package
+        .revision
+        .clone();
+    // Hold the store so the enable stops between its generation check and its save.
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let store = manager.store.clone();
+    let (mark, gate) = (entered.clone(), release.clone());
+    let blocked = tokio::spawn(async move {
+        store
+            .run(move |_| {
+                mark.store(true, Ordering::SeqCst);
+                let (lock, condvar) = &*gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = condvar.wait(open).unwrap();
+                }
+                Ok(())
+            })
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let enable = {
+        let manager = manager.clone();
+        let revision = revision.clone();
+        tokio::spawn(async move {
+            manager
+                .enable(
+                    "reference".into(),
+                    EnablePluginRequest {
+                        enabled: true,
+                        revision,
+                        ..Default::default()
+                    },
+                )
+                .await
+        })
+    };
+    let state = || manager.entries.read().unwrap()["reference"].state.clone();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state() != "ready" {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let disable = {
+        let manager = manager.clone();
+        let revision = revision.clone();
+        tokio::spawn(async move {
+            manager
+                .enable(
+                    "reference".into(),
+                    EnablePluginRequest {
+                        enabled: false,
+                        revision,
+                        ..Default::default()
+                    },
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(state(), "ready", "a later disable must wait for the commit");
+    {
+        let (lock, condvar) = &*release;
+        *lock.lock().unwrap() = true;
+        condvar.notify_all();
+    }
+    enable.await.unwrap().unwrap();
+    disable.await.unwrap().unwrap();
+    blocked.await.unwrap().unwrap();
+    assert_eq!(state(), "disabled");
+    let saved = manager
+        .store
+        .plugin_get("enabled".into(), "reference".into())
+        .await
+        .unwrap();
+    let saved: EnablePluginRequest = serde_json::from_value(saved["input"].clone()).unwrap();
+    assert!(!saved.enabled);
+    manager.restore().await.unwrap();
+    assert!(manager.ready("reference", None).is_err());
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn reload_accepts_identical_code_rewritten_on_disk() {
     let (manager, _temp, _) = manager().await;
     let revision = manager.entries.read().unwrap()["reference"]

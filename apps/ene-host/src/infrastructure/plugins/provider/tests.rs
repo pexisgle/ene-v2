@@ -135,6 +135,5 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
             );
         }
     }
-    worker.stop().await;
     server.abort();
 }
