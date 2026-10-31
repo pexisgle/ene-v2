@@ -385,7 +385,13 @@ impl Manager {
         {
             // Keep the stopped registration until its terminal journal is durable.
             self.harness_stop(key, "plugin_stopped").await?;
-            self.sessions.lock().unwrap().remove(key);
+            let mut sessions = self.sessions.lock().unwrap();
+            if sessions
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                sessions.remove(key);
+            }
         }
         Ok(())
     }
@@ -569,27 +575,29 @@ impl Manager {
             )
         };
         let key = binding.id.clone();
+        let existing = self.sessions.lock().unwrap().get(&key).cloned();
+        if let Some(stale) = existing.filter(|session| !session.matches(&binding)) {
+            // A session that belongs to another binding is only replaced once its stop is durable.
+            self.stop_session(&key, &stale).await?;
+            return Err(conflict());
+        }
         let worker = {
             let mut sessions = self.sessions.lock().unwrap();
-            let reusable = sessions.get(&key).is_some_and(|session| {
-                session.matches(&binding) && !session.lifetime.is_cancelled()
-            });
-            if !reusable {
-                if let Some(stale) = sessions.remove(&key) {
-                    stale.lifetime.cancel();
-                }
-                if sessions.len() >= MAX_SESSIONS {
-                    return Err(Error::unavailable());
-                }
-                sessions.insert(
-                    key.clone(),
-                    Arc::new(SessionState::new(
+            let existing = sessions.get(&key).cloned();
+            match existing {
+                Some(session) => session,
+                None => {
+                    if sessions.len() >= MAX_SESSIONS {
+                        return Err(Error::unavailable());
+                    }
+                    let session = Arc::new(SessionState::new(
                         &binding,
                         entry.cancellation.child_token(),
-                    )),
-                );
+                    ));
+                    sessions.insert(key.clone(), session.clone());
+                    session
+                }
             }
-            sessions[&key].clone()
         };
         drop(binding_lock);
         let lifetime = &worker.lifetime;

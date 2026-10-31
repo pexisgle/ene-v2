@@ -176,9 +176,79 @@ async fn a_session_from_another_binding_is_never_reused() {
         .await
         .unwrap();
     assert_eq!(
+        invoke_plugin(&manager, call()).await.unwrap_err().kind,
+        ErrorKind::StateConflict
+    );
+    assert_eq!(
         invoke_plugin(&manager, call()).await.unwrap().result.json,
         r#"{"plugin":"Q"}"#
     );
+    manager.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn a_stopping_session_does_not_remove_its_replacement() {
+    let (manager, _temp, companion) = manager().await;
+    let binding = binding_to(&manager, "x", "reference", "behavior", &companion);
+    let session = Arc::new(SessionState::new(&binding, CancellationToken::new()));
+    manager
+        .sessions
+        .lock()
+        .unwrap()
+        .insert("x".into(), session.clone());
+    // Park the stop inside harness_stop, after it checked that the entry is its own.
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let store = manager.store.clone();
+    let (mark, gate) = (entered.clone(), release.clone());
+    let blocked = tokio::spawn(async move {
+        store
+            .run(move |_| {
+                mark.store(true, Ordering::SeqCst);
+                let (lock, condvar) = &*gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = condvar.wait(open).unwrap();
+                }
+                Ok(())
+            })
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let stop = {
+        let manager = manager.clone();
+        let session = session.clone();
+        tokio::spawn(async move { manager.stop_session("x", &session).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while session.worker.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let replacement = Arc::new(SessionState::new(&binding, CancellationToken::new()));
+    manager
+        .sessions
+        .lock()
+        .unwrap()
+        .insert("x".into(), replacement.clone());
+    {
+        let (lock, condvar) = &*release;
+        *lock.lock().unwrap() = true;
+        condvar.notify_all();
+    }
+    stop.await.unwrap().unwrap();
+    blocked.await.unwrap().unwrap();
+    assert!(Arc::ptr_eq(
+        &manager.sessions.lock().unwrap()["x"],
+        &replacement
+    ));
     manager.shutdown().await.unwrap();
 }
 #[tokio::test]
