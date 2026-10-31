@@ -200,6 +200,76 @@ async fn embedded_character_state_permissions_updates_and_disable() {
     assert!(invoke_plugin(&manager, invoke()).await.is_err());
     assert!(manager.sessions.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn reload_accepts_identical_code_rewritten_on_disk() {
+    let (manager, _temp, _) = manager().await;
+    let revision = manager.entries.read().unwrap()["reference"]
+        .package
+        .revision
+        .clone();
+    manager
+        .enable(
+            "reference".into(),
+            EnablePluginRequest {
+                enabled: true,
+                revision,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let file = manager.root.join("reference/reference.wasm");
+    let code = std::fs::read(&file).unwrap();
+    ene_platform::storage::write_atomic(&file, &code).unwrap();
+    let state = |manager: &Manager| {
+        manager
+            .list()
+            .into_iter()
+            .find(|plugin| plugin.id == "reference")
+            .unwrap()
+            .state
+    };
+    assert_eq!(state(&manager), "changed");
+    manager.reload().await.unwrap();
+    assert_eq!(state(&manager), "ready");
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reload_keeps_an_enable_that_finishes_during_the_scan() {
+    let (manager, _temp, _) = manager().await;
+    let revision = manager.entries.read().unwrap()["reference"]
+        .package
+        .revision
+        .clone();
+    // The scan reads the files before the enable completes.
+    let (packages, errors) = manager.load_packages().unwrap();
+    manager
+        .enable(
+            "reference".into(),
+            EnablePluginRequest {
+                enabled: true,
+                revision,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager.apply_scan(packages, errors).unwrap();
+    assert!(manager.ready("reference", None).is_ok());
+    assert_eq!(
+        manager
+            .list()
+            .into_iter()
+            .find(|plugin| plugin.id == "reference")
+            .unwrap()
+            .state,
+        "ready"
+    );
+    manager.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn changed_or_missing_code_can_be_disabled_and_stays_disabled() {
     for remove in [false, true] {

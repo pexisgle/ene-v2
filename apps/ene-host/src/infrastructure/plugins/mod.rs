@@ -186,8 +186,11 @@ impl Manager {
         manager
     }
     fn scan(&self) -> Result<()> {
-        let old = self.entries.read().map_err(failure)?.clone();
-        let mut next = BTreeMap::new();
+        let (packages, errors) = self.load_packages()?;
+        self.apply_scan(packages, errors)
+    }
+    fn load_packages(&self) -> Result<(BTreeMap<String, Package>, Vec<String>)> {
+        let mut packages = BTreeMap::new();
         let mut provider_ids = std::collections::BTreeSet::new();
         let mut errors = Vec::new();
         if self.root.exists() {
@@ -230,31 +233,44 @@ impl Manager {
                     continue;
                 }
                 let id = package.manifest.id.clone();
-                if next.contains_key(&id) {
+                if packages.contains_key(&id) {
                     errors.push(format!("{id}: duplicate package id"));
                     continue;
                 }
-                let entry = old
-                    .get(&id)
-                    .filter(|e| {
-                        e.package.root == package.root && e.package.revision == package.revision
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| Entry {
-                        package,
-                        state: "disabled".into(),
-                        error: None,
-                        cancellation: self.stopped.child_token(),
-                        generation: self.generations.fetch_add(1, Ordering::Relaxed),
-                        capabilities: BTreeMap::new(),
-                    });
                 for provider in package_providers {
                     provider_ids.insert(provider);
                 }
-                next.insert(id, entry);
+                packages.insert(id, package);
             }
         }
+        Ok((packages, errors))
+    }
+    /// Merge a finished scan into the entries as they are now, not as they were when it started.
+    fn apply_scan(&self, packages: BTreeMap<String, Package>, errors: Vec<String>) -> Result<()> {
         let mut entries = self.entries.write().map_err(failure)?;
+        let mut next = BTreeMap::new();
+        for (id, package) in packages {
+            let entry = match entries.get(&id) {
+                // Keep the management state; only the verified file snapshot is refreshed.
+                Some(e)
+                    if e.package.root == package.root && e.package.revision == package.revision =>
+                {
+                    Entry {
+                        package,
+                        ..e.clone()
+                    }
+                }
+                _ => Entry {
+                    package,
+                    state: "disabled".into(),
+                    error: None,
+                    cancellation: self.stopped.child_token(),
+                    generation: self.generations.fetch_add(1, Ordering::Relaxed),
+                    capabilities: BTreeMap::new(),
+                },
+            };
+            next.insert(id, entry);
+        }
         for (id, entry) in entries.iter() {
             if !next
                 .get(id)
@@ -264,6 +280,7 @@ impl Manager {
             }
         }
         *entries = next;
+        drop(entries);
         *self.discovery_error.write().map_err(failure)? = if errors.is_empty() {
             None
         } else {
