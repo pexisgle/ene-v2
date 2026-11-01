@@ -1625,6 +1625,81 @@ async fn cancel_waiter(abort_waiter: bool) {
 }
 
 #[tokio::test]
+async fn a_pending_cancel_blocks_the_next_harness_start() {
+    let (manager, _temp, companion) = manager().await;
+    manager
+        .entries
+        .write()
+        .unwrap()
+        .get_mut("reference")
+        .unwrap()
+        .state = "ready".into();
+    let binding = binding(&manager, &companion, "task", "harness", vec![]);
+    manager.bind(binding.clone()).await.unwrap();
+    let session = Arc::new(SessionState::new(&binding, CancellationToken::new()));
+    manager
+        .sessions
+        .lock()
+        .unwrap()
+        .insert("task".into(), session.clone());
+    let active = session.lifetime.child_token();
+    let _invocation = ActiveInvocation::new(session.clone(), active.clone());
+    let held = session.worker.lock().await;
+    let app = application(&manager);
+    let cancel = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            app.invoke_plugin(PluginInvocation {
+                binding_id: "task".into(),
+                operation: document(
+                    serde_json::to_value(Operation::Harness {
+                        input: HarnessInput::Cancel,
+                    })
+                    .unwrap(),
+                )
+                .into(),
+                ..Default::default()
+            })
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), active.cancelled())
+        .await
+        .unwrap();
+    assert!(!cancel.is_finished());
+    // The old task finishes and its registration goes away while the cancel waits.
+    manager.sessions.lock().unwrap().remove("task");
+    let start = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            app.invoke_plugin(PluginInvocation {
+                binding_id: "task".into(),
+                operation: document(
+                    serde_json::to_value(Operation::Harness {
+                        input: HarnessInput::Start {
+                            instruction: "next".into(),
+                        },
+                    })
+                    .unwrap(),
+                )
+                .into(),
+                ..Default::default()
+            })
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !start.is_finished(),
+        "a pending cancel must block the next start"
+    );
+    drop(held);
+    assert!(cancel.await.unwrap().is_err());
+    start.await.unwrap().unwrap();
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn rebind_cancels_before_waiting_and_old_session_drop_preserves_replacement() {
     let (manager, _temp, companion) = manager().await;
     manager

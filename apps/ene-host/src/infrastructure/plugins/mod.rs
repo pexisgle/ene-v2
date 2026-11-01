@@ -599,7 +599,8 @@ impl Manager {
                 }
             }
         };
-        drop(binding_lock);
+        // A cancel keeps the binding lock until its terminal record is durable.
+        let _cancel_binding = cancelling.then_some(binding_lock);
         let lifetime = &worker.lifetime;
         let guard = worker.worker.lock().await;
         let mut session = Session {
