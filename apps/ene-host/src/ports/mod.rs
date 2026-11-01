@@ -1,4 +1,5 @@
 //! Operation-level boundaries. Application code never receives a SQL connection.
+pub mod inference;
 pub mod plugin;
 use crate::domain::*;
 use futures_util::future::BoxFuture;

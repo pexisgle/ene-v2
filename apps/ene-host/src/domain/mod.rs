@@ -1,4 +1,5 @@
 //! Host entities independent of HTTP, persistence and provider implementations.
+pub mod harness;
 mod message;
 mod operation;
 pub mod rules;
@@ -95,18 +96,21 @@ pub enum GrantStatus {
 pub enum GrantPurpose {
     Conversation,
     ConnectionCheck,
+    Task,
 }
 impl GrantPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Conversation => "conversation",
             Self::ConnectionCheck => "connection_check",
+            Self::Task => "task",
         }
     }
     pub fn parse(value: &str) -> Result<Self, Error> {
         match value {
             "conversation" => Ok(Self::Conversation),
             "connection_check" => Ok(Self::ConnectionCheck),
+            "task" => Ok(Self::Task),
             _ => Err(Error::new(ErrorKind::UnsupportedCapability)),
         }
     }

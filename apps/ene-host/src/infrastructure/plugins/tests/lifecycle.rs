@@ -1,4 +1,5 @@
 use super::*;
+use ene_plugin::Operation;
 use std::time::Duration;
 
 async fn invoke(manager: &Manager, input: HarnessInput) -> Result<PluginResult> {
@@ -11,6 +12,20 @@ async fn invoke(manager: &Manager, input: HarnessInput) -> Result<PluginResult> 
         },
     )
     .await
+}
+
+fn start(prompt: &str) -> HarnessInput {
+    HarnessInput::Start {
+        prompt: vec![ene_plugin::ContentBlock::text(prompt)],
+    }
+}
+fn allow() -> HarnessInput {
+    HarnessInput::Respond {
+        request_id: "permission-1".into(),
+        outcome: ene_plugin::RequestPermissionOutcome::Selected {
+            option_id: "allow".into(),
+        },
+    }
 }
 
 async fn pending() -> (Manager, tempfile::TempDir, PluginBinding) {
@@ -28,14 +43,7 @@ async fn pending() -> (Manager, tempfile::TempDir, PluginBinding) {
         .await
         .unwrap();
     manager.bind(binding.clone()).await.unwrap();
-    invoke(
-        &manager,
-        HarnessInput::Start {
-            instruction: "test".into(),
-        },
-    )
-    .await
-    .unwrap();
+    invoke(&manager, start("test")).await.unwrap();
     (manager, temp, binding)
 }
 
@@ -108,23 +116,26 @@ async fn rejected_harness_inputs_preserve_the_pending_guest_and_journal() {
         .plugin_get("harness".into(), "task".into())
         .await
         .unwrap();
-    for input in [
-        HarnessInput::Start {
-            instruction: "duplicate".into(),
-        },
-        HarnessInput::Result {
-            operation_id: "wrong-id".into(),
-            result: Value::Null,
-        },
-        HarnessInput::Answer {
-            question_id: "model-1".into(),
-            answer: "wrong kind".into(),
-        },
+    for (input, kind) in [
+        (start("duplicate"), ErrorKind::StateConflict),
+        (
+            HarnessInput::Respond {
+                request_id: "wrong-id".into(),
+                outcome: ene_plugin::RequestPermissionOutcome::Cancelled,
+            },
+            ErrorKind::StateConflict,
+        ),
+        (
+            HarnessInput::Respond {
+                request_id: "permission-1".into(),
+                outcome: ene_plugin::RequestPermissionOutcome::Selected {
+                    option_id: "unknown".into(),
+                },
+            },
+            ErrorKind::InvalidRequest,
+        ),
     ] {
-        assert_eq!(
-            invoke(&manager, input).await.unwrap_err().kind,
-            ErrorKind::StateConflict
-        );
+        assert_eq!(invoke(&manager, input).await.unwrap_err().kind, kind);
         assert_eq!(
             manager
                 .store
@@ -138,15 +149,7 @@ async fn rejected_harness_inputs_preserve_the_pending_guest_and_journal() {
             &session
         ));
     }
-    let result = invoke(
-        &manager,
-        HarnessInput::Result {
-            operation_id: "model-1".into(),
-            result: Value::Null,
-        },
-    )
-    .await
-    .unwrap();
+    let result = invoke(&manager, allow()).await.unwrap();
     assert_eq!(result.generation, generation);
     manager.shutdown().await.unwrap();
 }
@@ -167,13 +170,13 @@ async fn rebind_finishes_the_old_harness_before_starting_another() {
         .plugin_get("harness".into(), "task".into())
         .await
         .unwrap();
-    assert_eq!(saved["task_id"], old["task_id"]);
+    assert_eq!(saved["session_id"], old["session_id"]);
     assert_eq!(saved["status"], "failed");
-    assert_eq!(saved["report"], "plugin_stopped");
+    assert_eq!(saved["failure"], "plugin_stopped");
     assert!(saved["pending"].is_null());
     assert_eq!(
         saved["events"].as_array().unwrap().len(),
-        old["events"].as_array().unwrap().len() + 1
+        old["events"].as_array().unwrap().len()
     );
     manager.bind(binding).await.unwrap();
     assert_eq!(
@@ -184,21 +187,14 @@ async fn rebind_finishes_the_old_harness_before_starting_another() {
             .unwrap(),
         saved
     );
-    invoke(
-        &manager,
-        HarnessInput::Start {
-            instruction: "new task".into(),
-        },
-    )
-    .await
-    .unwrap();
+    invoke(&manager, start("new task")).await.unwrap();
     assert_ne!(
         manager
             .store
             .plugin_get("harness".into(), "task".into())
             .await
-            .unwrap()["task_id"],
-        old["task_id"]
+            .unwrap()["session_id"],
+        old["session_id"]
     );
     manager.shutdown().await.unwrap();
 }
@@ -239,15 +235,7 @@ async fn terminal_storage_failures_are_reported_and_retriable() {
             "reload" => manager.reload().await,
             "shutdown" => app.stop().await,
             "cancel" => invoke(&manager, HarnessInput::Cancel).await.map(|_| ()),
-            "invoke" => invoke(
-                &manager,
-                HarnessInput::Result {
-                    operation_id: "model-1".into(),
-                    result: Value::Null,
-                },
-            )
-            .await
-            .map(|_| ()),
+            "invoke" => invoke(&manager, allow()).await.map(|_| ()),
             _ => unreachable!(),
         };
         assert_eq!(
@@ -264,8 +252,10 @@ async fn terminal_storage_failures_are_reported_and_retriable() {
             before
         );
         let session = manager.sessions.lock().unwrap()["task"].clone();
-        assert!(session.lifetime.is_cancelled());
-        assert!(session.worker.lock().await.is_none());
+        if ending != "invoke" {
+            assert!(session.lifetime.is_cancelled());
+            assert!(session.worker.lock().await.is_none());
+        }
         if ending == "rebind" {
             assert_eq!(
                 manager.bindings().await.unwrap()[0].configuration.json,
@@ -288,11 +278,11 @@ async fn terminal_storage_failures_are_reported_and_retriable() {
             .await
             .unwrap();
         assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["report"], "plugin_stopped");
+        assert_eq!(saved["failure"], "plugin_stopped");
         assert!(saved["pending"].is_null());
         assert_eq!(
             saved["events"].as_array().unwrap().len(),
-            before["events"].as_array().unwrap().len() + 1
+            before["events"].as_array().unwrap().len()
         );
         app.stop().await.unwrap();
         assert_eq!(
@@ -397,7 +387,7 @@ async fn rebind_recovers_a_task_after_failed_shutdown_and_restart() {
                 .await
                 .unwrap();
             assert_eq!(journal["status"], "failed");
-            assert_eq!(journal["report"], "host_interrupted");
+            assert_eq!(journal["failure"], "host_interrupted");
         } else {
             restarted
                 .enable(
@@ -420,13 +410,7 @@ async fn rebind_recovers_a_task_after_failed_shutdown_and_restart() {
             .unwrap();
         assert_eq!(journal["status"], "failed");
         assert!(journal["pending"].is_null());
-        let retry = invoke(
-            &restarted,
-            HarnessInput::Start {
-                instruction: "after restart".into(),
-            },
-        )
-        .await;
+        let retry = invoke(&restarted, start("after restart")).await;
         app.stop().await.unwrap();
         assert!(
             retry.is_ok(),
@@ -476,15 +460,7 @@ async fn wrong_extension_does_not_destroy_pending_harness() {
         .await
         .unwrap();
     assert_eq!(journal, before);
-    let retry = invoke(
-        &manager,
-        HarnessInput::Result {
-            operation_id: "model-1".into(),
-            result: Value::Null,
-        },
-    )
-    .await
-    .unwrap();
+    let retry = invoke(&manager, allow()).await.unwrap();
     assert_eq!(retry.generation, generation);
     app.stop().await.unwrap();
 }
@@ -628,7 +604,7 @@ async fn startup_recovery_reports_storage_failure_and_preserves_terminal_tasks()
             assert_eq!(recovered, before);
         } else {
             assert_eq!(recovered["status"], "failed");
-            assert_eq!(recovered["report"], "host_interrupted");
+            assert_eq!(recovered["failure"], "host_interrupted");
             assert!(recovered["pending"].is_null());
         }
         app.restore_plugins().await.unwrap();
@@ -642,4 +618,164 @@ async fn startup_recovery_reports_storage_failure_and_preserves_terminal_tasks()
         );
         app.stop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn respond_without_a_live_guest_is_rejected() {
+    let (manager, _temp, companion) = manager().await;
+    manager
+        .entries
+        .write()
+        .unwrap()
+        .get_mut("reference")
+        .unwrap()
+        .state = "ready".into();
+    let binding = binding(&manager, &companion, "task", "harness", vec![]);
+    manager.bind(binding.clone()).await.unwrap();
+    let mut journal = HarnessSession::start("orphan");
+    let call = HarnessEvent::Update {
+        update: SessionUpdate::ToolCall(ene_plugin::ToolCall {
+            tool_call_id: "call-1".into(),
+            title: "step".into(),
+            ..Default::default()
+        }),
+    };
+    manager
+        .harness_apply(&binding.id, &mut journal, &call)
+        .await
+        .unwrap();
+    let permission = HarnessEvent::RequestPermission {
+        request_id: "permission-1".into(),
+        tool_call: ene_plugin::ToolCallUpdate {
+            tool_call_id: "call-1".into(),
+            ..Default::default()
+        },
+        options: vec![ene_plugin::PermissionOption {
+            option_id: "allow".into(),
+            name: "Allow".into(),
+            kind: ene_plugin::PermissionOptionKind::AllowOnce,
+        }],
+    };
+    manager
+        .harness_apply(&binding.id, &mut journal, &permission)
+        .await
+        .unwrap();
+    let before = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        invoke(&manager, allow()).await.unwrap_err().kind,
+        ErrorKind::StateConflict
+    );
+    assert_eq!(
+        manager
+            .store
+            .plugin_get("harness".into(), "task".into())
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(manager.sessions.lock().unwrap().is_empty());
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_denied_permission_fails_the_task() {
+    let (manager, _temp, _) = pending().await;
+    let result = invoke(
+        &manager,
+        HarnessInput::Respond {
+            request_id: "permission-1".into(),
+            outcome: ene_plugin::RequestPermissionOutcome::Selected {
+                option_id: "deny".into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(result.events.len(), 1);
+    assert_eq!(journal["status"], "failed");
+    assert_eq!(journal["failure"], "refusal");
+    assert_eq!(journal["stop_reason"], "refusal");
+    assert!(journal["pending"].is_null());
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_event_that_cannot_be_persisted_fails_the_turn() {
+    let (manager, _temp, _) = pending().await;
+    manager
+        .store
+        .run(|db| {
+            db.execute_batch("CREATE TEMP TRIGGER reject_report BEFORE UPDATE ON plugin_records WHEN OLD.namespace='harness' AND NEW.value LIKE '%参照タスクを完了%' BEGIN SELECT RAISE(ABORT, 'injected report failure'); END;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        invoke(&manager, allow()).await.unwrap_err().kind,
+        ErrorKind::StorageFailure
+    );
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "failed");
+    assert_eq!(journal["failure"], "invocation_failed");
+    assert!(journal["pending"].is_null());
+    assert!(manager.sessions.lock().unwrap().is_empty());
+    manager
+        .store
+        .run(|db| {
+            db.execute_batch("DROP TRIGGER reject_report")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_legacy_journal_is_finalized_without_resume() {
+    let (manager, _temp, _) = pending().await;
+    manager
+        .store
+        .plugin_set(
+            "harness".into(),
+            "task".into(),
+            json!({
+                "task_id": "legacy-task",
+                "status": "waiting_answer",
+                "pending": "question-1",
+                "question": true,
+                "events": [],
+                "report": null
+            }),
+        )
+        .await
+        .unwrap();
+    manager
+        .harness_stop("task", "host_interrupted")
+        .await
+        .unwrap();
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["contract_version"], 4);
+    assert_eq!(journal["session_id"], "legacy-task");
+    assert_eq!(journal["status"], "failed");
+    assert_eq!(journal["failure"], "host_interrupted");
+    assert!(journal["pending"].is_null());
+    assert!(journal["events"].as_array().unwrap().is_empty());
+    manager.shutdown().await.unwrap();
 }

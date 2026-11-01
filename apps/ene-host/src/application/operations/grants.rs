@@ -36,7 +36,7 @@ pub async fn post_grant(
         return Err(Error::new(ErrorKind::RevisionConflict));
     }
     if request.kind != "data_transfer"
-        || !["conversation", "connection_check"].contains(&request.purpose.as_str())
+        || !["conversation", "connection_check", "task"].contains(&request.purpose.as_str())
         || request
             .destinations
             .iter()
@@ -44,7 +44,7 @@ pub async fn post_grant(
         || request
             .data_kinds
             .iter()
-            .any(|d| !["conversation", "metadata", "test_input"].contains(&d.as_str()))
+            .any(|d| !["conversation", "metadata", "test_input", "task"].contains(&d.as_str()))
         || request.destinations.is_empty()
         || request.data_kinds.is_empty()
     {
@@ -140,7 +140,7 @@ pub async fn patch_grant(
         let data = data.values;
         if data
             .iter()
-            .any(|d| !["conversation", "metadata", "test_input"].contains(&d.as_str()))
+            .any(|d| !["conversation", "metadata", "test_input", "task"].contains(&d.as_str()))
         {
             return Err(Error::invalid());
         }

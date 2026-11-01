@@ -4,13 +4,15 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Shared compatibility version for manifests, extension APIs.
-pub const CONTRACT_VERSION: u32 = 3;
+pub const CONTRACT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Host,
     Desktop,
+    /// An external ACP agent launched as an explicit subprocess.
+    Acp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -57,8 +59,12 @@ pub struct Manifest {
 pub struct EntryPoint {
     pub id: String,
     pub target: Target,
-    /// Relative file inside the verified code snapshot; not a host path.
+    /// Relative file inside the verified code snapshot; empty for `acp`.
+    #[serde(default)]
     pub file: String,
+    /// Executable and arguments for `acp` entrypoints; never a shell command.
+    #[serde(default)]
+    pub command: Vec<String>,
     pub provides: Vec<Extension>,
     #[serde(default)]
     pub uses: Vec<Service>,

@@ -25,3 +25,6 @@ pub const WASM_FUEL: u64 = 100_000_000;
 pub const WASM_INITIALIZATION_FUEL: u64 = 10_000_000;
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(180);
+/// A harness turn runs inside one instance call and only yields on client
+/// requests, so it needs a wall-clock budget for a whole task segment.
+pub const HARNESS_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);

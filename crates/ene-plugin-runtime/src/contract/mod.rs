@@ -1,9 +1,15 @@
 //! Checks extension semantics independently of the execution backend.
+mod character;
+mod harness;
+mod llm;
+mod speech;
+
 use crate::{
     Error, Result,
     limits::{MAX_CHUNK, MAX_STREAM_EVENTS},
 };
 use ene_plugin::*;
+
 /// Bound resource reads; the Wasm boundary checks serialized payload sizes.
 pub fn service_request(request: &ServiceRequest) -> Result<()> {
     if matches!(request, ServiceRequest::Desktop {
@@ -14,15 +20,18 @@ pub fn service_request(request: &ServiceRequest) -> Result<()> {
     }
     Ok(())
 }
+
 pub struct Events {
     extension: Extension,
     models: bool,
     terminal: bool,
+    harness_pending: bool,
     count: u64,
     speech: Option<(String, u64)>,
     character: Option<CharacterTarget>,
     audio_sequence: u64,
 }
+
 impl Events {
     pub fn new(operation: &Operation) -> Self {
         let speech = match operation {
@@ -47,6 +56,7 @@ impl Events {
             extension: operation.extension(),
             models: matches!(operation, Operation::ListModels { .. }),
             terminal: false,
+            harness_pending: false,
             count: 0,
             speech,
             character: match operation {
@@ -56,8 +66,10 @@ impl Events {
             audio_sequence: 0,
         }
     }
+
     pub fn accept(&mut self, event: &Event) -> Result<()> {
         if self.terminal
+            || self.harness_pending
             || self.count >= MAX_STREAM_EVENTS
             || event.extension() != self.extension
             || self.extension == Extension::Llm
@@ -66,65 +78,17 @@ impl Events {
             return Err(Error::Protocol);
         }
         match event {
-            Event::Character { target, .. } if self.character.as_ref() != Some(target) => {
-                return Err(Error::Protocol);
-            }
-            Event::Character {
-                action: CharacterAction::Speak { text },
-                ..
-            } if text.len() > 16384 => return Err(Error::Protocol),
-            Event::Character {
-                action:
-                    CharacterAction::Expression { name, duration_ms }
-                    | CharacterAction::Motion {
-                        asset: name,
-                        duration_ms,
-                    },
-                ..
-            } if name.len() > 128 || *duration_ms > 60000 => return Err(Error::Protocol),
-            Event::Finished { reason } => {
-                if reason.is_empty() || reason.len() > 128 {
-                    return Err(Error::Protocol);
-                }
-                self.terminal = true;
-            }
-            Event::Models { models } => {
-                if models.len() > 32768 {
-                    return Err(Error::Protocol);
-                }
-                self.terminal = true;
-            }
-            Event::Audio { chunk } => {
-                if self.speech.as_ref() != Some(&(chunk.utterance_id.clone(), chunk.generation))
-                    || chunk.sequence != self.audio_sequence
-                    || chunk.format != "pcm_s16le"
-                    || !(8000..=192000).contains(&chunk.sample_rate)
-                    || !(1..=8).contains(&chunk.channels)
-                {
-                    return Err(Error::Protocol);
-                }
-                use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&chunk.data_base64)
-                    .map_err(|_| Error::Protocol)?;
-                if bytes.len() > MAX_CHUNK || bytes.len() % (2 * chunk.channels as usize) != 0 {
-                    return Err(Error::Protocol);
-                }
-                self.audio_sequence += 1;
-                self.terminal = chunk.done;
-            }
-            Event::Harness {
-                event:
-                    HarnessEvent::Completed { .. }
-                    | HarnessEvent::Failed { .. }
-                    | HarnessEvent::Cancelled,
-            } => self.terminal = true,
+            Event::Character { target, action } => self.accept_character(target, action)?,
+            Event::Audio { chunk } => self.accept_audio(chunk)?,
+            Event::Harness { event } => self.accept_harness(event)?,
+            Event::Finished { .. } | Event::Models { .. } => self.accept_llm(event)?,
             Event::Transcript { .. } => self.terminal = true,
             _ => {}
         }
         self.count += 1;
         Ok(())
     }
+
     pub fn finish(&self) -> Result<()> {
         if matches!(
             self.extension,
@@ -136,9 +100,11 @@ impl Events {
         Ok(())
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn operation_specific_results_require_the_correct_terminal_event() {
         let generate = Operation::Generate {
@@ -204,6 +170,7 @@ mod tests {
             assert!(events.accept(&terminal).is_err());
         }
     }
+
     #[test]
     fn character_action_limits_are_enforced_by_the_runtime() {
         let target = CharacterTarget {
@@ -254,6 +221,7 @@ mod tests {
             })
             .unwrap();
     }
+
     #[test]
     fn character_events_cannot_change_the_authorized_target() {
         let target = CharacterTarget {

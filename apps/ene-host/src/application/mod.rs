@@ -1,6 +1,7 @@
 mod commit;
 mod credentials;
 mod generation;
+mod inference;
 mod operations;
 mod plugins;
 mod runtime;

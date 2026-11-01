@@ -1,6 +1,15 @@
 mod lifecycle;
+use super::invoke::LocalServices;
+use super::sessions::{ActiveInvocation, Session, SessionState};
 use super::*;
-use ene_plugin::{CharacterEvent, CharacterTarget, HarnessInput, Service};
+use crate::domain::harness::{MAX_TRANSCRIPT, Session as HarnessSession, Status as HarnessStatus};
+use ene_plugin::{
+    CharacterEvent, CharacterTarget, ContentBlock, ContentChunk, GenerationRequest, HarnessEvent,
+    HarnessInput, Operation, RequestPermissionOutcome, Service, ServiceRequest, SessionUpdate,
+};
+use ene_plugin_runtime::limits::MAX_EVENTS;
+use ene_rpc::TerminalPolicy;
+use std::sync::atomic::Ordering;
 fn application(manager: &Manager) -> crate::application::HostApplication {
     crate::bootstrap::application_with_plugins(
         manager.store.clone(),
@@ -11,6 +20,26 @@ fn application(manager: &Manager) -> crate::application::HostApplication {
 }
 async fn invoke_plugin(manager: &Manager, input: PluginInvocation) -> Result<PluginResult> {
     application(manager).invoke_plugin(input).await
+}
+fn harness_invocation(input: HarnessInput) -> PluginInvocation {
+    PluginInvocation {
+        binding_id: "task".into(),
+        operation: document(serde_json::to_value(Operation::Harness { input }).unwrap()).into(),
+        ..Default::default()
+    }
+}
+fn task_start(prompt: &str) -> HarnessInput {
+    HarnessInput::Start {
+        prompt: vec![ContentBlock::text(prompt)],
+    }
+}
+fn allow() -> HarnessInput {
+    HarnessInput::Respond {
+        request_id: "permission-1".into(),
+        outcome: RequestPermissionOutcome::Selected {
+            option_id: "allow".into(),
+        },
+    }
 }
 pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
     let temp = tempfile::tempdir().unwrap();
@@ -824,64 +853,37 @@ async fn harness_and_speech_share_the_wasm_contract() {
         .bind(binding(&manager, &companion, "task", "harness", vec![]))
         .await
         .unwrap();
-    for input in [
-        HarnessInput::Start {
-            instruction: "test".into(),
-        },
-        HarnessInput::Result {
-            operation_id: "model-1".into(),
-            result: Value::Null,
-        },
-        HarnessInput::Result {
-            operation_id: "tool-1".into(),
-            result: Value::Null,
-        },
-        HarnessInput::Answer {
-            question_id: "question-1".into(),
-            answer: "done".into(),
-        },
-    ] {
-        if matches!(input, HarnessInput::Answer { .. }) {
-            let mut journal = manager
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap();
-            journal["events"] = json!(vec![
-                Event::Harness {
-                    event: HarnessEvent::Progress {
-                        text: "step".into()
-                    }
-                };
-                MAX_EVENTS
-            ]);
-            manager
-                .store
-                .plugin_set("harness".into(), "task".into(), journal)
-                .await
-                .unwrap();
-        }
-        let result = invoke_plugin(
-            &manager,
-            PluginInvocation {
-                binding_id: "task".into(),
-                operation: document(serde_json::to_value(Operation::Harness { input }).unwrap())
-                    .into(),
-                ..Default::default()
-            },
-        )
+    let started = invoke_plugin(&manager, harness_invocation(task_start("test")))
         .await
         .unwrap();
-        assert_eq!(result.events.len(), 1);
-    }
+    assert_eq!(started.events.len(), 4);
+    let journal: HarnessSession = serde_json::from_value(
+        manager
+            .store
+            .plugin_get("harness".into(), "task".into())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(journal.status, HarnessStatus::WaitingForInput);
+    assert!(journal.pending.is_some());
+    let finished = invoke_plugin(&manager, harness_invocation(allow()))
+        .await
+        .unwrap();
+    assert!(!finished.events.is_empty());
     let journal = manager
         .store
         .plugin_get("harness".into(), "task".into())
         .await
         .unwrap();
     assert_eq!(journal["status"], "completed");
-    assert_eq!(journal["report"], "done");
-    assert_eq!(journal["events"].as_array().unwrap().len(), MAX_EVENTS);
+    assert_eq!(journal["stop_reason"], "end_turn");
+    assert!(
+        journal["report"]
+            .as_str()
+            .unwrap()
+            .contains("参照タスクを完了しました。")
+    );
     manager
         .bind(binding(&manager, &companion, "speech", "speech", vec![]))
         .await
@@ -915,8 +917,84 @@ async fn harness_and_speech_share_the_wasm_contract() {
     manager.shutdown().await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn harness_commit_failure_is_terminal_and_allows_a_new_task() {
+async fn a_long_harness_turn_keeps_the_newest_events() {
+    let (manager, _temp, companion) = manager().await;
+    let init = kernel_bytes("{}");
+    let chunk = kernel_bytes(
+        &serde_json::to_string(&ene_plugin::Event::Harness {
+            event: HarnessEvent::Update {
+                update: SessionUpdate::AgentMessageChunk(ContentChunk {
+                    content: ContentBlock::text("x"),
+                    message_id: None,
+                }),
+            },
+        })
+        .unwrap(),
+    );
+    let stop = kernel_bytes(
+        &serde_json::to_string(&ene_plugin::Event::Harness {
+            event: HarnessEvent::Stop {
+                stop_reason: ene_plugin::StopReason::EndTurn,
+            },
+        })
+        .unwrap(),
+    );
+    let wasm = wat::parse_str(format!(
+        r#"(module
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+        (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (import "extism:host/user" "ene_emit" (func $emit (param i64)))
+        (func (export "ene_initialize") (result i32) (local $p i64)
+          {init} local.get $p i64.const 2 call $output i32.const 0)
+        (func (export "ene_invoke") (result i32) (local $p i64) (local $i i32)
+          (loop $again
+            {chunk} local.get $p call $emit
+            local.get $i i32.const 1 i32.add local.tee $i i32.const 300 i32.lt_u br_if $again)
+          {stop} local.get $p call $emit
+          {init} local.get $p i64.const 2 call $output i32.const 0))"#
+    ))
+    .unwrap();
+    ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
+        .unwrap();
+    manager.scan().unwrap();
+    manager
+        .entries
+        .write()
+        .unwrap()
+        .get_mut("reference")
+        .unwrap()
+        .state = "ready".into();
+    let binding = binding(&manager, &companion, "task", "harness", vec![]);
+    manager.bind(binding).await.unwrap();
+    let result = invoke_plugin(&manager, harness_invocation(task_start("test")))
+        .await
+        .unwrap();
+    assert_eq!(result.events.len(), MAX_EVENTS);
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "completed");
+    assert_eq!(journal["report"], "x".repeat(300));
+    let events = journal["events"].as_array().unwrap();
+    assert_eq!(events.len(), MAX_TRANSCRIPT);
+    assert!(matches!(
+        serde_json::from_value::<HarnessEvent>(events.last().unwrap().clone()).unwrap(),
+        HarnessEvent::Stop { .. }
+    ));
+    assert_eq!(
+        serde_json::from_str::<Value>(result.events.last().unwrap().json.as_str()).unwrap()["type"],
+        "harness"
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn harness_transcript_is_bounded_and_a_terminal_turn_allows_a_new_task() {
     let (manager, _temp, companion) = manager().await;
     manager
         .entries
@@ -929,63 +1007,52 @@ async fn harness_commit_failure_is_terminal_and_allows_a_new_task() {
         .bind(binding(&manager, &companion, "task", "harness", vec![]))
         .await
         .unwrap();
-    let invoke = |input| {
-        invoke_plugin(
-            &manager,
-            PluginInvocation {
-                binding_id: "task".into(),
-                operation: document(serde_json::to_value(Operation::Harness { input }).unwrap())
-                    .into(),
-                ..Default::default()
-            },
-        )
-    };
-    invoke(HarnessInput::Start {
-        instruction: "test".into(),
-    })
-    .await
+    invoke_plugin(&manager, harness_invocation(task_start("test")))
+        .await
+        .unwrap();
+    let mut journal: HarnessSession = serde_json::from_value(
+        manager
+            .store
+            .plugin_get("harness".into(), "task".into())
+            .await
+            .unwrap(),
+    )
     .unwrap();
-    let mut journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
+    let extra = HarnessEvent::Update {
+        update: SessionUpdate::AgentMessageChunk(ContentChunk {
+            content: ContentBlock::text("step"),
+            message_id: None,
+        }),
+    };
+    for _ in 0..MAX_TRANSCRIPT + 5 {
+        manager
+            .harness_apply("task", &mut journal, &extra)
+            .await
+            .unwrap();
+    }
+    assert_eq!(journal.events.len(), MAX_TRANSCRIPT);
+    invoke_plugin(&manager, harness_invocation(allow()))
         .await
         .unwrap();
-    journal["events"] = json!(vec![
-        Event::Harness {
-            event: HarnessEvent::Progress {
-                text: "step".into()
-            }
-        };
-        MAX_EVENTS
-    ]);
-    manager
-        .store
-        .plugin_set("harness".into(), "task".into(), journal)
-        .await
-        .unwrap();
-    assert!(
-        invoke(HarnessInput::Result {
-            operation_id: "model-1".into(),
-            result: Value::Null
-        })
-        .await
-        .is_err()
-    );
     let journal = manager
         .store
         .plugin_get("harness".into(), "task".into())
         .await
         .unwrap();
-    assert_eq!(journal["status"], "failed");
-    assert_eq!(journal["report"], "commit_failed");
-    assert_eq!(journal["events"].as_array().unwrap().len(), MAX_EVENTS);
+    assert_eq!(journal["status"], "completed");
+    let events = journal["events"].as_array().unwrap();
+    assert_eq!(events.len(), MAX_TRANSCRIPT);
+    assert!(matches!(
+        serde_json::from_value::<HarnessEvent>(events.last().unwrap().clone()).unwrap(),
+        HarnessEvent::Stop { .. }
+    ));
     assert!(manager.sessions.lock().unwrap().is_empty());
-    invoke(HarnessInput::Start {
-        instruction: "retry".into(),
-    })
-    .await
-    .unwrap();
-    invoke(HarnessInput::Cancel).await.unwrap();
+    invoke_plugin(&manager, harness_invocation(task_start("retry")))
+        .await
+        .unwrap();
+    invoke_plugin(&manager, harness_invocation(HarnessInput::Cancel))
+        .await
+        .unwrap();
     manager.shutdown().await.unwrap();
 }
 
@@ -1480,9 +1547,7 @@ async fn failed_starts_release_instance_slots() {
             PluginInvocation {
                 binding_id: "task".into(),
                 operation: document(serde_json::to_value(Operation::Harness {
-                    input: HarnessInput::Start {
-                        instruction: "test".into(),
-                    },
+                    input: task_start("test"),
                 })
                 .unwrap()).into(),
              ..Default::default() },
@@ -1518,33 +1583,32 @@ async fn cancel_waiter(abort_waiter: bool) {
         .state = "ready".into();
     let binding = binding(&manager, &companion, "task", "harness", vec![]);
     manager.bind(binding.clone()).await.unwrap();
-    let journal = manager
-        .harness_begin(
-            &binding,
-            &HarnessInput::Start {
-                instruction: "test".into(),
-            },
-        )
+    let mut journal = HarnessSession::start("task-session");
+    let call = HarnessEvent::Update {
+        update: SessionUpdate::ToolCall(ene_plugin::ToolCall {
+            tool_call_id: "call-1".into(),
+            title: "step".into(),
+            ..Default::default()
+        }),
+    };
+    manager
+        .harness_apply(&binding.id, &mut journal, &call)
         .await
         .unwrap();
+    let permission = HarnessEvent::RequestPermission {
+        request_id: "q".into(),
+        tool_call: ene_plugin::ToolCallUpdate {
+            tool_call_id: "call-1".into(),
+            ..Default::default()
+        },
+        options: vec![ene_plugin::PermissionOption {
+            option_id: "allow".into(),
+            name: "Allow".into(),
+            kind: ene_plugin::PermissionOptionKind::AllowOnce,
+        }],
+    };
     manager
-        .harness_commit(&binding.id, journal, &{
-            let mut events = vec![Event::Harness {
-                event: HarnessEvent::Question {
-                    question_id: "q".into(),
-                    text: "?".into(),
-                },
-            }];
-            events.extend(std::iter::repeat_n(
-                Event::Harness {
-                    event: HarnessEvent::Progress {
-                        text: "step".into(),
-                    },
-                },
-                MAX_EVENTS - 1,
-            ));
-            events
-        })
+        .harness_apply(&binding.id, &mut journal, &permission)
         .await
         .unwrap();
     let lifetime = CancellationToken::new();
@@ -1676,9 +1740,7 @@ async fn a_pending_cancel_blocks_the_next_harness_start() {
                 binding_id: "task".into(),
                 operation: document(
                     serde_json::to_value(Operation::Harness {
-                        input: HarnessInput::Start {
-                            instruction: "next".into(),
-                        },
+                        input: task_start("next"),
                     })
                     .unwrap(),
                 )
@@ -1800,9 +1862,7 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
                     binding_id: "task".into(),
                     operation: document(
                         serde_json::to_value(Operation::Harness {
-                            input: HarnessInput::Start {
-                                instruction: "test".into(),
-                            },
+                            input: task_start("test"),
                         })
                         .unwrap(),
                     )
@@ -1846,7 +1906,7 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
                 .await
                 .unwrap();
             assert_eq!(journal["status"], "failed");
-            assert_eq!(journal["report"], "plugin_stopped");
+            assert_eq!(journal["failure"], "plugin_stopped");
             assert!(manager.sessions.lock().unwrap().is_empty());
             continue;
         }
@@ -1878,7 +1938,7 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
         assert_eq!(journal["events"].as_array().unwrap().len(), 1);
         assert_eq!(
             serde_json::from_str::<Value>(confirmed.result.json.as_str()).unwrap()["task_id"],
-            journal["task_id"]
+            journal["session_id"]
         );
         assert_eq!(
             serde_json::from_str::<Value>(
@@ -1890,21 +1950,90 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
                     .as_str()
             )
             .unwrap()["task_id"],
-            journal["task_id"]
+            journal["session_id"]
         );
         manager
-            .harness_begin(
-                &binding,
-                &HarnessInput::Start {
-                    instruction: "again".into(),
-                },
-            )
+            .harness_begin(&binding, &task_start("again"))
             .await
             .unwrap();
         assert!(manager.sessions.lock().unwrap().is_empty());
         assert_eq!(manager.invocation_slots.available_permits(), 16);
         app.stop().await.unwrap();
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancel_interrupts_a_running_harness_turn() {
+    let (manager, _temp, companion) = manager().await;
+    let init = kernel_bytes("{}");
+    let wasm = wat::parse_str(format!(
+        r#"(module
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+        (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (func (export "ene_initialize") (result i32) (local $p i64)
+          {init} local.get $p i64.const 2 call $output i32.const 0)
+        (func (export "ene_invoke") (result i32) (loop $forever br $forever) i32.const 0))"#
+    ))
+    .unwrap();
+    ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
+        .unwrap();
+    manager.scan().unwrap();
+    manager
+        .entries
+        .write()
+        .unwrap()
+        .get_mut("reference")
+        .unwrap()
+        .state = "ready".into();
+    let binding = binding(&manager, &companion, "task", "harness", vec![]);
+    manager.bind(binding).await.unwrap();
+    let app = application(&manager);
+    let other = app.clone();
+    let start = tokio::spawn(async move {
+        other
+            .invoke_plugin(harness_invocation(task_start("test")))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let journal = manager
+                .store
+                .plugin_get("harness".into(), "task".into())
+                .await
+                .unwrap();
+            if journal["status"] == "running" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the running turn must be recorded before cancellation");
+    let cancelled = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.invoke_plugin(harness_invocation(HarnessInput::Cancel)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(start.await.unwrap().is_err());
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "cancelled");
+    assert_eq!(journal["stop_reason"], "cancelled");
+    assert!(journal["pending"].is_null());
+    assert!(manager.sessions.lock().unwrap().is_empty());
+    assert_eq!(
+        serde_json::from_str::<Value>(cancelled.result.json.as_str()).unwrap()["status"],
+        "cancelled"
+    );
+    assert_eq!(manager.invocation_slots.available_permits(), 16);
+    app.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -1971,13 +2100,18 @@ async fn connect_management_invokes_the_wasm_harness_and_enforces_host_authentic
         .bind_with_options(bound.clone(), crate::api::test_client::call_options(10))
         .await
         .unwrap();
+    let mut events = client
+        .host
+        .subscribe(ene_rpc::Empty::default())
+        .await
+        .unwrap();
     let result = client
         .plugins
         .invoke_with_options(
             PluginInvocation {
-                binding_id: bound.id,
+                binding_id: bound.id.clone(),
                 operation: document(
-                    json!({"type":"harness","input":{"type":"start","instruction":"日本語🙂"}}),
+                    json!({"type":"harness","input":{"type":"start","prompt":[{"type":"text","text":"日本語🙂"}]}}),
                 )
                 .into(),
                 ..Default::default()
@@ -1993,6 +2127,74 @@ async fn connect_management_invokes_the_wasm_harness_and_enforces_host_authentic
             .iter()
             .any(|e| serde_json::from_str::<Value>(&e.json).unwrap()["type"] == "harness")
     );
+    let result_json: Value = serde_json::from_str(&result.result.json).unwrap();
+    let state = client
+        .plugins
+        .get_harness_with_options(
+            ene_rpc::Id {
+                id: bound.id.clone(),
+                ..Default::default()
+            },
+            crate::api::test_client::call_options(5),
+        )
+        .await
+        .unwrap()
+        .into_owned();
+    let state: Value = serde_json::from_str(&state.state.json).unwrap();
+    assert_eq!(state["session_id"], result_json["task_id"]);
+    assert_eq!(state["status"], "waiting_for_input");
+    assert_eq!(state["pending"]["request_id"], "permission-1");
+    assert!(matches!(
+        unauthorized
+            .plugins
+            .get_harness_with_options(
+                ene_rpc::Id {
+                    id: bound.id.clone(),
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5)
+            )
+            .await,
+        Err(error) if error.code == ErrorCode::Unauthenticated
+    ));
+    assert_eq!(
+        client
+            .plugins
+            .get_harness_with_options(
+                ene_rpc::Id {
+                    id: "missing".into(),
+                    ..Default::default()
+                },
+                crate::api::test_client::call_options(5)
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+    let mut task = None;
+    for _ in 0..8 {
+        let Some(message) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            events.message::<ene_rpc::HostEvent>(),
+        )
+        .await
+        .unwrap()
+        .unwrap() else {
+            break;
+        };
+        let message = message.to_owned_message();
+        if let Some(ene_rpc::host_event::Event::Notification(notification)) = message.event
+            && let Some(ene_rpc::notification::Event::HarnessTask(event)) = notification.event
+        {
+            task = Some(event);
+            break;
+        }
+    }
+    let task = task.expect("harness task notification");
+    assert_eq!(task.binding_id, bound.id);
+    assert_eq!(task.status, "waiting_for_input");
+    assert_eq!(task.task_id, result_json["task_id"].as_str().unwrap());
     assert_eq!(
         client
             .plugins
@@ -2073,4 +2275,550 @@ async fn event_count_and_byte_overflow_stop_the_invocation_promptly() {
         );
         assert!(manager.sessions.lock().unwrap().is_empty());
     }
+}
+
+struct FixedInference(Arc<std::sync::Mutex<Option<crate::ports::inference::InferenceRequest>>>);
+impl crate::ports::inference::TaskInference for FixedInference {
+    fn complete<'a>(
+        &'a self,
+        request: crate::ports::inference::InferenceRequest,
+        _: CancellationToken,
+    ) -> futures_util::future::BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            *self.0.lock().unwrap() = Some(request);
+            Ok("fixture".into())
+        })
+    }
+}
+
+struct NoMutations;
+impl crate::ports::plugin::Mutations for NoMutations {
+    fn submit(
+        &self,
+        _: futures_util::future::BoxFuture<'static, Result<()>>,
+    ) -> futures_util::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+fn model_request() -> GenerationRequest {
+    GenerationRequest {
+        endpoint: "https://guest.invalid".into(),
+        options: json!({"guest": true}),
+        model: "guest-model".into(),
+        preamble: "system".into(),
+        messages: vec![ene_plugin::provider::ChatMessage {
+            role: "user".into(),
+            text: "hi".into(),
+        }],
+        max_tokens: 512,
+        tools: vec![],
+    }
+}
+
+#[tokio::test]
+async fn the_models_service_forwards_a_host_owned_request() {
+    let (manager, _temp, companion) = manager().await;
+    let granted = binding(
+        &manager,
+        &companion,
+        "task",
+        "harness",
+        vec![Service::Models],
+    );
+    manager
+        .enable(
+            "reference".into(),
+            EnablePluginRequest {
+                enabled: true,
+                revision: granted.revision.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager.bind(granted.clone()).await.unwrap();
+    let denied = binding(&manager, &companion, "task-denied", "harness", vec![]);
+    manager.bind(denied.clone()).await.unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    manager.attach_inference(Arc::new(FixedInference(seen.clone())));
+    let services = LocalServices {
+        manager: manager.clone(),
+        binding: granted.clone(),
+        cancel: CancellationToken::new(),
+        mutations: Arc::new(NoMutations),
+    };
+    let value = services
+        .handle(ServiceRequest::Models {
+            request: model_request(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(value["text"], "fixture");
+    let seen = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(seen.companion_id, companion);
+    assert_eq!(seen.preamble, "system");
+    assert_eq!(seen.messages, vec![(true, "hi".into())]);
+    assert_eq!(seen.max_tokens, 512);
+
+    let denied = LocalServices {
+        manager: manager.clone(),
+        binding: denied,
+        cancel: CancellationToken::new(),
+        mutations: Arc::new(NoMutations),
+    };
+    assert_eq!(
+        denied
+            .handle(ServiceRequest::Models {
+                request: model_request(),
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "permission_required"
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_tools_service_reads_and_writes_inside_the_workspace() {
+    let (manager, _temp, companion) = manager().await;
+    let root = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(root.path()).unwrap();
+    let root_text = canonical.to_str().unwrap().to_owned();
+    let mut granted = binding(
+        &manager,
+        &companion,
+        "task",
+        "harness",
+        vec![Service::Tools],
+    );
+    granted.workspace_root = Some(root_text.clone());
+    manager
+        .enable(
+            "reference".into(),
+            EnablePluginRequest {
+                enabled: true,
+                revision: granted.revision.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    manager.bind(granted.clone()).await.unwrap();
+    let stored = manager
+        .bindings()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.id == granted.id)
+        .unwrap();
+    assert_eq!(stored.workspace_root.as_deref(), Some(root_text.as_str()));
+    let denied = binding(&manager, &companion, "task-denied", "harness", vec![]);
+    manager.bind(denied.clone()).await.unwrap();
+    let no_root = binding(
+        &manager,
+        &companion,
+        "task-no-root",
+        "harness",
+        vec![Service::Tools],
+    );
+    manager.bind(no_root.clone()).await.unwrap();
+
+    let services = LocalServices {
+        manager: manager.clone(),
+        binding: granted.clone(),
+        cancel: CancellationToken::new(),
+        mutations: Arc::new(NoMutations),
+    };
+    assert_eq!(
+        services
+            .handle(ServiceRequest::Tool {
+                name: "fs.write_text_file".into(),
+                arguments: json!({"path":"note.txt","content":"hello"}),
+            })
+            .await
+            .unwrap()["ok"],
+        true
+    );
+    assert_eq!(
+        services
+            .handle(ServiceRequest::Tool {
+                name: "fs.read_text_file".into(),
+                arguments: json!({"path":"note.txt"}),
+            })
+            .await
+            .unwrap()["content"],
+        "hello"
+    );
+    assert_eq!(
+        services
+            .handle(ServiceRequest::Tool {
+                name: "fs.read_text_file".into(),
+                arguments: json!({"path":"../escape"}),
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "permission_required"
+    );
+    assert_eq!(
+        services
+            .handle(ServiceRequest::Tool {
+                name: "shell".into(),
+                arguments: json!({}),
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "unsupported_tool"
+    );
+    for unbound in [no_root, denied] {
+        let services = LocalServices {
+            manager: manager.clone(),
+            binding: unbound,
+            cancel: CancellationToken::new(),
+            mutations: Arc::new(NoMutations),
+        };
+        assert_eq!(
+            services
+                .handle(ServiceRequest::Tool {
+                    name: "fs.read_text_file".into(),
+                    arguments: json!({"path":"note.txt"}),
+                })
+                .await
+                .unwrap_err()
+                .code,
+            "permission_required"
+        );
+    }
+    let mut bad = binding(
+        &manager,
+        &companion,
+        "bad-root",
+        "harness",
+        vec![Service::Tools],
+    );
+    bad.workspace_root = Some("relative/path".into());
+    assert_eq!(
+        manager.bind(bad).await.unwrap_err().kind,
+        ErrorKind::InvalidRequest
+    );
+    let mut root_binding = binding(
+        &manager,
+        &companion,
+        "root-dir",
+        "harness",
+        vec![Service::Tools],
+    );
+    root_binding.workspace_root = Some(std::path::MAIN_SEPARATOR.to_string());
+    assert_eq!(
+        manager.bind(root_binding).await.unwrap_err().kind,
+        ErrorKind::InvalidRequest
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+const ACP_AGENT: &str = r#"
+import json, sys
+session = "s1"
+prompt_id = None
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = msg["id"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "started"}, "messageId": "m1"}}})
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "go"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+    elif msg.get("id") == 900:
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": json.dumps(msg["result"]["outcome"])}, "messageId": "m2"}}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+    elif method == "session/cancel":
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "cancelled"}})
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_acp_agent_drives_a_harness_turn_and_permission() {
+    let (manager, _temp, companion) = manager().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let script = workspace.path().join("agent.py");
+    std::fs::write(&script, ACP_AGENT).unwrap();
+    let package = manager.root.join("acp-test");
+    crate::test_support::create_directory(&package).unwrap();
+    crate::test_support::write(
+        package.join("manifest.json"),
+        json!({
+            "contract_version": ene_plugin::CONTRACT_VERSION,
+            "id": "acp-test",
+            "name": "ACP test",
+            "version": "1",
+            "entrypoints": [{
+                "id": "main",
+                "target": "acp",
+                "provides": ["harness"],
+                "command": ["python3", script.to_str().unwrap()]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    manager.scan().unwrap();
+    let revision = manager.entries.read().unwrap()["acp-test"]
+        .package
+        .revision
+        .clone();
+    manager
+        .enable(
+            "acp-test".into(),
+            EnablePluginRequest {
+                enabled: true,
+                revision: revision.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let root = std::fs::canonicalize(workspace.path()).unwrap();
+    let binding = PluginBinding {
+        id: "acp-task".into(),
+        plugin_id: "acp-test".into(),
+        entrypoint: "main".into(),
+        revision,
+        companion_id: companion.clone(),
+        workspace_root: Some(root.to_str().unwrap().into()),
+        configuration: document(json!({})).into(),
+        ..Default::default()
+    };
+    manager.bind(binding.clone()).await.unwrap();
+    let invoke = |input: HarnessInput| PluginInvocation {
+        binding_id: "acp-task".into(),
+        operation: document(serde_json::to_value(Operation::Harness { input }).unwrap()).into(),
+        ..Default::default()
+    };
+    invoke_plugin(
+        &manager,
+        invoke(HarnessInput::Start {
+            prompt: vec![ContentBlock::text("go")],
+        }),
+    )
+    .await
+    .unwrap();
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "acp-task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "waiting_for_input");
+    assert_eq!(journal["pending"]["request_id"], "900");
+    assert!(journal["report"].as_str().unwrap().contains("started"));
+    invoke_plugin(
+        &manager,
+        invoke(HarnessInput::Respond {
+            request_id: "900".into(),
+            outcome: RequestPermissionOutcome::Selected {
+                option_id: "allow".into(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "acp-task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "completed");
+    assert_eq!(journal["stop_reason"], "end_turn");
+    assert!(journal["report"].as_str().unwrap().contains("allow"));
+    assert!(manager.acp.lock().unwrap().is_empty());
+
+    invoke_plugin(
+        &manager,
+        invoke(HarnessInput::Start {
+            prompt: vec![ContentBlock::text("again")],
+        }),
+    )
+    .await
+    .unwrap();
+    invoke_plugin(&manager, invoke(HarnessInput::Cancel))
+        .await
+        .unwrap();
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "acp-task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "cancelled");
+    assert!(manager.acp.lock().unwrap().is_empty());
+
+    let mut without_root = binding.clone();
+    without_root.id = "acp-without-root".into();
+    without_root.workspace_root = None;
+    assert_eq!(
+        manager.bind(without_root).await.unwrap_err().kind,
+        ErrorKind::InvalidRequest
+    );
+    let mut with_services = binding;
+    with_services.id = "acp-with-services".into();
+    with_services.services = vec!["models".into()];
+    assert_eq!(
+        manager.bind(with_services).await.unwrap_err().kind,
+        ErrorKind::InvalidRequest
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+const ACP_TERMINAL_AGENT: &str = r#"
+import json, sys
+session = "s1"
+prompt_id = None
+terminal_id = None
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "started"}, "messageId": "m1"}}})
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "run echo"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create", "params": {"sessionId": session, "command": "echo", "args": ["hello"], "outputByteLimit": 64}})
+    elif mid == 901:
+        terminal_id = msg["result"]["terminalId"]
+        send({"jsonrpc": "2.0", "id": 902, "method": "terminal/wait_for_exit", "params": {"sessionId": session, "terminalId": terminal_id}})
+    elif mid == 902:
+        send({"jsonrpc": "2.0", "id": 903, "method": "terminal/output", "params": {"sessionId": session, "terminalId": terminal_id}})
+    elif mid == 903:
+        output = msg["result"]["output"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": output}, "messageId": "m2"}}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_acp_agent_runs_a_permission_gated_terminal_command() {
+    let (manager, _temp, companion) = manager().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let script = workspace.path().join("agent.py");
+    std::fs::write(&script, ACP_TERMINAL_AGENT).unwrap();
+    let package = manager.root.join("acp-terminal");
+    crate::test_support::create_directory(&package).unwrap();
+    crate::test_support::write(
+        package.join("manifest.json"),
+        json!({
+            "contract_version": ene_plugin::CONTRACT_VERSION,
+            "id": "acp-terminal",
+            "name": "ACP terminal",
+            "version": "1",
+            "entrypoints": [{
+                "id": "main",
+                "target": "acp",
+                "provides": ["harness"],
+                "command": ["python3", script.to_str().unwrap()]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    manager.scan().unwrap();
+    let revision = manager.entries.read().unwrap()["acp-terminal"]
+        .package
+        .revision
+        .clone();
+    manager
+        .enable(
+            "acp-terminal".into(),
+            EnablePluginRequest {
+                enabled: true,
+                revision: revision.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let root = std::fs::canonicalize(workspace.path()).unwrap();
+    let binding = PluginBinding {
+        id: "terminal-task".into(),
+        plugin_id: "acp-terminal".into(),
+        entrypoint: "main".into(),
+        revision,
+        companion_id: companion.clone(),
+        workspace_root: Some(root.to_str().unwrap().into()),
+        terminal: Some(TerminalPolicy {
+            enabled: true,
+            allowed_commands: vec!["echo".into()],
+            max_seconds: 5,
+            max_output_bytes: 1024,
+            ..Default::default()
+        })
+        .into(),
+        configuration: document(json!({})).into(),
+        ..Default::default()
+    };
+    manager.bind(binding.clone()).await.unwrap();
+    let invoke = |input: HarnessInput| PluginInvocation {
+        binding_id: "terminal-task".into(),
+        operation: document(serde_json::to_value(Operation::Harness { input }).unwrap()).into(),
+        ..Default::default()
+    };
+    invoke_plugin(
+        &manager,
+        invoke(HarnessInput::Start {
+            prompt: vec![ContentBlock::text("go")],
+        }),
+    )
+    .await
+    .unwrap();
+    invoke_plugin(
+        &manager,
+        invoke(HarnessInput::Respond {
+            request_id: "900".into(),
+            outcome: RequestPermissionOutcome::Selected {
+                option_id: "allow".into(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "terminal-task".into())
+        .await
+        .unwrap();
+    assert_eq!(journal["status"], "completed");
+    assert!(journal["report"].as_str().unwrap().contains("hello"));
+    assert!(manager.acp.lock().unwrap().is_empty());
+
+    let mut bad_policy = binding;
+    bad_policy.id = "terminal-bad".into();
+    bad_policy.terminal = Some(TerminalPolicy {
+        enabled: true,
+        allowed_commands: vec![],
+        max_seconds: 5,
+        max_output_bytes: 1024,
+        ..Default::default()
+    })
+    .into();
+    assert_eq!(
+        manager.bind(bad_policy).await.unwrap_err().kind,
+        ErrorKind::InvalidRequest
+    );
+    manager.shutdown().await.unwrap();
 }

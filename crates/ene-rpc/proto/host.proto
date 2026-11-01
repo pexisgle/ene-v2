@@ -137,15 +137,33 @@ message Plugin {
 }
 message Plugins { repeated Plugin items = 1; }
 message EnablePluginRequest { string id = 1; bool enabled = 2; string revision = 3; }
+// Explicit opt-in for the ACP terminal capability. Commands are executed
+// directly (no shell) as the host user; there is no sandbox.
+message TerminalPolicy {
+  bool enabled = 1;
+  repeated string allowed_commands = 2;
+  uint32 max_seconds = 3;
+  uint32 max_output_bytes = 4;
+}
 message PluginBinding {
   string id = 1; string plugin_id = 2; string entrypoint = 3; string revision = 4;
   string companion_id = 5; repeated string services = 6; JsonDocument configuration = 7;
   // Required for character entrypoints; actions are scoped to this device and companion_id.
   string device_id = 8;
+  // Absolute workspace root for the `tools` fs capabilities; empty disables them.
+  optional string workspace_root = 9;
+  // ACP bindings only. Absent or disabled means terminal requests are rejected.
+  optional TerminalPolicy terminal = 10;
 }
 message PluginBindings { repeated PluginBinding items = 1; }
 message PluginInvocation { string binding_id = 1; JsonDocument operation = 2; }
 message PluginResult { uint64 generation = 1; repeated JsonDocument events = 2; JsonDocument result = 3; }
+// Harness task state is read from the host journal; the notification is a hint to re-read.
+message HarnessState { string binding_id = 1; JsonDocument state = 2; }
+message HarnessTaskNotification {
+  string binding_id = 1; string companion_id = 2; string task_id = 3;
+  string status = 4; optional string stop_reason = 5; optional string failure = 6;
+}
 message CharacterActionNotification {
   string binding_id = 1; string revision = 2; uint64 generation = 3;
   uint64 expires_at_ms = 4; JsonDocument event = 5;
@@ -172,6 +190,7 @@ message Notification {
     PersistenceFailure host_storage_failed = 10;
     PersistenceFailure generation_persistence_failed = 11;
     CharacterActionNotification plugin_character_action = 12;
+    HarnessTaskNotification harness_task = 13;
   }
 }
 message InitialState { string subscription_id = 1; Snapshot snapshot = 2; }
@@ -257,6 +276,7 @@ service PluginService {
   rpc ListBindings(Empty) returns (PluginBindings);
   rpc Bind(PluginBinding) returns (PluginBindings);
   rpc Invoke(PluginInvocation) returns (PluginResult);
+  rpc GetHarness(Id) returns (HarnessState);
 }
 service DeviceService {
   rpc RegisterDevice(RegisterDeviceRequest) returns (DeviceRegistration);

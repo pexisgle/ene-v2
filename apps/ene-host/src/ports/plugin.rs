@@ -2,6 +2,7 @@
 use super::Result;
 use ene_rpc::{EnablePluginRequest, Plugin, PluginBinding, PluginInvocation, PluginResult};
 use futures_util::future::BoxFuture;
+use serde_json::Value;
 use std::sync::Arc;
 
 /// Accepted guest mutations outlive the invocation waiting for them.
@@ -20,6 +21,8 @@ pub trait Plugins: Send + Sync {
         input: PluginInvocation,
         mutations: Arc<dyn Mutations>,
     ) -> BoxFuture<'_, Result<PluginResult>>;
+    /// Reads the stored task journal for one binding.
+    fn harness(&self, binding_id: String) -> BoxFuture<'_, Result<Option<Value>>>;
     fn restore(&self) -> BoxFuture<'_, Result<()>>;
     fn cancel(&self);
     fn shutdown(&self) -> BoxFuture<'_, Result<()>>;

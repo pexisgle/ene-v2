@@ -1,6 +1,8 @@
 use super::*;
+use crate::infrastructure::llm::plugin::manifest;
 use crate::{domain::OperationKind, llm::test_support::InvocationFixture};
-use ene_plugin::{GenerationRequest, provider::ChatMessage};
+use ene_plugin::{GenerationRequest, Operation, provider::ChatMessage};
+use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {

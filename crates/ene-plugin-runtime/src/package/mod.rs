@@ -1,20 +1,24 @@
 //! Packages are read without executing code. Executable files are captured and installed
 //! in memory; plugins receive no filesystem access to code or assets.
+mod paths;
+mod read;
+
+pub use paths::identifier;
+use paths::{portable_name, relative};
+use read::{Stamp, hash_file, open_code, owned, read, unchanged};
+
 use crate::{
     Error, Result,
     limits::{MAX_ASSET_BYTES, MAX_CODE},
 };
 use ene_plugin::*;
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
-    time::SystemTime,
 };
+
 #[derive(Clone, Debug)]
 pub struct Package {
     pub root: PathBuf,
@@ -22,183 +26,6 @@ pub struct Package {
     pub revision: String,
     files: Arc<BTreeMap<String, Vec<u8>>>,
     stamps: Arc<BTreeMap<String, Stamp>>,
-}
-#[derive(Clone, Debug)]
-struct Stamp {
-    len: u64,
-    modified: Option<SystemTime>,
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-    #[cfg(unix)]
-    ctime: i64,
-    #[cfg(unix)]
-    ctime_nsec: i64,
-}
-#[cfg(unix)]
-fn stamp(metadata: &std::fs::Metadata) -> Stamp {
-    Stamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-        ctime: metadata.ctime(),
-        ctime_nsec: metadata.ctime_nsec(),
-    }
-}
-#[cfg(not(unix))]
-fn stamp(metadata: &std::fs::Metadata) -> Stamp {
-    Stamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    }
-}
-#[cfg(unix)]
-fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
-    metadata.is_file()
-        && metadata.len() == stamp.len
-        && metadata.modified().ok() == stamp.modified
-        && metadata.dev() == stamp.dev
-        && metadata.ino() == stamp.ino
-        && metadata.ctime() == stamp.ctime
-        && metadata.ctime_nsec() == stamp.ctime_nsec
-}
-#[cfg(not(unix))]
-fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
-    metadata.is_file() && metadata.len() == stamp.len && metadata.modified().ok() == stamp.modified
-}
-/// Portable package paths use forward slashes, never native device paths.
-fn relative(path: &str) -> bool {
-    !path.is_empty()
-        && path.len() <= 1024
-        && !path.contains('\\')
-        && !path.chars().any(char::is_control)
-        && path.split('/').all(|part| {
-            !part.is_empty()
-                && part != "."
-                && part != ".."
-                && !part.contains(':')
-                && !part.contains(['<', '>', '"', '|', '?', '*'])
-                && !part.ends_with(['.', ' '])
-                && !matches!(
-                    part.split('.')
-                        .next()
-                        .unwrap_or_default()
-                        .trim_end_matches(' ')
-                        .to_ascii_uppercase()
-                        .as_str(),
-                    "CON"
-                        | "PRN"
-                        | "AUX"
-                        | "NUL"
-                        | "COM1"
-                        | "COM2"
-                        | "COM3"
-                        | "COM4"
-                        | "COM5"
-                        | "COM6"
-                        | "COM7"
-                        | "COM8"
-                        | "COM9"
-                        | "LPT1"
-                        | "LPT2"
-                        | "LPT3"
-                        | "LPT4"
-                        | "LPT5"
-                        | "LPT6"
-                        | "LPT7"
-                        | "LPT8"
-                        | "LPT9"
-                        | "CONIN$"
-                        | "CONOUT$"
-                        | "COM¹"
-                        | "COM²"
-                        | "COM³"
-                        | "LPT¹"
-                        | "LPT²"
-                        | "LPT³"
-                )
-        })
-}
-pub fn identifier(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 80
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-fn owned(path: &Path, directory: bool) -> Result<()> {
-    ene_platform::storage::check(path, directory, false).map_err(|_| Error::Invalid)
-}
-fn portable_name(names: &mut BTreeMap<String, (String, bool)>, path: &str) -> Result<()> {
-    if !relative(path) {
-        return Err(Error::Invalid);
-    }
-    let mut prefix = String::new();
-    let mut parts = path.split('/').peekable();
-    while let Some(part) = parts.next() {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
-        let directory = parts.peek().is_some();
-        match names.entry(prefix.to_lowercase()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert((prefix.clone(), directory));
-            }
-            std::collections::btree_map::Entry::Occupied(entry)
-                if directory && entry.get() == &(prefix.clone(), true) => {}
-            _ => return Err(Error::Invalid),
-        }
-    }
-    Ok(())
-}
-fn read(root: &Path, path: &str, limit: u64) -> Result<(Vec<u8>, Stamp)> {
-    if !relative(path) {
-        return Err(Error::Invalid);
-    }
-    let file = open_code(root, path)?;
-    let m = file.metadata()?;
-    if !m.is_file() || m.len() > limit {
-        return Err(Error::Invalid);
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(Error::Invalid);
-    }
-    Ok((bytes, stamp(&m)))
-}
-fn open_code(root: &Path, path: &str) -> Result<std::fs::File> {
-    let mut parent = root.to_path_buf();
-    let components: Vec<_> = Path::new(path).components().collect();
-    for part in &components[..components.len() - 1] {
-        parent.push(part);
-        owned(&parent, true)?;
-    }
-    Ok(ene_platform::storage::open(&root.join(path), false, false)?)
-}
-fn hash_file(mut file: std::fs::File, limit: u64) -> Result<(String, Stamp)> {
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > limit {
-        return Err(Error::Invalid);
-    }
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    let mut total = 0u64;
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        total = total.saturating_add(read as u64);
-        if total > limit {
-            return Err(Error::Invalid);
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok((format!("{:x}", digest.finalize()), stamp(&metadata)))
 }
 impl Package {
     pub fn load(root: &Path) -> Result<Self> {
@@ -219,9 +46,26 @@ impl Package {
         let mut ids = BTreeSet::new();
         let mut providers = BTreeSet::new();
         for e in &manifest.entrypoints {
+            let target_valid = match e.target {
+                Target::Acp => {
+                    e.file.is_empty()
+                        && !e.command.is_empty()
+                        && e.command.len() <= 64
+                        && e.command.iter().all(|part| {
+                            !part.is_empty()
+                                && part.len() <= 4096
+                                && !part.chars().any(char::is_control)
+                        })
+                        && e.provides == [Extension::Harness]
+                        && e.uses.is_empty()
+                        && e.window_events.is_empty()
+                        && e.provider.is_none()
+                }
+                Target::Host | Target::Desktop => relative(&e.file) && e.command.is_empty(),
+            };
             if !identifier(&e.id)
                 || !ids.insert(&e.id)
-                || !relative(&e.file)
+                || !target_valid
                 || e.provides.is_empty()
                 || e.provides.len() > 6
                 || e.uses.len() > 8
@@ -255,6 +99,7 @@ impl Package {
             .entrypoints
             .iter()
             .map(|e| &e.file)
+            .filter(|file| !file.is_empty())
             .collect::<BTreeSet<_>>()
         {
             if files.contains_key(path) {
@@ -344,6 +189,7 @@ impl Package {
 }
 #[cfg(test)]
 mod tests {
+    use super::paths::{portable_name, relative};
     #[test]
     fn package_paths_cannot_name_devices_or_streams() {
         for path in [
@@ -369,6 +215,45 @@ mod tests {
         ene_platform::storage::write_atomic(&dir.join("main.wasm"), b"return {}").unwrap();
         ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":ene_plugin::CONTRACT_VERSION,"id":"sample","name":"Sample","version":"1","entrypoints":[{"id":"behavior","target":"host","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes()).unwrap();
     }
+    #[test]
+    fn acp_entrypoints_require_a_command_and_no_code_file() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        ene_platform::storage::create_private_dir_all(&root).unwrap();
+        let write = |entry: serde_json::Value| {
+            ene_platform::storage::write_atomic(
+                &root.join("manifest.json"),
+                serde_json::json!({
+                    "contract_version": ene_plugin::CONTRACT_VERSION,
+                    "id": "acp", "name": "ACP", "version": "1",
+                    "entrypoints": [entry]
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        };
+        write(serde_json::json!({
+            "id": "main", "target": "acp", "provides": ["harness"],
+            "command": ["/bin/agent", "--acp"]
+        }));
+        Package::load(&root).unwrap();
+        write(serde_json::json!({
+            "id": "main", "target": "acp", "provides": ["harness"]
+        }));
+        assert!(Package::load(&root).is_err());
+        write(serde_json::json!({
+            "id": "main", "target": "acp", "file": "main.wasm",
+            "provides": ["harness"], "command": ["/bin/agent"]
+        }));
+        assert!(Package::load(&root).is_err());
+        write(serde_json::json!({
+            "id": "main", "target": "acp", "provides": ["character"],
+            "command": ["/bin/agent"]
+        }));
+        assert!(Package::load(&root).is_err());
+    }
+
     #[test]
     fn window_subscriptions_require_a_desktop_character_entrypoint_and_service() {
         let source = tempfile::tempdir().unwrap();

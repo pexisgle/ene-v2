@@ -1,0 +1,176 @@
+//! Task inference: the host owns the connection, credentials and grant checks.
+use super::generation::{authorize, config, invocation, register};
+use super::*;
+use crate::{
+    domain::rules,
+    llm::{ChatMessage, ChatRole, Event, Generation, InvocationInput},
+    ports::inference::{InferenceRequest, TaskInference},
+};
+use futures_util::{FutureExt, StreamExt, future::BoxFuture};
+use std::sync::{Arc, Weak};
+use tokio_util::sync::CancellationToken;
+
+/// The guest may ask for a long answer, but the host bounds the budget.
+const MAX_TASK_TOKENS: u64 = 8192;
+
+pub(crate) struct Inference {
+    weak: Weak<Inner>,
+}
+
+impl TaskInference for Inference {
+    fn complete<'a>(
+        &'a self,
+        request: InferenceRequest,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        async move {
+            let Some(inner) = self.weak.upgrade() else {
+                return Err(Error::unavailable());
+            };
+            HostApplication(inner).infer_task(request, cancel).await
+        }
+        .boxed()
+    }
+}
+
+/// Removes the running entry even when the awaiting service future is dropped
+/// by the runtime's cancellation or timeout path.
+struct RunGuard {
+    app: HostApplication,
+    id: String,
+}
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if let Ok(mut controls) = self.app.0.controls.try_lock() {
+            controls.running.remove(&self.id);
+        }
+    }
+}
+
+impl HostApplication {
+    pub(crate) fn inference(&self) -> Arc<dyn TaskInference> {
+        Arc::new(Inference {
+            weak: Arc::downgrade(&self.0),
+        })
+    }
+
+    pub(crate) async fn infer_task(
+        &self,
+        request: InferenceRequest,
+        cancel: CancellationToken,
+    ) -> Result<String, Error> {
+        if request.messages.is_empty() {
+            return Err(Error::invalid());
+        }
+        let max_tokens = request.max_tokens.clamp(1, MAX_TASK_TOKENS);
+        let id = Uuid::new_v4().to_string();
+        let mut controls = self.0.controls.lock().await;
+        if controls.failed() {
+            return Err(Error::unavailable());
+        }
+        let configuration = config(self, &mut controls).await?;
+        let companion = configuration
+            .companions
+            .get(&request.companion_id)
+            .ok_or_else(Error::invalid)?;
+        // Tasks use the dedicated assignment; falling back to the companion
+        // model would silently widen what the user configured.
+        let assignment = companion
+            .model_assignments
+            .task
+            .as_option()
+            .ok_or_else(model_unset)?;
+        let connection =
+            rules::connection(&configuration, &assignment.connection_id).ok_or_else(model_unset)?;
+        let context = authorize(
+            self,
+            &configuration,
+            &controls,
+            &request.companion_id,
+            &connection,
+            OperationKind::Task,
+        )?;
+        let messages = request
+            .messages
+            .into_iter()
+            .map(|(user, text)| ChatMessage {
+                role: if user {
+                    ChatRole::User
+                } else {
+                    ChatRole::Assistant
+                },
+                text,
+            })
+            .collect();
+        let generation = Generation::new(
+            &connection,
+            assignment.model_id.clone(),
+            request.preamble,
+            messages,
+            max_tokens,
+        )?;
+        let receiver = register(
+            &mut controls,
+            id.clone(),
+            request.companion_id.clone(),
+            &connection,
+            &context,
+            OperationKind::Task,
+        );
+        let sender = controls
+            .running
+            .get(&id)
+            .map(|running| running.cancel.clone())
+            .ok_or_else(Error::unavailable)?;
+        drop(controls);
+        let _guard = RunGuard {
+            app: self.clone(),
+            id: id.clone(),
+        };
+        // The runtime drops the service future on cancellation; forward the
+        // token into the provider's watch channel so the outbound call stops.
+        let forward = tokio::spawn({
+            let token = cancel.clone();
+            async move {
+                token.cancelled().await;
+                let _ = sender.send(true);
+            }
+        });
+        let input = invocation(
+            self,
+            connection,
+            context,
+            id,
+            InvocationInput::Task(generation),
+            receiver,
+        );
+        let spec = OperationKind::Task.spec();
+        let result = tokio::time::timeout(spec.timeout, async {
+            let mut stream = input.generate().await?;
+            let mut text = String::new();
+            while let Some(event) = stream.next().await {
+                match event? {
+                    Event::Delta(delta) => {
+                        if text.len() + delta.len() > spec.output_bytes {
+                            return Err(Error::new(ErrorKind::ResourceLimit));
+                        }
+                        text.push_str(&delta);
+                    }
+                    Event::Finished(_) => break,
+                }
+            }
+            Ok::<_, Error>(text)
+        })
+        .await
+        .map_err(|_| Error::new(ErrorKind::Unavailable))??;
+        forward.abort();
+        Ok(result)
+    }
+}
+
+fn model_unset() -> Error {
+    Error {
+        kind: ErrorKind::StateConflict,
+        reason: Some("model_unset"),
+    }
+}

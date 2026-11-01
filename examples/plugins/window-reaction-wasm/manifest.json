@@ -1,5 +1,5 @@
 {
-  "contract_version": 3,
+  "contract_version": 4,
   "id": "window-reaction-wasm",
   "name": "Window reaction example",
   "version": "0.1.0",

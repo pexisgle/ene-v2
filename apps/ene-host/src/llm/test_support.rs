@@ -37,6 +37,9 @@ impl InvocationFixture {
                 InvocationInput::ConnectionCheck(self.request.expect("check fixture generation"))
             }
             OperationKind::ModelList => InvocationInput::ModelList,
+            OperationKind::Task => {
+                InvocationInput::Task(self.request.expect("task fixture generation"))
+            }
         };
         Invocation::new(
             self.id,

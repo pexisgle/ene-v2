@@ -28,11 +28,31 @@ SQLiteには設定・会話・操作の受付記録・プラグイン状態を�
 
 プラグインの変更・呼び出しとゲストからの状態保存は、既存の `MutationExecutor` が所有します。RPCの切断やゲストのキャンセル後も、受理済みの状態保存は完了まで継続し、保存障害はホスト側に通知します。ホスト終了時は受付を閉じ、プラグインへ停止を通知してから、受理済み処理の保存完了を待ちます。
 
-Harnessは再バインド・無効化・再読み込み・終了で旧タスクを終端状態として保存します。Cancelの保存に失敗しても、DB復旧後に再送するとゲストを再開せず保存だけ再試行できます。起動時は、プラグイン有効化より先に未完了タスクを `host_interrupted` として終了し、完了済みの記録は保持します。復旧保存に失敗した場合は起動を成功扱いにしません。未対応の操作種別や不正な継続入力では、保存済みタスクとゲストの状態を維持します。
+HarnessはACP v1相当のセッションをbindingごとに1件保持し、`running` / `waiting_for_input` / `completed` / `failed` / `cancelled`を保存します。`session/update`相当のイベントは受信ごとに永続化し、長期のターンでも進捗を失いません。`session/request_permission`相当の相談ではターンを中断し、`Respond`でゲストを再開します。Cancelはゲストを再開せず終端状態を保存し、再送時は保存だけを再試行します。再バインド・無効化・再読み込み・終了では`plugin_stopped`、起動時は`host_interrupted`として未完了タスクを終了します。旧版の保存形式は再開せず置換し、復旧保存に失敗した場合は起動を成功扱いにしません。長いターンでは `PluginResult.events` は最新256件に限り、正本はジャーナルです。ハーネスは権限相談の境界を除き1ターンが1回の呼び出しになるため、インスタンスとサービス待ちの実行上限を30分に延ばしています（CPUはfuelで制限）。
+
+### ワークスペースとfsツール
+
+`PluginBinding.workspace_root` に絶対パスを指定すると、`tools` を許可したハーネスが `fs.read_text_file` / `fs.write_text_file` を呼べます。ルートはバインド時にcanonical化し、ファイルシステムのルートは拒否します。パスはルート相対のみで、絶対パス・`..`・`.`・シンボリックリンク・通常ファイル以外を拒否し、読み書きは256KiB、書き込みはatomic rename、親ディレクトリは自動作成しません。端末実行は別途オプトインのcapabilityとして扱います。
+
+### 端末（明示オプトイン）
+
+ACPバインディングの`terminal`ポリシーを有効にした場合だけ、ACPの`terminal/create`・`output`・`wait_for_exit`・`kill`・`release`を処理します。コマンドは`allowed_commands`（実行ファイル名または絶対パスの完全一致）に限定し、シェルを介さず、`workspace_root`配下の`cwd`だけを許可します。直前の`session/request_permission`でユーザーがallowを選んだ直後の1コマンドだけを受け付けます。出力は`max_output_bytes`で打ち切り、`max_seconds`で強制終了します。**サンドボックスはなく、ホストのOSユーザー権限で実行されます**（コンテナ・seccomp・ネットワーク制限なし）。信頼できるエージェントとコマンドだけを許可してください。
+
+### ハーネス状態の取得と通知
+
+`PluginService.GetHarness` はバインディングIDから保存済みのタスクジャーナル（`running` / `waiting_for_input` / `completed` / `failed` / `cancelled`、`pending`、`tool_calls`、`plan`、`report`、`failure`、`stop_reason`）を返します。ハーネスの呼び出しが成功するたびに `Notification.harness_task`（`binding_id`、`companion_id`、`task_id`、`status`、`stop_reason`）を配信します。これは再取得のヒントであり、正本は `GetHarness` のジャーナルです。失敗した呼び出しはRPCエラーになるため、状態は `GetHarness` で確認します。これはTask APIの最小読み取り面で、コンパニオン単位の一覧・質問・報告APIは未実装です。
+
+### タスク推論（`models` サービス）
+
+`models` を宣言・許可したハーネスは、ホスト経由でタスク用のモデルを呼べます。ホストはコンパニオンの `model_assignments.task` とホスト設定の接続・モデルを使い、`purpose: "task"`・`data_kinds: ["task"]` のデータ送信Grantを検証します。ゲストが指定した endpoint・options・model・tools は採用せず、`max_tokens` はホスト上限（8192）に丸め、出力は `task` 操作の上限（256,000バイト）で打ち切ります。タスク割当が未設定なら `model_unset`、Grantがなければ `permission_required` を返します。推論はキャンセル可能で、ホスト終了時も実行中の送信を止めます。
+
+### 外部ACPエージェント
+
+`target: "acp"` の entrypoint を持つパッケージは、`command` の子プロセスをACPエージェントとして起動します。シェルを介さず、環境変数は許可リスト（`PATH`・`HOME`・`USERPROFILE`・`LANG`・`LC_ALL`・`TERM`・`SYSTEMROOT`）だけを渡し、ホストの資格情報は渡しません。`workspace_root` が必須で、fs client capability はそのルートに限定し、terminal はバインディングのポリシーが有効な場合だけ advertise します。`initialize`・`session/new`・`session/prompt`・`session/update`・`session/request_permission` を共通ジャーナルへ写像し、`GetHarness` と通知はWasmハーネスと共通です。Cancel・無効化・再バインド・終了ではプロセスを停止して終端化し、initialize等の失敗は `acp_failed` としてタスクを終了します。旧ホストはACP entrypointを無効なmanifestとして拒否します。
 
 LLM実行は無効化・生成キャンセル・実行失敗で出力転送も終了し、受信が止まっていても実行管理枠を解放します。完了イベントなしで閉じたストリームは失敗として扱います。
 
-プラグイン契約はv2です。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。ウィンドウ監視はデスクトップ専用のため、ホストでは実行しません。
+プラグイン契約はv4です。Harnessの入力・イベントはACP v1の語彙（`Start` / `Respond` / `Cancel`、`Update` / `RequestPermission` / `Stop`）に変わりました。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。ウィンドウ監視はデスクトップ専用のため、ホストでは実行しません。
 
 音声通信の認可・セッション管理は実装済みですが、本番用の音声認識・合成エンジンは接続していません。エンジンがない状態では音声利用可能と通知しません。デスクトップUI、ファイル操作ワーカー、完成版の自律タスクループはこのホストの実装完了範囲に含みません。
 
@@ -74,4 +94,4 @@ cargo clippy -p ene-host -p ene-platform -p ene-plugin-runtime --all-targets --a
 
 会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、組み込みExtism、ローカルHTTPサーバーを使って認証・取り消し・停止・サイズ制限を検証します。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。有料の外部APIや実機音声エンジンはテストから呼びません。
 
-旧Luauプラグインは非対応です。Rust製プラグインは `ene-plugin-sdk` への依存を `ene-plugin` に変更します。共通契約はバージョン3です。manifestの `runtime` と `code_files` を削除し、`contract_version` を3に更新してください。操作・イベントのJSON形式とエクスポート関数名は維持しています。revisionが変わるため、再有効化とバインディングの再設定が必要です。保存データは削除しません。旧 `ENE_PLUGIN_RUNNER_BIN` / `ENE_PLUGIN_CACHE_DIR` は不要で、旧コードキャッシュを実行時に読みません。
+旧Luauプラグインは非対応です。Rust製プラグインは `ene-plugin-sdk` への依存を `ene-plugin` に変更します。共通契約はバージョン4です。ハーネスはACP v1の入力・イベントへ移行し、`contract_version` を4に更新してください。旧v3の保存ジャーナルは起動時に`host_interrupted`として終端化され、再開しません。revisionが変わるため、再有効化とバインディングの再設定が必要です。保存データは削除しません。旧 `ENE_PLUGIN_RUNNER_BIN` / `ENE_PLUGIN_CACHE_DIR` は不要で、旧コードキャッシュを実行時に読みません。

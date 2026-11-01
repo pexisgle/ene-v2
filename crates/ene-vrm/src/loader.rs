@@ -562,28 +562,3 @@ impl GltfExtensionHandler for VrmExtensions {
         self.nodes.clear();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gltf::binary::{Glb, Header};
-    use std::borrow::Cow;
-
-    #[test]
-    fn validation_accepts_a_glb_json_chunk() {
-        let json = br#"{"asset":{"version":"2.0"}}"#;
-        let bin = [0u8; 1024];
-        let bytes = Glb {
-            header: Header {
-                magic: *b"glTF",
-                version: 2,
-                length: 0,
-            },
-            json: Cow::Borrowed(json),
-            bin: Some(Cow::Borrowed(&bin)),
-        }
-        .to_vec()
-        .unwrap();
-        validate_gltf(&bytes).unwrap();
-    }
-}

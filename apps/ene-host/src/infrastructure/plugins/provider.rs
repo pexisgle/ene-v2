@@ -6,8 +6,9 @@ use crate::{
     llm::{self, Invocation, LlmProvider, Model, Policy},
 };
 use base64::Engine;
-use ene_plugin::{HttpChunk, HttpRequest};
-use futures_util::{StreamExt, stream::BoxStream};
+use ene_plugin::{Event, Failure, HttpChunk, HttpRequest, Operation, ServiceRequest};
+use futures_util::{StreamExt, TryFutureExt, stream::BoxStream};
+use tokio::sync::mpsc;
 
 #[cfg(test)]
 mod tests;

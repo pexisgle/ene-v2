@@ -1,5 +1,5 @@
 {
-  "contract_version": 3,
+  "contract_version": 4,
   "id": "reference",
   "name": "ene reference extensions",
   "version": "1.0.0",
@@ -22,7 +22,10 @@
       "provides": [
         "harness"
       ],
-      "uses": []
+      "uses": [
+        "models",
+        "tools"
+      ]
     },
     {
       "id": "speech",

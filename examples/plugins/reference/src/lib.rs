@@ -4,13 +4,145 @@ mod guest {
     use ene_plugin::*;
     use serde_json::{Value, json};
     use std::cell::RefCell;
-    thread_local! { static PENDING: RefCell<Option<String>> = const { RefCell::new(None) }; }
 
     #[plugin_fn]
     pub fn ene_initialize() -> FnResult<Json<Value>> {
         Ok(Json(
             json!({"events":true,"state":true,"consultation":true,"cancellation":true,"formats":["pcm_s16le"]}),
         ))
+    }
+
+    thread_local! { static STEP: RefCell<Step> = const { RefCell::new(Step::Idle) }; }
+    #[derive(Clone, Copy, PartialEq)]
+    enum Step {
+        Idle,
+        AwaitingPermission,
+    }
+
+    const PERMISSION: &str = "permission-1";
+
+    fn harness(input: &HarnessInput) -> Result<HarnessEvent, extism_pdk::Error> {
+        Ok(match input {
+            HarnessInput::Start { prompt } => {
+                STEP.with(|step| {
+                    if *step.borrow() != Step::Idle {
+                        return Err(extism_pdk::Error::msg("task already active"));
+                    }
+                    *step.borrow_mut() = Step::AwaitingPermission;
+                    Ok(())
+                })?;
+                let instruction = prompt
+                    .iter()
+                    .map(|block| match block {
+                        ContentBlock::Text(text) => text.text.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                emit_update(SessionUpdate::Plan(Plan {
+                    entries: vec![
+                        PlanEntry {
+                            content: "参照データを確認する".into(),
+                            priority: PlanEntryPriority::High,
+                            status: PlanEntryStatus::InProgress,
+                        },
+                        PlanEntry {
+                            content: "結果をまとめる".into(),
+                            priority: PlanEntryPriority::Medium,
+                            status: PlanEntryStatus::Pending,
+                        },
+                    ],
+                }))?;
+                emit_update(SessionUpdate::AgentMessageChunk(ContentChunk {
+                    content: ContentBlock::text(format!(
+                        "{instruction} の参照データを確認します。"
+                    )),
+                    message_id: Some("progress".into()),
+                }))?;
+                emit_update(SessionUpdate::ToolCall(ToolCall {
+                    tool_call_id: "tool-1".into(),
+                    title: "参照データを確認".into(),
+                    name: Some("reference.inspect".into()),
+                    kind: Some(ToolKind::Read),
+                    ..Default::default()
+                }))?;
+                HarnessEvent::RequestPermission {
+                    request_id: PERMISSION.into(),
+                    tool_call: ToolCallUpdate {
+                        tool_call_id: "tool-1".into(),
+                        ..Default::default()
+                    },
+                    options: vec![
+                        PermissionOption {
+                            option_id: "allow".into(),
+                            name: "許可する".into(),
+                            kind: PermissionOptionKind::AllowOnce,
+                        },
+                        PermissionOption {
+                            option_id: "deny".into(),
+                            name: "拒否する".into(),
+                            kind: PermissionOptionKind::RejectOnce,
+                        },
+                    ],
+                }
+            }
+            HarnessInput::Respond {
+                request_id,
+                outcome,
+            } => {
+                STEP.with(|step| {
+                    if *step.borrow() != Step::AwaitingPermission {
+                        return Err(extism_pdk::Error::msg("no permission request"));
+                    }
+                    if request_id != PERMISSION {
+                        return Err(extism_pdk::Error::msg("wrong permission request"));
+                    }
+                    *step.borrow_mut() = Step::Idle;
+                    Ok(())
+                })?;
+                let allowed = matches!(
+                    outcome,
+                    RequestPermissionOutcome::Selected { option_id } if option_id == "allow"
+                );
+                if allowed {
+                    emit_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                        tool_call_id: "tool-1".into(),
+                        status: Some(ToolCallStatus::InProgress),
+                        ..Default::default()
+                    }))?;
+                    emit_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                        tool_call_id: "tool-1".into(),
+                        status: Some(ToolCallStatus::Completed),
+                        content: Some(vec![ToolCallContent::Content {
+                            content: ContentBlock::text("参照データを確認しました。"),
+                        }]),
+                        ..Default::default()
+                    }))?;
+                    emit_update(SessionUpdate::AgentMessageChunk(ContentChunk {
+                        content: ContentBlock::text("参照タスクを完了しました。"),
+                        message_id: Some("report".into()),
+                    }))?;
+                    HarnessEvent::Stop {
+                        stop_reason: StopReason::EndTurn,
+                    }
+                } else {
+                    HarnessEvent::Stop {
+                        stop_reason: StopReason::Refusal,
+                    }
+                }
+            }
+            HarnessInput::Cancel => {
+                STEP.with(|step| *step.borrow_mut() = Step::Idle);
+                HarnessEvent::Stop {
+                    stop_reason: StopReason::Cancelled,
+                }
+            }
+        })
+    }
+
+    fn emit_update(update: SessionUpdate) -> Result<(), extism_pdk::Error> {
+        emit(Event::Harness {
+            event: HarnessEvent::Update { update },
+        })
     }
 
     #[plugin_fn]
@@ -42,65 +174,7 @@ mod guest {
                 }
             }
             Operation::Harness { input } => {
-                let event = PENDING.with(|pending| -> Result<HarnessEvent, extism_pdk::Error> {
-                    let mut pending = pending.borrow_mut();
-                    Ok(match input {
-                        HarnessInput::Cancel => {
-                            *pending = None;
-                            HarnessEvent::Cancelled
-                        }
-                        HarnessInput::Start { instruction } => {
-                            if pending.is_some() {
-                                return Err(extism_pdk::Error::msg("task already active"));
-                            }
-                            *pending = Some("model-1".into());
-                            HarnessEvent::ModelRequest {
-                                operation_id: "model-1".into(),
-                                request: GenerationRequest {
-                                    endpoint: "https://example.com/api".into(),
-                                    options: json!({}),
-                                    model: "reference".into(),
-                                    preamble: String::new(),
-                                    messages: vec![provider::ChatMessage {
-                                        role: "user".into(),
-                                        text: instruction,
-                                    }],
-                                    max_tokens: 64,
-                                    tools: vec![],
-                                },
-                            }
-                        }
-                        HarnessInput::Result { operation_id, .. } => {
-                            if pending.as_ref() != Some(&operation_id) {
-                                return Err(extism_pdk::Error::msg("wrong operation result"));
-                            }
-                            if operation_id == "model-1" {
-                                *pending = Some("tool-1".into());
-                                HarnessEvent::ToolRequest {
-                                    operation_id: "tool-1".into(),
-                                    name: "reference.inspect".into(),
-                                    arguments: json!({}),
-                                }
-                            } else {
-                                *pending = Some("question-1".into());
-                                HarnessEvent::Question {
-                                    question_id: "question-1".into(),
-                                    text: "参照タスクを完了しますか？".into(),
-                                }
-                            }
-                        }
-                        HarnessInput::Answer {
-                            question_id,
-                            answer,
-                        } => {
-                            if pending.as_ref() != Some(&question_id) {
-                                return Err(extism_pdk::Error::msg("wrong consultation"));
-                            }
-                            *pending = None;
-                            HarnessEvent::Completed { report: answer }
-                        }
-                    })
-                })?;
+                let event = harness(&input)?;
                 emit(Event::Harness { event })?;
             }
             Operation::Speech { input } => emit(match input {

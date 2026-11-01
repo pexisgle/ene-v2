@@ -22,6 +22,7 @@ pub(crate) enum InvocationInput {
     Conversation(Generation),
     ConnectionCheck(Generation),
     ModelList,
+    Task(Generation),
 }
 impl InvocationInput {
     fn operation(&self) -> OperationKind {
@@ -29,6 +30,7 @@ impl InvocationInput {
             Self::Conversation(_) => OperationKind::Conversation,
             Self::ConnectionCheck(_) => OperationKind::ConnectionCheck,
             Self::ModelList => OperationKind::ModelList,
+            Self::Task(_) => OperationKind::Task,
         }
     }
 }
@@ -99,9 +101,9 @@ impl Invocation {
     }
     pub fn generation(&self) -> Result<&Generation> {
         match &self.input {
-            InvocationInput::Conversation(request) | InvocationInput::ConnectionCheck(request) => {
-                Ok(request)
-            }
+            InvocationInput::Conversation(request)
+            | InvocationInput::ConnectionCheck(request)
+            | InvocationInput::Task(request) => Ok(request),
             InvocationInput::ModelList => Err(Error::invalid()),
         }
     }
@@ -164,7 +166,9 @@ impl Invocation {
                             && request.body().is_empty()
                             && path == format!("{base_path}/models")
                     }
-                    OperationKind::Conversation | OperationKind::ConnectionCheck => {
+                    OperationKind::Conversation
+                    | OperationKind::ConnectionCheck
+                    | OperationKind::Task => {
                         *request.method() == http::Method::POST
                             && (path == format!("{base_path}/chat/completions")
                                 || path == format!("{base_path}/responses"))

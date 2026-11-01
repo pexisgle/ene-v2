@@ -7,6 +7,7 @@ pub enum OperationKind {
     Conversation,
     ConnectionCheck,
     ModelList,
+    Task,
 }
 
 pub struct OperationSpec {
@@ -22,9 +23,15 @@ impl OperationKind {
             Self::Conversation => "conversation",
             Self::ConnectionCheck => "connection_check",
             Self::ModelList => "model_list",
+            Self::Task => "task",
         }
     }
-    pub const ALL: [Self; 3] = [Self::Conversation, Self::ConnectionCheck, Self::ModelList];
+    pub const ALL: [Self; 4] = [
+        Self::Conversation,
+        Self::ConnectionCheck,
+        Self::ModelList,
+        Self::Task,
+    ];
     pub const fn spec(self) -> OperationSpec {
         match self {
             Self::Conversation => OperationSpec {
@@ -44,6 +51,12 @@ impl OperationKind {
                 data: &["metadata"],
                 timeout: Duration::from_secs(30),
                 output_bytes: 8 * 1024 * 1024,
+            },
+            Self::Task => OperationSpec {
+                purpose: GrantPurpose::Task,
+                data: &["task"],
+                timeout: Duration::from_secs(300),
+                output_bytes: 256_000,
             },
         }
     }

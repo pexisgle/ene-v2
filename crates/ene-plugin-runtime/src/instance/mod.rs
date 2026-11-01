@@ -1,163 +1,20 @@
 //! Extism instances execute on Tokio's blocking pool; host capabilities stay explicit.
+mod invocation;
+mod supervisor;
+
+pub use invocation::{DenyServices, Services};
+pub use supervisor::Supervisor;
+
 use crate::{Error, Package, Result, contract::Events, limits::*};
 use ene_plugin::*;
-use futures_util::future::BoxFuture;
+use invocation::{ActiveGuard, Cancellation, Invocation, SLOTS, ene_emit, ene_service};
 use serde_json::Value;
 use std::{
-    cell::RefCell,
-    future::Future,
-    sync::{
-        Arc, LazyLock, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex, atomic::AtomicUsize},
     time::Duration,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio_util::sync::CancellationToken;
-
-pub trait Services: Send + Sync {
-    fn handle(&self, request: ServiceRequest)
-    -> BoxFuture<'_, std::result::Result<Value, Failure>>;
-    fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>>;
-}
-pub struct DenyServices;
-impl Services for DenyServices {
-    fn handle(&self, _: ServiceRequest) -> BoxFuture<'_, std::result::Result<Value, Failure>> {
-        Box::pin(async { Err(Failure::new("permission_required")) })
-    }
-    fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-// A cancelled compilation still holds its slot until the native compiler returns.
-static SLOTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(MAX_INSTANCES)));
-thread_local! {
-    static ACTIVE: RefCell<Option<Arc<Invocation>>> = const { RefCell::new(None) };
-}
-fn active() -> Result<Arc<Invocation>> {
-    ACTIVE
-        .with(|slot| slot.borrow().clone())
-        .ok_or(Error::Denied)
-}
-struct ActiveGuard(Option<Arc<Invocation>>);
-impl ActiveGuard {
-    fn set(value: Option<Arc<Invocation>>) -> Self {
-        Self(ACTIVE.with(|slot| slot.replace(value)))
-    }
-}
-impl Drop for ActiveGuard {
-    fn drop(&mut self) {
-        ACTIVE.with(|slot| *slot.borrow_mut() = self.0.take());
-    }
-}
-fn ene_service(
-    plugin: &mut extism::CurrentPlugin,
-    input: &[extism::Val],
-    output: &mut [extism::Val],
-    _: extism::UserData<()>,
-) -> std::result::Result<(), extism::Error> {
-    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-    if raw.len() > MAX_MESSAGE_BYTES {
-        return Err(Error::Protocol.into());
-    }
-    let invocation = active()?;
-    // Charge the bytes actually received and sent, not their re-encoded form.
-    invocation.charge(&invocation.bytes, raw.len(), MAX_SERVICE_BYTES)?;
-    let request = serde_json::from_slice(raw)?;
-    let result = invocation.service(request)?;
-    let bytes = serde_json::to_vec(&result)?;
-    if bytes.len() > MAX_CHUNK {
-        return Err(Error::Protocol.into());
-    }
-    invocation.charge(&invocation.bytes, bytes.len(), MAX_SERVICE_BYTES)?;
-    plugin.memory_set_val(&mut output[0], bytes)
-}
-fn ene_emit(
-    plugin: &mut extism::CurrentPlugin,
-    input: &[extism::Val],
-    _: &mut [extism::Val],
-    _: extism::UserData<()>,
-) -> std::result::Result<(), extism::Error> {
-    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-    if raw.len() > MAX_CHUNK {
-        return Err(Error::Protocol.into());
-    }
-    let invocation = active()?;
-    invocation.charge(&invocation.stream_bytes, raw.len(), MAX_STREAM_BYTES)?;
-    invocation.emit(serde_json::from_slice(raw)?)?;
-    Ok(())
-}
-struct Invocation {
-    services: Arc<dyn Services>,
-    declared: Vec<Service>,
-    calls: AtomicUsize,
-    bytes: AtomicUsize,
-    stream_bytes: AtomicUsize,
-    events: mpsc::Sender<Event>,
-    validator: Mutex<Events>,
-    cancel: CancellationToken,
-    runtime: tokio::runtime::Handle,
-}
-impl Invocation {
-    fn wait<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        self.runtime.block_on(async {
-            tokio::select! { biased;
-                _ = self.cancel.cancelled() => Err(Error::Cancelled),
-                _ = self.events.closed() => Err(Error::Cancelled),
-                result = tokio::time::timeout(EXECUTION_TIMEOUT, work) => result.unwrap_or(Err(Error::Timeout)),
-            }
-        })
-    }
-    fn service(&self, request: ServiceRequest) -> Result<std::result::Result<Value, Failure>> {
-        crate::contract::service_request(&request)?;
-        if self.calls.fetch_add(1, Ordering::Relaxed) >= MAX_SERVICE_CALLS {
-            return Err(Error::Protocol);
-        }
-        self.wait(async {
-            self.services.check().await?;
-            if !self.declared.contains(&request.service()) {
-                return Ok(Err(Failure::new("undeclared_service")));
-            }
-            let result = self.services.handle(request).await;
-            self.services.check().await?;
-            Ok(result)
-        })
-    }
-    fn emit(&self, event: Event) -> Result<()> {
-        self.validator
-            .lock()
-            .map_err(|_| Error::Unavailable)?
-            .accept(&event)?;
-        self.wait(async {
-            self.services.check().await?;
-            self.events.send(event).await.map_err(|_| Error::Cancelled)
-        })
-    }
-    fn charge(&self, total: &AtomicUsize, bytes: usize, limit: usize) -> Result<()> {
-        let total = total
-            .fetch_add(bytes, Ordering::Relaxed)
-            .checked_add(bytes)
-            .ok_or(Error::Protocol)?;
-        if total > limit {
-            return Err(Error::Protocol);
-        }
-        Ok(())
-    }
-}
-struct Cancellation {
-    token: CancellationToken,
-    interrupt: extism::CancelHandle,
-    armed: bool,
-}
-impl Drop for Cancellation {
-    fn drop(&mut self) {
-        self.token.cancel();
-        if self.armed {
-            let _ = self.interrupt.cancel();
-        }
-    }
-}
 
 pub struct Instance {
     plugin: Option<extism::Plugin>,
@@ -167,12 +24,19 @@ pub struct Instance {
     permit: Arc<OwnedSemaphorePermit>,
     pub capabilities: Value,
 }
-fn build(package: &Package, file: &str) -> Result<extism::Plugin> {
+fn extension_timeout(extension: Extension) -> Duration {
+    if extension == Extension::Harness {
+        HARNESS_EXECUTION_TIMEOUT
+    } else {
+        EXECUTION_TIMEOUT
+    }
+}
+fn build(package: &Package, file: &str, timeout: Duration) -> Result<extism::Plugin> {
     let code = package.code(file)?.to_vec();
     let mut manifest = extism::Manifest::new([extism::Wasm::data(code)])
         .with_allowed_hosts(std::iter::empty())
         .with_memory_max(WASM_MEMORY_PAGES)
-        .with_timeout(EXECUTION_TIMEOUT);
+        .with_timeout(timeout);
     // Extism vars are not part of the manifest capability; disable writes.
     manifest.memory.max_var_bytes = Some(0);
     // Extism instantiates the kernel, the linked guest and the callable guest.
@@ -225,6 +89,16 @@ impl Instance {
             return Err(Error::Unsupported);
         }
         let file = entry.file.clone();
+        // A harness entrypoint can run a whole task segment; other extensions
+        // keep the short call deadline.
+        let timeout = extension_timeout(
+            entry
+                .provides
+                .iter()
+                .copied()
+                .find(|extension| *extension == Extension::Harness)
+                .unwrap_or(Extension::Llm),
+        );
         let permit = SLOTS
             .clone()
             .try_acquire_owned()
@@ -236,7 +110,7 @@ impl Instance {
                 return Err(Error::Cancelled);
             }
             package.verify()?;
-            let plugin = build(&package, &file)?;
+            let plugin = build(&package, &file, timeout)?;
             if token.is_cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -326,10 +200,11 @@ impl Instance {
         {
             *generation = self.generation;
         }
+        let timeout = extension_timeout(operation.extension());
         tokio::select! { biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             _ = events.closed() => return Err(Error::Cancelled),
-            result = tokio::time::timeout(EXECUTION_TIMEOUT, services.check()) => result.map_err(|_| Error::Timeout)??,
+            result = tokio::time::timeout(timeout, services.check()) => result.map_err(|_| Error::Timeout)??,
         }
         let input = serde_json::to_vec(&operation)?;
         let context = Arc::new(Invocation {
@@ -341,18 +216,19 @@ impl Instance {
             events,
             validator: Mutex::new(Events::new(&operation)),
             cancel: cancel.child_token(),
+            timeout,
             runtime: tokio::runtime::Handle::current(),
         });
         let result = tokio::select! { biased;
             _ = context.events.closed() => Err(Error::Cancelled),
-            result = self.call("ene_invoke", input, Some(context.clone()), cancel, EXECUTION_TIMEOUT) => result,
+            result = self.call("ene_invoke", input, Some(context.clone()), cancel, timeout) => result,
         };
         let result = async {
             let value = result?;
             context.validator.lock().map_err(|_| Error::Unavailable)?.finish()?;
             tokio::select! { biased;
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
-                result = tokio::time::timeout(EXECUTION_TIMEOUT, context.services.check()) => result.map_err(|_| Error::Timeout)??,
+                result = tokio::time::timeout(timeout, context.services.check()) => result.map_err(|_| Error::Timeout)??,
             }
             Ok(value)
         }.await;
@@ -388,41 +264,5 @@ impl Instance {
             }
         }
         Ok(())
-    }
-}
-#[derive(Clone, Default)]
-pub struct Supervisor {
-    tracker: tokio_util::task::TaskTracker,
-    tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
-}
-impl Supervisor {
-    pub fn spawn(
-        &self,
-        task: impl std::future::Future<Output = ()> + Send + 'static,
-    ) -> Result<()> {
-        let mut tasks = self.tasks.lock().map_err(|_| Error::Unavailable)?;
-        if self.tracker.is_closed() {
-            return Err(Error::Unavailable);
-        }
-        tasks.retain(|t| !t.is_finished());
-        if tasks.len() >= MAX_INSTANCES {
-            return Err(Error::Unavailable);
-        }
-        tasks.push(self.tracker.spawn(task).abort_handle());
-        Ok(())
-    }
-    pub async fn shutdown(&self) {
-        self.tracker.close();
-        if tokio::time::timeout(Duration::from_secs(4), self.tracker.wait())
-            .await
-            .is_err()
-        {
-            if let Ok(tasks) = self.tasks.lock() {
-                for task in tasks.iter() {
-                    task.abort();
-                }
-            }
-            self.tracker.wait().await;
-        }
     }
 }

@@ -59,11 +59,11 @@ pub fn evaluate(
         "provider_unavailable"
     } else if policy.is_some_and(|p| p.requires_credentials) && !state.credential_present {
         "credential_missing"
-    } else if operation == OperationKind::Conversation
+    } else if matches!(operation, OperationKind::Conversation | OperationKind::Task)
         && !configuration
             .companions
             .get(companion)
-            .and_then(|c| c.model_assignments.companion.as_option())
+            .and_then(|c| assignment(&c.model_assignments, operation))
             .is_some_and(|assignment| {
                 assignment.connection_id == connection.id
                     && validate_model_id(&assignment.model_id).is_ok()
@@ -85,6 +85,18 @@ pub fn evaluate(
         ..Default::default()
     }
 }
+/// The model slot an operation is allowed to use.
+fn assignment(
+    assignments: &ModelAssignments,
+    operation: OperationKind,
+) -> Option<&ModelAssignment> {
+    match operation {
+        OperationKind::Conversation => assignments.companion.as_option(),
+        OperationKind::Task => assignments.task.as_option(),
+        OperationKind::ConnectionCheck | OperationKind::ModelList => None,
+    }
+}
+
 pub fn connection(c: &Configuration, id: &str) -> Option<ProviderConnection> {
     c.settings.connections.iter().find(|p| p.id == id).cloned()
 }
@@ -276,6 +288,69 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn task_inference_requires_the_task_assignment() {
+        let mut c = configuration();
+        c.settings.connections.push(ProviderConnection {
+            id: "p".into(),
+            kind: "llm".into(),
+            adapter: "test".into(),
+            endpoint: "https://gateway.test".into(),
+            ..Default::default()
+        });
+        let connection = c.settings.connections[0].clone();
+        let policy = Policy {
+            revision: "v1".into(),
+            fingerprint: json!({}),
+            destinations: vec!["https://gateway.test".into()],
+            requires_credentials: false,
+            environment_variable: None,
+        };
+        let mut task_grant = c.grants[0].clone();
+        task_grant.id = "task".into();
+        task_grant.purpose = GrantPurpose::Task;
+        task_grant.data_kinds = vec!["task".into()];
+        c.grants.push(task_grant);
+        let state = ExecutionState {
+            credential_present: false,
+            healthy: true,
+            stopping: false,
+            busy: false,
+        };
+        let missing = evaluate(
+            &c,
+            "c",
+            &connection,
+            OperationKind::Task,
+            Some(&policy),
+            state,
+        );
+        assert_eq!(missing.dependency, "model_unset");
+        assert!(!missing.runnable);
+        c.companions
+            .get_mut("c")
+            .unwrap()
+            .model_assignments
+            .get_or_insert_default()
+            .task = Some(ModelAssignment {
+            connection_id: "p".into(),
+            model_id: "task-model".into(),
+            ..Default::default()
+        })
+        .into();
+        let ready = evaluate(
+            &c,
+            "c",
+            &connection,
+            OperationKind::Task,
+            Some(&policy),
+            state,
+        );
+        assert_eq!(ready.dependency, "ready");
+        assert_eq!(ready.authorization, "granted");
+        assert!(ready.runnable);
+    }
+
     #[test]
     fn permission_covers_all_destinations_data_purpose_and_implementation() {
         let mut c = configuration();

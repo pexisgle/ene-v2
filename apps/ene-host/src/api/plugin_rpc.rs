@@ -110,4 +110,31 @@ impl w::PluginService for PluginRpc {
                 .map_err(failure)?,
         )
     }
+    async fn get_harness(
+        &self,
+        _: RequestContext,
+        req: ServiceRequest<'_, w::Id>,
+    ) -> ServiceResult<w::HarnessState> {
+        let binding_id = req.id.to_owned();
+        let state = self
+            .app
+            .application
+            .harness_state(binding_id.clone())
+            .await
+            .map_err(failure)?
+            .ok_or_else(|| {
+                failure(crate::domain::Error::new(
+                    crate::domain::ErrorKind::NotFound,
+                ))
+            })?;
+        Response::ok(w::HarnessState {
+            binding_id,
+            state: ene_rpc::JsonDocument {
+                json: state.to_string(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        })
+    }
 }

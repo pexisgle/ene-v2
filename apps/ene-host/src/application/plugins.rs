@@ -55,6 +55,15 @@ impl HostApplication {
         );
         Ok(())
     }
+    pub async fn harness_state(
+        &self,
+        binding_id: String,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        match &self.0.plugins {
+            Some(plugins) => plugins.harness(binding_id).await,
+            None => Ok(None),
+        }
+    }
     pub async fn invoke_plugin(
         &self,
         input: ene_rpc::PluginInvocation,
@@ -111,6 +120,28 @@ impl HostApplication {
                     )),
                 );
             }
+        }
+        // Harness turns publish a compact hint; the journal stays authoritative.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&result.result.json)
+            && let (Some(task_id), Some(status)) =
+                (value["task_id"].as_str(), value["status"].as_str())
+        {
+            generation::publish(
+                &mut boundary,
+                self,
+                Some(&binding.companion_id),
+                ene_rpc::notification::Event::HarnessTask(Box::new(
+                    ene_rpc::HarnessTaskNotification {
+                        binding_id: binding.id.clone(),
+                        companion_id: binding.companion_id.clone(),
+                        task_id: task_id.into(),
+                        status: status.into(),
+                        stop_reason: value["stop_reason"].as_str().map(str::to_owned),
+                        failure: None,
+                        ..Default::default()
+                    },
+                )),
+            );
         }
         Ok(result)
     }

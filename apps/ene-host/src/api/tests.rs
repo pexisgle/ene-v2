@@ -1816,3 +1816,79 @@ async fn connect_disconnect_keeps_accepted_generation_and_explicit_stop_cancels_
     server.abort();
     f.app.application.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn task_inference_uses_the_task_assignment_and_grant() {
+    use crate::ports::inference::InferenceRequest;
+    use tokio_util::sync::CancellationToken;
+
+    let mut f = ConversationFixture::new().await;
+    let inference = f.app.application.inference();
+    let request = |companion: &str| InferenceRequest {
+        companion_id: companion.into(),
+        preamble: "system".into(),
+        messages: vec![(true, "hello".into())],
+        max_tokens: 128,
+    };
+    let missing = inference
+        .complete(request(&f.companion), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.reason, Some("model_unset"));
+
+    assert_eq!(
+        mutate(
+            &f.app,
+            "PATCH",
+            &format!("Companion/{}", f.companion),
+            json!({
+                "revision": 2,
+                "model_assignments": {
+                    "task": {"connection_id": f.connection, "model_id": "task-model"}
+                }
+            }),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &f.app,
+            "POST",
+            "Grants",
+            json!({
+                "companion_id": f.companion,
+                "connection_id": f.connection,
+                "kind": "data_transfer",
+                "consent": {
+                    "settings_revision": 2,
+                    "provider_revision": "builtin-openai-v2-model-catalog"
+                },
+                "destinations": ["https://api.openai.com", "https://models.dev"],
+                "data_kinds": ["task"],
+                "purpose": "task"
+            }),
+            Some("task-grant")
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let task = {
+        let inference = inference.clone();
+        let companion = f.companion.clone();
+        tokio::spawn(async move {
+            inference
+                .complete(request(&companion), CancellationToken::new())
+                .await
+        })
+    };
+    let generation = f.started().await;
+    assert_eq!(generation.model(), "task-model");
+    assert_eq!(generation.preamble(), "system");
+    f.finish.add_permits(1);
+    assert_eq!(task.await.unwrap().unwrap(), "途中");
+}

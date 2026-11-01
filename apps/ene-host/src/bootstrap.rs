@@ -55,7 +55,8 @@ pub(crate) fn application_with_plugins(
         providers,
         std::sync::Arc::new(super::infrastructure::credentials::Store::default()),
         shutdown,
-        Some(plugins),
+        Some(plugins.clone()),
     );
+    plugins.attach_inference(application.inference());
     App::new(application, token).with_device_store(devices)
 }

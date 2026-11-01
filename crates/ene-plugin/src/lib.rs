@@ -7,9 +7,13 @@ pub mod provider;
 mod window;
 
 pub use api::{
-    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, DesktopCapabilities,
-    DesktopOperation, Event, GenerationRequest, HarnessEvent, HarnessInput, HttpChunk, HttpRequest,
-    LlmCapabilities, Operation, ResourceHandle, ServiceRequest, SpeechInput, ToolDefinition,
+    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, ContentBlock, ContentChunk,
+    DesktopCapabilities, DesktopOperation, Event, GenerationRequest, HarnessEvent, HarnessInput,
+    HttpChunk, HttpRequest, LlmCapabilities, MessageId, ModelResponse, Operation, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    RequestId, RequestPermissionOutcome, ResourceHandle, ServiceRequest, SessionUpdate,
+    SpeechInput, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation,
+    ToolCallStatus, ToolCallUpdate, ToolDefinition, ToolKind,
 };
 pub use failure::Failure;
 pub use manifest::{
