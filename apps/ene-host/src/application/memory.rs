@@ -532,3 +532,31 @@ fn consolidation_payload(
     })
     .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_consolidation_output_is_distinct_from_no_change() {
+        assert!(parse_consolidation("not json").is_err());
+        assert!(parse_consolidation(r#"{"memories":[] ,"reason":"no_change"}"#).is_ok());
+        assert!(
+            parse_consolidation(
+                r#"{"memories":[{"content":"経験","acquisition":"direct_experience"}]}"#
+            )
+            .is_ok()
+        );
+        // An unknown top-level field is not silently applied as a state change.
+        assert!(parse_consolidation(r#"{"memories":[],"state":{}}"#).is_err());
+    }
+
+    #[test]
+    fn consolidation_ids_cover_the_range_and_method() {
+        let one = consolidation_operation_id("a", 1, 5);
+        assert_eq!(one, consolidation_operation_id("a", 1, 5));
+        assert_ne!(one, consolidation_operation_id("a", 2, 5));
+        assert_ne!(one, consolidation_operation_id("b", 1, 5));
+        assert_ne!(one, consolidation_operation_id("a", 1, 6));
+    }
+}

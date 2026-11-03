@@ -819,6 +819,32 @@ mod tests {
                 assert_eq!(result.fts, "ok");
                 assert_eq!(result.memories.len(), 1);
                 assert_eq!(result.memories[0].id, first_for_check);
+                let recent = search(
+                    db,
+                    "a",
+                    "柚子ジャム",
+                    None,
+                    None,
+                    10,
+                    false,
+                    Some("2025-01-01T00:00:00Z"),
+                    None,
+                    "now",
+                )?;
+                assert_eq!(recent.memories.len(), 1);
+                let future = search(
+                    db,
+                    "a",
+                    "柚子ジャム",
+                    None,
+                    None,
+                    10,
+                    false,
+                    Some("2027-01-01T00:00:00Z"),
+                    None,
+                    "now",
+                )?;
+                assert!(future.memories.is_empty());
                 let other = search(
                     db,
                     "b",
