@@ -2,18 +2,20 @@
 //! calls and session log.
 
 use super::messages;
+use super::mind::{BoundServe, MindBound, MindCallScope, operation_id, turn_sources};
 use super::{Command, Event, Signal};
 use crate::domain::{Error, ErrorKind, OperationKind};
 use ene_rpc as w;
 use rig_core::completion::Message;
 use rig_core::conversation::{Author, AuthorKind, MessageId, RequestId};
+use rig_core::serve::ErasedHandler;
 use rig_ecs::WriteLogs;
 use rig_ecs::prelude::*;
 use rig_ecs::session_log::{SessionLog, SessionStore};
 use rig_memory::DirStore;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
@@ -81,6 +83,12 @@ fn run_app(
         .add_systems(Last, confirm_deliveries.after(WriteLogs))
         .add_systems(Last, report_log_failure.after(WriteLogs))
         .add_systems(AgentPass, enforce_output_limit.in_set(ReviewSystems::Edit))
+        .add_systems(
+            AgentPass,
+            bind_mind_calls
+                .in_set(Stage::Prepare)
+                .in_set(PrepareSystems::Edit),
+        )
         .add_observer(on_turn_settled)
         .add_observer(on_message_started)
         .add_tool(CurrentTime);
@@ -297,9 +305,10 @@ fn apply_commands(world: &mut World) {
     }
 }
 
-/// The tools one parent agent may call. Only the bound parent gets the mind
-/// tools; any other conversation keeps the harmless current_time tool.
-fn tool_access(mind_tools: bool, bridge_bound: bool) -> ToolAccess {
+/// The tools one agent may call. Every root companion gets the mind tools,
+/// each call bound to its own agent; a kernel without the host bridge keeps
+/// every registered tool for tests.
+fn tool_access(mind_tools: bool, bridge_present: bool) -> ToolAccess {
     if mind_tools {
         ToolAccess::Only(vec![
             "current_time".into(),
@@ -307,7 +316,7 @@ fn tool_access(mind_tools: bool, bridge_bound: bool) -> ToolAccess {
             "mind_read".into(),
             "mind_update".into(),
         ])
-    } else if bridge_bound {
+    } else if bridge_present {
         ToolAccess::Only(vec!["current_time".into()])
     } else {
         ToolAccess::All
@@ -335,19 +344,19 @@ fn connect(
                     reason: Some("the model configuration changed".into()),
                 });
             }
-            let bound = world
+            let bridge_present = world
                 .get_resource::<crate::rig::mind::MindBridge>()
-                .is_some_and(|bridge| bridge.bound());
-            let access = tool_access(mind_tools, bound);
+                .is_some();
+            let access = tool_access(mind_tools, bridge_present);
             world
                 .entity_mut(entity)
                 .insert((SystemPrompt(prompt), model, access));
         }
         None => {
-            let bound = world
+            let bridge_present = world
                 .get_resource::<crate::rig::mind::MindBridge>()
                 .is_some();
-            let access = tool_access(mind_tools, bound);
+            let access = tool_access(mind_tools, bridge_present);
             // A fresh app spawns one agent with a random id; it has no
             // conversation and is not a companion. The first companion
             // replaces it rather than leaving a second parent behind.
@@ -368,23 +377,6 @@ fn connect(
                 model,
                 access,
             ));
-        }
-    }
-    if mind_tools {
-        if let Some(bridge) = world.get_resource::<crate::rig::mind::MindBridge>() {
-            bridge.bind(companion.clone());
-        }
-        // Only the bound parent gets the mind tools. Other parent agents keep
-        // the harmless current_time tool.
-        let mut other =
-            world.query_filtered::<(Entity, &AgentId), (With<Agent>, Without<ActiveTurn>)>();
-        let strip = other
-            .iter(world)
-            .filter(|(_, id)| id.0 != companion)
-            .map(|(entity, _)| entity)
-            .collect::<Vec<_>>();
-        for entity in strip {
-            world.entity_mut(entity).insert(tool_access(false, true));
         }
     }
 }
@@ -610,6 +602,55 @@ fn take_new(
         .into_iter()
         .filter(|message| emitted.0.insert(message.id.clone()))
         .collect()
+}
+
+const MIND_TOOLS: [&str; 3] = ["mind_recall", "mind_read", "mind_update"];
+
+/// Wraps a mind tool call's handler with the immutable facts of its call: the
+/// calling agent, the turn, the provider's call id and the saved inputs that
+/// turn answers. The tool and host never consult a shared "current owner".
+fn bind_mind_calls(
+    mut commands: Commands,
+    calls: Query<(Entity, &ToolRequest, &ForAgent, &CallHandler), Without<MindBound>>,
+    agents: Query<(
+        &AgentId,
+        &Conversation,
+        Option<&ActiveTurn>,
+        Option<&SpawnedBy>,
+    )>,
+    turns: Query<&Turn>,
+) {
+    for (entity, request, for_agent, handler) in &calls {
+        let name = request.call.function.name.as_str();
+        if !MIND_TOOLS.contains(&name) {
+            continue;
+        }
+        let Ok((id, conversation, Some(active), spawned)) = agents.get(for_agent.0) else {
+            continue;
+        };
+        let Ok(turn) = turns.get(active.turn()) else {
+            continue;
+        };
+        let turn_start = turn.start.to_string();
+        let call_id = request.call.id.wire().into_owned();
+        let scope = Arc::new(MindCallScope {
+            companion: id.0.clone(),
+            operation_id: operation_id(&id.0, &turn_start, &call_id),
+            turn_start,
+            call_id,
+            sources: turn_sources(conversation, turn.start),
+            // Root companions are the parent agents. A child agent's call is
+            // denied here even if it somehow sees the tool definition.
+            allowed: spawned.is_none(),
+        });
+        let wrapper = ErasedHandler::new(BoundServe {
+            inner: handler.0.0.clone(),
+            scope: scope.clone(),
+        });
+        commands
+            .entity(entity)
+            .insert((CallHandler(rig_ecs::effects::Handler(wrapper)), MindBound));
+    }
 }
 
 /// Confirms each delivery only once the frame's log write succeeded and the

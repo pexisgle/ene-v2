@@ -148,7 +148,7 @@ impl Store {
         operation_id: String,
         request_hash: String,
         request: crate::domain::mind::MindUpdateRequest,
-        source: crate::domain::mind::SourceRef,
+        sources: Vec<crate::domain::mind::SourceRef>,
         actor: String,
         now: String,
     ) -> crate::ports::Result<crate::domain::mind::MindUpdateResult> {
@@ -159,7 +159,7 @@ impl Store {
                 &operation_id,
                 &request_hash,
                 &request,
-                &source,
+                &sources,
                 &actor,
                 &now,
             )

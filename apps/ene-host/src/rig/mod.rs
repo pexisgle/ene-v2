@@ -674,6 +674,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mind_tool_calls_are_bound_to_their_own_companion() {
+        let temp = tempfile::tempdir().unwrap();
+        let (calls, mut calls_rx) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = std::sync::Arc::new(super::mind::MindBridge::new(calls));
+        let (runtime, mut received) = Runtime::start_with(temp.path().join("rig"), {
+            let bridge = bridge.clone();
+            move |app| {
+                app.insert_resource((*bridge).clone());
+                app.add_tool(super::mind::MindUpdate(bridge.clone()));
+                app.add_tool(super::mind::MindRead(bridge.clone()));
+                app.add_tool(super::mind::MindRecall(bridge));
+            }
+        })
+        .unwrap();
+        let script = || {
+            MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call(
+                        "call-mind",
+                        "mind_update",
+                        json!({"expected_revision": 1, "memories": []}),
+                    ),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+                vec![
+                    MockStreamEvent::text("了解しました。"),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+            ])
+        };
+        runtime
+            .connect(
+                "companion-a".into(),
+                "A".into(),
+                connection_of(script()),
+                true,
+            )
+            .unwrap();
+        runtime
+            .deliver("companion-a".into(), "Aの話".into(), "request-a".into())
+            .await
+            .unwrap();
+        // Connecting a second parent must not replace the first one once its
+        // conversation carries the accepted input.
+        runtime
+            .connect(
+                "companion-b".into(),
+                "B".into(),
+                connection_of(script()),
+                true,
+            )
+            .unwrap();
+        runtime
+            .deliver("companion-b".into(), "Bの話".into(), "request-b".into())
+            .await
+            .unwrap();
+        let mut seen = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let call = tokio::time::timeout(Duration::from_secs(5), calls_rx.recv())
+                .await
+                .expect("mind call")
+                .expect("mind channel");
+            assert!(!call.scope.sources.is_empty());
+            assert!(
+                call.scope
+                    .turn_start
+                    .starts_with(|c: char| c.is_ascii_digit())
+                    || !call.scope.turn_start.is_empty()
+            );
+            seen.insert(
+                call.scope.companion.clone(),
+                call.scope.operation_id().to_owned(),
+            );
+            call.reply.send(Ok("ok".into())).unwrap();
+        }
+        assert!(seen.contains_key("companion-a"));
+        assert!(seen.contains_key("companion-b"));
+        assert_ne!(seen["companion-a"], seen["companion-b"]);
+        for _ in 0..2 {
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match next(&mut received).await {
+                        Event::TurnFinished { .. } => break,
+                        Event::StorageFailed { reason } | Event::Fatal { reason } => {
+                            panic!("kernel failed: {reason}")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await;
+        }
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_mind_prompt_change_reaches_the_next_model_call_without_a_reconnect() {
         use rig_core::completion::Message as RigMessage;
         let temp = tempfile::tempdir().unwrap();

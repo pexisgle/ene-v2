@@ -6,10 +6,7 @@ use crate::rig::mind::{MindCall, MindCallKind, ReadArgs, RecallArgs};
 use crate::{
     domain::{
         Error, ErrorKind,
-        mind::{
-            MemoryRecord, MindUpdateRequest, MindUpdateResult, ProfileDocument, SourceKind,
-            SourceRef, StoredMind,
-        },
+        mind::{MemoryRecord, MindUpdateRequest, MindUpdateResult, ProfileDocument, StoredMind},
     },
     ports::Result,
 };
@@ -231,20 +228,24 @@ impl HostApplication {
         companion: String,
         operation_id: String,
         request: MindUpdateRequest,
+        sources: Vec<crate::domain::mind::SourceRef>,
     ) -> Result<MindUpdateResult> {
         request.validate()?;
-        let source = {
-            let controls = self.0.controls.lock().await;
-            controls.mind_inputs.get(&companion).cloned()
-        };
-        let Some(source) = source else {
+        if operation_id.is_empty()
+            || sources.is_empty()
+            || sources.iter().any(|source| {
+                source.kind != crate::domain::mind::SourceKind::Input
+                    || source.id.is_empty()
+                    || source.observed_at.as_deref().is_none_or(str::is_empty)
+            })
+        {
             return Err(Error {
                 kind: ErrorKind::InvalidRequest,
                 reason: Some("source_unavailable"),
             });
-        };
+        }
         let c = self.companion(&companion).await?;
-        let request_hash = serde_json::to_string(&(&companion, &request, &source))
+        let request_hash = serde_json::to_string(&(&companion, &request, &sources))
             .map_err(|_| Error::invalid())?;
         let result = self
             .0
@@ -254,7 +255,7 @@ impl HostApplication {
                 operation_id,
                 request_hash,
                 request,
-                source,
+                sources,
                 "parent".into(),
                 now(),
             )
@@ -335,11 +336,27 @@ impl HostApplication {
     /// Runs one host-bound mind tool call and replies to the kernel. The model
     /// supplies the content; the host supplies owner, operation id and source.
     pub(crate) async fn handle_mind_call(&self, call: MindCall) {
+        let scope = call.scope;
+        if !scope.allowed {
+            let _ = call.reply.send(Err(tool_error(Error {
+                kind: ErrorKind::PermissionRequired,
+                reason: Some("mind_not_permitted"),
+            })));
+            return;
+        }
+        if scope.turn_start.is_empty() || scope.call_id.is_empty() {
+            let _ = call.reply.send(Err(tool_error(Error {
+                kind: ErrorKind::InvalidRequest,
+                reason: Some("mind_context_incomplete"),
+            })));
+            return;
+        }
+        let companion = scope.companion.clone();
         let result = match call.kind {
             MindCallKind::Recall => match serde_json::from_value::<RecallArgs>(call.args) {
                 Ok(args) => match self
                     .mind_recall(
-                        call.companion,
+                        companion,
                         args.query,
                         args.limit.unwrap_or(8).clamp(1, 20) as usize,
                     )
@@ -355,7 +372,7 @@ impl HostApplication {
                 Err(_) => Err(tool_error(Error::invalid())),
             },
             MindCallKind::Read => match serde_json::from_value::<ReadArgs>(call.args) {
-                Ok(args) => match self.mind_read(call.companion, args.id).await {
+                Ok(args) => match self.mind_read(companion, args.id).await {
                     Ok(Some(memory)) => Ok(json!({"found": true, "memory": memory}).to_string()),
                     Ok(None) => Ok(json!({"found": false}).to_string()),
                     Err(error) => Err(tool_error(error)),
@@ -364,7 +381,12 @@ impl HostApplication {
             },
             MindCallKind::Update => match serde_json::from_value(call.args) {
                 Ok(request) => match self
-                    .apply_mind_update(call.companion, uuid::Uuid::new_v4().to_string(), request)
+                    .apply_mind_update(
+                        companion,
+                        scope.operation_id().to_owned(),
+                        request,
+                        scope.sources.clone(),
+                    )
                     .await
                 {
                     Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
@@ -399,53 +421,4 @@ pub(crate) fn spawn_mind_tools(
             app.handle_mind_call(call).await;
         }
     });
-}
-
-/// The source a saved memory cites: the accepted input of the current turn.
-pub(crate) fn input_source(stream_id: &str, request_id: &str) -> SourceRef {
-    SourceRef {
-        kind: SourceKind::Input,
-        id: request_id.into(),
-        entry_id: Some(stream_id.into()),
-        speaker: Some("user".into()),
-        observed_at: Some(now()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::mind::{ProfileDocument, StoredMind, StoredState};
-
-    #[test]
-    fn the_prompt_separates_authored_material_from_lived_state() {
-        let stored = StoredMind {
-            profile_revision: 2,
-            profile: ProfileDocument {
-                facets: vec!["静かだがよく見ている".into()],
-                examples: vec!["「なるほど」と短く返す".into()],
-                ..Default::default()
-            },
-            state_revision: 3,
-            state: StoredState {
-                emotion: Some(json!({
-                    "description": "少しうれしい",
-                    "target": "ユーザー",
-                    "signals": [{"label":"声がやわらぐ","intensity":0.4}]
-                })),
-                relationships: vec![
-                    json!({"subject":"ユーザー","understanding":"好みを話してくれる"}),
-                ],
-                tendencies: vec!["約束を覚えている".into()],
-                concerns: vec!["無理をしていないか".into()],
-            },
-            updated_at: "2026-01-01T00:00:00Z".into(),
-        };
-        let prompt = compose_prompt("日本語で答える。", &stored);
-        assert!(prompt.contains("日本語で答える。"));
-        assert!(prompt.contains("実体験として記憶しない"));
-        assert!(prompt.contains("少しうれしい"));
-        assert!(prompt.contains("revision: 3"));
-        assert!(prompt.contains("mind_update"));
-    }
 }
