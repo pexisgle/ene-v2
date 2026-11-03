@@ -1,5 +1,7 @@
 # 心：人格・経験・自動記憶・感情の統合
 
+> 2026-11-03のステップ3実装では、整理と埋め込みを`purpose=memory, data=["memory"]`のGrantとコンパニオン接続へ分離し、自動想起はローカルSQLiteの語句検索（配送前に外部埋め込みを待たない）、意味検索は親の`mind_recall`とした。索引はFTS5とSQLite格納ベクトル（RigのOpenAI embedding wireを認可付きトランスポートで利用）で、LanceDBは規模・評価に応じた置換候補である。実装・受入の詳細は[Alpha計画](../alpha.md)を正本とする。
+
 状態：Alphaの採用設計（2026-11-03）。モデル品質・性能の達成を宣言するものではない。範囲と実装順序は[Alpha計画](../alpha.md)、実行は[Rig上の構成](../architecture.md)、出典と採否は[参考元](../references.md#alpha-mind)を参照する。
 
 ## 1. 目的と非目標
