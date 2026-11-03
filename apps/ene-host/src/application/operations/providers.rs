@@ -79,7 +79,7 @@ impl HostApplication {
         let app = self.clone();
         let (mut reply, response) = oneshot::channel();
         // Registration and task ownership happen under the same controls lock as shutdown.
-        self.0.generations.spawn(async move {
+        self.0.background.spawn(async move {
             let result = tokio::select! {
                 biased;
                 _ = reply.closed() => Err(Error::new(ErrorKind::PermissionRequired)),

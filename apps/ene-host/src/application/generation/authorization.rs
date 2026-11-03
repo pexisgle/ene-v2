@@ -1,11 +1,11 @@
 use super::*;
 
-pub(in crate::application) struct AuthorizedContext {
+pub(crate) struct AuthorizedContext {
     pub binding: ProviderBinding,
     pub secret: Option<Secret>,
 }
 
-pub(in crate::application) fn authorize(
+pub(crate) fn authorize(
     app: &HostApplication,
     configuration: &Configuration,
     controls: &Controls,
@@ -50,7 +50,7 @@ pub(in crate::application) fn authorize(
     Ok(AuthorizedContext { binding, secret })
 }
 
-pub(in crate::application) fn register(
+pub(crate) fn register(
     controls: &mut Controls,
     id: String,
     companion: String,
@@ -74,45 +74,67 @@ pub(in crate::application) fn register(
 }
 
 /// Linearization gate shared by outbound sends and successful completion.
-pub(in crate::application) fn check_run(
-    app: &HostApplication,
-    controls: &Controls,
-    id: &str,
-) -> Result<(), Error> {
-    let c = controls.config.as_ref().ok_or_else(Error::unavailable)?;
+pub(crate) fn check_run(app: &HostApplication, controls: &Controls, id: &str) -> Result<(), Error> {
     let run = controls
         .running
         .get(id)
         .ok_or_else(|| Error::new(ErrorKind::PermissionRequired))?;
-    if *run.cancel.borrow() || *app.0.shutdown.borrow() || controls.failed() {
+    if *run.cancel.borrow() {
         return Err(Error::new(ErrorKind::PermissionRequired));
     }
-    let connection = rules::connection(c, &run.connection)
+    check_access(
+        app,
+        controls,
+        &run.companion,
+        &run.connection,
+        &run.policy,
+        run.nonce.as_deref(),
+        run.operation,
+    )
+}
+
+/// Whether the configuration still permits this operation under the same
+/// connection, policy and credential as when it was accepted. Used by every
+/// outbound send and by a kernel turn's authorization callback.
+pub(crate) fn check_access(
+    app: &HostApplication,
+    controls: &Controls,
+    companion: &str,
+    connection: &str,
+    policy: &Policy,
+    nonce: Option<&str>,
+    operation: OperationKind,
+) -> Result<(), Error> {
+    if *app.0.shutdown.borrow() || controls.failed() {
+        return Err(Error::new(ErrorKind::PermissionRequired));
+    }
+    let configuration = controls.config.as_ref().ok_or_else(Error::unavailable)?;
+    let provider = rules::connection(configuration, connection)
         .ok_or_else(|| Error::new(ErrorKind::PermissionRequired))?;
-    let policy = app
+    let current = app
         .0
         .providers
-        .resolve(&connection)
+        .resolve(&provider)
         .map(|binding| binding.policy().clone())
         .map_err(|_| Error::new(ErrorKind::PermissionRequired))?;
-    if policy.fingerprint != run.policy.fingerprint
+    if current.fingerprint != policy.fingerprint
         || controls
             .secrets
-            .get(&connection.id)
-            .map(|secret| &secret.nonce)
-            != run.nonce.as_ref()
-        || (policy.requires_credentials && !controls.secrets.contains_key(&connection.id))
+            .get(connection)
+            .map(|secret| secret.nonce.as_str())
+            != nonce
+        || (current.requires_credentials && !controls.secrets.contains_key(connection))
     {
         return Err(Error::new(ErrorKind::PermissionRequired));
     }
-    let spec = run.operation.spec();
+    let spec = operation.spec();
     if !rules::allowed(
-        c,
-        &run.companion,
-        &connection,
+        configuration,
+        companion,
+        &provider,
         spec.purpose.as_str(),
         spec.data,
-        &policy,
+        &current,
     ) {
         return Err(Error::new(ErrorKind::PermissionRequired));
     }
@@ -132,7 +154,7 @@ impl Authorization for Authority {
     }
 }
 
-pub(in crate::application) fn invocation(
+pub(crate) fn invocation(
     app: &HostApplication,
     connection: ProviderConnection,
     context: AuthorizedContext,

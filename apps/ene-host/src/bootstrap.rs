@@ -22,6 +22,11 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
         .await
         .map_err(|_| "database initialization failed")?;
     let app = application(store, runtime.token.clone());
+    let rig_dir = state.join("rig");
+    runtime::private_directory(&rig_dir)?;
+    let (kernel, events) = crate::rig::Runtime::start(rig_dir)
+        .map_err(|_| "the Rig execution kernel failed to start")?;
+    app.application.attach_rig(kernel, events);
     app.application
         .initialize()
         .await

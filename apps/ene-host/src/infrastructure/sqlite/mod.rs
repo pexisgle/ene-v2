@@ -8,13 +8,13 @@ mod schema;
 mod tests;
 #[cfg(test)]
 use queries::meta;
-use queries::{page, snapshot};
+use queries::snapshot;
 use schema::initialize;
 
 pub(crate) mod conversation;
-use crate::domain::{Companion, Failure, Message, ModelAssignments, Settings};
+use crate::domain::{Companion, Failure, ModelAssignments, Settings};
 use serde_json::json;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Semaphore;
 use tokio_rusqlite::{
     Connection as AsyncConnection,
@@ -32,10 +32,6 @@ pub enum Error {
     Migration(#[from] rusqlite_migration::Error),
     #[error("database stopped")]
     Stopped,
-    #[error("invalid_cursor")]
-    InvalidCursor,
-    #[error("storage resource limit")]
-    ResourceLimit,
     #[error("invalid stored receipt")]
     CorruptReceipt,
     #[error("idempotency_conflict")]
@@ -102,33 +98,6 @@ impl Store {
 
     pub async fn snapshot(&self) -> Result<StoredSnapshot> {
         self.call(snapshot).await
-    }
-
-    pub async fn messages(
-        &self,
-        c: String,
-        cursor: Option<String>,
-        limit: usize,
-    ) -> Result<ene_rpc::History> {
-        self.call(move |db| page(db, &c, cursor.as_deref(), limit))
-            .await
-    }
-
-    pub async fn message(&self, c: String, id: String) -> Result<Option<Message>> {
-        self.call(move |db| {
-            db.query_row(
-                "SELECT body FROM messages WHERE companion_id=?1 AND id=?2",
-                params![c, id],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(Error::from)
-            .and_then(|s| {
-                s.map(|s| serde_json::from_str(&s).map_err(Error::from))
-                    .transpose()
-            })
-        })
-        .await
     }
 }
 

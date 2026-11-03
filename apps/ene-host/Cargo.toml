@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 http.workspace = true
 reqwest.workspace = true
-rig-http = "0.44"
+rig-http = "0.46"
 ene-rpc.workspace = true
 ene-plugin.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
@@ -20,7 +20,10 @@ buffa.workspace = true
 bytes.workspace = true
 ene-platform.workspace = true
 ene-plugin-runtime.workspace = true
-rig-core = { version = "0.44", default-features = false, features = [] }
+rig-core = { version = "0.46", default-features = false, features = [] }
+rig-ecs = "0.46"
+rig-memory = { version = "0.46", features = ["fs"] }
+bevy_ecs = "=0.20.0"
 keyring = { version = "4", default-features = false, features = ["v1"] }
 time.workspace = true
 clap.workspace = true
@@ -42,6 +45,7 @@ sha2 = "0.11"
 tokio-util = { workspace = true, features = ["codec"] }
 
 [dev-dependencies]
+rig-core = { version = "0.46", default-features = false, features = ["test-utils"] }
 tempfile.workspace = true
 wat = "1"
 tokio-tungstenite = "0.30"

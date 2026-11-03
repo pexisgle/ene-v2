@@ -23,26 +23,12 @@ pub struct Controls {
     pub secrets: BTreeMap<String, Secret>,
     pub running: BTreeMap<String, Running>,
     storage_fault: bool,
-    pub tails: BTreeMap<String, watch::Receiver<Option<Result<(), Error>>>>,
+    execution_fault: bool,
+    /// The model configuration each companion's Rig agent was last connected
+    /// with. A different signature reconnects before the next input.
+    pub connected: BTreeMap<String, String>,
 }
 
-fn failure(code: &'static str) -> Failure {
-    Failure {
-        code: code.into(),
-        message: match code {
-            "cancelled" => "停止操作・送信許可や資格情報の取消・ホスト終了により生成を停止しました",
-            "input_limit" => "入力が送信上限を超えています。文章を短くしてください",
-            _ => "モデルとの接続または保存に失敗しました。再実行は自動で行いません",
-        }
-        .into(),
-        details: ene_rpc::JsonDocument {
-            json: "{}".into(),
-            ..Default::default()
-        }
-        .into(),
-        ..Default::default()
-    }
-}
 pub fn publish(
     boundary: &mut Boundary,
     app: &HostApplication,
@@ -77,6 +63,17 @@ pub(crate) use super::commit::commit;
 impl Controls {
     /// A fault transition and its notification share the snapshot boundary.
     pub fn fail_storage(&mut self, app: &HostApplication, boundary: &mut Boundary) {
+        self.fail_storage_with(app, boundary, None);
+    }
+
+    /// [`Self::fail_storage`], carrying the reason when the host has one. The
+    /// text is host-generated and must not contain credentials.
+    pub fn fail_storage_with(
+        &mut self,
+        app: &HostApplication,
+        boundary: &mut Boundary,
+        reason: Option<String>,
+    ) {
         if self.storage_fault {
             return;
         }
@@ -88,21 +85,51 @@ impl Controls {
             ene_rpc::notification::Event::HostStorageFailed(Box::new(
                 ene_rpc::PersistenceFailure {
                     code: "storage_error".into(),
+                    message: reason
+                        .map(|reason| reason.chars().take(1024).collect())
+                        .unwrap_or_default(),
                     ..Default::default()
                 },
             )),
         );
     }
 
+    /// The kernel itself stopped; unlike a storage fault, no write was lost
+    /// by this transition, but no execution is possible either.
+    pub fn fail_execution(
+        &mut self,
+        app: &HostApplication,
+        boundary: &mut Boundary,
+        reason: String,
+    ) {
+        if self.execution_fault {
+            return;
+        }
+        self.execution_fault = true;
+        publish(
+            boundary,
+            app,
+            None,
+            ene_rpc::notification::Event::HostFailure(Box::new(ene_rpc::HostFailure {
+                code: "execution_unavailable".into(),
+                message: reason,
+                ..Default::default()
+            })),
+        );
+    }
+
     pub fn failed(&self) -> bool {
-        self.storage_fault
+        self.storage_fault || self.execution_fault
     }
     pub fn admit(&self, app: &HostApplication) -> Result<(), Error> {
-        if *app.0.shutdown.borrow() || app.0.generations.is_closed() {
+        if *app.0.shutdown.borrow() {
             return Err(Error::unavailable());
         }
-        if self.failed() {
+        if self.storage_fault {
             return Err(Error::new(ErrorKind::StorageFailure));
+        }
+        if self.execution_fault {
+            return Err(Error::unavailable());
         }
         if self.running.len() >= MAX_EXECUTIONS {
             return Err(Error {
@@ -186,9 +213,7 @@ mod authorization;
 mod supervisor;
 pub(super) use supervisor::execute;
 mod initialization;
-mod streaming;
-pub(super) use authorization::{AuthorizedContext, authorize, check_run, invocation, register};
-pub use streaming::generate;
+pub(crate) use authorization::{authorize, check_access, check_run, invocation, register};
 
 pub(crate) fn invalidate_changed_grants(
     app: &HostApplication,

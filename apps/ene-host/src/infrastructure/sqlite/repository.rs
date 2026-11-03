@@ -6,21 +6,6 @@ impl crate::ports::Repository for Store {
     ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<StoredSnapshot>> {
         Box::pin(async move { self.snapshot().await.map_err(core_error) })
     }
-    fn messages(
-        &self,
-        c: String,
-        cursor: Option<String>,
-        limit: usize,
-    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<ene_rpc::History>> {
-        Box::pin(async move { self.messages(c, cursor, limit).await.map_err(core_error) })
-    }
-    fn message(
-        &self,
-        c: String,
-        id: String,
-    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<Option<Message>>> {
-        Box::pin(async move { self.message(c, id).await.map_err(core_error) })
-    }
     fn configuration(
         &self,
     ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<crate::domain::Configuration>>
@@ -106,25 +91,33 @@ impl crate::ports::Repository for Store {
             .map_err(core_error)
         })
     }
-    fn accept(
+    fn complete_receipt(
         &self,
-        key: String,
-        companion: String,
-        request: serde_json::Value,
-    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<crate::ports::Accepted>> {
+        r: crate::ports::Receipt,
+    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<()>> {
         Box::pin(async move {
-            self.call(move |db| conversation::accept(db, &key, &companion, request))
-                .await
-                .map_err(core_error)
+            self.call(move |db| {
+                conversation::complete_receipt(
+                    db,
+                    &r.key,
+                    &r.target,
+                    &r.request,
+                    stored_outcome(r.outcome),
+                    &r.response,
+                )
+            })
+            .await
+            .map_err(core_error)
         })
     }
-    fn update_message(
+    fn release_receipt(
         &self,
-        id: String,
-        update: crate::domain::MessageUpdate,
-    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<Message>> {
+        key: String,
+        target: String,
+        request: serde_json::Value,
+    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<()>> {
         Box::pin(async move {
-            self.call(move |db| conversation::update_message(db, &id, update))
+            self.call(move |db| conversation::release_receipt(db, &key, &target, &request))
                 .await
                 .map_err(core_error)
         })
@@ -133,10 +126,8 @@ impl crate::ports::Repository for Store {
 pub(crate) fn core_error(error: Error) -> crate::domain::Error {
     use crate::domain::{Error as CoreError, ErrorKind};
     match error {
-        Error::InvalidCursor => CoreError::invalid(),
         Error::IdempotencyConflict => CoreError::new(ErrorKind::IdempotencyConflict),
         Error::StateConflict => CoreError::new(ErrorKind::StateConflict),
-        Error::ResourceLimit => CoreError::new(ErrorKind::ResourceLimit),
         _ => CoreError::new(ErrorKind::StorageFailure),
     }
 }

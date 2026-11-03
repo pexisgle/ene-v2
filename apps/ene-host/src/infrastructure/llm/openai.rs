@@ -175,3 +175,54 @@ impl LlmProvider for Provider {
         Box::pin(models(i))
     }
 }
+
+/// The parent conversation's model, connected as a Rig kernel agent's
+/// effect handler. The host's transport stays the signing and destination
+/// boundary; Rig owns the request encoding, tool calls and streaming.
+pub(crate) fn agent_connection(
+    outbound: std::sync::Arc<crate::llm::Outbound>,
+    model: &str,
+) -> Result<rig_ecs::model::Connection> {
+    use rig_core::catalog::Catalog;
+    use rig_core::operation::Completion;
+    use rig_core::serve::ErasedHandler;
+    use rig_core::serve::adapters::ModelAdapter;
+    use rig_ecs::effects::Handler;
+
+    if !crate::infrastructure::llm::can_serve_conversation(outbound.connection()) {
+        return Err(Error {
+            kind: ErrorKind::UnsupportedCapability,
+            reason: Some("adapter_unsupported"),
+        });
+    }
+    let endpoint = outbound.connection().endpoint.clone();
+    let spec = Catalog::builtin()
+        .resolve(&format!("{ID}/{model}"))
+        .map_err(|_| Error {
+            kind: ErrorKind::UnsupportedCapability,
+            reason: Some("model_unsupported"),
+        })?
+        .spec
+        .clone();
+    if !spec.tools {
+        return Err(Error {
+            kind: ErrorKind::UnsupportedCapability,
+            reason: Some("model_cannot_call_tools"),
+        });
+    }
+    let transport = crate::llm::AuthorizedTransport::for_outbound(
+        outbound,
+        crate::llm::CredentialPlacement::Bearer,
+    )?;
+    let client = OpenAIConfig::new("managed-by-host")
+        .with_base_url(&endpoint)
+        .connect(transport);
+    // The Responses wire is what this adapter has always spoken.
+    let model = client.responses(model.to_owned());
+    let reference = spec.reference();
+    let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(reference, model));
+    Ok(rig_ecs::model::Connection {
+        spec: std::sync::Arc::new(spec),
+        handler: Handler(handler),
+    })
+}

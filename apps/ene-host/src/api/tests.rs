@@ -215,100 +215,6 @@ struct ConversationFixture {
     finish: std::sync::Arc<tokio::sync::Semaphore>,
     _temp: tempfile::TempDir,
 }
-#[tokio::test]
-async fn stop_waits_for_streaming_and_queued_terminal_writes() {
-    let mut f = ConversationFixture::new().await;
-    let streaming = f.send("shutdown-streaming").await;
-    f.started().await;
-    let queued = f.send("shutdown-queued").await;
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let message = f
-                .app
-                .application
-                .message(f.companion.clone(), streaming.clone())
-                .await
-                .unwrap();
-            if message.text == "途中" {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    // Block the real SQLite worker after the streaming delta was persisted.
-    // stop must remain pending until terminal updates can reach that worker.
-    let (entered, observed) = tokio::sync::oneshot::channel();
-    let (release, gate) = std::sync::mpsc::channel();
-    let store = f.store.clone();
-    let blocker = tokio::spawn(async move {
-        store
-            .run(move |_| {
-                entered.send(()).unwrap();
-                gate.recv().unwrap();
-                Ok(())
-            })
-            .await
-            .unwrap();
-    });
-    observed.await.unwrap();
-    let stopping = f.app.application.stop();
-    tokio::pin!(stopping);
-    let premature = tokio::time::timeout(std::time::Duration::from_millis(100), &mut stopping)
-        .await
-        .is_ok();
-    release.send(()).unwrap();
-    blocker.await.unwrap();
-    assert!(
-        !premature,
-        "stop returned before cancellation could be persisted"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(2), stopping)
-        .await
-        .unwrap()
-        .unwrap();
-    for id in [streaming.clone(), queued] {
-        assert_eq!(
-            f.store
-                .message(f.companion.clone(), id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "cancelled"
-        );
-    }
-    assert_eq!(
-        f.store
-            .message(f.companion.clone(), streaming)
-            .await
-            .unwrap()
-            .unwrap()
-            .text,
-        "途中"
-    );
-    assert!(f.started.try_recv().is_err());
-    let rejected = f
-        .app
-        .application
-        .accept_message(
-            f.companion.clone(),
-            "after-stop".into(),
-            crate::application::MessageInput {
-                text: "after-stop".into(),
-                resources: vec![],
-                question_id: None,
-                decision: None,
-                ..Default::default()
-            },
-        )
-        .await;
-    assert_eq!(
-        rejected.unwrap_err().kind,
-        crate::domain::ErrorKind::Unavailable
-    );
-}
 impl ConversationFixture {
     async fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
@@ -362,164 +268,13 @@ impl ConversationFixture {
             _temp: temp,
         }
     }
-    async fn send(&self, key: &str) -> String {
-        let (status, accepted) = mutate(
-            &self.app,
-            "POST",
-            &format!("SendMessage/{}", self.companion),
-            json!({"text":key}),
-            Some(key),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        accepted["response_message_id"].as_str().unwrap().into()
-    }
     async fn started(&mut self) -> crate::llm::Generation {
         tokio::time::timeout(std::time::Duration::from_secs(2), self.started.recv())
             .await
             .unwrap()
             .unwrap()
     }
-    async fn terminal(&self, id: &str) -> String {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let status = self
-                    .app
-                    .application
-                    .message(self.companion.clone(), id.into())
-                    .await
-                    .unwrap()
-                    .status;
-                if !matches!(status.as_str(), "queued" | "streaming") {
-                    return status;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap()
-    }
 }
-#[tokio::test]
-async fn queued_generation_uses_start_time_configuration_and_prior_completed_history() {
-    let mut f = ConversationFixture::new().await;
-    let first = f.send("first").await;
-    let initial = f.started().await;
-    assert_eq!(initial.model(), "old-model");
-    assert_eq!(initial.preamble(), "old mind");
-    let second = f.send("second").await;
-    assert!(f.started.try_recv().is_err());
-    assert_eq!(mutate(&f.app,"PATCH",&format!("Companion/{}",f.companion),json!({"revision":2,"mind":"new mind","model_assignments":{"companion":{"connection_id":f.connection,"model_id":"new-model"}}}),None).await.0,StatusCode::OK);
-    f.finish.add_permits(1);
-    let next = f.started().await;
-    assert_eq!(next.model(), "new-model");
-    assert_eq!(next.preamble(), "new mind");
-    assert!(
-        next.messages()
-            .iter()
-            .any(|m| m.role == crate::llm::ChatRole::Assistant && m.text == "途中")
-    );
-    assert_eq!(f.terminal(&first).await, "completed");
-    f.finish.add_permits(1);
-    assert_eq!(f.terminal(&second).await, "completed");
-}
-#[tokio::test]
-async fn grant_noop_and_expansion_preserve_generation_but_narrowing_cancels_it() {
-    let mut f = ConversationFixture::new().await;
-    let id = f.send("running").await;
-    f.started().await;
-    let path = format!("Grant/{}", f.grant);
-    for input in [
-        json!({"revision":1}),
-        json!({"revision":2,"data_kinds":["conversation","metadata"]}),
-    ] {
-        assert_eq!(
-            mutate(&f.app, "PATCH", &path, input, None).await.0,
-            StatusCode::OK
-        );
-        assert_ne!(
-            f.app
-                .application
-                .message(f.companion.clone(), id.clone())
-                .await
-                .unwrap()
-                .status,
-            "cancelled"
-        );
-    }
-    assert_eq!(
-        mutate(
-            &f.app,
-            "PATCH",
-            &path,
-            json!({"revision":3,"data_kinds":["metadata"]}),
-            None
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(f.terminal(&id).await, "cancelled");
-}
-#[tokio::test]
-async fn terminal_storage_failure_remains_visible_and_blocks_dependent_generation() {
-    let mut f = ConversationFixture::new().await;
-    let first = f.send("first").await;
-    f.started().await;
-    let second = f.send("second").await;
-    let third = f.send("third").await;
-    let fault_id = first.clone();
-    f.store.run(move |db| { db.execute_batch(&format!("CREATE TRIGGER fail_terminal BEFORE UPDATE ON messages WHEN NEW.id = '{fault_id}' AND NEW.status IN ('completed','failed','cancelled') BEGIN SELECT RAISE(FAIL,'disk full'); END;"))?; Ok(()) }).await.unwrap();
-    let mut subscription = f.app.application.subscribe().await;
-    f.finish.add_permits(1);
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if matches!(
-                subscription.receiver.recv().await.unwrap().event,
-                Some(ene_rpc::notification::Event::GenerationPersistenceFailed(_))
-            ) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(f.terminal(&second).await, "failed");
-    assert_eq!(f.terminal(&third).await, "failed");
-    assert!(f.started.try_recv().is_err());
-    let snapshot = f.app.application.snapshot(None).await.unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&snapshot.stored.companions[0].availability.json).unwrap()["chat"]
-            ["reasons"][0]["code"],
-        "storage_error"
-    );
-    assert_eq!(
-        f.app
-            .application
-            .message(f.companion.clone(), first)
-            .await
-            .unwrap()
-            .status,
-        "streaming"
-    );
-    assert_eq!(
-        mutate(
-            &f.app,
-            "POST",
-            &format!("SendMessage/{}", f.companion),
-            json!({"text":"fourth"}),
-            Some("fourth")
-        )
-        .await
-        .0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_eq!(
-        f.app.application.stop().await.unwrap_err().kind,
-        crate::domain::ErrorKind::StorageFailure
-    );
-}
-
 fn operation(
     method: &str,
     descriptor: &str,
@@ -817,7 +572,8 @@ impl crate::llm::ProviderRegistry for RoutedRegistry {
             std::sync::Arc::new(FixtureProvider {
                 policy: self.policy(c)?,
                 started: None,
-                finish: None,
+                // A connection check needs at least one text chunk.
+                finish: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
                 send_outbound: true,
             }),
             c,
@@ -989,7 +745,7 @@ async fn changing_service_clears_credentials_before_new_authorization() {
                 "POST",
                 "Grants",
                 json!({"companion_id":c,"connection_id":p,"kind":"data_transfer",
-        "consent":{"settings_revision":3,"provider_revision":"routed-v1"},"destinations":[destination],"data_kinds":["conversation"],"purpose":"conversation"}),
+        "consent":{"settings_revision":3,"provider_revision":"routed-v1"},"destinations":[destination],"data_kinds":["test_input"],"purpose":"connection_check"}),
                 Some("new-grant")
             )
             .await
@@ -1000,8 +756,8 @@ async fn changing_service_clears_credentials_before_new_authorization() {
             mutate(
                 &app,
                 "POST",
-                &format!("SendMessage/{c}"),
-                json!({"text":"hello"}),
+                &format!("CheckConnection/{p}"),
+                json!({"companion_id":c,"purpose":"companion","model_id":"m"}),
                 Some("new-message")
             )
             .await
@@ -1025,8 +781,8 @@ async fn changing_service_clears_credentials_before_new_authorization() {
             mutate(
                 &app,
                 "POST",
-                &format!("SendMessage/{c}"),
-                json!({"text":"hello"}),
+                &format!("CheckConnection/{p}"),
+                json!({"companion_id":c,"purpose":"companion","model_id":"m"}),
                 Some("new-message")
             )
             .await
@@ -1134,52 +890,6 @@ async fn disconnected_revocation_finishes_disk_authority_and_notifications() {
     f.app.application.stop().await.unwrap();
 }
 
-#[tokio::test]
-async fn long_conversations_keep_recent_turns_within_broker_budget() {
-    let mut f = ConversationFixture::new().await;
-    for i in 0..17 {
-        let text = format!("{i}:{}", "a".repeat(65_000));
-        let (status, accepted) = mutate(
-            &f.app,
-            "POST",
-            &format!("SendMessage/{}", f.companion),
-            json!({"text":text}),
-            Some(&format!("long-{i}")),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let generation = f.started().await;
-        if i == 16 {
-            let request = ene_plugin::GenerationRequest {
-                endpoint: generation.endpoint().to_owned(),
-                options: generation.options().clone(),
-                model: generation.model().to_owned(),
-                preamble: generation.preamble().to_owned(),
-                messages: generation
-                    .messages()
-                    .iter()
-                    .map(|m| ene_plugin::provider::ChatMessage {
-                        role: m.role.as_str().into(),
-                        text: m.text.clone(),
-                    })
-                    .collect(),
-                max_tokens: generation.max_tokens(),
-                tools: Vec::new(),
-            };
-            assert!(serde_json::to_vec(&request).unwrap().len() < 512 * 1024);
-            assert_eq!(request.messages.last().unwrap().text, text);
-            assert!(request.messages.len() < 33);
-            assert!(!request.messages.iter().any(|m| m.text.starts_with("0:")));
-        }
-        f.finish.add_permits(1);
-        assert_eq!(
-            f.terminal(accepted["response_message_id"].as_str().unwrap())
-                .await,
-            "completed"
-        );
-    }
-}
-
 impl crate::ports::Credentials for TestCredentials {
     fn environment(&self, _: &str) -> crate::ports::Result<String> {
         Err(crate::domain::Error::unavailable())
@@ -1264,285 +974,6 @@ async fn revoking_credentials_cancels_a_running_connection_check_without_waiting
 mod credentials;
 
 #[tokio::test]
-async fn client_can_reconnect_and_page_escaped_history_without_truncation() {
-    let (app, temp) = app().await;
-    let store = Store::open(temp.path().join("host.sqlite3")).await.unwrap();
-    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    let target = companion.clone();
-    {
-        let db =
-            tokio_rusqlite::rusqlite::Connection::open(temp.path().join("host.sqlite3")).unwrap();
-        for sequence in 1..=75 {
-            let message = ene_rpc::Message {
-                id: format!("escaped-{sequence}"),
-                companion_id: target.clone(),
-                role: "companion".into(),
-                text: "\0".repeat(1000),
-                status: "completed".into(),
-                created_at: "2026-10-01T00:00:00Z".into(),
-                sequence,
-                resources: vec![],
-                in_reply_to: None,
-                task_id: None,
-                question_id: None,
-                failure: Default::default(),
-                ..Default::default()
-            };
-            db.execute(
-                "INSERT INTO messages VALUES (?1,?2,?3,'completed',?4)",
-                tokio_rusqlite::rusqlite::params![
-                    message.id,
-                    target,
-                    sequence as i64,
-                    serde_json::to_string(&message).unwrap()
-                ],
-            )
-            .unwrap();
-        }
-    }
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = crate::api::test_client::ApiClient::new(
-        &format!("http://{}/rpc", listener.local_addr().unwrap()),
-        "private-token",
-    )
-    .unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
-    let snapshot = client
-        .host
-        .get_snapshot_with_options(
-            ene_rpc::SnapshotRequest {
-                subscription_id: None,
-                ..Default::default()
-            },
-            crate::api::test_client::call_options(5),
-        )
-        .await
-        .unwrap()
-        .into_owned();
-    assert!(snapshot.messages.len() == 50);
-    let mut seen: std::collections::BTreeSet<_> =
-        snapshot.messages.iter().map(|m| m.sequence).collect();
-    let mut cursor = snapshot.message_cursors[&companion].value.clone();
-    while let Some(before) = cursor {
-        let history = client
-            .host
-            .get_history_with_options(
-                ene_rpc::HistoryRequest {
-                    companion_id: (&companion).into(),
-                    cursor: Some((&before).into()),
-                    limit: Some(100),
-                    ..Default::default()
-                },
-                crate::api::test_client::call_options(5),
-            )
-            .await
-            .unwrap()
-            .into_owned();
-        assert!(!history.items.is_empty());
-        for message in history.items {
-            assert_eq!(message.text, "\0".repeat(1000));
-            assert!(seen.insert(message.sequence));
-        }
-        cursor = history.next_cursor;
-    }
-    assert_eq!(seen, (1..=75).collect());
-    assert!(
-        client
-            .host
-            .get_snapshot_with_options(
-                ene_rpc::SnapshotRequest {
-                    subscription_id: None,
-                    ..Default::default()
-                },
-                crate::api::test_client::call_options(5)
-            )
-            .await
-            .map(|response| response.into_owned())
-            .is_ok(),
-        "reconnect must remain possible"
-    );
-    server.abort();
-    let _ = server.await;
-}
-
-#[tokio::test]
-async fn cancelled_unsent_prompt_is_excluded_from_future_history() {
-    let mut f = ConversationFixture::new().await;
-    let first = f.send("first-input").await;
-    f.started().await;
-    let unsent = f.send("withdrawn-sensitive-input").await;
-    assert!(f.started.try_recv().is_err());
-    assert_eq!(
-        mutate(
-            &f.app,
-            "DELETE",
-            &format!("Grant/{}", f.grant),
-            Value::Null,
-            None
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(f.terminal(&first).await, "cancelled");
-    assert_eq!(f.terminal(&unsent).await, "cancelled");
-    assert!(
-        f.started.try_recv().is_err(),
-        "queued text was never sent to a provider"
-    );
-    assert_eq!(mutate(&f.app,"POST","Grants",json!({"companion_id":f.companion,"connection_id":f.connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),Some("restored-grant")).await.0,StatusCode::OK);
-    let third = f.send("new-input").await;
-    let generation = f.started().await;
-    let leaked = generation
-        .messages()
-        .iter()
-        .any(|m| m.text == "withdrawn-sensitive-input");
-    f.finish.add_permits(1);
-    f.terminal(&third).await;
-    f.app.application.stop().await.unwrap();
-    assert!(
-        !leaked,
-        "a withdrawn, never-transmitted prompt was automatically added to a later provider request"
-    );
-}
-
-#[tokio::test]
-async fn regrant_does_not_revive_queued_requests() {
-    let mut f = ConversationFixture::new().await;
-    let first = f.send("running-input").await;
-    f.started().await;
-    let second = f.send("queued-before-revoke").await;
-    let revoke_path = format!("Grant/{}", f.grant);
-    let grant = json!({"companion_id":f.companion,"connection_id":f.connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"});
-    let revoked = mutate(&f.app, "DELETE", &revoke_path, Value::Null, None).await;
-    let restored = mutate(&f.app, "POST", "Grants", grant, Some("replacement-grant")).await;
-    assert_eq!(revoked.0, StatusCode::OK);
-    assert_eq!(restored.0, StatusCode::OK);
-    assert_eq!(f.terminal(&first).await, "cancelled");
-    let restarted =
-        tokio::time::timeout(std::time::Duration::from_millis(200), f.started.recv()).await;
-    let was_sent = restarted.is_ok();
-    f.finish.add_permits(1);
-    assert_eq!(f.terminal(&second).await, "cancelled");
-    f.app.application.stop().await.unwrap();
-    assert!(
-        !was_sent,
-        "a request queued before revocation was transmitted after regrant without a new send"
-    );
-}
-
-#[tokio::test]
-async fn revoking_credentials_cancels_queued_conversations() {
-    let mut f = ConversationFixture::new().await;
-    let first = f.send("running-before-credential-revoke").await;
-    f.started().await;
-    let second = f.send("queued-before-credential-revoke").await;
-    assert_eq!(
-        mutate(
-            &f.app,
-            "DELETE",
-            &format!("Credentials/{}", f.connection),
-            Value::Null,
-            None
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(f.terminal(&first).await, "cancelled");
-    assert_eq!(f.terminal(&second).await, "cancelled");
-    assert!(f.started.try_recv().is_err());
-    f.app.application.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn dropped_core_waiter_still_commits_publishes_and_is_joined_by_shutdown() {
-    use crate::ports::Repository;
-    let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(temp.path().join("owned.db")).await.unwrap();
-    let application = crate::application::HostApplication::new(
-        std::sync::Arc::new(store.clone()),
-        std::sync::Arc::new(crate::infrastructure::llm::registry::Registry::discover()),
-        std::sync::Arc::new(TestCredentials),
-        tokio::sync::watch::channel(false).0,
-    );
-    application.companions().await.unwrap();
-    let mut events = application.subscribe().await;
-    let (entered, observing) = tokio::sync::oneshot::channel();
-    let (release, blocked) = std::sync::mpsc::channel();
-    let database = store.clone();
-    let blocker = tokio::spawn(async move {
-        database
-            .run(move |_| {
-                entered.send(()).unwrap();
-                let _ = blocked.recv();
-                Ok(())
-            })
-            .await
-            .unwrap();
-    });
-    observing.await.unwrap();
-    let owned = application.clone();
-    let caller = tokio::spawn(async move {
-        owned
-            .patch_settings(crate::application::SettingsPatch {
-                revision: 1,
-                connections: ene_rpc::ConnectionInputs::default().into(),
-                ..Default::default()
-            })
-            .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if tokio::time::timeout(
-                std::time::Duration::from_millis(5),
-                application.companions(),
-            )
-            .await
-            .is_err()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("mutation owns controls before abandoning its waiter");
-    caller.abort();
-    let _ = caller.await;
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            application.companions()
-        )
-        .await
-        .is_err(),
-        "caller cancellation cannot abandon commit ownership"
-    );
-    release.send(()).unwrap();
-    blocker.await.unwrap();
-    application.stop().await.unwrap();
-    assert_eq!(store.configuration().await.unwrap().settings.revision, 2);
-    let published = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let event = events.receiver.recv().await.unwrap();
-            if matches!(
-                event.event,
-                Some(ene_rpc::notification::Event::SettingsUpdated(_))
-            ) {
-                break event;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    let Some(ene_rpc::notification::Event::SettingsUpdated(settings)) = published.event else {
-        panic!("settings event missing")
-    };
-    assert_eq!(settings.revision, 2);
-}
-
-#[tokio::test]
 async fn abandoned_connection_check_finishes_the_original_receipt_after_revocation() {
     let mut fixture = ConversationFixture::new().await;
     let companion = fixture.companion.clone();
@@ -1623,72 +1054,6 @@ async fn abandoned_connection_check_finishes_the_original_receipt_after_revocati
 }
 
 #[tokio::test]
-async fn provider_panics_finalize_messages_and_do_not_leave_followers_waiting() {
-    let mut fixture = ConversationFixture::new().await;
-    fixture.started.close(); // The hostile fixture panics when reporting startup.
-    let first = fixture.send("panic-first").await;
-    let second = fixture.send("panic-follower").await;
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        for id in [first, second] {
-            loop {
-                let message = fixture
-                    .app
-                    .application
-                    .message(fixture.companion.clone(), id.clone())
-                    .await
-                    .unwrap();
-                if message.status == "failed" {
-                    assert!(message.failure.is_set());
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    fixture.app.application.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn execution_quota_rejects_before_creating_rows_and_replays_existing_acceptance() {
-    let mut fixture = ConversationFixture::new().await;
-    for index in 0..crate::domain::MAX_EXECUTIONS {
-        fixture.send(&format!("quota-{index}")).await;
-    }
-    fixture.started().await;
-    let path = format!("SendMessage/{}", fixture.companion);
-    let body = json!({"text":"quota-0"});
-    assert_eq!(
-        mutate(&fixture.app, "POST", &path, body, Some("quota-0"))
-            .await
-            .0,
-        StatusCode::OK
-    );
-    let (status, error) = mutate(
-        &fixture.app,
-        "POST",
-        &path,
-        json!({"text":"overflow"}),
-        Some("overflow"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(error["error"]["details"]["reason"], "busy");
-    assert_eq!(
-        fixture
-            .store
-            .messages(fixture.companion.clone(), None, 50)
-            .await
-            .unwrap()
-            .items
-            .len(),
-        crate::domain::MAX_EXECUTIONS * 2
-    );
-    fixture.app.application.stop().await.unwrap();
-}
-
-#[tokio::test]
 async fn review_configuration_storage_failure_notifies_without_publishing_unsaved_settings() {
     let f = ConversationFixture::new().await;
     let before = f.app.application.snapshot(None).await.unwrap();
@@ -1749,72 +1114,6 @@ async fn review_configuration_storage_failure_notifies_without_publishing_unsave
         f.app.application.stop().await.unwrap_err().kind,
         crate::domain::ErrorKind::StorageFailure
     );
-}
-
-#[tokio::test]
-async fn connect_disconnect_keeps_accepted_generation_and_explicit_stop_cancels_queue() {
-    use crate::api::test_client::ApiClient;
-    use ene_rpc as w;
-    let mut f = ConversationFixture::new().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = ApiClient::new(
-        &format!("http://{}/rpc", listener.local_addr().unwrap()),
-        "private-token",
-    )
-    .unwrap();
-    let routes = router(f.app.clone());
-    let server = tokio::spawn(async move {
-        axum::serve(listener, routes).await.unwrap();
-    });
-    let mut subscription = client.host.subscribe(w::Empty::default()).await.unwrap();
-    crate::api::test_client::initial(&mut subscription).await;
-    let companion = f.companion.clone();
-    let send = |key: &'static str| {
-        let client = client.clone();
-        let companion = companion.clone();
-        async move {
-            client
-                .host
-                .send_message(w::SendMessageRequest {
-                    companion_id: companion,
-                    request_key: key.into(),
-                    text: key.into(),
-                    ..Default::default()
-                })
-                .await
-                .unwrap()
-                .into_owned()
-        }
-    };
-    let accepted = send("connect-detached").await;
-    f.started().await;
-    drop(subscription);
-    f.finish.add_permits(1);
-    assert_eq!(f.terminal(&accepted.response_message_id).await, "completed");
-    // The same generated request reuses the receipt, even after completion.
-    assert_eq!(send("connect-detached").await, accepted);
-    assert!(f.started.try_recv().is_err());
-    let active = send("connect-stop-active").await;
-    f.started().await;
-    let queued = send("connect-stop-queued").await;
-    client
-        .host
-        .stop_with_options(
-            ene_rpc::StopRequest {
-                companion_id: (&f.companion).into(),
-                ..Default::default()
-            },
-            crate::api::test_client::call_options(5),
-        )
-        .await
-        .map(|_| ())
-        .unwrap();
-    for id in [active.response_message_id, queued.response_message_id] {
-        assert_eq!(f.terminal(&id).await, "cancelled");
-    }
-    assert!(f.started.try_recv().is_err());
-    server.abort();
-    f.app.application.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -1891,4 +1190,409 @@ async fn task_inference_uses_the_task_assignment_and_grant() {
     assert_eq!(generation.preamble(), "system");
     f.finish.add_permits(1);
     assert_eq!(task.await.unwrap().unwrap(), "途中");
+}
+
+/// The host API path over the real kernel: acceptance, a tool round, turn
+/// notifications, history, a stop that does not wait for the running call,
+/// and the conversation surviving a restart. The provider is scripted; no
+/// network or credential is used.
+#[tokio::test]
+async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
+    use crate::rig;
+    use rig_core::catalog::Catalog;
+    use rig_core::operation::Completion;
+    use rig_core::serve::ErasedHandler;
+    use rig_core::serve::adapters::ModelAdapter;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+    use rig_ecs::effects::Handler;
+    use std::sync::Arc;
+
+    #[derive(serde::Deserialize)]
+    struct NoArgs {}
+
+    struct Hold {
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        gate: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+    impl rig_ecs::prelude::Tool for Hold {
+        const NAME: &'static str = "hold";
+        type Args = NoArgs;
+        type Output = String;
+        type Error = std::convert::Infallible;
+
+        fn description(&self) -> String {
+            "Waits until released.".into()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+        async fn call(
+            &self,
+            _: &mut rig_ecs::prelude::ToolContext,
+            _: NoArgs,
+        ) -> Result<String, Self::Error> {
+            let _ = self.entered.send(());
+            // Never released: only a stop ends a turn waiting here.
+            let _ = self.gate.acquire().await;
+            Ok("released".into())
+        }
+    }
+
+    fn connection(model: MockCompletionModel) -> rig_ecs::model::Connection {
+        let spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .expect("builtin catalog")
+            .shared();
+        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(spec.reference(), model));
+        rig_ecs::model::Connection {
+            spec,
+            handler: Handler(handler),
+        }
+    }
+
+    async fn turn_state(
+        subscription: &mut crate::application::Subscription,
+        state: &str,
+        within: std::time::Duration,
+    ) -> ene_rpc::TurnEvent {
+        tokio::time::timeout(within, async {
+            loop {
+                let notification = subscription.receiver.recv().await.unwrap();
+                if let Some(ene_rpc::notification::Event::TurnEvent(event)) = notification.event
+                    && event.state == state
+                {
+                    return *event;
+                }
+            }
+        })
+        .await
+        .expect("turn event")
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().to_path_buf();
+    let store = Store::open(state_dir.join("host.sqlite3")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let app = crate::bootstrap::application(store.clone(), "private-token".into());
+    let rig_dir = state_dir.join("rig");
+    std::fs::create_dir_all(&rig_dir).unwrap();
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (kernel, events) = rig::Runtime::start_test(rig_dir.clone(), move |app| {
+        rig_ecs::tools::AppToolsExt::add_tool(
+            app,
+            Hold {
+                entered: entered_tx,
+                gate: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+            },
+        );
+    })
+    .unwrap();
+    app.application.attach_rig(kernel, events);
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("call-1", "current_time", json!({})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("いまは正午です。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::tool_call("call-2", "hold", json!({})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        // The second held turn is stopped by the revocation; the last two
+        // turns are only needed if a stop ever failed.
+        vec![
+            MockStreamEvent::tool_call("call-3", "hold", json!({})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("終わりました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("終わりました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    app.application
+        .set_test_model(Arc::new(move |_, _| Ok(connection(model.clone()))));
+
+    let (status, saved) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let connection = saved["connections"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("Companion/{companion}"),
+            json!({"revision":1,"mind":"日本語で簡潔に答える。","model_assignments":{"companion":{"connection_id":connection,"model_id":"gpt-6-luna"}}}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "PUT",
+            &format!("Credentials/{connection}"),
+            json!({"secret":"test-only"}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (status, grant) = mutate(
+        &app,
+        "POST",
+        "Grants",
+        json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+        Some("grant"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let grant = grant["grant"]["id"].as_str().unwrap().to_owned();
+
+    let mut subscription = app.application.subscribe().await;
+    let (status, accepted) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"いま何時？"}),
+        Some("first"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let request_id = accepted["request_id"].as_str().unwrap().to_owned();
+    assert!(!request_id.is_empty());
+    let answered = turn_state(
+        &mut subscription,
+        "answered",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(answered.request_id.as_deref(), Some(request_id.as_str()));
+    assert!(!answered.stream_id.is_empty());
+    let history = app
+        .application
+        .messages(companion.clone(), None, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .items
+            .iter()
+            .map(|message| (message.role.as_str(), message.text.as_str()))
+            .collect::<Vec<_>>(),
+        [("user", "いま何時？"), ("assistant", "いまは正午です。")]
+    );
+    assert_eq!(
+        history.items[0].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+    assert_eq!(
+        history.items[1].request_id.as_deref(),
+        Some(request_id.as_str()),
+        "the reply names the accepted input"
+    );
+
+    // The same accepted key replays the same acceptance without a new turn.
+    let (status, replayed) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"いま何時？"}),
+        Some("first"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed, accepted);
+
+    // A turn waiting in the held tool stops without waiting for it.
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"止めて"}),
+        Some("second"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    entered_rx.recv().await.expect("the held tool started");
+    let started = std::time::Instant::now();
+    app.application
+        .cancel_companion(companion.clone())
+        .await
+        .unwrap();
+    let stopped = turn_state(
+        &mut subscription,
+        "stopped",
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(
+        stopped
+            .failure
+            .as_option()
+            .map(|failure| failure.code.as_str()),
+        Some("cancelled")
+    );
+
+    // A committed revocation stops a turn that is waiting in a tool, and the
+    // next input is refused rather than sent under the old grant.
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"権限を取り消して"}),
+        Some("third"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    entered_rx
+        .recv()
+        .await
+        .expect("the held tool started again");
+    assert_eq!(
+        mutate(&app, "DELETE", &format!("Grant/{grant}"), json!({}), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    turn_state(
+        &mut subscription,
+        "stopped",
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            &format!("SendMessage/{companion}"),
+            json!({"text":"まだ送れる？"}),
+            Some("fourth"),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
+    app.application.stop().await.unwrap();
+    drop(app);
+
+    // The next host on the same state reads the saved conversation.
+    let store = Store::open(state_dir.join("host.sqlite3")).await.unwrap();
+    let restarted = crate::bootstrap::application(store, "private-token".into());
+    let (kernel, events) = rig::Runtime::start(rig_dir).unwrap();
+    restarted.application.attach_rig(kernel, events);
+    let history = restarted
+        .application
+        .messages(companion, None, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .items
+            .iter()
+            .map(|message| (message.role.as_str(), message.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("user", "いま何時？"),
+            ("assistant", "いまは正午です。"),
+            ("user", "止めて"),
+            ("user", "権限を取り消して"),
+        ]
+    );
+    restarted.application.stop().await.unwrap();
+}
+
+/// A provider adapter that is not the built-in OpenAI connection cannot be
+/// used for the parent conversation; this is refused rather than sent through
+/// an OpenAI-shaped connection the adapter never advertised.
+#[tokio::test]
+async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let shutdown = tokio::sync::watch::channel(false).0;
+    let credentials = std::sync::Arc::new(StoredCredentials::default());
+    let app = App::new(
+        crate::application::HostApplication::new(
+            std::sync::Arc::new(store),
+            std::sync::Arc::new(RoutedRegistry),
+            credentials,
+            shutdown,
+        ),
+        "private-token".into(),
+    );
+    let (status, saved) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":1,"connections":[{"kind":"llm","adapter":"service-a","endpoint":"https://service.test/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let connection = saved["connections"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mutate(
+            &app,
+            "PUT",
+            &format!("Credentials/{connection}"),
+            json!({"secret":"test-key"}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("Companion/{companion}"),
+            json!({"revision":1,"model_assignments":{"companion":{"connection_id":connection,"model_id":"m"}}}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            "Grants",
+            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"routed-v1"},"destinations":["https://service.test"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            Some("grant")
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (status, error) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"hello"}),
+        Some("first"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error["error"]["code"], "unsupported_capability");
+    app.application.stop().await.unwrap();
 }

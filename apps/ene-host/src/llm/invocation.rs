@@ -19,6 +19,9 @@ impl Authorization for RestrictedAuthorization {
     }
 }
 pub(crate) enum InvocationInput {
+    /// Only the transport's contract tests build a one-shot conversation
+    /// invocation now that the kernel sends its own requests.
+    #[cfg(test)]
     Conversation(Generation),
     ConnectionCheck(Generation),
     ModelList,
@@ -27,6 +30,7 @@ pub(crate) enum InvocationInput {
 impl InvocationInput {
     fn operation(&self) -> OperationKind {
         match self {
+            #[cfg(test)]
             Self::Conversation(_) => OperationKind::Conversation,
             Self::ConnectionCheck(_) => OperationKind::ConnectionCheck,
             Self::ModelList => OperationKind::ModelList,
@@ -34,90 +38,49 @@ impl InvocationInput {
         }
     }
 }
-/// Adapters can only submit unsigned requests to `AuthorizedTransport`.
-/// Signing cannot be used independently to inspect a credential-bearing request.
-/// ```compile_fail
-/// use ene_host::llm::{Invocation, CredentialPlacement};
-/// async fn extract(invocation: &Invocation, request: &mut http::Request<bytes::Bytes>) {
-///     invocation.authorize_outbound(request, &CredentialPlacement::Bearer).await.unwrap();
-/// }
-/// ```
-pub struct Invocation {
+
+/// The host-owned authority for one outbound operation: what may be sent,
+/// where, under which credential and grant. The request itself is separate,
+/// so an execution kernel can build its own requests and still go through the
+/// one signing and destination-checking boundary.
+pub(crate) struct Outbound {
     id: String,
     connection: Connection,
-    input: InvocationInput,
     secret: Option<Secret>,
     authorization: Arc<dyn Authorization>,
-    cancel: watch::Receiver<bool>,
     binding: ProviderBinding,
+    operation: OperationKind,
 }
 
-#[derive(Clone)]
-pub enum CredentialPlacement {
-    None,
-    Bearer,
-    Header(String),
-    Query(String),
-}
-#[derive(Clone)]
-pub(crate) enum TransportScope {
-    Provider,
-    Catalog(url::Url),
-}
-
-impl Invocation {
+impl Outbound {
     pub(crate) fn new(
         id: String,
         connection: Connection,
-        input: InvocationInput,
         secret: Option<Secret>,
         authorization: Arc<dyn Authorization>,
-        cancel: watch::Receiver<bool>,
         binding: ProviderBinding,
+        operation: OperationKind,
     ) -> Self {
         Self {
             id,
             connection,
-            input,
             secret,
             authorization,
-            cancel,
             binding,
+            operation,
         }
     }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    /// Add runtime revocation without replacing the host's original authorization.
-    pub fn restrict(mut self, scope: Arc<dyn Authorization>) -> Self {
-        self.authorization = Arc::new(RestrictedAuthorization {
-            original: self.authorization,
-            scope,
-        });
-        self
-    }
-    pub fn connection(&self) -> &Connection {
+    pub(crate) fn connection(&self) -> &Connection {
         &self.connection
     }
-    pub fn generation(&self) -> Result<&Generation> {
-        match &self.input {
-            InvocationInput::Conversation(request)
-            | InvocationInput::ConnectionCheck(request)
-            | InvocationInput::Task(request) => Ok(request),
-            InvocationInput::ModelList => Err(Error::invalid()),
-        }
+    pub(crate) fn policy(&self) -> &Policy {
+        self.binding.policy()
     }
-    pub fn authorization(&self) -> Arc<dyn Authorization> {
+    pub(crate) fn authorization(&self) -> Arc<dyn Authorization> {
         self.authorization.clone()
     }
-    pub fn cancellation(&self) -> watch::Receiver<bool> {
-        self.cancel.clone()
-    }
-    pub fn operation(&self) -> OperationKind {
-        self.input.operation()
-    }
-    pub fn policy(&self) -> &Policy {
-        self.binding.policy()
+    pub(crate) fn operation(&self) -> OperationKind {
+        self.operation
     }
 
     // Only the host-owned transport may sign requests.
@@ -160,7 +123,7 @@ impl Invocation {
                 }
                 let base_path = base.path().trim_end_matches('/');
                 let path = target.path();
-                let allowed = match self.operation() {
+                let allowed = match self.operation {
                     OperationKind::ModelList => {
                         *request.method() == http::Method::GET
                             && request.body().is_empty()
@@ -214,19 +177,117 @@ impl Invocation {
         }
         Ok(())
     }
+}
+
+/// One credential-bearing request of the host's own adapters. Adapters can
+/// only submit unsigned requests to [`AuthorizedTransport`]; the signing
+/// method is private to this module and its transport.
+pub struct Invocation {
+    outbound: Arc<Outbound>,
+    input: InvocationInput,
+    cancel: watch::Receiver<bool>,
+}
+
+#[derive(Clone)]
+pub enum CredentialPlacement {
+    None,
+    Bearer,
+    Header(String),
+    Query(String),
+}
+#[derive(Clone)]
+pub(crate) enum TransportScope {
+    Provider,
+    Catalog(url::Url),
+}
+
+impl Invocation {
+    pub(crate) fn new(
+        id: String,
+        connection: Connection,
+        input: InvocationInput,
+        secret: Option<Secret>,
+        authorization: Arc<dyn Authorization>,
+        cancel: watch::Receiver<bool>,
+        binding: ProviderBinding,
+    ) -> Self {
+        let outbound = Outbound::new(
+            id,
+            connection,
+            secret,
+            authorization,
+            binding,
+            input.operation(),
+        );
+        Self {
+            outbound: Arc::new(outbound),
+            input,
+            cancel,
+        }
+    }
+    pub fn id(&self) -> &str {
+        &self.outbound.id
+    }
+    /// Add runtime revocation without replacing the host's original authorization.
+    pub fn restrict(mut self, scope: Arc<dyn Authorization>) -> Self {
+        let outbound = Self::restricted(&self.outbound, scope);
+        self.outbound = outbound;
+        self
+    }
+    fn restricted(outbound: &Outbound, scope: Arc<dyn Authorization>) -> Arc<Outbound> {
+        Arc::new(Outbound {
+            id: outbound.id.clone(),
+            connection: outbound.connection.clone(),
+            secret: outbound.secret.clone(),
+            authorization: Arc::new(RestrictedAuthorization {
+                original: outbound.authorization.clone(),
+                scope,
+            }),
+            binding: outbound.binding.clone(),
+            operation: outbound.operation,
+        })
+    }
+    pub fn connection(&self) -> &Connection {
+        &self.outbound.connection
+    }
+    pub fn generation(&self) -> Result<&Generation> {
+        match &self.input {
+            #[cfg(test)]
+            InvocationInput::Conversation(request) => Ok(request),
+            InvocationInput::ConnectionCheck(request) | InvocationInput::Task(request) => {
+                Ok(request)
+            }
+            InvocationInput::ModelList => Err(Error::invalid()),
+        }
+    }
+    pub fn authorization(&self) -> Arc<dyn Authorization> {
+        self.outbound.authorization.clone()
+    }
+    pub fn cancellation(&self) -> watch::Receiver<bool> {
+        self.cancel.clone()
+    }
+    pub fn operation(&self) -> OperationKind {
+        self.input.operation()
+    }
+    pub fn policy(&self) -> &Policy {
+        self.outbound.policy()
+    }
+    pub(crate) fn outbound(&self) -> Arc<Outbound> {
+        self.outbound.clone()
+    }
     pub async fn generate(self) -> Result<BoxStream<'static, Result<Event>>> {
         if self.operation() == OperationKind::ModelList {
             return Err(Error::invalid());
         }
-        self.authorization.check().await?;
-        self.binding.provider.clone().generate(self).await
+        self.outbound.authorization.check().await?;
+        self.outbound.binding.provider.clone().generate(self).await
     }
     pub async fn models(self) -> Result<Vec<Model>> {
         if self.operation() != OperationKind::ModelList {
             return Err(Error::invalid());
         }
-        self.authorization.check().await?;
-        let models = self.binding.provider.clone().models(self).await?;
+        self.outbound.authorization.check().await?;
+        let models = self.outbound.binding.provider.clone().models(self).await?;
         validate_models(&models)?;
         Ok(models)
     }

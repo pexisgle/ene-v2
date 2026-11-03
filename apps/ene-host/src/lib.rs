@@ -9,6 +9,7 @@ mod audio;
 mod bootstrap;
 mod devices;
 mod infrastructure;
+mod rig;
 #[cfg(test)]
 mod test_support;
 

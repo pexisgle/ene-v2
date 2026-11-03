@@ -1,4 +1,5 @@
 mod commit;
+mod conversation;
 mod credentials;
 mod generation;
 mod inference;
@@ -31,6 +32,8 @@ pub struct Subscription {
 pub struct SnapshotView {
     pub grants: Vec<Grant>,
     pub stored: StoredSnapshot,
+    pub messages: Vec<Message>,
+    pub message_cursors: HashMap<String, Option<String>>,
     pub cursor: Cursor,
     pub health: ene_rpc::HostHealth,
 }
@@ -45,11 +48,14 @@ struct Inner {
     plugins: Option<Arc<dyn crate::ports::plugin::Plugins>>,
     plugin_events: Arc<tokio::sync::Semaphore>,
     plugin_tasks: TaskTracker,
+    background: TaskTracker,
     controls: Mutex<Controls>,
     boundary: Mutex<Boundary>,
     events: broadcast::Sender<Notification>,
     shutdown: watch::Sender<bool>,
-    generations: TaskTracker,
+    rig: std::sync::OnceLock<Arc<crate::rig::Runtime>>,
+    #[cfg(test)]
+    test_model: std::sync::OnceLock<Arc<crate::application::conversation::TestModel>>,
     mutations: runtime::MutationExecutor,
     stops: runtime::MutationExecutor,
     cleanups: TaskTracker,
@@ -80,9 +86,12 @@ impl HostApplication {
             plugins,
             plugin_events: Arc::new(tokio::sync::Semaphore::new(16)),
             plugin_tasks: TaskTracker::new(),
+            background: TaskTracker::new(),
             controls: Mutex::new(Controls::default()),
             shutdown,
-            generations: TaskTracker::new(),
+            rig: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            test_model: std::sync::OnceLock::new(),
             mutations: runtime::MutationExecutor::default(),
             stops: runtime::MutationExecutor::new(8),
             cleanups: TaskTracker::new(),
@@ -100,6 +109,7 @@ impl HostApplication {
     }
     pub(crate) fn begin_shutdown(&self) {
         self.0.plugin_tasks.close();
+        self.0.background.close();
         self.0.stops.close();
         self.0.mutations.close();
         self.0.shutdown.send_replace(true);
@@ -111,22 +121,26 @@ impl HostApplication {
         self.begin_shutdown();
         {
             let controls = self.0.controls.lock().await;
-            self.0.generations.close();
             for run in controls.running.values() {
                 run.cancel.send_replace(true);
             }
         }
         self.0.stops.wait().await;
         self.0.mutations.wait().await;
+        // The kernel stops its turns, writes the session log and exits
+        // before the host reports a clean stop. Its failure never skips
+        // the other components' shutdown, which could leave work running.
+        let rig_shutdown = match self.0.rig.get() {
+            Some(rig) => rig.shutdown().await,
+            None => Ok(()),
+        };
         self.0.providers.shutdown().await;
         let plugin_shutdown = match &self.0.plugins {
             Some(plugins) => plugins.shutdown().await,
             None => Ok(()),
         };
         self.0.plugin_tasks.wait().await;
-        // Cancellation only signals generation. Its terminal database write
-        // and persistence-failure handling must finish before the runtime exits.
-        self.0.generations.wait().await;
+        self.0.background.wait().await;
         self.0.cleanups.close();
         self.0.cleanups.wait().await;
         // One bounded second pass also retries any earlier observable failure.
@@ -144,6 +158,7 @@ impl HostApplication {
         }
         self.0.cleanups.close();
         self.0.cleanups.wait().await;
+        rig_shutdown?;
         plugin_shutdown?;
         if self.0.controls.lock().await.failed() {
             return Err(Error::new(ErrorKind::StorageFailure));
@@ -188,33 +203,66 @@ impl HostApplication {
         self.0.boundary.lock().await.connections.remove(id);
     }
     pub async fn snapshot(&self, subscription: Option<&str>) -> Result<SnapshotView, Error> {
-        let controls = self.0.controls.lock().await;
-        let health = ene_rpc::HostHealth {
-            ready: !controls.failed() && !*self.0.shutdown.borrow(),
-            recovery_required: controls.failed(),
-            stopping: *self.0.shutdown.borrow(),
-            credential_cleanup_pending: self.0.cleanup.lock().expect("cleanup lock").pending.len()
-                as u64,
-            ..Default::default()
+        let (mut health, stored, grants) = {
+            let controls = self.0.controls.lock().await;
+            let health = ene_rpc::HostHealth {
+                ready: !controls.failed() && !*self.0.shutdown.borrow(),
+                recovery_required: controls.failed(),
+                stopping: *self.0.shutdown.borrow(),
+                credential_cleanup_pending: self
+                    .0
+                    .cleanup
+                    .lock()
+                    .expect("cleanup lock")
+                    .pending
+                    .len() as u64,
+                ..Default::default()
+            };
+            let stored = self.0.repository.snapshot().await?;
+            let mut config = self.0.repository.configuration().await?;
+            generation::refresh(self, &controls, &mut config);
+            let mut stored = stored;
+            stored.companions = config.companions.into_values().collect();
+            (health, stored, config.grants)
         };
-        let boundary = self.0.boundary.lock().await;
-        if subscription.is_some_and(|id| {
-            boundary
-                .connections
-                .get(id)
-                .is_none_or(|lease| lease.strong_count() == 0)
-        }) {
-            return Err(Error::new(ErrorKind::ResyncRequired));
+        let cursor = {
+            let boundary = self.0.boundary.lock().await;
+            if subscription.is_some_and(|id| {
+                boundary
+                    .connections
+                    .get(id)
+                    .is_none_or(|lease| lease.strong_count() == 0)
+            }) {
+                return Err(Error::new(ErrorKind::ResyncRequired));
+            }
+            boundary.cursor.clone()
+        };
+        let mut messages = Vec::new();
+        let mut message_cursors = HashMap::new();
+        if let Ok(rig) = self.rig() {
+            for companion in &stored.companions {
+                match rig.history(companion.id.clone(), None, 50).await {
+                    Ok(page) => {
+                        message_cursors.insert(companion.id.clone(), page.next_cursor);
+                        messages.extend(page.items);
+                    }
+                    Err(_) => {
+                        // The snapshot still carries configuration and why the
+                        // history is unavailable; it does not claim readiness
+                        // or a complete history it could not read.
+                        health.ready = false;
+                        health.recovery_required = true;
+                        message_cursors.insert(companion.id.clone(), None);
+                    }
+                }
+            }
         }
-        let mut stored = self.0.repository.snapshot().await?;
-        let mut config = self.0.repository.configuration().await?;
-        generation::refresh(self, &controls, &mut config);
-        stored.companions = config.companions.into_values().collect();
-        let grants = config.grants;
         Ok(SnapshotView {
             grants,
             stored,
-            cursor: boundary.cursor.clone(),
+            messages,
+            message_cursors,
+            cursor,
             health,
         })
     }
@@ -232,14 +280,10 @@ impl HostApplication {
         let app = self.clone();
         self.0
             .stops
-            .submit(self.clone(), async move {
-                app.companion(&id).await?;
-                let controls = app.0.controls.lock().await;
-                for run in controls.running.values().filter(|run| run.companion == id) {
-                    run.cancel.send_replace(true);
-                }
-                Ok(())
-            })
+            .submit(
+                self.clone(),
+                async move { conversation::cancel(app, id).await },
+            )
             .await
     }
     pub async fn companions(&self) -> Result<Vec<Companion>, Error> {
@@ -329,31 +373,9 @@ impl HostApplication {
         cursor: Option<String>,
         limit: usize,
     ) -> Result<ene_rpc::History, Error> {
-        self.companion(&companion).await?;
-        if !(1..=200).contains(&limit)
-            || cursor
-                .as_ref()
-                .is_some_and(|cursor| !valid_cursor(&companion, cursor))
-        {
-            return Err(Error::invalid());
-        }
-        self.0.repository.messages(companion, cursor, limit).await
+        conversation::history(self, companion, cursor, limit).await
     }
     pub async fn message(&self, companion: String, id: String) -> Result<Message, Error> {
-        CompanionId::parse(companion.clone())?;
-        MessageId::parse(id.clone())?;
-        self.0
-            .repository
-            .message(companion, id)
-            .await?
-            .ok_or_else(|| Error::new(ErrorKind::NotFound))
+        conversation::message(self, companion, id).await
     }
-}
-fn valid_cursor(companion: &str, cursor: &str) -> bool {
-    cursor.split_once(':').is_some_and(|(sequence, id)| {
-        id == companion
-            && sequence
-                .parse::<u64>()
-                .is_ok_and(|n| n > 0 && n <= i64::MAX as u64)
-    })
 }

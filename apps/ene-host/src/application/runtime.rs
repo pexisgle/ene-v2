@@ -136,7 +136,7 @@ impl HostApplication {
     ) -> Result<(crate::ports::Outcome, serde_json::Value), Error> {
         CompanionId::parse(id.clone())?;
         RequestKey::parse(key.clone())?;
-        self.owned(operations::accept_message(self.clone(), id, key, request))
+        self.owned(super::conversation::accept(self.clone(), id, key, request))
             .await
     }
     pub async fn check(

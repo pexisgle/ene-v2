@@ -291,6 +291,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_oversized_response_body_fails_instead_of_reading_forever() {
+        let (origin, task) = server(Router::new().fallback(axum::routing::post(|| async {
+            "x".repeat(MAX_RESPONSE_BYTES + 1)
+        })))
+        .await;
+        let transport = transport(
+            format!("{origin}/v1"),
+            Arc::new(Gate(AtomicBool::new(true))),
+            OperationKind::Conversation,
+            CredentialPlacement::None,
+        );
+        // A declared length over the budget is refused before any body is
+        // read; a chunked body is stopped as it grows.
+        if let Ok(response) = transport
+            .send_streaming(post(format!("{origin}/v1/chat/completions")))
+            .await
+        {
+            let mut body = response.into_body();
+            let mut read = 0usize;
+            let failed = loop {
+                match body.next().await {
+                    Some(Ok(chunk)) => read += chunk.len(),
+                    Some(Err(_)) => break true,
+                    None => break false,
+                }
+            };
+            assert!(failed, "the oversized body was read whole: {read} bytes");
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn chunked_wire_and_sse_budgets_apply_before_adapter_parsing() {
         let (origin, task) = server(
             Router::new()

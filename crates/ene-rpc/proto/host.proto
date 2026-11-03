@@ -16,6 +16,9 @@ message Message {
   string status = 5; string created_at = 6; uint64 sequence = 7;
   repeated JsonDocument resources = 8; optional string in_reply_to = 9;
   optional string task_id = 10; optional string question_id = 11; Failure failure = 12;
+  // The accepted input this entry or reply belongs to. A reply carries the id
+  // of the input it answers; the id is the same value SendMessage returned.
+  optional string request_id = 13;
 }
 message Companion {
   string id = 1; string name = 2; JsonDocument body = 3; JsonDocument voice = 4;
@@ -78,7 +81,9 @@ message SendMessageRequest {
   string companion_id = 1; string text = 2; string request_key = 3;
   repeated JsonDocument resources = 4; optional string question_id = 5; optional string decision = 6;
 }
-message MessageAcceptance { string request_id = 1; string message_id = 2; string response_message_id = 3; }
+// The host has taken responsibility for the input. Delivery, execution and its
+// end are confirmed by MessageCreated, TurnEvent and GetHistory, not here.
+message MessageAcceptance { string request_id = 1; reserved 2, 3; reserved "message_id", "response_message_id"; }
 message GrantsRequest { optional string companion_id = 1; }
 message Grants { repeated Grant items = 1; }
 message Consent { uint64 settings_revision = 1; string provider_revision = 2; }
@@ -179,18 +184,34 @@ message Availability {
   optional string provider_revision = 4; repeated string destinations = 5;
   JsonDocument connection_fingerprint = 6; repeated OperationAvailability operations = 7;
 }
-message MessageDelta { string message_id = 1; uint64 offset = 2; string delta = 3; }
-message PersistenceFailure { optional string message_id = 1; string code = 2; }
+// Progress of the reply to the input its stream_id names. The final text is the
+// message TurnEvent reports; deltas are not the saved conversation.
+message MessageDelta { string stream_id = 1; uint64 offset = 2; string delta = 3; }
+// One execution of a companion from an accepted input to its end. `state` is
+// streaming, answered, stopped or failed. `message_id` is the saved reply entry
+// when one exists. Streaming is also reported as MessageDelta with this stream_id.
+message TurnEvent {
+  string companion_id = 1; string stream_id = 2; string state = 3;
+  optional string request_id = 4; optional string message_id = 5; Failure failure = 6;
+}
+message PersistenceFailure { optional string message_id = 1; string code = 2; string message = 3; }
+// The host's execution kernel stopped and no running turn will be answered.
+message HostFailure { string code = 1; string message = 2; }
 message Notification {
   Cursor cursor = 1; optional string companion_id = 2;
+  // The former message-start/update and generation-failure events; the turn
+  // event carries their meaning now.
+  reserved 4, 5, 11;
+  reserved "message_started", "message_updated", "generation_persistence_failed";
   oneof event {
-    Message message_created = 3; Message message_started = 4; Message message_updated = 5;
+    Message message_created = 3;
     MessageDelta message_delta = 6; Companion companion_updated = 7;
     Settings settings_updated = 8; Grants grants_updated = 9;
     PersistenceFailure host_storage_failed = 10;
-    PersistenceFailure generation_persistence_failed = 11;
     CharacterActionNotification plugin_character_action = 12;
     HarnessTaskNotification harness_task = 13;
+    TurnEvent turn_event = 14;
+    HostFailure host_failure = 15;
   }
 }
 message InitialState { string subscription_id = 1; Snapshot snapshot = 2; }

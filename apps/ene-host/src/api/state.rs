@@ -33,7 +33,7 @@ impl App {
     ) -> Result<ene_rpc::Snapshot, super::error::ApiError> {
         let view = self.application.snapshot(subscription).await?;
         let stored = view.stored;
-        let message_cursors = stored
+        let message_cursors = view
             .message_cursors
             .into_iter()
             .map(|(id, value)| {
@@ -52,7 +52,7 @@ impl App {
             capabilities: ene_rpc::JsonDocument { json: serde_json::json!({"limits":{"max_companions":1,"max_concurrent_tasks":1},"features":["history","notifications","chat","connection_settings","credentials","data_transfer_grants","connection_check","provider_plugins"],"adapters":self.application.providers().iter().filter(|p|p.state=="ready").map(|p|p.id.clone()).collect::<Vec<_>>(),"model_reference_formats":["provider_model_id"],"transport":{"rpc":"/rpc","audio":"/audio","audio_available":self.audio.available(),"device_operations":true}}).to_string(), ..Default::default() }.into(),
             cursor: view.cursor.into(),
             companions: stored.companions,
-            messages: stored.messages,
+            messages: view.messages,
             message_cursors,
             settings: stored.settings.into(),
             grants: view.grants.into_iter().map(Into::into).collect(),

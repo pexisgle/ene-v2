@@ -144,6 +144,7 @@ impl ProviderBinding {
 mod budget;
 mod invocation;
 pub(crate) use invocation::InvocationInput;
+pub(crate) use invocation::Outbound;
 pub use invocation::{
     AuthorizedTransport, CredentialPlacement, Invocation, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
     Response,

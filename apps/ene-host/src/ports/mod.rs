@@ -21,23 +21,6 @@ pub struct Receipt {
     pub outcome: Outcome,
     pub response: Value,
 }
-pub enum Accepted {
-    New {
-        receipt: MessageAcceptance,
-        user: Box<Message>,
-        response: Box<Message>,
-    },
-    Replay {
-        receipt: MessageAcceptance,
-    },
-}
-impl Accepted {
-    pub fn receipt(&self) -> &MessageAcceptance {
-        match self {
-            Self::New { receipt, .. } | Self::Replay { receipt } => receipt,
-        }
-    }
-}
 /// Configuration and receipt effect are one durable transaction.
 pub enum ConfigurationCommit {
     Update(Configuration),
@@ -52,13 +35,6 @@ pub enum ConfigurationCommit {
 }
 pub trait Repository: Send + Sync {
     fn snapshot(&self) -> BoxFuture<'_, Result<StoredSnapshot>>;
-    fn messages(
-        &self,
-        c: String,
-        cursor: Option<String>,
-        limit: usize,
-    ) -> BoxFuture<'_, Result<ene_rpc::History>>;
-    fn message(&self, c: String, id: String) -> BoxFuture<'_, Result<Option<Message>>>;
     fn configuration(&self) -> BoxFuture<'_, Result<Configuration>>;
     fn commit_configuration(&self, change: ConfigurationCommit) -> BoxFuture<'_, Result<()>>;
     fn receipt(
@@ -68,13 +44,17 @@ pub trait Repository: Send + Sync {
         request: Value,
     ) -> BoxFuture<'_, Result<Option<(Outcome, Value)>>>;
     fn reserve(&self, receipt: Receipt) -> BoxFuture<'_, Result<()>>;
-    fn accept(
+    /// Completes a receipt this repository reserved as pending. The
+    /// compare-and-set leaves a concurrent or repeated completion unchanged.
+    fn complete_receipt(&self, receipt: Receipt) -> BoxFuture<'_, Result<()>>;
+    /// Removes a pending receipt whose operation never became accepted, so
+    /// the same request key can be tried again.
+    fn release_receipt(
         &self,
         key: String,
-        companion: String,
+        target: String,
         request: Value,
-    ) -> BoxFuture<'_, Result<Accepted>>;
-    fn update_message(&self, id: String, update: MessageUpdate) -> BoxFuture<'_, Result<Message>>;
+    ) -> BoxFuture<'_, Result<()>>;
 }
 /// Secrets have no Debug/Serialize implementation and never become protocol messages.
 #[derive(Clone)]

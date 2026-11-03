@@ -49,3 +49,82 @@ pub fn save_receipt(
     }
     Ok(())
 }
+
+/// Pending -> final, or an unchanged repeat. A different final state is a
+/// conflict: the same key must not be completed twice with different results.
+pub fn complete_receipt(
+    db: &Connection,
+    key: &str,
+    target: &str,
+    request: &Value,
+    status: u16,
+    response: &Value,
+) -> Result<(), crate::infrastructure::sqlite::Error> {
+    let principal: String = db
+        .query_row(
+            "SELECT value FROM metadata WHERE key='principal'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(crate::infrastructure::sqlite::Error::from)?;
+    let body = request.to_string();
+    let result = response.to_string();
+    let existing: Option<(String, String, i64, String)> = db
+        .query_row(
+            "SELECT method,target,status,response FROM receipts WHERE principal=?1 AND key=?2",
+            params![principal, key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(crate::infrastructure::sqlite::Error::from)?;
+    let Some((method, old_target, old_status, old_response)) = existing else {
+        return Err(crate::infrastructure::sqlite::Error::StateConflict);
+    };
+    if method != "POST" || old_target != target {
+        return Err(crate::infrastructure::sqlite::Error::IdempotencyConflict);
+    }
+    if old_status != 0 {
+        let same = u16::try_from(old_status).ok() == Some(status)
+            && serde_json::from_str::<Value>(&old_response)
+                .map_err(crate::infrastructure::sqlite::Error::from)?
+                == *response;
+        return if same {
+            Ok(())
+        } else {
+            Err(crate::infrastructure::sqlite::Error::IdempotencyConflict)
+        };
+    }
+    let rows = db
+        .execute(
+            "UPDATE receipts SET status=?1,response=?2 WHERE principal=?3 AND key=?4 AND target=?5 AND method='POST' AND status=0 AND request=?6",
+            params![status, result, principal, key, target, body],
+        )
+        .map_err(crate::infrastructure::sqlite::Error::from)?;
+    if rows != 1 {
+        return Err(crate::infrastructure::sqlite::Error::StateConflict);
+    }
+    Ok(())
+}
+
+/// Drops a pending receipt whose operation had no effect. A completed
+/// receipt is never removed here.
+pub fn release_receipt(
+    db: &Connection,
+    key: &str,
+    target: &str,
+    request: &Value,
+) -> Result<(), crate::infrastructure::sqlite::Error> {
+    let principal: String = db
+        .query_row(
+            "SELECT value FROM metadata WHERE key='principal'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(crate::infrastructure::sqlite::Error::from)?;
+    db.execute(
+        "DELETE FROM receipts WHERE principal=?1 AND key=?2 AND target=?3 AND method='POST' AND status=0 AND request=?4",
+        params![principal, key, target, request.to_string()],
+    )
+    .map_err(crate::infrastructure::sqlite::Error::from)?;
+    Ok(())
+}

@@ -62,32 +62,6 @@ pub(super) fn initialize(db: &mut Connection) -> Result<()> {
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
     migrations.to_latest(db)?;
     let tx = db.transaction()?;
-    let interrupted: Vec<(String, String)> = {
-        let mut statement =
-            tx.prepare("SELECT id,body FROM messages WHERE status IN ('queued','streaming')")?;
-        statement
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?
-    };
-    for (id, body) in interrupted {
-        let mut message: Message = serde_json::from_str(&body)?;
-        message.status = "failed".into();
-        message.failure = Failure {
-            code: "host_interrupted".into(),
-            message: "ホストの停止により生成が中断されました。自動再実行しません。".into(),
-            details: ene_rpc::JsonDocument {
-                json: "{}".into(),
-                ..Default::default()
-            }
-            .into(),
-            ..Default::default()
-        }
-        .into();
-        tx.execute(
-            "UPDATE messages SET status='failed',body=?2 WHERE id=?1",
-            params![id, serde_json::to_string(&message)?],
-        )?;
-    }
     let pending: Vec<(String, String, String)> = {
         let mut q = tx.prepare("SELECT principal,key,response FROM receipts WHERE status=0")?;
         q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -172,7 +146,17 @@ mod companion_migration_tests {
                 .unwrap(),
             options
         );
-        let saved = page(&db, &original.id, None, 50).unwrap().items.remove(0);
+        // The legacy messages table is kept by the migrations and is not
+        // rewritten; new conversations are saved by Rig.
+        let saved: ene_rpc::Message = serde_json::from_str(
+            &db.query_row(
+                "SELECT body FROM messages WHERE companion_id=?1",
+                [&original.id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(saved.text, "saved text");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved.resources[0].json).unwrap(),

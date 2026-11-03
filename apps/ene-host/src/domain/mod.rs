@@ -1,9 +1,7 @@
 //! Host entities independent of HTTP, persistence and provider implementations.
 pub mod harness;
-mod message;
 mod operation;
 pub mod rules;
-pub use message::MessageUpdate;
 pub use operation::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,8 +40,6 @@ pub struct StoredSnapshot {
     pub environment_id: String,
     pub companions: Vec<Companion>,
     pub settings: Settings,
-    pub messages: Vec<Message>,
-    pub message_cursors: std::collections::BTreeMap<String, Option<String>>,
 }
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{kind:?}")]
@@ -81,7 +77,6 @@ impl Error {
     }
 }
 
-pub use crate::ports::Accepted;
 pub use Connection as ProviderConnection;
 pub use MessageAcceptance as Acceptance;
 

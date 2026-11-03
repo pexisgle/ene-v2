@@ -1,10 +1,12 @@
 //! Authorization, credential attachment and sending share one private boundary.
-use super::{CredentialPlacement, Invocation, TransportScope};
+use super::{CredentialPlacement, Invocation, Outbound, TransportScope};
 use crate::{
     domain::{Error, ErrorKind},
     ports::Result,
 };
 use bytes::Bytes;
+use std::future::Future;
+use std::pin::pin;
 use std::{sync::Arc, time::Duration};
 
 pub const MAX_REQUEST_BYTES: usize = 512 * 1024;
@@ -13,24 +15,40 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AuthorizedTransport {
     client: reqwest::Client,
-    invocation: Arc<Invocation>,
+    outbound: Arc<Outbound>,
     placement: CredentialPlacement,
     scope: TransportScope,
+    runtime: tokio::runtime::Handle,
     max_response_bytes: usize,
     timeout: Duration,
 }
 
 impl AuthorizedTransport {
     pub fn new(invocation: Arc<Invocation>, placement: CredentialPlacement) -> Result<Self> {
+        Self::for_outbound(invocation.outbound(), placement)
+    }
+
+    /// The same boundary for a request the host does not own: the Rig
+    /// execution kernel sends its own requests through this transport.
+    pub(crate) fn for_outbound(
+        outbound: Arc<Outbound>,
+        placement: CredentialPlacement,
+    ) -> Result<Self> {
         let client = http_client()?;
-        let timeout = invocation.operation().spec().timeout;
+        let timeout = outbound.operation().spec().timeout;
+        let max_response_bytes = MAX_RESPONSE_BYTES;
+        // A Rig task pool polls this future on its own thread, where no Tokio
+        // runtime is current. Capture the host's runtime here so reqwest's
+        // I/O is driven by the host runtime, not by a second implicit one.
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::unavailable())?;
         Ok(Self {
             client,
             timeout,
-            invocation,
+            outbound,
             placement,
+            runtime,
             scope: TransportScope::Provider,
-            max_response_bytes: MAX_RESPONSE_BYTES,
+            max_response_bytes,
         })
     }
 
@@ -51,20 +69,29 @@ impl AuthorizedTransport {
                 reason: Some("input_limit"),
             });
         }
-        self.invocation
+        self.outbound
             .authorize_outbound(&mut request, &self.placement, &self.scope)
             .await?;
         let (parts, body) = request.into_parts();
-        // This is the actual send boundary, including Rig's lazy streaming requests.
-        let response = self
-            .client
-            .request(parts.method, parts.uri.to_string())
-            .timeout(self.timeout)
-            .headers(parts.headers)
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| external())?;
+        // This is the actual send boundary, including Rig's lazy streaming
+        // requests. reqwest builds its deadline with `tokio::time::sleep`
+        // while the request builder is constructed, so the builder and the
+        // send both run inside the captured host runtime: a Rig task pool
+        // has no runtime of its own to fall back on.
+        let client = self.client.clone();
+        let timeout = self.timeout;
+        let runtime = self.runtime.clone();
+        let response = poll_in(runtime, async move {
+            client
+                .request(parts.method, parts.uri.to_string())
+                .timeout(timeout)
+                .headers(parts.headers)
+                .body(body)
+                .send()
+                .await
+        })
+        .await
+        .map_err(|_| external())?;
         if response.status().is_redirection() {
             return Err(Error::new(ErrorKind::PermissionRequired));
         }
@@ -76,16 +103,28 @@ impl AuthorizedTransport {
         }
         Ok(Response {
             response,
-            invocation: self.invocation.clone(),
+            outbound: self.outbound.clone(),
+            runtime: self.runtime.clone(),
             bytes: 0,
             max_bytes: self.max_response_bytes,
         })
     }
 }
 
+/// Polls `future` with `runtime` entered, wherever the caller's executor runs.
+async fn poll_in<T>(runtime: tokio::runtime::Handle, future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    std::future::poll_fn(|cx| {
+        let _entered = runtime.enter();
+        future.as_mut().poll(cx)
+    })
+    .await
+}
+
 pub struct Response {
     response: reqwest::Response,
-    invocation: Arc<Invocation>,
+    outbound: Arc<Outbound>,
+    runtime: tokio::runtime::Handle,
     bytes: usize,
     max_bytes: usize,
 }
@@ -97,9 +136,11 @@ impl Response {
         self.response.headers()
     }
     pub async fn chunk(&mut self) -> Result<Option<Bytes>> {
-        self.invocation.authorization().check().await?;
-        let chunk = self.response.chunk().await.map_err(|_| external())?;
-        self.invocation.authorization().check().await?;
+        self.outbound.authorization().check().await?;
+        let chunk = poll_in(self.runtime.clone(), self.response.chunk())
+            .await
+            .map_err(|_| external())?;
+        self.outbound.authorization().check().await?;
         if let Some(chunk) = &chunk {
             self.bytes = self.bytes.saturating_add(chunk.len());
             if self.bytes > self.max_bytes {
