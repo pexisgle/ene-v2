@@ -227,6 +227,10 @@ impl HostApplication {
         {
             return Err(Error::invalid());
         }
+        #[cfg(test)]
+        if let Some(hook) = self.0.embedding_hook.get() {
+            return hook(companion_id.to_owned(), input).await;
+        }
         let id = Uuid::new_v4().to_string();
         let mut controls = self.0.controls.lock().await;
         if controls.failed() {

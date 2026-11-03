@@ -2,7 +2,7 @@ mod commit;
 mod conversation;
 mod credentials;
 mod generation;
-mod inference;
+pub(crate) mod inference;
 pub(crate) mod memory;
 pub(crate) mod mind;
 mod operations;
@@ -26,6 +26,17 @@ use std::{
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
+#[cfg(test)]
+pub(crate) type EmbeddingHook = std::sync::Arc<
+    dyn Fn(
+            String,
+            Vec<String>,
+        )
+            -> futures_util::future::BoxFuture<'static, Result<crate::llm::Embedding, Error>>
+        + Send
+        + Sync,
+>;
+
 #[cfg(test)]
 pub(crate) type ConsolidationHook = std::sync::Arc<
     dyn Fn(String) -> futures_util::future::BoxFuture<'static, Result<String, Error>> + Send + Sync,
@@ -75,6 +86,8 @@ struct Inner {
         std::sync::Mutex<std::collections::HashMap<String, crate::application::mind::ActiveRecall>>,
     active_request: std::sync::Mutex<std::collections::HashMap<String, String>>,
     #[cfg(test)]
+    embedding_hook: std::sync::OnceLock<EmbeddingHook>,
+    #[cfg(test)]
     consolidation_hook: std::sync::OnceLock<ConsolidationHook>,
 }
 #[derive(Clone)]
@@ -109,6 +122,8 @@ impl HostApplication {
             active_recall: std::sync::Mutex::new(std::collections::HashMap::new()),
             active_request: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
+            embedding_hook: std::sync::OnceLock::new(),
+            #[cfg(test)]
             consolidation_hook: std::sync::OnceLock::new(),
             events: broadcast::channel(256).0,
             boundary: Mutex::new(Boundary {
@@ -121,6 +136,12 @@ impl HostApplication {
             }),
         }))
     }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn set_embedding_hook(&self, hook: EmbeddingHook) {
+        let _ = self.0.embedding_hook.set(hook);
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn set_consolidation_hook(&self, hook: ConsolidationHook) {

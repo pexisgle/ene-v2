@@ -2238,3 +2238,245 @@ async fn memory_forget_and_share_are_owner_only_and_idempotent() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes() {
+    use crate::bootstrap;
+    use crate::llm::Embedding;
+    use rig_core::catalog::Catalog;
+    use rig_core::operation::Completion;
+    use rig_core::serve::ErasedHandler;
+    use rig_core::serve::adapters::ModelAdapter;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+    use rig_ecs::effects::Handler;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let source = crate::domain::mind::SourceRef {
+        kind: crate::domain::mind::SourceKind::Input,
+        id: "seed".into(),
+        entry_id: Some("seed".into()),
+        speaker: Some("user".into()),
+        observed_at: Some("2026-01-01T00:00:00Z".into()),
+    };
+    let memory_id = store
+        .mind_update(
+            companion.clone(),
+            "seed-op".into(),
+            "seed-hash".into(),
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: 1,
+                memories: vec![crate::domain::mind::NewMemory {
+                    content: "一緒に柚子ジャムを作った。".into(),
+                    description: "共有した経験".into(),
+                    appraisal: String::new(),
+                    acquisition: crate::domain::mind::Acquisition::DirectExperience,
+                    supersedes: Vec::new(),
+                    sources: Vec::new(),
+                    occurred_at: None,
+                }],
+                state: None,
+            },
+            vec![source],
+            "parent".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .await
+        .unwrap()
+        .memories[0]
+        .id
+        .clone();
+    store
+        .mind_store_vectors(
+            vec![crate::infrastructure::sqlite::memory::VectorEntry {
+                memory_id: memory_id.clone(),
+                model: crate::application::inference::EMBEDDING_MODEL.into(),
+                preprocess: crate::infrastructure::sqlite::memory::TEXT_PREPROCESS.into(),
+                vector: vec![1.0, 0.0],
+            }],
+            crate::application::inference::EMBEDDING_MODEL.into(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .await
+        .unwrap();
+
+    let app = bootstrap::application(store.clone(), "private-token".into());
+    let rig_dir = temp.path().join("rig");
+    std::fs::create_dir_all(&rig_dir).unwrap();
+    bootstrap::attach_kernel(&app, rig_dir).unwrap();
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::text("思い出しました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("ローカル結果で答えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    let captured = model.clone();
+    app.application.set_test_model(Arc::new(move |_, _| {
+        let spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .expect("catalog")
+            .shared();
+        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
+            spec.reference(),
+            model.clone(),
+        ));
+        Ok(rig_ecs::model::Connection {
+            spec,
+            handler: Handler(handler),
+        })
+    }));
+    let (status, saved) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let connection = saved["connections"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("Companion/{companion}"),
+            json!({
+                "revision": 1,
+                "mind": "静かな助手",
+                "model_assignments": {"companion": {"connection_id": connection, "model_id": "deepseek/deepseek-flash"}}
+            }),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "PUT",
+            &format!("Credentials/{connection}"),
+            json!({"secret":"test-only"}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            "Grants",
+            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            Some("semantic-grant"),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_gate = gate.clone();
+    let hook_calls = calls.clone();
+    let hook_fail = fail.clone();
+    app.application
+        .set_embedding_hook(Arc::new(move |_companion, _input| {
+            let gate = hook_gate.clone();
+            let calls = hook_calls.clone();
+            let fail = hook_fail.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if fail.load(Ordering::SeqCst) {
+                    return Err(crate::domain::Error::new(
+                        crate::domain::ErrorKind::ProviderFailure,
+                    ));
+                }
+                gate.notified().await;
+                Ok(Embedding {
+                    vectors: vec![vec![1.0, 0.0]],
+                    input_tokens: 1,
+                })
+            })
+        }));
+
+    let mut subscription = app.application.subscribe().await;
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"あの黄色い果実の甘い保存食は何だった？"}),
+        Some("semantic-wait"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while calls.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the semantic search did not start"
+    );
+    assert_eq!(
+        captured.requests().len(),
+        0,
+        "the model was called while the semantic search was pending"
+    );
+    gate.notify_one();
+    wait_for_answered(&mut subscription).await;
+    let requests = captured.requests();
+    assert_eq!(requests.len(), 1);
+    let system = requests[0]
+        .chat_history
+        .iter()
+        .find_map(|message| match &**message {
+            rig_core::completion::Message::System { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("system prompt");
+    assert!(
+        system.contains("柚子ジャム") && system.contains(&memory_id),
+        "the semantic result was not in the final model request: {system}"
+    );
+
+    // A search failure must keep the local lexical result and still send once.
+    fail.store(true, Ordering::SeqCst);
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"柚子ジャムの思い出は？"}),
+        Some("semantic-failure"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+    let requests = captured.requests();
+    assert_eq!(requests.len(), 2);
+    let system = requests[1]
+        .chat_history
+        .iter()
+        .find_map(|message| match &**message {
+            rig_core::completion::Message::System { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("failure system prompt");
+    assert!(
+        system.contains("柚子ジャム") && system.contains("意味=error"),
+        "local results were lost on search failure: {system}"
+    );
+
+    app.application.stop().await.unwrap();
+}
