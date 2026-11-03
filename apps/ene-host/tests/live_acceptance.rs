@@ -519,8 +519,7 @@ async fn provider_acceptance_through_the_host() {
         other => panic!("unknown provider {other}"),
     };
     let Some(key) = keys.get(env_name).filter(|key| !key.is_empty()) else {
-        eprintln!("[live] {env_name} is not present in .env; skipped");
-        return;
+        panic!("{env_name} is not present in .env; the live acceptance cannot be verified");
     };
 
     let temp = tempfile::tempdir().unwrap();
