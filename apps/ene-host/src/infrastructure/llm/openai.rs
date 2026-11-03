@@ -52,13 +52,13 @@ pub fn policy(c: &Connection) -> Result<Policy> {
     if c.kind != "llm"
         || c.adapter != ID
         || c.endpoint != ENDPOINT
-        || serde_json::from_str::<Value>(&c.options.json).ok() != Some(json!({}))
+        || crate::infrastructure::llm::explicit_tool_calling(c).is_err()
     {
         return Err(Error::new(ErrorKind::UnsupportedCapability));
     }
     Ok(Policy {
         revision: REVISION.into(),
-        fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":json!({}),"implementation":REVISION}),
+        fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":serde_json::from_str::<Value>(&c.options.json).unwrap_or(Value::Null),"implementation":REVISION}),
         destinations: descriptor().destinations,
         requires_credentials: true,
         environment_variable: Some("OPENAI_API_KEY".into()),
@@ -183,27 +183,38 @@ pub(crate) fn agent_connection(
     outbound: std::sync::Arc<crate::llm::Outbound>,
     model: &str,
 ) -> Result<rig_ecs::model::Connection> {
-    use rig_core::catalog::Catalog;
+    use rig_core::catalog::{Catalog, ModelSpec};
     use rig_core::operation::Completion;
+    use rig_core::providers::registry::ProviderId;
     use rig_core::serve::ErasedHandler;
     use rig_core::serve::adapters::ModelAdapter;
     use rig_ecs::effects::Handler;
 
-    if !crate::infrastructure::llm::can_serve_conversation(outbound.connection()) {
-        return Err(Error {
-            kind: ErrorKind::UnsupportedCapability,
-            reason: Some("adapter_unsupported"),
-        });
-    }
-    let endpoint = outbound.connection().endpoint.clone();
-    let spec = Catalog::builtin()
-        .resolve(&format!("{ID}/{model}"))
-        .map_err(|_| Error {
-            kind: ErrorKind::UnsupportedCapability,
-            reason: Some("model_unsupported"),
-        })?
-        .spec
-        .clone();
+    let connection = outbound.connection();
+    let endpoint = connection.endpoint.clone();
+    let reference = format!("{ID}/{model}");
+    let spec = match Catalog::builtin().resolve(&reference) {
+        Ok(resolved) => resolved.shared(),
+        Err(_) => match crate::infrastructure::llm::explicit_tool_calling(connection)? {
+            Some(true) => {
+                let provider = ProviderId::catalog(ID)
+                    .ok_or_else(|| Error::new(ErrorKind::UnsupportedCapability))?;
+                std::sync::Arc::new(ModelSpec::new(provider, model).with_tools(true))
+            }
+            Some(false) => {
+                return Err(Error {
+                    kind: ErrorKind::UnsupportedCapability,
+                    reason: Some("model_cannot_call_tools"),
+                });
+            }
+            None => {
+                return Err(Error {
+                    kind: ErrorKind::UnsupportedCapability,
+                    reason: Some("model_capability_unknown"),
+                });
+            }
+        },
+    };
     if !spec.tools {
         return Err(Error {
             kind: ErrorKind::UnsupportedCapability,
@@ -219,10 +230,9 @@ pub(crate) fn agent_connection(
         .connect(transport);
     // The Responses wire is what this adapter has always spoken.
     let model = client.responses(model.to_owned());
-    let reference = spec.reference();
     let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(reference, model));
     Ok(rig_ecs::model::Connection {
-        spec: std::sync::Arc::new(spec),
+        spec,
         handler: Handler(handler),
     })
 }

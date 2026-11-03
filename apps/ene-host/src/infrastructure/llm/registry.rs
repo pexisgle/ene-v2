@@ -1,5 +1,5 @@
 //! Builtin and reviewed Wasm providers share the host authorization port.
-use super::openai;
+use super::{openai, openrouter};
 use crate::{
     domain::{Connection, Error, ErrorKind},
     llm::*,
@@ -26,7 +26,7 @@ impl Registry {
 }
 impl ProviderRegistry for Registry {
     fn descriptors(&self) -> Vec<Descriptor> {
-        let mut result = vec![openai::descriptor()];
+        let mut result = vec![openai::descriptor(), openrouter::descriptor()];
         if let Some(plugins) = &self.plugins {
             result.extend(plugins.descriptors());
         }
@@ -36,12 +36,15 @@ impl ProviderRegistry for Registry {
         if connection.adapter == openai::ID {
             return openai::policy(connection).map(|p| p.bind_connection(connection));
         }
+        if connection.adapter == openrouter::ID {
+            return openrouter::policy(connection).map(|p| p.bind_connection(connection));
+        }
         self.plugins()?
             .provider_policy(connection)
             .map(|p| p.bind_connection(connection))
     }
     fn scope_fingerprint(&self, connection: &Connection) -> Result<serde_json::Value> {
-        if connection.adapter == openai::ID {
+        if matches!(connection.adapter.as_str(), openai::ID | openrouter::ID) {
             return self.policy(connection).map(|p| p.fingerprint);
         }
         self.plugins()?
@@ -51,6 +54,9 @@ impl ProviderRegistry for Registry {
     fn resolve(&self, connection: &Connection) -> Result<ProviderBinding> {
         if connection.adapter == openai::ID {
             return ProviderBinding::resolve(Arc::new(openai::Provider), connection);
+        }
+        if connection.adapter == openrouter::ID {
+            return ProviderBinding::resolve(Arc::new(openrouter::Provider), connection);
         }
         ProviderBinding::resolve(
             self.plugins()?
@@ -70,7 +76,7 @@ impl ProviderRegistry for Registry {
     }
     fn enable(&self, id: String, enabled: bool) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            if id == openai::ID {
+            if matches!(id.as_str(), openai::ID | openrouter::ID) {
                 return if enabled {
                     Ok(())
                 } else {
