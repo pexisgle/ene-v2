@@ -32,7 +32,14 @@ impl TurnSpan {
 
     fn failure(&self) -> Option<w::Failure> {
         let (code, message) = match &self.end {
-            Some(TurnEnd::Failed { why }) => ("generation_failed", why.as_str()),
+            Some(TurnEnd::Failed { why }) => (
+                if why == "output_limit" {
+                    "output_limit"
+                } else {
+                    "generation_failed"
+                },
+                why.as_str(),
+            ),
             Some(TurnEnd::Stopped { why, .. }) => (
                 "cancelled",
                 why.as_deref().unwrap_or("停止操作により生成を停止しました"),
@@ -239,6 +246,27 @@ pub(super) fn reply_entry(conversation: &Conversation, start: MessageId) -> Opti
         .entries()
         .rfind(|entry| entry.index >= start && assistant_text(entry.message).is_some())
         .map(|entry| entry.id.to_string())
+}
+
+/// Whether the conversation or its saved inbox carries this request id. The
+/// id is the host's stable reference for an accepted input.
+pub(super) fn has_request(conversation: &Conversation, request_id: &str) -> bool {
+    let in_entries = conversation.entries().any(|entry| {
+        entry
+            .author
+            .and_then(|author| author.request.as_ref())
+            .is_some_and(|request| request.0 == request_id)
+    });
+    if in_entries {
+        return true;
+    }
+    conversation.asides().any(|(_, aside)| {
+        aside.kind == "rig.inbox"
+            && serde_json::from_value::<rig_ecs::inbox::Incoming>(aside.value.clone())
+                .ok()
+                .and_then(|message| message.author.request)
+                .is_some_and(|request| request.0 == request_id)
+    })
 }
 
 /// The user entry that asked for the turn, when it is still in the

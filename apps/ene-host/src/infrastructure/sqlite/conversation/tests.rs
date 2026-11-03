@@ -1,5 +1,5 @@
 use super::*;
-use crate::infrastructure::sqlite::{Store, meta};
+use crate::infrastructure::sqlite::Store;
 
 #[tokio::test]
 async fn a_pending_receipt_completes_once_and_releases_only_before_completion() {
@@ -56,19 +56,30 @@ async fn a_pending_receipt_completes_once_and_releases_only_before_completion() 
 }
 
 #[tokio::test]
-async fn restart_marks_an_unconfirmed_delivery_unavailable_instead_of_accepted() {
+async fn a_pending_chat_receipt_survives_restart_for_the_next_send_to_resolve() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.db");
+    let target = "/v1/companions/c/messages";
+    let request = json!({"text": "hello"});
+    let (target_first, request_first) = (target.to_owned(), request.clone());
     let first = Store::open(path.clone()).await.unwrap();
     first
-        .run(|db| {
+        .run(move |db| {
             save_receipt(
                 db,
-                "pending",
-                "/v1/companions/c/messages",
-                &json!({"text": "hello"}),
+                "chat",
+                &target_first,
+                &request_first,
                 0,
                 &json!({"requestId": "r1"}),
+            )?;
+            save_receipt(
+                db,
+                "check",
+                "/v1/connections/x/check",
+                &json!({}),
+                0,
+                &json!({"requestId": "c1"}),
             )?;
             Ok(())
         })
@@ -76,21 +87,21 @@ async fn restart_marks_an_unconfirmed_delivery_unavailable_instead_of_accepted()
         .unwrap();
     first.db.clone().close().await.unwrap();
     drop(first);
+
+    // A chat input may already be in the kernel's saved log, so its receipt
+    // is left for the host to settle from the kernel. Other pending receipts
+    // are settled as before.
+    let (target, request) = (target.to_owned(), request);
     let second = Store::open(path).await.unwrap();
     second
-        .run(|db| {
-            let (outcome, response) = receipt(
-                db,
-                "pending",
-                "/v1/companions/c/messages",
-                &json!({"text": "hello"}),
-            )?
-            .unwrap();
-            assert_eq!(outcome, 503);
-            assert_eq!(response["error"]["code"], "unavailable");
+        .run(move |db| {
+            let chat = receipt(db, "chat", &target, &request)?.unwrap();
+            assert_eq!(chat.0, 0);
+            assert_eq!(chat.1["requestId"], "r1");
+            let check = receipt(db, "check", "/v1/connections/x/check", &json!({}))?.unwrap();
+            assert_eq!(check.0, 503);
             Ok(())
         })
         .await
         .unwrap();
-    let _ = meta;
 }

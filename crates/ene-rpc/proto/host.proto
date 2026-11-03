@@ -197,6 +197,9 @@ message TurnEvent {
 message PersistenceFailure { optional string message_id = 1; string code = 2; string message = 3; }
 // The host's execution kernel stopped and no running turn will be answered.
 message HostFailure { string code = 1; string message = 2; }
+// A failed turn took the user's unanswered input out of the saved conversation;
+// the client puts this text back in its input. It is not a conversation message.
+message RecalledInput { string companion_id = 1; string text = 2; optional string reason = 3; }
 message Notification {
   Cursor cursor = 1; optional string companion_id = 2;
   // The former message-start/update and generation-failure events; the turn
@@ -212,6 +215,7 @@ message Notification {
     HarnessTaskNotification harness_task = 13;
     TurnEvent turn_event = 14;
     HostFailure host_failure = 15;
+    RecalledInput recalled_input = 16;
   }
 }
 message InitialState { string subscription_id = 1; Snapshot snapshot = 2; }

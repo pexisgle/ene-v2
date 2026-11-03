@@ -1419,6 +1419,48 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replayed, accepted);
 
+    // A crash between the kernel's log write and the receipt completion
+    // leaves a pending receipt. The next send resolves it from the saved
+    // conversation and returns the same acceptance without delivering again.
+    app.application
+        .reserve_test_chat_receipt(&companion, "crash-key", "いま何時？", &request_id)
+        .await
+        .unwrap();
+    let (status, recovered) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"いま何時？"}),
+        Some("crash-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recovered, accepted);
+
+    // A pending receipt the kernel never accepted is finalized unavailable;
+    // a retry gets the same explicit result and starts no turn.
+    app.application
+        .reserve_test_chat_receipt(&companion, "lost-key", "失われた入力", "missing-request")
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let (status, _) = mutate(
+            &app,
+            "POST",
+            &format!("SendMessage/{companion}"),
+            json!({"text":"失われた入力"}),
+            Some("lost-key"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let history = app
+        .application
+        .messages(companion.clone(), None, 50)
+        .await
+        .unwrap();
+    assert_eq!(history.items.len(), 2, "recovery delivered a duplicate");
+
     // A turn waiting in the held tool stops without waiting for it.
     let (status, _) = mutate(
         &app,

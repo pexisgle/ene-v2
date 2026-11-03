@@ -63,7 +63,11 @@ pub(super) fn initialize(db: &mut Connection) -> Result<()> {
     migrations.to_latest(db)?;
     let tx = db.transaction()?;
     let pending: Vec<(String, String, String)> = {
-        let mut q = tx.prepare("SELECT principal,key,response FROM receipts WHERE status=0")?;
+        // A chat receipt stays pending until the kernel's saved log proves the
+        // input was accepted; the host resolves it on the next send.
+        let mut q = tx.prepare(
+            "SELECT principal,key,response FROM receipts WHERE status=0 AND target NOT LIKE '/v1/companions/%/messages'",
+        )?;
         q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?
     };

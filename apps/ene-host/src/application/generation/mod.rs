@@ -6,7 +6,10 @@ use crate::{
 };
 use futures_util::{StreamExt, future::BoxFuture};
 use serde_json::Value;
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 use tokio::sync::watch;
 use uuid::Uuid;
 pub struct Running {
@@ -27,6 +30,9 @@ pub struct Controls {
     /// The model configuration each companion's Rig agent was last connected
     /// with. A different signature reconnects before the next input.
     pub connected: BTreeMap<String, String>,
+    /// Request keys accepted by this process and not yet finalized. A pending
+    /// receipt for one of these belongs to a live request, not a lost one.
+    pub inflight: HashSet<String>,
 }
 
 pub fn publish(

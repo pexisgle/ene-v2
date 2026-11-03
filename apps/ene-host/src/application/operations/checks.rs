@@ -128,6 +128,20 @@ pub async fn check(
         Ok((chunks, text.chars().count()))
     };
     let result = execute(&app, OperationKind::ConnectionCheck, &mut cancelled, work).await;
+    if result
+        .as_ref()
+        .is_err_and(|error| error.kind == ErrorKind::UnsupportedCapability)
+    {
+        // This provider has no one-shot generation path (for example a native
+        // OpenRouter connection); report that instead of a generic failure.
+        let _ = app.0.repository.release_receipt(key, target, body).await;
+        let mut controls = app.0.controls.lock().await;
+        controls.running.remove(&request_id);
+        return Err(Error {
+            kind: ErrorKind::UnsupportedCapability,
+            reason: Some("provider_check_unsupported"),
+        });
+    }
     let mut controls = app.0.controls.lock().await;
     let mut c = config(&app, &mut controls).await?;
     let cancelled_now = check_run(&app, &controls, &request_id).is_err();

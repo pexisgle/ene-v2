@@ -60,6 +60,21 @@ pub(crate) enum Event {
     StorageFailed { reason: String },
     /// The kernel app itself stopped working. Running turns are not answered.
     Fatal { reason: String },
+    /// A failed turn took the user's unanswered input out of the conversation
+    /// and returned it to the client.
+    Recalled {
+        companion: String,
+        text: String,
+        why: Option<String>,
+    },
+}
+
+/// Test-only counters for an idle-load measurement.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Metrics {
+    pub frames: std::sync::atomic::AtomicU64,
+    pub wakes: std::sync::atomic::AtomicU64,
 }
 
 /// The handle the host uses; the kernel's state is not reachable through it.
@@ -68,6 +83,8 @@ pub(crate) struct Runtime {
     /// from concurrent requests without a second queue.
     signals: Mutex<Sender<Signal>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(test)]
+    metrics: std::sync::Arc<Metrics>,
 }
 
 enum Signal {
@@ -87,6 +104,11 @@ enum Command {
         text: String,
         request_id: String,
         reply: oneshot::Sender<Result<(), Error>>,
+    },
+    HasRequest {
+        companion: String,
+        request_id: String,
+        reply: oneshot::Sender<Result<bool, Error>>,
     },
     Stop {
         companion: String,
@@ -118,6 +140,12 @@ impl Runtime {
         Self::start_inner(directory, None)
     }
 
+    /// Test-only: the kernel thread's frame and wake counters.
+    #[cfg(test)]
+    pub(crate) fn metrics(&self) -> std::sync::Arc<Metrics> {
+        self.metrics.clone()
+    }
+
     /// Starts the kernel with a test-only app extension, for a tool or a
     /// counter the host does not register.
     #[cfg(test)]
@@ -141,17 +169,33 @@ impl Runtime {
         })?;
         let (sender, receiver) = mpsc::channel();
         let waker = sender.clone();
+        #[cfg(test)]
+        let metrics = std::sync::Arc::new(Metrics::default());
+        #[cfg(test)]
+        let thread_metrics = metrics.clone();
         let thread = std::thread::Builder::new()
             .name("ene-rig".into())
             // The app's schedules and the session log recurse deeper than a
             // data-only thread's default stack.
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || kernel::run(store, receiver, waker, events, configure))
+            .spawn(move || {
+                kernel::run(
+                    store,
+                    receiver,
+                    waker,
+                    events,
+                    configure,
+                    #[cfg(test)]
+                    thread_metrics,
+                )
+            })
             .map_err(|_| Error::unavailable())?;
         Ok((
             Self {
                 signals: Mutex::new(sender),
                 thread: Mutex::new(Some(thread)),
+                #[cfg(test)]
+                metrics,
             },
             received,
         ))
@@ -179,8 +223,9 @@ impl Runtime {
     }
 
     /// Adds the input to the companion's Rig inbox. Returns once the kernel
-    /// accepted the message, not once a model answered; a busy agent keeps it
-    /// for the turn's next call (`Steer`).
+    /// accepted the message and wrote that acceptance to the session log, not
+    /// once a model answered; a busy agent keeps it for the turn's next call
+    /// (`Steer`).
     pub(crate) async fn deliver(
         &self,
         companion: String,
@@ -191,6 +236,25 @@ impl Runtime {
         self.send(Signal::Command(Command::Deliver {
             companion,
             text,
+            request_id,
+            reply,
+        }))?;
+        tokio::time::timeout(QUERY_TIMEOUT, reply_rx)
+            .await
+            .map_err(|_| Error::unavailable())?
+            .map_err(|_| Error::unavailable())?
+    }
+
+    /// Whether the saved conversation or inbox carries this accepted input.
+    /// Used to resolve a receipt left pending by a host crash.
+    pub(crate) async fn has_request(
+        &self,
+        companion: String,
+        request_id: String,
+    ) -> Result<bool, Error> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.send(Signal::Command(Command::HasRequest {
+            companion,
             request_id,
             reply,
         }))?;
@@ -508,6 +572,19 @@ mod tests {
             .deliver("companion".into(), "二つ目".into(), "request-2".into())
             .await
             .unwrap();
+        assert!(
+            runtime
+                .has_request("companion".into(), "request-2".into())
+                .await
+                .unwrap(),
+            "the accepted input is not tracked in the inbox"
+        );
+        assert!(
+            !runtime
+                .has_request("companion".into(), "never-sent".into())
+                .await
+                .unwrap()
+        );
         release.send(()).unwrap();
         let mut finished = 0;
         loop {
@@ -833,16 +910,149 @@ mod tests {
                 ]]),
             )
             .unwrap();
-        runtime
+        // Acceptance waits for the log write: an input whose save failed is
+        // refused, not accepted and then lost.
+        let refused = runtime
             .deliver("companion".into(), "二度目".into(), "request-2".into())
-            .await
-            .unwrap();
+            .await;
+        assert_eq!(
+            refused.unwrap_err().kind,
+            crate::domain::ErrorKind::StorageFailure
+        );
         let failure = loop {
             if let Event::StorageFailed { reason } = next(&mut received).await {
                 break reason;
             }
         };
         assert!(!failure.is_empty());
+        runtime.shutdown().await.unwrap();
+    }
+
+    /// The idle loop's real cost, not just a short frame count. Run alone:
+    /// `cargo test -p ene-host --lib measure_idle_cpu -- --ignored --nocapture --test-threads=1`.
+    /// The 1s wake is kept for delayed retry/timer deadlines; it costs one
+    /// frame per second, measured below.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "idle CPU measurement; needs no network but runs for 11 seconds"]
+    async fn measure_idle_cpu() {
+        fn ticks() -> Option<u64> {
+            let text = std::fs::read_to_string("/proc/self/stat").ok()?;
+            let end = text.rfind(')')?;
+            let fields = text[end + 1..].split_whitespace().collect::<Vec<_>>();
+            // Fields after comm: state is field 3; utime is 14 and stime 15.
+            let user = fields.get(11)?.parse::<u64>().ok()?;
+            let system = fields.get(12)?.parse::<u64>().ok()?;
+            Some(user + system)
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, _events) = start(temp.path().join("rig"));
+        let metrics = runtime.metrics();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (before, frame0, wake0) = (
+            ticks().expect("process CPU"),
+            metrics.frames.load(Ordering::Relaxed),
+            metrics.wakes.load(Ordering::Relaxed),
+        );
+        let observed = Duration::from_secs(10);
+        tokio::time::sleep(observed).await;
+        let (after, frames, wakes) = (
+            ticks().expect("process CPU"),
+            metrics.frames.load(Ordering::Relaxed),
+            metrics.wakes.load(Ordering::Relaxed),
+        );
+        // Linux USER_HZ is 100 on the supported targets.
+        let cpu = (after.saturating_sub(before)) as f64 / 100.0;
+        let percent = cpu / observed.as_secs_f64() * 100.0;
+        println!(
+            "[idle] os={} arch={} observed={:?} cpu={:.3}s cpu_percent={:.2}% frames={} wakes={} frames_per_sec={:.2}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            observed,
+            cpu,
+            percent,
+            frames.saturating_sub(frame0),
+            wakes.saturating_sub(wake0),
+            frames.saturating_sub(frame0) as f64 / observed.as_secs_f64(),
+        );
+        assert!(
+            percent < 25.0,
+            "an idle host used {percent:.2}% CPU; a busy loop is the likely cause"
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_oversized_single_reply_is_refused_and_the_input_is_returned() {
+        let limit = crate::domain::OperationKind::Conversation
+            .spec()
+            .output_bytes;
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, mut received) = start(temp.path().join("rig"));
+        runtime
+            .connect(
+                "companion".into(),
+                "簡潔に答える。".into(),
+                connection(vec![vec![
+                    MockStreamEvent::text("x".repeat(limit + 1)),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ]]),
+            )
+            .unwrap();
+        runtime
+            .deliver(
+                "companion".into(),
+                "長すぎる返答をください".into(),
+                "request-1".into(),
+            )
+            .await
+            .unwrap();
+        let mut recalled = None;
+        let finished = loop {
+            match next(&mut received).await {
+                Event::Recalled { text, .. } => recalled = Some(text),
+                Event::TurnFinished {
+                    state,
+                    failure,
+                    messages,
+                    ..
+                } => break (state, failure, messages),
+                Event::StorageFailed { reason } | Event::Fatal { reason } => {
+                    panic!("kernel failed: {reason}")
+                }
+                _ => {}
+            }
+        };
+        let (state, failure, messages) = finished;
+        assert_eq!(state, "failed");
+        assert_eq!(
+            failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("output_limit")
+        );
+        assert!(
+            messages.iter().all(|message| message.role != "assistant"),
+            "the oversized reply was announced as a message: {messages:?}"
+        );
+        // The input is handed back after the failed turn settles.
+        if recalled.is_none() {
+            recalled = loop {
+                match tokio::time::timeout(Duration::from_secs(2), received.recv()).await {
+                    Ok(Some(Event::Recalled { text, .. })) => break Some(text),
+                    Ok(Some(Event::StorageFailed { reason } | Event::Fatal { reason })) => {
+                        panic!("kernel failed: {reason}")
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break None,
+                }
+            };
+        }
+        assert_eq!(recalled.as_deref(), Some("長すぎる返答をください"));
+        let history = runtime.history("companion".into(), None, 50).await.unwrap();
+        assert!(
+            history.items.is_empty(),
+            "a refused reply or its withdrawn input was saved: {:?}",
+            history.items
+        );
         runtime.shutdown().await.unwrap();
     }
 }

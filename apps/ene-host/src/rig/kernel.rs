@@ -5,6 +5,7 @@ use super::messages;
 use super::{Command, Event, Signal};
 use crate::domain::{Error, ErrorKind, OperationKind};
 use ene_rpc as w;
+use rig_core::completion::Message;
 use rig_core::conversation::{Author, AuthorKind, MessageId, RequestId};
 use rig_ecs::WriteLogs;
 use rig_ecs::prelude::*;
@@ -15,6 +16,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
 /// The shortest gap between two frames.
 const FRAME: Duration = Duration::from_millis(16);
@@ -34,10 +36,19 @@ pub(super) fn run(
     waker: Sender<Signal>,
     events: UnboundedSender<Event>,
     configure: Option<Configure>,
+    #[cfg(test)] metrics: std::sync::Arc<super::Metrics>,
 ) {
     let reporter = events.clone();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_app(store, signals, waker, events, configure)
+        run_app(
+            store,
+            signals,
+            waker,
+            events,
+            configure,
+            #[cfg(test)]
+            metrics,
+        )
     }));
     if outcome.is_err() {
         let _ = reporter.send(Event::Fatal {
@@ -52,7 +63,10 @@ fn run_app(
     waker: Sender<Signal>,
     events: UnboundedSender<Event>,
     configure: Option<Configure>,
+    #[cfg(test)] metrics: std::sync::Arc<super::Metrics>,
 ) {
+    #[cfg(test)]
+    let wake_metrics = metrics.clone();
     let waker = Mutex::new(waker);
     let mut app = App::new();
     app.add_plugins(TaskPoolPlugin::default())
@@ -60,6 +74,10 @@ fn run_app(
         .insert_resource(Wake::new({
             move || {
                 if let Ok(waker) = waker.lock() {
+                    #[cfg(test)]
+                    wake_metrics
+                        .wakes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = waker.send(Signal::Wake);
                 }
             }
@@ -67,13 +85,20 @@ fn run_app(
         .add_plugins((AgentPlugin, SessionLogPlugin))
         .insert_resource(Events(events))
         .init_resource::<Pending>()
+        .init_resource::<Acks>()
         .init_resource::<Turns>()
         .init_resource::<Emitted>()
         .add_systems(Startup, initialize)
         .add_systems(PreUpdate, apply_commands)
-        .add_systems(PostUpdate, (track_turns, forward_stream).chain())
+        .add_systems(
+            PostUpdate,
+            (track_turns, forward_stream, forward_recalled).chain(),
+        )
+        .add_systems(Last, confirm_deliveries.after(WriteLogs))
         .add_systems(Last, report_log_failure.after(WriteLogs))
+        .add_systems(AgentPass, enforce_output_limit.in_set(ReviewSystems::Edit))
         .add_observer(on_turn_settled)
+        .add_observer(on_message_started)
         .add_tool(CurrentTime);
     if let Some(configure) = configure {
         configure(&mut app);
@@ -108,6 +133,10 @@ fn run_app(
             queued.0.append(&mut pending);
         }
         let started = Instant::now();
+        #[cfg(test)]
+        metrics
+            .frames
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         app.update();
         if app.should_exit().is_some() {
             break;
@@ -127,6 +156,20 @@ fn run_app(
 /// Commands wait here for the frame that applies them.
 #[derive(Resource, Default)]
 struct Pending(Vec<Command>);
+
+/// Deliveries waiting for the frame that accepted them to be written to the
+/// session log. Acceptance is returned to the host only after that write, so a
+/// crash cannot report a turn started from input that was never saved.
+struct PendingAck {
+    request_id: String,
+    reply: oneshot::Sender<Result<(), Error>>,
+}
+
+#[derive(Resource, Default)]
+struct Acks {
+    pending: Vec<PendingAck>,
+    accepted: HashSet<String>,
+}
 
 /// What each active turn is, from the API's point of view.
 #[derive(Default)]
@@ -207,7 +250,25 @@ fn apply_commands(world: &mut World) {
                 request_id,
                 reply,
             } => {
-                let _ = reply.send(deliver(world, companion, text, request_id));
+                if let Err(error) = deliver(world, companion, text, request_id.clone()) {
+                    let _ = reply.send(Err(error));
+                } else {
+                    world
+                        .resource_mut::<Acks>()
+                        .pending
+                        .push(PendingAck { request_id, reply });
+                }
+            }
+            Command::HasRequest {
+                companion,
+                request_id,
+                reply,
+            } => {
+                let result = agent_entity(world, &companion)
+                    .and_then(|entity| world.get::<Conversation>(entity))
+                    .map(|conversation| messages::has_request(conversation, &request_id))
+                    .ok_or_else(|| Error::new(ErrorKind::NotFound));
+                let _ = reply.send(result);
             }
             Command::Stop { companion, reason } => stop(world, &companion, reason),
             Command::History {
@@ -416,19 +477,29 @@ fn on_turn_settled(
     let over_limit = turn_state.as_ref().is_some_and(|state| state.over_limit);
     let (state_name, failure) = match &outcome {
         TurnOutcome::Answered(_) => ("answered", None),
-        TurnOutcome::Failed(why) => (
-            "failed",
-            Some(w::Failure {
-                code: "generation_failed".into(),
-                message: why.chars().take(1024).collect(),
-                details: w::JsonDocument {
-                    json: "{}".into(),
+        TurnOutcome::Failed(why) => {
+            let (code, message) = if why == "output_limit" {
+                (
+                    "output_limit",
+                    "返答が出力上限を超えたため破棄しました".to_owned(),
+                )
+            } else {
+                ("generation_failed", why.chars().take(1024).collect())
+            };
+            (
+                "failed",
+                Some(w::Failure {
+                    code: code.into(),
+                    message,
+                    details: w::JsonDocument {
+                        json: "{}".into(),
+                        ..Default::default()
+                    }
+                    .into(),
                     ..Default::default()
-                }
-                .into(),
-                ..Default::default()
-            }),
-        ),
+                }),
+            )
+        }
         TurnOutcome::Stopped(reason) => (
             "stopped",
             Some(w::Failure {
@@ -529,6 +600,90 @@ fn take_new(
         .into_iter()
         .filter(|message| emitted.0.insert(message.id.clone()))
         .collect()
+}
+
+/// Confirms each delivery only once the frame's log write succeeded and the
+/// kernel started the message. A pending delivery is retried next frame.
+fn confirm_deliveries(log: Res<SessionLog>, mut acks: ResMut<Acks>) {
+    if let Some(failure) = log.failure() {
+        for ack in acks.pending.drain(..) {
+            let _ = ack.reply.send(Err(Error {
+                kind: ErrorKind::StorageFailure,
+                reason: Some("session_log_failed"),
+            }));
+        }
+        acks.accepted.clear();
+        let _ = failure;
+        return;
+    }
+    let Acks {
+        pending: waiting,
+        accepted,
+    } = &mut *acks;
+    let mut pending = Vec::with_capacity(waiting.len());
+    for ack in waiting.drain(..) {
+        if accepted.remove(&ack.request_id) {
+            let _ = ack.reply.send(Ok(()));
+        } else {
+            pending.push(ack);
+        }
+    }
+    *waiting = pending;
+}
+
+/// Notes the request id of each accepted message so its delivery can be
+/// confirmed after the log write.
+fn on_message_started(
+    started: On<Add<Started>>,
+    incoming: Query<&Incoming>,
+    mut acks: ResMut<Acks>,
+) {
+    let Ok(message) = incoming.get(started.entity) else {
+        return;
+    };
+    if let Some(request) = &message.author.request {
+        acks.accepted.insert(request.0.clone());
+    }
+}
+
+/// Reports text a failed turn returned to the client, so its input is not
+/// lost when the kernel removes it from the conversation.
+fn forward_recalled(
+    mut recalled: MessageReader<Recalled>,
+    agents: Query<&AgentId, With<Agent>>,
+    events: Res<Events>,
+) {
+    for message in recalled.read() {
+        let Ok(id) = agents.get(message.agent) else {
+            continue;
+        };
+        events.send(Event::Recalled {
+            companion: id.0.clone(),
+            text: message.text.clone(),
+            why: message.why.clone(),
+        });
+    }
+}
+
+/// Refuses a model reply that exceeds the conversation's output budget before
+/// it can be committed. Streaming deltas are stopped earlier; this catches a
+/// single reply event that arrived whole.
+fn enforce_output_limit(mut calls: Query<&mut Outcome, (With<TurnCall>, ReadyToSettle)>) {
+    for mut outcome in &mut calls {
+        let Some(response) = outcome.completion() else {
+            continue;
+        };
+        let text = response
+            .message()
+            .map(|message| match message {
+                Message::Assistant(reply) => reply.text(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+        if text.len() > OperationKind::Conversation.spec().output_bytes {
+            *outcome = Outcome::refused("output_limit");
+        }
+    }
 }
 
 /// Reports a session log that stopped writing once, so the host stops

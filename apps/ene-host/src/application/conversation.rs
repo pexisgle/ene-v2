@@ -134,7 +134,69 @@ pub(crate) async fn accept(
         {
             return match outcome {
                 Outcome::Accepted => Ok((Outcome::Accepted, stored)),
-                Outcome::Pending => Err(Error {
+                // A pending receipt from a live request is not resolved by a
+                // duplicate; a pending receipt after a restart is settled
+                // from the kernel's saved conversation and inbox.
+                Outcome::Pending if controls.inflight.contains(&key) => Err(Error {
+                    kind: ErrorKind::Unavailable,
+                    reason: Some("not_delivered"),
+                }),
+                Outcome::Pending => {
+                    let request_id = stored
+                        .get("requestId")
+                        .or_else(|| stored.get("request_id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| Error::new(ErrorKind::StorageFailure))?;
+                    let found = app
+                        .rig()?
+                        .has_request(companion.clone(), request_id.clone())
+                        .await?;
+                    if found {
+                        app.0
+                            .repository
+                            .complete_receipt(Receipt {
+                                key: key.clone(),
+                                target: target.clone(),
+                                request: body.clone(),
+                                outcome: Outcome::Accepted,
+                                response: stored.clone(),
+                            })
+                            .await?;
+                        return Ok((Outcome::Accepted, stored));
+                    }
+                    let failure = json!(ene_rpc::ApiFailure {
+                        request_id,
+                        error: Failure {
+                            code: "unavailable".into(),
+                            message: "ホストが中断しました".into(),
+                            details: ene_rpc::JsonDocument {
+                                json: json!({"reason":"not_delivered"}).to_string(),
+                                ..Default::default()
+                            }
+                            .into(),
+                            ..Default::default()
+                        }
+                        .into(),
+                        http_status: 503,
+                        ..Default::default()
+                    });
+                    app.0
+                        .repository
+                        .complete_receipt(Receipt {
+                            key,
+                            target,
+                            request: body,
+                            outcome: Outcome::Unavailable,
+                            response: failure,
+                        })
+                        .await?;
+                    Err(Error {
+                        kind: ErrorKind::Unavailable,
+                        reason: Some("not_delivered"),
+                    })
+                }
+                Outcome::Unavailable => Err(Error {
                     kind: ErrorKind::Unavailable,
                     reason: Some("not_delivered"),
                 }),
@@ -214,6 +276,7 @@ pub(crate) async fn accept(
                 response: response.clone(),
             })
             .await?;
+        controls.inflight.insert(key.clone());
         if controls.connected.get(&companion) != Some(&signature) {
             // The connect must reach the kernel before any later input for
             // this companion, so a concurrent accept cannot deliver first.
@@ -221,7 +284,12 @@ pub(crate) async fn accept(
             if let Err(error) =
                 runtime.connect(companion.clone(), companion_config.mind.clone(), model)
             {
-                let _ = app.0.repository.release_receipt(key, target, body).await;
+                let _ = app
+                    .0
+                    .repository
+                    .release_receipt(key.clone(), target, body)
+                    .await;
+                controls.inflight.remove(&key);
                 return Err(error);
             }
             controls.connected.insert(companion.clone(), signature);
@@ -238,16 +306,19 @@ pub(crate) async fn accept(
         controls.connected.remove(&companion);
         return Err(error);
     }
-    app.0
+    let completed = app
+        .0
         .repository
         .complete_receipt(Receipt {
-            key,
+            key: key.clone(),
             target,
             request: body,
             outcome: Outcome::Accepted,
             response: response.clone(),
         })
-        .await?;
+        .await;
+    app.0.controls.lock().await.inflight.remove(&key);
+    completed?;
     Ok((Outcome::Accepted, response))
 }
 
@@ -349,6 +420,33 @@ impl HostApplication {
     #[cfg(test)]
     pub(crate) fn set_test_model(&self, model: Arc<TestModel>) {
         let _ = self.0.test_model.set(model);
+    }
+
+    /// Test-only: leave a chat receipt pending as a crash between the kernel's
+    /// log write and the receipt completion would.
+    #[cfg(test)]
+    pub(crate) async fn reserve_test_chat_receipt(
+        &self,
+        companion: &str,
+        key: &str,
+        text: &str,
+        request_id: &str,
+    ) -> crate::ports::Result<()> {
+        self.0
+            .repository
+            .reserve(Receipt {
+                key: key.into(),
+                target: format!("/v1/companions/{companion}/messages"),
+                request: json!({
+                    "text": text,
+                    "resources": [],
+                    "question_id": null,
+                    "decision": null,
+                }),
+                outcome: Outcome::Pending,
+                response: json!({"requestId": request_id}),
+            })
+            .await
     }
 
     /// Attaches the kernel and consumes what it did. Called once, before the
@@ -475,6 +573,24 @@ impl HostApplication {
                         let _ = runtime.stop(companion, Some("storage_error".into()));
                     }
                 }
+            }
+            Event::Recalled {
+                companion,
+                text,
+                why,
+            } => {
+                let mut boundary = self.0.boundary.lock().await;
+                publish(
+                    &mut boundary,
+                    self,
+                    Some(&companion),
+                    ene_rpc::notification::Event::RecalledInput(Box::new(ene_rpc::RecalledInput {
+                        companion_id: companion.clone(),
+                        text,
+                        reason: why,
+                        ..Default::default()
+                    })),
+                );
             }
             Event::Fatal { reason } => {
                 let mut controls = self.0.controls.lock().await;
