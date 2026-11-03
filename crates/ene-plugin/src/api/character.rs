@@ -1,5 +1,4 @@
 //! Character events and actions.
-use crate::WindowEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,7 +11,6 @@ pub enum CharacterEvent {
     ConversationFinished { text: String },
     TaskChanged { task_id: String, state: String },
     Timer { id: String },
-    Window { event: WindowEvent },
     Custom { name: String, data: Value },
 }
 

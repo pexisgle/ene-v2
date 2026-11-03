@@ -8,11 +8,9 @@ use crate::{
     ports::Result,
 };
 use futures_util::future::BoxFuture;
-use rig_core::catalog::{Catalog, ModelSpec};
 use rig_core::operation::Completion;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::wire::OPENROUTER;
-use rig_core::providers::registry::ProviderId;
 use rig_core::serve::ErasedHandler;
 use rig_core::serve::adapters::ModelAdapter;
 use rig_ecs::effects::Handler;
@@ -157,35 +155,7 @@ pub(crate) fn agent_connection(
 ) -> Result<rig_ecs::model::Connection> {
     let connection = outbound.connection();
     let endpoint = connection.endpoint.clone();
-    let reference = format!("{ID}/{model}");
-    let spec = match Catalog::builtin().resolve(&reference) {
-        Ok(resolved) => resolved.shared(),
-        Err(_) => match crate::infrastructure::llm::explicit_tool_calling(connection)? {
-            Some(true) => {
-                let provider = ProviderId::catalog(ID)
-                    .ok_or_else(|| Error::new(ErrorKind::UnsupportedCapability))?;
-                Arc::new(ModelSpec::new(provider, model).with_tools(true))
-            }
-            Some(false) => {
-                return Err(Error {
-                    kind: ErrorKind::UnsupportedCapability,
-                    reason: Some("model_cannot_call_tools"),
-                });
-            }
-            None => {
-                return Err(Error {
-                    kind: ErrorKind::UnsupportedCapability,
-                    reason: Some("model_capability_unknown"),
-                });
-            }
-        },
-    };
-    if !spec.tools {
-        return Err(Error {
-            kind: ErrorKind::UnsupportedCapability,
-            reason: Some("model_cannot_call_tools"),
-        });
-    }
+    let (spec, reference) = crate::infrastructure::llm::tool_spec(connection, ID, model)?;
     let transport = crate::llm::AuthorizedTransport::for_outbound(
         outbound,
         crate::llm::CredentialPlacement::Bearer,

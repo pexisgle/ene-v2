@@ -40,7 +40,7 @@ impl Devices {
             let connection = state
                 .connections
                 .get(&request.device_id)
-                .filter(|c| c.lease.strong_count() > 0)
+                .filter(|c| !c.queue.is_closed())
                 .ok_or_else(conflict)?;
             let permit = connection
                 .queue
@@ -79,7 +79,7 @@ impl Devices {
             && !state
                 .connections
                 .get(&op.request.device_id)
-                .is_some_and(|c| c.id == op.subscription_id && c.lease.strong_count() > 0)
+                .is_some_and(|c| c.id == op.subscription_id && !c.queue.is_closed())
         {
             result.status = w::OperationStatus::Uncertain.into();
         }

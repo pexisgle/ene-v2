@@ -27,7 +27,7 @@ const IDLE: Duration = Duration::from_secs(1);
 /// timer that passed while the host slept is not stretched.
 const MAX_FRAME_GAP: Duration = Duration::from_secs(60);
 
-/// A test-only extension of the app, such as an extra tool.
+/// An extension of the app the host registers itself, such as a mind tool.
 pub(super) type Configure = Box<dyn FnOnce(&mut App) + Send>;
 
 pub(super) fn run(
@@ -35,20 +35,11 @@ pub(super) fn run(
     signals: Receiver<Signal>,
     waker: Sender<Signal>,
     events: UnboundedSender<Event>,
-    configure: Option<Configure>,
-    #[cfg(test)] metrics: std::sync::Arc<super::Metrics>,
+    configure: Configure,
 ) {
     let reporter = events.clone();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_app(
-            store,
-            signals,
-            waker,
-            events,
-            configure,
-            #[cfg(test)]
-            metrics,
-        )
+        run_app(store, signals, waker, events, configure)
     }));
     if outcome.is_err() {
         let _ = reporter.send(Event::Fatal {
@@ -62,11 +53,8 @@ fn run_app(
     signals: Receiver<Signal>,
     waker: Sender<Signal>,
     events: UnboundedSender<Event>,
-    configure: Option<Configure>,
-    #[cfg(test)] metrics: std::sync::Arc<super::Metrics>,
+    configure: Configure,
 ) {
-    #[cfg(test)]
-    let wake_metrics = metrics.clone();
     let waker = Mutex::new(waker);
     let mut app = App::new();
     app.add_plugins(TaskPoolPlugin::default())
@@ -74,10 +62,6 @@ fn run_app(
         .insert_resource(Wake::new({
             move || {
                 if let Ok(waker) = waker.lock() {
-                    #[cfg(test)]
-                    wake_metrics
-                        .wakes
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = waker.send(Signal::Wake);
                 }
             }
@@ -100,9 +84,7 @@ fn run_app(
         .add_observer(on_turn_settled)
         .add_observer(on_message_started)
         .add_tool(CurrentTime);
-    if let Some(configure) = configure {
-        configure(&mut app);
-    }
+    configure(&mut app);
     app.finish();
     if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
         time.set_max_delta(MAX_FRAME_GAP);
@@ -133,10 +115,6 @@ fn run_app(
             queued.0.append(&mut pending);
         }
         let started = Instant::now();
-        #[cfg(test)]
-        metrics
-            .frames
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         app.update();
         if app.should_exit().is_some() {
             break;
@@ -319,6 +297,23 @@ fn apply_commands(world: &mut World) {
     }
 }
 
+/// The tools one parent agent may call. Only the bound parent gets the mind
+/// tools; any other conversation keeps the harmless current_time tool.
+fn tool_access(mind_tools: bool, bridge_bound: bool) -> ToolAccess {
+    if mind_tools {
+        ToolAccess::Only(vec![
+            "current_time".into(),
+            "mind_recall".into(),
+            "mind_read".into(),
+            "mind_update".into(),
+        ])
+    } else if bridge_bound {
+        ToolAccess::Only(vec!["current_time".into()])
+    } else {
+        ToolAccess::All
+    }
+}
+
 fn connect(
     world: &mut World,
     companion: String,
@@ -332,15 +327,6 @@ fn connect(
         && world
             .get_resource::<crate::rig::mind::MindBridge>()
             .is_some();
-    let mind_access = || {
-        ToolAccess::Only(vec![
-            "current_time".into(),
-            "mind_recall".into(),
-            "mind_read".into(),
-            "mind_update".into(),
-        ])
-    };
-    let conversation_access = || ToolAccess::Only(vec!["current_time".into()]);
     match agent_entity(world, &companion) {
         Some(entity) => {
             if world.get::<ActiveTurn>(entity).is_some() {
@@ -349,31 +335,19 @@ fn connect(
                     reason: Some("the model configuration changed".into()),
                 });
             }
-            let access = if mind_tools {
-                mind_access()
-            } else if world
+            let bound = world
                 .get_resource::<crate::rig::mind::MindBridge>()
-                .is_some_and(|bridge| bridge.bound())
-            {
-                conversation_access()
-            } else {
-                ToolAccess::All
-            };
+                .is_some_and(|bridge| bridge.bound());
+            let access = tool_access(mind_tools, bound);
             world
                 .entity_mut(entity)
                 .insert((SystemPrompt(prompt), model, access));
         }
         None => {
-            let access = if mind_tools {
-                mind_access()
-            } else if world
+            let bound = world
                 .get_resource::<crate::rig::mind::MindBridge>()
-                .is_some()
-            {
-                conversation_access()
-            } else {
-                ToolAccess::All
-            };
+                .is_some();
+            let access = tool_access(mind_tools, bound);
             // A fresh app spawns one agent with a random id; it has no
             // conversation and is not a companion. The first companion
             // replaces it rather than leaving a second parent behind.
@@ -410,7 +384,7 @@ fn connect(
             .map(|(entity, _)| entity)
             .collect::<Vec<_>>();
         for entity in strip {
-            world.entity_mut(entity).insert(conversation_access());
+            world.entity_mut(entity).insert(tool_access(false, true));
         }
     }
 }
@@ -539,48 +513,24 @@ fn on_turn_settled(
         TurnOutcome::Answered(_) => ("answered", None),
         TurnOutcome::Failed(why) => {
             let (code, message) = if why == "output_limit" {
-                (
-                    "output_limit",
-                    "返答が出力上限を超えたため破棄しました".to_owned(),
-                )
+                ("output_limit", "返答が出力上限を超えたため破棄しました")
             } else {
-                ("generation_failed", why.chars().take(1024).collect())
+                ("generation_failed", why.as_str())
             };
-            (
-                "failed",
-                Some(w::Failure {
-                    code: code.into(),
-                    message,
-                    details: w::JsonDocument {
-                        json: "{}".into(),
-                        ..Default::default()
-                    }
-                    .into(),
-                    ..Default::default()
-                }),
-            )
+            ("failed", Some(messages::failure(code, message)))
         }
         TurnOutcome::Stopped(reason) => (
             "stopped",
-            Some(w::Failure {
-                code: if over_limit {
-                    "output_limit".into()
+            Some(messages::failure(
+                if over_limit {
+                    "output_limit"
                 } else {
-                    "cancelled".into()
+                    "cancelled"
                 },
-                message: reason
-                    .clone()
-                    .unwrap_or_else(|| "停止操作により生成を停止しました".into())
-                    .chars()
-                    .take(1024)
-                    .collect(),
-                details: w::JsonDocument {
-                    json: "{}".into(),
-                    ..Default::default()
-                }
-                .into(),
-                ..Default::default()
-            }),
+                reason
+                    .as_deref()
+                    .unwrap_or("停止操作により生成を停止しました"),
+            )),
         ),
     };
     let message_id = matches!(outcome, TurnOutcome::Answered(_) | TurnOutcome::Stopped(_))

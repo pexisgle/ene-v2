@@ -7,13 +7,16 @@ pub(crate) mod mind;
 mod operations;
 mod plugins;
 mod runtime;
-use crate::{domain::*, ports::Repository};
+use crate::domain::*;
+use crate::infrastructure::plugins::Manager;
+use crate::infrastructure::sqlite::Store;
 use crate::{llm::ProviderRegistry, ports::Credentials};
+#[cfg(test)]
+pub(crate) use ene_rpc::ConnectionInput;
 pub use ene_rpc::Notification;
 use generation::{Controls, config};
 pub use operations::{
-    CheckInput, CompanionPatch, ConnectionInput, GrantInput, GrantPatch, MessageInput,
-    SettingsPatch,
+    CheckInput, CompanionPatch, GrantInput, GrantPatch, MessageInput, SettingsPatch,
 };
 use std::{
     collections::HashMap,
@@ -24,7 +27,6 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 pub struct Subscription {
     pub id: String,
-    pub cursor: Cursor,
     pub receiver: broadcast::Receiver<Notification>,
     // A dropped RPC body invalidates its subscription even when it cannot run
     // async cleanup. The boundary never owns the lease.
@@ -43,10 +45,10 @@ pub(super) struct Boundary {
     connections: HashMap<String, Weak<()>>,
 }
 struct Inner {
-    repository: Arc<dyn Repository>,
+    repository: Arc<Store>,
     providers: Arc<dyn ProviderRegistry>,
     credentials: Arc<dyn Credentials>,
-    plugins: Option<Arc<dyn crate::ports::plugin::Plugins>>,
+    plugins: Option<Arc<Manager>>,
     plugin_events: Arc<tokio::sync::Semaphore>,
     plugin_tasks: TaskTracker,
     background: TaskTracker,
@@ -65,20 +67,12 @@ struct Inner {
 #[derive(Clone)]
 pub struct HostApplication(Arc<Inner>);
 impl HostApplication {
-    pub fn new(
-        repository: Arc<dyn Repository>,
-        providers: Arc<dyn ProviderRegistry>,
-        credentials: Arc<dyn Credentials>,
-        shutdown: watch::Sender<bool>,
-    ) -> Self {
-        Self::with_plugins(repository, providers, credentials, shutdown, None)
-    }
     pub fn with_plugins(
-        repository: Arc<dyn Repository>,
+        repository: Arc<Store>,
         providers: Arc<dyn ProviderRegistry>,
         credentials: Arc<dyn Credentials>,
         shutdown: watch::Sender<bool>,
-        plugins: Option<Arc<dyn crate::ports::plugin::Plugins>>,
+        plugins: Option<Arc<Manager>>,
     ) -> Self {
         Self(Arc::new(Inner {
             repository,
@@ -135,7 +129,6 @@ impl HostApplication {
             Some(rig) => rig.shutdown().await,
             None => Ok(()),
         };
-        self.0.providers.shutdown().await;
         let plugin_shutdown = match &self.0.plugins {
             Some(plugins) => plugins.shutdown().await,
             None => Ok(()),
@@ -195,7 +188,6 @@ impl HostApplication {
             .insert(id.clone(), Arc::downgrade(&lease));
         Subscription {
             id,
-            cursor: boundary.cursor.clone(),
             receiver,
             lease,
         }
@@ -268,7 +260,7 @@ impl HostApplication {
         })
     }
     pub async fn companion(&self, id: &str) -> Result<Companion, Error> {
-        CompanionId::parse(id.to_owned())?;
+        validate_id(id)?;
         self.companions()
             .await?
             .into_iter()
@@ -277,7 +269,7 @@ impl HostApplication {
     }
     /// Explicit user cancellation is independent of any response stream.
     pub async fn cancel_companion(&self, id: String) -> Result<(), Error> {
-        CompanionId::parse(id.clone())?;
+        validate_id(&id)?;
         let app = self.clone();
         self.0
             .stops
@@ -313,8 +305,8 @@ impl HostApplication {
         id: String,
         companion: String,
     ) -> Result<ene_rpc::Availability, Error> {
-        ConnectionId::parse(id.clone())?;
-        CompanionId::parse(companion.clone())?;
+        validate_id(&id)?;
+        validate_id(&companion)?;
         let mut controls = self.0.controls.lock().await;
         let configuration = config(self, &mut controls).await?;
         if !configuration.companions.contains_key(&companion) {
@@ -343,14 +335,12 @@ impl HostApplication {
                 .as_ref()
                 .map(|policy| policy.destinations.clone())
                 .unwrap_or_default(),
-            connection_fingerprint: ene_rpc::JsonDocument {
-                json: policy
+            connection_fingerprint: ene_rpc::JsonDocument::from(
+                policy
                     .as_ref()
                     .map(|policy| policy.fingerprint.clone())
-                    .unwrap_or(serde_json::Value::Null)
-                    .to_string(),
-                ..Default::default()
-            }
+                    .unwrap_or(serde_json::Value::Null),
+            )
             .into(),
             operations: OperationKind::ALL
                 .into_iter()

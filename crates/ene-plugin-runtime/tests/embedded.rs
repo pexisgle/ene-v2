@@ -75,41 +75,35 @@ async fn service_budget_counts_received_json_bytes() {
     );
 }
 #[tokio::test]
-async fn embedded_host_and_desktop_instances_preserve_event_order_under_backpressure() {
-    for target in [Target::Host, Target::Desktop] {
-        let code = wasm(&format!(
-            "(loop $next {} {} local.get $i i32.const 1 i32.add local.tee $i i32.const 100 i32.lt_u br_if $next)",
-            emit("a"),
-            emit("b")
-        ));
-        let (package, _temp) = package(&code, target, &[]);
-        let cancel = CancellationToken::new();
-        let wrong = if target == Target::Host {
-            Target::Desktop
-        } else {
-            Target::Host
-        };
-        assert!(
-            Instance::load(package.clone(), "main".into(), wrong, 1, &cancel)
-                .await
-                .is_err()
-        );
-        let mut instance = Instance::load(package, "main".into(), target, 1, &cancel)
+async fn embedded_host_instance_preserves_event_order_under_backpressure() {
+    let target = Target::Host;
+    let code = wasm(&format!(
+        "(loop $next {} {} local.get $i i32.const 1 i32.add local.tee $i i32.const 100 i32.lt_u br_if $next)",
+        emit("a"),
+        emit("b")
+    ));
+    let (package, _temp) = package(&code, target, &[]);
+    let cancel = CancellationToken::new();
+    assert!(
+        Instance::load(package.clone(), "main".into(), Target::Acp, 1, &cancel)
             .await
-            .unwrap();
-        let (tx, mut rx) = mpsc::channel(1);
-        let run = instance.invoke(character(), Arc::new(DenyServices), tx, &cancel);
-        let collect = async {
-            for i in 0..200 {
-                assert!(
-                    matches!(rx.recv().await,Some(Event::Character {action:CharacterAction::Speak{text},..}) if text==if i%2==0 {"a"} else {"b"})
-                );
-            }
-            assert!(rx.recv().await.is_none());
-        };
-        let (result, ()) = tokio::join!(run, collect);
-        assert_eq!(result.unwrap(), json!({}));
-    }
+            .is_err()
+    );
+    let mut instance = Instance::load(package, "main".into(), target, 1, &cancel)
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    let run = instance.invoke(character(), Arc::new(DenyServices), tx, &cancel);
+    let collect = async {
+        for i in 0..200 {
+            assert!(
+                matches!(rx.recv().await,Some(Event::Character {action:CharacterAction::Speak{text},..}) if text==if i%2==0 {"a"} else {"b"})
+            );
+        }
+        assert!(rx.recv().await.is_none());
+    };
+    let (result, ()) = tokio::join!(run, collect);
+    assert_eq!(result.unwrap(), json!({}));
 }
 struct Waiting {
     entered: Notify,
@@ -209,15 +203,27 @@ async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
         "(loop $forever br $forever)".to_string(),
         "i32.const 7 return".to_string(),
         bad_event,
-        format!("i64.const {} call $alloc call $emit", MAX_CHUNK+1),
-        format!("i64.const {} call $alloc call $service drop", MAX_MESSAGE_BYTES+1),
-        format!("{} local.get $p call $service drop",write(&json!({"type":"desktop","operation":{"type":"read_resource","handle":"x","offset":0,"length":MAX_CHUNK+1}}).to_string())),
+        format!("i64.const {} call $alloc call $emit", MAX_CHUNK + 1),
+        format!(
+            "i64.const {} call $alloc call $service drop",
+            MAX_MESSAGE_BYTES + 1
+        ),
     ] {
-        let (package,_temp)=package(&wasm(&body),Target::Host,&[Service::Desktop]);
-        let cancel=CancellationToken::new();
-        let mut instance=Instance::load(package,"main".into(),Target::Host,1,&cancel).await.unwrap();
-        let (tx,_rx)=mpsc::channel(1);
-        assert!(tokio::time::timeout(Duration::from_secs(5),instance.invoke(character(),Arc::new(Unexpected),tx,&cancel)).await.unwrap().is_err());
+        let (package, _temp) = package(&wasm(&body), Target::Host, &[]);
+        let cancel = CancellationToken::new();
+        let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+            .await
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                instance.invoke(character(), Arc::new(Unexpected), tx, &cancel)
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
     }
 }
 #[tokio::test]

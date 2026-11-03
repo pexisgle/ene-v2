@@ -2,7 +2,6 @@ pub(crate) mod constraint;
 pub(crate) mod look_at;
 pub(crate) mod spring;
 
-pub use look_at::LookAt;
 pub use spring::{SpringJointProps, SpringRig};
 
 use crate::{
@@ -30,7 +29,6 @@ use bevy::{
 #[component(map_entities)]
 pub struct Vrm {
     pub bones: HashMap<schema::HumanBoneName, Entity>,
-    pub meta: schema::VrmMeta,
 }
 
 impl Vrm {
@@ -43,37 +41,6 @@ impl MapEntities for Vrm {
     fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
         for entity in self.bones.values_mut() {
             *entity = mapper.get_mapped(*entity);
-        }
-    }
-}
-
-impl Default for Vrm {
-    fn default() -> Self {
-        Self {
-            bones: HashMap::default(),
-            meta: schema::VrmMeta {
-                allow_antisocial_or_hate_usage: None,
-                allow_excessively_sexual_usage: None,
-                allow_excessively_violent_usage: None,
-                allow_political_or_religious_usage: None,
-                allow_redistribution: None,
-                authors: Vec::new(),
-                avatar_permission: None,
-                commercial_usage: None,
-                contact_information: None,
-                copyright_information: None,
-                credit_notation: None,
-                extensions: None,
-                extras: None,
-                license_url: String::new(),
-                modification: None,
-                name: String::new(),
-                other_license_url: None,
-                references: None,
-                third_party_licenses: None,
-                thumbnail_image: None,
-                version: None,
-            },
         }
     }
 }
@@ -162,23 +129,15 @@ pub(crate) fn attach(
                 ChildOf(root),
             ))
             .id();
-        world.entity_mut(root).insert((
-            LookAt::default(),
-            look_at::Gaze {
-                definition: definition.clone(),
-                input,
-                active: false,
-            },
-        ));
+        world.entity_mut(root).insert(look_at::Gaze {
+            definition: definition.clone(),
+            input,
+            active: false,
+        });
     }
-    world.entity_mut(root).insert((
-        Vrm {
-            bones,
-            meta: model.meta.clone(),
-        },
-        AnimationPlayer::default(),
-        constraints,
-    ));
+    world
+        .entity_mut(root)
+        .insert((Vrm { bones }, AnimationPlayer::default(), constraints));
     expressions::attach(world, root, model.expressions.as_ref(), nodes)?;
     if let Some(springs) = springs {
         let colliders = springs

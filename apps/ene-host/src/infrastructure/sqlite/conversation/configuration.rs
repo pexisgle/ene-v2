@@ -1,23 +1,12 @@
 use super::*;
 pub fn load(db: &Connection) -> Result<Configuration, crate::infrastructure::sqlite::Error> {
-    fn get<T: serde::de::DeserializeOwned>(
-        db: &Connection,
-        key: &str,
-    ) -> Result<T, crate::infrastructure::sqlite::Error> {
-        let value: String = db
-            .query_row("SELECT value FROM metadata WHERE key=?1", [key], |r| {
-                r.get(0)
-            })
-            .map_err(crate::infrastructure::sqlite::Error::from)?;
-        serde_json::from_str(&value).map_err(crate::infrastructure::sqlite::Error::from)
-    }
     let mut companions = std::collections::BTreeMap::new();
     let mut query = db.prepare("SELECT id,body FROM companions")?;
     for row in query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (id, body) = row?;
         companions.insert(id, serde_json::from_str(&body)?);
     }
-    let settings = get(db, "settings")?;
+    let settings = serde_json::from_str(&super::super::queries::meta(db, "settings")?)?;
     let extras: Option<String> = db
         .query_row(
             "SELECT value FROM metadata WHERE key='configuration_extras'",

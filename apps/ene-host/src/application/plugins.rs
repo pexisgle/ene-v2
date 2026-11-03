@@ -6,7 +6,7 @@ impl HostApplication {
         }
         Ok(())
     }
-    fn plugin_port(&self) -> Result<&dyn crate::ports::plugin::Plugins, Error> {
+    fn plugin_port(&self) -> Result<&crate::infrastructure::plugins::Manager, Error> {
         self.0
             .plugins
             .as_deref()

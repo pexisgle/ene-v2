@@ -102,7 +102,7 @@ async fn optional_catalog_failures_keep_provider_models_but_revocation_stops_rea
                 .origin()
                 .ascii_serialization(),
         ]);
-        let result = optional_enrich(&mut models, Arc::new(invocation), &source).await;
+        let result = enrich(&mut models, Arc::new(invocation), &source).await;
         assert!(arrived.load(Ordering::SeqCst));
         if revoke {
             assert_eq!(result.unwrap_err().kind, ErrorKind::PermissionRequired);

@@ -148,20 +148,13 @@ fn relative(path: &str) -> Result<PathBuf, Error> {
         || path.len() > MAX_PATH
         || path.chars().any(char::is_control)
         || Path::new(path).is_absolute()
+        || Path::new(path)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(denied());
     }
-    let mut clean = PathBuf::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::Normal(part) => clean.push(part),
-            _ => return Err(denied()),
-        }
-    }
-    if clean.as_os_str().is_empty() {
-        return Err(Error::invalid());
-    }
-    Ok(clean)
+    Ok(PathBuf::from(path))
 }
 
 fn denied() -> Error {

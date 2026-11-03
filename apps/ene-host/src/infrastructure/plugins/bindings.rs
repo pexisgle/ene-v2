@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::path::Path;
 
 impl Manager {
-    pub(super) async fn list_bindings(&self) -> Result<Vec<PluginBinding>> {
+    pub async fn bindings(&self) -> Result<Vec<PluginBinding>> {
         self.store
             .plugin_list("bindings".into())
             .await
@@ -20,7 +20,7 @@ impl Manager {
             .collect()
     }
 
-    pub(super) async fn bind_plugin(&self, mut input: PluginBinding) -> Result<()> {
+    pub async fn bind(&self, mut input: PluginBinding) -> Result<()> {
         match input.workspace_root.take() {
             Some(root) if !root.is_empty() => {
                 input.workspace_root = Some(workspace_root(&root)?);

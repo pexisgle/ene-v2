@@ -1,6 +1,6 @@
 //! Wasm bridge: the Host owns session identity, permission waits and terminal state.
 use super::*;
-use crate::domain::harness::{CONTRACT_VERSION, Change, Session, Status};
+use crate::domain::harness::{CONTRACT_VERSION, Session, Status};
 use ene_plugin::{HarnessEvent, HarnessInput};
 use serde_json::Value;
 
@@ -84,10 +84,9 @@ impl Manager {
         binding_id: &str,
         session: &mut Session,
         event: &HarnessEvent,
-    ) -> Result<Change> {
-        let change = session.apply(event)?;
-        self.harness_store(binding_id, session).await?;
-        Ok(change)
+    ) -> Result<()> {
+        session.apply(event)?;
+        self.harness_store(binding_id, session).await
     }
     /// Terminates a suspended turn on behalf of the client. Never resumes the guest.
     pub(super) async fn harness_cancel(&self, binding_id: &str) -> Result<Session> {

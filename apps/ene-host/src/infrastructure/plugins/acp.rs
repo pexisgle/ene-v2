@@ -9,7 +9,6 @@ use crate::infrastructure::{
 use ene_plugin::{Event, HarnessEvent, HarnessInput, Operation};
 use ene_plugin_runtime::limits::MAX_EVENTS;
 use ene_rpc::{PluginBinding, PluginResult};
-use serde_json::json;
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use tokio::sync::MutexGuard;
 use tokio_util::sync::CancellationToken;
@@ -230,20 +229,18 @@ fn remember(events: &mut VecDeque<Event>, event: HarnessEvent) {
 }
 
 fn plugin_result(generation: u64, journal: &HarnessSession, events: Vec<Event>) -> PluginResult {
-    let mut result = json!({
-        "task_id": journal.session_id,
-        "status": journal.status.name(),
-    });
-    if let Some(stop_reason) = journal.stop_reason {
-        result["stop_reason"] = json!(stop_reason);
-    }
+    let result = super::harness_result(journal);
     PluginResult {
         generation,
         events: events
             .into_iter()
-            .filter_map(|event| serde_json::to_value(event).ok().map(document))
+            .filter_map(|event| {
+                serde_json::to_value(event)
+                    .ok()
+                    .map(ene_rpc::JsonDocument::from)
+            })
             .collect(),
-        result: document(result).into(),
+        result: ene_rpc::JsonDocument::from(result).into(),
         ..Default::default()
     }
 }

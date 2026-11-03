@@ -11,4 +11,5 @@ mod receipts;
 mod tests;
 
 pub use configuration::{load, write_configuration};
+pub(crate) use receipts::request_id;
 pub use receipts::{complete_receipt, receipt, release_receipt, save_receipt};

@@ -5,15 +5,11 @@ use buffa::Message;
 use connectrpc::ConnectError;
 use ene_rpc::rpc as w;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::{Arc, Weak},
-    time::Duration,
-};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
-use tokio::sync::{Mutex, MutexGuard, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, MutexGuard, Semaphore, mpsc};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
@@ -50,19 +46,17 @@ struct State {
     activation_not_before: Option<Instant>,
     journal: w::DeviceJournal,
     connections: HashMap<String, Connection>,
-    changes: HashMap<String, watch::Sender<()>>,
+    changes: HashMap<String, CancellationToken>,
     activations: HashMap<String, (w::Activation, Instant)>,
 }
 struct Connection {
     id: String,
     queue: mpsc::Sender<w::DeviceOperation>,
-    lease: Weak<()>,
 }
 pub(crate) struct Subscription {
     pub id: String,
     pub queue: mpsc::Receiver<w::DeviceOperation>,
-    pub lease: Arc<()>,
-    pub changed: watch::Receiver<()>,
+    pub changed: CancellationToken,
 }
 fn denied() -> ConnectError {
     ConnectError::permission_denied("端末操作の許可が必要です")
@@ -120,10 +114,6 @@ impl Devices {
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(64)),
         }))
-    }
-    pub async fn initialize(&self) -> Result<(), ConnectError> {
-        let _state = self.lock().await?;
-        Ok(())
     }
     pub async fn stop(&self) {
         self.0.slots.close();
@@ -201,7 +191,7 @@ impl Devices {
         {
             state.failed = true;
             for signal in state.changes.values() {
-                signal.send_replace(());
+                signal.cancel();
             }
             return Err(unavailable());
         }

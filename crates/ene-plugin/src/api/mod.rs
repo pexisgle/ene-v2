@@ -2,7 +2,6 @@
 //!
 //! Payloads live in capability modules; the shared wire enums are in [`wire`].
 mod character;
-mod desktop;
 mod harness;
 mod http;
 mod llm;
@@ -10,7 +9,6 @@ mod speech;
 mod wire;
 
 pub use character::{CharacterAction, CharacterEvent, CharacterTarget};
-pub use desktop::{DesktopCapabilities, DesktopOperation, ResourceHandle};
 pub use harness::{
     ContentBlock, ContentChunk, HarnessEvent, HarnessInput, MessageId, PermissionOption,
     PermissionOptionId, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,

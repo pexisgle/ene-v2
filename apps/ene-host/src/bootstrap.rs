@@ -30,10 +30,6 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
         .initialize()
         .await
         .map_err(|_| "credential initialization failed")?;
-    app.devices
-        .initialize()
-        .await
-        .map_err(|_| "device initialization failed")?;
     app.application.restore_plugins().await?;
     Ok((runtime, app))
 }
@@ -47,9 +43,9 @@ pub(crate) fn attach_kernel(app: &App, rig_dir: PathBuf) -> Result<(), Box<dyn E
     let configure = bridge.clone();
     let (kernel, events) = crate::rig::Runtime::start_with(rig_dir, move |app| {
         app.insert_resource((*configure).clone());
-        app.add_tool(crate::rig::mind::MindRecall::new(configure.clone()));
-        app.add_tool(crate::rig::mind::MindRead::new(configure.clone()));
-        app.add_tool(crate::rig::mind::MindUpdate::new(configure));
+        app.add_tool(crate::rig::mind::MindRecall(configure.clone()));
+        app.add_tool(crate::rig::mind::MindRead(configure.clone()));
+        app.add_tool(crate::rig::mind::MindUpdate(configure));
     })
     .map_err(|_| "the Rig execution kernel failed to start")?;
     crate::application::mind::spawn_mind_tools(app.application.clone(), received);
@@ -81,5 +77,7 @@ pub(crate) fn application_with_plugins(
         Some(plugins.clone()),
     );
     plugins.attach_inference(application.inference());
-    App::new(application, token).with_device_store(devices)
+    let mut app = App::new(application, token);
+    app.devices = crate::devices::Devices::new(Some(devices));
+    app
 }

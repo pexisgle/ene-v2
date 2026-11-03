@@ -275,20 +275,6 @@ message ActivationRequest { string companion_id = 1; string device_id = 2; optio
 message Activation { string companion_id = 1; string device_id = 2; uint64 revision = 3; uint32 lease_ms = 4; }
 message StopRequest { string companion_id = 1; }
 
-// A protobuf message occupies exactly one binary WebSocket message. Audio
-// codecs are negotiated by Start; no bespoke binary header is used.
-message PrepareAudioRequest { string companion_id = 1; string device_id = 2; string codec = 3; uint32 sample_rate = 4; uint32 channels = 5; }
-message AudioStart {
-  string session_id = 1; string companion_id = 2; string device_id = 3;
-  string codec = 4; uint32 sample_rate = 5; uint32 channels = 6; uint64 generation = 7;
-}
-message AudioChunk { string session_id = 1; uint64 sequence = 2; bytes data = 3; }
-message AudioEnd { string session_id = 1; }
-message AudioFailure { string session_id = 1; string code = 2; }
-message AudioFrame {
-  oneof frame { AudioStart start = 1; AudioChunk chunk = 2; AudioEnd end = 3; AudioFailure failure = 4; }
-}
-
 service HostService {
   rpc GetSnapshot(SnapshotRequest) returns (Snapshot);
   rpc Subscribe(Empty) returns (stream HostEvent);
@@ -301,7 +287,6 @@ service HostService {
   rpc GetMessage(MessageRequest) returns (Message);
   rpc SendMessage(SendMessageRequest) returns (MessageAcceptance);
   rpc Stop(StopRequest) returns (Empty);
-  rpc PrepareAudio(PrepareAudioRequest) returns (AudioStart);
   rpc GetSettings(Empty) returns (Settings);
   rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
   rpc ListGrants(GrantsRequest) returns (Grants);

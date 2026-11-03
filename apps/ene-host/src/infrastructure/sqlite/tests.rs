@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn completing_check_requires_matching_pending_identity_and_updates_one_receipt() {
-    use crate::ports::{ConfigurationCommit, Outcome, Receipt, Repository};
+    use crate::ports::{ConfigurationCommit, Outcome, Receipt};
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("receipt.db")).await.unwrap();
     let original = store.configuration().await.unwrap();

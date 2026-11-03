@@ -9,6 +9,7 @@ use axum::{
     http::Request,
 };
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tower::ServiceExt;
 async fn app() -> (App, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
@@ -18,6 +19,23 @@ async fn app() -> (App, tempfile::TempDir) {
         temp,
     )
 }
+fn host_app(
+    store: Store,
+    registry: std::sync::Arc<dyn crate::llm::ProviderRegistry>,
+    credentials: std::sync::Arc<dyn crate::ports::Credentials>,
+) -> App {
+    App::new(
+        crate::application::HostApplication::with_plugins(
+            Arc::new(store),
+            registry,
+            credentials,
+            tokio::sync::watch::channel(false).0,
+            None,
+        ),
+        "private-token".into(),
+    )
+}
+
 async fn request_method(
     app: &App,
     method: &str,
@@ -222,19 +240,17 @@ impl ConversationFixture {
         let companion = store.snapshot().await.unwrap().companions[0].id.clone();
         let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
         let finish = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let shutdown = tokio::sync::watch::channel(false).0;
-        let app = App::new(
-            crate::application::HostApplication::new(
-                std::sync::Arc::new(store.clone()),
-                std::sync::Arc::new(ControlledRegistry {
-                    registry: crate::infrastructure::llm::registry::Registry::discover(),
-                    started,
-                    finish: finish.clone(),
-                }),
-                std::sync::Arc::new(TestCredentials),
-                shutdown,
-            ),
-            "private-token".into(),
+        let app = host_app(
+            store.clone(),
+            Arc::new(ControlledRegistry {
+                registry: crate::infrastructure::llm::registry::Registry::discover(),
+                started,
+                finish: finish.clone(),
+            }),
+            Arc::new(StoredCredentials {
+                session_only: true,
+                ..Default::default()
+            }),
         );
         let (status, settings) = mutate(&app, "PATCH", "Settings", json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -360,24 +376,12 @@ async fn mutate(
         return (status, connect_fixture::decode_response(&op, &bytes));
     }
     let error: connectrpc::ConnectError = serde_json::from_slice(&bytes).unwrap();
-    for detail in error.details {
-        if let Some(encoded) = detail.value {
-            use base64::Engine;
-            use buffa::Message;
-            let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
-                .decode(encoded)
-                .unwrap();
-            let failure = ene_rpc::rpc::ApiFailure::decode_from_slice(&bytes).unwrap();
-            return (
-                StatusCode::from_u16(failure.http_status as u16).unwrap(),
-                connect_fixture::normalized(serde_json::to_value(failure).unwrap()),
-            );
-        }
-    }
-    panic!("missing API failure detail for {op}: {status}")
+    let failure = crate::api::test_client::failure(&error);
+    (
+        StatusCode::from_u16(failure.http_status as u16).unwrap(),
+        connect_fixture::normalized(serde_json::to_value(failure).unwrap()),
+    )
 }
-
-struct TestCredentials;
 
 mod grant_consent_tests {
     use super::*;
@@ -439,17 +443,15 @@ mod grant_consent_tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("host.db")).await.unwrap();
         let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-        let shutdown = tokio::sync::watch::channel(false).0;
-        let app = App::new(
-            crate::application::HostApplication::new(
-                Arc::new(store),
-                Arc::new(ReloadableRegistry {
-                    revision: AtomicU64::new(1),
-                }),
-                Arc::new(TestCredentials),
-                shutdown,
-            ),
-            "private-token".into(),
+        let app = host_app(
+            store,
+            Arc::new(ReloadableRegistry {
+                revision: AtomicU64::new(1),
+            }),
+            Arc::new(StoredCredentials {
+                session_only: true,
+                ..Default::default()
+            }),
         );
         let (status, settings) = mutate(
             &app,
@@ -603,26 +605,47 @@ impl crate::llm::ProviderRegistry for RoutedRegistry {
     }
 }
 
+/// An in-memory credential store with the failure knobs the tests need.
 #[derive(Default)]
-struct StoredCredentials(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+struct StoredCredentials {
+    values: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    environment: Option<&'static str>,
+    session_only: bool,
+    /// The first save persists the value and then reports a storage failure.
+    fail_first_save: bool,
+    /// `forget` never finishes, as an unresponsive Secret Service call would.
+    unresponsive_forget: bool,
+    /// A load waits on `release` after reporting to `entered`.
+    load_gate: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+    saves: std::sync::atomic::AtomicUsize,
+    forgets: std::sync::atomic::AtomicUsize,
+}
 impl crate::ports::Credentials for StoredCredentials {
     fn environment(&self, _: &str) -> crate::ports::Result<String> {
-        Err(crate::domain::Error::unavailable())
+        self.environment
+            .map(str::to_owned)
+            .ok_or_else(crate::domain::Error::unavailable)
     }
     fn session_only(&self) -> bool {
-        false
+        self.session_only
     }
     fn load(
         &self,
         reference: String,
     ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<String>> {
         Box::pin(async move {
-            self.0
+            let value = self
+                .values
                 .lock()
                 .unwrap()
                 .get(&reference)
                 .cloned()
-                .ok_or_else(crate::domain::Error::unavailable)
+                .ok_or_else(crate::domain::Error::unavailable)?;
+            if let Some((entered, release)) = &self.load_gate {
+                entered.add_permits(1);
+                release.acquire().await.unwrap().forget();
+            }
+            Ok(value)
         })
     }
     fn save(
@@ -631,8 +654,13 @@ impl crate::ports::Credentials for StoredCredentials {
         value: String,
     ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<()>> {
         Box::pin(async move {
-            self.0.lock().unwrap().insert(reference, value);
-            Ok(())
+            let first = self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            self.values.lock().unwrap().insert(reference, value);
+            if first && self.fail_first_save {
+                Err(crate::domain::Error::unavailable())
+            } else {
+                Ok(())
+            }
         })
     }
     fn forget(
@@ -640,7 +668,12 @@ impl crate::ports::Credentials for StoredCredentials {
         reference: String,
     ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<()>> {
         Box::pin(async move {
-            self.0.lock().unwrap().remove(&reference);
+            self.forgets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.unresponsive_forget {
+                std::future::pending::<()>().await
+            }
+            self.values.lock().unwrap().remove(&reference);
             Ok(())
         })
     }
@@ -685,16 +718,11 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("host.db")).await.unwrap();
         let c = store.snapshot().await.unwrap().companions[0].id.clone();
-        let shutdown = tokio::sync::watch::channel(false).0;
         let credentials = std::sync::Arc::new(StoredCredentials::default());
-        let app = App::new(
-            crate::application::HostApplication::new(
-                std::sync::Arc::new(store.clone()),
-                std::sync::Arc::new(RoutedRegistry),
-                credentials.clone(),
-                shutdown,
-            ),
-            "private-token".into(),
+        let app = host_app(
+            store.clone(),
+            std::sync::Arc::new(RoutedRegistry),
+            credentials.clone(),
         );
         let (status, saved) = mutate(
             &app,
@@ -720,13 +748,14 @@ async fn changing_service_clears_credentials_before_new_authorization() {
             StatusCode::OK
         );
         assert!(
-            crate::ports::Repository::configuration(&store)
+            store
+                .configuration()
                 .await
                 .unwrap()
                 .credential_refs
                 .contains_key(p)
         );
-        assert_eq!(credentials.0.lock().unwrap().len(), 1);
+        assert_eq!(credentials.values.lock().unwrap().len(), 1);
         assert_eq!(mutate(&app,"PATCH",&format!("Companion/{c}"),json!({"revision":1,"model_assignments":{"companion":{"connection_id":p,"model_id":"m"}}}),None).await.0,StatusCode::OK);
         let (status, saved) = mutate(
             &app,
@@ -740,13 +769,14 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(saved["connections"][0]["credential_state"], "missing");
         assert!(
-            crate::ports::Repository::configuration(&store)
+            store
+                .configuration()
                 .await
                 .unwrap()
                 .credential_refs
                 .is_empty()
         );
-        assert!(credentials.0.lock().unwrap().is_empty());
+        assert!(credentials.values.lock().unwrap().is_empty());
         assert_eq!(
             mutate(
                 &app,
@@ -857,9 +887,7 @@ async fn disconnected_revocation_finishes_disk_authority_and_notifications() {
     drop(revoke);
     release.send(()).unwrap();
     blocker.await.unwrap();
-    let persisted = crate::ports::Repository::configuration(&f.store)
-        .await
-        .unwrap();
+    let persisted = f.store.configuration().await.unwrap();
     assert_eq!(
         persisted.grants[0].status,
         crate::domain::GrantStatus::Invalidated
@@ -896,28 +924,6 @@ async fn disconnected_revocation_finishes_disk_authority_and_notifications() {
     };
     assert_eq!(grants.items[0].status, "invalidated");
     f.app.application.stop().await.unwrap();
-}
-
-impl crate::ports::Credentials for TestCredentials {
-    fn environment(&self, _: &str) -> crate::ports::Result<String> {
-        Err(crate::domain::Error::unavailable())
-    }
-    fn session_only(&self) -> bool {
-        true
-    }
-    fn load(&self, _: String) -> futures_util::future::BoxFuture<'_, crate::ports::Result<String>> {
-        Box::pin(async { Err(crate::domain::Error::unavailable()) })
-    }
-    fn save(
-        &self,
-        _: String,
-        _: String,
-    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-    fn forget(&self, _: String) -> futures_util::future::BoxFuture<'_, crate::ports::Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
 }
 
 #[tokio::test]
@@ -1285,7 +1291,7 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     let rig_dir = state_dir.join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (kernel, events) = rig::Runtime::start_test(rig_dir.clone(), move |app| {
+    let (kernel, events) = rig::Runtime::start_with(rig_dir.clone(), move |app| {
         rig_ecs::tools::AppToolsExt::add_tool(
             app,
             Hold {
@@ -1546,7 +1552,7 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     // The next host on the same state reads the saved conversation.
     let store = Store::open(state_dir.join("host.sqlite3")).await.unwrap();
     let restarted = crate::bootstrap::application(store, "private-token".into());
-    let (kernel, events) = rig::Runtime::start(rig_dir).unwrap();
+    let (kernel, events) = rig::Runtime::start_with(rig_dir, |_| {}).unwrap();
     restarted.application.attach_rig(kernel, events);
     let history = restarted
         .application
@@ -1577,17 +1583,8 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    let shutdown = tokio::sync::watch::channel(false).0;
     let credentials = std::sync::Arc::new(StoredCredentials::default());
-    let app = App::new(
-        crate::application::HostApplication::new(
-            std::sync::Arc::new(store),
-            std::sync::Arc::new(RoutedRegistry),
-            credentials,
-            shutdown,
-        ),
-        "private-token".into(),
-    );
+    let app = host_app(store, std::sync::Arc::new(RoutedRegistry), credentials);
     let (status, saved) = mutate(
         &app,
         "PATCH",

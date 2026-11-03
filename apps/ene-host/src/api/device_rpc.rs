@@ -65,17 +65,17 @@ impl w::DeviceService for DeviceRpc {
         let cancelled = auth::cancelled(principal);
         let mut shutdown = self.app.application.shutdown();
         Response::stream_ok(async_stream::stream! {
-            let _lease=subscription.lease;tokio::pin!(cancelled);
-            yield Ok(w::DeviceEvent{event:Some(w::device_event::Event::Ready(Box::new(w::DeviceSubscription{subscription_id:subscription.id,..Default::default()}))),..Default::default()});
-            loop {if *shutdown.borrow(){break;}tokio::select! {biased;
-                _=&mut cancelled=>break,
-                _=shutdown.changed()=>break,
-                _=subscription.changed.changed()=>break,
-                command=subscription.queue.recv()=>match command {
-                    Some(command)=>yield Ok(w::DeviceEvent{event:Some(w::device_event::Event::Operation(Box::new(command))),..Default::default()}),None=>break,
-                }
-            }}
-        })
+        tokio::pin!(cancelled);
+                    yield Ok(w::DeviceEvent{event:Some(w::device_event::Event::Ready(Box::new(w::DeviceSubscription{subscription_id:subscription.id,..Default::default()}))),..Default::default()});
+                    loop {if *shutdown.borrow(){break;}tokio::select! {biased;
+                        _=&mut cancelled=>break,
+                        _=shutdown.changed()=>break,
+                        _=subscription.changed.cancelled()=>break,
+                        command=subscription.queue.recv()=>match command {
+                            Some(command)=>yield Ok(w::DeviceEvent{event:Some(w::device_event::Event::Operation(Box::new(command))),..Default::default()}),None=>break,
+                        }
+                    }}
+                })
     }
     async fn request_operation(
         &self,

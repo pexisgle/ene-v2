@@ -112,7 +112,6 @@ impl Invocation {
         })
     }
     fn service(&self, request: ServiceRequest) -> Result<std::result::Result<Value, Failure>> {
-        crate::contract::service_request(&request)?;
         if self.calls.fetch_add(1, Ordering::Relaxed) >= MAX_SERVICE_CALLS {
             return Err(Error::Protocol);
         }

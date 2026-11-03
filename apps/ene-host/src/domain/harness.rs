@@ -73,13 +73,6 @@ pub struct Session {
     pub events: Vec<HarnessEvent>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Change {
-    Updated,
-    Waiting,
-    Stopped,
-}
-
 impl Session {
     pub fn start(session_id: impl Into<String>) -> Self {
         Self {
@@ -106,14 +99,13 @@ impl Session {
     pub fn terminal(&self) -> bool {
         self.status.terminal()
     }
-    pub fn apply(&mut self, event: &HarnessEvent) -> Result<Change> {
+    pub fn apply(&mut self, event: &HarnessEvent) -> Result<()> {
         if self.status.terminal() {
             return Err(conflict());
         }
-        let change = match event {
+        match event {
             HarnessEvent::Update { update } => {
                 self.apply_update(update)?;
-                Change::Updated
             }
             HarnessEvent::RequestPermission {
                 request_id,
@@ -144,19 +136,17 @@ impl Session {
                     options: options.clone(),
                 });
                 self.status = Status::WaitingForInput;
-                Change::Waiting
             }
             HarnessEvent::Stop { stop_reason } => {
                 if self.pending.is_some() {
                     return Err(conflict());
                 }
                 self.stop(*stop_reason);
-                Change::Stopped
             }
         };
         self.events.push(event.clone());
         self.trim();
-        Ok(change)
+        Ok(())
     }
     /// Clears the waiting permission and allows the guest to resume.
     pub fn respond(&mut self, request_id: &str, outcome: &RequestPermissionOutcome) -> Result<()> {
@@ -481,12 +471,9 @@ mod tests {
     fn a_permission_waits_for_a_known_option_and_resumes_running() {
         let mut session = new_session();
         session.apply(&tool_call("call-1")).unwrap();
-        assert_eq!(
-            session
-                .apply(&permission("permission-1", "call-1", true))
-                .unwrap(),
-            Change::Waiting
-        );
+        session
+            .apply(&permission("permission-1", "call-1", true))
+            .unwrap();
         assert_eq!(session.status, Status::WaitingForInput);
         assert!(
             session

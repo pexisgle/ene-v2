@@ -15,14 +15,13 @@ ExtismのHost SDKをホストプロセス内に組み込んで実行します。
 
 ホストは `127.0.0.1` の空きポートで待ち受け、Linuxでは `$XDG_RUNTIME_DIR/ene-host/connection.json` に `endpoint` と `token` を書きます。ディレクトリは0700、ファイルは0600です。トークンは起動ごとに更新し、終了時に接続ファイルを削除します。同じランタイムディレクトリでの二重起動は拒否します。
 
-クライアントは `ene_rpc::connect(endpoint, token)` で接続し、生成された `HostServiceClient`、`DeviceServiceClient`、`PluginServiceClient` を利用します。音声の双方向通信は `/audio` のWebSocketです。通常のRPC・通知、デバイス認可・操作、プラグイン管理はConnectサービスで扱います。
+クライアントは `ene_rpc::connect(endpoint, token)` で接続し、生成された `HostServiceClient`、`DeviceServiceClient`、`PluginServiceClient` を利用します。通常のRPC・通知、デバイス認可・操作、プラグイン管理はConnectサービスで扱います。
 
 | 環境変数 | 用途 |
 | --- | --- |
 | `ENE_HOST_STATE_DIR` | SQLite保存先。Linuxの既定値はXDG stateディレクトリ内の `ene` |
 | `ENE_HOST_SESSION_CREDENTIALS` | 設定するとAPIキーをセッション中だけ保持 |
 | `ENE_PLUGIN_DIR` | プラグインの検索ディレクトリ。既定値はアプリのdataディレクトリ内の `plugins` |
-| `ENE_WEB_ORIGIN` | ブラウザーセッションで許可するorigin。省略時はホスト自身のorigin |
 
 初期コンパニオンと空の接続設定をSQLiteへ作成します。生成するには接続・資格情報・モデル割当・データ送信許可をAPIで登録します。組み込みプロバイダーはOpenAI Responses APIとOpenRouter（OpenAI互換Chat Completions）です。OpenRouter用Wasmは `examples/plugins/openrouter-wasm` をビルドし、manifestと `provider.wasm` をプラグインディレクトリのパッケージに配置します。資格情報はホスト側で付与し、ゲストには渡しません。
 
@@ -102,9 +101,9 @@ ACPバインディングの`terminal`ポリシーを有効にした場合だけ�
 
 タスク推論・接続確認のLLM実行は無効化・生成キャンセル・実行失敗で出力転送も終了し、受信が止まっていても実行管理枠を解放します。完了イベントなしで閉じたストリームは失敗として扱います。
 
-プラグイン契約はv4です。Harnessの入力・イベントはACP v1の語彙（`Start` / `Respond` / `Cancel`、`Update` / `RequestPermission` / `Stop`）に変わりました。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。ウィンドウ監視はデスクトップ専用のため、ホストでは実行しません。
+プラグイン契約はv4です。Harnessの入力・イベントはACP v1の語彙（`Start` / `Respond` / `Cancel`、`Update` / `RequestPermission` / `Stop`）に変わりました。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。
 
-音声通信の認可・セッション管理は実装済みですが、本番用の音声認識・合成エンジンは接続していません。エンジンがない状態では音声利用可能と通知しません。デスクトップUI、ファイル操作ワーカー、完成版の自律タスクループはこのホストの実装完了範囲に含みません。
+デスクトップUI、音声認識・合成、ファイル操作ワーカー、完成版の自律タスクループはこのホストの実装完了範囲に含みません。
 
 ## パッケージの境界
 
@@ -121,9 +120,9 @@ Rig の `HttpClientExt` はホストの `AuthorizedTransport` に直接実装し
 | `domain` | ホストの状態、入力検証、許可と実行可否のルール、記憶・心の型と検証 |
 | `ports` | 永続化、資格情報ストア、プラグイン管理、心・記憶のトランザクション境界 |
 | `llm` | プロバイダー契約、生成入力、権限付き実行、HTTP通信、Rigとの接続 |
-| `api` | 認証、Connectサービス、ブラウザーセッション、通知 |
+| `api` | 認証、Connectサービス、通知 |
 | `infrastructure` | SQLite、資格情報ストア、OpenAI・プラグイン接続、接続情報の公開 |
-| `devices` / `audio` | デバイス操作と音声セッションの認可・寿命管理 |
+| `devices` | デバイス操作の認可・寿命管理 |
 | `bootstrap` / `server` | 依存の組み立て、起動、シグナルによる停止 |
 
 `llm::invocation` は非公開モジュールです。認証情報を持つ `Invocation` と、その子モジュールの通信実装を同じ境界に置きます。APIキーをリクエストに付与するメソッドは非公開のまま、送信先検証・認証情報の付与・送信を一続きで実行します。送信前と受信中の権限確認、リダイレクト拒否、サイズ制限もここで適用します。
@@ -147,6 +146,6 @@ cargo test -p ene-host --lib measure_idle_cpu -- --ignored --nocapture --test-th
 通常のホストテストに、実際のPDK製WasmとHTTPブローカーの結合検証を含みます。
 別のWasm出力先を使う場合は `ENE_TEST_REFERENCE_WASM` / `ENE_TEST_PDK_WASM` で指定します。
 
-会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、組み込みExtism、ローカルHTTPサーバーを使って認証・取り消し・停止・サイズ制限を検証します。心は、同じ操作の再試行・異なる内容との競合・古いrevision・他コンパニオンの記憶参照・不正フィールド・保存失敗時のロールバック・訂正関係・所有者を越えた検索・変更なし・再起動後の保持・プロファイル通知・スクリプト化親の更新が次のモデル要求へ入ることを検証します。Rig実行カーネルは、スクリプト化したモデルでツール呼び出し・追加入力・停止・待機時のフレーム数・セッションログの保存失敗・再起動後の復元を検証します。ホストAPIの統合テストも同じスクリプト化モデルで、受理、通知、履歴、停止、取消、再起動を通します。組み込みOpenAI Responsesの本番接続経路は、ローカルのSSEサーバーを相手に、リクエスト先・資格情報の付与・ストリーミング解釈を検証します（実モデルは呼びません）。別に、`.env` の鍵を使う明示的な受入テスト（`live_acceptance`、既定は無視）で、OpenAIの `gpt-6-luna` とOpenRouterの `google/gemini-2.5-flash-lite` を実際に呼び、ツール要求・実行・結果の返却・最終応答・履歴・再起動を確認します。`mind_acceptance_through_the_host` は、架空の人格と合成の好みを使い、`mind_update`の保存・`MindUpdated`・訂正、会話を持たない再起動先での`mind_recall`、OpenRouterへのモデル変更後の同じ記憶の利用を確認します。実測はOpenAIの初回更新2呼び出し・訂正4呼び出し・再起動先2呼び出し、OpenRouter 2呼び出しの計10呼び出し、入力15571・出力513トークン、Rigカタログ単価からの参考コスト0.00141388 USDでした（請求額ではない）。鍵はテストプロセスから通常の資格情報APIへ渡し、表示・保存しません。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。通常のテスト実行では有料の外部API・実モデル・実機音声エンジンを呼びません。`live_acceptance` は明示実行した場合だけ `.env` の鍵で実プロバイダーを呼びます。
+会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、組み込みExtism、ローカルHTTPサーバーを使って認証・取り消し・停止・サイズ制限を検証します。心は、同じ操作の再試行・異なる内容との競合・古いrevision・他コンパニオンの記憶参照・不正フィールド・保存失敗時のロールバック・訂正関係・所有者を越えた検索・変更なし・再起動後の保持・プロファイル通知・スクリプト化親の更新が次のモデル要求へ入ることを検証します。Rig実行カーネルは、スクリプト化したモデルでツール呼び出し・追加入力・停止・待機時のフレーム数・セッションログの保存失敗・再起動後の復元を検証します。ホストAPIの統合テストも同じスクリプト化モデルで、受理、通知、履歴、停止、取消、再起動を通します。組み込みOpenAI Responsesの本番接続経路は、ローカルのSSEサーバーを相手に、リクエスト先・資格情報の付与・ストリーミング解釈を検証します（実モデルは呼びません）。別に、`.env` の鍵を使う明示的な受入テスト（`live_acceptance`、既定は無視）で、OpenAIの `gpt-6-luna` とOpenRouterの `google/gemini-2.5-flash-lite` を実際に呼び、ツール要求・実行・結果の返却・最終応答・履歴・再起動を確認します。`mind_acceptance_through_the_host` は、架空の人格と合成の好みを使い、`mind_update`の保存・`MindUpdated`・訂正、会話を持たない再起動先での`mind_recall`、OpenRouterへのモデル変更後の同じ記憶の利用を確認します。実測はOpenAIの初回更新2呼び出し・訂正4呼び出し・再起動先2呼び出し、OpenRouter 2呼び出しの計10呼び出し、入力15571・出力513トークン、Rigカタログ単価からの参考コスト0.00141388 USDでした（請求額ではない）。鍵はテストプロセスから通常の資格情報APIへ渡し、表示・保存しません。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。通常のテスト実行では有料の外部API・実モデルを呼びません。`live_acceptance` は明示実行した場合だけ `.env` の鍵で実プロバイダーを呼びます。
 
 旧Luauプラグインは非対応です。Rust製プラグインは `ene-plugin-sdk` への依存を `ene-plugin` に変更します。共通契約はバージョン4です。ハーネスはACP v1の入力・イベントへ移行し、`contract_version` を4に更新してください。旧v3の保存ジャーナルは起動時に`host_interrupted`として終端化され、再開しません。revisionが変わるため、再有効化とバインディングの再設定が必要です。保存データは削除しません。旧 `ENE_PLUGIN_RUNNER_BIN` / `ENE_PLUGIN_CACHE_DIR` は不要で、旧コードキャッシュを実行時に読みません。

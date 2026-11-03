@@ -1,7 +1,7 @@
 //! Shared wire enums for operations, events and service requests.
 use super::{
-    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, DesktopOperation,
-    GenerationRequest, HarnessEvent, HarnessInput, HttpRequest, SpeechInput,
+    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, GenerationRequest, HarnessEvent,
+    HarnessInput, HttpRequest, SpeechInput,
 };
 use crate::manifest::{Extension, Service};
 use serde::{Deserialize, Serialize};
@@ -124,9 +124,6 @@ pub enum ServiceRequest {
         target: CharacterTarget,
         action: CharacterAction,
     },
-    Desktop {
-        operation: DesktopOperation,
-    },
 }
 
 impl ServiceRequest {
@@ -139,7 +136,6 @@ impl ServiceRequest {
             Self::Models { .. } => Service::Models,
             Self::Tool { .. } => Service::Tools,
             Self::Character { .. } => Service::CharacterActions,
-            Self::Desktop { .. } => Service::Desktop,
         }
     }
 }

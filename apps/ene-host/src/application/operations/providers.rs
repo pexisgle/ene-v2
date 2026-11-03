@@ -40,7 +40,7 @@ impl HostApplication {
         id: String,
         companion_id: Option<String>,
     ) -> Result<Vec<crate::llm::Model>, Error> {
-        ConnectionId::parse(id.clone())?;
+        validate_id(&id)?;
         let mut controls = self.0.controls.lock().await;
         controls.admit(self)?;
         let c = config(self, &mut controls).await?;

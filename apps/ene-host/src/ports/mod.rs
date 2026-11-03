@@ -33,66 +33,6 @@ pub enum ConfigurationCommit {
         receipt: Receipt,
     },
 }
-pub trait Repository: Send + Sync {
-    fn snapshot(&self) -> BoxFuture<'_, Result<StoredSnapshot>>;
-    fn configuration(&self) -> BoxFuture<'_, Result<Configuration>>;
-    fn commit_configuration(&self, change: ConfigurationCommit) -> BoxFuture<'_, Result<()>>;
-    fn receipt(
-        &self,
-        key: String,
-        target: String,
-        request: Value,
-    ) -> BoxFuture<'_, Result<Option<(Outcome, Value)>>>;
-    fn reserve(&self, receipt: Receipt) -> BoxFuture<'_, Result<()>>;
-    /// Completes a receipt this repository reserved as pending. The
-    /// compare-and-set leaves a concurrent or repeated completion unchanged.
-    fn complete_receipt(&self, receipt: Receipt) -> BoxFuture<'_, Result<()>>;
-    /// Removes a pending receipt whose operation never became accepted, so
-    /// the same request key can be tried again.
-    fn release_receipt(
-        &self,
-        key: String,
-        target: String,
-        request: Value,
-    ) -> BoxFuture<'_, Result<()>>;
-    fn mind_view(
-        &self,
-        companion: String,
-        now: String,
-    ) -> BoxFuture<'_, Result<crate::domain::mind::StoredMind>>;
-    /// One idempotent transaction for memories, current state and the
-    /// operation record. A stale revision or a missing reference changes
-    /// nothing.
-    #[allow(clippy::too_many_arguments)]
-    fn mind_update(
-        &self,
-        owner: String,
-        operation_id: String,
-        request_hash: String,
-        request: crate::domain::mind::MindUpdateRequest,
-        source: crate::domain::mind::SourceRef,
-        actor: String,
-        now: String,
-    ) -> BoxFuture<'_, Result<crate::domain::mind::MindUpdateResult>>;
-    fn mind_recall(
-        &self,
-        owner: String,
-        query: String,
-        limit: usize,
-    ) -> BoxFuture<'_, Result<Vec<crate::domain::mind::MemoryRecord>>>;
-    fn mind_read(
-        &self,
-        owner: String,
-        id: String,
-    ) -> BoxFuture<'_, Result<Option<crate::domain::mind::MemoryRecord>>>;
-    fn mind_update_profile(
-        &self,
-        companion: String,
-        expected_revision: u64,
-        profile: crate::domain::mind::ProfileDocument,
-        now: String,
-    ) -> BoxFuture<'_, Result<(u64, crate::domain::mind::ProfileDocument)>>;
-}
 /// Secrets have no Debug/Serialize implementation and never become protocol messages.
 #[derive(Clone)]
 pub struct Secret {

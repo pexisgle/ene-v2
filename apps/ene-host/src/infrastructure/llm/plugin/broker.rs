@@ -53,9 +53,6 @@ pub async fn send(
     if models && (method != "GET" || body.is_some()) || !models && method != "POST" {
         return Err(denied());
     }
-    if !["POST", "GET"].contains(&method.as_str()) || method == "GET" && body.is_some() {
-        return Err(denied());
-    }
     let mut map = http::header::HeaderMap::new();
     for (key, value) in headers {
         let name = http::header::HeaderName::from_bytes(key.as_bytes()).map_err(|_| denied())?;

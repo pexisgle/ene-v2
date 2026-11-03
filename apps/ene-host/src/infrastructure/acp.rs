@@ -155,15 +155,7 @@ impl AcpSession {
             .stderr(Stdio::piped())
             .env_clear()
             .kill_on_drop(true);
-        for key in [
-            "PATH",
-            "HOME",
-            "USERPROFILE",
-            "LANG",
-            "LC_ALL",
-            "TERM",
-            "SYSTEMROOT",
-        ] {
+        for key in BASE_ENV {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }

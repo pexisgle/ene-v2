@@ -361,7 +361,7 @@ pub(super) fn reconfigured(
 }
 
 pub(crate) async fn cancel(app: HostApplication, companion: String) -> crate::ports::Result<()> {
-    CompanionId::parse(companion.clone())?;
+    validate_id(&companion)?;
     app.companion(&companion).await?;
     // A host without a kernel has no parent turn to stop; its other
     // execution registrations are still cancelled below.
@@ -389,23 +389,11 @@ pub(crate) async fn history(
     limit: usize,
 ) -> crate::ports::Result<ene_rpc::History> {
     app.companion(&companion).await?;
-    if !(1..=200).contains(&limit)
-        || cursor
-            .as_ref()
-            .is_some_and(|cursor| !valid_cursor(&companion, cursor))
-    {
+    if !(1..=200).contains(&limit) {
         return Err(Error::invalid());
     }
+    // A malformed cursor is refused by the kernel's history reader.
     app.rig()?.history(companion, cursor, limit).await
-}
-
-pub(crate) fn valid_cursor(companion: &str, cursor: &str) -> bool {
-    cursor.split_once(':').is_some_and(|(sequence, id)| {
-        id == companion
-            && sequence
-                .parse::<u64>()
-                .is_ok_and(|n| n > 0 && n <= i64::MAX as u64)
-    })
 }
 
 pub(crate) async fn message(
@@ -413,8 +401,8 @@ pub(crate) async fn message(
     companion: String,
     id: String,
 ) -> crate::ports::Result<Message> {
-    CompanionId::parse(companion.clone())?;
-    MessageId::parse(id.clone())?;
+    validate_id(&companion)?;
+    validate_id(&id)?;
     app.companion(&companion).await?;
     app.rig()?.message(companion, id).await
 }

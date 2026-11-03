@@ -1,13 +1,13 @@
 # ene-vrm
 
-Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する非公開クレートです。glTFのデコード、シーン・スキン・モーフ、アニメーションの補間、描画はBevyが担当し、VRMC拡張の解析と、ヒューマノイド姿勢・表情・LookAt・ノード制約・SpringBone・MToon（輪郭を含む）の適用だけを担います。`VRMC_vrm`／`VRMC_vrm_animation`／`VRMC_springBone`／`VRMC_materials_mtoon`の型は`vrm-spec`、制約の依存順序は`petgraph`を使います。
+Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する非公開クレートです。glTFのデコード、シーン・スキン・モーフ、アニメーションの補間、描画はBevyが担当し、VRMC拡張の解析と、ヒューマノイド姿勢・表情・視線・ノード制約・SpringBone・MToon（輪郭を含む）の適用だけを担います。`VRMC_vrm`／`VRMC_vrm_animation`／`VRMC_springBone`／`VRMC_materials_mtoon`の型は`vrm-spec`、制約の依存順序は`petgraph`を使います。
 
 ## 使い方
 
 `DefaultPlugins`の後に`VrmPlugin`を追加します。`.vrm`／`.vrma`は`AssetServer`で読み、モデルは標準どおり`default_scene`を`WorldAssetRoot`で生成し、モーションは`AnimationPlayer`で再生します。`Vrm`と`AnimationPlayer`は生成されたシーンルートに付きます。
 
 - `Vrm::bone(HumanBoneName::Hips)`でボーン、`vrm.meta`で`vrm-spec`のメタ情報を取得します。
-- `ExpressionWeights`／`LookAt`／`SpringRig::paused`／`SpringJointProps`で表情・視線・物理を制御します。手動で指定した表情はアニメーションに優先し、削除するとアニメーションへ戻ります。
+- `SpringRig::paused`／`SpringJointProps`で物理を制御します。表情と視線はアニメーション入力に従います。
 - 実行順はアニメーション→姿勢→LookAt→表情→制約→SpringBone→Transform伝播です。
 
 ## 対象外と制限

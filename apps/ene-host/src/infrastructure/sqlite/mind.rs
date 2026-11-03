@@ -78,7 +78,7 @@ pub(super) fn view(
 
 fn memory_from_row(row: &tokio_rusqlite::rusqlite::Row<'_>) -> Result<MemoryRecord> {
     let sources: String = row.get(7)?;
-    let supersedes: String = row.get(11)?;
+    let supersedes: String = row.get(10)?;
     Ok(MemoryRecord {
         id: row.get(0)?,
         owner: row.get(1)?,
@@ -91,11 +91,8 @@ fn memory_from_row(row: &tokio_rusqlite::rusqlite::Row<'_>) -> Result<MemoryReco
         sources: serde_json::from_str(&sources).map_err(Error::Json)?,
         recorded_at: row.get(8)?,
         occurred_at: row.get(9)?,
-        related: serde_json::from_str(&row.get::<_, String>(10)?).map_err(Error::Json)?,
         supersedes: serde_json::from_str(&supersedes).map_err(Error::Json)?,
         superseded_by: Vec::new(),
-        recall_preference: row.get(12)?,
-        created_by: row.get(13)?,
     })
 }
 
@@ -210,7 +207,7 @@ pub(super) fn update(
                 memory.content,
                 memory.description,
                 memory.appraisal,
-                acquisition_str(memory.acquisition),
+                acquisition_str(memory.acquisition)?,
                 serde_json::to_string(&sources)?,
                 now,
                 memory.occurred_at,
@@ -296,14 +293,11 @@ fn record(
     Ok(())
 }
 
-fn acquisition_str(acquisition: Acquisition) -> &'static str {
-    match acquisition {
-        Acquisition::DirectExperience => "direct_experience",
-        Acquisition::UserStatement => "user_statement",
-        Acquisition::Report => "report",
-        Acquisition::Shared => "shared",
-        Acquisition::Inference => "inference",
-    }
+fn acquisition_str(acquisition: Acquisition) -> Result<String> {
+    serde_json::to_value(acquisition)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or(Error::CorruptReceipt)
 }
 
 fn like(query: &str) -> String {
@@ -361,8 +355,8 @@ pub(super) fn recall(
 ) -> Result<Vec<MemoryRecord>> {
     let terms = search_terms(query);
     let mut sql = String::from(
-        "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference \
-         ,created_by FROM mind_memories WHERE owner=?1 AND (",
+        "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,supersedes \
+         FROM mind_memories WHERE owner=?1 AND (",
     );
     let mut values: Vec<tokio_rusqlite::rusqlite::types::Value> = vec![owner.to_owned().into()];
     for (index, term) in terms.iter().enumerate() {
@@ -404,8 +398,8 @@ pub(super) fn read(
 ) -> Result<Option<MemoryRecord>> {
     let memory = db
         .query_row(
-            "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference \
-             ,created_by FROM mind_memories WHERE owner=?1 AND id=?2",
+            "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,supersedes \
+             FROM mind_memories WHERE owner=?1 AND id=?2",
             params![owner, id],
             |row| {
                 memory_from_row(row).map_err(|error| match error {
@@ -751,7 +745,6 @@ mod tests {
         store
             .run(move |db| {
                 let old = read(db, "a", &old_id)?.expect("old memory");
-                assert_eq!(old.created_by, "parent");
                 assert_eq!(old.superseded_by, vec![new_id.clone()]);
                 let new = read(db, "a", &new_id)?.expect("new memory");
                 assert_eq!(new.supersedes, vec![old_id.clone()]);

@@ -1,18 +1,29 @@
 use super::*;
 
+pub(crate) fn principal(db: &Connection) -> Result<String, crate::infrastructure::sqlite::Error> {
+    db.query_row(
+        "SELECT value FROM metadata WHERE key='principal'",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(crate::infrastructure::sqlite::Error::from)
+}
+
+/// A stored response may spell the request id `requestId` or `request_id`.
+pub(crate) fn request_id(value: &Value) -> Option<&str> {
+    value
+        .get("requestId")
+        .or_else(|| value.get("request_id"))
+        .and_then(Value::as_str)
+}
+
 pub fn receipt(
     db: &Connection,
     key: &str,
     target: &str,
     request: &Value,
 ) -> Result<Option<(u16, Value)>, crate::infrastructure::sqlite::Error> {
-    let principal: String = db
-        .query_row(
-            "SELECT value FROM metadata WHERE key='principal'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(crate::infrastructure::sqlite::Error::from)?;
+    let principal = principal(db)?;
     let row:Option<(String,String,String,i64,String)>=db.query_row("SELECT method,target,request,status,response FROM receipts WHERE principal=?1 AND key=?2",params![principal,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(crate::infrastructure::sqlite::Error::from)?;
     match row {
         Some((method, old_target, body, status, response)) => {
@@ -60,13 +71,7 @@ pub fn complete_receipt(
     status: u16,
     response: &Value,
 ) -> Result<(), crate::infrastructure::sqlite::Error> {
-    let principal: String = db
-        .query_row(
-            "SELECT value FROM metadata WHERE key='principal'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(crate::infrastructure::sqlite::Error::from)?;
+    let principal = principal(db)?;
     let body = request.to_string();
     let result = response.to_string();
     let existing: Option<(String, String, i64, String)> = db
@@ -114,13 +119,7 @@ pub fn release_receipt(
     target: &str,
     request: &Value,
 ) -> Result<(), crate::infrastructure::sqlite::Error> {
-    let principal: String = db
-        .query_row(
-            "SELECT value FROM metadata WHERE key='principal'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(crate::infrastructure::sqlite::Error::from)?;
+    let principal = principal(db)?;
     db.execute(
         "DELETE FROM receipts WHERE principal=?1 AND key=?2 AND target=?3 AND method='POST' AND status=0 AND request=?4",
         params![principal, key, target, request.to_string()],

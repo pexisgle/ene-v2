@@ -13,6 +13,20 @@ use rig_ecs::prelude::*;
 /// How a turn that has no end yet is shown.
 const OPEN: &str = "incomplete";
 
+/// One terminal failure in the wire shape, with the message bounded.
+pub(super) fn failure(code: &str, message: &str) -> w::Failure {
+    w::Failure {
+        code: code.into(),
+        message: message.chars().take(1024).collect(),
+        details: w::JsonDocument {
+            json: "{}".into(),
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
 struct TurnSpan {
     start: usize,
     request_entry: Option<String>,
@@ -46,17 +60,7 @@ impl TurnSpan {
             ),
             _ => return None,
         };
-        let message = message.chars().take(1024).collect::<String>();
-        Some(w::Failure {
-            code: code.into(),
-            message,
-            details: w::JsonDocument {
-                json: "{}".into(),
-                ..Default::default()
-            }
-            .into(),
-            ..Default::default()
-        })
+        Some(failure(code, message))
     }
 }
 

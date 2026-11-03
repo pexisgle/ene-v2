@@ -1,7 +1,7 @@
 //! Authenticated generated services use the shared RPC messages directly.
 use super::{error::ApiError, state::App};
 use connectrpc::{
-    ConnectError, ErrorCode, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
+    ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
 use ene_rpc as w;
 use std::sync::Arc;
@@ -35,24 +35,12 @@ fn receipt<T: serde::de::DeserializeOwned>(
     if matches!(outcome, Outcome::Pending | Outcome::Unavailable) {
         let mut body: w::ApiFailure = serde_json::from_value(value)
             .map_err(|_| ConnectError::internal("応答を変換できません"))?;
-        let status = if matches!(outcome, Outcome::Pending) {
+        body.http_status = if matches!(outcome, Outcome::Pending) {
             409
         } else {
             503
         };
-        body.http_status = status;
-        return Err(ConnectError::new(
-            if status == 409 {
-                ErrorCode::FailedPrecondition
-            } else {
-                ErrorCode::Unavailable
-            },
-            &body.error.message,
-        )
-        .with_detail(connectrpc::ErrorDetail::from_message(
-            "ene.host.v1.ApiFailure",
-            &body,
-        )));
+        return Err(super::error::ApiError::from_failure(body).into_rpc());
     }
     serde_json::from_value::<T>(value).map_err(|_| ConnectError::internal("応答を読み取れません"))
 }
@@ -233,40 +221,12 @@ impl w::HostService for HostRpc {
         _: RequestContext,
         req: ServiceRequest<'_, w::StopRequest>,
     ) -> ServiceResult<w::Empty> {
-        self.app.audio.stop(req.companion_id).await;
         self.app
             .application
             .cancel_companion(req.companion_id.into())
             .await
             .map_err(failure)?;
         Response::ok(w::Empty::default())
-    }
-    async fn prepare_audio(
-        &self,
-        ctx: RequestContext,
-        req: ServiceRequest<'_, w::PrepareAudioRequest>,
-    ) -> ServiceResult<w::AudioStart> {
-        super::auth::own_device(&ctx, req.device_id)?;
-        self.app
-            .application
-            .companion(req.companion_id)
-            .await
-            .map_err(failure)?;
-        self.app
-            .devices
-            .permitted(req.device_id, "audio.input")
-            .await?;
-        self.app
-            .devices
-            .permitted(req.device_id, "audio.output")
-            .await?;
-        let permission = self.app.devices.changes(req.device_id).await?;
-        Response::ok(
-            self.app
-                .audio
-                .prepare(req.to_owned_message(), permission)
-                .await?,
-        )
     }
     async fn get_settings(
         &self,

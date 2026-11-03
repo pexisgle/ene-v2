@@ -5,11 +5,16 @@ use ene_rpc as w;
 pub(super) struct PluginRpc {
     pub app: App,
 }
-fn plugins(app: &App) -> Result<w::Plugins, ConnectError> {
-    Ok(w::Plugins {
+fn not_found() -> ConnectError {
+    failure(crate::domain::Error::new(
+        crate::domain::ErrorKind::NotFound,
+    ))
+}
+fn plugins(app: &App) -> w::Plugins {
+    w::Plugins {
         items: app.application.plugins(),
         ..Default::default()
-    })
+    }
 }
 #[allow(refining_impl_trait)]
 impl w::PluginService for PluginRpc {
@@ -18,7 +23,7 @@ impl w::PluginService for PluginRpc {
         _: RequestContext,
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::Plugins> {
-        Response::ok(plugins(&self.app)?)
+        Response::ok(plugins(&self.app))
     }
     async fn get(
         &self,
@@ -31,11 +36,7 @@ impl w::PluginService for PluginRpc {
             .plugins()
             .into_iter()
             .find(|p| p.id == req.id)
-            .ok_or_else(|| {
-                failure(crate::domain::Error::new(
-                    crate::domain::ErrorKind::NotFound,
-                ))
-            })?;
+            .ok_or_else(not_found)?;
         Response::ok(value)
     }
     async fn reload(
@@ -48,7 +49,7 @@ impl w::PluginService for PluginRpc {
             .reload_plugins()
             .await
             .map_err(failure)?;
-        Response::ok(plugins(&self.app)?)
+        Response::ok(plugins(&self.app))
     }
     async fn enable(
         &self,
@@ -60,7 +61,7 @@ impl w::PluginService for PluginRpc {
             .enable_plugin(req.id.to_owned(), req.to_owned_message())
             .await
             .map_err(failure)?;
-        Response::ok(plugins(&self.app)?)
+        Response::ok(plugins(&self.app))
     }
     async fn list_bindings(
         &self,
@@ -122,11 +123,7 @@ impl w::PluginService for PluginRpc {
             .harness_state(binding_id.clone())
             .await
             .map_err(failure)?
-            .ok_or_else(|| {
-                failure(crate::domain::Error::new(
-                    crate::domain::ErrorKind::NotFound,
-                ))
-            })?;
+            .ok_or_else(not_found)?;
         Response::ok(w::HarnessState {
             binding_id,
             state: ene_rpc::JsonDocument {

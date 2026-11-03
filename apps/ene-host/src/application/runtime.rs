@@ -100,7 +100,7 @@ impl HostApplication {
         id: String,
         request: CompanionPatch,
     ) -> Result<Companion, Error> {
-        CompanionId::parse(id.clone())?;
+        validate_id(&id)?;
         self.owned(operations::patch_companion(self.clone(), id, request))
             .await
     }
@@ -109,9 +109,9 @@ impl HostApplication {
         key: String,
         request: GrantInput,
     ) -> Result<(crate::ports::Outcome, serde_json::Value), Error> {
-        RequestKey::parse(key.clone())?;
-        CompanionId::parse(request.companion_id.clone())?;
-        ConnectionId::parse(request.connection_id.clone())?;
+        validate_request_key(&key)?;
+        validate_id(&request.companion_id)?;
+        validate_id(&request.connection_id)?;
         self.owned(operations::post_grant(self.clone(), key, request))
             .await
     }
@@ -120,12 +120,12 @@ impl HostApplication {
         id: String,
         request: GrantPatch,
     ) -> Result<ene_rpc::GrantResult, Error> {
-        GrantId::parse(id.clone())?;
+        validate_id(&id)?;
         self.owned(operations::patch_grant(self.clone(), id, request))
             .await
     }
     pub async fn delete_grant(&self, id: String) -> Result<(), Error> {
-        GrantId::parse(id.clone())?;
+        validate_id(&id)?;
         self.owned(operations::delete_grant(self.clone(), id)).await
     }
     pub async fn accept_message(
@@ -134,8 +134,8 @@ impl HostApplication {
         key: String,
         request: MessageInput,
     ) -> Result<(crate::ports::Outcome, serde_json::Value), Error> {
-        CompanionId::parse(id.clone())?;
-        RequestKey::parse(key.clone())?;
+        validate_id(&id)?;
+        validate_request_key(&key)?;
         self.owned(super::conversation::accept(self.clone(), id, key, request))
             .await
     }
@@ -145,9 +145,9 @@ impl HostApplication {
         key: String,
         request: CheckInput,
     ) -> Result<(crate::ports::Outcome, serde_json::Value), Error> {
-        ConnectionId::parse(id.clone())?;
-        CompanionId::parse(request.companion_id.clone())?;
-        RequestKey::parse(key.clone())?;
+        validate_id(&id)?;
+        validate_id(&request.companion_id)?;
+        validate_request_key(&key)?;
         self.owned(operations::check(self.clone(), id, key, request))
             .await
     }
@@ -157,13 +157,13 @@ impl HostApplication {
         value: Option<String>,
         source: Option<String>,
     ) -> Result<ene_rpc::CredentialResult, Error> {
-        ConnectionId::parse(id.clone())?;
+        validate_id(&id)?;
         let app = self.clone();
         self.owned(async move { app.register_credentials_inner(id, value, source).await })
             .await
     }
     pub async fn revoke_credentials(&self, id: String) -> Result<(), Error> {
-        ConnectionId::parse(id.clone())?;
+        validate_id(&id)?;
         let app = self.clone();
         self.owned(async move { app.revoke_credentials_inner(id).await })
             .await
@@ -174,7 +174,7 @@ impl HostApplication {
             .await
     }
     pub async fn enable_provider(&self, id: String, enabled: bool) -> Result<(), Error> {
-        ProviderId::parse(id.clone())?;
+        validate_id(&id)?;
         let app = self.clone();
         self.owned(async move { app.enable_provider_inner(id, enabled).await })
             .await

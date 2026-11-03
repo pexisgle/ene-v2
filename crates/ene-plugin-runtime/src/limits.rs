@@ -18,7 +18,6 @@ pub const MAX_INSTANCES: usize = 16;
 /// Persistent guests hold instance slots; leave room for provider generations.
 pub const MAX_SESSIONS: usize = MAX_INSTANCES / 2;
 pub const MAX_CODE: u64 = 32 * 1024 * 1024;
-pub const MAX_ASSET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const WASM_MEMORY_PAGES: u32 = 1024;
 pub const WASM_TABLE_ELEMENTS: usize = 20_000;
 pub const WASM_FUEL: u64 = 100_000_000;

@@ -19,11 +19,6 @@ pub enum ExpressionName {
     Custom(String),
 }
 
-/// Explicit manual weights override animation. Remove a key to restore animation.
-#[derive(Component, Clone, Default, Reflect, Deref, DerefMut)]
-#[reflect(Component, Clone, opaque)]
-pub struct ExpressionWeights(pub HashMap<ExpressionName, f32>);
-
 #[derive(Clone, MapEntities)]
 pub(crate) struct ExpressionBinding {
     pub(crate) name: ExpressionName,
@@ -79,15 +74,9 @@ impl Binds {
 }
 
 pub(crate) fn weight<'a>(
-    manual: Option<&'a ExpressionWeights>,
     transforms: impl Fn(Entity) -> Option<f32> + 'a,
 ) -> impl Fn(&ExpressionBinding) -> f32 + 'a {
-    move |binding| {
-        manual
-            .and_then(|weights| weights.get(&binding.name).copied())
-            .or_else(|| transforms(binding.target))
-            .unwrap_or(0.)
-    }
+    move |binding| transforms(binding.target).unwrap_or(0.)
 }
 
 fn expressions(definitions: &Expressions) -> impl Iterator<Item = (ExpressionName, &Expression)> {
@@ -206,19 +195,15 @@ pub(crate) fn attach(
             });
         }
     }
-    world.entity_mut(root).insert((
-        ExpressionWeights::default(),
-        Binds {
-            bindings,
-            morphs: morphs.into_values().collect(),
-        },
-    ));
+    world.entity_mut(root).insert(Binds {
+        bindings,
+        morphs: morphs.into_values().collect(),
+    });
     Ok(())
 }
 
 pub(crate) fn setup(app: &mut App) {
-    app.register_type::<ExpressionWeights>()
-        .register_type::<Binds>()
+    app.register_type::<Binds>()
         .register_type::<MaterialBinds<StandardMaterial>>()
         .register_type::<MaterialBinds<MToonMaterial>>()
         .add_systems(
@@ -303,7 +288,6 @@ pub(crate) fn look_at_scale(binds: &Binds, raw: impl Fn(&ExpressionBinding) -> f
 #[allow(clippy::type_complexity)]
 pub(crate) fn apply(
     roots: Query<(
-        &ExpressionWeights,
         &Binds,
         Option<&MaterialBinds<StandardMaterial>>,
         Option<&MaterialBinds<MToonMaterial>>,
@@ -313,8 +297,8 @@ pub(crate) fn apply(
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut toon: ResMut<Assets<MToonMaterial>>,
 ) {
-    for (manual, binds, standard_binds, toon_binds) in &roots {
-        let raw = weight(Some(manual), |entity| {
+    for (binds, standard_binds, toon_binds) in &roots {
+        let raw = weight(|entity| {
             transforms
                 .get(entity)
                 .ok()
@@ -349,6 +333,20 @@ mod tests {
     use super::*;
     use crate::schema::UvTransform;
     use bevy::math::Affine2;
+
+    /// Drives the animation channel the expression reads.
+    fn set_weight(app: &mut App, root: Entity, name: &str, value: f32) {
+        let target = app
+            .world()
+            .get::<Binds>(root)
+            .and_then(|binds| binds.target(&ExpressionName::Custom(name.into())))
+            .unwrap();
+        app.world_mut()
+            .get_mut::<Transform>(target)
+            .unwrap()
+            .translation
+            .x = value;
+    }
 
     fn bindings(definitions: &Expressions) -> Vec<ExpressionBinding> {
         expressions(definitions)
@@ -390,11 +388,8 @@ mod tests {
             &HashMap::from([(0, mesh)]),
         )
         .unwrap();
-        {
-            let mut weights = app.world_mut().get_mut::<ExpressionWeights>(root).unwrap();
-            weights.insert(ExpressionName::Custom("a".into()), 0.8);
-            weights.insert(ExpressionName::Custom("b".into()), 0.6);
-        }
+        set_weight(&mut app, root, "a", 0.8);
+        set_weight(&mut app, root, "b", 0.6);
         app.update();
         let weights = app.world().get::<MorphWeights>(mesh).unwrap().weights();
         assert!(
@@ -403,10 +398,8 @@ mod tests {
         );
         assert!((weights[1] - 0.8).abs() < 1e-6);
         assert_eq!(weights[2], 0.4);
-        app.world_mut()
-            .get_mut::<ExpressionWeights>(root)
-            .unwrap()
-            .clear();
+        set_weight(&mut app, root, "a", 0.);
+        set_weight(&mut app, root, "b", 0.);
         app.update();
         assert_eq!(
             app.world().get::<MorphWeights>(mesh).unwrap().weights(),

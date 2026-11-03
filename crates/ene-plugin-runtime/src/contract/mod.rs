@@ -4,22 +4,8 @@ mod harness;
 mod llm;
 mod speech;
 
-use crate::{
-    Error, Result,
-    limits::{MAX_CHUNK, MAX_STREAM_EVENTS},
-};
+use crate::{Error, Result, limits::MAX_STREAM_EVENTS};
 use ene_plugin::*;
-
-/// Bound resource reads; the Wasm boundary checks serialized payload sizes.
-pub fn service_request(request: &ServiceRequest) -> Result<()> {
-    if matches!(request, ServiceRequest::Desktop {
-            operation: DesktopOperation::ReadResource { length, .. }
-        } if *length as usize > MAX_CHUNK)
-    {
-        return Err(Error::Protocol);
-    }
-    Ok(())
-}
 
 pub struct Events {
     extension: Extension,

@@ -68,7 +68,6 @@ impl ProviderRegistry for Registry {
     fn reload(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async {
             if let Some(plugins) = &self.plugins {
-                use crate::ports::plugin::Plugins;
                 plugins.reload().await?;
             }
             Ok(())

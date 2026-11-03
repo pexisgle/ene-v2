@@ -3,9 +3,7 @@ use crate::domain::{
     Connection, Error, ErrorKind, MAX_MODEL_ID_BYTES, MAX_MODELS, OperationKind, validate_model_id,
 };
 use crate::ports::Result;
-pub use ene_rpc::{
-    Model, Provider as Descriptor, ProviderCapabilities as Capabilities, SettingField as Field,
-};
+pub use ene_rpc::{Model, Provider as Descriptor, ProviderCapabilities as Capabilities};
 use futures_util::{future::BoxFuture, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -145,13 +143,9 @@ mod budget;
 mod invocation;
 pub(crate) use invocation::InvocationInput;
 pub(crate) use invocation::Outbound;
-pub use invocation::{
-    AuthorizedTransport, CredentialPlacement, Invocation, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
-    Response,
-};
+pub use invocation::{AuthorizedTransport, CredentialPlacement, Invocation, Response};
 #[cfg(test)]
 pub(crate) mod test_support;
-pub use budget::MAX_GENERATION_BYTES;
 #[derive(Clone, Debug)]
 pub enum Event {
     Delta(String),
@@ -185,9 +179,6 @@ pub trait ProviderRegistry: Send + Sync {
     }
     fn reload(&self) -> BoxFuture<'_, Result<()>>;
     fn enable(&self, id: String, enabled: bool) -> BoxFuture<'_, Result<()>>;
-    fn shutdown(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async {})
-    }
 }
 /// Every builtin and plugin adapter implements this same provider-neutral boundary.
 pub trait LlmProvider: Send + Sync {

@@ -7,7 +7,7 @@ use crate::{
 };
 use base64::Engine;
 use ene_plugin::{Event, Failure, HttpChunk, HttpRequest, Operation, ServiceRequest};
-use futures_util::{StreamExt, TryFutureExt, stream::BoxStream};
+use futures_util::{StreamExt, TryFutureExt, future::BoxFuture, stream::BoxStream};
 use tokio::sync::mpsc;
 
 #[cfg(test)]
@@ -50,7 +50,7 @@ impl Manager {
             .revision
             .clone();
         let package_id = package.clone();
-        self.change_enabled(
+        self.enable(
             package,
             EnablePluginRequest {
                 id: package_id,

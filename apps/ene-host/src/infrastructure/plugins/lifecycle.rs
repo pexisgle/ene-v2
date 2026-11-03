@@ -2,7 +2,7 @@
 use super::{Manager, conflict, failure, storage_failure, unsupported, verify};
 use crate::{
     domain::{Error, ErrorKind},
-    ports::{Result, plugin::Plugins},
+    ports::Result,
 };
 use ene_plugin::Target;
 use ene_plugin_runtime::instance::Instance;
@@ -11,11 +11,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::atomic::Ordering};
 
 impl Manager {
-    pub(super) async fn change_enabled(
-        &self,
-        id: String,
-        input: EnablePluginRequest,
-    ) -> Result<()> {
+    pub async fn enable(&self, id: String, input: EnablePluginRequest) -> Result<()> {
         if input.enabled {
             let package = self
                 .entries
@@ -104,7 +100,7 @@ impl Manager {
         }
         result.map(|_| ())
     }
-    pub(super) async fn restore(&self) -> Result<()> {
+    pub(crate) async fn restore(&self) -> Result<()> {
         // Guest memory cannot survive a host restart; finalize its saved tasks first.
         for binding in self.bindings().await? {
             self.harness_stop(&binding.id, "host_interrupted").await?;
@@ -120,7 +116,7 @@ impl Manager {
                 record.get("id").and_then(Value::as_str),
                 record.get("input"),
             ) && let Ok(input) = serde_json::from_value::<EnablePluginRequest>(input.clone())
-                && let Err(error) = self.change_enabled(id.into(), input).await
+                && let Err(error) = self.enable(id.into(), input).await
                 && error.kind == ErrorKind::StorageFailure
             {
                 return Err(error);

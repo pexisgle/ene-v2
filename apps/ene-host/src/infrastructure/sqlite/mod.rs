@@ -100,10 +100,6 @@ impl Store {
                 _ => Error::Stopped,
             })
     }
-
-    pub async fn snapshot(&self) -> Result<StoredSnapshot> {
-        self.call(snapshot).await
-    }
 }
 
 impl Store {

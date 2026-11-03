@@ -20,10 +20,9 @@ use ene_rpc as w;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
-use tokio::{process::Command, time::timeout};
+use tokio::time::timeout;
 
 const CALL: Duration = Duration::from_secs(120);
 
@@ -60,41 +59,10 @@ fn dotenv() -> BTreeMap<String, String> {
     values
 }
 
-fn host_command(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ene-host"));
-    command
-        .env("XDG_RUNTIME_DIR", root)
-        .env("ENE_HOST_STATE_DIR", root.join("state"))
-        .env("ENE_PLUGIN_DIR", root.join("plugins"))
-        .env("ENE_HOST_SESSION_CREDENTIALS", "1")
-        .env_remove("ENE_WEB_ORIGIN")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-    command
-}
+mod common;
 
 async fn start(root: &Path) -> (tokio::process::Child, w::HostServiceClient<HttpClient>) {
-    let mut child = host_command(root).spawn().unwrap();
-    let descriptor = root.join("ene-host/connection.json");
-    let connection: serde_json::Value = timeout(Duration::from_secs(20), async {
-        loop {
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "host exited during startup"
-            );
-            match std::fs::read(&descriptor) {
-                Ok(bytes) => break serde_json::from_slice(&bytes).unwrap(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-                Err(error) => panic!("connection descriptor: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("host startup deadline");
+    let (child, connection) = common::start(root).await;
     let (transport, config) = w::connect(
         connection["endpoint"].as_str().unwrap(),
         connection["token"].as_str().unwrap(),
@@ -104,16 +72,7 @@ async fn start(root: &Path) -> (tokio::process::Child, w::HostServiceClient<Http
 }
 
 async fn stop(mut child: tokio::process::Child, root: &Path) {
-    rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
-        rustix::process::Signal::TERM,
-    )
-    .unwrap();
-    timeout(Duration::from_secs(15), child.wait())
-        .await
-        .expect("host stopped")
-        .expect("host wait");
-    assert!(!root.join("ene-host/connection.json").exists());
+    common::stop(&mut child, root).await;
 }
 
 fn json_doc(text: &str) -> w::JsonDocument {

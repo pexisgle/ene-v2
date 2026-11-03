@@ -1,8 +1,6 @@
 //! Host invocation path: one binding, one operation, validated events and services.
 use super::sessions::{ActiveInvocation, Session, SessionState};
-use super::{
-    Manager, conflict, document, failure, invocation_failure, storage_failure, unsupported,
-};
+use super::{Manager, conflict, failure, invocation_failure, storage_failure, unsupported};
 use crate::infrastructure::workspace::Workspace;
 use crate::{
     domain::{Error, ErrorKind, harness::Session as HarnessSession},
@@ -25,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 impl Manager {
-    pub(super) async fn invoke_inner(
+    pub async fn invoke(
         &self,
         input: PluginInvocation,
         mutations: Arc<dyn Mutations>,
@@ -56,17 +54,12 @@ impl Manager {
                 .invoke_acp(binding, entry, operation, binding_lock)
                 .await;
         }
-        if let Operation::Character { target, event } = &operation {
-            if target.device_id != binding.device_id
+        if let Operation::Character { target, .. } = &operation
+            && (target.device_id != binding.device_id
                 || target.character_id != binding.companion_id
-                || !ene_plugin_runtime::package::identifier(&target.device_id)
-            {
-                return Err(Error::new(ErrorKind::PermissionRequired));
-            }
-            if matches!(event, ene_plugin::CharacterEvent::Window { .. }) {
-                // Window observation belongs to the desktop adapter, not host bindings.
-                return Err(unsupported());
-            }
+                || !ene_plugin_runtime::package::identifier(&target.device_id))
+        {
+            return Err(Error::new(ErrorKind::PermissionRequired));
         }
         if let Operation::Character {
             event: ene_plugin::CharacterEvent::Custom { name, .. },
@@ -164,7 +157,7 @@ impl Manager {
             return Ok(PluginResult {
                 generation: entry.generation,
                 events: harness_terminal(&journal),
-                result: document(harness_result(&journal)).into(),
+                result: ene_rpc::JsonDocument::from(super::harness_result(&journal)).into(),
                 ..Default::default()
             });
         }
@@ -284,7 +277,7 @@ impl Manager {
                 let (worked, applied) = tokio::join!(work, applier);
                 let (journal, events) = applied?;
                 worked?;
-                let result = harness_result(&journal);
+                let result = super::harness_result(&journal);
                 (events, result, Some(journal))
             } else {
                 let collect = async move {
@@ -354,23 +347,16 @@ impl Manager {
             generation: instance_generation,
             events: events
                 .into_iter()
-                .map(|event| serde_json::to_value(event).map(document).map_err(failure))
+                .map(|event| {
+                    serde_json::to_value(event)
+                        .map(ene_rpc::JsonDocument::from)
+                        .map_err(failure)
+                })
                 .collect::<Result<_>>()?,
-            result: document(result).into(),
+            result: ene_rpc::JsonDocument::from(result).into(),
             ..Default::default()
         })
     }
-}
-
-fn harness_result(journal: &HarnessSession) -> Value {
-    let mut result = json!({
-        "task_id": journal.session_id,
-        "status": journal.status.name(),
-    });
-    if let Some(stop_reason) = journal.stop_reason {
-        result["stop_reason"] = json!(stop_reason);
-    }
-    result
 }
 
 fn harness_terminal(journal: &HarnessSession) -> Vec<ene_rpc::JsonDocument> {
@@ -380,7 +366,7 @@ fn harness_terminal(journal: &HarnessSession) -> Vec<ene_rpc::JsonDocument> {
         .rev()
         .find(|event| matches!(event, HarnessEvent::Stop { .. }))
         .map(|event| {
-            vec![document(
+            vec![ene_rpc::JsonDocument::from(
                 serde_json::to_value(Event::Harness {
                     event: event.clone(),
                 })

@@ -13,7 +13,6 @@
 | パッケージ | 役割 |
 | --- | --- |
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
-| [`ene-desktop`](apps/ene-desktop/) | Slintの会話・設定UI、音声再生、キャラクター描画プロセスの管理 |
 | [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
 | [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK |
 | [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | Extismの組み込み実行、検証、実行制限 |
@@ -28,7 +27,6 @@
 nix develop
 just verify
 just run-host
-just run-desktop
 ```
 
 direnvを使う場合は、リポジトリのルートで一度`direnv allow`を実行すると、ディレクトリへ入るたびに開発環境が有効になります。
@@ -48,7 +46,6 @@ cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --ta
 cargo test --workspace --all-features --locked
 cargo build --workspace --all-targets --all-features --locked
 cargo run --locked -p ene-host
-cargo run --locked -p ene-desktop
 ```
 
 `just verify`は整形とClippy（テストを含む型検査）を実行します。テストは対象の挙動を変更したときに`just test`で実行し、変更していない合格済みのテストを繰り返す必要はありません。成果物が必要なときは`just build`を実行します。
@@ -90,6 +87,5 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |
 | `just run-host` | 認証付きホストAPIを起動 |
-| `just run-desktop` | デスクトップの骨組みを起動 |
 | `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |
 | `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |

@@ -6,7 +6,7 @@ use crate::{
     ports::{Outcome, Receipt},
 };
 pub use ene_rpc::{
-    CheckRequest as CheckInput, ConnectionInput, CreateGrantRequest as GrantInput,
+    CheckRequest as CheckInput, CreateGrantRequest as GrantInput,
     SendMessageRequest as MessageInput, UpdateCompanionRequest as CompanionPatch,
     UpdateGrantRequest as GrantPatch, UpdateSettingsRequest as SettingsPatch,
 };

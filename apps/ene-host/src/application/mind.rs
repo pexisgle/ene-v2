@@ -22,13 +22,6 @@ fn now() -> String {
         .unwrap_or_default()
 }
 
-fn document(value: &Value) -> w::JsonDocument {
-    w::JsonDocument {
-        json: serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
-        ..Default::default()
-    }
-}
-
 /// The wire view of the authored profile and current state. `core` stays on
 /// the companion; the profile table holds the author's extra material.
 fn view(companion: &str, core: &str, stored: StoredMind) -> w::MindView {
@@ -43,10 +36,10 @@ fn view(companion: &str, core: &str, stored: StoredMind) -> w::MindView {
     };
     let state = w::MindState {
         revision: stored.state_revision,
-        emotion: document(&stored.state.emotion.clone().unwrap_or_else(|| json!({}))).into(),
-        relationships: document(&Value::Array(stored.state.relationships.clone())).into(),
-        tendencies: document(&json!(stored.state.tendencies)).into(),
-        concerns: document(&json!(stored.state.concerns)).into(),
+        emotion: w::JsonDocument::from(&stored.state.emotion.unwrap_or_else(|| json!({}))).into(),
+        relationships: w::JsonDocument::from(&Value::Array(stored.state.relationships)).into(),
+        tendencies: w::JsonDocument::from(&json!(stored.state.tendencies)).into(),
+        concerns: w::JsonDocument::from(&json!(stored.state.concerns)).into(),
         updated_at: stored.updated_at,
         ..Default::default()
     };
@@ -205,7 +198,7 @@ impl HostApplication {
         request: w::UpdateMindProfileRequest,
     ) -> Result<w::MindView> {
         let companion = request.companion_id;
-        crate::domain::CompanionId::parse(companion.clone())?;
+        crate::domain::validate_id(&companion)?;
         let profile = ProfileDocument {
             facets: request.facets,
             examples: request.examples,

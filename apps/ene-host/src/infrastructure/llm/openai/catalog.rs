@@ -10,11 +10,7 @@ use serde_json::Value;
 pub const ORIGIN: &str = "https://models.dev";
 pub const URL: &str = "https://models.dev/api.json";
 
-pub async fn enrich(models: &mut [Model], input: std::sync::Arc<Invocation>) -> Result<()> {
-    optional_enrich(models, input, URL).await
-}
-
-async fn optional_enrich(
+pub async fn enrich(
     models: &mut [Model],
     input: std::sync::Arc<Invocation>,
     source: &str,

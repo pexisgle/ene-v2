@@ -1,29 +1,21 @@
 //! Wire-protocol fixtures for host integration tests.
 use connectrpc::client::{CallOptions, HttpClient};
 use ene_rpc::*;
-use http::header::{AUTHORIZATION, HeaderValue};
 use std::time::Duration;
 use tokio::time::timeout;
-use url::Url;
 #[derive(Clone)]
 pub struct ApiClient {
     pub host: HostServiceClient<HttpClient>,
     pub devices: DeviceServiceClient<HttpClient>,
     pub plugins: PluginServiceClient<HttpClient>,
-    endpoint: Url,
-    bearer: HeaderValue,
 }
 impl ApiClient {
     pub fn new(endpoint: &str, token: &str) -> Result<Self, connectrpc::ConnectError> {
         let (transport, config) = ene_rpc::connect(endpoint, token)?;
-        let mut bearer = HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
-        bearer.set_sensitive(true);
         Ok(Self {
             host: HostServiceClient::new(transport.clone(), config.clone()),
             devices: DeviceServiceClient::new(transport.clone(), config.clone()),
             plugins: PluginServiceClient::new(transport, config),
-            endpoint: Url::parse(endpoint).unwrap(),
-            bearer,
         })
     }
 }
@@ -64,6 +56,3 @@ pub fn failure(error: &connectrpc::ConnectError) -> ApiFailure {
     assert!(failure.error.is_set());
     failure
 }
-
-#[path = "test_audio.rs"]
-pub mod audio;

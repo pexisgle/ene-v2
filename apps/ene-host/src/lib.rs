@@ -1,11 +1,10 @@
 //! Host application, execution policy and authorized provider communication.
-pub mod application;
-pub mod domain;
-pub mod llm;
-pub mod ports;
+mod application;
+mod domain;
+mod llm;
+mod ports;
 
 mod api;
-mod audio;
 mod bootstrap;
 mod devices;
 mod infrastructure;

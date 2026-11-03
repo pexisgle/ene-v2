@@ -10,11 +10,7 @@ mod sessions;
 use super::{llm::plugin::manifest::Bundle, sqlite::Store};
 use crate::{
     domain::{Error, ErrorKind},
-    ports::{
-        Result,
-        inference::TaskInference,
-        plugin::{Mutations, Plugins},
-    },
+    ports::{Result, inference::TaskInference},
 };
 use ene_plugin::Target;
 use ene_plugin_runtime::{
@@ -22,13 +18,10 @@ use ene_plugin_runtime::{
     instance::{Instance, Services, Supervisor},
     limits::MAX_INSTANCES,
 };
-use ene_rpc::{
-    EnablePluginRequest, Plugin, PluginBinding, PluginEntry, PluginInvocation, PluginResult,
-};
-use futures_util::future::BoxFuture;
-use serde_json::Value;
+use ene_rpc::{EnablePluginRequest, Plugin, PluginBinding, PluginEntry};
 #[cfg(test)]
-use serde_json::json;
+use ene_rpc::{PluginInvocation, PluginResult};
+use serde_json::{Value, json};
 use sessions::Sessions;
 use std::{
     collections::BTreeMap,
@@ -217,8 +210,8 @@ fn bundle(package: &Package, entrypoint: &str) -> Result<Bundle> {
         revision: package.revision.clone(),
     })
 }
-impl Plugins for Manager {
-    fn list(&self) -> Vec<Plugin> {
+impl Manager {
+    pub fn list(&self) -> Vec<Plugin> {
         let entries: Vec<Entry> = self
             .entries
             .read()
@@ -267,74 +260,59 @@ impl Plugins for Manager {
         }
         result
     }
-    fn reload(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async {
-            if self.stopped.is_cancelled() {
-                return Err(Error::unavailable());
-            }
-            let manager = self.clone();
-            let scan = tokio::task::spawn_blocking(move || manager.scan())
-                .await
-                .map_err(failure)?;
-            if let Err(error) = scan {
-                *self.discovery_error.write().map_err(failure)? =
-                    Some("invalid_manifest_or_duplicate_id".into());
-                return Err(error);
-            }
-            self.stop_sessions(None).await?;
-            Ok(())
-        })
+    pub async fn reload(&self) -> Result<()> {
+        if self.stopped.is_cancelled() {
+            return Err(Error::unavailable());
+        }
+        let manager = self.clone();
+        let scan = tokio::task::spawn_blocking(move || manager.scan())
+            .await
+            .map_err(failure)?;
+        if let Err(error) = scan {
+            *self.discovery_error.write().map_err(failure)? =
+                Some("invalid_manifest_or_duplicate_id".into());
+            return Err(error);
+        }
+        self.stop_sessions(None).await?;
+        Ok(())
     }
-    fn enable(&self, id: String, input: EnablePluginRequest) -> BoxFuture<'_, Result<()>> {
-        Box::pin(self.change_enabled(id, input))
+    pub async fn harness(&self, binding_id: String) -> Result<Option<Value>> {
+        let Some(loaded) = self.harness_load(&binding_id).await? else {
+            return Ok(None);
+        };
+        serde_json::to_value(loaded.session)
+            .map(Some)
+            .map_err(failure)
     }
-    fn bindings(&self) -> BoxFuture<'_, Result<Vec<PluginBinding>>> {
-        Box::pin(self.list_bindings())
-    }
-    fn bind(&self, input: PluginBinding) -> BoxFuture<'_, Result<()>> {
-        Box::pin(self.bind_plugin(input))
-    }
-    fn invoke(
-        &self,
-        input: PluginInvocation,
-        mutations: Arc<dyn Mutations>,
-    ) -> BoxFuture<'_, Result<PluginResult>> {
-        Box::pin(self.invoke_inner(input, mutations))
-    }
-    fn harness(&self, binding_id: String) -> BoxFuture<'_, Result<Option<Value>>> {
-        Box::pin(async move {
-            let Some(loaded) = self.harness_load(&binding_id).await? else {
-                return Ok(None);
-            };
-            serde_json::to_value(loaded.session)
-                .map(Some)
-                .map_err(failure)
-        })
-    }
-    fn restore(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(Manager::restore(self))
-    }
-    fn cancel(&self) {
+    pub fn cancel(&self) {
         self.stopped.cancel();
     }
-    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async {
-            self.cancel();
-            let result = self.stop_sessions(None).await;
-            self.supervisor.shutdown().await;
-            result
-        })
+    pub async fn shutdown(&self) -> Result<()> {
+        self.cancel();
+        let result = self.stop_sessions(None).await;
+        self.supervisor.shutdown().await;
+        result
     }
+}
+
+/// The harness task view returned to the plugin client.
+pub(super) fn harness_result(journal: &crate::domain::harness::Session) -> Value {
+    let mut result = json!({
+        "task_id": journal.session_id,
+        "status": journal.status.name(),
+    });
+    if let Some(stop_reason) = journal.stop_reason {
+        result["stop_reason"] = json!(stop_reason);
+    }
+    result
 }
 
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(test)]
 fn document(value: Value) -> ene_rpc::JsonDocument {
-    ene_rpc::JsonDocument {
-        json: value.to_string(),
-        ..Default::default()
-    }
+    value.into()
 }
 fn name(value: impl serde::Serialize) -> String {
     serde_json::to_value(value)

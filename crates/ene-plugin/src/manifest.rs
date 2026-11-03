@@ -10,7 +10,6 @@ pub const CONTRACT_VERSION: u32 = 4;
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Host,
-    Desktop,
     /// An external ACP agent launched as an explicit subprocess.
     Acp,
 }
@@ -23,13 +22,11 @@ pub enum Extension {
     Stt,
     Character,
     Harness,
-    Desktop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Service {
-    WindowEvents,
     Log,
     Configuration,
     State,
@@ -37,7 +34,6 @@ pub enum Service {
     Models,
     Tools,
     CharacterActions,
-    Desktop,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,8 +47,6 @@ pub struct Manifest {
     #[serde(default)]
     pub description: String,
     pub entrypoints: Vec<EntryPoint>,
-    #[serde(default)]
-    pub assets: BTreeMap<String, Asset>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,18 +62,8 @@ pub struct EntryPoint {
     pub provides: Vec<Extension>,
     #[serde(default)]
     pub uses: Vec<Service>,
-    /// Desktop character entrypoints only; requires the WindowEvents service grant.
-    #[serde(default)]
-    pub window_events: Vec<crate::WindowSubscription>,
     #[serde(default)]
     pub provider: Option<ProviderConfiguration>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Asset {
-    pub path: String,
-    pub sha256: String,
-    pub size: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

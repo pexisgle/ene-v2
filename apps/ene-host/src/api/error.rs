@@ -49,6 +49,15 @@ impl ApiError {
             "要求の形式が正しくありません",
         )
     }
+    /// A failure body carried through a durable receipt.
+    pub(crate) fn from_failure(body: ene_rpc::ApiFailure) -> Self {
+        let status = StatusCode::from_u16(body.http_status as u16)
+            .unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+        Self {
+            status,
+            body: Box::new(body),
+        }
+    }
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

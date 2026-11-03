@@ -2,16 +2,14 @@
 // under MIT OR Apache-2.0; see LICENSE-bevy_vrm1-*.
 use crate::VrmSystems;
 use bevy::{ecs::entity::MapEntities, prelude::*, transform::helper::TransformHelper};
-use serde::Deserialize;
 use std::time::Duration;
 
 /// VRM 1.0 spring parameters in model-space meters.
 ///
 /// The solver scales `stiffness`, `gravity_power`, and `hit_radius` by the
 /// rig root's world scale. Callers should not pre-scale these values.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Deserialize, Reflect)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Reflect)]
 #[reflect(Component, Clone)]
-#[serde(default, rename_all = "camelCase")]
 pub struct SpringJointProps {
     pub stiffness: f32,
     pub gravity_power: f32,

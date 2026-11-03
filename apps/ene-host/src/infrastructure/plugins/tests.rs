@@ -9,6 +9,7 @@ use ene_plugin::{
 };
 use ene_plugin_runtime::limits::MAX_EVENTS;
 use ene_rpc::TerminalPolicy;
+use futures_util::future::BoxFuture;
 use std::sync::atomic::Ordering;
 fn application(manager: &Manager) -> crate::application::HostApplication {
     crate::bootstrap::application_with_plugins(

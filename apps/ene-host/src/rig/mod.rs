@@ -70,22 +70,12 @@ pub(crate) enum Event {
     },
 }
 
-/// Test-only counters for an idle-load measurement.
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct Metrics {
-    pub frames: std::sync::atomic::AtomicU64,
-    pub wakes: std::sync::atomic::AtomicU64,
-}
-
 /// The handle the host uses; the kernel's state is not reachable through it.
 pub(crate) struct Runtime {
     /// `std::sync::mpsc::Sender` is not `Sync`; the lock also orders sends
     /// from concurrent requests without a second queue.
     signals: Mutex<Sender<Signal>>,
     thread: Mutex<Option<JoinHandle<()>>>,
-    #[cfg(test)]
-    metrics: std::sync::Arc<Metrics>,
 }
 
 enum Signal {
@@ -142,42 +132,20 @@ impl Runtime {
     /// Opens the session directory and starts the kernel thread. The returned
     /// receiver carries what the kernel did; the host consumes it on its
     /// runtime, so it must be drained before the thread fills it.
-    #[cfg(test)]
-    pub(crate) fn start(
-        directory: std::path::PathBuf,
-    ) -> Result<(Self, tokio_mpsc::UnboundedReceiver<Event>), Error> {
-        Self::start_inner(directory, None)
-    }
-
-    /// Starts the kernel with app extensions the host registers itself, such as
-    /// the host-bound mind tools. The closure runs on the kernel thread before
-    /// the app finishes.
+    ///
+    /// The closure runs on the kernel thread before the app finishes and
+    /// registers app extensions the host owns, such as the host-bound mind
+    /// tools.
     pub(crate) fn start_with(
         directory: std::path::PathBuf,
         configure: impl FnOnce(&mut rig_ecs::prelude::App) + Send + 'static,
     ) -> Result<(Self, tokio_mpsc::UnboundedReceiver<Event>), Error> {
-        Self::start_inner(directory, Some(Box::new(configure)))
-    }
-
-    /// Test-only: the kernel thread's frame and wake counters.
-    #[cfg(test)]
-    pub(crate) fn metrics(&self) -> std::sync::Arc<Metrics> {
-        self.metrics.clone()
-    }
-
-    /// Starts the kernel with a test-only app extension, for a tool or a
-    /// counter the host does not register.
-    #[cfg(test)]
-    pub(crate) fn start_test(
-        directory: std::path::PathBuf,
-        configure: impl FnOnce(&mut rig_ecs::prelude::App) + Send + 'static,
-    ) -> Result<(Self, tokio_mpsc::UnboundedReceiver<Event>), Error> {
-        Self::start_inner(directory, Some(Box::new(configure)))
+        Self::start_inner(directory, Box::new(configure))
     }
 
     fn start_inner(
         directory: std::path::PathBuf,
-        configure: Option<kernel::Configure>,
+        configure: kernel::Configure,
     ) -> Result<(Self, tokio_mpsc::UnboundedReceiver<Event>), Error> {
         let (events, received) = tokio_mpsc::unbounded_channel();
         // Open before reporting success: a session directory the store
@@ -188,33 +156,17 @@ impl Runtime {
         })?;
         let (sender, receiver) = mpsc::channel();
         let waker = sender.clone();
-        #[cfg(test)]
-        let metrics = std::sync::Arc::new(Metrics::default());
-        #[cfg(test)]
-        let thread_metrics = metrics.clone();
         let thread = std::thread::Builder::new()
             .name("ene-rig".into())
             // The app's schedules and the session log recurse deeper than a
             // data-only thread's default stack.
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || {
-                kernel::run(
-                    store,
-                    receiver,
-                    waker,
-                    events,
-                    configure,
-                    #[cfg(test)]
-                    thread_metrics,
-                )
-            })
+            .spawn(move || kernel::run(store, receiver, waker, events, configure))
             .map_err(|_| Error::unavailable())?;
         Ok((
             Self {
                 signals: Mutex::new(sender),
                 thread: Mutex::new(Some(thread)),
-                #[cfg(test)]
-                metrics,
             },
             received,
         ))
@@ -262,13 +214,22 @@ impl Runtime {
         text: String,
         request_id: String,
     ) -> Result<(), Error> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.send(Signal::Command(Command::Deliver {
+        self.query(|reply| Command::Deliver {
             companion,
             text,
             request_id,
             reply,
-        }))?;
+        })
+        .await
+    }
+
+    /// Sends one command and waits a query timeout for the kernel's reply.
+    async fn query<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Command,
+    ) -> Result<T, Error> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.send(Signal::Command(make(reply)))?;
         tokio::time::timeout(QUERY_TIMEOUT, reply_rx)
             .await
             .map_err(|_| Error::unavailable())?
@@ -282,16 +243,12 @@ impl Runtime {
         companion: String,
         request_id: String,
     ) -> Result<bool, Error> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.send(Signal::Command(Command::HasRequest {
+        self.query(|reply| Command::HasRequest {
             companion,
             request_id,
             reply,
-        }))?;
-        tokio::time::timeout(QUERY_TIMEOUT, reply_rx)
-            .await
-            .map_err(|_| Error::unavailable())?
-            .map_err(|_| Error::unavailable())?
+        })
+        .await
     }
 
     /// Asks the kernel to stop the companion's running turn. The stop is
@@ -306,30 +263,22 @@ impl Runtime {
         cursor: Option<String>,
         limit: usize,
     ) -> Result<w::History, Error> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.send(Signal::Command(Command::History {
+        self.query(|reply| Command::History {
             companion,
             cursor,
             limit,
             reply,
-        }))?;
-        tokio::time::timeout(QUERY_TIMEOUT, reply_rx)
-            .await
-            .map_err(|_| Error::unavailable())?
-            .map_err(|_| Error::unavailable())?
+        })
+        .await
     }
 
     pub(crate) async fn message(&self, companion: String, id: String) -> Result<w::Message, Error> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.send(Signal::Command(Command::Message {
+        self.query(|reply| Command::Message {
             companion,
             id,
             reply,
-        }))?;
-        tokio::time::timeout(QUERY_TIMEOUT, reply_rx)
-            .await
-            .map_err(|_| Error::unavailable())?
-            .map_err(|_| Error::unavailable())?
+        })
+        .await
     }
 
     /// Stops the turns, saves the session and returns once the app is gone.
@@ -400,7 +349,7 @@ mod tests {
     }
 
     fn start(directory: std::path::PathBuf) -> (Runtime, tokio_mpsc::UnboundedReceiver<Event>) {
-        Runtime::start(directory).expect("kernel starts")
+        Runtime::start_with(directory, |_| {}).expect("kernel starts")
     }
 
     async fn next(received: &mut tokio_mpsc::UnboundedReceiver<Event>) -> Event {
@@ -573,7 +522,7 @@ mod tests {
             ],
         ]);
         let inspector = model.clone();
-        let (runtime, mut received) = Runtime::start_test(temp.path().join("rig"), move |app| {
+        let (runtime, mut received) = Runtime::start_with(temp.path().join("rig"), move |app| {
             app.add_tool(Hold {
                 entered,
                 release: std::sync::Mutex::new(Some(release_rx)),
@@ -666,7 +615,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_release, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let (runtime, mut received) = Runtime::start_test(temp.path().join("rig"), move |app| {
+        let (runtime, mut received) = Runtime::start_with(temp.path().join("rig"), move |app| {
             app.add_tool(Hold {
                 entered,
                 release: std::sync::Mutex::new(Some(release_rx)),
@@ -730,7 +679,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let (runtime, mut received) = Runtime::start_test(temp.path().join("rig"), move |app| {
+        let (runtime, mut received) = Runtime::start_with(temp.path().join("rig"), move |app| {
             app.add_tool(Hold {
                 entered,
                 release: std::sync::Mutex::new(Some(release_rx)),
@@ -813,7 +762,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let frames = Arc::new(AtomicUsize::new(0));
         let counter = frames.clone();
-        let (runtime, _received) = Runtime::start_test(temp.path().join("rig"), move |app| {
+        let (runtime, _received) = Runtime::start_with(temp.path().join("rig"), move |app| {
             app.add_systems(Update, move || {
                 counter.fetch_add(1, Ordering::Relaxed);
             });
@@ -1044,60 +993,6 @@ mod tests {
             }
         };
         assert!(!failure.is_empty());
-        runtime.shutdown().await.unwrap();
-    }
-
-    /// The idle loop's real cost, not just a short frame count. Run alone:
-    /// `cargo test -p ene-host --lib measure_idle_cpu -- --ignored --nocapture --test-threads=1`.
-    /// The 1s wake is kept for delayed retry/timer deadlines; it costs one
-    /// frame per second, measured below.
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    #[ignore = "idle CPU measurement; needs no network but runs for 11 seconds"]
-    async fn measure_idle_cpu() {
-        fn ticks() -> Option<u64> {
-            let text = std::fs::read_to_string("/proc/self/stat").ok()?;
-            let end = text.rfind(')')?;
-            let fields = text[end + 1..].split_whitespace().collect::<Vec<_>>();
-            // Fields after comm: state is field 3; utime is 14 and stime 15.
-            let user = fields.get(11)?.parse::<u64>().ok()?;
-            let system = fields.get(12)?.parse::<u64>().ok()?;
-            Some(user + system)
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let (runtime, _events) = start(temp.path().join("rig"));
-        let metrics = runtime.metrics();
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let (before, frame0, wake0) = (
-            ticks().expect("process CPU"),
-            metrics.frames.load(Ordering::Relaxed),
-            metrics.wakes.load(Ordering::Relaxed),
-        );
-        let observed = Duration::from_secs(10);
-        tokio::time::sleep(observed).await;
-        let (after, frames, wakes) = (
-            ticks().expect("process CPU"),
-            metrics.frames.load(Ordering::Relaxed),
-            metrics.wakes.load(Ordering::Relaxed),
-        );
-        // Linux USER_HZ is 100 on the supported targets.
-        let cpu = (after.saturating_sub(before)) as f64 / 100.0;
-        let percent = cpu / observed.as_secs_f64() * 100.0;
-        println!(
-            "[idle] os={} arch={} observed={:?} cpu={:.3}s cpu_percent={:.2}% frames={} wakes={} frames_per_sec={:.2}",
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            observed,
-            cpu,
-            percent,
-            frames.saturating_sub(frame0),
-            wakes.saturating_sub(wake0),
-            frames.saturating_sub(frame0) as f64 / observed.as_secs_f64(),
-        );
-        assert!(
-            percent < 25.0,
-            "an idle host used {percent:.2}% CPU; a busy loop is the likely cause"
-        );
         runtime.shutdown().await.unwrap();
     }
 

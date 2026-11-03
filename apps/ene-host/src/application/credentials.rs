@@ -10,20 +10,6 @@ pub(super) struct CleanupState {
     pub pending: std::collections::BTreeMap<String, bool>,
     worker: bool,
 }
-// Drop only hands the reference to the application-owned cleanup worker. It
-// never creates an untracked asynchronous task or touches the secret service.
-struct CredentialCandidate {
-    app: HostApplication,
-    reference: String,
-    attached: bool,
-}
-impl Drop for CredentialCandidate {
-    fn drop(&mut self) {
-        if !self.attached {
-            self.app.schedule_forget(self.reference.clone());
-        }
-    }
-}
 impl HostApplication {
     pub(super) fn schedule_forget(&self, reference: String) {
         let mut cleanup = self.0.cleanup.lock().expect("cleanup lock");
@@ -168,11 +154,6 @@ impl HostApplication {
                 ..Default::default()
             });
         }
-        let mut candidate = CredentialCandidate {
-            app: self.clone(),
-            reference: reference.clone(),
-            attached: false,
-        };
         let saved = self
             .0
             .credentials
@@ -182,6 +163,8 @@ impl HostApplication {
         let mut controls = self.0.controls.lock().await;
         let mut c = config(self, &mut controls).await?;
         if !controls.secrets.get(&id).is_some_and(|s| s.nonce == nonce) {
+            // The secret was stored for a candidate this request no longer owns.
+            self.schedule_forget(reference);
             return Err(Error::new(ErrorKind::StateConflict));
         }
         if saved {
@@ -190,8 +173,12 @@ impl HostApplication {
             p.credential_state = "stored".into();
             c.credential_refs.insert(id, reference.clone());
             update_connection(&mut c, p);
-            commit(self, &mut controls, c).await?;
-            candidate.attached = true;
+            if let Err(error) = commit(self, &mut controls, c).await {
+                self.schedule_forget(reference);
+                return Err(error);
+            }
+        } else {
+            self.schedule_forget(reference);
         }
         Ok(ene_rpc::CredentialResult {
             credential_state: if saved { "stored" } else { "session_only" }.into(),

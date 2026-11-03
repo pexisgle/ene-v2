@@ -1,14 +1,12 @@
 use crate::{api, bootstrap};
-use clap::Parser;
 use std::error::Error;
 use tokio::net::TcpListener;
 
-#[derive(Parser)]
-#[command(
-    about = "ene local host",
-    long_about = "ene local host: XDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint. ENE_HOST_STATE_DIR overrides the SQLite state directory. ENE_PLUGIN_DIR overrides the runtime-installable plugin directory."
-)]
-struct Args {}
+/// `ene-host` takes no arguments; configuration comes from the environment.
+const USAGE: &str = "ene-host takes no arguments.\
+\nXDG_RUNTIME_DIR/ene-host/connection.json publishes the authenticated loopback endpoint.\
+\nENE_HOST_STATE_DIR overrides the SQLite state directory.\
+\nENE_PLUGIN_DIR overrides the runtime-installable plugin directory.";
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -22,29 +20,21 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 }
 
 async fn serve() -> Result<(), Box<dyn Error>> {
-    let _args = Args::parse();
-    let (runtime, mut app) = bootstrap::initialize().await?;
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-    let web_origin = std::env::var("ENE_WEB_ORIGIN")
-        .unwrap_or_else(|_| format!("http://{}", listener.local_addr().expect("bound listener")));
-    let parsed = url::Url::parse(&web_origin)?;
-    if parsed.origin().ascii_serialization() != web_origin
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || parsed.path() != "/"
-        || !matches!(parsed.scheme(), "http" | "https")
-    {
-        return Err("invalid ENE_WEB_ORIGIN".into());
+    if let Some(arg) = std::env::args_os().nth(1) {
+        if arg == "-h" || arg == "--help" {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        eprintln!("{USAGE}");
+        return Err("invalid arguments".into());
     }
-    app.web_origin = Some(web_origin.into());
+    let (runtime, app) = bootstrap::initialize().await?;
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     runtime.publish(format!("http://{}/rpc", listener.local_addr()?))?;
     eprintln!("ene-host: authenticated loopback service ready");
     let shutdown = app.application.clone();
     let application = app.application.clone();
     let devices = app.devices.clone();
-    let audio = app.audio.clone();
     axum::serve(listener, api::router(app))
         .with_graceful_shutdown(async move {
             #[cfg(unix)]
@@ -61,7 +51,6 @@ async fn serve() -> Result<(), Box<dyn Error>> {
             shutdown.begin_shutdown();
         })
         .await?;
-    audio.shutdown().await;
     devices.stop().await;
     application.stop().await?;
     drop(runtime);

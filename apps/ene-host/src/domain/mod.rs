@@ -79,7 +79,6 @@ impl Error {
 }
 
 pub use Connection as ProviderConnection;
-pub use MessageAcceptance as Acceptance;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -129,11 +128,8 @@ impl From<Grant> for ene_rpc::Grant {
             .into(),
             revision: grant.revision,
             invalidation_reason: grant.invalidation_reason,
-            connection_fingerprint: ene_rpc::JsonDocument {
-                json: grant.connection_fingerprint.to_string(),
-                ..Default::default()
-            }
-            .into(),
+            connection_fingerprint: ene_rpc::JsonDocument::from(grant.connection_fingerprint)
+                .into(),
             ..Default::default()
         }
     }

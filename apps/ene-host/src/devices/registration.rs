@@ -112,7 +112,7 @@ impl Devices {
             }
             this.commit(&mut state, journal).await?;
             if let Some(signal) = state.changes.get(&id) {
-                signal.send_replace(());
+                signal.cancel();
             }
             if !allowed {
                 state.connections.remove(&id);
@@ -121,17 +121,10 @@ impl Devices {
         })
         .await
     }
-    pub async fn permitted(&self, id: &str, capability: &str) -> Result<(), ConnectError> {
-        permitted(&self.lock().await?.journal, id, Some(capability))
-    }
-    pub async fn changes(&self, id: &str) -> Result<watch::Receiver<()>, ConnectError> {
+    pub async fn changes(&self, id: &str) -> Result<CancellationToken, ConnectError> {
         let mut state = self.lock().await?;
         permitted(&state.journal, id, None)?;
-        Ok(state
-            .changes
-            .entry(id.into())
-            .or_insert_with(|| watch::channel(()).0)
-            .subscribe())
+        Ok(state.changes.entry(id.into()).or_default().clone())
     }
     pub async fn subscribe(&self, id: String) -> Result<Subscription, ConnectError> {
         let mut state = self.lock().await?;
@@ -139,30 +132,23 @@ impl Devices {
         if state
             .connections
             .get(&id)
-            .is_some_and(|c| c.lease.strong_count() > 0)
+            .is_some_and(|c| !c.queue.is_closed())
         {
             return Err(conflict());
         }
         let session = Uuid::new_v4().to_string();
-        let lease = Arc::new(());
         let (queue, incoming) = mpsc::channel(32);
-        let changed = state
-            .changes
-            .entry(id.clone())
-            .or_insert_with(|| watch::channel(()).0)
-            .subscribe();
+        let changed = state.changes.entry(id.clone()).or_default().clone();
         state.connections.insert(
             id,
             Connection {
                 id: session.clone(),
                 queue,
-                lease: Arc::downgrade(&lease),
             },
         );
         Ok(Subscription {
             id: session,
             queue: incoming,
-            lease,
             changed,
         })
     }

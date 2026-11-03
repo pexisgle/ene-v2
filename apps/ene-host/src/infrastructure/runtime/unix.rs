@@ -1,12 +1,10 @@
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
+use ene_platform::storage;
 use rustix::fs::{AtFlags, Mode, OFlags};
 use std::{
-    fs::{self, File, Metadata},
+    fs::File,
     io::{self, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    },
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -16,37 +14,17 @@ pub struct Runtime {
     _lock: File,
     pub token: String,
 }
-fn check_metadata(metadata: Metadata, is_dir: bool) -> io::Result<()> {
-    if metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o077 != 0
-        || if is_dir {
-            !metadata.is_dir()
-        } else {
-            !metadata.is_file() || metadata.nlink() != 1
-        }
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "ene file must be owned by the current user, private, regular, and singly linked",
-        ));
-    }
-    Ok(())
-}
 fn directory(path: &Path) -> io::Result<File> {
     let file = File::from(rustix::fs::open(
         path,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
-    check_metadata(file.metadata()?, true)?;
+    storage::check_handle(&file, true, true)?;
     Ok(file)
 }
 pub fn private_directory(path: &Path) -> io::Result<File> {
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    }
+    storage::create_private_dir_all(path)?;
     directory(path)
 }
 fn private_at(directory: &File, name: &Path) -> io::Result<File> {
@@ -56,21 +34,11 @@ fn private_at(directory: &File, name: &Path) -> io::Result<File> {
         OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::RUSR | Mode::WUSR,
     )?);
-    check_metadata(file.metadata()?, false)?;
+    storage::check_handle(&file, false, true)?;
     Ok(file)
 }
 pub fn private_file(path: &Path) -> io::Result<File> {
-    let parent =
-        directory(path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "missing parent directory")
-        })?)?;
-    private_at(
-        &parent,
-        Path::new(
-            path.file_name()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?,
-        ),
-    )
+    storage::private_file(path)
 }
 impl Runtime {
     pub fn acquire(root: &Path) -> io::Result<Self> {
@@ -86,7 +54,7 @@ impl Runtime {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?);
-        check_metadata(directory.metadata()?, true)?;
+        storage::check_handle(&directory, true, true)?;
         let lock = private_at(&directory, Path::new("host.lock"))?;
         match lock.try_lock() {
             Ok(()) => {}
@@ -106,7 +74,7 @@ impl Runtime {
             Mode::empty(),
         ) {
             Ok(fd) => {
-                check_metadata(File::from(fd).metadata()?, false)?;
+                storage::check_handle(&File::from(fd), false, true)?;
                 rustix::fs::unlinkat(&directory, "connection.json", AtFlags::empty())?;
             }
             Err(rustix::io::Errno::NOENT) => {}
@@ -148,9 +116,11 @@ impl Drop for Runtime {
 #[cfg(test)]
 mod fd_tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     fn private_temp() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         temp
     }
     #[test]

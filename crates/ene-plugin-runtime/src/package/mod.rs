@@ -1,16 +1,13 @@
 //! Packages are read without executing code. Executable files are captured and installed
-//! in memory; plugins receive no filesystem access to code or assets.
+//! in memory; plugins receive no filesystem access to the code.
 mod paths;
 mod read;
 
 pub use paths::identifier;
 use paths::{portable_name, relative};
-use read::{Stamp, hash_file, open_code, owned, read, unchanged};
+use read::{Stamp, owned, read, unchanged};
 
-use crate::{
-    Error, Result,
-    limits::{MAX_ASSET_BYTES, MAX_CODE},
-};
+use crate::{Error, Result, limits::MAX_CODE};
 use ene_plugin::*;
 use sha2::{Digest, Sha256};
 use std::{
@@ -39,7 +36,6 @@ impl Package {
             || manifest.version.is_empty()
             || manifest.entrypoints.is_empty()
             || manifest.entrypoints.len() > 32
-            || manifest.assets.len() > 256
         {
             return Err(Error::Invalid);
         }
@@ -58,10 +54,9 @@ impl Package {
                         })
                         && e.provides == [Extension::Harness]
                         && e.uses.is_empty()
-                        && e.window_events.is_empty()
                         && e.provider.is_none()
                 }
-                Target::Host | Target::Desktop => relative(&e.file) && e.command.is_empty(),
+                Target::Host => relative(&e.file) && e.command.is_empty(),
             };
             if !identifier(&e.id)
                 || !ids.insert(&e.id)
@@ -69,10 +64,6 @@ impl Package {
                 || e.provides.is_empty()
                 || e.provides.len() > 6
                 || e.uses.len() > 8
-                || (!e.window_events.is_empty() || e.uses.contains(&Service::WindowEvents))
-                    && (e.target != Target::Desktop
-                        || !e.provides.contains(&Extension::Character)
-                        || !e.uses.contains(&Service::WindowEvents))
                 || e.provides.iter().collect::<BTreeSet<_>>().len() != e.provides.len()
                 || e.uses.iter().collect::<BTreeSet<_>>().len() != e.uses.len()
             {
@@ -114,35 +105,12 @@ impl Package {
             files.insert(path.clone(), data);
             stamps.insert(path.clone(), stamp);
         }
-        for asset in manifest.assets.values() {
-            portable_name(&mut portable_names, &asset.path)?;
-            if files.contains_key(&asset.path)
-                || asset.size > MAX_ASSET_BYTES
-                || asset.sha256.len() != 64
-                || !asset.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                return Err(Error::Invalid);
-            }
-            let (digest, stamp) = hash_file(open_code(root, &asset.path)?, MAX_ASSET_BYTES)?;
-            if stamp.len != asset.size || digest != asset.sha256.to_ascii_lowercase() {
-                return Err(Error::Invalid);
-            }
-            stamps.insert(asset.path.clone(), stamp);
-        }
         let mut hash = Sha256::new();
         for (path, bytes) in &files {
             hash.update((path.len() as u64).to_le_bytes());
             hash.update(path.as_bytes());
             hash.update((bytes.len() as u64).to_le_bytes());
             hash.update(bytes);
-        }
-        for (name, asset) in &manifest.assets {
-            hash.update((name.len() as u64).to_le_bytes());
-            hash.update(name.as_bytes());
-            hash.update((asset.path.len() as u64).to_le_bytes());
-            hash.update(asset.path.as_bytes());
-            hash.update(asset.size.to_le_bytes());
-            hash.update(asset.sha256.to_ascii_lowercase().as_bytes());
         }
         Ok(Self {
             root: root.to_path_buf(),
@@ -255,33 +223,6 @@ mod tests {
     }
 
     #[test]
-    fn window_subscriptions_require_a_desktop_character_entrypoint_and_service() {
-        let source = tempfile::tempdir().unwrap();
-        let root = source.path().join("package");
-        fixture(&root);
-        let path = root.join("manifest.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        manifest["entrypoints"][0]["window_events"] = serde_json::json!([{
-            "applications": ["editor"], "events": ["focused"]
-        }]);
-        let write = |manifest: &serde_json::Value| {
-            ene_platform::storage::write_atomic(&path, manifest.to_string().as_bytes()).unwrap();
-        };
-        write(&manifest);
-        assert!(Package::load(&root).is_err());
-        manifest["entrypoints"][0]["uses"] = serde_json::json!(["window_events"]);
-        write(&manifest);
-        assert!(Package::load(&root).is_err());
-        manifest["entrypoints"][0]["target"] = serde_json::json!("desktop");
-        write(&manifest);
-        Package::load(&root).unwrap();
-        manifest["entrypoints"][0]["provides"] = serde_json::json!(["harness"]);
-        write(&manifest);
-        assert!(Package::load(&root).is_err());
-    }
-
-    #[test]
     fn snapshots_capture_code_and_source_changes_invalidate_revision() {
         let source = tempfile::tempdir().unwrap();
         let source_root = source.path().join("package");
@@ -290,27 +231,6 @@ mod tests {
         std::fs::write(source_root.join("main.wasm"), "return {changed=true}").unwrap();
         assert!(matches!(package.verify(), Err(Error::Changed)));
         assert_eq!(package.code("main.wasm").unwrap(), b"return {}");
-    }
-    #[test]
-    fn asset_contents_are_hashed_not_only_sized() {
-        let source = tempfile::tempdir().unwrap();
-        let root = source.path().join("package");
-        fixture(&root);
-        std::fs::write(root.join("voice.bin"), b"hello").unwrap();
-        let path = root.join("manifest.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        manifest["assets"] = serde_json::json!({
-            "voice": {
-                "path": "voice.bin",
-                "sha256": format!("{:x}", Sha256::digest(b"hello")),
-                "size": 5
-            }
-        });
-        ene_platform::storage::write_atomic(&path, manifest.to_string().as_bytes()).unwrap();
-        Package::load(&root).unwrap();
-        std::fs::write(root.join("voice.bin"), b"world").unwrap();
-        assert!(matches!(Package::load(&root), Err(Error::Invalid)));
     }
     #[test]
     fn same_size_and_restored_mtime_still_invalidates_verification() {

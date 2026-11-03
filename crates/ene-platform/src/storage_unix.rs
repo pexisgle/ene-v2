@@ -19,6 +19,12 @@ pub fn open(path: &Path, directory: bool, private: bool) -> io::Result<File> {
             OFlags::empty()
         };
     let file = File::from(rustix::fs::open(path, flags, Mode::empty())?);
+    check_handle(&file, directory, private)?;
+    Ok(file)
+}
+
+/// The shared ownership, mode and type policy for an opened descriptor.
+pub fn check_handle(file: &File, directory: bool, private: bool) -> io::Result<()> {
     let m = file.metadata()?;
     if m.uid() != rustix::process::geteuid().as_raw()
         || m.mode() & if private { 0o077 } else { 0o022 } != 0
@@ -30,7 +36,7 @@ pub fn open(path: &Path, directory: bool, private: bool) -> io::Result<File> {
             "unsafe ene file ownership, mode or type",
         ));
     }
-    Ok(file)
+    Ok(())
 }
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     if !path.exists() {
@@ -41,7 +47,7 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     }
     check(path, true, true)
 }
-fn private_file(path: &Path) -> io::Result<File> {
+pub fn private_file(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     check(
         path.parent()

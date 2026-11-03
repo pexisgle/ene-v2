@@ -26,10 +26,9 @@ rig-memory = { version = "0.46", features = ["fs"] }
 bevy_ecs = "=0.20.0"
 keyring = { version = "4", default-features = false, features = ["v1"] }
 time.workspace = true
-clap.workspace = true
 thiserror.workspace = true
 rusqlite_migration = "2"
-axum = { workspace = true, features = ["ws"] }
+axum.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -41,14 +40,13 @@ uuid.workspace = true
 url.workspace = true
 async-stream.workspace = true
 base64.workspace = true
-sha2 = "0.11"
+sha2.workspace = true
 tokio-util = { workspace = true, features = ["codec"] }
 
 [dev-dependencies]
 rig-core = { version = "0.46", default-features = false, features = ["test-utils"] }
 tempfile.workspace = true
 wat = "1"
-tokio-tungstenite = "0.30"
 tokio = { workspace = true, default-features = true, features = ["test-util"] }
 ene-rpc = { workspace = true, features = ["client"] }
 http.workspace = true

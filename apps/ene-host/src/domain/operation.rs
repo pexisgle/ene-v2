@@ -85,36 +85,19 @@ pub fn next_revision(value: u64) -> Result<u64, Error> {
         .ok_or_else(|| Error::new(ErrorKind::StateConflict))
 }
 
-macro_rules! identifier {
-    ($($name:ident),+ $(,)?) => {$ (
-        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(String);
-        impl $name {
-            pub fn parse(value: String) -> Result<Self, Error> {
-                if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
-                    return Err(Error::invalid());
-                }
-                Ok(Self(value))
-            }
-            pub fn as_str(&self) -> &str { &self.0 }
-            pub fn into_string(self) -> String { self.0 }
-        }
-    )+};
+/// A host-meaningful id: non-empty, bounded and free of control characters.
+pub fn validate_id(value: &str) -> Result<(), Error> {
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(Error::invalid());
+    }
+    Ok(())
 }
-identifier!(CompanionId, ConnectionId, MessageId, GrantId, ProviderId);
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequestKey(String);
-impl RequestKey {
-    pub fn parse(value: String) -> Result<Self, Error> {
-        if value.is_empty()
-            || value.len() > 200
-            || value.bytes().any(|byte| !(0x20..=0x7e).contains(&byte))
-        {
-            return Err(Error::invalid());
-        }
-        Ok(Self(value))
+pub fn validate_request_key(value: &str) -> Result<(), Error> {
+    if value.is_empty()
+        || value.len() > 200
+        || value.bytes().any(|byte| !(0x20..=0x7e).contains(&byte))
+    {
+        return Err(Error::invalid());
     }
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+    Ok(())
 }

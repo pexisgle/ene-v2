@@ -75,10 +75,7 @@ pub(super) fn initialize(db: &mut Connection) -> Result<()> {
     for (principal, key, body) in pending {
         let previous: serde_json::Value = serde_json::from_str(&body)?;
         let result = json!(ene_rpc::ApiFailure {
-            request_id: previous
-                .get("requestId")
-                .or_else(|| previous.get("request_id"))
-                .and_then(serde_json::Value::as_str)
+            request_id: conversation::request_id(&previous)
                 .unwrap_or_default()
                 .into(),
             error: Failure {

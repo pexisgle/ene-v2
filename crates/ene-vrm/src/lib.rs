@@ -10,10 +10,10 @@ mod runtime;
 mod schema;
 
 use bevy::{app::AnimationSystems, prelude::*, transform::TransformSystems};
-pub use expressions::{ExpressionName, ExpressionWeights};
+pub use expressions::ExpressionName;
 pub use material::{MToonExtension, MToonMaterial};
-pub use runtime::{LookAt, SpringJointProps, SpringRig, Vrm};
-pub use schema::{ExpressionPresetName, HumanBoneName, VrmMeta};
+pub use runtime::{SpringJointProps, SpringRig, Vrm};
+pub use schema::{ExpressionPresetName, HumanBoneName};
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VrmSystems {
@@ -458,8 +458,8 @@ mod tests {
             "VRMA gaze did not rotate the eye bone"
         );
 
-        // LookAt target and overrideLookAt suppression on first instance
-        let (root, _, _, head, eye) = rigs[0];
+        // A stopped gaze animation leaves the eye at rest.
+        let (root, _, _, _, eye) = rigs[0];
         let eye_rest = app
             .world()
             .get::<animation::RestPose>(eye)
@@ -472,28 +472,6 @@ mod tests {
             .stop_all();
         app.update();
         assert!(!gaze_input_active(&app, root));
-        assert!(
-            app.world()
-                .get::<Transform>(eye)
-                .unwrap()
-                .rotation
-                .abs_diff_eq(eye_rest, 1e-5)
-        );
-
-        let head_tf = *app.world().get::<GlobalTransform>(head).unwrap();
-        let head_rest = app
-            .world()
-            .get::<animation::RestPose>(head)
-            .unwrap()
-            .global_rotation;
-        let side_target = head_tf.transform_point(Vec3::new(0.02, 0.03, 0.04))
-            + head_tf.rotation().normalize() * head_rest.inverse() * Vec3::new(1., 0., 1.);
-        app.world_mut().get_mut::<LookAt>(root).unwrap().target = Some(side_target);
-        app.world_mut()
-            .get_mut::<ExpressionWeights>(root)
-            .unwrap()
-            .insert(ExpressionName::Preset(ExpressionPresetName::Blink), 1.);
-        app.update();
         assert!(
             app.world()
                 .get::<Transform>(eye)

@@ -4,7 +4,7 @@ use crate::ports::Secret;
 use tokio::sync::watch;
 
 mod transport;
-pub use transport::{AuthorizedTransport, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Response};
+pub use transport::{AuthorizedTransport, Response};
 
 struct RestrictedAuthorization {
     original: Arc<dyn Authorization>,
@@ -225,9 +225,6 @@ impl Invocation {
             cancel,
         }
     }
-    pub fn id(&self) -> &str {
-        &self.outbound.id
-    }
     /// Add runtime revocation without replacing the host's original authorization.
     pub fn restrict(mut self, scope: Arc<dyn Authorization>) -> Self {
         let outbound = Self::restricted(&self.outbound, scope);
@@ -268,9 +265,6 @@ impl Invocation {
     }
     pub fn operation(&self) -> OperationKind {
         self.input.operation()
-    }
-    pub fn policy(&self) -> &Policy {
-        self.outbound.policy()
     }
     pub(crate) fn outbound(&self) -> Arc<Outbound> {
         self.outbound.clone()

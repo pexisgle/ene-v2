@@ -1,5 +1,5 @@
 //! Task inference: the host owns the connection, credentials and grant checks.
-use super::generation::{authorize, config, invocation, register};
+use super::generation::{authorize, config, execute, invocation, register};
 use super::*;
 use crate::{
     domain::rules,
@@ -117,6 +117,7 @@ impl HostApplication {
             &context,
             OperationKind::Task,
         );
+        let mut cancelled = receiver.clone();
         let sender = controls
             .running
             .get(&id)
@@ -144,14 +145,14 @@ impl HostApplication {
             InvocationInput::Task(generation),
             receiver,
         );
-        let spec = OperationKind::Task.spec();
-        let result = tokio::time::timeout(spec.timeout, async {
+        let output_bytes = OperationKind::Task.spec().output_bytes;
+        let work = async move {
             let mut stream = input.generate().await?;
             let mut text = String::new();
             while let Some(event) = stream.next().await {
                 match event? {
                     Event::Delta(delta) => {
-                        if text.len() + delta.len() > spec.output_bytes {
+                        if text.len() + delta.len() > output_bytes {
                             return Err(Error::new(ErrorKind::ResourceLimit));
                         }
                         text.push_str(&delta);
@@ -159,12 +160,11 @@ impl HostApplication {
                     Event::Finished(_) => break,
                 }
             }
-            Ok::<_, Error>(text)
-        })
-        .await
-        .map_err(|_| Error::new(ErrorKind::Unavailable))??;
+            Ok(text)
+        };
+        let result = execute(self, OperationKind::Task, &mut cancelled, work).await;
         forward.abort();
-        Ok(result)
+        result
     }
 }
 

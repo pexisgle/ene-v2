@@ -25,6 +25,42 @@ pub(crate) fn can_serve_conversation(connection: &crate::domain::Connection) -> 
     connection.kind == "llm" && matches!(connection.adapter.as_str(), openai::ID | openrouter::ID)
 }
 
+/// Resolves the parent conversation's catalog model and refuses one that cannot
+/// call tools. Shared by the built-in adapters, which differ only in wire.
+pub(crate) fn tool_spec(
+    connection: &crate::domain::Connection,
+    adapter: &str,
+    model: &str,
+) -> crate::ports::Result<(std::sync::Arc<rig_core::catalog::ModelSpec>, String)> {
+    use rig_core::catalog::{Catalog, ModelSpec};
+    use rig_core::providers::registry::ProviderId;
+    let reference = format!("{adapter}/{model}");
+    let spec = match Catalog::builtin().resolve(&reference) {
+        Ok(resolved) => resolved.shared(),
+        Err(_) => match explicit_tool_calling(connection)? {
+            Some(true) => {
+                let provider = ProviderId::catalog(adapter).ok_or_else(|| {
+                    crate::domain::Error::new(crate::domain::ErrorKind::UnsupportedCapability)
+                })?;
+                std::sync::Arc::new(ModelSpec::new(provider, model).with_tools(true))
+            }
+            Some(false) => return Err(tool_error("model_cannot_call_tools")),
+            None => return Err(tool_error("model_capability_unknown")),
+        },
+    };
+    if !spec.tools {
+        return Err(tool_error("model_cannot_call_tools"));
+    }
+    Ok((spec, reference))
+}
+
+fn tool_error(reason: &'static str) -> crate::domain::Error {
+    crate::domain::Error {
+        kind: crate::domain::ErrorKind::UnsupportedCapability,
+        reason: Some(reason),
+    }
+}
+
 /// An explicit declaration that the configured model calls tools, for a model
 /// the Rig catalog does not list. `None` leaves the capability unknown.
 pub(crate) fn explicit_tool_calling(

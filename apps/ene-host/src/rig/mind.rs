@@ -92,27 +92,11 @@ pub(crate) struct ReadArgs {
 }
 
 #[derive(Clone)]
-pub(crate) struct MindRecall(Arc<MindBridge>);
+pub(crate) struct MindRecall(pub(crate) Arc<MindBridge>);
 #[derive(Clone)]
-pub(crate) struct MindRead(Arc<MindBridge>);
+pub(crate) struct MindRead(pub(crate) Arc<MindBridge>);
 #[derive(Clone)]
-pub(crate) struct MindUpdate(Arc<MindBridge>);
-
-impl MindRecall {
-    pub(crate) fn new(bridge: Arc<MindBridge>) -> Self {
-        Self(bridge)
-    }
-}
-impl MindRead {
-    pub(crate) fn new(bridge: Arc<MindBridge>) -> Self {
-        Self(bridge)
-    }
-}
-impl MindUpdate {
-    pub(crate) fn new(bridge: Arc<MindBridge>) -> Self {
-        Self(bridge)
-    }
-}
+pub(crate) struct MindUpdate(pub(crate) Arc<MindBridge>);
 
 impl Tool for MindRecall {
     const NAME: &'static str = "mind_recall";
