@@ -318,7 +318,10 @@ impl HostApplication {
                 memories: parsed.memories,
                 state: None,
             };
-            request.validate()?;
+            if let Err(error) = request.validate() {
+                self.fail_consolidation(companion, &error).await;
+                return Err(error);
+            }
             let operation_id = consolidation_operation_id(
                 companion,
                 status.last_sequence,
