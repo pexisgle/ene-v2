@@ -177,7 +177,9 @@ async fn send_turn(
                 }
                 Some(w::notification::Event::TurnEvent(event)) => match event.state.as_str() {
                     "answered" => return,
-                    "stopped" | "failed" => panic!("turn ended {}", event.state),
+                    "stopped" | "failed" => {
+                        panic!("turn ended {}: {:?}", event.state, event.failure)
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -278,7 +280,8 @@ fn log_facts(state: &Path, companion: &str) -> LogFacts {
         };
         find_usage(&value, &mut usage);
         if value["type"] == "state"
-            && let Some(text) = value["value"]["content"].as_str()
+            && value["key"] == "rig_ecs::agent::SystemPrompt"
+            && let Some(text) = value["value"].as_str()
         {
             system_prompts.push(text.to_owned());
         }
@@ -786,7 +789,7 @@ async fn db_mind(path: &Path) -> (Vec<serde_json::Value>, serde_json::Value) {
     let (rows, state) = db
         .call(|db| -> std::result::Result<(Vec<serde_json::Value>, String), tokio_rusqlite::rusqlite::Error> {
             let mut statement = db.prepare(
-                "SELECT content,sources,supersedes,acquisition,recorded_at FROM mind_memories ORDER BY recorded_at,id",
+                "SELECT content,sources,supersedes,acquisition,recorded_at,created_by FROM mind_memories ORDER BY recorded_at,id",
             )?;
             let rows = statement
                 .query_map([], |row| {
@@ -796,6 +799,7 @@ async fn db_mind(path: &Path) -> (Vec<serde_json::Value>, serde_json::Value) {
                         "supersedes": row.get::<_, String>(2)?,
                         "acquisition": row.get::<_, String>(3)?,
                         "recorded_at": row.get::<_, String>(4)?,
+                        "created_by": row.get::<_, String>(5)?,
                     }))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1175,12 +1179,15 @@ async fn mind_acceptance_through_the_host() {
         !raw.contains("この好みを mind_update で記憶し"),
         "the fresh host still had the original conversation"
     );
+    // Automatic recall intentionally puts relevant saved memories into the
+    // prompt now; the current-mind state itself was checked above without the
+    // fruit names. The fresh answer still cites the corrected memory.
     assert!(
         recall_facts
             .system_prompts
             .iter()
-            .all(|prompt| !prompt.contains("柚子") && !prompt.contains("りんご")),
-        "the current mind prompt contained the fact before recall: {:?}",
+            .any(|prompt| prompt.contains("思い出した記憶") && prompt.contains("りんご")),
+        "the fresh prompt did not receive the recalled memories: {:?}",
         recall_facts.system_prompts
     );
     let mind_after = client2
@@ -1390,4 +1397,344 @@ async fn mind_acceptance_through_the_host() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&root2);
     let _ = std::fs::remove_dir_all(&root3);
+}
+
+/// Step 3: a normal turn with no save request is consolidated by the host,
+/// then a fresh host with no conversation answers a paraphrase from the
+/// automatically recalled memory. Ignored: needs .env keys and spends a small
+/// amount on the parent, consolidation and embedding calls.
+#[tokio::test]
+#[ignore = "live automatic memory acceptance; needs .env keys and spends a small amount"]
+async fn automatic_memory_acceptance_through_the_host() {
+    let keys = dotenv();
+    let Some(key) = keys.get("OPENAI_API_KEY").filter(|key| !key.is_empty()) else {
+        panic!("OPENAI_API_KEY is missing; automatic memory cannot be verified");
+    };
+    let root = newer_root();
+    let state = root.join("state");
+    let (child, client) = start(&root).await;
+    let snapshot = client
+        .get_snapshot_with_options(w::SnapshotRequest::default(), call_options())
+        .await
+        .expect("snapshot")
+        .into_owned();
+    let companion = snapshot.companions[0].clone();
+    let providers = client
+        .list_providers_with_options(w::Empty::default(), call_options())
+        .await
+        .expect("providers")
+        .into_owned();
+    let openai = providers
+        .items
+        .iter()
+        .find(|provider| provider.id == "openai")
+        .expect("openai descriptor");
+    let settings = client
+        .update_settings_with_options(
+            w::UpdateSettingsRequest {
+                revision: snapshot
+                    .settings
+                    .as_option()
+                    .map(|s| s.revision)
+                    .unwrap_or(1),
+                connections: w::ConnectionInputs {
+                    items: vec![w::ConnectionInput {
+                        kind: "llm".into(),
+                        adapter: "openai".into(),
+                        endpoint: "https://api.openai.com/v1".into(),
+                        options: json_doc("{}").into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            },
+            call_options(),
+        )
+        .await
+        .expect("settings")
+        .into_owned();
+    let connection = settings.connections[0].id.clone();
+    client
+        .register_credentials_with_options(
+            w::CredentialRequest {
+                id: connection.clone(),
+                secret: Some(key.clone()),
+                ..Default::default()
+            },
+            call_options(),
+        )
+        .await
+        .expect("credential");
+    let destinations = openai.destinations.clone();
+    grant(
+        &client,
+        GrantSetup {
+            key: "auto-conversation",
+            companion: &companion.id,
+            connection: &connection,
+            settings_revision: settings.revision,
+            provider_revision: &openai.revision,
+            destinations: &destinations,
+            data_kinds: &["conversation"],
+            purpose: "conversation",
+        },
+    )
+    .await;
+    grant(
+        &client,
+        GrantSetup {
+            key: "auto-task",
+            companion: &companion.id,
+            connection: &connection,
+            settings_revision: settings.revision,
+            provider_revision: &openai.revision,
+            destinations: &destinations,
+            data_kinds: &["task"],
+            purpose: "task",
+        },
+    )
+    .await;
+    client
+        .update_companion_with_options(
+            w::UpdateCompanionRequest {
+                id: companion.id.clone(),
+                revision: companion.revision,
+                mind: Some("あなたは架空の静かな助手「ミナ」。相手との出来事を大切にする。".into()),
+                companion_assignment: w::AssignmentPatch {
+                    change: Some(w::assignment_patch::Change::Set(Box::new(
+                        w::ModelAssignment {
+                            connection_id: connection.clone(),
+                            model_id: "gpt-6-luna".into(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                }
+                .into(),
+                task_assignment: w::AssignmentPatch {
+                    change: Some(w::assignment_patch::Change::Set(Box::new(
+                        w::ModelAssignment {
+                            connection_id: connection.clone(),
+                            model_id: "gpt-6-luna".into(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            },
+            call_options(),
+        )
+        .await
+        .expect("companion with task model");
+    let first = send_turn(
+        &client,
+        &companion.id,
+        "一緒に柚子ジャムを作った。最初はすっぱすぎて失敗したけど、砂糖を足して作り直したらうまくいった。二人で笑った。今日は保存ツールを使わずに、普通に感想だけ返して。",
+        "auto-first",
+    )
+    .await;
+    println!(
+        "[auto] parent answer: {}",
+        first.created.last().cloned().unwrap_or_default()
+    );
+    let parent_log = log_with_turn(&state, &companion.id).await;
+    assert!(
+        parent_log
+            .tools
+            .iter()
+            .all(|tool| tool.name != "mind_update"),
+        "the parent called mind_update; automatic formation was not isolated: {:?}",
+        parent_log
+            .tools
+            .iter()
+            .map(|tool| &tool.name)
+            .collect::<Vec<_>>()
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let (mind, consolidation, memory) = loop {
+        let mind = client
+            .get_mind_with_options(
+                w::Id {
+                    id: companion.id.clone(),
+                    ..Default::default()
+                },
+                call_options(),
+            )
+            .await
+            .expect("mind while consolidating")
+            .into_owned();
+        let status = mind.consolidation.as_option().cloned().unwrap_or_default();
+        let (rows, _) = db_mind(&state.join("host.sqlite3")).await;
+        let memory = rows
+            .iter()
+            .find(|row| {
+                row["content"].as_str().is_some_and(|content| {
+                    content.contains("柚子ジャム") || content.contains("ジャム")
+                })
+            })
+            .cloned();
+        if status.jobs >= 1 && memory.is_some() {
+            break (mind, status, memory.unwrap());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "no automatic memory within 90s: state={} last={} pending={} rows={}",
+                status.state,
+                status.last_sequence,
+                mind.index
+                    .as_option()
+                    .map(|index| index.pending_vectors)
+                    .unwrap_or(0),
+                rows.len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    println!(
+        "[auto] consolidation jobs={} calls={} chars={} memory={}",
+        consolidation.jobs,
+        consolidation.model_calls,
+        consolidation.input_chars,
+        memory["content"].as_str().unwrap_or_default()
+    );
+    assert!(
+        matches!(
+            memory["acquisition"].as_str(),
+            Some("direct_experience" | "user_statement" | "shared")
+        ),
+        "unexpected acquisition: {}",
+        memory["acquisition"]
+    );
+    assert_eq!(memory["created_by"], "consolidation");
+    let sources: Vec<serde_json::Value> =
+        serde_json::from_str(memory["sources"].as_str().unwrap()).unwrap();
+    assert!(sources.iter().any(|source| source["kind"] == "input"));
+    assert!(sources.iter().any(|source| source["kind"] == "reply"));
+    assert!(sources.iter().all(|source| {
+        source["observed_at"]
+            .as_str()
+            .is_some_and(|time| time.len() > 10)
+    }));
+    // Wait for both indexes; the fresh host will query the vector index.
+    let index_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let index_status = loop {
+        let index = client
+            .get_mind_with_options(
+                w::Id {
+                    id: companion.id.clone(),
+                    ..Default::default()
+                },
+                call_options(),
+            )
+            .await
+            .expect("index status")
+            .into_owned()
+            .index
+            .as_option()
+            .cloned()
+            .unwrap_or_default();
+        if index.pending_vectors == 0
+            && index.pending_fts == 0
+            && index.embedding_model.as_deref() == Some("text-embedding-3-small")
+        {
+            break index;
+        }
+        assert!(
+            tokio::time::Instant::now() < index_deadline,
+            "index did not finish: {index:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    println!(
+        "[auto] index fts_pending={} vector_pending={} embedding_calls={} embedding_tokens={} state={}",
+        index_status.pending_fts,
+        index_status.pending_vectors,
+        index_status.embedding_calls,
+        index_status.embedding_tokens,
+        index_status.state
+    );
+    let parent_facts = log_with_turn(&state, &companion.id).await;
+    let (parent_in, parent_out, parent_cost) = summarize(&parent_facts.usage);
+    println!(
+        "[auto] parent calls={} input_tokens={parent_in} output_tokens={parent_out} catalog_cost_usd={parent_cost:.8}",
+        parent_facts.usage.len()
+    );
+    let _ = mind;
+
+    stop(child, &root).await;
+    let root2 = newer_root();
+    std::fs::create_dir_all(root2.join("state")).unwrap();
+    copy_mind_database(
+        &state.join("host.sqlite3"),
+        &root2.join("state/host.sqlite3"),
+    )
+    .await;
+    let state2 = root2.join("state");
+    let (child2, client2) = start(&root2).await;
+    client2
+        .register_credentials_with_options(
+            w::CredentialRequest {
+                id: connection.clone(),
+                secret: Some(key.clone()),
+                ..Default::default()
+            },
+            call_options(),
+        )
+        .await
+        .expect("credential after restart");
+    // No word of this query occurs in the saved memory; only the semantic
+    // vector index can surface it.
+    let paraphrase = "あの黄色い果実の保存食、何だったっけ？";
+    let answer = send_turn(&client2, &companion.id, paraphrase, "auto-recall").await;
+    let answer_text = answer.created.last().cloned().unwrap_or_default();
+    println!("[auto] fresh answer: {answer_text}");
+    assert!(
+        answer_text.contains("柚子"),
+        "the fresh answer did not use the automatic memory: {answer_text}"
+    );
+    let facts = log_with_turn(&state2, &companion.id).await;
+    assert!(
+        facts
+            .system_prompts
+            .iter()
+            .any(|prompt| prompt.contains("柚子") || prompt.contains("ジャム")),
+        "the fresh system prompt did not receive the recalled memory: {:?}",
+        facts.system_prompts
+    );
+    let raw = std::fs::read_to_string(
+        state2
+            .join("rig/logs")
+            .join(format!("{}.jsonl", companion.id)),
+    )
+    .unwrap();
+    assert!(
+        !raw.contains("一緒に柚子ジャムを作った。甘くて"),
+        "the fresh host still had the original conversation"
+    );
+    let (fresh_in, fresh_out, fresh_cost) = summarize(&facts.usage);
+    let fresh_mind = client2
+        .get_mind_with_options(
+            w::Id {
+                id: companion.id.clone(),
+                ..Default::default()
+            },
+            call_options(),
+        )
+        .await
+        .expect("fresh mind")
+        .into_owned();
+    let fresh_index = fresh_mind.index.as_option().cloned().unwrap_or_default();
+    println!(
+        "[auto] fresh calls={} input_tokens={fresh_in} output_tokens={fresh_out} catalog_cost_usd={fresh_cost:.8} embedding_calls={} embedding_tokens={}",
+        facts.usage.len(),
+        fresh_index.embedding_calls,
+        fresh_index.embedding_tokens
+    );
+    stop(child2, &root2).await;
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&root2);
 }
