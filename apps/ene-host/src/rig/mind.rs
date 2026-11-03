@@ -182,6 +182,12 @@ pub(crate) struct RecallArgs {
     pub query: String,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub include_forgotten: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
@@ -222,7 +228,10 @@ impl Tool for MindRecall {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 200},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8}
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                "since": {"type": "string", "maxLength": 64},
+                "until": {"type": "string", "maxLength": 64},
+                "include_forgotten": {"type": "boolean", "default": false}
             },
             "required": ["query"],
             "additionalProperties": false

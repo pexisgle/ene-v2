@@ -161,6 +161,27 @@ impl w::HostService for HostRpc {
         )
     }
 
+    async fn control_memory(
+        &self,
+        _: RequestContext,
+        req: ServiceRequest<'_, w::MemoryControlRequest>,
+    ) -> ServiceResult<w::MemoryControlResult> {
+        let request = req.to_owned_message();
+        let memory = self
+            .app
+            .application
+            .control_memory(request.companion_id, request.memory_id, request.action)
+            .await
+            .map_err(failure)?;
+        Response::ok(w::MemoryControlResult {
+            memory_id: memory.id,
+            audience: memory.audience,
+            recall_preference: memory.recall_preference,
+            revision: memory.revision,
+            ..Default::default()
+        })
+    }
+
     async fn update_mind_profile(
         &self,
         _: RequestContext,

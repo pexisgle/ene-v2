@@ -3,7 +3,7 @@ use super::generation::{authorize, config, execute, invocation, register};
 use super::*;
 use crate::{
     domain::rules,
-    llm::{ChatMessage, ChatRole, Event, Generation, InvocationInput},
+    llm::{ChatMessage, ChatRole, Embedding, EmbeddingRequest, Event, Generation, InvocationInput},
     ports::inference::{InferenceRequest, TaskInference},
 };
 use futures_util::{FutureExt, StreamExt, future::BoxFuture};
@@ -12,6 +12,11 @@ use tokio_util::sync::CancellationToken;
 
 /// The guest may ask for a long answer, but the host bounds the budget.
 const MAX_TASK_TOKENS: u64 = 8192;
+/// The one embedding model the built-in OpenAI adapter knows how to price and
+/// store. Its version is part of the vector index key.
+pub(crate) const EMBEDDING_MODEL: &str = "text-embedding-3-small";
+const MAX_EMBEDDING_INPUTS: usize = 32;
+const MAX_EMBEDDING_CHARS: usize = 16_000;
 
 pub(crate) struct Inference {
     weak: Weak<Inner>,
@@ -165,6 +170,94 @@ impl HostApplication {
         let result = execute(self, OperationKind::Task, &mut cancelled, work).await;
         forward.abort();
         result
+    }
+}
+
+impl HostApplication {
+    /// Embed index text under the companion's task assignment and task grant.
+    /// The index stores the model and dimension with each vector; a different
+    /// adapter or model must not share that space.
+    pub(crate) async fn embed_task(
+        &self,
+        companion_id: &str,
+        input: Vec<String>,
+    ) -> Result<Embedding, Error> {
+        if input.is_empty()
+            || input.len() > MAX_EMBEDDING_INPUTS
+            || input
+                .iter()
+                .any(|text| text.is_empty() || text.chars().count() > MAX_EMBEDDING_CHARS)
+        {
+            return Err(Error::invalid());
+        }
+        let id = Uuid::new_v4().to_string();
+        let mut controls = self.0.controls.lock().await;
+        if controls.failed() {
+            return Err(Error::unavailable());
+        }
+        let configuration = config(self, &mut controls).await?;
+        let companion = configuration
+            .companions
+            .get(companion_id)
+            .ok_or_else(Error::invalid)?;
+        let assignment = companion
+            .model_assignments
+            .task
+            .as_option()
+            .ok_or_else(model_unset)?;
+        let connection =
+            rules::connection(&configuration, &assignment.connection_id).ok_or_else(model_unset)?;
+        if connection.adapter != "openai" {
+            return Err(Error::new(ErrorKind::UnsupportedCapability));
+        }
+        let context = authorize(
+            self,
+            &configuration,
+            &controls,
+            companion_id,
+            &connection,
+            OperationKind::Embedding,
+        )?;
+        let receiver = register(
+            &mut controls,
+            id.clone(),
+            companion_id.to_owned(),
+            &connection,
+            &context,
+            OperationKind::Embedding,
+        );
+        let mut cancelled = receiver.clone();
+        drop(controls);
+        let _guard = RunGuard {
+            app: self.clone(),
+            id: id.clone(),
+        };
+        let input = invocation(
+            self,
+            connection,
+            context,
+            id,
+            InvocationInput::Embedding(EmbeddingRequest {
+                model: EMBEDDING_MODEL.into(),
+                input,
+            }),
+            receiver,
+        );
+        let embedding = execute(self, OperationKind::Embedding, &mut cancelled, async move {
+            input.embed().await
+        })
+        .await?;
+        let _ = self
+            .0
+            .repository
+            .mind_record_embedding(
+                companion_id.to_owned(),
+                EMBEDDING_MODEL.into(),
+                embedding.input_tokens,
+                super::mind::now(),
+            )
+            .await;
+        Ok(embedding)
     }
 }
 

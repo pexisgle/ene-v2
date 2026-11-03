@@ -340,6 +340,7 @@ fn operation(
             body["companion_id"] = json!(id);
             "UpdateMindProfile"
         }
+        ("POST", "MemoryControl") => "ControlMemory",
         _ => panic!("unmapped fixture {method} {descriptor}"),
     };
     if let Some(key) = key {
@@ -1944,4 +1945,285 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
         .await
         .unwrap();
     assert!(!answered.stream_id.is_empty());
+}
+
+async fn wait_for_answered(subscription: &mut crate::application::Subscription) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notification = subscription.receiver.recv().await.unwrap();
+            if let Some(ene_rpc::notification::Event::TurnEvent(event)) = notification.event
+                && event.state == "answered"
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("answered turn");
+}
+
+/// A normal turn without a mind_update tool call is consolidated by the finite
+/// host worker. The next turn receives the new memory through automatic recall
+/// (lexical fallback here, since the test has no task model to embed with).
+#[tokio::test]
+async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool() {
+    use crate::bootstrap;
+    use rig_core::catalog::Catalog;
+    use rig_core::operation::Completion;
+    use rig_core::serve::ErasedHandler;
+    use rig_core::serve::adapters::ModelAdapter;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+    use rig_ecs::effects::Handler;
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let app = bootstrap::application(store.clone(), "private-token".into());
+    let rig_dir = temp.path().join("rig");
+    std::fs::create_dir_all(&rig_dir).unwrap();
+    bootstrap::attach_kernel(&app, rig_dir).unwrap();
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::text("楽しかったですね。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("柚子ジャムのことですね。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    let captured = model.clone();
+    app.application.set_test_model(Arc::new(move |_, _| {
+        let spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .expect("builtin catalog")
+            .shared();
+        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
+            spec.reference(),
+            model.clone(),
+        ));
+        Ok(rig_ecs::model::Connection {
+            spec,
+            handler: Handler(handler),
+        })
+    }));
+    let (status, saved) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let connection = saved["connections"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("Companion/{companion}"),
+            json!({
+                "revision": 1,
+                "mind": "静かな助手",
+                "model_assignments": {"companion": {"connection_id": connection, "model_id": "deepseek/deepseek-flash"}}
+            }),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "PUT",
+            &format!("Credentials/{connection}"),
+            json!({"secret":"test-only"}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            "Grants",
+            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            Some("auto-memory-grant"),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    app.application.set_consolidation_hook(Arc::new(|prompt| {
+        assert!(prompt.contains("一緒に柚子ジャムを作った"), "batch prompt");
+        assert!(prompt.contains("confirmed_entries"));
+        Box::pin(async {
+            Ok(r#"{"memories":[{"content":"一緒に柚子ジャムを作った経験","description":"共に作った思い出","appraisal":"楽しかった","acquisition":"direct_experience"}],"reason":"shared experience"}"#.to_owned())
+        })
+    }));
+    app.application.start_mind_worker();
+    let mut subscription = app.application.subscribe().await;
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"一緒に柚子ジャムを作った。楽しかった。"}),
+        Some("auto-first"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        let mind = app.application.get_mind(companion.clone()).await.unwrap();
+        if mind
+            .consolidation
+            .as_option()
+            .is_some_and(|status| status.jobs >= 1 && status.last_sequence > 0)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the consolidation worker did not run: {mind:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let owner = companion.clone();
+    store
+        .run(move |db| {
+            let (created_by, sources): (String, String) = db.query_row(
+                "SELECT created_by,sources FROM mind_memories WHERE owner=?1",
+                [owner.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(created_by, "consolidation");
+            let sources: Vec<crate::domain::mind::SourceRef> = serde_json::from_str(&sources)?;
+            assert!(
+                sources
+                    .iter()
+                    .any(|source| source.kind == crate::domain::mind::SourceKind::Input)
+            );
+            assert!(
+                sources
+                    .iter()
+                    .any(|source| source.kind == crate::domain::mind::SourceKind::Reply)
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // The second turn's model input gets the consolidated memory through
+    // automatic recall, without a mind_recall tool call.
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"ジャムの思い出は？"}),
+        Some("auto-second"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+    let requests = captured.requests();
+    assert!(requests.len() >= 2);
+    let second = &requests[1];
+    let system = second
+        .chat_history
+        .iter()
+        .find_map(|message| match &**message {
+            rig_core::completion::Message::System { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("second system prompt");
+    assert!(
+        system.contains("一緒に柚子ジャムを作った経験"),
+        "automatic recall missing from {system}"
+    );
+    app.application.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn memory_forget_and_share_are_owner_only_and_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let source = crate::domain::mind::SourceRef {
+        kind: crate::domain::mind::SourceKind::Input,
+        id: "request".into(),
+        entry_id: Some("entry".into()),
+        speaker: Some("user".into()),
+        observed_at: Some("2026-01-01T00:00:00Z".into()),
+    };
+    let id = store
+        .mind_update(
+            companion.clone(),
+            "op-control".into(),
+            "hash-control".into(),
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: 1,
+                memories: vec![crate::domain::mind::NewMemory {
+                    content: "柚子ジャムを作った".into(),
+                    description: String::new(),
+                    appraisal: String::new(),
+                    acquisition: crate::domain::mind::Acquisition::DirectExperience,
+                    supersedes: Vec::new(),
+                    sources: Vec::new(),
+                    occurred_at: None,
+                }],
+                state: None,
+            },
+            vec![source],
+            "parent".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .await
+        .unwrap()
+        .memories[0]
+        .id
+        .clone();
+    let app = crate::bootstrap::application(store.clone(), "private-token".into());
+    let (status, forgotten) = mutate(
+        &app,
+        "POST",
+        "MemoryControl",
+        json!({"companion_id": companion, "memory_id": id, "action": "forget"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(forgotten["recall_preference"], "forgotten");
+    let (status, again) = mutate(
+        &app,
+        "POST",
+        "MemoryControl",
+        json!({"companion_id": companion, "memory_id": id, "action": "forget"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["revision"], forgotten["revision"]);
+    let (status, shared) = mutate(
+        &app,
+        "POST",
+        "MemoryControl",
+        json!({"companion_id": companion, "memory_id": id, "action": "share"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(shared["audience"], "shared");
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        "MemoryControl",
+        json!({"companion_id": companion, "memory_id": "00000000-0000-0000-0000-000000000001", "action": "share"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

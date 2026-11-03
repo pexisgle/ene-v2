@@ -50,6 +50,8 @@ pub enum SourceKind {
     Memory,
     /// An operation (a later consolidation job) that produced this.
     Operation,
+    /// A confirmed assistant reply in the same experience.
+    Reply,
 }
 
 /// A memory about to be added. The host fills the owner, id, revision, times
@@ -89,10 +91,20 @@ pub struct MemoryRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<String>,
     #[serde(default)]
+    pub related: Vec<String>,
+    #[serde(default)]
     pub supersedes: Vec<String>,
     /// Memories that correct this one, computed from the owner's records.
     #[serde(default)]
     pub superseded_by: Vec<String>,
+    pub recall_preference: String,
+    pub created_by: String,
+    #[serde(default = "private_audience")]
+    pub audience: String,
+}
+
+fn private_audience() -> String {
+    "private".into()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

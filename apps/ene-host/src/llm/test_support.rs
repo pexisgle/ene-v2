@@ -40,6 +40,10 @@ impl InvocationFixture {
             OperationKind::Task => {
                 InvocationInput::Task(self.request.expect("task fixture generation"))
             }
+            OperationKind::Embedding => InvocationInput::Embedding(EmbeddingRequest {
+                model: "fixture".into(),
+                input: vec!["fixture".into()],
+            }),
         };
         Invocation::new(
             self.id,

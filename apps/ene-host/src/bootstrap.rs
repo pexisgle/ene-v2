@@ -30,6 +30,7 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
         .initialize()
         .await
         .map_err(|_| "credential initialization failed")?;
+    app.application.start_mind_worker();
     app.application.restore_plugins().await?;
     Ok((runtime, app))
 }

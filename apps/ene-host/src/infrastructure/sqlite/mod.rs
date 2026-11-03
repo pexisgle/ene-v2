@@ -1,4 +1,5 @@
 //! SQLite execution, schema lifecycle and repository implementation.
+pub(crate) mod memory;
 mod mind;
 mod plugins;
 mod queries;
@@ -43,6 +44,8 @@ pub enum Error {
     RevisionConflict,
     #[error("unknown_reference")]
     UnknownReference,
+    #[error("invalid_request")]
+    InvalidRequest,
     #[error("database schema {0} is newer than this host")]
     FutureSchema(usize),
 }

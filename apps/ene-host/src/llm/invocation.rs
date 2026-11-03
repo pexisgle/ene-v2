@@ -26,6 +26,7 @@ pub(crate) enum InvocationInput {
     ConnectionCheck(Generation),
     ModelList,
     Task(Generation),
+    Embedding(crate::llm::EmbeddingRequest),
 }
 impl InvocationInput {
     fn operation(&self) -> OperationKind {
@@ -35,6 +36,7 @@ impl InvocationInput {
             Self::ConnectionCheck(_) => OperationKind::ConnectionCheck,
             Self::ModelList => OperationKind::ModelList,
             Self::Task(_) => OperationKind::Task,
+            Self::Embedding(_) => OperationKind::Embedding,
         }
     }
 }
@@ -135,6 +137,10 @@ impl Outbound {
                         *request.method() == http::Method::POST
                             && (path == format!("{base_path}/chat/completions")
                                 || path == format!("{base_path}/responses"))
+                    }
+                    OperationKind::Embedding => {
+                        *request.method() == http::Method::POST
+                            && path == format!("{base_path}/embeddings")
                     }
                 };
                 if !allowed {
@@ -247,6 +253,18 @@ impl Invocation {
     pub fn connection(&self) -> &Connection {
         &self.outbound.connection
     }
+    pub fn embedding_request(&self) -> Result<&crate::llm::EmbeddingRequest> {
+        match &self.input {
+            InvocationInput::Embedding(request) => Ok(request),
+            _ => Err(Error::invalid()),
+        }
+    }
+
+    pub async fn embed(self) -> Result<crate::llm::Embedding> {
+        let binding = self.outbound.binding.clone();
+        binding.provider().embed(self).await
+    }
+
     pub fn generation(&self) -> Result<&Generation> {
         match &self.input {
             #[cfg(test)]
@@ -254,7 +272,7 @@ impl Invocation {
             InvocationInput::ConnectionCheck(request) | InvocationInput::Task(request) => {
                 Ok(request)
             }
-            InvocationInput::ModelList => Err(Error::invalid()),
+            InvocationInput::ModelList | InvocationInput::Embedding(_) => Err(Error::invalid()),
         }
     }
     pub fn authorization(&self) -> Arc<dyn Authorization> {

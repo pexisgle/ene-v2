@@ -55,6 +55,18 @@ pub struct ChatMessage {
     pub text: String,
 }
 #[derive(Clone, Debug, Serialize)]
+pub struct EmbeddingRequest {
+    pub model: String,
+    pub input: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Embedding {
+    pub vectors: Vec<Vec<f32>>,
+    pub input_tokens: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Generation {
     pub(crate) endpoint: String,
     pub(crate) options: Value,
@@ -138,6 +150,9 @@ impl ProviderBinding {
     pub fn policy(&self) -> &Policy {
         &self.policy
     }
+    pub(crate) fn provider(&self) -> Arc<dyn LlmProvider> {
+        self.provider.clone()
+    }
 }
 mod budget;
 mod invocation;
@@ -188,6 +203,9 @@ pub trait LlmProvider: Send + Sync {
         invocation: Invocation,
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>>;
     fn models(&self, invocation: Invocation) -> BoxFuture<'_, Result<Vec<Model>>>;
+    fn embed(&self, _: Invocation) -> BoxFuture<'_, Result<crate::llm::Embedding>> {
+        Box::pin(async { Err(Error::new(ErrorKind::UnsupportedCapability)) })
+    }
 }
 
 #[cfg(test)]

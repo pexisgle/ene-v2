@@ -299,6 +299,15 @@ pub(crate) async fn accept(
     }
 
     let runtime = app.rig()?;
+    // The turn's model input gets a small automatic recall for the accepted
+    // text. It is a best-effort view; a missing index never blocks the turn.
+    if let Ok(core) = app.companion(&companion).await
+        && let Ok(prompt) = app
+            .mind_prompt_with_recall(&companion, &core.mind, &request.text)
+            .await
+    {
+        let _ = runtime.set_mind_prompt(companion.clone(), prompt);
+    }
     if let Err(error) = runtime
         .deliver(companion.clone(), request.text.clone(), request_id.clone())
         .await
@@ -543,6 +552,7 @@ impl HostApplication {
                         ..Default::default()
                     })),
                 );
+                self.notify_mind_work();
             }
             Event::StorageFailed { reason } => {
                 let mut controls = self.0.controls.lock().await;

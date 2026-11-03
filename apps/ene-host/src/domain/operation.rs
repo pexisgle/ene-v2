@@ -8,6 +8,7 @@ pub enum OperationKind {
     ConnectionCheck,
     ModelList,
     Task,
+    Embedding,
 }
 
 pub struct OperationSpec {
@@ -24,13 +25,15 @@ impl OperationKind {
             Self::ConnectionCheck => "connection_check",
             Self::ModelList => "model_list",
             Self::Task => "task",
+            Self::Embedding => "embedding",
         }
     }
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Conversation,
         Self::ConnectionCheck,
         Self::ModelList,
         Self::Task,
+        Self::Embedding,
     ];
     pub const fn spec(self) -> OperationSpec {
         match self {
@@ -57,6 +60,14 @@ impl OperationKind {
                 data: &["task"],
                 timeout: Duration::from_secs(300),
                 output_bytes: 256_000,
+            },
+            Self::Embedding => OperationSpec {
+                // Embeddings are background index work, sent under the task
+                // grant rather than the parent conversation's grant.
+                purpose: GrantPurpose::Task,
+                data: &["task"],
+                timeout: Duration::from_secs(60),
+                output_bytes: 8 * 1024 * 1024,
             },
         }
     }

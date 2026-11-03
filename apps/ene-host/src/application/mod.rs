@@ -3,6 +3,7 @@ mod conversation;
 mod credentials;
 mod generation;
 mod inference;
+pub(crate) mod memory;
 pub(crate) mod mind;
 mod operations;
 mod plugins;
@@ -25,6 +26,11 @@ use std::{
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
+#[cfg(test)]
+pub(crate) type ConsolidationHook = std::sync::Arc<
+    dyn Fn(String) -> futures_util::future::BoxFuture<'static, Result<String, Error>> + Send + Sync,
+>;
+
 pub struct Subscription {
     pub id: String,
     pub receiver: broadcast::Receiver<Notification>,
@@ -63,6 +69,10 @@ struct Inner {
     stops: runtime::MutationExecutor,
     cleanups: TaskTracker,
     cleanup: std::sync::Mutex<credentials::CleanupState>,
+    mind_notify: tokio::sync::Notify,
+    mind_started: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    consolidation_hook: std::sync::OnceLock<ConsolidationHook>,
 }
 #[derive(Clone)]
 pub struct HostApplication(Arc<Inner>);
@@ -91,6 +101,10 @@ impl HostApplication {
             stops: runtime::MutationExecutor::new(8),
             cleanups: TaskTracker::new(),
             cleanup: std::sync::Mutex::new(Default::default()),
+            mind_notify: tokio::sync::Notify::new(),
+            mind_started: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            consolidation_hook: std::sync::OnceLock::new(),
             events: broadcast::channel(256).0,
             boundary: Mutex::new(Boundary {
                 cursor: Cursor {
@@ -102,6 +116,12 @@ impl HostApplication {
             }),
         }))
     }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn set_consolidation_hook(&self, hook: ConsolidationHook) {
+        let _ = self.0.consolidation_hook.set(hook);
+    }
+
     pub(crate) fn begin_shutdown(&self) {
         self.0.plugin_tasks.close();
         self.0.background.close();

@@ -167,24 +167,210 @@ impl Store {
         .await
         .map_err(core_error)
     }
-    pub async fn mind_recall(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mind_search(
         &self,
-        owner: String,
+        caller: String,
         query: String,
+        vector: Option<Vec<f32>>,
+        model: Option<String>,
         limit: usize,
-    ) -> crate::ports::Result<Vec<crate::domain::mind::MemoryRecord>> {
-        self.call(move |db| mind::recall(db, &owner, &query, limit))
+        include_forgotten: bool,
+        since: Option<String>,
+        until: Option<String>,
+        now: String,
+    ) -> crate::ports::Result<memory::SearchResult> {
+        self.call(move |db| {
+            memory::search(
+                db,
+                &caller,
+                &query,
+                vector.as_deref(),
+                model.as_deref(),
+                limit,
+                include_forgotten,
+                since.as_deref(),
+                until.as_deref(),
+                &now,
+            )
+        })
+        .await
+        .map_err(core_error)
+    }
+    pub async fn mind_index_status(
+        &self,
+        companion: String,
+        now: String,
+    ) -> crate::ports::Result<memory::IndexStatus> {
+        self.call(move |db| memory::index_status(db, &companion, &now))
             .await
             .map_err(core_error)
     }
-    pub async fn mind_read(
+    pub async fn mind_record_embedding(
+        &self,
+        companion: String,
+        model: String,
+        tokens: u64,
+        now: String,
+    ) -> crate::ports::Result<()> {
+        self.call(move |db| memory::record_embedding(db, &companion, &model, tokens, &now))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_set_index_state(
+        &self,
+        companion: String,
+        state: String,
+        reason: Option<String>,
+        model: Option<String>,
+        now: String,
+    ) -> crate::ports::Result<()> {
+        self.call(move |db| {
+            memory::set_index_state(
+                db,
+                &companion,
+                &state,
+                reason.as_deref(),
+                model.as_deref(),
+                &now,
+            )
+        })
+        .await
+        .map_err(core_error)
+    }
+    pub async fn mind_consolidation(
+        &self,
+        companion: String,
+        method: String,
+        now: String,
+    ) -> crate::ports::Result<memory::ConsolidationStatus> {
+        self.call(move |db| memory::consolidation_status(db, &companion, &method, &now))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_set_consolidation(
+        &self,
+        companion: String,
+        method: String,
+        state: String,
+        reason: Option<String>,
+        now: String,
+    ) -> crate::ports::Result<()> {
+        self.call(move |db| {
+            memory::set_consolidation_state(
+                db,
+                &companion,
+                &method,
+                &state,
+                reason.as_deref(),
+                &now,
+            )
+        })
+        .await
+        .map_err(core_error)
+    }
+    pub async fn mind_pending_fts(&self, limit: usize) -> crate::ports::Result<Vec<String>> {
+        self.call(move |db| memory::pending_fts(db, limit))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_index_fts(&self, ids: Vec<String>, now: String) -> crate::ports::Result<()> {
+        self.call(move |db| memory::index_fts(db, &ids, &now))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_pending_vectors(
+        &self,
+        limit: usize,
+    ) -> crate::ports::Result<Vec<(String, String, String)>> {
+        self.call(move |db| memory::pending_vectors(db, limit))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_store_vectors(
+        &self,
+        entries: Vec<memory::VectorEntry>,
+        model: String,
+        now: String,
+    ) -> crate::ports::Result<()> {
+        self.call(move |db| memory::store_vectors(db, &entries, &model, &now))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_mark_index_error(
+        &self,
+        ids: Vec<String>,
+        kind: String,
+        reason: String,
+        now: String,
+    ) -> crate::ports::Result<()> {
+        self.call(move |db| memory::mark_index_error(db, &ids, &kind, &reason, &now))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_read_visible(
+        &self,
+        caller: String,
+        id: String,
+    ) -> crate::ports::Result<Option<crate::domain::mind::MemoryRecord>> {
+        self.call(move |db| memory::read_visible(db, &caller, &id))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_recent(
+        &self,
+        owner: String,
+        limit: usize,
+    ) -> crate::ports::Result<Vec<crate::domain::mind::MemoryRecord>> {
+        self.call(move |db| memory::recent(db, &owner, limit))
+            .await
+            .map_err(core_error)
+    }
+    pub async fn mind_control(
         &self,
         owner: String,
         id: String,
-    ) -> crate::ports::Result<Option<crate::domain::mind::MemoryRecord>> {
-        self.call(move |db| mind::read(db, &owner, &id))
+        action: String,
+        now: String,
+    ) -> crate::ports::Result<crate::domain::mind::MemoryRecord> {
+        self.call(move |db| memory::control(db, &owner, &id, &action, &now))
             .await
             .map_err(core_error)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mind_consolidate(
+        &self,
+        owner: String,
+        operation_id: String,
+        request_hash: String,
+        request: crate::domain::mind::MindUpdateRequest,
+        sources: Vec<crate::domain::mind::SourceRef>,
+        through_sequence: u64,
+        method: String,
+        model_calls: u64,
+        input_chars: u64,
+        now: String,
+    ) -> crate::ports::Result<(
+        crate::domain::mind::MindUpdateResult,
+        memory::ConsolidationStatus,
+    )> {
+        self.call(move |db| {
+            memory::consolidate(
+                db,
+                &owner,
+                &operation_id,
+                &request_hash,
+                &request,
+                &sources,
+                through_sequence,
+                &method,
+                model_calls,
+                input_chars,
+                &now,
+            )
+        })
+        .await
+        .map_err(core_error)
     }
     pub async fn mind_update_profile(
         &self,
@@ -208,6 +394,7 @@ pub(crate) fn core_error(error: Error) -> crate::domain::Error {
             kind: ErrorKind::InvalidRequest,
             reason: Some("unknown_reference"),
         },
+        Error::InvalidRequest => CoreError::new(ErrorKind::InvalidRequest),
         _ => CoreError::new(ErrorKind::StorageFailure),
     }
 }

@@ -161,6 +161,57 @@ async fn fetch_models(
 }
 
 pub struct Provider;
+pub async fn embed(input: Invocation) -> Result<crate::llm::Embedding> {
+    let request = input.embedding_request()?.clone();
+    let endpoint = input.connection().endpoint.trim_end_matches('/').to_owned();
+    let transport = crate::llm::AuthorizedTransport::new(
+        std::sync::Arc::new(input),
+        CredentialPlacement::Bearer,
+    )?;
+    let body = serde_json::to_vec(&json!({
+        "model": request.model,
+        "input": request.input,
+        "encoding_format": "float"
+    }))
+    .map_err(|_| Error::invalid())?;
+    let request = http::Request::post(format!("{endpoint}/embeddings"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(bytes::Bytes::from(body))
+        .map_err(|_| Error::invalid())?;
+    let response = transport.send(request).await?;
+    if !response.status().is_success() {
+        return Err(Error::new(ErrorKind::ProviderFailure));
+    }
+    let value: Value = serde_json::from_slice(&response.bytes().await?)
+        .map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
+    let vectors = value["data"]
+        .as_array()
+        .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?
+        .iter()
+        .map(|item| {
+            item["embedding"]
+                .as_array()
+                .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?
+                .iter()
+                .map(|number| {
+                    number
+                        .as_f64()
+                        .map(|number| number as f32)
+                        .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let dimension = vectors.first().map(Vec::len).unwrap_or_default();
+    if vectors.is_empty() || vectors.iter().any(|vector| vector.len() != dimension) {
+        return Err(Error::new(ErrorKind::ExternalFailure));
+    }
+    Ok(crate::llm::Embedding {
+        vectors,
+        input_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or_default(),
+    })
+}
+
 impl LlmProvider for Provider {
     fn policy(&self, c: &Connection) -> Result<Policy> {
         policy(c)
@@ -173,6 +224,12 @@ impl LlmProvider for Provider {
     }
     fn models(&self, i: Invocation) -> futures_util::future::BoxFuture<'_, Result<Vec<Model>>> {
         Box::pin(models(i))
+    }
+    fn embed(
+        &self,
+        i: Invocation,
+    ) -> futures_util::future::BoxFuture<'_, Result<crate::llm::Embedding>> {
+        Box::pin(embed(i))
     }
 }
 

@@ -58,6 +58,11 @@ fn read_row(
     ))
 }
 
+pub(super) fn revision(tx: &Transaction<'_>, companion: &str) -> Result<u64> {
+    let (_, _, revision, _, _) = read_row(tx, companion)?;
+    Ok(revision)
+}
+
 pub(super) fn view(
     db: &mut tokio_rusqlite::rusqlite::Connection,
     companion: &str,
@@ -76,9 +81,8 @@ pub(super) fn view(
     })
 }
 
-fn memory_from_row(row: &tokio_rusqlite::rusqlite::Row<'_>) -> Result<MemoryRecord> {
+pub(super) fn memory_from_row(row: &tokio_rusqlite::rusqlite::Row<'_>) -> Result<MemoryRecord> {
     let sources: String = row.get(7)?;
-    let supersedes: String = row.get(10)?;
     Ok(MemoryRecord {
         id: row.get(0)?,
         owner: row.get(1)?,
@@ -91,8 +95,12 @@ fn memory_from_row(row: &tokio_rusqlite::rusqlite::Row<'_>) -> Result<MemoryReco
         sources: serde_json::from_str(&sources).map_err(Error::Json)?,
         recorded_at: row.get(8)?,
         occurred_at: row.get(9)?,
-        supersedes: serde_json::from_str(&supersedes).map_err(Error::Json)?,
+        related: serde_json::from_str(&row.get::<_, String>(10)?).map_err(Error::Json)?,
+        supersedes: serde_json::from_str(&row.get::<_, String>(11)?).map_err(Error::Json)?,
         superseded_by: Vec::new(),
+        recall_preference: row.get(12)?,
+        created_by: row.get(13)?,
+        audience: row.get(14)?,
     })
 }
 
@@ -116,12 +124,11 @@ fn check_references(tx: &Transaction<'_>, owner: &str, request: &MindUpdateReque
     Ok(())
 }
 
-/// Applies one idempotent mind update. A stale revision, a reference to
-/// another companion's private memory, or a storage failure leaves no partial
-/// change.
+/// Applies one idempotent mind update inside `tx`. The caller owns the
+/// transaction so consolidation can advance its cursor with the same commit.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn update(
-    db: &mut tokio_rusqlite::rusqlite::Connection,
+pub(super) fn apply_tx(
+    tx: &Transaction<'_>,
     owner: &str,
     operation_id: &str,
     request_hash: &str,
@@ -130,8 +137,7 @@ pub(super) fn update(
     actor: &str,
     now: &str,
 ) -> Result<MindUpdateResult> {
-    let tx = db.transaction()?;
-    ensure(&tx, owner, now)?;
+    ensure(tx, owner, now)?;
     if let Some((stored_hash, response)) = tx
         .query_row(
             "SELECT request_hash,response FROM mind_operations WHERE owner=?1 AND operation_id=?2",
@@ -143,15 +149,21 @@ pub(super) fn update(
         if stored_hash != request_hash {
             return Err(Error::IdempotencyConflict);
         }
-        let result = serde_json::from_str(&response).map_err(Error::Json)?;
-        tx.commit()?;
-        return Ok(result);
+        return serde_json::from_str(&response).map_err(Error::Json);
     }
-    let (_, _, revision, mut state, _) = read_row(&tx, owner)?;
+    if actor == "consolidation"
+        && request
+            .state
+            .as_ref()
+            .is_some_and(|state| !state.is_empty())
+    {
+        return Err(Error::InvalidRequest);
+    }
+    let (_, _, revision, mut state, _) = read_row(tx, owner)?;
     if request.expected_revision != revision {
         return Err(Error::RevisionConflict);
     }
-    check_references(&tx, owner, request)?;
+    check_references(tx, owner, request)?;
     let state_changed = request
         .state
         .as_ref()
@@ -164,7 +176,7 @@ pub(super) fn update(
             memories: Vec::new(),
         };
         record(
-            &tx,
+            tx,
             owner,
             operation_id,
             request_hash,
@@ -173,7 +185,6 @@ pub(super) fn update(
             sources,
             now,
         )?;
-        tx.commit()?;
         return Ok(result);
     }
 
@@ -200,6 +211,11 @@ pub(super) fn update(
                 serde_json::to_string(&memory.supersedes)?,
                 actor,
             ],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO mind_index_pending(memory_id,kind,attempts,updated_at) \
+             VALUES (?1,'fts',0,?2),(?1,'vector',0,?2)",
+            params![id, now],
         )?;
         changed.push(ChangedMemory {
             id,
@@ -237,13 +253,38 @@ pub(super) fn update(
         memories: changed,
     };
     record(
-        &tx,
+        tx,
         owner,
         operation_id,
         request_hash,
         &result,
         actor,
         sources,
+        now,
+    )?;
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update(
+    db: &mut tokio_rusqlite::rusqlite::Connection,
+    owner: &str,
+    operation_id: &str,
+    request_hash: &str,
+    request: &MindUpdateRequest,
+    sources: &[SourceRef],
+    actor: &str,
+    now: &str,
+) -> Result<MindUpdateResult> {
+    let tx = db.transaction()?;
+    let result = apply_tx(
+        &tx,
+        owner,
+        operation_id,
+        request_hash,
+        request,
+        sources,
+        actor,
         now,
     )?;
     tx.commit()?;
@@ -285,7 +326,7 @@ fn acquisition_str(acquisition: Acquisition) -> Result<String> {
         .ok_or(Error::CorruptReceipt)
 }
 
-fn like(query: &str) -> String {
+pub(super) fn like(query: &str) -> String {
     let escaped = query
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -297,7 +338,7 @@ fn like(query: &str) -> String {
 /// search: it finds a stored memory for a natural short phrase without a
 /// tokenizer or embeddings. The trigram/semantic search of step 3 replaces it
 /// behind the same recall contract.
-fn search_terms(query: &str) -> Vec<String> {
+pub(super) fn search_terms(query: &str) -> Vec<String> {
     let trimmed = query.trim();
     let mut terms = vec![trimmed.to_owned()];
     let chars = trimmed.chars().collect::<Vec<_>>();
@@ -313,7 +354,7 @@ fn search_terms(query: &str) -> Vec<String> {
     terms
 }
 
-fn superseded_by(
+pub(super) fn superseded_by(
     db: &tokio_rusqlite::rusqlite::Connection,
     owner: &str,
 ) -> Result<HashMap<String, Vec<String>>> {
@@ -332,6 +373,7 @@ fn superseded_by(
     Ok(map)
 }
 
+#[cfg(test)]
 pub(super) fn recall(
     db: &mut tokio_rusqlite::rusqlite::Connection,
     owner: &str,
@@ -340,7 +382,7 @@ pub(super) fn recall(
 ) -> Result<Vec<MemoryRecord>> {
     let terms = search_terms(query);
     let mut sql = String::from(
-        "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,supersedes \
+        "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,audience \
          FROM mind_memories WHERE owner=?1 AND (",
     );
     let mut values: Vec<tokio_rusqlite::rusqlite::types::Value> = vec![owner.to_owned().into()];
@@ -376,6 +418,7 @@ pub(super) fn recall(
     Ok(memories)
 }
 
+#[cfg(test)]
 pub(super) fn read(
     db: &mut tokio_rusqlite::rusqlite::Connection,
     owner: &str,
@@ -383,7 +426,7 @@ pub(super) fn read(
 ) -> Result<Option<MemoryRecord>> {
     let memory = db
         .query_row(
-            "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,supersedes \
+            "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,audience \
              FROM mind_memories WHERE owner=?1 AND id=?2",
             params![owner, id],
             |row| {

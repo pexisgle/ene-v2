@@ -93,7 +93,9 @@ fn assignment(
     match operation {
         OperationKind::Conversation => assignments.companion.as_option(),
         OperationKind::Task => assignments.task.as_option(),
-        OperationKind::ConnectionCheck | OperationKind::ModelList => None,
+        OperationKind::ConnectionCheck | OperationKind::ModelList | OperationKind::Embedding => {
+            None
+        }
     }
 }
 

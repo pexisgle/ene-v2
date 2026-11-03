@@ -40,7 +40,25 @@ message MindState {
   JsonDocument relationships = 3; JsonDocument tendencies = 4;
   JsonDocument concerns = 5; string updated_at = 6;
 }
-message MindView { string companion_id = 1; MindProfile profile = 2; MindState state = 3; }
+message MindIndexStatus {
+  string state = 1; optional string reason = 2;
+  uint64 pending_fts = 3; uint64 pending_vectors = 4;
+  optional string embedding_model = 5; uint64 embedding_calls = 6;
+  uint64 embedding_tokens = 7; string updated_at = 8;
+}
+message MindConsolidationStatus {
+  uint64 last_sequence = 1; string method_revision = 2; string state = 3;
+  optional string reason = 4; uint64 jobs = 5; uint64 model_calls = 6;
+  uint64 input_chars = 7; string updated_at = 8;
+}
+message MindView {
+  string companion_id = 1; MindProfile profile = 2; MindState state = 3;
+  MindIndexStatus index = 4; MindConsolidationStatus consolidation = 5;
+}
+message MemoryControlRequest { string companion_id = 1; string memory_id = 2; string action = 3; }
+message MemoryControlResult {
+  string memory_id = 1; string audience = 2; string recall_preference = 3; uint64 revision = 4;
+}
 message UpdateMindProfileRequest {
   string companion_id = 1; uint64 expected_revision = 2;
   repeated string facets = 3; repeated string examples = 4;
@@ -283,6 +301,7 @@ service HostService {
   rpc UpdateCompanion(UpdateCompanionRequest) returns (Companion);
   rpc GetMind(Id) returns (MindView);
   rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
+  rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
   rpc GetHistory(HistoryRequest) returns (History);
   rpc GetMessage(MessageRequest) returns (Message);
   rpc SendMessage(SendMessageRequest) returns (MessageAcceptance);

@@ -2,6 +2,7 @@
 //! and the host-bound recall/read/update path.
 
 use super::{Boundary, HostApplication, generation::publish};
+use crate::application::inference::EMBEDDING_MODEL;
 use crate::rig::mind::{MindCall, MindCallKind, ReadArgs, RecallArgs};
 use crate::{
     domain::{
@@ -13,7 +14,7 @@ use crate::{
 use ene_rpc as w;
 use serde_json::{Value, json};
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
@@ -21,7 +22,13 @@ fn now() -> String {
 
 /// The wire view of the authored profile and current state. `core` stays on
 /// the companion; the profile table holds the author's extra material.
-fn view(companion: &str, core: &str, stored: StoredMind) -> w::MindView {
+fn view(
+    companion: &str,
+    core: &str,
+    stored: StoredMind,
+    index: crate::infrastructure::sqlite::memory::IndexStatus,
+    consolidation: crate::infrastructure::sqlite::memory::ConsolidationStatus,
+) -> w::MindView {
     let profile = w::MindProfile {
         core: core.into(),
         revision: stored.profile_revision,
@@ -44,13 +51,56 @@ fn view(companion: &str, core: &str, stored: StoredMind) -> w::MindView {
         companion_id: companion.into(),
         profile: profile.into(),
         state: state.into(),
+        index: w::MindIndexStatus {
+            state: index.state,
+            reason: index.reason,
+            pending_fts: index.pending_fts,
+            pending_vectors: index.pending_vectors,
+            embedding_model: index.embedding_model,
+            embedding_calls: index.embedding_calls,
+            embedding_tokens: index.embedding_tokens,
+            updated_at: index.updated_at,
+            ..Default::default()
+        }
+        .into(),
+        consolidation: w::MindConsolidationStatus {
+            last_sequence: consolidation.last_sequence,
+            method_revision: consolidation.method_revision,
+            state: consolidation.state,
+            reason: consolidation.reason,
+            jobs: consolidation.jobs,
+            model_calls: consolidation.model_calls,
+            input_chars: consolidation.input_chars,
+            updated_at: consolidation.updated_at,
+            ..Default::default()
+        }
+        .into(),
         ..Default::default()
     }
+}
+
+pub(crate) struct RecallResult {
+    pub memories: Vec<MemoryRecord>,
+    pub lexical: String,
+    pub semantic: String,
+    pub pending: u64,
+    pub reason: Option<String>,
 }
 
 /// What the model needs to know: authored material, the current mind, and how
 /// to use the three host tools. This is a view; SQLite stays canonical.
 pub(crate) fn compose_prompt(core: &str, stored: &StoredMind) -> String {
+    compose_prompt_with("", core, stored, &[], "unchecked", "unchecked")
+}
+
+pub(crate) fn compose_prompt_with(
+    companion: &str,
+    core: &str,
+    stored: &StoredMind,
+    recalled: &[MemoryRecord],
+    lexical: &str,
+    semantic: &str,
+) -> String {
     let mut out = String::with_capacity(12_000);
     out.push_str(
         "あなたは次の人格設定を持つコンパニオンとして、この会話の相手と話す。\n\
@@ -90,6 +140,33 @@ pub(crate) fn compose_prompt(core: &str, stored: &StoredMind) -> String {
         stored.state_revision
     ));
     render_current_state(&mut out, &stored.state);
+    out.push_str(&format!(
+        "\n[いまの話題で思い出した記憶]\n検索状態: 語句={lexical} 意味={semantic}\n"
+    ));
+    if recalled.is_empty() {
+        out.push_str("該当する記憶はない。想起できていない場合と混同しないため、必要なら mind_recall を使う。\n");
+    } else {
+        for memory in recalled.iter().take(3) {
+            let shared = if memory.owner != companion {
+                "（共有された記憶）"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "- id: {} {} revision {}\n  {}\n",
+                memory.id,
+                shared,
+                memory.revision,
+                memory.content.chars().take(600).collect::<String>()
+            ));
+            if !memory.description.is_empty() {
+                out.push_str(&format!(
+                    "  説明: {}\n",
+                    memory.description.chars().take(300).collect::<String>()
+                ));
+            }
+        }
+    }
     out.push_str(
         "\n[心と記憶の操作]\n\
          - mind_recall: 保存済みの記憶を語句で検索する。必要なときだけ使う。\n\
@@ -187,7 +264,21 @@ impl HostApplication {
             .repository
             .mind_view(companion.clone(), now())
             .await?;
-        Ok(view(&companion, &c.mind, stored))
+        let index = self
+            .0
+            .repository
+            .mind_index_status(companion.clone(), now())
+            .await?;
+        let consolidation = self
+            .0
+            .repository
+            .mind_consolidation(
+                companion.clone(),
+                crate::application::memory::METHOD_REVISION.into(),
+                now(),
+            )
+            .await?;
+        Ok(view(&companion, &c.mind, stored, index, consolidation))
     }
 
     pub(crate) async fn update_mind_profile(
@@ -217,6 +308,7 @@ impl HostApplication {
             .repository
             .mind_view(companion.clone(), now())
             .await?;
+        self.notify_mind_work();
         publish_mind(self, &companion, &c.mind, stored).await
     }
 
@@ -261,6 +353,7 @@ impl HostApplication {
             )
             .await?;
         if result.changed {
+            self.notify_mind_work();
             let stored = self
                 .0
                 .repository
@@ -271,17 +364,87 @@ impl HostApplication {
         Ok(result)
     }
 
+    pub(crate) async fn control_memory(
+        &self,
+        companion: String,
+        memory_id: String,
+        action: String,
+    ) -> Result<MemoryRecord> {
+        crate::domain::validate_id(&companion)?;
+        uuid::Uuid::parse_str(&memory_id).map_err(|_| Error::invalid())?;
+        self.companion(&companion).await?;
+        self.0
+            .repository
+            .mind_control(companion, memory_id, action, now())
+            .await
+    }
+
     pub(crate) async fn mind_recall(
         &self,
         companion: String,
         query: String,
         limit: usize,
-    ) -> Result<Vec<MemoryRecord>> {
-        if query.trim().is_empty() || query.chars().count() > 200 || !(1..=20).contains(&limit) {
+        include_forgotten: bool,
+        since: Option<String>,
+        until: Option<String>,
+    ) -> Result<RecallResult> {
+        if query.trim().is_empty()
+            || query.chars().count() > 200
+            || !(1..=20).contains(&limit)
+            || since.as_deref().is_some_and(|value| value.len() > 64)
+            || until.as_deref().is_some_and(|value| value.len() > 64)
+        {
             return Err(Error::invalid());
         }
         self.companion(&companion).await?;
-        self.0.repository.mind_recall(companion, query, limit).await
+        let embedded = self.embed_task(&companion, vec![query.clone()]).await;
+        let (vector, model, semantic, reason) = match embedded {
+            Ok(embedding) if embedding.vectors.len() == 1 => (
+                Some(embedding.vectors.into_iter().next().unwrap_or_default()),
+                Some(EMBEDDING_MODEL.to_owned()),
+                "ok".to_owned(),
+                None,
+            ),
+            Ok(_) => (
+                None,
+                None,
+                "error".to_owned(),
+                Some("embedding_shape".to_owned()),
+            ),
+            Err(error) => (
+                None,
+                None,
+                match error.kind {
+                    ErrorKind::UnsupportedCapability | ErrorKind::StateConflict => {
+                        "unavailable".to_owned()
+                    }
+                    _ => "error".to_owned(),
+                },
+                error.reason.map(str::to_owned),
+            ),
+        };
+        let result = self
+            .0
+            .repository
+            .mind_search(
+                companion,
+                query,
+                vector,
+                model,
+                limit,
+                include_forgotten,
+                since,
+                until,
+                now(),
+            )
+            .await?;
+        Ok(RecallResult {
+            memories: result.memories,
+            lexical: result.fts.to_owned(),
+            semantic,
+            pending: result.pending,
+            reason: reason.or(result.reason),
+        })
     }
 
     pub(crate) async fn mind_read(
@@ -291,7 +454,7 @@ impl HostApplication {
     ) -> Result<Option<MemoryRecord>> {
         uuid::Uuid::parse_str(&id).map_err(|_| Error::invalid())?;
         self.companion(&companion).await?;
-        self.0.repository.mind_read(companion, id).await
+        self.0.repository.mind_read_visible(companion, id).await
     }
 
     /// The prompt composed at reconnect time from the current stored mind.
@@ -303,17 +466,57 @@ impl HostApplication {
             .await?;
         Ok(compose_prompt(core, &stored))
     }
+
+    /// The prompt for an accepted input: current mind plus a small automatic
+    /// recall. A recall or embedding failure does not fail the turn; the status
+    /// in the prompt says what was not available.
+    pub(crate) async fn mind_prompt_with_recall(
+        &self,
+        companion: &str,
+        core: &str,
+        text: &str,
+    ) -> Result<String> {
+        let stored = self
+            .0
+            .repository
+            .mind_view(companion.to_owned(), now())
+            .await?;
+        let recalled = self
+            .mind_recall(companion.to_owned(), text.to_owned(), 3, false, None, None)
+            .await;
+        let (memories, lexical, semantic) = match recalled {
+            Ok(result) => (result.memories, result.lexical, result.semantic),
+            Err(_) => (Vec::new(), "error".into(), "unavailable".into()),
+        };
+        Ok(compose_prompt_with(
+            companion, core, &stored, &memories, &lexical, &semantic,
+        ))
+    }
 }
 
 /// Publish the committed state and refresh the live model input. Both happen
 /// only after the SQLite commit; a failure here does not roll the mind back.
-async fn publish_mind(
+pub(super) async fn publish_mind(
     app: &HostApplication,
     companion: &str,
     core: &str,
     stored: StoredMind,
 ) -> Result<w::MindView> {
-    let view = view(companion, core, stored.clone());
+    let index = app
+        .0
+        .repository
+        .mind_index_status(companion.to_owned(), now())
+        .await?;
+    let consolidation = app
+        .0
+        .repository
+        .mind_consolidation(
+            companion.to_owned(),
+            crate::application::memory::METHOD_REVISION.into(),
+            now(),
+        )
+        .await?;
+    let view = view(companion, core, stored.clone(), index, consolidation);
     if let Ok(runtime) = app.rig() {
         let prompt = compose_prompt(core, &stored);
         if let Err(error) = runtime.set_mind_prompt(companion.to_owned(), prompt) {
@@ -359,12 +562,21 @@ impl HostApplication {
                         companion,
                         args.query,
                         args.limit.unwrap_or(8).clamp(1, 20) as usize,
+                        args.include_forgotten.unwrap_or(false),
+                        args.since,
+                        args.until,
                     )
                     .await
                 {
-                    Ok(memories) => Ok(json!({
-                        "count": memories.len(),
-                        "memories": memories,
+                    Ok(result) => Ok(json!({
+                        "count": result.memories.len(),
+                        "memories": result.memories,
+                        "search": {
+                            "lexical": result.lexical,
+                            "semantic": result.semantic,
+                            "pending": result.pending,
+                            "reason": result.reason,
+                        }
                     })
                     .to_string()),
                     Err(error) => Err(tool_error(error)),
