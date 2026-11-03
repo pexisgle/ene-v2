@@ -38,7 +38,7 @@ IDはホスト内で安定した不透明な値とする。親、バックエン
 
 `GetMind`は`MindView`を返し、`UpdateMindProfile`は著者プロファイルの追加材料を版検証付きで更新する。核は既存の`UpdateCompanion.mind`で編集する。MindViewはcompanion_id、核と側面・会話例・背景・表現語彙、profile revision、現在の心のrevisionと更新時刻、現在感情（短い説明・対象・理由・表現信号）、関係の理解、経験してきた傾向、気にかけていることを返す。感情・関係・傾向・懸念はキャラクター固有のJSONで、全員共通の数値尺度を強制しない。全私的記憶や内部推論全文を、アバター表示のためだけに送らない。現在状態と特定発話の表現指示を区別する。
 
-MindViewは索引状態（FTS/vectorの処理待ち、埋め込みmodel・呼び出し数・トークン数）と整理状態（last_sequence、last_offset、jobs、model_calls、input_chars、error/unconfigured）も返す。索引・整理が未完了なことと、該当記憶がないことを混同しない。
+MindViewは索引状態（FTS/vectorの処理待ち、埋め込みmodel・呼び出し数・トークン数）と整理状態（last_sequence、next_offset、skipped、jobs、model_calls、input_chars、error/unconfigured）も返す。索引・整理が未完了なことと、該当記憶がないことを混同しない。
 
 `ControlMemory`は所有者だけが記憶の`recall_preference`（forget/remember）と`audience`（share/unshare）を変更できる。忘却は物理削除ではなく通常想起からの除外であり、`include_forgotten`で過去として参照できる。共有記憶は他コンパニオンの想起対象になるが、所有者の私的な入力出所は共有先へ渡さない。共有解除後はcanonicalのaudience再検証で、古い索引から返さない。同じ値への操作はrevisionを増やさない。
 
@@ -76,6 +76,6 @@ RequestViewは質問と権限要求を区別し、対象session/run、request id
 
 ステップ2の実装では、`GetMind` / `UpdateMindProfile`と通知`MindUpdated`を追加し、`mind_companions`の著者プロファイル追加材料と現在の心、`mind_memories`の記憶、`mind_operations`の適用結果をSQLiteへ追加した。記憶と心の正本はSQLite、会話はRigセッションログのままであり、会話全文を複製しない。ステップ1の旧データは削除せず、心の初期状態は既存の`Companion.mind`から読む。
 
-ステップ3の実装では、整理・埋め込みを`purpose=memory, data=["memory"]`のGrantとコンパニオン接続へ分離し、タスク割当・タスクGrantとは共有しない。自動想起はローカルSQLiteの語句検索で配送前に外部埋め込みを待たず、意味検索は`mind_recall`で行う。確定はRigの会話entryの`status=completed`で判定し、処理済み`(last_sequence,last_offset)`の直後から前向きに取得する。長い発言はオフセット分割し、末尾まで処理するまで処理済みにしない。埋め込みはRigのOpenAI wireに認可付きトランスポートを渡し、検索時にmodel・前処理・次元を照合する。共有の公開範囲は本文・説明・appraisal・訂正関係idで、私的な出所は渡さない。`mind_index_pending`・`mind_memories_fts`（FTS5 trigram）・`mind_vectors`（model/dimension/前処理/vector）・`mind_index_status`・`mind_consolidation`を追加し、`ControlMemory`、MindViewの索引/整理状態を追加した。自動整理は確定した会話範囲と処理済み位置を同じSQLiteトランザクションで進め、生成失敗・保存失敗・競合では進めない。FTSとベクトルはRRFで統合し、canonicalの所有者・共有範囲・忘却・時刻で再検証する。埋め込みはタスクGrantで送り、OpenRouter接続の埋め込みは未対応としてsemantic unavailableを返す。
+ステップ3の実装では、整理・埋め込みを`purpose=memory, data=["memory"]`のGrantとコンパニオン接続へ分離し、タスク割当・タスクGrantとは共有しない。自動想起はローカルSQLiteの語句検索で配送前に外部埋め込みを待たず、意味検索は`mind_recall`で行う。確定はRigの会話entryの`status=completed`で判定し、処理済み`(last_sequence,last_offset)`の直後から前向きに取得する。長い発言はnext-offsetで分割し、末尾まで処理するまで処理済みにしない。既適用範囲の再送はadvanced=false。失敗/停止ページは終端skipし、未確定応答では待つ。埋め込みはRigのOpenAI wireに認可付きトランスポートを渡し、検索時にmodel・前処理・次元を照合する。共有の公開範囲は本文・説明・appraisal・訂正関係idで、私的な出所は渡さない。`mind_index_pending`・`mind_memories_fts`（FTS5 trigram）・`mind_vectors`（model/dimension/前処理/vector）・`mind_index_status`・`mind_consolidation`を追加し、`ControlMemory`、MindViewの索引/整理状態を追加した。自動整理は確定した会話範囲と処理済み位置を同じSQLiteトランザクションで進め、生成失敗・保存失敗・競合では進めない。FTSとベクトルはRRFで統合し、canonicalの所有者・共有範囲・忘却・時刻で再検証する。埋め込みはタスクGrantで送り、OpenRouter接続の埋め込みは未対応としてsemantic unavailableを返す。
 
 本書は意味の契約と責務を定める。最終的なフィールド名・タグ・エラーコードは実装時のprotobuf/SDKを正本とし、同じwire仕様を手書き文書へ重複列挙しない。実装した能力だけを広告する。[実装順序](alpha.md)
