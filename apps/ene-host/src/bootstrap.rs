@@ -6,6 +6,7 @@ use crate::{
         sqlite::Store,
     },
 };
+use rig_ecs::prelude::AppToolsExt;
 use std::{error::Error, path::PathBuf};
 pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
     let runtime = Runtime::acquire(&paths::runtime()?)?;
@@ -24,9 +25,7 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
     let app = application(store, runtime.token.clone());
     let rig_dir = state.join("rig");
     runtime::private_directory(&rig_dir)?;
-    let (kernel, events) = crate::rig::Runtime::start(rig_dir)
-        .map_err(|_| "the Rig execution kernel failed to start")?;
-    app.application.attach_rig(kernel, events);
+    attach_kernel(&app, rig_dir)?;
     app.application
         .initialize()
         .await
@@ -37,6 +36,25 @@ pub async fn initialize() -> Result<(Runtime, App), Box<dyn Error>> {
         .map_err(|_| "device initialization failed")?;
     app.application.restore_plugins().await?;
     Ok((runtime, app))
+}
+
+/// Starts the kernel with the host-bound mind tools and the task that answers
+/// them. The kernel still owns turns and tool execution; the host owns the
+/// canonical SQLite store and the input source binding.
+pub(crate) fn attach_kernel(app: &App, rig_dir: PathBuf) -> Result<(), Box<dyn Error>> {
+    let (calls, received) = tokio::sync::mpsc::unbounded_channel();
+    let bridge = std::sync::Arc::new(crate::rig::mind::MindBridge::new(calls));
+    let configure = bridge.clone();
+    let (kernel, events) = crate::rig::Runtime::start_with(rig_dir, move |app| {
+        app.insert_resource((*configure).clone());
+        app.add_tool(crate::rig::mind::MindRecall::new(configure.clone()));
+        app.add_tool(crate::rig::mind::MindRead::new(configure.clone()));
+        app.add_tool(crate::rig::mind::MindUpdate::new(configure));
+    })
+    .map_err(|_| "the Rig execution kernel failed to start")?;
+    crate::application::mind::spawn_mind_tools(app.application.clone(), received);
+    app.application.attach_rig(kernel, events);
+    Ok(())
 }
 
 pub fn application(store: Store, token: String) -> App {

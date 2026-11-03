@@ -11,6 +11,7 @@
 
 mod kernel;
 mod messages;
+pub(crate) mod mind;
 
 use crate::domain::{Error, ErrorKind};
 use ene_rpc as w;
@@ -98,6 +99,13 @@ enum Command {
         companion: String,
         prompt: String,
         model: rig_ecs::model::Connection,
+        mind_tools: bool,
+    },
+    /// Replaces the live model input after a committed mind or profile change.
+    /// It does not stop a running turn or reconnect the model.
+    SetMindPrompt {
+        companion: String,
+        prompt: String,
     },
     Deliver {
         companion: String,
@@ -134,10 +142,21 @@ impl Runtime {
     /// Opens the session directory and starts the kernel thread. The returned
     /// receiver carries what the kernel did; the host consumes it on its
     /// runtime, so it must be drained before the thread fills it.
+    #[cfg(test)]
     pub(crate) fn start(
         directory: std::path::PathBuf,
     ) -> Result<(Self, tokio_mpsc::UnboundedReceiver<Event>), Error> {
         Self::start_inner(directory, None)
+    }
+
+    /// Starts the kernel with app extensions the host registers itself, such as
+    /// the host-bound mind tools. The closure runs on the kernel thread before
+    /// the app finishes.
+    pub(crate) fn start_with(
+        directory: std::path::PathBuf,
+        configure: impl FnOnce(&mut rig_ecs::prelude::App) + Send + 'static,
+    ) -> Result<(Self, tokio_mpsc::UnboundedReceiver<Event>), Error> {
+        Self::start_inner(directory, Some(Box::new(configure)))
     }
 
     /// Test-only: the kernel thread's frame and wake counters.
@@ -214,11 +233,22 @@ impl Runtime {
         companion: String,
         prompt: String,
         model: rig_ecs::model::Connection,
+        mind_tools: bool,
     ) -> Result<(), Error> {
         self.send(Signal::Command(Command::Connect {
             companion,
             prompt,
             model,
+            mind_tools,
+        }))
+    }
+
+    /// Updates the live system prompt from a committed mind revision. The next
+    /// model call in the running turn sees it; the turn is not stopped.
+    pub(crate) fn set_mind_prompt(&self, companion: String, prompt: String) -> Result<(), Error> {
+        self.send(Signal::Command(Command::SetMindPrompt {
+            companion,
+            prompt,
         }))
     }
 
@@ -402,6 +432,7 @@ mod tests {
                         MockStreamEvent::final_response_with_default_usage(),
                     ],
                 ]),
+                false,
             )
             .unwrap();
         runtime
@@ -554,6 +585,7 @@ mod tests {
                 "companion".into(),
                 "簡潔に答える。".into(),
                 connection_of(model),
+                false,
             )
             .unwrap();
         runtime
@@ -649,6 +681,7 @@ mod tests {
                     MockStreamEvent::tool_call("call-1", "hold", json!({})),
                     MockStreamEvent::final_response_with_default_usage(),
                 ]]),
+                false,
             )
             .unwrap();
         runtime
@@ -689,6 +722,90 @@ mod tests {
             .await
             .expect("the kernel stopped")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_mind_prompt_change_reaches_the_next_model_call_without_a_reconnect() {
+        use rig_core::completion::Message as RigMessage;
+        let temp = tempfile::tempdir().unwrap();
+        let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (runtime, mut received) = Runtime::start_test(temp.path().join("rig"), move |app| {
+            app.add_tool(Hold {
+                entered,
+                release: std::sync::Mutex::new(Some(release_rx)),
+            });
+        })
+        .unwrap();
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call("call-1", "hold", json!({})),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("新しい心で答えます。"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let captured = model.clone();
+        runtime
+            .connect(
+                "companion".into(),
+                "古い心".into(),
+                connection_of(model),
+                false,
+            )
+            .unwrap();
+        runtime
+            .deliver("companion".into(), "続けて".into(), "request-1".into())
+            .await
+            .unwrap();
+        loop {
+            if let Event::TurnStarted { .. } = next(&mut received).await {
+                break;
+            }
+        }
+        entered_rx.recv().await.expect("the tool started");
+        runtime
+            .set_mind_prompt("companion".into(), "新しい心".into())
+            .unwrap();
+        // Let the command reach the kernel's next frame while the call waits.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.send(()).unwrap();
+        loop {
+            match next(&mut received).await {
+                Event::TurnFinished { state, .. } => {
+                    assert_eq!(state, "answered");
+                    break;
+                }
+                Event::StorageFailed { reason } | Event::Fatal { reason } => {
+                    panic!("kernel failed: {reason}")
+                }
+                _ => {}
+            }
+        }
+        let requests = captured.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "the prompt change reconnected or retried"
+        );
+        let system = |request: &rig_core::completion::CompletionRequest| {
+            request
+                .chat_history
+                .iter()
+                .find_map(|message| match &**message {
+                    RigMessage::System { content } => Some(content.clone()),
+                    _ => None,
+                })
+        };
+        assert_eq!(system(&requests[0]).as_deref(), Some("古い心"));
+        assert_eq!(
+            system(&requests[1]).as_deref(),
+            Some("新しい心"),
+            "the next model call did not see the committed mind"
+        );
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -831,7 +948,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, mut received) = start(temp.path().join("rig"));
         runtime
-            .connect("companion".into(), "簡潔に答える。".into(), model)
+            .connect("companion".into(), "簡潔に答える。".into(), model, false)
             .unwrap();
         runtime
             .deliver("companion".into(), "ping".into(), "request-1".into())
@@ -882,6 +999,7 @@ mod tests {
                     MockStreamEvent::text("一度目"),
                     MockStreamEvent::final_response_with_default_usage(),
                 ]]),
+                false,
             )
             .unwrap();
         runtime
@@ -908,6 +1026,7 @@ mod tests {
                     MockStreamEvent::text("二度目"),
                     MockStreamEvent::final_response_with_default_usage(),
                 ]]),
+                false,
             )
             .unwrap();
         // Acceptance waits for the log write: an input whose save failed is
@@ -997,6 +1116,7 @@ mod tests {
                     MockStreamEvent::text("x".repeat(limit + 1)),
                     MockStreamEvent::final_response_with_default_usage(),
                 ]]),
+                false,
             )
             .unwrap();
         runtime

@@ -85,6 +85,8 @@ pub fn encode_request(op: &str, mut v: Value) -> Vec<u8> {
         }
         "RegisterCredentials" => encode::<w::CredentialRequest>(v),
         "CheckConnection" => encode::<w::CheckRequest>(v),
+        "GetMind" => encode::<w::Id>(v),
+        "UpdateMindProfile" => encode::<w::UpdateMindProfileRequest>(v),
         "RevokeGrant" | "RevokeCredentials" => encode::<w::Id>(v),
         _ => panic!("unmapped request {op}"),
     }
@@ -103,6 +105,7 @@ pub fn decode_response(op: &str, bytes: &[u8]) -> Value {
         "RegisterCredentials" => decode::<w::CredentialResult>(bytes),
         "CreateGrant" | "UpdateGrant" => decode::<w::GrantResult>(bytes),
         "CheckConnection" => decode::<w::CheckResult>(bytes),
+        "GetMind" | "UpdateMindProfile" => decode::<w::MindView>(bytes),
         "RevokeGrant" | "RevokeCredentials" => decode::<w::Empty>(bytes),
         _ => panic!("unmapped response {op}"),
     }

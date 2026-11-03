@@ -159,6 +159,34 @@ impl w::HostService for HostRpc {
                 .map_err(failure)?,
         )
     }
+    async fn get_mind(
+        &self,
+        _: RequestContext,
+        req: ServiceRequest<'_, w::Id>,
+    ) -> ServiceResult<w::MindView> {
+        Response::ok(
+            self.app
+                .application
+                .get_mind(req.to_owned_message().id)
+                .await
+                .map_err(failure)?,
+        )
+    }
+
+    async fn update_mind_profile(
+        &self,
+        _: RequestContext,
+        req: ServiceRequest<'_, w::UpdateMindProfileRequest>,
+    ) -> ServiceResult<w::MindView> {
+        Response::ok(
+            self.app
+                .application
+                .update_mind_profile(req.to_owned_message())
+                .await
+                .map_err(failure)?,
+        )
+    }
+
     async fn get_history(
         &self,
         _: RequestContext,

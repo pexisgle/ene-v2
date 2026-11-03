@@ -33,6 +33,9 @@ pub struct Controls {
     /// Request keys accepted by this process and not yet finalized. A pending
     /// receipt for one of these belongs to a live request, not a lost one.
     pub inflight: HashSet<String>,
+    /// The accepted input a mind update from this companion may cite. Set when
+    /// the kernel reports the turn's start; the model cannot choose it.
+    pub mind_inputs: BTreeMap<String, crate::domain::mind::SourceRef>,
 }
 
 pub fn publish(

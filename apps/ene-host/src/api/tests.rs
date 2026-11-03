@@ -316,6 +316,14 @@ fn operation(
             body["id"] = json!(id);
             "CheckConnection"
         }
+        ("GET", "Mind") => {
+            body["id"] = json!(id);
+            "GetMind"
+        }
+        ("PATCH", "MindProfile") => {
+            body["companion_id"] = json!(id);
+            "UpdateMindProfile"
+        }
         _ => panic!("unmapped fixture {method} {descriptor}"),
     };
     if let Some(key) = key {
@@ -1637,4 +1645,306 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error["error"]["code"], "unsupported_capability");
     app.application.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mind_profile_is_revisioned_notified_and_persists_across_hosts() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let app = crate::bootstrap::application(store.clone(), "private-token".into());
+    let (status, initial) =
+        mutate(&app, "GET", &format!("Mind/{companion}"), json!(null), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(initial["state"]["revision"], 1);
+    assert_eq!(initial["profile"]["revision"], 1);
+    assert!(!initial["profile"]["core"].as_str().unwrap().is_empty());
+
+    let mut subscription = app.application.subscribe().await;
+    let (status, updated) = mutate(
+        &app,
+        "PATCH",
+        &format!("MindProfile/{companion}"),
+        json!({
+            "expected_revision": 1,
+            "facets": ["静かだがよく見ている"],
+            "examples": ["「なるほど」と短く返す"],
+            "background": ["架空の街で育った"],
+            "expression": ["声を落として話す"]
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["profile"]["revision"], 2);
+    assert_eq!(updated["profile"]["facets"][0], "静かだがよく見ている");
+    assert_eq!(updated["profile"]["core"], initial["profile"]["core"]);
+    let notification = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        subscription.receiver.recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    match notification.event {
+        Some(ene_rpc::notification::Event::MindUpdated(view)) => {
+            assert_eq!(view.state.expect("state").revision, 1);
+            assert_eq!(view.profile.expect("profile").revision, 2);
+        }
+        other => panic!("expected MindUpdated, got {other:?}"),
+    }
+
+    let (status, _) = mutate(
+        &app,
+        "PATCH",
+        &format!("MindProfile/{companion}"),
+        json!({"expected_revision": 1, "facets": ["古い版"]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    drop(app);
+    let restarted = crate::bootstrap::application(store, "private-token".into());
+    let (status, after) = mutate(
+        &restarted,
+        "GET",
+        &format!("Mind/{companion}"),
+        json!(null),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after["profile"]["revision"], 2);
+    assert_eq!(after["profile"]["examples"][0], "「なるほど」と短く返す");
+}
+
+/// A scripted parent requests one real mind update. The host commits it, feeds
+/// the committed state into the same turn's next model call, and notifies the
+/// client; the source is the accepted input, and the author example is not
+/// stored as an experience.
+#[tokio::test]
+async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
+    use rig_core::catalog::Catalog;
+    use rig_core::operation::Completion;
+    use rig_core::serve::ErasedHandler;
+    use rig_core::serve::adapters::ModelAdapter;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+    use rig_ecs::effects::Handler;
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let app = crate::bootstrap::application(store.clone(), "private-token".into());
+    let rig_dir = temp.path().join("rig");
+    std::fs::create_dir_all(&rig_dir).unwrap();
+    crate::bootstrap::attach_kernel(&app, rig_dir).unwrap();
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call(
+                "call-mind",
+                "mind_update",
+                json!({
+                    "expected_revision": 1,
+                    "memories": [{
+                        "content": "ユーザーは柚子が好き",
+                        "description": "好きな果物",
+                        "acquisition": "user_statement",
+                        "sources": []
+                    }],
+                    "state": {
+                        "emotion": {
+                            "description": "少しうれしい",
+                            "target": "ユーザー",
+                            "reason": "好みを話してくれた",
+                            "signals": [{"label":"声がやわらぐ","intensity":0.4}]
+                        },
+                        "relationships": [{
+                            "subject": "ユーザー",
+                            "understanding": "好みを話してくれる"
+                        }]
+                    }
+                }),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("覚えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    let captured = model.clone();
+    app.application.set_test_model(Arc::new(move |_, _| {
+        let spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .expect("builtin catalog")
+            .shared();
+        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
+            spec.reference(),
+            model.clone(),
+        ));
+        Ok(rig_ecs::model::Connection {
+            spec,
+            handler: Handler(handler),
+        })
+    }));
+
+    let (status, saved) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let connection = saved["connections"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("Companion/{companion}"),
+            json!({
+                "revision": 1,
+                "mind": "日本語で、落ち着いて答える。",
+                "model_assignments": {"companion": {"connection_id": connection, "model_id": "deepseek/deepseek-flash"}}
+            }),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "PUT",
+            &format!("Credentials/{connection}"),
+            json!({"secret":"test-only"}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            "Grants",
+            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            Some("mind-grant"),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // The author example is role-play material, not an experience.
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("MindProfile/{companion}"),
+            json!({
+                "expected_revision": 1,
+                "examples": ["「なるほど」と短く返す"],
+                "facets": ["静かだがよく見ている"]
+            }),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let mut subscription = app.application.subscribe().await;
+    let (status, accepted) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"柚子が好きです。覚えておいて。"}),
+        Some("mind-first"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let request_id = accepted["request_id"].as_str().unwrap().to_owned();
+    let (mut mind_updated, answered) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut updated = None;
+            loop {
+                let notification = subscription.receiver.recv().await.unwrap();
+                match notification.event {
+                    Some(ene_rpc::notification::Event::MindUpdated(view)) => updated = Some(view),
+                    Some(ene_rpc::notification::Event::TurnEvent(event))
+                        if event.state == "answered" =>
+                    {
+                        return (updated, event);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("mind turn deadline");
+    let updated = mind_updated.take().expect("MindUpdated");
+    assert_eq!(
+        updated.state.as_option().map(|state| state.revision),
+        Some(2)
+    );
+
+    let requests = captured.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the tool round must make two model calls"
+    );
+    let system = |request: &rig_core::completion::CompletionRequest| {
+        request
+            .chat_history
+            .iter()
+            .find_map(|message| match &**message {
+                rig_core::completion::Message::System { content } => Some(content.clone()),
+                _ => None,
+            })
+    };
+    let first = system(&requests[0]).expect("first system prompt");
+    let second = system(&requests[1]).expect("second system prompt");
+    assert!(first.contains("「なるほど」と短く返す"));
+    assert!(first.contains("revision: 1"));
+    assert!(!first.contains("少しうれしい"));
+    assert!(second.contains("少しうれしい"), "{second}");
+    assert!(second.contains("revision: 2"), "{second}");
+    assert!(second.contains("好みを話してくれる"), "{second}");
+
+    store
+        .run(move |db| {
+            let (content, sources): (String, String) = db.query_row(
+                "SELECT content,sources FROM mind_memories WHERE owner=?1",
+                [companion.clone()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(content, "ユーザーは柚子が好き");
+            let sources: Vec<crate::domain::mind::SourceRef> = serde_json::from_str(&sources)?;
+            assert_eq!(sources[0].kind, crate::domain::mind::SourceKind::Input);
+            assert_eq!(sources[0].id, request_id);
+            assert!(sources[0].entry_id.is_some());
+            let author_examples: i64 = db.query_row(
+                "SELECT COUNT(*) FROM mind_memories WHERE content LIKE '%なるほど%'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(author_examples, 0);
+            let state: String = db.query_row(
+                "SELECT state FROM mind_companions WHERE companion_id=?1",
+                [companion.clone()],
+                |row| row.get(0),
+            )?;
+            assert!(state.contains("少しうれしい"));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(!answered.stream_id.is_empty());
 }

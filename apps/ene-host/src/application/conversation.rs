@@ -281,9 +281,12 @@ pub(crate) async fn accept(
             // The connect must reach the kernel before any later input for
             // this companion, so a concurrent accept cannot deliver first.
             let runtime = app.rig()?;
-            if let Err(error) =
-                runtime.connect(companion.clone(), companion_config.mind.clone(), model)
-            {
+            let prompt = app.mind_prompt(&companion, &companion_config.mind).await?;
+            // The Alpha host supports one mind-enabled parent; it is the first
+            // companion in the stable map. Other parent agents get the harmless
+            // tool only, so they cannot write this companion's private mind.
+            let mind_tools = configuration.companions.keys().next() == Some(&companion);
+            if let Err(error) = runtime.connect(companion.clone(), prompt, model, mind_tools) {
                 let _ = app
                     .0
                     .repository
@@ -479,6 +482,15 @@ impl HostApplication {
                 messages,
             } => {
                 self.character_event(&companion, ene_plugin::CharacterEvent::ConversationStarted);
+                if let Some(request_id) = request_id.as_deref() {
+                    let source = super::mind::input_source(&stream_id, request_id);
+                    self.0
+                        .controls
+                        .lock()
+                        .await
+                        .mind_inputs
+                        .insert(companion.clone(), source);
+                }
                 let mut boundary = self.0.boundary.lock().await;
                 for message in messages {
                     publish(

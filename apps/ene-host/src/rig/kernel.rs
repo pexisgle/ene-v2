@@ -243,7 +243,13 @@ fn apply_commands(world: &mut World) {
                 companion,
                 prompt,
                 model,
-            } => connect(world, companion, prompt, model),
+                mind_tools,
+            } => connect(world, companion, prompt, model, mind_tools),
+            Command::SetMindPrompt { companion, prompt } => {
+                if let Some(entity) = agent_entity(world, &companion) {
+                    world.entity_mut(entity).insert(SystemPrompt(prompt));
+                }
+            }
             Command::Deliver {
                 companion,
                 text,
@@ -318,7 +324,23 @@ fn connect(
     companion: String,
     prompt: String,
     model: rig_ecs::model::Connection,
+    mind_tools: bool,
 ) {
+    // A kernel without the host-bound bridge (such as a test kernel) must not
+    // narrow tool access to tools it does not have.
+    let mind_tools = mind_tools
+        && world
+            .get_resource::<crate::rig::mind::MindBridge>()
+            .is_some();
+    let mind_access = || {
+        ToolAccess::Only(vec![
+            "current_time".into(),
+            "mind_recall".into(),
+            "mind_read".into(),
+            "mind_update".into(),
+        ])
+    };
+    let conversation_access = || ToolAccess::Only(vec!["current_time".into()]);
     match agent_entity(world, &companion) {
         Some(entity) => {
             if world.get::<ActiveTurn>(entity).is_some() {
@@ -327,11 +349,31 @@ fn connect(
                     reason: Some("the model configuration changed".into()),
                 });
             }
+            let access = if mind_tools {
+                mind_access()
+            } else if world
+                .get_resource::<crate::rig::mind::MindBridge>()
+                .is_some_and(|bridge| bridge.bound())
+            {
+                conversation_access()
+            } else {
+                ToolAccess::All
+            };
             world
                 .entity_mut(entity)
-                .insert((SystemPrompt(prompt), model));
+                .insert((SystemPrompt(prompt), model, access));
         }
         None => {
+            let access = if mind_tools {
+                mind_access()
+            } else if world
+                .get_resource::<crate::rig::mind::MindBridge>()
+                .is_some()
+            {
+                conversation_access()
+            } else {
+                ToolAccess::All
+            };
             // A fresh app spawns one agent with a random id; it has no
             // conversation and is not a companion. The first companion
             // replaces it rather than leaving a second parent behind.
@@ -347,10 +389,28 @@ fn connect(
             world.spawn((
                 Name::new("agent"),
                 Agent,
-                AgentId(companion),
+                AgentId(companion.clone()),
                 SystemPrompt(prompt),
                 model,
+                access,
             ));
+        }
+    }
+    if mind_tools {
+        if let Some(bridge) = world.get_resource::<crate::rig::mind::MindBridge>() {
+            bridge.bind(companion.clone());
+        }
+        // Only the bound parent gets the mind tools. Other parent agents keep
+        // the harmless current_time tool.
+        let mut other =
+            world.query_filtered::<(Entity, &AgentId), (With<Agent>, Without<ActiveTurn>)>();
+        let strip = other
+            .iter(world)
+            .filter(|(_, id)| id.0 != companion)
+            .map(|(entity, _)| entity)
+            .collect::<Vec<_>>();
+        for entity in strip {
+            world.entity_mut(entity).insert(conversation_access());
         }
     }
 }

@@ -3,6 +3,7 @@ mod conversation;
 mod credentials;
 mod generation;
 mod inference;
+pub(crate) mod mind;
 mod operations;
 mod plugins;
 mod runtime;
