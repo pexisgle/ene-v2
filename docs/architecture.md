@@ -1,6 +1,6 @@
 # Alphaホスト・アーキテクチャ
 
-状態：採用する設計方針（2026-11-03）。**実装済み機能の一覧ではない。** この文書変更ではRustコード、依存、DB、protobufを変更しない。現行実装との差分と検証の入口は[Alpha計画](alpha.md)、実際の起動方法は[ene-host](../apps/ene-host/README.md)を参照する。
+状態：採用する設計方針（2026-11-03）。**実装済み機能の一覧ではない。** 実装状況と検証の入口は[Alpha計画](alpha.md)、実際の起動方法は[ene-host](../apps/ene-host/README.md)を参照する。
 
 [構想](vision.md)と[機能一覧](features/README.md)を実現するため、旧MVPからホストの中核を検証できるAlphaへ範囲を広げる。旧設計は[履歴](history/mvp-architecture.md)に残す。「長期記憶なし」「作業は一件」「終了後は必ず新規依頼」という旧制約は本設計へ適用しない。
 
