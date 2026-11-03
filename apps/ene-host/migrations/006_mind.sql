@@ -21,6 +21,7 @@ CREATE TABLE mind_memories (
   related TEXT NOT NULL,
   supersedes TEXT NOT NULL,
   recall_preference TEXT NOT NULL,
+  created_by TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX mind_memories_owner ON mind_memories(owner, recorded_at DESC);
@@ -30,6 +31,9 @@ CREATE TABLE mind_operations (
   request_hash TEXT NOT NULL,
   response TEXT NOT NULL,
   revision INTEGER NOT NULL,
+  updated_by TEXT NOT NULL,
+  source TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (owner, operation_id)
 );
+CREATE INDEX mind_operations_request ON mind_operations(owner, request_hash);

@@ -142,6 +142,7 @@ impl crate::ports::Repository for Store {
         request_hash: String,
         request: crate::domain::mind::MindUpdateRequest,
         source: crate::domain::mind::SourceRef,
+        actor: String,
         now: String,
     ) -> futures_util::future::BoxFuture<
         '_,
@@ -156,6 +157,7 @@ impl crate::ports::Repository for Store {
                     &request_hash,
                     &request,
                     &source,
+                    &actor,
                     &now,
                 )
             })

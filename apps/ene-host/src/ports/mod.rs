@@ -63,6 +63,7 @@ pub trait Repository: Send + Sync {
     /// One idempotent transaction for memories, current state and the
     /// operation record. A stale revision or a missing reference changes
     /// nothing.
+    #[allow(clippy::too_many_arguments)]
     fn mind_update(
         &self,
         owner: String,
@@ -70,6 +71,7 @@ pub trait Repository: Send + Sync {
         request_hash: String,
         request: crate::domain::mind::MindUpdateRequest,
         source: crate::domain::mind::SourceRef,
+        actor: String,
         now: String,
     ) -> BoxFuture<'_, Result<crate::domain::mind::MindUpdateResult>>;
     fn mind_recall(

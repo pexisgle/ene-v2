@@ -95,6 +95,7 @@ fn memory_from_row(row: &tokio_rusqlite::rusqlite::Row<'_>) -> Result<MemoryReco
         supersedes: serde_json::from_str(&supersedes).map_err(Error::Json)?,
         superseded_by: Vec::new(),
         recall_preference: row.get(12)?,
+        created_by: row.get(13)?,
     })
 }
 
@@ -121,6 +122,7 @@ fn check_references(tx: &Transaction<'_>, owner: &str, request: &MindUpdateReque
 /// Applies one idempotent mind update. A stale revision, a reference to
 /// another companion's private memory, or a storage failure leaves no partial
 /// change.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn update(
     db: &mut tokio_rusqlite::rusqlite::Connection,
     owner: &str,
@@ -128,6 +130,7 @@ pub(super) fn update(
     request_hash: &str,
     request: &MindUpdateRequest,
     source: &SourceRef,
+    actor: &str,
     now: &str,
 ) -> Result<MindUpdateResult> {
     let tx = db.transaction()?;
@@ -143,6 +146,21 @@ pub(super) fn update(
         if stored_hash != request_hash {
             return Err(Error::IdempotencyConflict);
         }
+        let result = serde_json::from_str(&response).map_err(Error::Json)?;
+        tx.commit()?;
+        return Ok(result);
+    }
+    // The same request from the same turn may arrive under a new operation id
+    // after a lost tool result; its content and input source are stable, so
+    // return the applied result instead of applying it twice.
+    if let Some((response,)) = tx
+        .query_row(
+            "SELECT response FROM mind_operations WHERE owner=?1 AND request_hash=?2 LIMIT 1",
+            params![owner, request_hash],
+            |row| Ok((row.get::<_, String>(0)?,)),
+        )
+        .optional()?
+    {
         let result = serde_json::from_str(&response).map_err(Error::Json)?;
         tx.commit()?;
         return Ok(result);
@@ -163,7 +181,16 @@ pub(super) fn update(
             changed: false,
             memories: Vec::new(),
         };
-        record(&tx, owner, operation_id, request_hash, &result, now)?;
+        record(
+            &tx,
+            owner,
+            operation_id,
+            request_hash,
+            &result,
+            actor,
+            source,
+            now,
+        )?;
         tx.commit()?;
         return Ok(result);
     }
@@ -175,8 +202,8 @@ pub(super) fn update(
         sources.extend(memory.sources.iter().cloned());
         tx.execute(
             "INSERT INTO mind_memories \
-             (id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,updated_at) \
-             VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9,?10,?11,'normal',?8)",
+             (id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,updated_at) \
+             VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9,?10,?11,'normal',?12,?8)",
             params![
                 id,
                 owner,
@@ -189,6 +216,7 @@ pub(super) fn update(
                 memory.occurred_at,
                 "[]",
                 serde_json::to_string(&memory.supersedes)?,
+                actor,
             ],
         )?;
         changed.push(ChangedMemory {
@@ -226,28 +254,42 @@ pub(super) fn update(
         changed: true,
         memories: changed,
     };
-    record(&tx, owner, operation_id, request_hash, &result, now)?;
+    record(
+        &tx,
+        owner,
+        operation_id,
+        request_hash,
+        &result,
+        actor,
+        source,
+        now,
+    )?;
     tx.commit()?;
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record(
     tx: &Transaction<'_>,
     owner: &str,
     operation_id: &str,
     request_hash: &str,
     result: &MindUpdateResult,
+    actor: &str,
+    source: &SourceRef,
     now: &str,
 ) -> Result<()> {
     tx.execute(
         "INSERT INTO mind_operations \
-         (owner,operation_id,request_hash,response,revision,updated_at) VALUES (?1,?2,?3,?4,?5,?6)",
+         (owner,operation_id,request_hash,response,revision,updated_by,source,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             owner,
             operation_id,
             request_hash,
             serde_json::to_string(result)?,
             result.revision as i64,
+            actor,
+            serde_json::to_string(source)?,
             now
         ],
     )?;
@@ -320,7 +362,7 @@ pub(super) fn recall(
     let terms = search_terms(query);
     let mut sql = String::from(
         "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference \
-         FROM mind_memories WHERE owner=?1 AND (",
+         ,created_by FROM mind_memories WHERE owner=?1 AND (",
     );
     let mut values: Vec<tokio_rusqlite::rusqlite::types::Value> = vec![owner.to_owned().into()];
     for (index, term) in terms.iter().enumerate() {
@@ -363,7 +405,7 @@ pub(super) fn read(
     let memory = db
         .query_row(
             "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference \
-             FROM mind_memories WHERE owner=?1 AND id=?2",
+             ,created_by FROM mind_memories WHERE owner=?1 AND id=?2",
             params![owner, id],
             |row| {
                 memory_from_row(row).map_err(|error| match error {
@@ -475,6 +517,7 @@ mod tests {
                     "hash-1",
                     &request(1, vec![memory("柚子が好き")]),
                     &source(),
+                    "parent",
                     "2026-01-01T00:00:00Z",
                 )?;
                 let two = update(
@@ -484,6 +527,7 @@ mod tests {
                     "hash-1",
                     &request(1, vec![memory("柚子が好き")]),
                     &source(),
+                    "parent",
                     "2026-01-01T00:00:01Z",
                 )?;
                 Ok((one, two))
@@ -508,6 +552,7 @@ mod tests {
                     "hash-2",
                     &request(1, Vec::new()),
                     &source(),
+                    "parent",
                     "2026-01-01T00:00:02Z",
                 );
                 assert!(matches!(different, Err(Error::IdempotencyConflict)));
@@ -530,6 +575,7 @@ mod tests {
                         "h",
                         &request(9, vec![memory("x")]),
                         &source(),
+                        "parent",
                         "now",
                     ),
                     Err(Error::RevisionConflict)
@@ -544,6 +590,7 @@ mod tests {
                         "h2",
                         &request(1, vec![foreign]),
                         &source(),
+                        "parent",
                         "now",
                     ),
                     Err(Error::UnknownReference)
@@ -556,6 +603,7 @@ mod tests {
                     "h3",
                     &request(1, vec![memory("a private")]),
                     &source(),
+                    "parent",
                     "now",
                 )?;
                 let id: String =
@@ -572,6 +620,7 @@ mod tests {
                         "h4",
                         &request(1, vec![stolen]),
                         &source(),
+                        "parent",
                         "now",
                     ),
                     Err(Error::UnknownReference)
@@ -610,6 +659,7 @@ mod tests {
                     "h",
                     &request(1, Vec::new()),
                     &source(),
+                    "parent",
                     "now",
                 )?;
                 let second = update(
@@ -619,6 +669,7 @@ mod tests {
                     "h",
                     &request(1, Vec::new()),
                     &source(),
+                    "parent",
                     "later",
                 )?;
                 Ok((first, second))
@@ -648,7 +699,9 @@ mod tests {
                 )?;
                 let mut request = request(1, vec![memory("rollback")]);
                 request.state = Some(state_change());
-                assert!(update(db, "a", "op-1", "h", &request, &source(), "now").is_err());
+                assert!(
+                    update(db, "a", "op-1", "h", &request, &source(), "parent", "now").is_err()
+                );
                 db.execute_batch("DROP TRIGGER fail_memory;")?;
                 let stored = view(db, "a", "now")?;
                 assert_eq!(stored.state_revision, 1);
@@ -674,6 +727,7 @@ mod tests {
                     "h1",
                     &request(1, vec![memory("柚子が好き")]),
                     &source(),
+                    "parent",
                     "2026-01-01T00:00:00Z",
                 )?;
                 let old_id = old.memories[0].id.clone();
@@ -687,6 +741,7 @@ mod tests {
                     "h2",
                     &request(2, vec![correction]),
                     &source(),
+                    "parent",
                     "2026-01-01T00:00:01Z",
                 )?;
                 Ok((old_id, new.memories[0].id.clone()))
@@ -696,6 +751,7 @@ mod tests {
         store
             .run(move |db| {
                 let old = read(db, "a", &old_id)?.expect("old memory");
+                assert_eq!(old.created_by, "parent");
                 assert_eq!(old.superseded_by, vec![new_id.clone()]);
                 let new = read(db, "a", &new_id)?.expect("new memory");
                 assert_eq!(new.supersedes, vec![old_id.clone()]);
@@ -721,6 +777,7 @@ mod tests {
                     "h1",
                     &request_a,
                     &source(),
+                    "parent",
                     "2026-01-01T00:00:00Z",
                 )?;
                 update(
@@ -730,6 +787,7 @@ mod tests {
                     "h2",
                     &request(1, vec![memory("柚子はbの秘密")]),
                     &source(),
+                    "parent",
                     "2026-01-01T00:00:01Z",
                 )?;
                 let found = recall(db, "a", "柚子", 10)?;
@@ -764,6 +822,7 @@ mod tests {
                     "h",
                     &request(1, vec![memory("一緒に山へ行った")]),
                     &source(),
+                    "parent",
                     "now",
                 )?;
                 let (revision, stored) = update_profile(db, "a", 1, &profile_for_write, "now")?;

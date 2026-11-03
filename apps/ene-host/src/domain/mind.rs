@@ -96,6 +96,7 @@ pub struct MemoryRecord {
     #[serde(default)]
     pub superseded_by: Vec<String>,
     pub recall_preference: String,
+    pub created_by: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
