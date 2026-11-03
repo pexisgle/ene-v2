@@ -282,6 +282,23 @@ fn apply_commands(world: &mut World) {
                 };
                 let _ = reply.send(result);
             }
+            Command::HistoryAfter {
+                companion,
+                after,
+                limit,
+                reply,
+            } => {
+                let result = match agent_entity(world, &companion) {
+                    Some(entity) => world
+                        .get::<Conversation>(entity)
+                        .map(|conversation| {
+                            messages::history_after(conversation, &companion, after, limit)
+                        })
+                        .unwrap_or_default(),
+                    None => w::History::default(),
+                };
+                let _ = reply.send(Ok(result));
+            }
             Command::Message {
                 companion,
                 id,

@@ -59,15 +59,17 @@ pub fn evaluate(
         "provider_unavailable"
     } else if policy.is_some_and(|p| p.requires_credentials) && !state.credential_present {
         "credential_missing"
-    } else if matches!(operation, OperationKind::Conversation | OperationKind::Task)
-        && !configuration
-            .companions
-            .get(companion)
-            .and_then(|c| assignment(&c.model_assignments, operation))
-            .is_some_and(|assignment| {
-                assignment.connection_id == connection.id
-                    && validate_model_id(&assignment.model_id).is_ok()
-            })
+    } else if matches!(
+        operation,
+        OperationKind::Conversation | OperationKind::Task | OperationKind::Consolidation
+    ) && !configuration
+        .companions
+        .get(companion)
+        .and_then(|c| assignment(&c.model_assignments, operation))
+        .is_some_and(|assignment| {
+            assignment.connection_id == connection.id
+                && validate_model_id(&assignment.model_id).is_ok()
+        })
     {
         "model_unset"
     } else {
@@ -91,7 +93,9 @@ fn assignment(
     operation: OperationKind,
 ) -> Option<&ModelAssignment> {
     match operation {
-        OperationKind::Conversation => assignments.companion.as_option(),
+        OperationKind::Conversation | OperationKind::Consolidation => {
+            assignments.companion.as_option()
+        }
         OperationKind::Task => assignments.task.as_option(),
         OperationKind::ConnectionCheck | OperationKind::ModelList | OperationKind::Embedding => {
             None
@@ -290,6 +294,59 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn memory_purpose_is_not_authorized_by_a_task_grant() {
+        let mut c = configuration();
+        let connection = ProviderConnection {
+            id: "p".into(),
+            kind: "llm".into(),
+            adapter: "test".into(),
+            endpoint: "https://gateway.test".into(),
+            ..Default::default()
+        };
+        c.settings.connections.push(connection.clone());
+        let policy = Policy {
+            revision: "v1".into(),
+            fingerprint: json!({}),
+            destinations: vec!["https://gateway.test".into()],
+            requires_credentials: false,
+            environment_variable: None,
+        };
+        let mut task = c.grants[0].clone();
+        task.purpose = GrantPurpose::Task;
+        task.data_kinds = vec!["task".into()];
+        c.grants = vec![task];
+        assert!(!allowed(
+            &c,
+            "c",
+            &connection,
+            "memory",
+            &["memory"],
+            &policy
+        ));
+        let mut memory = c.grants[0].clone();
+        memory.purpose = GrantPurpose::Memory;
+        memory.data_kinds = vec!["memory".into()];
+        c.grants = vec![memory];
+        assert!(allowed(
+            &c,
+            "c",
+            &connection,
+            "memory",
+            &["memory"],
+            &policy
+        ));
+        assert!(!allowed(&c, "c", &connection, "task", &["task"], &policy));
+        assert_eq!(
+            OperationKind::Embedding.spec().purpose,
+            GrantPurpose::Memory
+        );
+        assert_eq!(
+            OperationKind::Consolidation.spec().purpose,
+            GrantPurpose::Memory
+        );
+    }
+
     #[test]
     fn task_inference_requires_the_task_assignment() {
         let mut c = configuration();

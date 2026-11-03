@@ -229,6 +229,37 @@ pub(super) fn history(
     })
 }
 
+fn page_after(all: Vec<w::Message>, companion: &str, after: u64, limit: usize) -> w::History {
+    let items = all
+        .into_iter()
+        .filter(|message| message.sequence > after)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next_cursor = (items.len() == limit)
+        .then(|| items.last().map(|message| message.sequence))
+        .flatten()
+        .map(|sequence| format!("{sequence}:{companion}"));
+    w::History {
+        items,
+        next_cursor,
+        ..Default::default()
+    }
+}
+
+pub(super) fn history_after(
+    conversation: &Conversation,
+    companion: &str,
+    after: u64,
+    limit: usize,
+) -> w::History {
+    page_after(
+        visible_messages(conversation, companion),
+        companion,
+        after,
+        limit,
+    )
+}
+
 pub(super) fn message(
     conversation: &Conversation,
     companion: &str,
@@ -277,4 +308,30 @@ pub(super) fn has_request(conversation: &Conversation, request_id: &str) -> bool
 /// conversation.
 pub(super) fn request_entry(conversation: &Conversation, start: MessageId) -> Option<EntryRef<'_>> {
     conversation.request(start)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(sequence: u64) -> w::Message {
+        w::Message {
+            id: format!("m{sequence}"),
+            sequence,
+            text: format!("message-{sequence}"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn forward_pages_continue_after_the_last_page_without_skipping() {
+        let all = (1..=70).map(message).collect::<Vec<_>>();
+        let first = page_after(all.clone(), "c", 0, 64);
+        assert_eq!(first.items.len(), 64);
+        let last = first.items.last().unwrap().sequence;
+        let rest = page_after(all, "c", last, 64);
+        assert_eq!(rest.items.len(), 6);
+        assert_eq!(rest.items.first().unwrap().sequence, last + 1);
+        assert_eq!(rest.items.last().unwrap().text, "message-70");
+    }
 }

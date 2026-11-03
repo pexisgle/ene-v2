@@ -49,7 +49,7 @@ message MindIndexStatus {
 message MindConsolidationStatus {
   uint64 last_sequence = 1; string method_revision = 2; string state = 3;
   optional string reason = 4; uint64 jobs = 5; uint64 model_calls = 6;
-  uint64 input_chars = 7; string updated_at = 8;
+  uint64 input_chars = 7; string updated_at = 8; uint64 last_offset = 9;
 }
 message MindView {
   string companion_id = 1; MindProfile profile = 2; MindState state = 3;

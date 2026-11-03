@@ -203,10 +203,32 @@ pub(super) fn apply_tx(
         let id = uuid::Uuid::new_v4().to_string();
         let mut attached = sources.to_vec();
         attached.extend(memory.sources.iter().cloned());
+        let forgotten_basis = memory
+            .supersedes
+            .iter()
+            .chain(attached.iter().filter_map(|source| {
+                (source.kind == SourceKind::Memory).then_some(&source.id)
+            }))
+            .any(|target| {
+                tx.query_row(
+                    "SELECT recall_preference='forgotten' FROM mind_memories WHERE owner=?1 AND id=?2",
+                    params![owner, target],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .unwrap_or(false)
+            });
+        let recall_preference = if forgotten_basis {
+            "forgotten"
+        } else {
+            "normal"
+        };
         tx.execute(
             "INSERT INTO mind_memories \
              (id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,updated_at) \
-             VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9,?10,?11,'normal',?12,?8)",
+             VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?8)",
             params![
                 id,
                 owner,
@@ -219,6 +241,7 @@ pub(super) fn apply_tx(
                 memory.occurred_at,
                 "[]",
                 serde_json::to_string(&memory.supersedes)?,
+                recall_preference,
                 actor,
             ],
         )?;

@@ -1982,7 +1982,7 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     let app = bootstrap::application(store.clone(), "private-token".into());
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
-    bootstrap::attach_kernel(&app, rig_dir).unwrap();
+    bootstrap::attach_kernel(&app, rig_dir.clone()).unwrap();
     let model = MockCompletionModel::from_stream_turns([
         vec![
             MockStreamEvent::text("楽しかったですね。"),
@@ -1993,7 +1993,6 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
             MockStreamEvent::final_response_with_default_usage(),
         ],
     ]);
-    let captured = model.clone();
     app.application.set_test_model(Arc::new(move |_, _| {
         let spec = Catalog::builtin()
             .resolve("deepseek/deepseek-flash")
@@ -2059,12 +2058,25 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
         StatusCode::OK
     );
     app.application.set_consolidation_hook(Arc::new(|prompt| {
-        assert!(prompt.contains("一緒に柚子ジャムを作った"), "batch prompt");
         assert!(prompt.contains("confirmed_entries"));
-        Box::pin(async {
-            Ok(r#"{"memories":[{"content":"一緒に柚子ジャムを作った経験","description":"共に作った思い出","appraisal":"楽しかった","acquisition":"direct_experience"}],"reason":"shared experience"}"#.to_owned())
+        assert!(prompt.contains("author_material"));
+        Box::pin(async move {
+            if prompt.contains("一緒に柚子ジャムを作った") {
+                Ok(r#"{"memories":[{"content":"一緒に柚子ジャムを作った経験","description":"共に作った思い出","appraisal":"楽しかった","acquisition":"direct_experience"}],"reason":"shared experience"}"#.to_owned())
+            } else {
+                // The second turn is a paraphrase; the test does not need a
+                // second memory, and an explicit no-change must advance the
+                // cursor without inventing one.
+                Ok(r#"{"memories":[],"reason":"no_change"}"#.to_owned())
+            }
         })
     }));
+    let long_prompt = app
+        .application
+        .mind_prompt_with_recall(&companion, "静かな助手", &"あ".repeat(300), "long-input")
+        .await
+        .unwrap();
+    assert!(long_prompt.contains("いまの話題で思い出した記憶"));
     app.application.start_mind_worker();
     let mut subscription = app.application.subscribe().await;
     let (status, _) = mutate(
@@ -2129,20 +2141,19 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     .await;
     assert_eq!(status, StatusCode::OK);
     wait_for_answered(&mut subscription).await;
-    let requests = captured.requests();
-    assert!(requests.len() >= 2);
-    let second = &requests[1];
-    let system = second
-        .chat_history
-        .iter()
-        .find_map(|message| match &**message {
-            rig_core::completion::Message::System { content } => Some(content.clone()),
-            _ => None,
-        })
-        .expect("second system prompt");
+    let log_path = rig_dir.join("logs").join(format!("{companion}.jsonl"));
+    let raw = std::fs::read_to_string(&log_path).unwrap();
+    let prompts = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value["type"] == "state" && value["key"] == "rig_ecs::agent::SystemPrompt")
+        .filter_map(|value| value["value"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
     assert!(
-        system.contains("一緒に柚子ジャムを作った経験"),
-        "automatic recall missing from {system}"
+        prompts
+            .iter()
+            .any(|prompt| prompt.contains("一緒に柚子ジャムを作った経験")),
+        "automatic recall missing from the model input: {prompts:?}"
     );
     app.application.stop().await.unwrap();
 }

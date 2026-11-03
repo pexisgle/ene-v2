@@ -37,7 +37,7 @@ impl InvocationFixture {
                 InvocationInput::ConnectionCheck(self.request.expect("check fixture generation"))
             }
             OperationKind::ModelList => InvocationInput::ModelList,
-            OperationKind::Task => {
+            OperationKind::Task | OperationKind::Consolidation => {
                 InvocationInput::Task(self.request.expect("task fixture generation"))
             }
             OperationKind::Embedding => InvocationInput::Embedding(EmbeddingRequest {

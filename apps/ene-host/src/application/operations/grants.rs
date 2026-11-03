@@ -36,15 +36,15 @@ pub async fn post_grant(
         return Err(Error::new(ErrorKind::RevisionConflict));
     }
     if request.kind != "data_transfer"
-        || !["conversation", "connection_check", "task"].contains(&request.purpose.as_str())
+        || !["conversation", "connection_check", "task", "memory"]
+            .contains(&request.purpose.as_str())
         || request
             .destinations
             .iter()
             .any(|d| !policy.destinations.contains(d))
-        || request
-            .data_kinds
-            .iter()
-            .any(|d| !["conversation", "metadata", "test_input", "task"].contains(&d.as_str()))
+        || request.data_kinds.iter().any(|d| {
+            !["conversation", "metadata", "test_input", "task", "memory"].contains(&d.as_str())
+        })
         || request.destinations.is_empty()
         || request.data_kinds.is_empty()
     {
@@ -138,10 +138,9 @@ pub async fn patch_grant(
     }
     if let Some(data) = request.data_kinds.into_option() {
         let data = data.values;
-        if data
-            .iter()
-            .any(|d| !["conversation", "metadata", "test_input", "task"].contains(&d.as_str()))
-        {
+        if data.iter().any(|d| {
+            !["conversation", "metadata", "test_input", "task", "memory"].contains(&d.as_str())
+        }) {
             return Err(Error::invalid());
         }
         g.data_kinds = data;

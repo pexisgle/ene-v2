@@ -15,6 +15,12 @@ const MAX_TASK_TOKENS: u64 = 8192;
 /// The one embedding model the built-in OpenAI adapter knows how to price and
 /// store. Its version is part of the vector index key.
 pub(crate) const EMBEDDING_MODEL: &str = "text-embedding-3-small";
+/// The structured output of a host memory call. The finish reason is kept so
+/// a truncated reply is not parsed as a valid no-change decision.
+pub(crate) struct InferenceOutput {
+    pub text: String,
+    pub finish: String,
+}
 const MAX_EMBEDDING_INPUTS: usize = 32;
 const MAX_EMBEDDING_CHARS: usize = 16_000;
 
@@ -64,9 +70,35 @@ impl HostApplication {
         request: InferenceRequest,
         cancel: CancellationToken,
     ) -> Result<String, Error> {
+        self.infer(request, cancel, false)
+            .await
+            .map(|output| output.text)
+    }
+
+    /// Memory consolidation is its own host purpose: it uses the companion's
+    /// configured connection and a memory grant, not the task assignment.
+    pub(crate) async fn infer_memory(
+        &self,
+        request: InferenceRequest,
+        cancel: CancellationToken,
+    ) -> Result<InferenceOutput, Error> {
+        self.infer(request, cancel, true).await
+    }
+
+    async fn infer(
+        &self,
+        request: InferenceRequest,
+        cancel: CancellationToken,
+        memory: bool,
+    ) -> Result<InferenceOutput, Error> {
         if request.messages.is_empty() {
             return Err(Error::invalid());
         }
+        let operation = if memory {
+            OperationKind::Consolidation
+        } else {
+            OperationKind::Task
+        };
         let max_tokens = request.max_tokens.clamp(1, MAX_TASK_TOKENS);
         let id = Uuid::new_v4().to_string();
         let mut controls = self.0.controls.lock().await;
@@ -78,13 +110,14 @@ impl HostApplication {
             .companions
             .get(&request.companion_id)
             .ok_or_else(Error::invalid)?;
-        // Tasks use the dedicated assignment; falling back to the companion
-        // model would silently widen what the user configured.
-        let assignment = companion
-            .model_assignments
-            .task
-            .as_option()
-            .ok_or_else(model_unset)?;
+        // Plugin tasks use the task slot; memory processing uses the
+        // companion connection under a separate memory purpose and grant.
+        let assignment = if memory {
+            companion.model_assignments.companion.as_option()
+        } else {
+            companion.model_assignments.task.as_option()
+        }
+        .ok_or_else(model_unset)?;
         let connection =
             rules::connection(&configuration, &assignment.connection_id).ok_or_else(model_unset)?;
         let context = authorize(
@@ -93,7 +126,7 @@ impl HostApplication {
             &controls,
             &request.companion_id,
             &connection,
-            OperationKind::Task,
+            operation,
         )?;
         let messages = request
             .messages
@@ -120,7 +153,7 @@ impl HostApplication {
             request.companion_id.clone(),
             &connection,
             &context,
-            OperationKind::Task,
+            operation,
         );
         let mut cancelled = receiver.clone();
         let sender = controls
@@ -150,10 +183,11 @@ impl HostApplication {
             InvocationInput::Task(generation),
             receiver,
         );
-        let output_bytes = OperationKind::Task.spec().output_bytes;
+        let output_bytes = operation.spec().output_bytes;
         let work = async move {
             let mut stream = input.generate().await?;
             let mut text = String::new();
+            let mut finish = String::new();
             while let Some(event) = stream.next().await {
                 match event? {
                     Event::Delta(delta) => {
@@ -162,12 +196,15 @@ impl HostApplication {
                         }
                         text.push_str(&delta);
                     }
-                    Event::Finished(_) => break,
+                    Event::Finished(reason) => {
+                        finish = reason;
+                        break;
+                    }
                 }
             }
-            Ok(text)
+            Ok(InferenceOutput { text, finish })
         };
-        let result = execute(self, OperationKind::Task, &mut cancelled, work).await;
+        let result = execute(self, operation, &mut cancelled, work).await;
         forward.abort();
         result
     }
@@ -177,7 +214,7 @@ impl HostApplication {
     /// Embed index text under the companion's task assignment and task grant.
     /// The index stores the model and dimension with each vector; a different
     /// adapter or model must not share that space.
-    pub(crate) async fn embed_task(
+    pub(crate) async fn embed_memory(
         &self,
         companion_id: &str,
         input: Vec<String>,
@@ -202,7 +239,7 @@ impl HostApplication {
             .ok_or_else(Error::invalid)?;
         let assignment = companion
             .model_assignments
-            .task
+            .companion
             .as_option()
             .ok_or_else(model_unset)?;
         let connection =

@@ -65,6 +65,7 @@ fn view(
         .into(),
         consolidation: w::MindConsolidationStatus {
             last_sequence: consolidation.last_sequence,
+            last_offset: consolidation.last_offset,
             method_revision: consolidation.method_revision,
             state: consolidation.state,
             reason: consolidation.reason,
@@ -77,6 +78,14 @@ fn view(
         .into(),
         ..Default::default()
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveRecall {
+    pub request_id: String,
+    pub memories: Vec<MemoryRecord>,
+    pub lexical: String,
+    pub reason: Option<String>,
 }
 
 pub(crate) struct RecallResult {
@@ -379,6 +388,73 @@ impl HostApplication {
             .await
     }
 
+    async fn mind_recall_lexical(
+        &self,
+        companion: String,
+        mut query: String,
+        limit: usize,
+    ) -> Result<RecallResult> {
+        // The automatic path is local SQLite only. It must not wait on an
+        // embedding provider before the input can be delivered. The query is
+        // bounded explicitly and the truncation is visible in the result.
+        let mut reason = None;
+        let length = query.chars().count();
+        if length > 4000 {
+            query = query.chars().take(4000).collect();
+            reason = Some("query_truncated".to_owned());
+        }
+        if query.trim().is_empty() {
+            return Err(Error::invalid());
+        }
+        self.companion(&companion).await?;
+        let result = self
+            .0
+            .repository
+            .mind_search(
+                companion,
+                query,
+                None,
+                None,
+                limit,
+                false,
+                None,
+                None,
+                now(),
+            )
+            .await?;
+        Ok(RecallResult {
+            memories: result.memories,
+            lexical: result.fts.to_owned(),
+            semantic: "not_requested".into(),
+            pending: result.pending,
+            reason: reason.or(result.reason),
+        })
+    }
+
+    fn set_active_recall(&self, companion: &str, recall: ActiveRecall) {
+        if let Ok(mut cache) = self.0.active_recall.lock() {
+            cache.insert(companion.to_owned(), recall);
+        }
+    }
+
+    pub(crate) fn clear_active_recall(&self, companion: &str, request_id: &str) {
+        if let Ok(mut cache) = self.0.active_recall.lock()
+            && cache
+                .get(companion)
+                .is_some_and(|recall| recall.request_id == request_id)
+        {
+            cache.remove(companion);
+        }
+    }
+
+    fn active_recall(&self, companion: &str) -> Option<ActiveRecall> {
+        self.0
+            .active_recall
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(companion).cloned())
+    }
+
     pub(crate) async fn mind_recall(
         &self,
         companion: String,
@@ -389,7 +465,7 @@ impl HostApplication {
         until: Option<String>,
     ) -> Result<RecallResult> {
         if query.trim().is_empty()
-            || query.chars().count() > 200
+            || query.chars().count() > 2000
             || !(1..=20).contains(&limit)
             || since.as_deref().is_some_and(|value| value.len() > 64)
             || until.as_deref().is_some_and(|value| value.len() > 64)
@@ -397,7 +473,7 @@ impl HostApplication {
             return Err(Error::invalid());
         }
         self.companion(&companion).await?;
-        let embedded = self.embed_task(&companion, vec![query.clone()]).await;
+        let embedded = self.embed_memory(&companion, vec![query.clone()]).await;
         let (vector, model, semantic, reason) = match embedded {
             Ok(embedding) if embedding.vectors.len() == 1 => (
                 Some(embedding.vectors.into_iter().next().unwrap_or_default()),
@@ -475,21 +551,46 @@ impl HostApplication {
         companion: &str,
         core: &str,
         text: &str,
+        request_id: &str,
     ) -> Result<String> {
+        let recall = self
+            .mind_recall_lexical(companion.to_owned(), text.to_owned(), 3)
+            .await;
+        let (memories, lexical, reason) = match recall {
+            Ok(result) => (result.memories, result.lexical, result.reason),
+            Err(_) => (
+                Vec::new(),
+                "error".to_owned(),
+                Some("lexical_error".to_owned()),
+            ),
+        };
+        self.set_active_recall(
+            companion,
+            ActiveRecall {
+                request_id: request_id.to_owned(),
+                memories: memories.clone(),
+                lexical: lexical.clone(),
+                reason: reason.clone(),
+            },
+        );
+        // Read the mind after the recall so a concurrent mind update is not
+        // overwritten by an older snapshot.
         let stored = self
             .0
             .repository
             .mind_view(companion.to_owned(), now())
             .await?;
-        let recalled = self
-            .mind_recall(companion.to_owned(), text.to_owned(), 3, false, None, None)
-            .await;
-        let (memories, lexical, semantic) = match recalled {
-            Ok(result) => (result.memories, result.lexical, result.semantic),
-            Err(_) => (Vec::new(), "error".into(), "unavailable".into()),
+        let lexical = match &reason {
+            Some(reason) => format!("{lexical}({reason})"),
+            None => lexical,
         };
         Ok(compose_prompt_with(
-            companion, core, &stored, &memories, &lexical, &semantic,
+            companion,
+            core,
+            &stored,
+            &memories,
+            &lexical,
+            "lexical_only",
         ))
     }
 }
@@ -518,7 +619,25 @@ pub(super) async fn publish_mind(
         .await?;
     let view = view(companion, core, stored.clone(), index, consolidation);
     if let Ok(runtime) = app.rig() {
-        let prompt = compose_prompt(core, &stored);
+        let active = app.active_recall(companion);
+        let lexical = active
+            .as_ref()
+            .map(|recall| match &recall.reason {
+                Some(reason) => format!("{}({reason})", recall.lexical),
+                None => recall.lexical.clone(),
+            })
+            .unwrap_or_else(|| "idle".into());
+        let prompt = compose_prompt_with(
+            companion,
+            core,
+            &stored,
+            active
+                .as_ref()
+                .map(|recall| recall.memories.as_slice())
+                .unwrap_or_default(),
+            &lexical,
+            "lexical_only",
+        );
         if let Err(error) = runtime.set_mind_prompt(companion.to_owned(), prompt) {
             // The next connect composes from SQLite; the update is not rolled
             // back for a missing kernel.

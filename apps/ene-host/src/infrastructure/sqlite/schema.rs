@@ -24,6 +24,9 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
         M::up(include_str!("../../../migrations/006_mind.sql")),
         M::up(include_str!("../../../migrations/007_memory_index.sql")),
         M::up(include_str!("../../../migrations/008_memory_revision.sql")),
+        M::up(include_str!(
+            "../../../migrations/009_consolidation_cursor_offset.sql"
+        )),
     ])
 }
 fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {

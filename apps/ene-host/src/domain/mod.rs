@@ -92,6 +92,7 @@ pub enum GrantPurpose {
     Conversation,
     ConnectionCheck,
     Task,
+    Memory,
 }
 impl GrantPurpose {
     pub fn as_str(self) -> &'static str {
@@ -99,6 +100,7 @@ impl GrantPurpose {
             Self::Conversation => "conversation",
             Self::ConnectionCheck => "connection_check",
             Self::Task => "task",
+            Self::Memory => "memory",
         }
     }
     pub fn parse(value: &str) -> Result<Self, Error> {
@@ -106,6 +108,7 @@ impl GrantPurpose {
             "conversation" => Ok(Self::Conversation),
             "connection_check" => Ok(Self::ConnectionCheck),
             "task" => Ok(Self::Task),
+            "memory" => Ok(Self::Memory),
             _ => Err(Error::new(ErrorKind::UnsupportedCapability)),
         }
     }

@@ -71,6 +71,8 @@ struct Inner {
     cleanup: std::sync::Mutex<credentials::CleanupState>,
     mind_notify: tokio::sync::Notify,
     mind_started: std::sync::atomic::AtomicBool,
+    active_recall:
+        std::sync::Mutex<std::collections::HashMap<String, crate::application::mind::ActiveRecall>>,
     #[cfg(test)]
     consolidation_hook: std::sync::OnceLock<ConsolidationHook>,
 }
@@ -103,6 +105,7 @@ impl HostApplication {
             cleanup: std::sync::Mutex::new(Default::default()),
             mind_notify: tokio::sync::Notify::new(),
             mind_started: std::sync::atomic::AtomicBool::new(false),
+            active_recall: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
             consolidation_hook: std::sync::OnceLock::new(),
             events: broadcast::channel(256).0,

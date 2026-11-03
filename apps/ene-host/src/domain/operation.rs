@@ -8,6 +8,7 @@ pub enum OperationKind {
     ConnectionCheck,
     ModelList,
     Task,
+    Consolidation,
     Embedding,
 }
 
@@ -25,14 +26,16 @@ impl OperationKind {
             Self::ConnectionCheck => "connection_check",
             Self::ModelList => "model_list",
             Self::Task => "task",
+            Self::Consolidation => "consolidation",
             Self::Embedding => "embedding",
         }
     }
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Conversation,
         Self::ConnectionCheck,
         Self::ModelList,
         Self::Task,
+        Self::Consolidation,
         Self::Embedding,
     ];
     pub const fn spec(self) -> OperationSpec {
@@ -61,11 +64,19 @@ impl OperationKind {
                 timeout: Duration::from_secs(300),
                 output_bytes: 256_000,
             },
+            Self::Consolidation => OperationSpec {
+                // Memory processing has its own consent scope: the memory
+                // grant, not the task grant used by plugins.
+                purpose: GrantPurpose::Memory,
+                data: &["memory"],
+                timeout: Duration::from_secs(300),
+                output_bytes: 256_000,
+            },
             Self::Embedding => OperationSpec {
-                // Embeddings are background index work, sent under the task
-                // grant rather than the parent conversation's grant.
-                purpose: GrantPurpose::Task,
-                data: &["task"],
+                // Embeddings are memory index work: memory purpose, never the
+                // task grant.
+                purpose: GrantPurpose::Memory,
+                data: &["memory"],
                 timeout: Duration::from_secs(60),
                 output_bytes: 8 * 1024 * 1024,
             },

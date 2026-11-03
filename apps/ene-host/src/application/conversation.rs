@@ -303,7 +303,7 @@ pub(crate) async fn accept(
     // text. It is a best-effort view; a missing index never blocks the turn.
     if let Ok(core) = app.companion(&companion).await
         && let Ok(prompt) = app
-            .mind_prompt_with_recall(&companion, &core.mind, &request.text)
+            .mind_prompt_with_recall(&companion, &core.mind, &request.text, &request_id)
             .await
     {
         let _ = runtime.set_mind_prompt(companion.clone(), prompt);
@@ -546,13 +546,16 @@ impl HostApplication {
                         companion_id: companion.clone(),
                         stream_id,
                         state: state.into(),
-                        request_id,
+                        request_id: request_id.clone(),
                         message_id,
                         failure: failure.into(),
                         ..Default::default()
                     })),
                 );
                 self.notify_mind_work();
+                if let Some(request_id) = request_id.as_deref() {
+                    self.clear_active_recall(&companion, request_id);
+                }
             }
             Event::StorageFailed { reason } => {
                 let mut controls = self.0.controls.lock().await;

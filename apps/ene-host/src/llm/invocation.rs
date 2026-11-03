@@ -133,7 +133,8 @@ impl Outbound {
                     }
                     OperationKind::Conversation
                     | OperationKind::ConnectionCheck
-                    | OperationKind::Task => {
+                    | OperationKind::Task
+                    | OperationKind::Consolidation => {
                         *request.method() == http::Method::POST
                             && (path == format!("{base_path}/chat/completions")
                                 || path == format!("{base_path}/responses"))

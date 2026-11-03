@@ -23,6 +23,7 @@ pub(crate) struct IndexStatus {
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct ConsolidationStatus {
     pub last_sequence: u64,
+    pub last_offset: u64,
     pub method_revision: String,
     pub state: String,
     pub reason: Option<String>,
@@ -42,8 +43,14 @@ pub(crate) struct SearchResult {
 pub(crate) struct VectorEntry {
     pub memory_id: String,
     pub model: String,
+    pub preprocess: String,
     pub vector: Vec<f32>,
 }
+
+/// The input preprocessing contract for the built-in embedding capability.
+/// It is stored with every vector and required when a vector is searched, so
+/// a model change or a preprocessing change cannot silently share a space.
+pub(crate) const TEXT_PREPROCESS: &str = "text-v1";
 
 pub(super) fn ensure_index(tx: &Transaction<'_>, companion: &str, now: &str) -> Result<()> {
     tx.execute(
@@ -60,8 +67,8 @@ pub(super) fn ensure_consolidation(
     now: &str,
 ) -> Result<()> {
     tx.execute(
-        "INSERT OR IGNORE INTO mind_consolidation(companion_id,last_sequence,method_revision,state,updated_at) \
-         VALUES (?1,0,?2,'idle',?3)",
+        "INSERT OR IGNORE INTO mind_consolidation(companion_id,last_sequence,last_offset,method_revision,state,updated_at) \
+         VALUES (?1,0,0,?2,'idle',?3)",
         params![companion, method, now],
     )?;
     Ok(())
@@ -155,7 +162,7 @@ pub(super) fn consolidation_status(
 
 fn read_consolidation(tx: &Transaction<'_>, companion: &str) -> Result<ConsolidationStatus> {
     Ok(tx.query_row(
-        "SELECT last_sequence,method_revision,state,reason,jobs,model_calls,input_chars,updated_at \
+        "SELECT last_sequence,method_revision,state,reason,jobs,model_calls,input_chars,updated_at,last_offset \
          FROM mind_consolidation WHERE companion_id=?1",
         [companion],
         |row| {
@@ -168,6 +175,7 @@ fn read_consolidation(tx: &Transaction<'_>, companion: &str) -> Result<Consolida
                 model_calls: row.get::<_, i64>(5)? as u64,
                 input_chars: row.get::<_, i64>(6)? as u64,
                 updated_at: row.get(7)?,
+                last_offset: row.get::<_, i64>(8)? as u64,
             })
         },
     )?)
@@ -278,9 +286,9 @@ pub(super) fn store_vectors(
         }
         tx.execute(
             "INSERT INTO mind_vectors(memory_id,model,dimension,preprocess,vector,updated_at) \
-             VALUES (?1,?2,?3,'text-v1',?4,?5) \
-             ON CONFLICT(memory_id) DO UPDATE SET model=excluded.model,dimension=excluded.dimension,vector=excluded.vector,updated_at=excluded.updated_at",
-            params![entry.memory_id, entry.model, entry.vector.len() as i64, bytes, now],
+             VALUES (?1,?2,?3,?4,?5,?6) \
+             ON CONFLICT(memory_id) DO UPDATE SET model=excluded.model,dimension=excluded.dimension,preprocess=excluded.preprocess,vector=excluded.vector,updated_at=excluded.updated_at",
+            params![entry.memory_id, entry.model, entry.vector.len() as i64, entry.preprocess, bytes, now],
         )?;
         tx.execute(
             "DELETE FROM mind_index_pending WHERE memory_id=?1 AND kind='vector'",
@@ -435,11 +443,13 @@ fn vector_ids(
     until: Option<&str>,
 ) -> Result<Vec<String>> {
     let (visible, mut values) = visible_sql(caller, include_forgotten, since, until);
+    let model_placeholder = values.len() + 1;
+    let preprocess_placeholder = values.len() + 2;
     values.push(model.to_owned().into());
+    values.push(TEXT_PREPROCESS.to_owned().into());
     let sql = format!(
         "SELECT v.memory_id,v.vector FROM mind_vectors v JOIN mind_memories m ON m.id=v.memory_id \
-         WHERE v.model=?{} AND {visible}",
-        values.len()
+         WHERE v.model=?{model_placeholder} AND v.preprocess=?{preprocess_placeholder} AND {visible}"
     );
     let mut statement = db.prepare(&sql)?;
     let rows = statement
@@ -531,7 +541,7 @@ pub(super) fn search(
 }
 
 fn hydrate(tx: &Transaction<'_>, caller: &str, ids: &[String]) -> Result<Vec<MemoryRecord>> {
-    let superseded = mind::superseded_by(tx, caller)?;
+    let mut correction_maps = std::collections::HashMap::new();
     let mut memories = Vec::new();
     for id in ids {
         let row = tx
@@ -547,6 +557,13 @@ fn hydrate(tx: &Transaction<'_>, caller: &str, ids: &[String]) -> Result<Vec<Mem
             .optional()?;
         let Some(mut memory) = row else {
             continue;
+        };
+        let superseded = if let Some(map) = correction_maps.get(&memory.owner) {
+            map
+        } else {
+            let map = mind::superseded_by(tx, &memory.owner)?;
+            correction_maps.insert(memory.owner.clone(), map);
+            correction_maps.get(&memory.owner).expect("inserted")
         };
         memory.superseded_by = superseded.get(id).cloned().unwrap_or_default();
         if memory.owner != caller {
@@ -573,20 +590,6 @@ pub(super) fn read_visible(
     let memory = hydrate(&tx, caller, &[id.to_owned()])?.into_iter().next();
     tx.commit()?;
     Ok(memory)
-}
-
-pub(super) fn recent(db: &mut Connection, owner: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
-    let mut statement = db.prepare(
-        "SELECT id FROM mind_memories WHERE owner=?1 ORDER BY recorded_at DESC,id LIMIT ?2",
-    )?;
-    let ids = statement
-        .query_map(params![owner, limit as i64], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    drop(statement);
-    let tx = db.transaction()?;
-    let memories = hydrate(&tx, owner, &ids)?;
-    tx.commit()?;
-    Ok(memories)
 }
 
 pub(super) fn control(
@@ -653,6 +656,7 @@ pub(super) fn consolidate(
     request: &MindUpdateRequest,
     sources: &[SourceRef],
     through_sequence: u64,
+    through_offset: u64,
     method: &str,
     model_calls: u64,
     input_chars: u64,
@@ -661,7 +665,7 @@ pub(super) fn consolidate(
     let tx = db.transaction()?;
     ensure_consolidation(&tx, owner, method, now)?;
     let status = read_consolidation(&tx, owner)?;
-    if status.last_sequence >= through_sequence {
+    if (status.last_sequence, status.last_offset) >= (through_sequence, through_offset) {
         let existing = tx
             .query_row(
                 "SELECT response FROM mind_operations WHERE owner=?1 AND operation_id=?2",
@@ -694,10 +698,10 @@ pub(super) fn consolidate(
         now,
     )?;
     tx.execute(
-        "UPDATE mind_consolidation SET last_sequence=?2,method_revision=?3,state='idle',reason=NULL, \
-         jobs=jobs+1,model_calls=model_calls+?4,input_chars=input_chars+?5,updated_at=?6 \
+        "UPDATE mind_consolidation SET last_sequence=?2,last_offset=?3,method_revision=?4,state='idle',reason=NULL, \
+         jobs=jobs+1,model_calls=model_calls+?5,input_chars=input_chars+?6,updated_at=?7 \
          WHERE companion_id=?1",
-        params![owner, through_sequence as i64, method, model_calls as i64, input_chars as i64, now],
+        params![owner, through_sequence as i64, through_offset as i64, method, model_calls as i64, input_chars as i64, now],
     )?;
     let status = read_consolidation(&tx, owner)?;
     tx.commit()?;
@@ -780,6 +784,7 @@ mod tests {
                     .map(|(index, (memory_id, _, _))| VectorEntry {
                         memory_id,
                         model: "test-model".into(),
+                        preprocess: TEXT_PREPROCESS.into(),
                         vector: if index == 0 {
                             vec![1.0, 0.0]
                         } else {
@@ -970,6 +975,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_forgotten_basis_does_not_become_a_normal_memory_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("m.db")).await.unwrap();
+        let id = seed(&store, "a", "柚子ジャムを作った").await;
+        store
+            .run(move |db| {
+                control(db, "a", &id, "forget", "now")?;
+                let mut new = memory("柚子ジャムを作った日の記録");
+                new.supersedes = vec![id.clone()];
+                let (result, _) = consolidate(
+                    db,
+                    "a",
+                    "forgotten-basis",
+                    "hf",
+                    &request(2, vec![new]),
+                    &[source(SourceKind::Input, "input-f")],
+                    10,
+                    0,
+                    METHOD_REVISION,
+                    1,
+                    10,
+                    "now",
+                )?;
+                assert!(result.changed);
+                let preference: String = db.query_row(
+                    "SELECT recall_preference FROM mind_memories WHERE supersedes LIKE ?1",
+                    [format!("%{id}%")],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(preference, "forgotten");
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_shared_memory_keeps_its_owner_correction_relation_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("m.db")).await.unwrap();
+        store
+            .run(|db| {
+                let first = mind::update(
+                    db,
+                    "a",
+                    "first",
+                    "h1",
+                    &request(1, vec![memory("相手は柚子が好き")]),
+                    &[source(SourceKind::Input, "in1")],
+                    "parent",
+                    "now",
+                )?
+                .memories[0]
+                    .id
+                    .clone();
+                let mut corrected = memory("相手はりんごが好き");
+                corrected.supersedes = vec![first.clone()];
+                let second = mind::update(
+                    db,
+                    "a",
+                    "second",
+                    "h2",
+                    &request(2, vec![corrected]),
+                    &[source(SourceKind::Input, "in2")],
+                    "parent",
+                    "now",
+                )?
+                .memories[0]
+                    .id
+                    .clone();
+                control(db, "a", &first, "share", "now")?;
+                let shared = search(db, "b", "柚子", None, None, 10, false, None, None, "now")?;
+                let memory = shared
+                    .memories
+                    .iter()
+                    .find(|memory| memory.id == first)
+                    .expect("shared");
+                assert_eq!(memory.superseded_by, vec![second.clone()]);
+                assert!(read_visible(db, "b", &second)?.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_consolidation_cursor_can_advance_inside_a_long_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("m.db")).await.unwrap();
+        store
+            .run(|db| {
+                let (_, status) = consolidate(
+                    db,
+                    "a",
+                    "partial-5",
+                    "h5",
+                    &request(1, Vec::new()),
+                    &[source(SourceKind::Input, "part")],
+                    1,
+                    5,
+                    METHOD_REVISION,
+                    1,
+                    5,
+                    "now",
+                )?;
+                assert_eq!(status.last_offset, 5);
+                let (_, status) = consolidate(
+                    db,
+                    "a",
+                    "partial-10",
+                    "h10",
+                    &request(1, Vec::new()),
+                    &[source(SourceKind::Input, "part")],
+                    1,
+                    10,
+                    METHOD_REVISION,
+                    1,
+                    5,
+                    "now",
+                )?;
+                assert_eq!((status.last_sequence, status.last_offset), (1, 10));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn consolidation_advances_the_cursor_in_the_same_transaction() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("m.db")).await.unwrap();
@@ -1011,6 +1144,7 @@ mod tests {
                     &request,
                     &sources,
                     10,
+                    0,
                     METHOD_REVISION,
                     1,
                     120,
@@ -1027,6 +1161,7 @@ mod tests {
                     &request,
                     &sources,
                     10,
+                    0,
                     METHOD_REVISION,
                     1,
                     120,
@@ -1067,6 +1202,7 @@ mod tests {
                     &forbidden,
                     &[source(SourceKind::Input, "input-1")],
                     5,
+                    0,
                     METHOD_REVISION,
                     1,
                     10,
@@ -1081,6 +1217,7 @@ mod tests {
                     &request(9, vec![memory("古い版")]),
                     &[source(SourceKind::Input, "input-2")],
                     6,
+                    0,
                     METHOD_REVISION,
                     1,
                     10,

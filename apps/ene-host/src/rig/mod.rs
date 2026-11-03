@@ -118,6 +118,12 @@ enum Command {
         limit: usize,
         reply: oneshot::Sender<Result<w::History, Error>>,
     },
+    HistoryAfter {
+        companion: String,
+        after: u64,
+        limit: usize,
+        reply: oneshot::Sender<Result<w::History, Error>>,
+    },
     Message {
         companion: String,
         id: String,
@@ -266,6 +272,21 @@ impl Runtime {
         self.query(|reply| Command::History {
             companion,
             cursor,
+            limit,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn history_after(
+        &self,
+        companion: String,
+        after: u64,
+        limit: usize,
+    ) -> Result<w::History, Error> {
+        self.query(|reply| Command::HistoryAfter {
+            companion,
+            after,
             limit,
             reply,
         })

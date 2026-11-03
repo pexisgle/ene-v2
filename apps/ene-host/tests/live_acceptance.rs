@@ -93,6 +93,34 @@ struct GrantSetup<'a> {
     purpose: &'a str,
 }
 
+async fn official_grant(client: &w::HostServiceClient<HttpClient>, setup: GrantSetup<'_>) {
+    grant(client, setup).await;
+}
+
+async fn insert_distractors(path: &Path, companion: &str) {
+    let db = tokio_rusqlite::Connection::open(path).await.unwrap();
+    let owner = companion.to_owned();
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    db.call(move |db| -> std::result::Result<(), tokio_rusqlite::rusqlite::Error> {
+        for (content, description) in [
+            ("りんごを買った", "果物の買い物"),
+            ("静かなカフェで本を読んだ", "一人の時間"),
+        ] {
+            db.execute(
+                "INSERT INTO mind_memories(id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,updated_at,audience) \
+                 VALUES (?1,?2,1,?3,?4,'','direct_experience','[]',?5,NULL,'[]','[]','normal','test_fixture',?5,'private')",
+                tokio_rusqlite::rusqlite::params![uuid::Uuid::new_v4().to_string(), owner, content, description, now],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    db.close().await.unwrap();
+}
+
 async fn grant(client: &w::HostServiceClient<HttpClient>, setup: GrantSetup<'_>) {
     client
         .create_grant_with_options(
@@ -134,6 +162,7 @@ async fn send_turn(
         .subscribe(w::Empty::default())
         .await
         .expect("subscribe");
+    let accept_start = std::time::Instant::now();
     let accepted = client
         .send_message_with_options(
             w::SendMessageRequest {
@@ -148,9 +177,11 @@ async fn send_turn(
         .expect("send")
         .into_owned();
     println!(
-        "[live] accepted key={key} request_id={}",
-        accepted.request_id
+        "[live] accepted key={key} request_id={} accept_elapsed_ms={}",
+        accepted.request_id,
+        accept_start.elapsed().as_millis()
     );
+    let response_start = std::time::Instant::now();
     let mut turn = Turn {
         deltas: Vec::new(),
         created: Vec::new(),
@@ -176,7 +207,13 @@ async fn send_turn(
                     turn.minds.push(*view);
                 }
                 Some(w::notification::Event::TurnEvent(event)) => match event.state.as_str() {
-                    "answered" => return,
+                    "answered" => {
+                        println!(
+                            "[live] answered key={key} first_response_elapsed_ms={}",
+                            response_start.elapsed().as_millis()
+                        );
+                        return;
+                    }
                     "stopped" | "failed" => {
                         panic!("turn ended {}: {:?}", event.state, event.failure)
                     }
@@ -1482,20 +1519,6 @@ async fn automatic_memory_acceptance_through_the_host() {
         },
     )
     .await;
-    grant(
-        &client,
-        GrantSetup {
-            key: "auto-task",
-            companion: &companion.id,
-            connection: &connection,
-            settings_revision: settings.revision,
-            provider_revision: &openai.revision,
-            destinations: &destinations,
-            data_kinds: &["task"],
-            purpose: "task",
-        },
-    )
-    .await;
     client
         .update_companion_with_options(
             w::UpdateCompanionRequest {
@@ -1513,23 +1536,12 @@ async fn automatic_memory_acceptance_through_the_host() {
                     ..Default::default()
                 }
                 .into(),
-                task_assignment: w::AssignmentPatch {
-                    change: Some(w::assignment_patch::Change::Set(Box::new(
-                        w::ModelAssignment {
-                            connection_id: connection.clone(),
-                            model_id: "gpt-6-luna".into(),
-                            ..Default::default()
-                        },
-                    ))),
-                    ..Default::default()
-                }
-                .into(),
                 ..Default::default()
             },
             call_options(),
         )
         .await
-        .expect("companion with task model");
+        .expect("companion with memory-capable model");
     let first = send_turn(
         &client,
         &companion.id,
@@ -1541,6 +1553,63 @@ async fn automatic_memory_acceptance_through_the_host() {
         "[auto] parent answer: {}",
         first.created.last().cloned().unwrap_or_default()
     );
+    // No memory grant yet: the memory purpose must be refused, and the worker
+    // must record the failure without calling a provider or advancing the
+    // cursor. Creating the grant then resumes the same pending batch.
+    let failure_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let failure = loop {
+        let status = client
+            .get_mind_with_options(
+                w::Id {
+                    id: companion.id.clone(),
+                    ..Default::default()
+                },
+                call_options(),
+            )
+            .await
+            .expect("mind while failing")
+            .into_owned()
+            .consolidation
+            .as_option()
+            .cloned()
+            .unwrap_or_default();
+        if status.state == "error" || status.state == "unconfigured" {
+            break status;
+        }
+        assert!(
+            tokio::time::Instant::now() < failure_deadline,
+            "the missing memory grant did not produce an observable failure: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    println!(
+        "[auto] pre-grant failure state={} reason={:?} jobs={} last={}",
+        failure.state, failure.reason, failure.jobs, failure.last_sequence
+    );
+    assert_eq!(failure.jobs, 0);
+    assert_eq!(failure.last_sequence, 0);
+    official_grant(
+        &client,
+        GrantSetup {
+            key: "auto-memory",
+            companion: &companion.id,
+            connection: &connection,
+            settings_revision: settings.revision,
+            provider_revision: &openai.revision,
+            destinations: &destinations,
+            data_kinds: &["memory"],
+            purpose: "memory",
+        },
+    )
+    .await;
+    // A new confirmed input resumes the failed batch; it is not a 5s retry.
+    let _resume = send_turn(
+        &client,
+        &companion.id,
+        "ジャムの思い出をもう一度聞かせて。今日も保存ツールを使わずに、普通に返して。",
+        "auto-resume",
+    )
+    .await;
     let parent_log = log_with_turn(&state, &companion.id).await;
     assert!(
         parent_log
@@ -1582,8 +1651,9 @@ async fn automatic_memory_acceptance_through_the_host() {
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
-                "no automatic memory within 90s: state={} last={} pending={} rows={}",
+                "no automatic memory within 90s: state={} jobs={} last={} pending={} rows={}",
                 status.state,
+                status.jobs,
                 status.last_sequence,
                 mind.index
                     .as_option()
@@ -1673,6 +1743,7 @@ async fn automatic_memory_acceptance_through_the_host() {
         &root2.join("state/host.sqlite3"),
     )
     .await;
+    insert_distractors(&root2.join("state/host.sqlite3"), &companion.id).await;
     let state2 = root2.join("state");
     let (child2, client2) = start(&root2).await;
     client2
@@ -1686,9 +1757,7 @@ async fn automatic_memory_acceptance_through_the_host() {
         )
         .await
         .expect("credential after restart");
-    // No word of this query occurs in the saved memory; only the semantic
-    // vector index can surface it.
-    let paraphrase = "あの黄色い果実の保存食、何だったっけ？";
+    let paraphrase = "ジャムの思い出は？";
     let answer = send_turn(&client2, &companion.id, paraphrase, "auto-recall").await;
     let answer_text = answer.created.last().cloned().unwrap_or_default();
     println!("[auto] fresh answer: {answer_text}");
@@ -1734,7 +1803,86 @@ async fn automatic_memory_acceptance_through_the_host() {
         fresh_index.embedding_calls,
         fresh_index.embedding_tokens
     );
+    // A third host has the same SQLite memory and candidates but no
+    // conversation. The query shares no vocabulary with the saved memory, so
+    // the model must use mind_recall's semantic search.
     stop(child2, &root2).await;
+    let root3 = newer_root();
+    std::fs::create_dir_all(root3.join("state")).unwrap();
+    copy_mind_database(
+        &state2.join("host.sqlite3"),
+        &root3.join("state/host.sqlite3"),
+    )
+    .await;
+    let state3 = root3.join("state");
+    let (child3, client3) = start(&root3).await;
+    client3
+        .register_credentials_with_options(
+            w::CredentialRequest {
+                id: connection.clone(),
+                secret: Some(key.clone()),
+                ..Default::default()
+            },
+            call_options(),
+        )
+        .await
+        .expect("credential for semantic host");
+    let semantic = send_turn(
+        &client3,
+        &companion.id,
+        "あの黄色い果実の甘い保存食、何だった？会話の流れではなく、必ず mind_recall で記憶を調べ、見つけた記憶のidも示して。",
+        "auto-semantic",
+    )
+    .await;
+    let semantic_answer = semantic.created.last().cloned().unwrap_or_default();
+    let semantic_log = log_with_turn(&state3, &companion.id).await;
+    println!("[auto] semantic answer: {semantic_answer}");
+    println!(
+        "[auto] semantic tools: {:?}",
+        semantic_log
+            .tools
+            .iter()
+            .map(|tool| &tool.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        semantic_log
+            .tools
+            .iter()
+            .any(|tool| tool.name == "mind_recall"),
+        "the semantic check did not call mind_recall"
+    );
+    assert!(
+        semantic_answer.contains("柚子"),
+        "the semantic check did not use the memory: {semantic_answer}"
+    );
+    let (semantic_in, semantic_out, semantic_cost) = summarize(&semantic_log.usage);
+    println!(
+        "[auto] semantic calls={} input_tokens={semantic_in} output_tokens={semantic_out} catalog_cost_usd={semantic_cost:.8}",
+        semantic_log.usage.len()
+    );
+    let semantic_index = client3
+        .get_mind_with_options(
+            w::Id {
+                id: companion.id.clone(),
+                ..Default::default()
+            },
+            call_options(),
+        )
+        .await
+        .expect("semantic mind")
+        .into_owned()
+        .index
+        .as_option()
+        .cloned()
+        .unwrap_or_default();
+    println!(
+        "[auto] semantic embeddings calls={} tokens={}",
+        semantic_index.embedding_calls, semantic_index.embedding_tokens
+    );
+    stop(child3, &root3).await;
+    let _ = std::fs::remove_dir_all(&root3);
+    let _ = std::fs::remove_dir_all(&root2);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&root2);
 }

@@ -227,7 +227,7 @@ impl Tool for MindRecall {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "query": {"type": "string", "minLength": 1, "maxLength": 200},
+                "query": {"type": "string", "minLength": 1, "maxLength": 2000},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
                 "since": {"type": "string", "maxLength": 64},
                 "until": {"type": "string", "maxLength": 64},
@@ -337,7 +337,7 @@ impl Tool for MindUpdate {
                     "properties": {
                         "emotion": {"type": "object", "properties": {
                             "description": {"type": "string", "maxLength": 500},
-                            "target": {"type": "string", "maxLength": 200},
+                            "target": {"type": "string", "maxLength": 2000},
                             "reason": {"type": "string", "maxLength": 500},
                             "signals": {"type": "array", "maxItems": 8, "items": {"type": "object", "properties": {
                                 "label": {"type": "string", "maxLength": 100},
@@ -345,7 +345,7 @@ impl Tool for MindUpdate {
                             }, "required": ["label", "intensity"], "additionalProperties": false}}
                         }, "required": ["description"], "additionalProperties": false},
                         "relationships": {"type": "array", "maxItems": 16, "items": {"type": "object", "properties": {
-                            "subject": {"type": "string", "maxLength": 200},
+                            "subject": {"type": "string", "maxLength": 2000},
                             "understanding": {"type": "string", "maxLength": 1000},
                             "evidence": {"type": "array", "maxItems": 16, "items": {"type": "string"}}
                         }, "required": ["subject", "understanding"], "additionalProperties": false}},

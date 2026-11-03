@@ -317,15 +317,6 @@ impl Store {
             .await
             .map_err(core_error)
     }
-    pub async fn mind_recent(
-        &self,
-        owner: String,
-        limit: usize,
-    ) -> crate::ports::Result<Vec<crate::domain::mind::MemoryRecord>> {
-        self.call(move |db| memory::recent(db, &owner, limit))
-            .await
-            .map_err(core_error)
-    }
     pub async fn mind_control(
         &self,
         owner: String,
@@ -346,6 +337,7 @@ impl Store {
         request: crate::domain::mind::MindUpdateRequest,
         sources: Vec<crate::domain::mind::SourceRef>,
         through_sequence: u64,
+        through_offset: u64,
         method: String,
         model_calls: u64,
         input_chars: u64,
@@ -363,6 +355,7 @@ impl Store {
                 &request,
                 &sources,
                 through_sequence,
+                through_offset,
                 &method,
                 model_calls,
                 input_chars,

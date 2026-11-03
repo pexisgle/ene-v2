@@ -168,47 +168,38 @@ pub async fn embed(input: Invocation) -> Result<crate::llm::Embedding> {
         std::sync::Arc::new(input),
         CredentialPlacement::Bearer,
     )?;
-    let body = serde_json::to_vec(&json!({
-        "model": request.model,
-        "input": request.input,
-        "encoding_format": "float"
-    }))
-    .map_err(|_| Error::invalid())?;
-    let request = http::Request::post(format!("{endpoint}/embeddings"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .body(bytes::Bytes::from(body))
-        .map_err(|_| Error::invalid())?;
-    let response = transport.send(request).await?;
-    if !response.status().is_success() {
-        return Err(Error::new(ErrorKind::ProviderFailure));
-    }
-    let value: Value = serde_json::from_slice(&response.bytes().await?)
-        .map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
-    let vectors = value["data"]
-        .as_array()
-        .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?
-        .iter()
-        .map(|item| {
-            item["embedding"]
-                .as_array()
-                .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?
-                .iter()
-                .map(|number| {
-                    number
-                        .as_f64()
-                        .map(|number| number as f32)
-                        .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))
-                })
-                .collect::<Result<Vec<_>>>()
+    // Use Rig's OpenAI embedding wire through the same authorized transport
+    // as the conversation and tool requests. The host owns only the consent,
+    // destination and size checks; encoding/response parsing stay in Rig.
+    let client = OpenAIConfig::new("managed-by-host")
+        .with_base_url(&endpoint)
+        .connect(transport);
+    let model = client.embedding(request.model, None);
+    let response = model
+        .call(request.input)
+        .await
+        .map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
+    let vectors = response
+        .embeddings
+        .into_iter()
+        .map(|embedding| {
+            embedding
+                .vec
+                .into_iter()
+                .map(|value| value as f32)
+                .collect::<Vec<f32>>()
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
     let dimension = vectors.first().map(Vec::len).unwrap_or_default();
-    if vectors.is_empty() || vectors.iter().any(|vector| vector.len() != dimension) {
+    if vectors.is_empty()
+        || dimension == 0
+        || vectors.iter().any(|vector| vector.len() != dimension)
+    {
         return Err(Error::new(ErrorKind::ExternalFailure));
     }
     Ok(crate::llm::Embedding {
         vectors,
-        input_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or_default(),
+        input_tokens: response.usage.input_tokens.unwrap_or_default(),
     })
 }
 
