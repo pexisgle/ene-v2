@@ -1830,18 +1830,18 @@ async fn automatic_memory_acceptance_through_the_host() {
     let semantic = send_turn(
         &client3,
         &companion.id,
-        "あの黄色い果実の甘い保存食、何だった？必要ならmind_recallで記憶を調べ、見つけた記憶のidも示して。",
+        "ツールは使わず、あなたが自然に思い出した記憶だけで答えて。あの黄色い果実の甘い保存食は何だった？",
         "auto-semantic",
     )
     .await;
     let semantic_answer = semantic.created.last().cloned().unwrap_or_default();
     let semantic_log = log_with_turn(&state3, &companion.id).await;
     assert!(
-        semantic_log
-            .tools
-            .iter()
-            .any(|tool| tool.name == "mind_recall"),
-        "the semantic tool check did not call mind_recall"
+        semantic_log.system_prompts.iter().any(|prompt| {
+            prompt.contains("柚子ジャム") && prompt.contains("意味=ok") && prompt.contains("- id:")
+        }),
+        "automatic semantic result was not in the recorded system prompt: {:?}",
+        semantic_log.system_prompts
     );
     println!("[auto] semantic answer: {semantic_answer}");
     println!(
@@ -1853,15 +1853,13 @@ async fn automatic_memory_acceptance_through_the_host() {
             .collect::<Vec<_>>()
     );
     assert!(
+        semantic_log.tools.is_empty(),
+        "automatic semantic evidence was replaced by a retrieval tool call: {:?}",
         semantic_log
             .tools
             .iter()
-            .any(|tool| tool.name == "mind_recall"),
-        "the semantic check did not call mind_recall"
-    );
-    assert!(
-        semantic_log.tools.iter().any(|tool| tool.name == "mind_recall"),
-        "the semantic tool check did not call mind_recall"
+            .map(|tool| &tool.name)
+            .collect::<Vec<_>>()
     );
     assert!(
         semantic_answer.contains("柚子"),

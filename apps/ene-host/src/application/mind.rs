@@ -478,6 +478,9 @@ impl HostApplication {
             active.remove(companion);
         }
         self.clear_bridge_entry(companion, request_id);
+        if let Ok(runtime) = self.rig() {
+            let _ = runtime.cancel_recall(request_id.to_owned());
+        }
     }
 
     fn active_recall(&self, companion: &str) -> Option<ActiveRecall> {
@@ -626,6 +629,30 @@ impl HostApplication {
             };
             bridge.offer(companion, request_id, prompt.clone(), version);
             self.set_active_request(companion, request_id);
+            if let Ok(runtime) = self.rig() {
+                let _ = runtime.hold_recall(
+                    companion.to_owned(),
+                    request_id.to_owned(),
+                    std::time::Instant::now() + std::time::Duration::from_millis(900),
+                );
+            }
+            let app = self.clone();
+            let companion_owned = companion.to_owned();
+            let request_owned = request_id.to_owned();
+            let text_owned = text.to_owned();
+            let core_owned = core.to_owned();
+            let local_prompt = prompt.clone();
+            self.0.background.spawn(async move {
+                app.semantic_recall(
+                    companion_owned,
+                    core_owned,
+                    text_owned,
+                    request_owned,
+                    local_prompt,
+                    version,
+                )
+                .await;
+            });
         }
         self.set_active_recall(
             companion,
@@ -643,6 +670,91 @@ impl HostApplication {
     fn clear_bridge_entry(&self, companion: &str, request: &str) {
         if let Some(bridge) = self.prompt_bridge() {
             bridge.remove(companion, request);
+        }
+    }
+
+    async fn semantic_recall(
+        &self,
+        companion: String,
+        core: String,
+        text: String,
+        request_id: String,
+        local_prompt: String,
+        version: PromptVersion,
+    ) {
+        let finish = |prompt: String| {
+            if let Ok(runtime) = self.rig() {
+                let _ = runtime.complete_recall(request_id.clone(), prompt);
+            }
+        };
+        let cancel = |app: &HostApplication| {
+            if let Ok(runtime) = app.rig() {
+                let _ = runtime.cancel_recall(request_id.clone());
+            }
+        };
+        if self.active_request(&companion).as_deref() != Some(request_id.as_str()) {
+            cancel(self);
+            return;
+        }
+        let count = self
+            .0
+            .repository
+            .mind_memory_count(companion.clone())
+            .await
+            .unwrap_or(0);
+        if count == 0 || text.chars().count() < 4 {
+            finish(local_prompt);
+            return;
+        }
+        let query = text.chars().take(2000).collect::<String>();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            self.mind_recall(companion.clone(), query, 3, false, None, None),
+        )
+        .await;
+        if self.active_request(&companion).as_deref() != Some(request_id.as_str()) {
+            cancel(self);
+            return;
+        }
+        let (memories, lexical, semantic, reason) = match result {
+            Ok(Ok(result)) => (
+                result.memories,
+                result.lexical,
+                result.semantic,
+                result.reason,
+            ),
+            _ => (
+                Vec::new(),
+                "error".to_owned(),
+                "unavailable".to_owned(),
+                Some("semantic_search_failed".to_owned()),
+            ),
+        };
+        let stored = match self.0.repository.mind_view(companion.clone(), now()).await {
+            Ok(stored) => stored,
+            Err(_) => {
+                finish(local_prompt);
+                return;
+            }
+        };
+        let prompt =
+            compose_prompt_with(&companion, &core, &stored, &memories, &lexical, &semantic);
+        if self.active_request(&companion).as_deref() == Some(request_id.as_str()) {
+            if !memories.is_empty() {
+                self.set_active_recall(
+                    &companion,
+                    ActiveRecall {
+                        request_id: request_id.clone(),
+                        recall_seq: version.recall,
+                        memories,
+                        lexical,
+                        reason,
+                    },
+                );
+            }
+            finish(prompt);
+        } else {
+            cancel(self);
         }
     }
 }

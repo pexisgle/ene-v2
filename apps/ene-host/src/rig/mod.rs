@@ -119,6 +119,19 @@ enum Command {
         limit: usize,
         reply: oneshot::Sender<Result<w::History, Error>>,
     },
+    HoldRecall {
+        companion: String,
+        request_id: String,
+        deadline: std::time::Instant,
+        reply: Option<oneshot::Sender<()>>,
+    },
+    RecallCompleted {
+        request_id: String,
+        prompt: String,
+    },
+    RecallCancelled {
+        request_id: String,
+    },
     HistoryAfter {
         companion: String,
         after: u64,
@@ -262,6 +275,55 @@ impl Runtime {
     /// accepted here; its end arrives as a finished turn.
     pub(crate) fn stop(&self, companion: String, reason: Option<String>) -> Result<(), Error> {
         self.send(Signal::Command(Command::Stop { companion, reason }))
+    }
+
+    pub(crate) fn hold_recall(
+        &self,
+        companion: String,
+        request_id: String,
+        deadline: std::time::Instant,
+    ) -> Result<(), Error> {
+        self.send(Signal::Command(Command::HoldRecall {
+            companion,
+            request_id,
+            deadline,
+            reply: None,
+        }))
+    }
+
+    /// Test/observation variant: resolves once the kernel has queued HoldOf
+    /// for this input's model request.
+    #[cfg(test)]
+    pub(crate) fn hold_recall_with_ack(
+        &self,
+        companion: String,
+        request_id: String,
+        deadline: std::time::Instant,
+    ) -> Result<oneshot::Receiver<()>, Error> {
+        let (reply, ack) = oneshot::channel();
+        self.send(Signal::Command(Command::HoldRecall {
+            companion,
+            request_id,
+            deadline,
+            reply: Some(reply),
+        }))?;
+        Ok(ack)
+    }
+
+    pub(crate) fn complete_recall(&self, request_id: String, prompt: String) -> Result<(), Error> {
+        self.send(Signal::Command(Command::RecallCompleted {
+            request_id,
+            prompt,
+        }))
+    }
+
+    pub(crate) fn cancel_recall(&self, request_id: String) -> Result<(), Error> {
+        self.send(Signal::Command(Command::RecallCancelled { request_id }))
+    }
+
+    #[cfg(test)]
+    fn signal_sender_for_test(&self) -> Sender<Signal> {
+        self.signals.lock().expect("kernel signals").clone()
     }
 
     pub(crate) async fn history(
@@ -1185,6 +1247,172 @@ mod tests {
             history.items.is_empty(),
             "a refused reply or its withdrawn input was saved: {:?}",
             history.items
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_held_model_call_is_released_by_async_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("非同期結果を使って答えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let requests = model.clone();
+        let (runtime, mut received) = start(temp.path().join("rig"));
+        runtime
+            .connect(
+                "companion".into(),
+                "簡潔に答える。".into(),
+                connection_of(model),
+                false,
+            )
+            .unwrap();
+        let held = runtime
+            .hold_recall_with_ack(
+                "companion".into(),
+                "hold-request".into(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+        runtime
+            .deliver(
+                "companion".into(),
+                "こんにちは".into(),
+                "hold-request".into(),
+            )
+            .await
+            .unwrap();
+        loop {
+            match next(&mut received).await {
+                Event::TurnStarted { .. } => break,
+                Event::TurnFinished { .. } => panic!("turn ended before the hold was created"),
+                _ => {}
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), held)
+            .await
+            .expect("the kernel observed the hold within 2s")
+            .expect("the hold ack");
+        assert_eq!(
+            requests.requests().len(),
+            0,
+            "the model was called while the hold was active"
+        );
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<String>();
+        let sender = runtime.signal_sender_for_test();
+        tokio::spawn(async move {
+            let Ok(prompt) = result_rx.await else {
+                return;
+            };
+            let _ = sender.send(Signal::Command(Command::RecallCompleted {
+                request_id: "hold-request".into(),
+                prompt,
+            }));
+        });
+        result_tx.send("SYSTEM\nRECALL-FIXED-42".into()).unwrap();
+        let finished = loop {
+            match next(&mut received).await {
+                Event::TurnFinished {
+                    state,
+                    failure,
+                    messages,
+                    ..
+                } => break (state, failure, messages),
+                Event::TurnStarted { .. } => {}
+                _ => {}
+            }
+        };
+        assert_eq!(finished.0, "answered");
+        assert!(finished.1.is_none(), "{:?}", finished.1);
+        assert_eq!(requests.requests().len(), 1);
+        let request = &requests.requests()[0];
+        let prompt = request
+            .chat_history
+            .iter()
+            .find_map(|message| match &**message {
+                rig_core::completion::Message::System { content } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("system prompt");
+        assert!(
+            prompt.contains("RECALL-FIXED-42"),
+            "the async result was not in the model request: {prompt}"
+        );
+        // A second, late completion after the turn settled must not send a
+        // second model call or start another turn.
+        let late = runtime.signal_sender_for_test();
+        late.send(Signal::Command(Command::RecallCompleted {
+            request_id: "hold-request".into(),
+            prompt: "LATE-RESULT".into(),
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            requests.requests().len(),
+            1,
+            "a late result sent another model call"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), received.recv())
+                .await
+                .is_err(),
+            "a late result started another turn"
+        );
+
+        // A second input held while the search is pending can still be
+        // stopped; a completion arriving after the stop must not send.
+        let stop_ack = runtime
+            .hold_recall_with_ack(
+                "companion".into(),
+                "stop-request".into(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+        runtime
+            .deliver(
+                "companion".into(),
+                "止まる入力".into(),
+                "stop-request".into(),
+            )
+            .await
+            .unwrap();
+        loop {
+            match next(&mut received).await {
+                Event::TurnStarted { request_id, .. }
+                    if request_id.as_deref() == Some("stop-request") =>
+                {
+                    break;
+                }
+                Event::TurnStarted { .. } => {}
+                _ => {}
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), stop_ack)
+            .await
+            .expect("the stop input was held")
+            .expect("the stop hold ack");
+        runtime
+            .stop("companion".into(), Some("test stop".into()))
+            .unwrap();
+        let stopped = loop {
+            if let Event::TurnFinished { state, .. } = next(&mut received).await {
+                break state;
+            }
+        };
+        assert_eq!(stopped, "stopped");
+        let late = runtime.signal_sender_for_test();
+        late.send(Signal::Command(Command::RecallCompleted {
+            request_id: "stop-request".into(),
+            prompt: "STALE-RESULT".into(),
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            requests.requests().len(),
+            1,
+            "a stopped request was sent after a late completion"
         );
         runtime.shutdown().await.unwrap();
     }

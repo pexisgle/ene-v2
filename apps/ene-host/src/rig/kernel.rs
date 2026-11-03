@@ -75,7 +75,9 @@ fn run_app(
         .init_resource::<Turns>()
         .init_resource::<Emitted>()
         .add_systems(Startup, initialize)
-        .add_systems(PreUpdate, apply_commands)
+        .init_resource::<RecallHolds>()
+        .add_systems(PreUpdate, (apply_commands, expire_recalls).chain())
+        .add_systems(AgentPass, hold_recall.in_set(Stage::Gate))
         .add_systems(
             PostUpdate,
             (track_turns, forward_stream, forward_recalled).chain(),
@@ -227,10 +229,159 @@ fn agent_entity(world: &mut World, companion: &str) -> Option<Entity> {
         .map(|(entity, _)| entity)
 }
 
+#[derive(Default, Resource)]
+struct RecallHolds {
+    held: HashMap<String, HeldRecall>,
+}
+
+struct HeldRecall {
+    companion: String,
+    entity: Entity,
+    deadline: Instant,
+    reply: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+fn hold_recall(
+    mut commands: Commands,
+    mut holds: ResMut<RecallHolds>,
+    calls: Query<(Entity, &ModelRequest, Option<&ForAgent>)>,
+    held: Query<&HoldOf>,
+    agents: Query<&AgentId, With<Agent>>,
+) {
+    let now = Instant::now();
+    let expired = holds
+        .held
+        .iter()
+        .filter(|(_, value)| value.deadline <= now)
+        .map(|(request, _)| request.clone())
+        .collect::<Vec<_>>();
+    for request in expired {
+        if let Some(value) = holds.held.remove(&request) {
+            commands.entity(value.entity).despawn();
+        }
+    }
+    for (call, request, agent) in &calls {
+        let Some(id) = request
+            .history
+            .as_ref()
+            .and_then(|history| {
+                history
+                    .entries()
+                    .rev()
+                    .find(|entry| entry.is_users_own())
+                    .and_then(|entry| entry.author)
+                    .and_then(|author| author.request.as_ref())
+            })
+            .map(|request| request.0.clone())
+        else {
+            continue;
+        };
+        let Some(value) = holds.held.get(&id) else {
+            continue;
+        };
+        let companion = agent
+            .and_then(|agent| agents.get(agent.0).ok())
+            .map(|agent| agent.0.as_str());
+        if companion != Some(value.companion.as_str()) {
+            continue;
+        }
+        if held.get(value.entity).is_ok() {
+            continue;
+        }
+        commands.entity(value.entity).insert(HoldOf(call));
+        if let Some(reply) = holds.held.get_mut(&id).and_then(|value| value.reply.take()) {
+            let _ = reply.send(());
+        }
+    }
+}
+
+fn expire_recalls(mut commands: Commands, mut holds: ResMut<RecallHolds>) {
+    let now = Instant::now();
+    let expired = holds
+        .held
+        .iter()
+        .filter(|(_, value)| value.deadline <= now)
+        .map(|(request, _)| request.clone())
+        .collect::<Vec<_>>();
+    for request in expired {
+        if let Some(value) = holds.held.remove(&request) {
+            commands.entity(value.entity).despawn();
+        }
+    }
+}
+
 fn apply_commands(world: &mut World) {
     let commands = std::mem::take(&mut world.resource_mut::<Pending>().0);
     for command in commands {
         match command {
+            Command::HoldRecall {
+                companion,
+                request_id,
+                deadline,
+                reply,
+            } => {
+                if let Some(old) = world.resource_mut::<RecallHolds>().held.remove(&request_id) {
+                    world.despawn(old.entity);
+                }
+                let entity = world.spawn_empty().id();
+                world.resource_mut::<RecallHolds>().held.insert(
+                    request_id,
+                    HeldRecall {
+                        companion,
+                        entity,
+                        deadline,
+                        reply,
+                    },
+                );
+            }
+            Command::RecallCompleted { request_id, prompt } => {
+                use rig_core::completion::SystemPrompt as CoreSystemPrompt;
+                let mut target = None;
+                {
+                    let mut query = world.query::<(Entity, &ModelRequest)>();
+                    for (entity, request) in query.iter(world) {
+                        let matches = request
+                            .history
+                            .as_ref()
+                            .and_then(|history| {
+                                history
+                                    .entries()
+                                    .rev()
+                                    .find(|entry| entry.is_users_own())
+                                    .and_then(|entry| entry.author)
+                                    .and_then(|author| author.request.as_ref())
+                            })
+                            .is_some_and(|request| request.0 == request_id);
+                        if matches {
+                            target = Some(entity);
+                            break;
+                        }
+                    }
+                }
+                if let Some(entity) = target {
+                    let agent = world.get::<ForAgent>(entity).map(|agent| agent.0);
+                    let prompt = CoreSystemPrompt {
+                        role: prompt,
+                        sections: Vec::new(),
+                    };
+                    if let Some(mut request) = world.get_mut::<ModelRequest>(entity) {
+                        request.prompt = Some(prompt.clone());
+                    }
+                    if let Some(agent) = agent {
+                        world
+                            .entity_mut(agent)
+                            .insert(SystemPrompt(prompt.role.clone()));
+                    }
+                }
+                if let Some(old) = world.resource_mut::<RecallHolds>().held.remove(&request_id) {
+                    world.despawn(old.entity);
+                }
+            }
+            Command::RecallCancelled { request_id } => {
+                if let Some(old) = world.resource_mut::<RecallHolds>().held.remove(&request_id) {
+                    world.despawn(old.entity);
+                }
+            }
             Command::Connect {
                 companion,
                 prompt,

@@ -333,6 +333,18 @@ impl Store {
             .await
             .map_err(core_error)
     }
+    pub async fn mind_memory_count(&self, companion: String) -> crate::ports::Result<u64> {
+        self.call(move |db| {
+            let count: i64 = db.query_row(
+                "SELECT COUNT(*) FROM mind_memories WHERE owner=?1 OR audience='shared'",
+                [companion],
+                |row| row.get(0),
+            )?;
+            Ok(count as u64)
+        })
+        .await
+        .map_err(core_error)
+    }
     pub async fn mind_read_visible(
         &self,
         caller: String,
