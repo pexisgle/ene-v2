@@ -12,7 +12,7 @@ IDはホスト内で安定した不透明な値とする。親、バックエン
 
 受付は完了ではない。長時間処理の受付には追跡IDと対象IDを返し、配送・実行・終了は取得と通知で確認できる。停止も受付と停止完了・不明を分ける。APIの接続が切れても、受理済みの保存や作業を無言に取り消さない。
 
-会話の受理は`request_id`を返す。同じ`request_key`の再送は同じ`request_id`を返し、配送を確認できなかった受理は成功として返さない。ユーザー発言と返答は`MessageCreated`、実行の開始と終了は`TurnEvent`（`streaming` / `answered` / `stopped` / `failed`）、文字片は`MessageDelta`（`stream_id`）で届く。確定本文は`MessageCreated`と`GetHistory`/`GetMessage`で取得し、文字片を確定内容として扱わない。停止は要求の受付を返し、停止完了は`TurnEvent`で確認する。
+会話の受理は`request_id`を返し、Rigが入力を受け付け、そのフレームのセッションログ書込みが成功した後に返す。保存できない入力は受理として返さない。同じ`request_key`の再送は同じ`request_id`を返し、配送を確認できなかった受理は成功として返さない。再起動後に未確定の会話レシートが残った場合は、同じ`request_key`の再送時にRigの保存済み会話・受信箱を`request_id`で照合し、受理済みなら元の結果を返して再配送せず、未配送なら503で確定する。ユーザー発言と返答は`MessageCreated`、実行の開始と終了は`TurnEvent`（`streaming` / `answered` / `stopped` / `failed`）、文字片は`MessageDelta`（`stream_id`）で届く。確定本文は`MessageCreated`と`GetHistory`/`GetMessage`で取得し、文字片を確定内容として扱わない。停止は要求の受付を返し、停止完了は`TurnEvent`で確認する。失敗したターンが入力を会話から取り出した場合は`RecalledInput`で本文を返し、クライアントは入力欄へ戻せる。会話メッセージとしては保存しない。
 
 知らない状態、壊れた応答、未知の終了理由は正常完了にしない。未対応、許可不足、競合、通信失敗、保存失敗、結果不明を区別する。エラーの詳細に資格情報・非公開記憶を含めない。
 
@@ -66,6 +66,6 @@ RequestViewは質問と権限要求を区別し、対象session/run、request id
 
 ## 6. 移行
 
-後方互換性のために旧REST案や単発ハーネス契約を温存しない。実装変更時にhost.protoとSDKを同時に更新し、必要なクライアント変更、DB・プラグインの移行や再設定を明示する。ステップ1の実装では、`SendMessage`の応答から応答メッセージIDを外し、`MessageStarted`/`MessageUpdated`を`TurnEvent`へ置き換え、`MessageDelta`を`stream_id`で相関させた。旧メッセージ表の行は削除しないが、親の会話はRigのセッションログへ移り、旧行は読み込まない。既存データの破棄や旧許可の無条件継承を、互換性不要の意味にはしない。
+後方互換性のために旧REST案や単発ハーネス契約を温存しない。実装変更時にhost.protoとSDKを同時に更新し、必要なクライアント変更、DB・プラグインの移行や再設定を明示する。ステップ1の実装では、`SendMessage`の応答から応答メッセージIDを外し、`MessageStarted`/`MessageUpdated`を`TurnEvent`へ置き換え、`MessageDelta`を`stream_id`で相関させ、失敗時の入力返却を`RecalledInput`として追加した。旧メッセージ表の行は削除しないが、親の会話はRigのセッションログへ移り、旧行は読み込まない。既存データの破棄や旧許可の無条件継承を、互換性不要の意味にはしない。
 
 本書は意味の契約と責務を定める。最終的なフィールド名・タグ・エラーコードは実装時のprotobuf/SDKを正本とし、同じwire仕様を手書き文書へ重複列挙しない。実装した能力だけを広告する。[実装順序](alpha.md)
