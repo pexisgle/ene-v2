@@ -1860,6 +1860,10 @@ async fn automatic_memory_acceptance_through_the_host() {
         "the semantic check did not call mind_recall"
     );
     assert!(
+        semantic_log.tools.iter().any(|tool| tool.name == "mind_recall"),
+        "the semantic tool check did not call mind_recall"
+    );
+    assert!(
         semantic_answer.contains("柚子"),
         "the semantic check did not use the memory: {semantic_answer}"
     );

@@ -477,6 +477,7 @@ impl HostApplication {
         {
             active.remove(companion);
         }
+        self.clear_bridge_entry(companion, request_id);
     }
 
     fn active_recall(&self, companion: &str) -> Option<ActiveRecall> {
@@ -637,6 +638,12 @@ impl HostApplication {
             },
         );
         Ok(prompt)
+    }
+
+    fn clear_bridge_entry(&self, companion: &str, request: &str) {
+        if let Some(bridge) = self.prompt_bridge() {
+            bridge.remove(companion, request);
+        }
     }
 }
 

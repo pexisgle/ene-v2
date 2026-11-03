@@ -82,6 +82,13 @@ impl PromptState {
         entry.version = version;
     }
 
+    pub(crate) fn remove(&self, companion: &str, request: &str) {
+        self.entries
+            .lock()
+            .expect("prompt entries lock")
+            .remove(&(companion.to_owned(), request.to_owned()));
+    }
+
     /// Read the prompt for a model request. No external search is awaited
     /// here; the host updates the slot before the next request.
     pub(crate) fn read(&self, companion: &str, request: &str) -> Option<String> {
