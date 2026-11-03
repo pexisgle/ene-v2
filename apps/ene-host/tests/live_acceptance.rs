@@ -470,7 +470,7 @@ async fn provider_acceptance_through_the_host() {
             settings_revision,
             provider_revision: &provider_revision,
             destinations: &all_destinations,
-            data_kinds: &["metadata"],
+            data_kinds: &["metadata", "test_input"],
             purpose: "connection_check",
         },
     )
@@ -502,6 +502,28 @@ async fn provider_acceptance_through_the_host() {
         ),
     };
     println!("[live] models_offered={} chosen={chosen}", available.len());
+
+    // OpenRouter has no one-shot check path yet; it must say so without
+    // sending a model request (the OpenAI check is covered by unit tests to
+    // avoid another paid call here).
+    if provider == "openrouter" {
+        let error = client
+            .check_connection_with_options(
+                w::CheckRequest {
+                    id: connection.clone(),
+                    request_key: "live-check".into(),
+                    companion_id: companion.id.clone(),
+                    purpose: "companion".into(),
+                    model_id: Some(chosen.clone()),
+                    ..Default::default()
+                },
+                call_options(),
+            )
+            .await
+            .expect_err("OpenRouter check is not implemented");
+        println!("[live] check_connection unsupported code={:?}", error.code);
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+    }
 
     let _updated = client
         .update_companion_with_options(
