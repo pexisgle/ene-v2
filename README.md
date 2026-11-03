@@ -1,6 +1,10 @@
 # ene
 
-デスクトップに常駐するキャラクターとの対話から、PC内の作業を任せるAIコンパニオンです。[構想](docs/vision.md)、[MVP](docs/mvp.md)、[アーキテクチャ](docs/architecture.md)に実装方針をまとめています。
+デスクトップに常駐するキャラクターとの対話から、PC内の作業を任せるAIコンパニオンです。[構想](docs/vision.md)、[Alphaホストの範囲](docs/alpha.md)、[アーキテクチャ](docs/architecture.md)に実装方針をまとめています。
+
+## 設計文書
+
+現在の採用設計は[アーキテクチャ](docs/architecture.md)、[心と自動記憶](docs/design/mind.md)、[作業相手API](docs/design/work.md)、[権限](docs/design/permissions.md)、[ホストAPI](docs/api.md)です。[調査・選定根拠](docs/references.md#alpha-design-sources)と[実装順序・検証条件](docs/alpha.md)を分けて記録しています。設計の追加だけで実装済みにはなりません。現行の動作・起動方法は各パッケージのREADMEを参照してください。
 
 ## ワークスペース
 

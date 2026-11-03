@@ -1,5 +1,7 @@
 # ene-host
 
+> このREADMEは現行実装と起動方法を説明します。今後のRig中心のAlpha設計は[アーキテクチャ](../../docs/architecture.md)と[Alpha計画](../../docs/alpha.md)を参照してください。設計文書の追加では依存・API・実装は更新していません。
+
 ホストの会話・設定・権限・生成処理、Connect API、SQLite保存、資格情報管理、プラグイン実行を持つパッケージです。`src/lib.rs` に実装をまとめ、`src/main.rs` から `ene_host::run()` を呼び出します。
 
 ## 起動と接続

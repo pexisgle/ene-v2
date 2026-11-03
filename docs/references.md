@@ -1,5 +1,64 @@
 # 参考元
 
+<a id="alpha-design-sources"></a>
+## Alphaホスト設計の調査・採否（2026-11-03）
+
+現在の技術判断はこの節と[採用設計](architecture.md)を参照する。以前のMVP選定や製品比較は末尾に履歴として保持し、最新実装・完成機能と混同しない。一次資料67件のIDと確認範囲を[調査索引](research/mind-sources.md)に収録した。全文精読・実機検証を一律に実施したという意味ではない。
+
+<a id="alpha-rig"></a>
+### Rigへの委譲
+
+[S01](research/mind-sources.md#s01)〜[S05](research/mind-sources.md#s05)を基に、調査基準版v0.46.0のrig-ecs、会話保存、ツール、モデル、拡張点を優先する。独自の第二カーネル・受信箱・履歴の複製を作らない。基準版の採用はCargo更新済みという意味ではない。接続、途中状態の記録、停止、待機時負荷を実装ゲートで確認する。
+
+<a id="alpha-mind"></a>
+### 人格・心
+
+| 参照 | 取り入れるもの | そのまま採らないもの |
+| --- | --- | --- |
+| [AIRIのカード](research/mind-sources.md#p02)、[SillyTavern](research/mind-sources.md#p11)、[MRPrompt](research/mind-sources.md#r03) | 小さな人格の核、関連する側面・例・背景の利用 | 全設定の常時投入、固定台詞表、カードの指示を権限へ昇格させること |
+| [AIRIのADR・実装](research/mind-sources.md#p03)・[記憶ツール](research/mind-sources.md#p04) | 人格別の記憶、詳細の必要時参照、子の出所付き通知 | 親の保存ツールだけへの依存、eneと異なる削除・共有・履歴保持数 |
+| [SocioMind](research/mind-sources.md#r04)・[実装](research/mind-sources.md#r05) | 人格・感情・関係・経験の結合 | 心理尺度の固定採用、全社会シミュレーター、多数のモデル呼び出し |
+| [DualMem](research/mind-sources.md#r06) | 出来事と人格に沿う解釈を区別し、根拠で結ぶ | 学習手順・実験成績がeneでも成立するという推定 |
+| [AITuberKit](research/mind-sources.md#p07)、[OnAir](research/mind-sources.md#p09)、[表情分類](research/mind-sources.md#p14) | 応答と声・表情をつなぐ表現情報 | 表情タグを持続する感情・関係性そのものにすること |
+
+作者が作った会話例・架空の背景は実体験ではない。共有された話を自分の直接経験にせず、想起・再整理を新しい経験として強化しない。これらはene側の設計判断であり、研究の心理モデルを科学的に確定した人間の心として実装するものではない。
+
+<a id="alpha-memory"></a>
+### 自動記憶と検索
+
+[Letta](research/mind-sources.md#m01)、[LangMemの遅延処理](research/mind-sources.md#m04)から、会話中の更新と後続の増分整理を分ける。[Mem0](research/mind-sources.md#m06)の既存記憶との照合、[Nemori](research/mind-sources.md#m11)の経験をまとまりとして扱う考え方を参照する。これらの実行基盤を丸ごと重ねず、Rig上の有限の内部処理へ接続する。自動処理の起動機会と、正確な記憶を形成する品質は別に検証する。
+
+[RisuAI](research/mind-sources.md#p17)の由来と複数の想起手掛かりを参考に、全文・意味・時間・関連を利用する。[Graphiti](research/mind-sources.md#m08)や[A-Mem](research/mind-sources.md#m10)は比較対象だが、初版で全記憶をグラフDBへ入れない。[MemoryBank](research/mind-sources.md#m12)等の時間・忘却の考え方を、固定の消去式へ変換しない。
+
+検索接続は[Rig LanceDB v0.46.0](https://github.com/0xPlaygrounds/rig/blob/v0.46.0/crates/rig-lancedb/src/lib.rs)を優先し、[SQLite FTS5](https://www.sqlite.org/fts5.html)と[LanceDBの複合検索](https://lancedb.com/docs/search/hybrid-search/)を利用する。Rigの共通契約で不足する機能は薄い接続で補う。日本語分割、索引更新、資源使用量を実測し、製品名だけで優位性を断定しない。
+
+<a id="alpha-permissions"></a>
+### 権限・隔離
+
+[Rigのガイド](research/mind-sources.md#s05)と[承認実装](research/mind-sources.md#s06)のGate・Hold・Ask・理由集約を再利用する。回答者不在で即拒否する既定動作は、eneの離席時保留へ接続を要する。[sandbox corpus](research/mind-sources.md#s07)は例であり汎用の安全性保証ではない。
+
+[Sandbox Runtime](research/mind-sources.md#s08)等の既存隔離を比較する。既定の広い読取、配布依存、実行中に変更できる規則の制約を検証する。[Codex](research/mind-sources.md#s11)・[OpenCode](research/mind-sources.md#s13)からも、確認頻度と実効アクセス範囲を別軸として扱う。[MCPの注釈](research/mind-sources.md#s14)を未信頼ツールへの認可根拠にしない。[Cedar](research/mind-sources.md#s15)等のDSLは必要性のない段階では採用しない。
+
+<a id="alpha-work"></a>
+### 作業相手とACP・MCP
+
+[ACPセッション](https://agentclientprotocol.com/protocol/session-setup)、[prompt turn](https://agentclientprotocol.com/protocol/prompt-turn)、[公式Rust SDK](https://agentclientprotocol.com/libraries/rust)を基準に、eneのsession・入力・更新・停止をアダプターへ写像する。ACP全機能をプラグインへ強制しないが、対応して公開する部分では要求ID・エラー・取消・完了の意味を守る。
+
+共通ツールの外部公開は[MCP公式Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)を優先する。ACPのモデルや認証は接続先の能力に従う。独自機能は能力と名前空間で表し、未対応を成功や自動的な別動作へ変換しない。実際のアダプター版で双方向の最小互換性を検証する。
+
+<a id="alpha-evaluation"></a>
+### 評価の採り方
+
+[InCharacter](research/mind-sources.md#r10)、[REMP](research/mind-sources.md#r12)、[LongMemEval](research/mind-sources.md#m15)、[LoCoMo](research/mind-sources.md#m17)を評価観点の資料とする。要旨のみの研究から個別の実装方式や数値保証を導かない。形成・検索・利用、人格・関係・感情・記憶、実務の正確さと資源を分ける。
+
+[Persistent Personas?](research/mind-sources.md#r13)を踏まえ雑談以外の実務も長期に評価し、[匿名評価](research/mind-sources.md#r14)を踏まえ独自キャラクターも使う。評価シナリオは実行時の分岐表ではない。論文の条件・モデル・言語・採点法をeneの性能保証へ置き換えない。
+
+---
+
+## 旧MVPおよび初期構想の調査記録
+
+以下は以前の選定・比較の記録。本文中の「今回」「MVP」は当時の範囲を指す。現在の規範と矛盾する場合は上記Alpha節と各設計文書を優先する。
+
 ## 設計における参照プロダクト
 
 キャラクターとしての臨場感や存在感の設計には AIRI や Desktop Mate、タスクの依頼から成果物の受け取りに至る体験設計には Grok Bot・Claude Cowork・ChatGPT Work を参考にします。また、nanobot・OpenClaw・OpenCode・Hermes Agent は、外部連携、アクセス権限、記憶保持、自律実行アーキテクチャを検討するための技術的材料とします。
