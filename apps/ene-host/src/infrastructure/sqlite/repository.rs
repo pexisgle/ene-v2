@@ -206,6 +206,25 @@ impl Store {
             .await
             .map_err(core_error)
     }
+    pub async fn mind_skip_consolidation(
+        &self,
+        companion: String,
+        sequence: u64,
+        offset: u64,
+        method: String,
+        now: String,
+    ) -> crate::ports::Result<()> {
+        self.call(move |db| {
+            memory::skip_consolidation(db, &companion, sequence, offset, &method, &now)
+        })
+        .await
+        .map_err(core_error)
+    }
+    pub async fn mind_retry_index(&self, now: String) -> crate::ports::Result<()> {
+        self.call(move |db| memory::retry_index(db, &now))
+            .await
+            .map_err(core_error)
+    }
     pub async fn mind_record_embedding(
         &self,
         companion: String,
@@ -269,8 +288,12 @@ impl Store {
         .await
         .map_err(core_error)
     }
-    pub async fn mind_pending_fts(&self, limit: usize) -> crate::ports::Result<Vec<String>> {
-        self.call(move |db| memory::pending_fts(db, limit))
+    pub async fn mind_pending_fts(
+        &self,
+        limit: usize,
+        now: String,
+    ) -> crate::ports::Result<Vec<String>> {
+        self.call(move |db| memory::pending_fts(db, limit, &now))
             .await
             .map_err(core_error)
     }
@@ -282,8 +305,9 @@ impl Store {
     pub async fn mind_pending_vectors(
         &self,
         limit: usize,
+        now: String,
     ) -> crate::ports::Result<Vec<(String, String, String)>> {
-        self.call(move |db| memory::pending_vectors(db, limit))
+        self.call(move |db| memory::pending_vectors(db, limit, &now))
             .await
             .map_err(core_error)
     }
@@ -302,9 +326,10 @@ impl Store {
         ids: Vec<String>,
         kind: String,
         reason: String,
+        permanent: bool,
         now: String,
     ) -> crate::ports::Result<()> {
-        self.call(move |db| memory::mark_index_error(db, &ids, &kind, &reason, &now))
+        self.call(move |db| memory::mark_index_error(db, &ids, &kind, &reason, permanent, &now))
             .await
             .map_err(core_error)
     }
@@ -342,10 +367,7 @@ impl Store {
         model_calls: u64,
         input_chars: u64,
         now: String,
-    ) -> crate::ports::Result<(
-        crate::domain::mind::MindUpdateResult,
-        memory::ConsolidationStatus,
-    )> {
+    ) -> crate::ports::Result<memory::ConsolidationOutcome> {
         self.call(move |db| {
             memory::consolidate(
                 db,

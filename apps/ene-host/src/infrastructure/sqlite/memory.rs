@@ -20,7 +20,12 @@ pub(crate) struct IndexStatus {
     pub updated_at: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct ConsolidationOutcome {
+    pub result: crate::domain::mind::MindUpdateResult,
+    pub status: ConsolidationStatus,
+    pub advanced: bool,
+}
+
 pub(crate) struct ConsolidationStatus {
     pub last_sequence: u64,
     pub last_offset: u64,
@@ -28,6 +33,7 @@ pub(crate) struct ConsolidationStatus {
     pub state: String,
     pub reason: Option<String>,
     pub jobs: u64,
+    pub skipped: u64,
     pub model_calls: u64,
     pub input_chars: u64,
     pub updated_at: String,
@@ -111,6 +117,13 @@ pub(super) fn index_status(db: &mut Connection, companion: &str, now: &str) -> R
     Ok(status)
 }
 
+fn unix_seconds(_value: &str) -> Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default())
+}
+
 pub(super) fn record_embedding(
     db: &mut Connection,
     companion: &str,
@@ -123,6 +136,20 @@ pub(super) fn record_embedding(
     tx.execute(
         "UPDATE mind_index_status SET embedding_model=?2,embedding_calls=embedding_calls+1,embedding_tokens=embedding_tokens+?3,updated_at=?4 WHERE companion_id=?1",
         params![companion, model, tokens as i64, now],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(super) fn retry_index(db: &mut Connection, now: &str) -> Result<()> {
+    let tx = db.transaction()?;
+    tx.execute(
+        "UPDATE mind_index_pending SET attempts=0,next_attempt_at=0,updated_at=?1",
+        [now],
+    )?;
+    tx.execute(
+        "UPDATE mind_index_status SET state='idle',reason=NULL,updated_at=?1",
+        [now],
     )?;
     tx.commit()?;
     Ok(())
@@ -162,7 +189,7 @@ pub(super) fn consolidation_status(
 
 fn read_consolidation(tx: &Transaction<'_>, companion: &str) -> Result<ConsolidationStatus> {
     Ok(tx.query_row(
-        "SELECT last_sequence,method_revision,state,reason,jobs,model_calls,input_chars,updated_at,last_offset \
+        "SELECT last_sequence,method_revision,state,reason,jobs,model_calls,input_chars,updated_at,last_offset,skipped \
          FROM mind_consolidation WHERE companion_id=?1",
         [companion],
         |row| {
@@ -176,6 +203,7 @@ fn read_consolidation(tx: &Transaction<'_>, companion: &str) -> Result<Consolida
                 input_chars: row.get::<_, i64>(6)? as u64,
                 updated_at: row.get(7)?,
                 last_offset: row.get::<_, i64>(8)? as u64,
+                skipped: row.get::<_, i64>(9)? as u64,
             })
         },
     )?)
@@ -200,13 +228,16 @@ pub(super) fn set_consolidation_state(
     Ok(())
 }
 
-pub(super) fn pending_fts(db: &mut Connection, limit: usize) -> Result<Vec<String>> {
+pub(super) fn pending_fts(db: &mut Connection, limit: usize, now: &str) -> Result<Vec<String>> {
+    let now = unix_seconds(now)?;
     let mut statement = db.prepare(
         "SELECT p.memory_id FROM mind_index_pending p JOIN mind_memories m ON m.id=p.memory_id \
-         WHERE p.kind='fts' ORDER BY p.updated_at LIMIT ?1",
+         WHERE p.kind='fts' AND p.next_attempt_at<=?2 ORDER BY p.updated_at LIMIT ?1",
     )?;
     let ids = statement
-        .query_map([limit as i64], |row| row.get::<_, String>(0))?
+        .query_map(params![limit as i64, now as i64], |row| {
+            row.get::<_, String>(0)
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(ids)
 }
@@ -249,14 +280,16 @@ pub(super) fn index_fts(db: &mut Connection, ids: &[String], now: &str) -> Resul
 pub(super) fn pending_vectors(
     db: &mut Connection,
     limit: usize,
+    now: &str,
 ) -> Result<Vec<(String, String, String)>> {
     let mut statement = db.prepare(
         "SELECT p.memory_id,m.owner,m.content FROM mind_index_pending p \
          JOIN mind_memories m ON m.id=p.memory_id \
-         WHERE p.kind='vector' ORDER BY p.updated_at LIMIT ?1",
+         WHERE p.kind='vector' AND p.next_attempt_at<=?2 ORDER BY p.updated_at LIMIT ?1",
     )?;
+    let now = unix_seconds(now)?;
     let rows = statement
-        .query_map([limit as i64], |row| {
+        .query_map(params![limit as i64, now as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -309,13 +342,25 @@ pub(super) fn mark_index_error(
     ids: &[String],
     kind: &str,
     reason: &str,
+    permanent: bool,
     now: &str,
 ) -> Result<()> {
     let tx = db.transaction()?;
+    let epoch = unix_seconds(now)?;
     for id in ids {
+        let attempts: i64 = tx.query_row(
+            "SELECT attempts FROM mind_index_pending WHERE memory_id=?1 AND kind=?2",
+            params![id, kind],
+            |row| row.get(0),
+        )?;
+        let next = if permanent || attempts + 1 >= 5 {
+            4_102_444_800
+        } else {
+            epoch + [5_u64, 15, 60, 300][attempts.min(3) as usize]
+        };
         tx.execute(
-            "UPDATE mind_index_pending SET attempts=attempts+1,last_error=?2,updated_at=?3 WHERE memory_id=?1 AND kind=?4",
-            params![id, reason, now, kind],
+            "UPDATE mind_index_pending SET attempts=attempts+1,last_error=?2,updated_at=?3,next_attempt_at=?5 WHERE memory_id=?1 AND kind=?4",
+            params![id, reason, now, kind, next as i64],
         )?;
     }
     for row in tx
@@ -648,6 +693,30 @@ pub(super) fn control(
 /// Applies a consolidation batch and advances the processed-through sequence in
 /// the same transaction. A failure or stale revision advances neither.
 #[allow(clippy::too_many_arguments)]
+pub(super) fn skip_consolidation(
+    db: &mut Connection,
+    owner: &str,
+    sequence: u64,
+    offset: u64,
+    method: &str,
+    now: &str,
+) -> Result<()> {
+    let tx = db.transaction()?;
+    ensure_consolidation(&tx, owner, method, now)?;
+    let status = read_consolidation(&tx, owner)?;
+    if (sequence, offset) <= (status.last_sequence, status.last_offset) {
+        tx.commit()?;
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE mind_consolidation SET last_sequence=?2,last_offset=?3,skipped=skipped+1,updated_at=?4 WHERE companion_id=?1",
+        params![owner, sequence as i64, offset as i64, now],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn consolidate(
     db: &mut Connection,
     owner: &str,
@@ -661,7 +730,7 @@ pub(super) fn consolidate(
     model_calls: u64,
     input_chars: u64,
     now: &str,
-) -> Result<(crate::domain::mind::MindUpdateResult, ConsolidationStatus)> {
+) -> Result<ConsolidationOutcome> {
     let tx = db.transaction()?;
     ensure_consolidation(&tx, owner, method, now)?;
     let status = read_consolidation(&tx, owner)?;
@@ -685,7 +754,11 @@ pub(super) fn consolidate(
             }
         };
         tx.commit()?;
-        return Ok((result, status));
+        return Ok(ConsolidationOutcome {
+            result,
+            status,
+            advanced: false,
+        });
     }
     let result = super::mind::apply_tx(
         &tx,
@@ -705,7 +778,11 @@ pub(super) fn consolidate(
     )?;
     let status = read_consolidation(&tx, owner)?;
     tx.commit()?;
-    Ok((result, status))
+    Ok(ConsolidationOutcome {
+        result,
+        status,
+        advanced: true,
+    })
 }
 
 #[cfg(test)]
@@ -769,7 +846,7 @@ mod tests {
     async fn index(store: &Store) {
         store
             .run(|db| {
-                let ids = pending_fts(db, 64)?;
+                let ids = pending_fts(db, 64, "now")?;
                 index_fts(db, &ids, "2026-01-01T00:00:01Z")?;
                 Ok(())
             })
@@ -777,7 +854,7 @@ mod tests {
             .unwrap();
         store
             .run(|db| {
-                let pending = pending_vectors(db, 64)?;
+                let pending = pending_vectors(db, 64, "now")?;
                 let entries = pending
                     .into_iter()
                     .enumerate()
@@ -984,7 +1061,7 @@ mod tests {
                 control(db, "a", &id, "forget", "now")?;
                 let mut new = memory("柚子ジャムを作った日の記録");
                 new.supersedes = vec![id.clone()];
-                let (result, _) = consolidate(
+                let outcome = consolidate(
                     db,
                     "a",
                     "forgotten-basis",
@@ -998,7 +1075,8 @@ mod tests {
                     10,
                     "now",
                 )?;
-                assert!(result.changed);
+                assert!(outcome.result.changed);
+                assert!(outcome.advanced);
                 let preference: String = db.query_row(
                     "SELECT recall_preference FROM mind_memories WHERE supersedes LIKE ?1",
                     [format!("%{id}%")],
@@ -1061,12 +1139,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_index_work_stops_retrying_until_configuration_resets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("retry.db")).await.unwrap();
+        let id = seed(&store, "a", "柚子ジャムを作った").await;
+        store
+            .run(move |db| {
+                let pending = pending_vectors(db, 64, "now")?;
+                assert_eq!(pending.len(), 1);
+                mark_index_error(
+                    db,
+                    std::slice::from_ref(&id),
+                    "vector",
+                    "PermissionRequired",
+                    true,
+                    "now",
+                )?;
+                assert!(pending_vectors(db, 64, "now")?.is_empty());
+                retry_index(db, "now")?;
+                assert_eq!(pending_vectors(db, 64, "now")?.len(), 1);
+                for _ in 0..4 {
+                    mark_index_error(
+                        db,
+                        std::slice::from_ref(&id),
+                        "vector",
+                        "provider",
+                        false,
+                        "now",
+                    )?;
+                }
+                assert!(pending_vectors(db, 64, "now")?.is_empty());
+                retry_index(db, "now")?;
+                assert_eq!(pending_vectors(db, 64, "now")?.len(), 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_terminal_skip_advances_without_a_model_job_and_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip.db");
+        let store = Store::open(path.clone()).await.unwrap();
+        store
+            .run(|db| {
+                skip_consolidation(db, "a", 7, 4, METHOD_REVISION, "now")?;
+                let status = consolidation_status(db, "a", METHOD_REVISION, "now")?;
+                assert_eq!((status.last_sequence, status.last_offset), (7, 4));
+                assert_eq!(status.skipped, 1);
+                assert_eq!(status.model_calls, 0);
+                skip_consolidation(db, "a", 6, 0, METHOD_REVISION, "now")?;
+                let status = consolidation_status(db, "a", METHOD_REVISION, "now")?;
+                assert_eq!((status.last_sequence, status.last_offset), (7, 4));
+                assert_eq!(status.skipped, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reopened = Store::open(path).await.unwrap();
+        reopened
+            .run(|db| {
+                let status = consolidation_status(db, "a", METHOD_REVISION, "now")?;
+                assert_eq!((status.last_sequence, status.last_offset), (7, 4));
+                assert_eq!(status.skipped, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn the_consolidation_cursor_can_advance_inside_a_long_entry() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("m.db")).await.unwrap();
         store
             .run(|db| {
-                let (_, status) = consolidate(
+                let outcome = consolidate(
                     db,
                     "a",
                     "partial-5",
@@ -1080,8 +1229,8 @@ mod tests {
                     5,
                     "now",
                 )?;
-                assert_eq!(status.last_offset, 5);
-                let (_, status) = consolidate(
+                assert_eq!(outcome.status.last_offset, 5);
+                let outcome = consolidate(
                     db,
                     "a",
                     "partial-10",
@@ -1095,7 +1244,10 @@ mod tests {
                     5,
                     "now",
                 )?;
-                assert_eq!((status.last_sequence, status.last_offset), (1, 10));
+                assert_eq!(
+                    (outcome.status.last_sequence, outcome.status.last_offset),
+                    (1, 10)
+                );
                 Ok(())
             })
             .await
@@ -1136,7 +1288,7 @@ mod tests {
                     source(SourceKind::Input, "input-1"),
                     source(SourceKind::Reply, "reply-1"),
                 ];
-                let (result, status) = consolidate(
+                let outcome = consolidate(
                     db,
                     "a",
                     "consolidate-a-0-10",
@@ -1150,10 +1302,11 @@ mod tests {
                     120,
                     "now",
                 )?;
-                assert!(result.changed);
-                assert_eq!(status.last_sequence, 10);
-                assert_eq!(status.jobs, 1);
-                let (again, status) = consolidate(
+                assert!(outcome.result.changed);
+                assert!(outcome.advanced);
+                assert_eq!(outcome.status.last_sequence, 10);
+                assert_eq!(outcome.status.jobs, 1);
+                let again = consolidate(
                     db,
                     "a",
                     "consolidate-a-0-10",
@@ -1167,8 +1320,9 @@ mod tests {
                     120,
                     "now",
                 )?;
-                assert_eq!(again, result);
-                assert_eq!(status.jobs, 1);
+                assert!(again.result.changed);
+                assert!(!again.advanced);
+                assert_eq!(again.status.jobs, 1);
                 let count: i64 =
                     db.query_row("SELECT COUNT(*) FROM mind_memories", [], |row| row.get(0))?;
                 assert_eq!(count, 1);
@@ -1246,8 +1400,8 @@ mod tests {
         let store = Store::open(path).await.unwrap();
         store
             .run(|db| {
-                let fts = pending_fts(db, 64)?;
-                let vectors = pending_vectors(db, 64)?;
+                let fts = pending_fts(db, 64, "now")?;
+                let vectors = pending_vectors(db, 64, "now")?;
                 assert_eq!(fts.len(), 1);
                 assert_eq!(vectors.len(), 1);
                 // A failed index transaction rolls back only the index work; the
@@ -1257,7 +1411,7 @@ mod tests {
                 let count: i64 =
                     db.query_row("SELECT COUNT(*) FROM mind_memories", [], |row| row.get(0))?;
                 assert_eq!(count, 1);
-                let pending = pending_fts(db, 64)?;
+                let pending = pending_fts(db, 64, "now")?;
                 assert_eq!(pending.len(), 1);
                 let result = search(
                     db,

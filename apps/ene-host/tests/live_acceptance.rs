@@ -1830,12 +1830,19 @@ async fn automatic_memory_acceptance_through_the_host() {
     let semantic = send_turn(
         &client3,
         &companion.id,
-        "あの黄色い果実の甘い保存食、何だった？会話の流れではなく、必ず mind_recall で記憶を調べ、見つけた記憶のidも示して。",
+        "あの黄色い果実の甘い保存食、何だった？必要ならmind_recallで記憶を調べ、見つけた記憶のidも示して。",
         "auto-semantic",
     )
     .await;
     let semantic_answer = semantic.created.last().cloned().unwrap_or_default();
     let semantic_log = log_with_turn(&state3, &companion.id).await;
+    assert!(
+        semantic_log
+            .tools
+            .iter()
+            .any(|tool| tool.name == "mind_recall"),
+        "the semantic tool check did not call mind_recall"
+    );
     println!("[auto] semantic answer: {semantic_answer}");
     println!(
         "[auto] semantic tools: {:?}",

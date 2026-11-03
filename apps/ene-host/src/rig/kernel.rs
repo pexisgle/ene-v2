@@ -89,6 +89,12 @@ fn run_app(
                 .in_set(Stage::Prepare)
                 .in_set(PrepareSystems::Edit),
         )
+        .add_systems(
+            AgentPass,
+            crate::rig::prompt::apply_prompt
+                .in_set(Stage::Prepare)
+                .in_set(PrepareSystems::Edit),
+        )
         .add_observer(on_turn_settled)
         .add_observer(on_message_started)
         .add_tool(CurrentTime);

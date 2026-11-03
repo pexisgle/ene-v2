@@ -42,7 +42,11 @@ pub(crate) fn attach_kernel(app: &App, rig_dir: PathBuf) -> Result<(), Box<dyn E
     let (calls, received) = tokio::sync::mpsc::unbounded_channel();
     let bridge = std::sync::Arc::new(crate::rig::mind::MindBridge::new(calls));
     let configure = bridge.clone();
+    let prompts = crate::rig::prompt::PromptState::new();
+    let prompt_resource = crate::rig::prompt::PromptBridge(prompts.clone());
+    let prompt_app = prompts.clone();
     let (kernel, events) = crate::rig::Runtime::start_with(rig_dir, move |app| {
+        app.insert_resource(prompt_resource);
         app.insert_resource((*configure).clone());
         app.add_tool(crate::rig::mind::MindRecall(configure.clone()));
         app.add_tool(crate::rig::mind::MindRead(configure.clone()));
@@ -50,6 +54,7 @@ pub(crate) fn attach_kernel(app: &App, rig_dir: PathBuf) -> Result<(), Box<dyn E
     })
     .map_err(|_| "the Rig execution kernel failed to start")?;
     crate::application::mind::spawn_mind_tools(app.application.clone(), received);
+    app.application.attach_prompt_bridge(prompt_app);
     app.application.attach_rig(kernel, events);
     Ok(())
 }

@@ -23,6 +23,7 @@ pub(crate) const METHOD_REVISION: &str = "consolidation-v1";
 const BATCH_MESSAGES: usize = 12;
 const BATCH_CHARS: usize = 8_000;
 const HISTORY_PAGE: usize = 64;
+const SCAN_PAGES: usize = 8;
 const RETRY_ATTEMPTS: u32 = 2;
 const VECTOR_BATCH: usize = 16;
 
@@ -74,17 +75,22 @@ impl HostApplication {
     }
 
     async fn index_once(&self) {
-        if let Ok(ids) = self.0.repository.mind_pending_fts(64).await
+        if let Ok(ids) = self.0.repository.mind_pending_fts(64, now()).await
             && !ids.is_empty()
             && let Err(error) = self.0.repository.mind_index_fts(ids.clone(), now()).await
         {
             let _ = self
                 .0
                 .repository
-                .mind_mark_index_error(ids, "fts".into(), format!("{error:?}"), now())
+                .mind_mark_index_error(ids, "fts".into(), format!("{error:?}"), false, now())
                 .await;
         }
-        let Ok(pending) = self.0.repository.mind_pending_vectors(VECTOR_BATCH).await else {
+        let Ok(pending) = self
+            .0
+            .repository
+            .mind_pending_vectors(VECTOR_BATCH, now())
+            .await
+        else {
             return;
         };
         if pending.is_empty() {
@@ -131,6 +137,7 @@ impl HostApplication {
                                 ids,
                                 "vector".into(),
                                 format!("{error:?}"),
+                                false,
                                 now(),
                             )
                             .await;
@@ -147,6 +154,12 @@ impl HostApplication {
                                 .reason
                                 .map(str::to_owned)
                                 .unwrap_or_else(|| format!("{:?}", error.kind)),
+                            matches!(
+                                error.kind,
+                                ErrorKind::PermissionRequired
+                                    | ErrorKind::UnsupportedCapability
+                                    | ErrorKind::StateConflict
+                            ),
                             now(),
                         )
                         .await;
@@ -177,7 +190,7 @@ impl HostApplication {
             return;
         };
         for companion in companions {
-            for _ in 0..2 {
+            for _ in 0..8 {
                 match self.consolidate_once(&companion.id).await {
                     Ok(true) => {}
                     Ok(false) | Err(_) => break,
@@ -198,12 +211,40 @@ impl HostApplication {
         if *self.shutdown().borrow() {
             return Ok(false);
         }
-        let messages = self
+        let mut pending = self
             .pending_messages(companion, status.last_sequence, status.last_offset)
             .await?;
+        if pending.waiting && pending.messages.is_empty() {
+            // Recheck the state, not a timer-as-confirmation: the assistant
+            // entry may become visible one kernel frame after the turn event.
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                pending = self
+                    .pending_messages(companion, status.last_sequence, status.last_offset)
+                    .await?;
+                if !pending.waiting {
+                    break;
+                }
+            }
+        }
         let (batch, sources, through, through_offset, chars) =
-            batch_chunks(messages, status.last_sequence, status.last_offset);
+            batch_chunks(pending.messages, status.last_sequence, status.last_offset);
         if batch.is_empty() {
+            if let Some((sequence, offset)) = pending.terminal_through
+                && (sequence, offset) > (status.last_sequence, status.last_offset)
+            {
+                self.0
+                    .repository
+                    .mind_skip_consolidation(
+                        companion.to_owned(),
+                        sequence,
+                        offset,
+                        METHOD_REVISION.into(),
+                        now(),
+                    )
+                    .await?;
+                return Ok(true);
+            }
             if status.state != "idle" {
                 let _ = self
                     .0
@@ -356,9 +397,9 @@ impl HostApplication {
                 )
                 .await
             {
-                Ok((result, _)) => {
-                    self.notify_mind_work();
-                    if result.changed {
+                Ok(outcome) => {
+                    if outcome.result.changed {
+                        self.notify_mind_work();
                         let stored = self
                             .0
                             .repository
@@ -366,7 +407,10 @@ impl HostApplication {
                             .await?;
                         publish_mind(self, companion, &current.mind, stored).await?;
                     }
-                    return Ok(true);
+                    // An already-applied range returns the past result but
+                    // must not be announced as progress or replayed.
+                    let _cursor = outcome.status.last_sequence;
+                    return Ok(outcome.advanced);
                 }
                 Err(error) => {
                     if retryable(&error) && attempt + 1 < RETRY_ATTEMPTS {
@@ -467,33 +511,62 @@ impl HostApplication {
         companion: &str,
         last_sequence: u64,
         last_offset: u64,
-    ) -> Result<Vec<ene_rpc::Message>, Error> {
+    ) -> Result<PendingPage, Error> {
         let runtime = self.rig()?;
-        let page = tokio::time::timeout(
-            Duration::from_secs(2),
-            runtime.history_after(
-                companion.to_owned(),
-                last_sequence.saturating_sub(1),
-                HISTORY_PAGE,
-            ),
-        )
-        .await
-        .map_err(|_| Error::unavailable())??;
+        let mut after = last_sequence.saturating_sub(1);
         let mut picked = Vec::new();
-        for message in page.items {
-            if message.sequence < last_sequence {
-                continue;
+        let mut terminal_through = None;
+        for _ in 0..SCAN_PAGES {
+            let page = tokio::time::timeout(
+                Duration::from_secs(2),
+                runtime.history_after(companion.to_owned(), after, HISTORY_PAGE),
+            )
+            .await
+            .map_err(|_| Error::unavailable())??;
+            let (targets, last_terminal, waiting) =
+                scan_page(&page.items, last_sequence, last_offset);
+            picked.extend(targets);
+            if waiting || !picked.is_empty() {
+                break;
             }
-            if message.sequence == last_sequence
-                && (last_offset == 0 || message.text.chars().count() <= last_offset as usize)
-            {
-                continue;
+            if let Some(position) = last_terminal {
+                terminal_through = Some(position);
             }
-            if confirmed_message(&message) {
-                picked.push(message);
+            let Some(last) = page.items.last().map(|message| message.sequence) else {
+                break;
+            };
+            if page.next_cursor.is_none() || last <= after {
+                break;
+            }
+            after = last;
+        }
+        // A completed turn's user entry is not a complete experience until
+        // its assistant entry is visible. Defer the whole batch rather than
+        // writing a user-only memory and then a second reply-only one.
+        let mut waiting = false;
+        if let Some(last) = picked.last()
+            && last.role == "user"
+            && last.turn_status == "completed"
+        {
+            let request = last.request_id.as_deref();
+            let paired = request.is_some_and(|request| {
+                picked.iter().any(|message| {
+                    message.role == "assistant"
+                        && message.request_id.as_deref() == Some(request)
+                        && message.status == "completed"
+                })
+            });
+            if !paired {
+                picked.clear();
+                waiting = true;
             }
         }
-        Ok(picked)
+        let has_picked = !picked.is_empty();
+        Ok(PendingPage {
+            messages: picked,
+            terminal_through: if has_picked { None } else { terminal_through },
+            waiting,
+        })
     }
 
     async fn consolidation_model(
@@ -541,6 +614,7 @@ struct RelatedMemories {
     forgotten: Vec<MemoryRecord>,
 }
 
+#[cfg(test)]
 fn confirmed_message(message: &ene_rpc::Message) -> bool {
     // A user's completed entry is an accepted experience even when the turn
     // later failed. An assistant entry is spoken experience only when the
@@ -549,6 +623,64 @@ fn confirmed_message(message: &ene_rpc::Message) -> bool {
     message.status == "completed"
         && matches!(message.role.as_str(), "user" | "assistant")
         && !message.text.trim().is_empty()
+}
+
+struct PendingPage {
+    messages: Vec<ene_rpc::Message>,
+    terminal_through: Option<(u64, u64)>,
+    waiting: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryClass {
+    Target,
+    Terminal,
+    Waiting,
+}
+
+fn classify_message(message: &ene_rpc::Message) -> EntryClass {
+    match message.role.as_str() {
+        "user"
+            if message.status == "completed"
+                && !message.text.trim().is_empty()
+                && message.turn_status != "incomplete" =>
+        {
+            EntryClass::Target
+        }
+        "assistant" if message.status == "completed" && !message.text.trim().is_empty() => {
+            EntryClass::Target
+        }
+        "assistant" if matches!(message.status.as_str(), "failed" | "cancelled") => {
+            EntryClass::Terminal
+        }
+        "user" | "assistant" => EntryClass::Waiting,
+        _ => EntryClass::Terminal,
+    }
+}
+
+fn scan_page(
+    messages: &[ene_rpc::Message],
+    last_sequence: u64,
+    last_offset: u64,
+) -> (Vec<ene_rpc::Message>, Option<(u64, u64)>, bool) {
+    let mut targets = Vec::new();
+    let mut terminal = None;
+    for message in messages {
+        if message.sequence < last_sequence
+            || (message.sequence == last_sequence
+                && message.text.chars().count() <= last_offset as usize)
+        {
+            continue;
+        }
+        match classify_message(message) {
+            EntryClass::Target => targets.push(message.clone()),
+            EntryClass::Terminal => {
+                terminal = Some((message.sequence, message.text.chars().count() as u64));
+            }
+            EntryClass::Waiting => return (targets, terminal, true),
+        }
+    }
+    (targets, terminal, false)
 }
 
 fn retryable(error: &Error) -> bool {
@@ -599,13 +731,11 @@ fn batch_chunks(
             total,
         });
         chars += take;
+        through_sequence = message.sequence;
+        through_offset = (start + take) as u64;
         if take < remaining {
-            through_sequence = message.sequence;
-            through_offset = (start + take) as u64;
             break;
         }
-        through_sequence = message.sequence;
-        through_offset = 0;
         if chunks.len() >= BATCH_MESSAGES {
             break;
         }
@@ -657,6 +787,13 @@ fn parse_consolidation(text: &str) -> std::result::Result<ConsolidationOutput, (
     if object
         .keys()
         .any(|key| key != "memories" && key != "reason")
+    {
+        return Err(());
+    }
+    if object
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(str::is_empty)
     {
         return Err(());
     }
@@ -778,7 +915,7 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text.chars().count(), 2_000);
         assert_eq!(through, 1);
-        assert_eq!(offset, 0);
+        assert_eq!(offset, 10_000);
         assert_eq!(chars, 2_000);
         assert!(chunks[0].text.chars().all(|ch| ch == 'あ'));
     }
@@ -813,6 +950,175 @@ mod tests {
         assert!(!confirmed_message(&message(6, "user", "completed", "  ")));
     }
 
+    #[tokio::test]
+    async fn ten_thousand_character_tail_survives_store_reopen_and_replay() {
+        use crate::domain::mind::{
+            Acquisition, MindUpdateRequest, NewMemory, SourceKind, SourceRef,
+        };
+        use crate::infrastructure::sqlite::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.db");
+        let store = Store::open(path.clone()).await.unwrap();
+        store
+            .mind_update(
+                "c".into(),
+                "seed".into(),
+                "seed-hash".into(),
+                MindUpdateRequest {
+                    expected_revision: 1,
+                    memories: vec![NewMemory {
+                        content: "既存".into(),
+                        description: String::new(),
+                        appraisal: String::new(),
+                        acquisition: Acquisition::DirectExperience,
+                        supersedes: Vec::new(),
+                        sources: Vec::new(),
+                        occurred_at: None,
+                    }],
+                    state: None,
+                },
+                vec![SourceRef {
+                    kind: SourceKind::Input,
+                    id: "seed".into(),
+                    entry_id: Some("seed".into()),
+                    speaker: Some("user".into()),
+                    observed_at: Some("2026-01-01T00:00:00Z".into()),
+                }],
+                "parent".into(),
+                "2026-01-01T00:00:00Z".into(),
+            )
+            .await
+            .unwrap();
+        let text = "終".repeat(10_000);
+        let message = message(1, "user", "completed", &text);
+        let (chunks, sources, through, offset, chars) = batch_chunks(vec![message.clone()], 0, 0);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!((through, offset, chars), (1, 8_000, 8_000));
+        let first = store
+            .mind_consolidate(
+                "c".into(),
+                "long-1".into(),
+                "h1".into(),
+                MemoryUpdateEmpty::request(2),
+                sources,
+                through,
+                offset,
+                METHOD_REVISION.into(),
+                1,
+                chars,
+                "2026-01-01T00:00:01Z".into(),
+            )
+            .await
+            .unwrap();
+        assert!(first.advanced);
+        assert_eq!(first.status.last_offset, 8_000);
+        // A new connection is the restart boundary; the original host's
+        // SQLite connection remains open just as a second host would see it.
+        let store = Store::open(path).await.unwrap();
+        let (chunks, sources, through, offset, chars) = batch_chunks(vec![message], 1, 8_000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!((through, offset, chars), (1, 10_000, 2_000));
+        let last = store
+            .mind_consolidate(
+                "c".into(),
+                "long-2".into(),
+                "h2".into(),
+                MemoryUpdateEmpty::request(2),
+                sources,
+                through,
+                offset,
+                METHOD_REVISION.into(),
+                1,
+                chars,
+                "2026-01-01T00:00:02Z".into(),
+            )
+            .await
+            .unwrap();
+        assert!(last.advanced);
+        assert_eq!(last.status.last_offset, 10_000);
+        let replay = store
+            .mind_consolidate(
+                "c".into(),
+                "long-2".into(),
+                "h2".into(),
+                MemoryUpdateEmpty::request(2),
+                vec![],
+                through,
+                offset,
+                METHOD_REVISION.into(),
+                1,
+                chars,
+                "2026-01-01T00:00:03Z".into(),
+            )
+            .await
+            .unwrap();
+        assert!(!replay.advanced);
+        assert_eq!(replay.status.last_offset, 10_000);
+    }
+
+    struct MemoryUpdateEmpty;
+    impl MemoryUpdateEmpty {
+        fn request(revision: u64) -> crate::domain::mind::MindUpdateRequest {
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: revision,
+                memories: Vec::new(),
+                state: None,
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_failed_pages_are_skipped_but_open_replies_wait() {
+        assert_eq!(
+            classify_message(&message(1, "assistant", "failed", "失敗")),
+            EntryClass::Terminal
+        );
+        assert_eq!(
+            classify_message(&message(2, "assistant", "cancelled", "停止")),
+            EntryClass::Terminal
+        );
+        assert_eq!(
+            classify_message(&message(3, "assistant", "incomplete", "未完了")),
+            EntryClass::Waiting
+        );
+        assert_eq!(
+            classify_message(&message(4, "user", "completed", "確定した発言")),
+            EntryClass::Target
+        );
+        assert_eq!(
+            classify_message(&message(5, "assistant", "completed", "答えた")),
+            EntryClass::Target
+        );
+    }
+
+    #[test]
+    fn failed_pages_are_passed_until_a_later_confirmed_user_input() {
+        let failed = (1..=3)
+            .map(|sequence| message(sequence, "assistant", "failed", "失敗"))
+            .collect::<Vec<_>>();
+        let user = vec![message(4, "user", "completed", "確定した発言")];
+        let (targets, terminal, waiting) = scan_page(&failed, 0, 0);
+        assert!(targets.is_empty());
+        assert_eq!(terminal, Some((3, 2)));
+        assert!(!waiting);
+        let (targets, _, waiting) = scan_page(&user, 0, 0);
+        assert_eq!(targets.len(), 1);
+        assert!(!waiting);
+    }
+
+    #[test]
+    fn an_open_reply_stops_the_scan_instead_of_being_skipped() {
+        let page = vec![
+            message(1, "assistant", "failed", "失敗"),
+            message(2, "assistant", "incomplete", "未完了"),
+            message(3, "user", "completed", "後続"),
+        ];
+        let (targets, terminal, waiting) = scan_page(&page, 0, 0);
+        assert!(targets.is_empty());
+        assert_eq!(terminal, Some((1, 2)));
+        assert!(waiting);
+    }
+
     #[test]
     fn invalid_consolidation_output_is_distinct_from_no_change() {
         assert!(parse_consolidation("not json").is_err());
@@ -825,6 +1131,7 @@ mod tests {
         assert!(parse_consolidation(r#"{"memories":[],"reason":"x","state":{}}"#).is_err());
         assert!(parse_consolidation(r#"{}"#).is_err());
         assert!(parse_consolidation(r#"{"memories":[]}"#).is_err());
+        assert!(parse_consolidation(r#"{"memories":[],"reason":""}"#).is_err());
     }
 
     #[test]

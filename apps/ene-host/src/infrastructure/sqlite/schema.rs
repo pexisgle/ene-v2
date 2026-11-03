@@ -27,6 +27,10 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
         M::up(include_str!(
             "../../../migrations/009_consolidation_cursor_offset.sql"
         )),
+        M::up(include_str!(
+            "../../../migrations/010_consolidation_skipped.sql"
+        )),
+        M::up(include_str!("../../../migrations/011_index_retry.sql")),
     ])
 }
 fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {

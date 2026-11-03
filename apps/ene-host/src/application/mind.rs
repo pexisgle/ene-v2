@@ -4,6 +4,7 @@
 use super::{Boundary, HostApplication, generation::publish};
 use crate::application::inference::EMBEDDING_MODEL;
 use crate::rig::mind::{MindCall, MindCallKind, ReadArgs, RecallArgs};
+use crate::rig::prompt::{PromptState, PromptVersion};
 use crate::{
     domain::{
         Error, ErrorKind,
@@ -70,6 +71,7 @@ fn view(
             state: consolidation.state,
             reason: consolidation.reason,
             jobs: consolidation.jobs,
+            skipped: consolidation.skipped,
             model_calls: consolidation.model_calls,
             input_chars: consolidation.input_chars,
             updated_at: consolidation.updated_at,
@@ -83,6 +85,7 @@ fn view(
 #[derive(Clone)]
 pub(crate) struct ActiveRecall {
     pub request_id: String,
+    pub recall_seq: u64,
     pub memories: Vec<MemoryRecord>,
     pub lexical: String,
     pub reason: Option<String>,
@@ -431,6 +434,28 @@ impl HostApplication {
         })
     }
 
+    pub(crate) fn attach_prompt_bridge(&self, bridge: std::sync::Arc<PromptState>) {
+        let _ = self.0.prompt_bridge.set(bridge);
+    }
+
+    fn prompt_bridge(&self) -> Option<&std::sync::Arc<PromptState>> {
+        self.0.prompt_bridge.get()
+    }
+
+    fn set_active_request(&self, companion: &str, request: &str) {
+        if let Ok(mut active) = self.0.active_request.lock() {
+            active.insert(companion.to_owned(), request.to_owned());
+        }
+    }
+
+    fn active_request(&self, companion: &str) -> Option<String> {
+        self.0
+            .active_request
+            .lock()
+            .ok()
+            .and_then(|active| active.get(companion).cloned())
+    }
+
     fn set_active_recall(&self, companion: &str, recall: ActiveRecall) {
         if let Ok(mut cache) = self.0.active_recall.lock() {
             cache.insert(companion.to_owned(), recall);
@@ -444,6 +469,13 @@ impl HostApplication {
                 .is_some_and(|recall| recall.request_id == request_id)
         {
             cache.remove(companion);
+        }
+        if let Ok(mut active) = self.0.active_request.lock()
+            && active
+                .get(companion)
+                .is_some_and(|active| active == request_id)
+        {
+            active.remove(companion);
         }
     }
 
@@ -564,34 +596,47 @@ impl HostApplication {
                 Some("lexical_error".to_owned()),
             ),
         };
-        self.set_active_recall(
-            companion,
-            ActiveRecall {
-                request_id: request_id.to_owned(),
-                memories: memories.clone(),
-                lexical: lexical.clone(),
-                reason: reason.clone(),
-            },
-        );
-        // Read the mind after the recall so a concurrent mind update is not
-        // overwritten by an older snapshot.
         let stored = self
             .0
             .repository
             .mind_view(companion.to_owned(), now())
             .await?;
-        let lexical = match &reason {
+        let lexical_status = match &reason {
             Some(reason) => format!("{lexical}({reason})"),
-            None => lexical,
+            None => lexical.clone(),
         };
-        Ok(compose_prompt_with(
+        let prompt = compose_prompt_with(
             companion,
             core,
             &stored,
             &memories,
-            &lexical,
+            &lexical_status,
             "lexical_only",
-        ))
+        );
+        let recall_seq = self
+            .prompt_bridge()
+            .map(|bridge| bridge.next_recall(companion))
+            .unwrap_or_default();
+        if let Some(bridge) = self.prompt_bridge() {
+            let version = PromptVersion {
+                profile: stored.profile_revision,
+                state: stored.state_revision,
+                recall: recall_seq,
+            };
+            bridge.offer(companion, request_id, prompt.clone(), version);
+            self.set_active_request(companion, request_id);
+        }
+        self.set_active_recall(
+            companion,
+            ActiveRecall {
+                request_id: request_id.to_owned(),
+                recall_seq,
+                memories,
+                lexical,
+                reason,
+            },
+        );
+        Ok(prompt)
     }
 }
 
@@ -638,6 +683,22 @@ pub(super) async fn publish_mind(
             &lexical,
             "lexical_only",
         );
+        if let (Some(bridge), Some(active), Some(request)) = (
+            app.prompt_bridge(),
+            active.as_ref(),
+            app.active_request(companion),
+        ) {
+            bridge.update(
+                companion,
+                &request,
+                prompt.clone(),
+                PromptVersion {
+                    profile: stored.profile_revision,
+                    state: stored.state_revision,
+                    recall: active.recall_seq,
+                },
+            );
+        }
         if let Err(error) = runtime.set_mind_prompt(companion.to_owned(), prompt) {
             // The next connect composes from SQLite; the update is not rolled
             // back for a missing kernel.

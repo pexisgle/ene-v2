@@ -12,6 +12,7 @@
 mod kernel;
 mod messages;
 pub(crate) mod mind;
+pub(crate) mod prompt;
 
 use crate::domain::{Error, ErrorKind};
 use ene_rpc as w;

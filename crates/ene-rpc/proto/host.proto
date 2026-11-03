@@ -19,6 +19,7 @@ message Message {
   // The accepted input this entry or reply belongs to. A reply carries the id
   // of the input it answers; the id is the same value SendMessage returned.
   optional string request_id = 13;
+  string turn_status = 14;
 }
 message Companion {
   string id = 1; string name = 2; JsonDocument body = 3; JsonDocument voice = 4;
@@ -49,7 +50,7 @@ message MindIndexStatus {
 message MindConsolidationStatus {
   uint64 last_sequence = 1; string method_revision = 2; string state = 3;
   optional string reason = 4; uint64 jobs = 5; uint64 model_calls = 6;
-  uint64 input_chars = 7; string updated_at = 8; uint64 last_offset = 9;
+  uint64 input_chars = 7; string updated_at = 8; uint64 last_offset = 9; uint64 skipped = 10;
 }
 message MindView {
   string companion_id = 1; MindProfile profile = 2; MindState state = 3;

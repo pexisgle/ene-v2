@@ -41,6 +41,14 @@ pub(super) async fn configuration(
     }
     // Snapshot shares this boundary; it cannot observe a committed DB with an old cursor.
     controls.config = Some(configuration.clone());
+    // A relevant settings/grant/credential change is a reason to retry index
+    // work that had exhausted its bounded attempts.
+    let _ = app
+        .0
+        .repository
+        .mind_retry_index(crate::application::mind::now())
+        .await;
+    app.notify_mind_work();
     // A turn started under the old model, credential or grant stops now; the
     // next input reconnects with the committed configuration.
     if let Ok(runtime) = app.rig() {

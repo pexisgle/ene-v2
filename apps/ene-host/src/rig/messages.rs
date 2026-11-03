@@ -162,6 +162,7 @@ fn entry_message(spans: &[TurnSpan], entry: &EntryRef<'_>, companion: &str) -> O
         task_id: None,
         question_id: None,
         failure: failure.into(),
+        turn_status: span.map(TurnSpan::status).unwrap_or(OPEN).into(),
         request_id: if role == "assistant" {
             span.and_then(|span| span.request_id.clone())
         } else {

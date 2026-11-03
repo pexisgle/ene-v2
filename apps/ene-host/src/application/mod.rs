@@ -73,6 +73,8 @@ struct Inner {
     mind_started: std::sync::atomic::AtomicBool,
     active_recall:
         std::sync::Mutex<std::collections::HashMap<String, crate::application::mind::ActiveRecall>>,
+    prompt_bridge: std::sync::OnceLock<std::sync::Arc<crate::rig::prompt::PromptState>>,
+    active_request: std::sync::Mutex<std::collections::HashMap<String, String>>,
     #[cfg(test)]
     consolidation_hook: std::sync::OnceLock<ConsolidationHook>,
 }
@@ -106,6 +108,8 @@ impl HostApplication {
             mind_notify: tokio::sync::Notify::new(),
             mind_started: std::sync::atomic::AtomicBool::new(false),
             active_recall: std::sync::Mutex::new(std::collections::HashMap::new()),
+            prompt_bridge: std::sync::OnceLock::new(),
+            active_request: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
             consolidation_hook: std::sync::OnceLock::new(),
             events: broadcast::channel(256).0,
