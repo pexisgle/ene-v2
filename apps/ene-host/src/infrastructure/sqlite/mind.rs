@@ -19,8 +19,8 @@ fn state_json(state: &StoredState) -> Result<String> {
 fn ensure(tx: &Transaction<'_>, companion: &str, now: &str) -> Result<()> {
     tx.execute(
         "INSERT OR IGNORE INTO mind_companions \
-         (companion_id,profile_revision,profile,state_revision,state,updated_at) \
-         VALUES (?1,1,?2,1,?3,?4)",
+         (companion_id,profile_revision,profile,state_revision,state,memory_revision,updated_at) \
+         VALUES (?1,1,?2,1,?3,1,?4)",
         params![
             companion,
             profile_json(&ProfileDocument::default())?,
@@ -34,32 +34,35 @@ fn ensure(tx: &Transaction<'_>, companion: &str, now: &str) -> Result<()> {
 fn read_row(
     tx: &Transaction<'_>,
     companion: &str,
-) -> Result<(u64, ProfileDocument, u64, StoredState, String)> {
-    let (profile_revision, profile, state_revision, state, updated_at) = tx.query_row(
-        "SELECT profile_revision,profile,state_revision,state,updated_at \
+) -> Result<(u64, ProfileDocument, u64, StoredState, u64, String)> {
+    let (profile_revision, profile, state_revision, state, memory_revision, updated_at) = tx
+        .query_row(
+            "SELECT profile_revision,profile,state_revision,state,memory_revision,updated_at \
          FROM mind_companions WHERE companion_id=?1",
-        params![companion],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)? as u64,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)? as u64,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        },
-    )?;
+            params![companion],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)? as u64,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )?;
     Ok((
         profile_revision,
         serde_json::from_str(&profile).map_err(Error::Json)?,
         state_revision,
         serde_json::from_str(&state).map_err(Error::Json)?,
+        memory_revision,
         updated_at,
     ))
 }
 
 pub(super) fn revision(tx: &Transaction<'_>, companion: &str) -> Result<u64> {
-    let (_, _, revision, _, _) = read_row(tx, companion)?;
+    let (_, _, revision, _, _, _) = read_row(tx, companion)?;
     Ok(revision)
 }
 
@@ -70,13 +73,15 @@ pub(super) fn view(
 ) -> Result<StoredMind> {
     let tx = db.transaction()?;
     ensure(&tx, companion, now)?;
-    let (profile_revision, profile, state_revision, state, updated_at) = read_row(&tx, companion)?;
+    let (profile_revision, profile, state_revision, state, memory_revision, updated_at) =
+        read_row(&tx, companion)?;
     tx.commit()?;
     Ok(StoredMind {
         profile_revision,
         profile,
         state_revision,
         state,
+        memory_revision,
         updated_at,
     })
 }
@@ -159,8 +164,13 @@ pub(super) fn apply_tx(
     {
         return Err(Error::InvalidRequest);
     }
-    let (_, _, revision, mut state, _) = read_row(tx, owner)?;
-    if request.expected_revision != revision {
+    let (_, _, revision, mut state, memory_revision, _) = read_row(tx, owner)?;
+    let expected = if actor == "consolidation" {
+        memory_revision
+    } else {
+        revision
+    };
+    if request.expected_revision != expected {
         return Err(Error::RevisionConflict);
     }
     check_references(tx, owner, request)?;
@@ -242,9 +252,16 @@ pub(super) fn apply_tx(
     let revision = revision
         .checked_add(1)
         .ok_or_else(|| Error::StateConflict)?;
+    let memory_revision = if changed.is_empty() {
+        memory_revision
+    } else {
+        memory_revision
+            .checked_add(1)
+            .ok_or_else(|| Error::StateConflict)?
+    };
     tx.execute(
-        "UPDATE mind_companions SET state_revision=?2,state=?3,updated_at=?4 WHERE companion_id=?1",
-        params![owner, revision as i64, state_json(&state)?, now],
+        "UPDATE mind_companions SET state_revision=?2,state=?3,memory_revision=?4,updated_at=?5 WHERE companion_id=?1",
+        params![owner, revision as i64, state_json(&state)?, memory_revision as i64, now],
     )?;
     let result = MindUpdateResult {
         operation_id: operation_id.into(),

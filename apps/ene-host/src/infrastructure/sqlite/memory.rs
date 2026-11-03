@@ -975,6 +975,29 @@ mod tests {
         let store = Store::open(dir.path().join("m.db")).await.unwrap();
         store
             .run(|db| {
+                // A parent's state-only mood change advances the mind revision
+                // but not the memory revision; it must not invalidate the
+                // pending consolidation batch.
+                let mut mood = request(1, Vec::new());
+                mood.state = Some(crate::domain::mind::StateUpdate {
+                    emotion: Some(crate::domain::mind::Emotion {
+                        description: "少し落ち着いている".into(),
+                        target: None,
+                        reason: None,
+                        signals: Vec::new(),
+                    }),
+                    ..Default::default()
+                });
+                mind::update(
+                    db,
+                    "a",
+                    "parent-mood",
+                    "mood-hash",
+                    &mood,
+                    &[source(SourceKind::Input, "mood")],
+                    "parent",
+                    "now",
+                )?;
                 let request = request(1, vec![memory("一緒に柚子ジャムを作った")]);
                 let sources = vec![
                     source(SourceKind::Input, "input-1"),

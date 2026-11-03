@@ -291,7 +291,7 @@ impl HostApplication {
         };
         let _reason = parsed.reason.clone();
         let request = MindUpdateRequest {
-            expected_revision: stored.state_revision,
+            expected_revision: stored.memory_revision,
             memories: parsed.memories,
             state: None,
         };
@@ -526,6 +526,7 @@ fn consolidation_payload(
         .collect::<Vec<_>>();
     serde_json::json!({
         "current_mind_revision": stored.state_revision,
+        "consolidation_revision": stored.memory_revision,
         "current_mind": stored.state,
         "existing_memories": known,
         "confirmed_entries": entries,

@@ -233,6 +233,7 @@ pub struct StoredMind {
     pub profile: ProfileDocument,
     pub state_revision: u64,
     pub state: StoredState,
+    pub memory_revision: u64,
     pub updated_at: String,
 }
 
