@@ -76,6 +76,7 @@ fn run_app(
         .init_resource::<Emitted>()
         .add_systems(Startup, initialize)
         .init_resource::<RecallHolds>()
+        .init_resource::<RecallResults>()
         .add_systems(PreUpdate, (apply_commands, expire_recalls).chain())
         .add_systems(AgentPass, hold_recall.in_set(Stage::Gate))
         .add_systems(
@@ -88,12 +89,6 @@ fn run_app(
         .add_systems(
             AgentPass,
             bind_mind_calls
-                .in_set(Stage::Prepare)
-                .in_set(PrepareSystems::Edit),
-        )
-        .add_systems(
-            AgentPass,
-            crate::rig::prompt::apply_prompt
                 .in_set(Stage::Prepare)
                 .in_set(PrepareSystems::Edit),
         )
@@ -234,6 +229,32 @@ struct RecallHolds {
     held: HashMap<String, HeldRecall>,
 }
 
+#[derive(Default, Resource)]
+struct RecallResults {
+    pending: HashMap<String, String>,
+    cancelled: HashSet<String>,
+}
+
+fn owned_prompt(role: String) -> rig_core::completion::SystemPrompt {
+    rig_core::completion::SystemPrompt {
+        role,
+        sections: Vec::new(),
+    }
+}
+
+fn apply_recall_prompt(world: &mut World, entity: Entity, prompt: String) {
+    let agent = world.get::<ForAgent>(entity).map(|agent| agent.0);
+    let prompt = owned_prompt(prompt);
+    if let Some(mut request) = world.get_mut::<ModelRequest>(entity) {
+        request.prompt = Some(prompt.clone());
+    }
+    if let Some(agent) = agent {
+        world
+            .entity_mut(agent)
+            .insert(SystemPrompt(prompt.role.clone()));
+    }
+}
+
 struct HeldRecall {
     companion: String,
     entity: Entity,
@@ -244,7 +265,8 @@ struct HeldRecall {
 fn hold_recall(
     mut commands: Commands,
     mut holds: ResMut<RecallHolds>,
-    calls: Query<(Entity, &ModelRequest, Option<&ForAgent>)>,
+    mut results: ResMut<RecallResults>,
+    mut calls: Query<(Entity, &mut ModelRequest, Option<&ForAgent>)>,
     held: Query<&HoldOf>,
     agents: Query<&AgentId, With<Agent>>,
 ) {
@@ -260,7 +282,7 @@ fn hold_recall(
             commands.entity(value.entity).despawn();
         }
     }
-    for (call, request, agent) in &calls {
+    for (call, mut request, agent) in &mut calls {
         let Some(id) = request
             .history
             .as_ref()
@@ -276,6 +298,19 @@ fn hold_recall(
         else {
             continue;
         };
+        if let Some(prompt) = results.pending.remove(&id) {
+            request.prompt = Some(rig_core::completion::SystemPrompt {
+                role: prompt.clone(),
+                sections: Vec::new(),
+            });
+            if let Some(agent) = agent {
+                commands.entity(agent.0).insert(SystemPrompt(prompt));
+            }
+            if let Some(value) = holds.held.remove(&id) {
+                commands.entity(value.entity).despawn();
+            }
+            continue;
+        }
         let Some(value) = holds.held.get(&id) else {
             continue;
         };
@@ -320,6 +355,10 @@ fn apply_commands(world: &mut World) {
                 deadline,
                 reply,
             } => {
+                world
+                    .resource_mut::<RecallResults>()
+                    .cancelled
+                    .remove(&request_id);
                 if let Some(old) = world.resource_mut::<RecallHolds>().held.remove(&request_id) {
                     world.despawn(old.entity);
                 }
@@ -335,7 +374,29 @@ fn apply_commands(world: &mut World) {
                 );
             }
             Command::RecallCompleted { request_id, prompt } => {
-                use rig_core::completion::SystemPrompt as CoreSystemPrompt;
+                let cancelled = world
+                    .resource::<RecallResults>()
+                    .cancelled
+                    .contains(&request_id);
+                if cancelled {
+                    world
+                        .resource_mut::<RecallResults>()
+                        .pending
+                        .remove(&request_id);
+                    if let Some(old) = world.resource_mut::<RecallHolds>().held.remove(&request_id)
+                    {
+                        world.despawn(old.entity);
+                    }
+                    continue;
+                }
+                let has_hold = world
+                    .resource::<RecallHolds>()
+                    .held
+                    .contains_key(&request_id);
+                let had_pending = world
+                    .resource::<RecallResults>()
+                    .pending
+                    .contains_key(&request_id);
                 let mut target = None;
                 {
                     let mut query = world.query::<(Entity, &ModelRequest)>();
@@ -359,25 +420,31 @@ fn apply_commands(world: &mut World) {
                     }
                 }
                 if let Some(entity) = target {
-                    let agent = world.get::<ForAgent>(entity).map(|agent| agent.0);
-                    let prompt = CoreSystemPrompt {
-                        role: prompt,
-                        sections: Vec::new(),
-                    };
-                    if let Some(mut request) = world.get_mut::<ModelRequest>(entity) {
-                        request.prompt = Some(prompt.clone());
-                    }
-                    if let Some(agent) = agent {
+                    if has_hold || had_pending {
+                        apply_recall_prompt(world, entity, prompt);
                         world
-                            .entity_mut(agent)
-                            .insert(SystemPrompt(prompt.role.clone()));
+                            .resource_mut::<RecallResults>()
+                            .pending
+                            .remove(&request_id);
+                        if let Some(old) =
+                            world.resource_mut::<RecallHolds>().held.remove(&request_id)
+                        {
+                            world.despawn(old.entity);
+                        }
                     }
-                }
-                if let Some(old) = world.resource_mut::<RecallHolds>().held.remove(&request_id) {
-                    world.despawn(old.entity);
+                } else if has_hold {
+                    world
+                        .resource_mut::<RecallResults>()
+                        .pending
+                        .insert(request_id, prompt);
                 }
             }
             Command::RecallCancelled { request_id } => {
+                {
+                    let mut results = world.resource_mut::<RecallResults>();
+                    results.pending.remove(&request_id);
+                    results.cancelled.insert(request_id.clone());
+                }
                 if let Some(old) = world.resource_mut::<RecallHolds>().held.remove(&request_id) {
                     world.despawn(old.entity);
                 }

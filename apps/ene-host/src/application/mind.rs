@@ -4,7 +4,6 @@
 use super::{Boundary, HostApplication, generation::publish};
 use crate::application::inference::EMBEDDING_MODEL;
 use crate::rig::mind::{MindCall, MindCallKind, ReadArgs, RecallArgs};
-use crate::rig::prompt::{PromptState, PromptVersion};
 use crate::{
     domain::{
         Error, ErrorKind,
@@ -85,7 +84,6 @@ fn view(
 #[derive(Clone)]
 pub(crate) struct ActiveRecall {
     pub request_id: String,
-    pub recall_seq: u64,
     pub memories: Vec<MemoryRecord>,
     pub lexical: String,
     pub reason: Option<String>,
@@ -434,14 +432,6 @@ impl HostApplication {
         })
     }
 
-    pub(crate) fn attach_prompt_bridge(&self, bridge: std::sync::Arc<PromptState>) {
-        let _ = self.0.prompt_bridge.set(bridge);
-    }
-
-    fn prompt_bridge(&self) -> Option<&std::sync::Arc<PromptState>> {
-        self.0.prompt_bridge.get()
-    }
-
     fn set_active_request(&self, companion: &str, request: &str) {
         if let Ok(mut active) = self.0.active_request.lock() {
             active.insert(companion.to_owned(), request.to_owned());
@@ -477,10 +467,7 @@ impl HostApplication {
         {
             active.remove(companion);
         }
-        self.clear_bridge_entry(companion, request_id);
-        if let Ok(runtime) = self.rig() {
-            let _ = runtime.cancel_recall(request_id.to_owned());
-        }
+        self.cancel_semantic(companion, request_id);
     }
 
     fn active_recall(&self, companion: &str) -> Option<ActiveRecall> {
@@ -617,48 +604,43 @@ impl HostApplication {
             &lexical_status,
             "lexical_only",
         );
-        let recall_seq = self
-            .prompt_bridge()
-            .map(|bridge| bridge.next_recall(companion))
-            .unwrap_or_default();
-        if let Some(bridge) = self.prompt_bridge() {
-            let version = PromptVersion {
-                profile: stored.profile_revision,
-                state: stored.state_revision,
-                recall: recall_seq,
-            };
-            bridge.offer(companion, request_id, prompt.clone(), version);
-            self.set_active_request(companion, request_id);
-            if let Ok(runtime) = self.rig() {
-                let _ = runtime.hold_recall(
-                    companion.to_owned(),
-                    request_id.to_owned(),
-                    std::time::Instant::now() + std::time::Duration::from_millis(900),
-                );
-            }
-            let app = self.clone();
-            let companion_owned = companion.to_owned();
-            let request_owned = request_id.to_owned();
-            let text_owned = text.to_owned();
-            let core_owned = core.to_owned();
-            let local_prompt = prompt.clone();
-            self.0.background.spawn(async move {
-                app.semantic_recall(
-                    companion_owned,
-                    core_owned,
-                    text_owned,
-                    request_owned,
-                    local_prompt,
-                    version,
-                )
-                .await;
-            });
+        self.set_active_request(companion, request_id);
+        if let Ok(runtime) = self.rig() {
+            let _ = runtime.set_mind_prompt(companion.to_owned(), prompt.clone());
+            let _ = runtime.hold_recall(
+                companion.to_owned(),
+                request_id.to_owned(),
+                std::time::Instant::now() + std::time::Duration::from_millis(900),
+            );
         }
+        let local = RecallResult {
+            memories: memories.clone(),
+            lexical: lexical.clone(),
+            semantic: "lexical_only".into(),
+            pending: 0,
+            reason: reason.clone(),
+        };
+        let app = self.clone();
+        let companion_owned = companion.to_owned();
+        let request_owned = request_id.to_owned();
+        let text_owned = text.to_owned();
+        let core_owned = core.to_owned();
+        let local_prompt = prompt.clone();
+        self.0.background.spawn(async move {
+            app.semantic_recall(
+                companion_owned,
+                core_owned,
+                text_owned,
+                request_owned,
+                local,
+                local_prompt,
+            )
+            .await;
+        });
         self.set_active_recall(
             companion,
             ActiveRecall {
                 request_id: request_id.to_owned(),
-                recall_seq,
                 memories,
                 lexical,
                 reason,
@@ -667,9 +649,16 @@ impl HostApplication {
         Ok(prompt)
     }
 
-    fn clear_bridge_entry(&self, companion: &str, request: &str) {
-        if let Some(bridge) = self.prompt_bridge() {
-            bridge.remove(companion, request);
+    /// Cancel any hold and drop the per-input search state without touching
+    /// the canonical mind.
+    fn cancel_semantic(&self, companion: &str, request: &str) {
+        if let Ok(runtime) = self.rig() {
+            let _ = runtime.cancel_recall(request.to_owned());
+        }
+        if self.active_request(companion).as_deref() == Some(request)
+            && let Ok(mut active) = self.0.active_request.lock()
+        {
+            active.remove(companion);
         }
     }
 
@@ -679,19 +668,15 @@ impl HostApplication {
         core: String,
         text: String,
         request_id: String,
+        local: RecallResult,
         local_prompt: String,
-        version: PromptVersion,
     ) {
         let finish = |prompt: String| {
             if let Ok(runtime) = self.rig() {
                 let _ = runtime.complete_recall(request_id.clone(), prompt);
             }
         };
-        let cancel = |app: &HostApplication| {
-            if let Ok(runtime) = app.rig() {
-                let _ = runtime.cancel_recall(request_id.clone());
-            }
-        };
+        let cancel = |app: &HostApplication| app.cancel_semantic(&companion, &request_id);
         if self.active_request(&companion).as_deref() != Some(request_id.as_str()) {
             cancel(self);
             return;
@@ -703,7 +688,8 @@ impl HostApplication {
             .await
             .unwrap_or(0);
         if count == 0 || text.chars().count() < 4 {
-            finish(local_prompt);
+            self.finish_local(&companion, &core, local, &local_prompt, &request_id)
+                .await;
             return;
         }
         let query = text.chars().take(2000).collect::<String>();
@@ -723,11 +709,17 @@ impl HostApplication {
                 result.semantic,
                 result.reason,
             ),
-            _ => (
-                Vec::new(),
-                "error".to_owned(),
-                "unavailable".to_owned(),
-                Some("semantic_search_failed".to_owned()),
+            Ok(Err(_)) => (
+                local.memories,
+                local.lexical,
+                "error".into(),
+                Some("semantic_search_failed".into()),
+            ),
+            Err(_) => (
+                local.memories,
+                local.lexical,
+                "timeout".into(),
+                Some("semantic_timeout".into()),
             ),
         };
         let stored = match self.0.repository.mind_view(companion.clone(), now()).await {
@@ -740,22 +732,52 @@ impl HostApplication {
         let prompt =
             compose_prompt_with(&companion, &core, &stored, &memories, &lexical, &semantic);
         if self.active_request(&companion).as_deref() == Some(request_id.as_str()) {
-            if !memories.is_empty() {
-                self.set_active_recall(
-                    &companion,
-                    ActiveRecall {
-                        request_id: request_id.clone(),
-                        recall_seq: version.recall,
-                        memories,
-                        lexical,
-                        reason,
-                    },
-                );
-            }
+            self.set_active_recall(
+                &companion,
+                ActiveRecall {
+                    request_id: request_id.clone(),
+                    memories,
+                    lexical,
+                    reason,
+                },
+            );
             finish(prompt);
         } else {
             cancel(self);
         }
+    }
+
+    async fn finish_local(
+        &self,
+        companion: &str,
+        core: &str,
+        local: RecallResult,
+        local_prompt: &str,
+        request_id: &str,
+    ) {
+        let finish = |prompt: String| {
+            if let Ok(runtime) = self.rig() {
+                let _ = runtime.complete_recall(request_id.to_owned(), prompt);
+            }
+        };
+        let stored = self
+            .0
+            .repository
+            .mind_view(companion.to_owned(), now())
+            .await;
+        let Ok(stored) = stored else {
+            finish(local_prompt.to_owned());
+            return;
+        };
+        let prompt = compose_prompt_with(
+            companion,
+            core,
+            &stored,
+            &local.memories,
+            &local.lexical,
+            "unavailable",
+        );
+        finish(prompt);
     }
 }
 
@@ -802,22 +824,6 @@ pub(super) async fn publish_mind(
             &lexical,
             "lexical_only",
         );
-        if let (Some(bridge), Some(active), Some(request)) = (
-            app.prompt_bridge(),
-            active.as_ref(),
-            app.active_request(companion),
-        ) {
-            bridge.update(
-                companion,
-                &request,
-                prompt.clone(),
-                PromptVersion {
-                    profile: stored.profile_revision,
-                    state: stored.state_revision,
-                    recall: active.recall_seq,
-                },
-            );
-        }
         if let Err(error) = runtime.set_mind_prompt(companion.to_owned(), prompt) {
             // The next connect composes from SQLite; the update is not rolled
             // back for a missing kernel.

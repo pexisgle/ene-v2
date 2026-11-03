@@ -214,7 +214,7 @@ impl HostApplication {
         let mut pending = self
             .pending_messages(companion, status.last_sequence, status.last_offset)
             .await?;
-        if pending.waiting && pending.messages.is_empty() {
+        if pending.waiting {
             // Recheck the state, not a timer-as-confirmation: the assistant
             // entry may become visible one kernel frame after the turn event.
             for _ in 0..2 {
@@ -526,7 +526,11 @@ impl HostApplication {
             let (targets, last_terminal, waiting) =
                 scan_page(&page.items, last_sequence, last_offset);
             picked.extend(targets);
-            if waiting || !picked.is_empty() {
+            if waiting {
+                break;
+            }
+            let dangling = unpaired_user(&picked);
+            if !picked.is_empty() && !dangling {
                 break;
             }
             if let Some(position) = last_terminal {
@@ -540,27 +544,12 @@ impl HostApplication {
             }
             after = last;
         }
-        // A completed turn's user entry is not a complete experience until
-        // its assistant entry is visible. Defer the whole batch rather than
-        // writing a user-only memory and then a second reply-only one.
-        let mut waiting = false;
-        if let Some(last) = picked.last()
-            && last.role == "user"
-            && last.turn_status == "completed"
-        {
-            let request = last.request_id.as_deref();
-            let paired = request.is_some_and(|request| {
-                picked.iter().any(|message| {
-                    message.role == "assistant"
-                        && message.request_id.as_deref() == Some(request)
-                        && message.status == "completed"
-                })
-            });
-            if !paired {
-                picked.clear();
-                waiting = true;
-            }
-        }
+        // Keep the confirmed user even when its reply is not in the same
+        // page. A short state recheck is allowed to pick up a reply that is
+        // not visible yet; after that the user is processed rather than
+        // waiting forever. Pages are never marked processed for a reply that
+        // has not been confirmed.
+        let waiting = unpaired_user(&picked);
         let has_picked = !picked.is_empty();
         Ok(PendingPage {
             messages: picked,
@@ -656,6 +645,23 @@ fn classify_message(message: &ene_rpc::Message) -> EntryClass {
         "user" | "assistant" => EntryClass::Waiting,
         _ => EntryClass::Terminal,
     }
+}
+
+fn unpaired_user(messages: &[ene_rpc::Message]) -> bool {
+    let Some(last) = messages.last() else {
+        return false;
+    };
+    if last.role != "user" || last.turn_status != "completed" {
+        return false;
+    }
+    let Some(request) = last.request_id.as_deref() else {
+        return false;
+    };
+    !messages.iter().any(|message| {
+        message.role == "assistant"
+            && message.request_id.as_deref() == Some(request)
+            && message.status == "completed"
+    })
 }
 
 fn scan_page(

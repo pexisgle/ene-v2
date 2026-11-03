@@ -12,7 +12,6 @@
 mod kernel;
 mod messages;
 pub(crate) mod mind;
-pub(crate) mod prompt;
 
 use crate::domain::{Error, ErrorKind};
 use ene_rpc as w;
@@ -1247,6 +1246,70 @@ mod tests {
             history.items.is_empty(),
             "a refused reply or its withdrawn input was saved: {:?}",
             history.items
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_result_arriving_before_the_model_request_is_not_lost() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("早い結果で答えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let requests = model.clone();
+        let (runtime, mut received) = start(temp.path().join("rig"));
+        runtime
+            .connect(
+                "companion".into(),
+                "簡潔に答える。".into(),
+                connection_of(model),
+                false,
+            )
+            .unwrap();
+        runtime
+            .hold_recall(
+                "companion".into(),
+                "early-request".into(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+        let sender = runtime.signal_sender_for_test();
+        sender
+            .send(Signal::Command(Command::RecallCompleted {
+                request_id: "early-request".into(),
+                prompt: "EARLY-RECALL".into(),
+            }))
+            .unwrap();
+        runtime
+            .deliver(
+                "companion".into(),
+                "こんにちは".into(),
+                "early-request".into(),
+            )
+            .await
+            .unwrap();
+        let finished = loop {
+            match next(&mut received).await {
+                Event::TurnFinished { state, failure, .. } => break (state, failure),
+                Event::TurnStarted { .. } => {}
+                _ => {}
+            }
+        };
+        assert_eq!(finished.0, "answered");
+        assert!(finished.1.is_none(), "{:?}", finished.1);
+        assert_eq!(requests.requests().len(), 1);
+        let prompt = requests.requests()[0]
+            .chat_history
+            .iter()
+            .find_map(|message| match &**message {
+                rig_core::completion::Message::System { content } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("system prompt");
+        assert!(
+            prompt.contains("EARLY-RECALL"),
+            "an early result was lost: {prompt}"
         );
         runtime.shutdown().await.unwrap();
     }
