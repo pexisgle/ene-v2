@@ -21,6 +21,7 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
                 })
             },
         ),
+        M::up(include_str!("../../../migrations/006_mind.sql")),
     ])
 }
 fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {

@@ -1,5 +1,6 @@
 //! Host entities independent of HTTP, persistence and provider implementations.
 pub mod harness;
+pub mod mind;
 mod operation;
 pub mod rules;
 pub use operation::*;

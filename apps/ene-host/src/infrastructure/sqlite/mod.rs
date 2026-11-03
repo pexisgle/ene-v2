@@ -1,4 +1,5 @@
 //! SQLite execution, schema lifecycle and repository implementation.
+mod mind;
 mod plugins;
 mod queries;
 mod repository;
@@ -38,6 +39,10 @@ pub enum Error {
     IdempotencyConflict,
     #[error("state_conflict")]
     StateConflict,
+    #[error("revision_conflict")]
+    RevisionConflict,
+    #[error("unknown_reference")]
+    UnknownReference,
     #[error("database schema {0} is newer than this host")]
     FutureSchema(usize),
 }

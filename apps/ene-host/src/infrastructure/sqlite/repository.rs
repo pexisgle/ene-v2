@@ -122,12 +122,105 @@ impl crate::ports::Repository for Store {
                 .map_err(core_error)
         })
     }
+
+    fn mind_view(
+        &self,
+        companion: String,
+        now: String,
+    ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<crate::domain::mind::StoredMind>>
+    {
+        Box::pin(async move {
+            self.call(move |db| mind::view(db, &companion, &now))
+                .await
+                .map_err(core_error)
+        })
+    }
+    fn mind_update(
+        &self,
+        owner: String,
+        operation_id: String,
+        request_hash: String,
+        request: crate::domain::mind::MindUpdateRequest,
+        source: crate::domain::mind::SourceRef,
+        now: String,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        crate::ports::Result<crate::domain::mind::MindUpdateResult>,
+    > {
+        Box::pin(async move {
+            self.call(move |db| {
+                mind::update(
+                    db,
+                    &owner,
+                    &operation_id,
+                    &request_hash,
+                    &request,
+                    &source,
+                    &now,
+                )
+            })
+            .await
+            .map_err(core_error)
+        })
+    }
+    fn mind_recall(
+        &self,
+        owner: String,
+        query: String,
+        limit: usize,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        crate::ports::Result<Vec<crate::domain::mind::MemoryRecord>>,
+    > {
+        Box::pin(async move {
+            self.call(move |db| mind::recall(db, &owner, &query, limit))
+                .await
+                .map_err(core_error)
+        })
+    }
+    fn mind_read(
+        &self,
+        owner: String,
+        id: String,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        crate::ports::Result<Option<crate::domain::mind::MemoryRecord>>,
+    > {
+        Box::pin(async move {
+            self.call(move |db| mind::read(db, &owner, &id))
+                .await
+                .map_err(core_error)
+        })
+    }
+    fn mind_update_profile(
+        &self,
+        companion: String,
+        expected_revision: u64,
+        profile: crate::domain::mind::ProfileDocument,
+        now: String,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        crate::ports::Result<(u64, crate::domain::mind::ProfileDocument)>,
+    > {
+        Box::pin(async move {
+            self.call(move |db| {
+                mind::update_profile(db, &companion, expected_revision, &profile, &now)
+            })
+            .await
+            .map_err(core_error)
+        })
+    }
 }
 pub(crate) fn core_error(error: Error) -> crate::domain::Error {
     use crate::domain::{Error as CoreError, ErrorKind};
     match error {
         Error::IdempotencyConflict => CoreError::new(ErrorKind::IdempotencyConflict),
         Error::StateConflict => CoreError::new(ErrorKind::StateConflict),
+        Error::RevisionConflict => CoreError::new(ErrorKind::RevisionConflict),
+        Error::UnknownReference => CoreError {
+            kind: ErrorKind::InvalidRequest,
+            reason: Some("unknown_reference"),
+        },
         _ => CoreError::new(ErrorKind::StorageFailure),
     }
 }
