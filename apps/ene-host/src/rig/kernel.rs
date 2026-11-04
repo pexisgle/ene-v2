@@ -224,6 +224,9 @@ fn agent_entity(world: &mut World, companion: &str) -> Option<Entity> {
         .map(|(entity, _)| entity)
 }
 
+#[derive(Component, Clone, Copy, Default)]
+struct PromptSequence(u64);
+
 #[derive(Default, Resource)]
 struct RecallHolds {
     held: HashMap<String, HeldRecall>,
@@ -455,9 +458,21 @@ fn apply_commands(world: &mut World) {
                 model,
                 mind_tools,
             } => connect(world, companion, prompt, model, mind_tools),
-            Command::SetMindPrompt { companion, prompt } => {
+            Command::SetMindPrompt {
+                companion,
+                prompt,
+                sequence,
+            } => {
                 if let Some(entity) = agent_entity(world, &companion) {
-                    world.entity_mut(entity).insert(SystemPrompt(prompt));
+                    let current = world
+                        .get::<PromptSequence>(entity)
+                        .map(|current| current.0)
+                        .unwrap_or(0);
+                    if sequence >= current {
+                        world
+                            .entity_mut(entity)
+                            .insert((SystemPrompt(prompt), PromptSequence(sequence)));
+                    }
                 }
             }
             Command::Deliver {

@@ -3208,7 +3208,6 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
 
 #[tokio::test]
 async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
-    use crate::application::mind::set_test_now;
     use crate::llm::Embedding;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3216,8 +3215,8 @@ async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    set_test_now(1_800_000_000);
     let app = crate::bootstrap::application(store.clone(), "private-token".into());
+    app.application.set_test_now(1_800_000_000);
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     crate::bootstrap::attach_kernel(&app, rig_dir).unwrap();
@@ -3295,13 +3294,14 @@ async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
     };
     assert_eq!(wait_for(calls.clone(), 1).await, 1);
     for expected in 2..=5 {
-        set_test_now(1_800_000_000 + expected as u64 * 1_000);
+        app.application
+            .set_test_now(1_800_000_000 + expected as u64 * 1_000);
         app.application.notify_mind_work();
         assert_eq!(wait_for(calls.clone(), expected).await, expected);
     }
     // The fifth attempt is the budget limit; later time and self-notifies
     // must not call the provider again.
-    set_test_now(1_800_000_000 + 60_000);
+    app.application.set_test_now(1_800_000_000 + 60_000);
     app.application.notify_mind_work();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(calls.load(Ordering::SeqCst), 5);
@@ -3334,6 +3334,164 @@ async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
             .pending_vectors,
         0
     );
-    set_test_now(0);
+    app.application.set_test_now(0);
+    app.application.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
+    use crate::application::PublishGate;
+    use crate::bootstrap;
+    use rig_core::catalog::Catalog;
+    use rig_core::operation::Completion;
+    use rig_core::serve::ErasedHandler;
+    use rig_core::serve::adapters::ModelAdapter;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+    use rig_ecs::effects::Handler;
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let app = bootstrap::application(store.clone(), "private-token".into());
+    let rig_dir = temp.path().join("rig");
+    std::fs::create_dir_all(&rig_dir).unwrap();
+    bootstrap::attach_kernel(&app, rig_dir).unwrap();
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::text("事前の応答"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("新しい心で答えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    let captured = model.clone();
+    app.application.set_test_model(Arc::new(move |_, _| {
+        let spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .expect("catalog")
+            .shared();
+        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
+            spec.reference(),
+            model.clone(),
+        ));
+        Ok(rig_ecs::model::Connection {
+            spec,
+            handler: Handler(handler),
+        })
+    }));
+    let (status, saved) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let connection = saved["connections"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("Companion/{companion}"),
+            json!({"revision":1,"mind":"古い人格","model_assignments":{"companion":{"connection_id":connection,"model_id":"deepseek/deepseek-flash"}}}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "PUT",
+            &format!("Credentials/{connection}"),
+            json!({"secret":"test-only"}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            "Grants",
+            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            Some("stale-grant"),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let mut subscription = app.application.subscribe().await;
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"事前入力"}),
+        Some("stale-before"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+    let gate = Arc::new(PublishGate::default());
+    app.application.set_publish_gate(gate.clone());
+
+    let profile_path = format!("MindProfile/{companion}");
+    let old = mutate(
+        &app,
+        "PATCH",
+        &profile_path,
+        json!({"expected_revision":1,"facets":["古い心の側面"],"examples":[]}),
+        None,
+    );
+    tokio::pin!(old);
+    tokio::select! {
+        _ = &mut old => panic!("old update completed before its publish was held"),
+        _ = gate.entered.notified() => {}
+    }
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("MindProfile/{companion}"),
+            json!({"expected_revision":2,"facets":["新しい心の側面"],"examples":[]}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    gate.release.notify_one();
+    assert_eq!(old.await.0, StatusCode::OK);
+
+    let runtime = app.application.rig().unwrap();
+    runtime
+        .deliver(companion.clone(), "確認".into(), "stale-after".into())
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while captured.requests().is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let requests = captured.requests();
+    assert_eq!(requests.len(), 2);
+    let system = requests[1]
+        .chat_history
+        .iter()
+        .find_map(|message| match &**message {
+            rig_core::completion::Message::System { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("system prompt");
+    assert!(
+        system.contains("新しい心の側面") && !system.contains("古い心の側面"),
+        "a stale publish rolled the model prompt back: {system}"
+    );
     app.application.stop().await.unwrap();
 }

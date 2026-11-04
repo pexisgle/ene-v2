@@ -61,6 +61,24 @@ pub(super) struct Boundary {
     cursor: Cursor,
     connections: HashMap<String, Weak<()>>,
 }
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct PublishGate {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+    first: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl PublishGate {
+    pub(crate) async fn block_first(&self) {
+        if !self.first.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
 struct Inner {
     repository: Arc<Store>,
     providers: Arc<dyn ProviderRegistry>,
@@ -76,12 +94,17 @@ struct Inner {
     rig: std::sync::OnceLock<Arc<crate::rig::Runtime>>,
     #[cfg(test)]
     test_model: std::sync::OnceLock<Arc<crate::application::conversation::TestModel>>,
+    #[cfg(test)]
+    test_now: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    publish_gate: std::sync::Mutex<Option<std::sync::Arc<PublishGate>>>,
     mutations: runtime::MutationExecutor,
     stops: runtime::MutationExecutor,
     cleanups: TaskTracker,
     cleanup: std::sync::Mutex<credentials::CleanupState>,
     mind_notify: tokio::sync::Notify,
     mind_started: std::sync::atomic::AtomicBool,
+    prompt_sequence: std::sync::atomic::AtomicU64,
     active_recall:
         std::sync::Mutex<std::collections::HashMap<String, crate::application::mind::ActiveRecall>>,
     active_request: std::sync::Mutex<std::collections::HashMap<String, String>>,
@@ -113,12 +136,17 @@ impl HostApplication {
             rig: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_model: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            test_now: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            publish_gate: std::sync::Mutex::new(None),
             mutations: runtime::MutationExecutor::default(),
             stops: runtime::MutationExecutor::new(8),
             cleanups: TaskTracker::new(),
             cleanup: std::sync::Mutex::new(Default::default()),
             mind_notify: tokio::sync::Notify::new(),
             mind_started: std::sync::atomic::AtomicBool::new(false),
+            prompt_sequence: std::sync::atomic::AtomicU64::new(0),
             active_recall: std::sync::Mutex::new(std::collections::HashMap::new()),
             active_request: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
@@ -146,6 +174,47 @@ impl HostApplication {
     #[allow(dead_code)]
     pub(crate) fn set_consolidation_hook(&self, hook: ConsolidationHook) {
         let _ = self.0.consolidation_hook.set(hook);
+    }
+
+    pub(crate) fn next_prompt_sequence(&self) -> u64 {
+        self.0
+            .prompt_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_publish_gate(&self, gate: std::sync::Arc<PublishGate>) {
+        *self.0.publish_gate.lock().unwrap() = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_gate(&self) -> Option<std::sync::Arc<PublishGate>> {
+        self.0.publish_gate.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_now(&self, seconds: u64) {
+        self.0
+            .test_now
+            .store(seconds, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn worker_now(&self) -> String {
+        #[cfg(test)]
+        {
+            let seconds = self.0.test_now.load(std::sync::atomic::Ordering::SeqCst);
+            if seconds != 0 {
+                return time::OffsetDateTime::from_unix_timestamp(seconds as i64)
+                    .ok()
+                    .and_then(|time| {
+                        time.format(&time::format_description::well_known::Rfc3339)
+                            .ok()
+                    })
+                    .unwrap_or_default();
+            }
+        }
+        crate::application::mind::now()
     }
 
     pub(crate) fn begin_shutdown(&self) {

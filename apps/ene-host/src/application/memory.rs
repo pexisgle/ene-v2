@@ -1,10 +1,7 @@
 //! Background index and consolidation work. Finite host tasks use the task
 //! grant; they are not a second personality or a general job framework.
 
-use super::{
-    HostApplication,
-    mind::{now, publish_mind},
-};
+use super::{HostApplication, mind::publish_mind};
 use crate::{
     domain::{
         Error, ErrorKind,
@@ -78,20 +75,34 @@ impl HostApplication {
     }
 
     async fn index_once(&self) {
-        if let Ok(ids) = self.0.repository.mind_pending_fts(64, now()).await
+        if let Ok(ids) = self
+            .0
+            .repository
+            .mind_pending_fts(64, self.worker_now())
+            .await
             && !ids.is_empty()
-            && let Err(error) = self.0.repository.mind_index_fts(ids.clone(), now()).await
+            && let Err(error) = self
+                .0
+                .repository
+                .mind_index_fts(ids.clone(), self.worker_now())
+                .await
         {
             let _ = self
                 .0
                 .repository
-                .mind_mark_index_error(ids, "fts".into(), format!("{error:?}"), false, now())
+                .mind_mark_index_error(
+                    ids,
+                    "fts".into(),
+                    format!("{error:?}"),
+                    false,
+                    self.worker_now(),
+                )
                 .await;
         }
         let Ok(pending) = self
             .0
             .repository
-            .mind_pending_vectors(VECTOR_BATCH, now())
+            .mind_pending_vectors(VECTOR_BATCH, self.worker_now())
             .await
         else {
             return;
@@ -129,7 +140,7 @@ impl HostApplication {
                         .mind_store_vectors(
                             entries,
                             super::inference::EMBEDDING_MODEL.into(),
-                            now(),
+                            self.worker_now(),
                         )
                         .await
                     {
@@ -141,7 +152,7 @@ impl HostApplication {
                                 "vector".into(),
                                 format!("{error:?}"),
                                 false,
-                                now(),
+                                self.worker_now(),
                             )
                             .await;
                     }
@@ -163,7 +174,7 @@ impl HostApplication {
                                     | ErrorKind::UnsupportedCapability
                                     | ErrorKind::StateConflict
                             ),
-                            now(),
+                            self.worker_now(),
                         )
                         .await;
                     let _ = self
@@ -180,7 +191,7 @@ impl HostApplication {
                             },
                             error.reason.map(str::to_owned),
                             None,
-                            now(),
+                            self.worker_now(),
                         )
                         .await;
                 }
@@ -209,7 +220,11 @@ impl HostApplication {
         let status = self
             .0
             .repository
-            .mind_consolidation(companion.to_owned(), METHOD_REVISION.into(), now())
+            .mind_consolidation(
+                companion.to_owned(),
+                METHOD_REVISION.into(),
+                self.worker_now(),
+            )
             .await?;
         if *self.shutdown().borrow() {
             return Ok(false);
@@ -243,7 +258,7 @@ impl HostApplication {
                         sequence,
                         offset,
                         METHOD_REVISION.into(),
-                        now(),
+                        self.worker_now(),
                     )
                     .await?;
                 return Ok(true);
@@ -257,7 +272,7 @@ impl HostApplication {
                         METHOD_REVISION.into(),
                         "idle".into(),
                         None,
-                        now(),
+                        self.worker_now(),
                     )
                     .await;
             }
@@ -276,7 +291,7 @@ impl HostApplication {
                     METHOD_REVISION.into(),
                     "unconfigured".into(),
                     Some("companion_model_unset".into()),
-                    now(),
+                    self.worker_now(),
                 )
                 .await?;
             return Ok(false);
@@ -284,7 +299,7 @@ impl HostApplication {
         let stored = self
             .0
             .repository
-            .mind_view(companion.to_owned(), now())
+            .mind_view(companion.to_owned(), self.worker_now())
             .await?;
         let related = self.related_memories(companion, &batch).await;
         let instructions = consolidation_instructions();
@@ -303,7 +318,7 @@ impl HostApplication {
                 METHOD_REVISION.into(),
                 "running".into(),
                 None,
-                now(),
+                self.worker_now(),
             )
             .await?;
         let mut attempt = 0u32;
@@ -350,7 +365,7 @@ impl HostApplication {
                             METHOD_REVISION.into(),
                             "error".into(),
                             Some("generation_invalid".into()),
-                            now(),
+                            self.worker_now(),
                         )
                         .await;
                     return Err(error);
@@ -396,7 +411,7 @@ impl HostApplication {
                     METHOD_REVISION.into(),
                     1,
                     chars,
-                    now(),
+                    self.worker_now(),
                 )
                 .await
             {
@@ -406,7 +421,7 @@ impl HostApplication {
                         let stored = self
                             .0
                             .repository
-                            .mind_view(companion.to_owned(), now())
+                            .mind_view(companion.to_owned(), self.worker_now())
                             .await?;
                         publish_mind(self, companion, &current.mind, stored).await?;
                     }
@@ -446,7 +461,7 @@ impl HostApplication {
                 METHOD_REVISION.into(),
                 state.into(),
                 Some(reason),
-                now(),
+                self.worker_now(),
             )
             .await;
     }
@@ -475,7 +490,7 @@ impl HostApplication {
                 false,
                 None,
                 None,
-                now(),
+                self.worker_now(),
             )
             .await
             .map(|result| result.memories)
@@ -492,7 +507,7 @@ impl HostApplication {
                 true,
                 None,
                 None,
-                now(),
+                self.worker_now(),
             )
             .await
             .map(|result| {

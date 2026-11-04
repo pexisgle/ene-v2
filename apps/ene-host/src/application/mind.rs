@@ -14,27 +14,7 @@ use crate::{
 use ene_rpc as w;
 use serde_json::{Value, json};
 
-#[cfg(test)]
-static TEST_NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-pub(crate) fn set_test_now(seconds: u64) {
-    TEST_NOW.store(seconds, std::sync::atomic::Ordering::SeqCst);
-}
-
 pub(crate) fn now() -> String {
-    #[cfg(test)]
-    if TEST_NOW.load(std::sync::atomic::Ordering::SeqCst) != 0 {
-        return time::OffsetDateTime::from_unix_timestamp(
-            TEST_NOW.load(std::sync::atomic::Ordering::SeqCst) as i64,
-        )
-        .ok()
-        .and_then(|time| {
-            time.format(&time::format_description::well_known::Rfc3339)
-                .ok()
-        })
-        .unwrap_or_default();
-    }
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
@@ -625,8 +605,9 @@ impl HostApplication {
             "lexical_only",
         );
         self.set_active_request(companion, request_id);
+        let sequence = self.next_prompt_sequence();
         if let Ok(runtime) = self.rig() {
-            let _ = runtime.set_mind_prompt(companion.to_owned(), prompt.clone());
+            let _ = runtime.set_mind_prompt(companion.to_owned(), prompt.clone(), sequence);
             let _ = runtime.hold_recall(
                 companion.to_owned(),
                 request_id.to_owned(),
@@ -827,6 +808,11 @@ pub(super) async fn publish_mind(
     core: &str,
     stored: StoredMind,
 ) -> Result<w::MindView> {
+    let sequence = app.next_prompt_sequence();
+    #[cfg(test)]
+    if let Some(gate) = app.publish_gate().await {
+        gate.block_first().await;
+    }
     let index = app
         .0
         .repository
@@ -862,7 +848,7 @@ pub(super) async fn publish_mind(
             &lexical,
             "lexical_only",
         );
-        if let Err(error) = runtime.set_mind_prompt(companion.to_owned(), prompt) {
+        if let Err(error) = runtime.set_mind_prompt(companion.to_owned(), prompt, sequence) {
             // The next connect composes from SQLite; the update is not rolled
             // back for a missing kernel.
             let _ = error;

@@ -96,6 +96,7 @@ enum Command {
     SetMindPrompt {
         companion: String,
         prompt: String,
+        sequence: u64,
     },
     Deliver {
         companion: String,
@@ -216,10 +217,16 @@ impl Runtime {
 
     /// Updates the live system prompt from a committed mind revision. The next
     /// model call in the running turn sees it; the turn is not stopped.
-    pub(crate) fn set_mind_prompt(&self, companion: String, prompt: String) -> Result<(), Error> {
+    pub(crate) fn set_mind_prompt(
+        &self,
+        companion: String,
+        prompt: String,
+        sequence: u64,
+    ) -> Result<(), Error> {
         self.send(Signal::Command(Command::SetMindPrompt {
             companion,
             prompt,
+            sequence,
         }))
     }
 
@@ -895,7 +902,7 @@ mod tests {
         }
         entered_rx.recv().await.expect("the tool started");
         runtime
-            .set_mind_prompt("companion".into(), "新しい心".into())
+            .set_mind_prompt("companion".into(), "新しい心".into(), 1)
             .unwrap();
         // Let the command reach the kernel's next frame while the call waits.
         tokio::time::sleep(Duration::from_millis(100)).await;

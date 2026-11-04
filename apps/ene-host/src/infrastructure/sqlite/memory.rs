@@ -118,15 +118,9 @@ pub(super) fn index_status(db: &mut Connection, companion: &str, now: &str) -> R
 }
 
 fn unix_seconds(value: &str) -> Result<u64> {
-    if let Ok(time) =
-        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
-    {
-        return Ok(time.unix_timestamp().max(0) as u64);
-    }
-    Ok(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default())
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map(|time| time.unix_timestamp().max(0) as u64)
+        .map_err(|_| Error::InvalidRequest)
 }
 
 pub(super) fn record_embedding(
@@ -851,7 +845,7 @@ mod tests {
     async fn index(store: &Store) {
         store
             .run(|db| {
-                let ids = pending_fts(db, 64, "now")?;
+                let ids = pending_fts(db, 64, "2026-01-01T00:00:00Z")?;
                 index_fts(db, &ids, "2026-01-01T00:00:01Z")?;
                 Ok(())
             })
@@ -859,7 +853,7 @@ mod tests {
             .unwrap();
         store
             .run(|db| {
-                let pending = pending_vectors(db, 64, "now")?;
+                let pending = pending_vectors(db, 64, "2026-01-01T00:00:00Z")?;
                 let entries = pending
                     .into_iter()
                     .enumerate()
@@ -901,7 +895,7 @@ mod tests {
                     false,
                     None,
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert_eq!(result.fts, "ok");
                 assert_eq!(result.memories.len(), 1);
@@ -916,7 +910,7 @@ mod tests {
                     false,
                     Some("2025-01-01T00:00:00Z"),
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert_eq!(recent.memories.len(), 1);
                 let future = search(
@@ -929,7 +923,7 @@ mod tests {
                     false,
                     Some("2027-01-01T00:00:00Z"),
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert!(future.memories.is_empty());
                 let other = search(
@@ -942,7 +936,7 @@ mod tests {
                     false,
                     None,
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert!(other.memories.iter().all(|memory| memory.owner == "b"));
                 Ok(())
@@ -961,7 +955,7 @@ mod tests {
         let _ = &id_for_check;
         store
             .run(move |db| {
-                control(db, "a", &id, "share", "now")?;
+                control(db, "a", &id, "share", "2026-01-01T00:00:00Z")?;
                 let shared = search(
                     db,
                     "b",
@@ -972,7 +966,7 @@ mod tests {
                     false,
                     None,
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert_eq!(shared.memories.len(), 1);
                 assert_eq!(shared.memories[0].owner, "a");
@@ -983,7 +977,7 @@ mod tests {
                         .iter()
                         .all(|source| source.kind != SourceKind::Input)
                 );
-                control(db, "a", &id, "unshare", "now")?;
+                control(db, "a", &id, "unshare", "2026-01-01T00:00:00Z")?;
                 // The FTS row is intentionally left in place; the canonical
                 // audience check must still hide it.
                 let fts_rows: i64 = db.query_row(
@@ -1002,7 +996,7 @@ mod tests {
                     false,
                     None,
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert!(hidden.memories.is_empty());
                 Ok(())
@@ -1019,7 +1013,7 @@ mod tests {
         index(&store).await;
         store
             .run(move |db| {
-                control(db, "a", &id, "forget", "now")?;
+                control(db, "a", &id, "forget", "2026-01-01T00:00:00Z")?;
                 let normalized = search(
                     db,
                     "a",
@@ -1030,7 +1024,7 @@ mod tests {
                     false,
                     None,
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert!(normalized.memories.is_empty());
                 let past = search(
@@ -1043,7 +1037,7 @@ mod tests {
                     true,
                     None,
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert_eq!(past.memories.len(), 1);
                 assert_eq!(past.memories[0].recall_preference, "forgotten");
@@ -1063,7 +1057,7 @@ mod tests {
         let id = seed(&store, "a", "柚子ジャムを作った").await;
         store
             .run(move |db| {
-                control(db, "a", &id, "forget", "now")?;
+                control(db, "a", &id, "forget", "2026-01-01T00:00:00Z")?;
                 let mut new = memory("柚子ジャムを作った日の記録");
                 new.supersedes = vec![id.clone()];
                 let outcome = consolidate(
@@ -1078,7 +1072,7 @@ mod tests {
                     METHOD_REVISION,
                     1,
                     10,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert!(outcome.result.changed);
                 assert!(outcome.advanced);
@@ -1108,7 +1102,7 @@ mod tests {
                     &request(1, vec![memory("相手は柚子が好き")]),
                     &[source(SourceKind::Input, "in1")],
                     "parent",
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?
                 .memories[0]
                     .id
@@ -1123,13 +1117,24 @@ mod tests {
                     &request(2, vec![corrected]),
                     &[source(SourceKind::Input, "in2")],
                     "parent",
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?
                 .memories[0]
                     .id
                     .clone();
-                control(db, "a", &first, "share", "now")?;
-                let shared = search(db, "b", "柚子", None, None, 10, false, None, None, "now")?;
+                control(db, "a", &first, "share", "2026-01-01T00:00:00Z")?;
+                let shared = search(
+                    db,
+                    "b",
+                    "柚子",
+                    None,
+                    None,
+                    10,
+                    false,
+                    None,
+                    None,
+                    "2026-01-01T00:00:00Z",
+                )?;
                 let memory = shared
                     .memories
                     .iter()
@@ -1150,7 +1155,7 @@ mod tests {
         let id = seed(&store, "a", "柚子ジャムを作った").await;
         store
             .run(move |db| {
-                let pending = pending_vectors(db, 64, "now")?;
+                let pending = pending_vectors(db, 64, "2026-01-01T00:00:00Z")?;
                 assert_eq!(pending.len(), 1);
                 mark_index_error(
                     db,
@@ -1158,11 +1163,11 @@ mod tests {
                     "vector",
                     "PermissionRequired",
                     true,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
-                assert!(pending_vectors(db, 64, "now")?.is_empty());
-                retry_index(db, "now")?;
-                assert_eq!(pending_vectors(db, 64, "now")?.len(), 1);
+                assert!(pending_vectors(db, 64, "2026-01-01T00:00:00Z")?.is_empty());
+                retry_index(db, "2026-01-01T00:00:00Z")?;
+                assert_eq!(pending_vectors(db, 64, "2026-01-01T00:00:00Z")?.len(), 1);
                 for _ in 0..4 {
                     mark_index_error(
                         db,
@@ -1170,12 +1175,12 @@ mod tests {
                         "vector",
                         "provider",
                         false,
-                        "now",
+                        "2026-01-01T00:00:00Z",
                     )?;
                 }
-                assert!(pending_vectors(db, 64, "now")?.is_empty());
-                retry_index(db, "now")?;
-                assert_eq!(pending_vectors(db, 64, "now")?.len(), 1);
+                assert!(pending_vectors(db, 64, "2026-01-01T00:00:00Z")?.is_empty());
+                retry_index(db, "2026-01-01T00:00:00Z")?;
+                assert_eq!(pending_vectors(db, 64, "2026-01-01T00:00:00Z")?.len(), 1);
                 Ok(())
             })
             .await
@@ -1189,13 +1194,15 @@ mod tests {
         let store = Store::open(path.clone()).await.unwrap();
         store
             .run(|db| {
-                skip_consolidation(db, "a", 7, 4, METHOD_REVISION, "now")?;
-                let status = consolidation_status(db, "a", METHOD_REVISION, "now")?;
+                skip_consolidation(db, "a", 7, 4, METHOD_REVISION, "2026-01-01T00:00:00Z")?;
+                let status =
+                    consolidation_status(db, "a", METHOD_REVISION, "2026-01-01T00:00:00Z")?;
                 assert_eq!((status.last_sequence, status.last_offset), (7, 4));
                 assert_eq!(status.skipped, 1);
                 assert_eq!(status.model_calls, 0);
-                skip_consolidation(db, "a", 6, 0, METHOD_REVISION, "now")?;
-                let status = consolidation_status(db, "a", METHOD_REVISION, "now")?;
+                skip_consolidation(db, "a", 6, 0, METHOD_REVISION, "2026-01-01T00:00:00Z")?;
+                let status =
+                    consolidation_status(db, "a", METHOD_REVISION, "2026-01-01T00:00:00Z")?;
                 assert_eq!((status.last_sequence, status.last_offset), (7, 4));
                 assert_eq!(status.skipped, 1);
                 Ok(())
@@ -1205,7 +1212,8 @@ mod tests {
         let reopened = Store::open(path).await.unwrap();
         reopened
             .run(|db| {
-                let status = consolidation_status(db, "a", METHOD_REVISION, "now")?;
+                let status =
+                    consolidation_status(db, "a", METHOD_REVISION, "2026-01-01T00:00:00Z")?;
                 assert_eq!((status.last_sequence, status.last_offset), (7, 4));
                 assert_eq!(status.skipped, 1);
                 Ok(())
@@ -1232,7 +1240,7 @@ mod tests {
                     METHOD_REVISION,
                     1,
                     5,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert_eq!(outcome.status.last_offset, 5);
                 let outcome = consolidate(
@@ -1247,7 +1255,7 @@ mod tests {
                     METHOD_REVISION,
                     1,
                     5,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert_eq!(
                     (outcome.status.last_sequence, outcome.status.last_offset),
@@ -1286,7 +1294,7 @@ mod tests {
                     &mood,
                     &[source(SourceKind::Input, "mood")],
                     "parent",
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 let request = request(1, vec![memory("一緒に柚子ジャムを作った")]);
                 let sources = vec![
@@ -1305,7 +1313,7 @@ mod tests {
                     METHOD_REVISION,
                     1,
                     120,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert!(outcome.result.changed);
                 assert!(outcome.advanced);
@@ -1323,7 +1331,7 @@ mod tests {
                     METHOD_REVISION,
                     1,
                     120,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert!(again.result.changed);
                 assert!(!again.advanced);
@@ -1365,7 +1373,7 @@ mod tests {
                     METHOD_REVISION,
                     1,
                     10,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 );
                 assert!(matches!(denied, Err(Error::InvalidRequest)));
                 let stale = consolidate(
@@ -1380,10 +1388,11 @@ mod tests {
                     METHOD_REVISION,
                     1,
                     10,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 );
                 assert!(matches!(stale, Err(Error::RevisionConflict)));
-                let status = consolidation_status(db, "a", METHOD_REVISION, "now")?;
+                let status =
+                    consolidation_status(db, "a", METHOD_REVISION, "2026-01-01T00:00:00Z")?;
                 assert_eq!(status.last_sequence, 0);
                 let count: i64 =
                     db.query_row("SELECT COUNT(*) FROM mind_memories", [], |row| row.get(0))?;
@@ -1405,18 +1414,18 @@ mod tests {
         let store = Store::open(path).await.unwrap();
         store
             .run(|db| {
-                let fts = pending_fts(db, 64, "now")?;
-                let vectors = pending_vectors(db, 64, "now")?;
+                let fts = pending_fts(db, 64, "2026-01-01T00:00:00Z")?;
+                let vectors = pending_vectors(db, 64, "2026-01-01T00:00:00Z")?;
                 assert_eq!(fts.len(), 1);
                 assert_eq!(vectors.len(), 1);
                 // A failed index transaction rolls back only the index work; the
                 // memory stays canonical and the pending row stays for a retry.
                 db.execute_batch("DROP TABLE mind_memories_fts;")?;
-                assert!(index_fts(db, &fts, "now").is_err());
+                assert!(index_fts(db, &fts, "2026-01-01T00:00:00Z").is_err());
                 let count: i64 =
                     db.query_row("SELECT COUNT(*) FROM mind_memories", [], |row| row.get(0))?;
                 assert_eq!(count, 1);
-                let pending = pending_fts(db, 64, "now")?;
+                let pending = pending_fts(db, 64, "2026-01-01T00:00:00Z")?;
                 assert_eq!(pending.len(), 1);
                 let result = search(
                     db,
@@ -1428,7 +1437,7 @@ mod tests {
                     false,
                     None,
                     None,
-                    "now",
+                    "2026-01-01T00:00:00Z",
                 )?;
                 assert_eq!(result.memories.len(), 1);
                 assert_eq!(result.fts, "fallback");

@@ -306,7 +306,7 @@ pub(crate) async fn accept(
             .mind_prompt_with_recall(&companion, &core.mind, &request.text, &request_id)
             .await
     {
-        let _ = runtime.set_mind_prompt(companion.clone(), prompt);
+        let _ = prompt;
     }
     if let Err(error) = runtime
         .deliver(companion.clone(), request.text.clone(), request_id.clone())
