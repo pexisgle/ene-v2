@@ -20,6 +20,43 @@ pub(crate) fn now() -> String {
         .unwrap_or_default()
 }
 
+fn compose_recall_fragment(
+    companion: &str,
+    recalled: &[MemoryRecord],
+    lexical: &str,
+    semantic: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "[いまの話題で思い出した記憶]\n検索状態: 語句={lexical} 意味={semantic}\n"
+    ));
+    if recalled.is_empty() {
+        out.push_str("該当する記憶はない。想起できていない場合と混同しないため、必要なら mind_recall を使う。\n");
+    } else {
+        for memory in recalled.iter().take(3) {
+            let shared = if memory.owner != companion {
+                "（共有された記憶）"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "- id: {} {} revision {}\n  {}\n",
+                memory.id,
+                shared,
+                memory.revision,
+                memory.content.chars().take(600).collect::<String>()
+            ));
+            if !memory.description.is_empty() {
+                out.push_str(&format!(
+                    "  説明: {}\n",
+                    memory.description.chars().take(300).collect::<String>()
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The wire view of the authored profile and current state. `core` stays on
 /// the companion; the profile table holds the author's extra material.
 fn view(
@@ -674,11 +711,7 @@ impl HostApplication {
     ) {
         let finish = |prompt: String| {
             if let Ok(runtime) = self.rig() {
-                let _ = runtime.complete_recall(
-                    request_id.clone(),
-                    prompt,
-                    self.next_prompt_sequence(),
-                );
+                let _ = runtime.complete_recall(request_id.clone(), prompt);
             }
         };
         let cancel = |app: &HostApplication| app.cancel_semantic(&companion, &request_id);
@@ -727,16 +760,7 @@ impl HostApplication {
                 Some("semantic_timeout".into()),
             ),
         };
-        let stored = match self.0.repository.mind_view(companion.clone(), now()).await {
-            Ok(stored) => stored,
-            Err(_) => {
-                finish(local_prompt);
-                return;
-            }
-        };
-        let core = self.current_core(&companion, &core).await;
-        let prompt =
-            compose_prompt_with(&companion, &core, &stored, &memories, &lexical, &semantic);
+        let fragment = compose_recall_fragment(&companion, &memories, &lexical, &semantic);
         if self.active_request(&companion).as_deref() == Some(request_id.as_str()) {
             self.set_active_recall(
                 &companion,
@@ -747,26 +771,10 @@ impl HostApplication {
                     reason,
                 },
             );
-            finish(prompt);
+            finish(fragment);
         } else {
             cancel(self);
         }
-    }
-
-    async fn current_core(&self, companion: &str, fallback: &str) -> String {
-        self.0
-            .repository
-            .snapshot()
-            .await
-            .ok()
-            .and_then(|snapshot| {
-                snapshot
-                    .companions
-                    .into_iter()
-                    .find(|item| item.id == companion)
-                    .map(|item| item.mind)
-            })
-            .unwrap_or_else(|| fallback.to_owned())
     }
 
     async fn finish_local(
@@ -779,32 +787,16 @@ impl HostApplication {
     ) {
         let finish = |prompt: String| {
             if let Ok(runtime) = self.rig() {
-                let _ = runtime.complete_recall(
-                    request_id.to_owned(),
-                    prompt,
-                    self.next_prompt_sequence(),
-                );
+                let _ = runtime.complete_recall(request_id.to_owned(), prompt);
             }
         };
-        let stored = self
-            .0
-            .repository
-            .mind_view(companion.to_owned(), now())
-            .await;
-        let Ok(stored) = stored else {
-            finish(local_prompt.to_owned());
-            return;
-        };
-        let core = self.current_core(companion, core).await;
-        let prompt = compose_prompt_with(
+        let _ = (core, local_prompt);
+        finish(compose_recall_fragment(
             companion,
-            &core,
-            &stored,
             &local.memories,
             &local.lexical,
             "unavailable",
-        );
-        finish(prompt);
+        ));
     }
 }
 

@@ -245,28 +245,24 @@ fn owned_prompt(role: String) -> rig_core::completion::SystemPrompt {
     }
 }
 
-fn apply_recall_prompt(world: &mut World, entity: Entity, prompt: String, sequence: u64) {
+fn apply_recall_prompt(world: &mut World, entity: Entity, fragment: String) {
     let agent = world.get::<ForAgent>(entity).map(|agent| agent.0);
     let current = agent
-        .and_then(|agent| world.get::<PromptSequence>(agent))
-        .map(|value| value.0)
-        .unwrap_or(0);
-    let chosen = if sequence >= current {
-        let prompt = owned_prompt(prompt);
-        if let Some(agent) = agent {
-            world
-                .entity_mut(agent)
-                .insert((SystemPrompt(prompt.role.clone()), PromptSequence(sequence)));
-        }
-        prompt
+        .and_then(|agent| world.get::<SystemPrompt>(agent))
+        .map(|prompt| prompt.0.clone())
+        .unwrap_or_default();
+    let combined = if current.is_empty() {
+        fragment
     } else {
-        agent
-            .and_then(|agent| world.get::<SystemPrompt>(agent))
-            .map(|prompt| owned_prompt(prompt.0.clone()))
-            .unwrap_or_else(|| owned_prompt(prompt))
+        format!("{current}\n\n{fragment}")
     };
+    if let Some(agent) = agent {
+        world
+            .entity_mut(agent)
+            .insert(SystemPrompt(combined.clone()));
+    }
     if let Some(mut request) = world.get_mut::<ModelRequest>(entity) {
-        request.prompt = Some(chosen);
+        request.prompt = Some(owned_prompt(combined));
     }
 }
 
@@ -314,26 +310,23 @@ fn hold_recall(
         else {
             continue;
         };
-        if let Some((prompt, sequence)) = results.pending.remove(&id) {
+        if let Some((fragment, _)) = results.pending.remove(&id) {
             let current = agent
                 .and_then(|agent| agent_state.get(agent.0).ok())
-                .map(|(_, sequence)| sequence.0)
-                .unwrap_or(0);
-            let chosen = if sequence >= current {
-                if let Some(agent) = agent {
-                    commands
-                        .entity(agent.0)
-                        .insert((SystemPrompt(prompt.clone()), PromptSequence(sequence)));
-                }
-                prompt
+                .map(|(prompt, _)| prompt.0.clone())
+                .unwrap_or_default();
+            let combined = if current.is_empty() {
+                fragment
             } else {
-                agent
-                    .and_then(|agent| agent_state.get(agent.0).ok())
-                    .map(|(prompt, _)| prompt.0.clone())
-                    .unwrap_or(prompt)
+                format!("{current}\n\n{fragment}")
             };
+            if let Some(agent) = agent {
+                commands
+                    .entity(agent.0)
+                    .insert(SystemPrompt(combined.clone()));
+            }
             request.prompt = Some(rig_core::completion::SystemPrompt {
-                role: chosen,
+                role: combined,
                 sections: Vec::new(),
             });
             if let Some(value) = holds.held.remove(&id) {
@@ -403,11 +396,7 @@ fn apply_commands(world: &mut World) {
                     },
                 );
             }
-            Command::RecallCompleted {
-                request_id,
-                prompt,
-                sequence,
-            } => {
+            Command::RecallCompleted { request_id, prompt } => {
                 let cancelled = world
                     .resource::<RecallResults>()
                     .cancelled
@@ -455,7 +444,7 @@ fn apply_commands(world: &mut World) {
                 }
                 if let Some(entity) = target {
                     if has_hold || had_pending {
-                        apply_recall_prompt(world, entity, prompt, sequence);
+                        apply_recall_prompt(world, entity, prompt);
                         world
                             .resource_mut::<RecallResults>()
                             .pending
@@ -470,7 +459,7 @@ fn apply_commands(world: &mut World) {
                     world
                         .resource_mut::<RecallResults>()
                         .pending
-                        .insert(request_id, (prompt, sequence));
+                        .insert(request_id, (prompt, 0));
                 }
             }
             Command::RecallCancelled { request_id } => {

@@ -128,7 +128,6 @@ enum Command {
     RecallCompleted {
         request_id: String,
         prompt: String,
-        sequence: u64,
     },
     RecallCancelled {
         request_id: String,
@@ -317,16 +316,10 @@ impl Runtime {
         Ok(ack)
     }
 
-    pub(crate) fn complete_recall(
-        &self,
-        request_id: String,
-        prompt: String,
-        sequence: u64,
-    ) -> Result<(), Error> {
+    pub(crate) fn complete_recall(&self, request_id: String, prompt: String) -> Result<(), Error> {
         self.send(Signal::Command(Command::RecallCompleted {
             request_id,
             prompt,
-            sequence,
         }))
     }
 
@@ -1293,7 +1286,6 @@ mod tests {
             .send(Signal::Command(Command::RecallCompleted {
                 request_id: "early-request".into(),
                 prompt: "EARLY-RECALL".into(),
-                sequence: 1,
             }))
             .unwrap();
         runtime
@@ -1387,7 +1379,6 @@ mod tests {
             let _ = sender.send(Signal::Command(Command::RecallCompleted {
                 request_id: "hold-request".into(),
                 prompt,
-                sequence: 1,
             }));
         });
         result_tx.send("SYSTEM\nRECALL-FIXED-42".into()).unwrap();
@@ -1425,7 +1416,6 @@ mod tests {
         late.send(Signal::Command(Command::RecallCompleted {
             request_id: "hold-request".into(),
             prompt: "LATE-RESULT".into(),
-            sequence: 1,
         }))
         .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1486,7 +1476,6 @@ mod tests {
         late.send(Signal::Command(Command::RecallCompleted {
             request_id: "stop-request".into(),
             prompt: "STALE-RESULT".into(),
-            sequence: 1,
         }))
         .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1543,8 +1532,7 @@ mod tests {
         sender
             .send(Signal::Command(Command::RecallCompleted {
                 request_id: "stale-completion".into(),
-                prompt: "OLD-COMPLETION".into(),
-                sequence: 5,
+                prompt: "RECALL-FRAGMENT".into(),
             }))
             .unwrap();
         let finished = loop {
@@ -1597,8 +1585,7 @@ mod tests {
         sender
             .send(Signal::Command(Command::RecallCompleted {
                 request_id: "stale-early".into(),
-                prompt: "OLD-EARLY".into(),
-                sequence: 5,
+                prompt: "RECALL-FRAGMENT".into(),
             }))
             .unwrap();
         runtime
