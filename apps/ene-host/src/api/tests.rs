@@ -3122,6 +3122,86 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
             ))
             .collect::<Vec<_>>()
     );
+    wait_for_answered(&mut subscription).await;
+    let steer_pending = app
+        .application
+        .pending_messages(
+            &companion,
+            terminal_result.status.last_sequence,
+            terminal_result.status.last_offset,
+        )
+        .await
+        .expect("steer pending");
+    let first_request = steer_pending
+        .messages
+        .iter()
+        .find(|message| message.text == "Steer入力1")
+        .and_then(|message| message.request_id.clone())
+        .expect("first steer request id");
+    let replies = steer_pending
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replies.len(),
+        1,
+        "the steer inputs did not share one turn answer: {:?}",
+        steer_pending
+            .messages
+            .iter()
+            .map(|message| (message.role.as_str(), message.text.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        replies[0].request_id.as_deref(),
+        Some(first_request.as_str())
+    );
+    let (steer_batch, steer_sources, steer_through, steer_offset, steer_chars) =
+        crate::application::memory::batch_chunks(
+            steer_pending.messages,
+            terminal_result.status.last_sequence,
+            terminal_result.status.last_offset,
+        );
+    assert!(
+        steer_batch
+            .iter()
+            .any(|chunk| chunk.text.contains("Steer入力1"))
+            && steer_batch
+                .iter()
+                .any(|chunk| chunk.text.contains("Steer入力2"))
+    );
+    let steer_result = store
+        .mind_consolidate(
+            companion.clone(),
+            "steer-op".into(),
+            "steer-hash".into(),
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: 1,
+                memories: Vec::new(),
+                state: None,
+            },
+            steer_sources,
+            steer_through,
+            steer_offset,
+            "consolidation-v1".into(),
+            0,
+            steer_chars,
+            "2026-01-01T00:00:03Z".into(),
+        )
+        .await
+        .expect("apply steer cursor");
+    assert!(steer_result.advanced);
+    let steer_after = app
+        .application
+        .pending_messages(
+            &companion,
+            steer_result.status.last_sequence,
+            steer_result.status.last_offset,
+        )
+        .await
+        .expect("steer next scan");
+    assert!(steer_after.messages.is_empty(), "steer range repeated");
 
     app.application.stop().await.unwrap();
 }
