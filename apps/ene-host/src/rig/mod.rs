@@ -128,6 +128,7 @@ enum Command {
     RecallCompleted {
         request_id: String,
         prompt: String,
+        sequence: u64,
     },
     RecallCancelled {
         request_id: String,
@@ -316,10 +317,16 @@ impl Runtime {
         Ok(ack)
     }
 
-    pub(crate) fn complete_recall(&self, request_id: String, prompt: String) -> Result<(), Error> {
+    pub(crate) fn complete_recall(
+        &self,
+        request_id: String,
+        prompt: String,
+        sequence: u64,
+    ) -> Result<(), Error> {
         self.send(Signal::Command(Command::RecallCompleted {
             request_id,
             prompt,
+            sequence,
         }))
     }
 
@@ -1286,6 +1293,7 @@ mod tests {
             .send(Signal::Command(Command::RecallCompleted {
                 request_id: "early-request".into(),
                 prompt: "EARLY-RECALL".into(),
+                sequence: 1,
             }))
             .unwrap();
         runtime
@@ -1379,6 +1387,7 @@ mod tests {
             let _ = sender.send(Signal::Command(Command::RecallCompleted {
                 request_id: "hold-request".into(),
                 prompt,
+                sequence: 1,
             }));
         });
         result_tx.send("SYSTEM\nRECALL-FIXED-42".into()).unwrap();
@@ -1416,6 +1425,7 @@ mod tests {
         late.send(Signal::Command(Command::RecallCompleted {
             request_id: "hold-request".into(),
             prompt: "LATE-RESULT".into(),
+            sequence: 1,
         }))
         .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1476,6 +1486,7 @@ mod tests {
         late.send(Signal::Command(Command::RecallCompleted {
             request_id: "stop-request".into(),
             prompt: "STALE-RESULT".into(),
+            sequence: 1,
         }))
         .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1483,6 +1494,138 @@ mod tests {
             requests.requests().len(),
             1,
             "a stopped request was sent after a late completion"
+        );
+        runtime.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_stale_recall_completion_cannot_roll_back_a_held_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("新しい心で答えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let requests = model.clone();
+        let (runtime, mut received) = start(temp.path().join("rig"));
+        runtime
+            .connect(
+                "companion".into(),
+                "base".into(),
+                connection_of(model),
+                false,
+            )
+            .unwrap();
+        let held = runtime
+            .hold_recall_with_ack(
+                "companion".into(),
+                "stale-completion".into(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+        runtime
+            .deliver("companion".into(), "入力".into(), "stale-completion".into())
+            .await
+            .unwrap();
+        loop {
+            match next(&mut received).await {
+                Event::TurnStarted { .. } => break,
+                Event::TurnFinished { .. } => panic!("turn ended before hold"),
+                _ => {}
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), held)
+            .await
+            .expect("hold ack")
+            .expect("hold");
+        runtime
+            .set_mind_prompt("companion".into(), "NEW-PROMPT".into(), 10)
+            .unwrap();
+        let sender = runtime.signal_sender_for_test();
+        sender
+            .send(Signal::Command(Command::RecallCompleted {
+                request_id: "stale-completion".into(),
+                prompt: "OLD-COMPLETION".into(),
+                sequence: 5,
+            }))
+            .unwrap();
+        let finished = loop {
+            if let Event::TurnFinished { state, .. } = next(&mut received).await {
+                break state;
+            }
+        };
+        assert_eq!(finished, "answered");
+        assert_eq!(requests.requests().len(), 1);
+        let system = requests.requests()[0]
+            .chat_history
+            .iter()
+            .find_map(|message| match &**message {
+                rig_core::completion::Message::System { content } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("system");
+        assert!(
+            system.contains("NEW-PROMPT") && !system.contains("OLD-COMPLETION"),
+            "{system}"
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stale_early_recall_cannot_roll_back_a_newer_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("新しい心で答えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let requests = model.clone();
+        let (runtime, mut received) = start(temp.path().join("rig"));
+        runtime
+            .connect(
+                "companion".into(),
+                "base".into(),
+                connection_of(model),
+                false,
+            )
+            .unwrap();
+        runtime
+            .hold_recall(
+                "companion".into(),
+                "stale-early".into(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+        let sender = runtime.signal_sender_for_test();
+        sender
+            .send(Signal::Command(Command::RecallCompleted {
+                request_id: "stale-early".into(),
+                prompt: "OLD-EARLY".into(),
+                sequence: 5,
+            }))
+            .unwrap();
+        runtime
+            .set_mind_prompt("companion".into(), "NEW-EARLY".into(), 10)
+            .unwrap();
+        runtime
+            .deliver("companion".into(), "入力".into(), "stale-early".into())
+            .await
+            .unwrap();
+        let finished = loop {
+            if let Event::TurnFinished { state, .. } = next(&mut received).await {
+                break state;
+            }
+        };
+        assert_eq!(finished, "answered");
+        assert_eq!(requests.requests().len(), 1);
+        let system = requests.requests()[0]
+            .chat_history
+            .iter()
+            .find_map(|message| match &**message {
+                rig_core::completion::Message::System { content } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("system");
+        assert!(
+            system.contains("NEW-EARLY") && !system.contains("OLD-EARLY"),
+            "{system}"
         );
         runtime.shutdown().await.unwrap();
     }

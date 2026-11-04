@@ -674,7 +674,11 @@ impl HostApplication {
     ) {
         let finish = |prompt: String| {
             if let Ok(runtime) = self.rig() {
-                let _ = runtime.complete_recall(request_id.clone(), prompt);
+                let _ = runtime.complete_recall(
+                    request_id.clone(),
+                    prompt,
+                    self.next_prompt_sequence(),
+                );
             }
         };
         let cancel = |app: &HostApplication| app.cancel_semantic(&companion, &request_id);
@@ -775,7 +779,11 @@ impl HostApplication {
     ) {
         let finish = |prompt: String| {
             if let Ok(runtime) = self.rig() {
-                let _ = runtime.complete_recall(request_id.to_owned(), prompt);
+                let _ = runtime.complete_recall(
+                    request_id.to_owned(),
+                    prompt,
+                    self.next_prompt_sequence(),
+                );
             }
         };
         let stored = self

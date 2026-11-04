@@ -234,7 +234,7 @@ struct RecallHolds {
 
 #[derive(Default, Resource)]
 struct RecallResults {
-    pending: HashMap<String, String>,
+    pending: HashMap<String, (String, u64)>,
     cancelled: HashSet<String>,
 }
 
@@ -245,16 +245,28 @@ fn owned_prompt(role: String) -> rig_core::completion::SystemPrompt {
     }
 }
 
-fn apply_recall_prompt(world: &mut World, entity: Entity, prompt: String) {
+fn apply_recall_prompt(world: &mut World, entity: Entity, prompt: String, sequence: u64) {
     let agent = world.get::<ForAgent>(entity).map(|agent| agent.0);
-    let prompt = owned_prompt(prompt);
+    let current = agent
+        .and_then(|agent| world.get::<PromptSequence>(agent))
+        .map(|value| value.0)
+        .unwrap_or(0);
+    let chosen = if sequence >= current {
+        let prompt = owned_prompt(prompt);
+        if let Some(agent) = agent {
+            world
+                .entity_mut(agent)
+                .insert((SystemPrompt(prompt.role.clone()), PromptSequence(sequence)));
+        }
+        prompt
+    } else {
+        agent
+            .and_then(|agent| world.get::<SystemPrompt>(agent))
+            .map(|prompt| owned_prompt(prompt.0.clone()))
+            .unwrap_or_else(|| owned_prompt(prompt))
+    };
     if let Some(mut request) = world.get_mut::<ModelRequest>(entity) {
-        request.prompt = Some(prompt.clone());
-    }
-    if let Some(agent) = agent {
-        world
-            .entity_mut(agent)
-            .insert(SystemPrompt(prompt.role.clone()));
+        request.prompt = Some(chosen);
     }
 }
 
@@ -270,6 +282,7 @@ fn hold_recall(
     mut holds: ResMut<RecallHolds>,
     mut results: ResMut<RecallResults>,
     mut calls: Query<(Entity, &mut ModelRequest, Option<&ForAgent>)>,
+    agent_state: Query<(&SystemPrompt, &PromptSequence)>,
     held: Query<&HoldOf>,
     agents: Query<&AgentId, With<Agent>>,
 ) {
@@ -301,14 +314,28 @@ fn hold_recall(
         else {
             continue;
         };
-        if let Some(prompt) = results.pending.remove(&id) {
+        if let Some((prompt, sequence)) = results.pending.remove(&id) {
+            let current = agent
+                .and_then(|agent| agent_state.get(agent.0).ok())
+                .map(|(_, sequence)| sequence.0)
+                .unwrap_or(0);
+            let chosen = if sequence >= current {
+                if let Some(agent) = agent {
+                    commands
+                        .entity(agent.0)
+                        .insert((SystemPrompt(prompt.clone()), PromptSequence(sequence)));
+                }
+                prompt
+            } else {
+                agent
+                    .and_then(|agent| agent_state.get(agent.0).ok())
+                    .map(|(prompt, _)| prompt.0.clone())
+                    .unwrap_or(prompt)
+            };
             request.prompt = Some(rig_core::completion::SystemPrompt {
-                role: prompt.clone(),
+                role: chosen,
                 sections: Vec::new(),
             });
-            if let Some(agent) = agent {
-                commands.entity(agent.0).insert(SystemPrompt(prompt));
-            }
             if let Some(value) = holds.held.remove(&id) {
                 commands.entity(value.entity).despawn();
             }
@@ -376,7 +403,11 @@ fn apply_commands(world: &mut World) {
                     },
                 );
             }
-            Command::RecallCompleted { request_id, prompt } => {
+            Command::RecallCompleted {
+                request_id,
+                prompt,
+                sequence,
+            } => {
                 let cancelled = world
                     .resource::<RecallResults>()
                     .cancelled
@@ -424,7 +455,7 @@ fn apply_commands(world: &mut World) {
                 }
                 if let Some(entity) = target {
                     if has_hold || had_pending {
-                        apply_recall_prompt(world, entity, prompt);
+                        apply_recall_prompt(world, entity, prompt, sequence);
                         world
                             .resource_mut::<RecallResults>()
                             .pending
@@ -439,7 +470,7 @@ fn apply_commands(world: &mut World) {
                     world
                         .resource_mut::<RecallResults>()
                         .pending
-                        .insert(request_id, prompt);
+                        .insert(request_id, (prompt, sequence));
                 }
             }
             Command::RecallCancelled { request_id } => {
@@ -604,9 +635,12 @@ fn connect(
                 .get_resource::<crate::rig::mind::MindBridge>()
                 .is_some();
             let access = tool_access(mind_tools, bridge_present);
-            world
-                .entity_mut(entity)
-                .insert((SystemPrompt(prompt), model, access));
+            world.entity_mut(entity).insert((
+                SystemPrompt(prompt),
+                PromptSequence(0),
+                model,
+                access,
+            ));
         }
         None => {
             let bridge_present = world
