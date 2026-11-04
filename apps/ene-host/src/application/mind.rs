@@ -14,7 +14,27 @@ use crate::{
 use ene_rpc as w;
 use serde_json::{Value, json};
 
+#[cfg(test)]
+static TEST_NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn set_test_now(seconds: u64) {
+    TEST_NOW.store(seconds, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub(crate) fn now() -> String {
+    #[cfg(test)]
+    if TEST_NOW.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return time::OffsetDateTime::from_unix_timestamp(
+            TEST_NOW.load(std::sync::atomic::Ordering::SeqCst) as i64,
+        )
+        .ok()
+        .and_then(|time| {
+            time.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_default();
+    }
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()

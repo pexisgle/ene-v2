@@ -3205,3 +3205,130 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
 
     app.application.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn index_worker_retry_budget_is_finite_and_reset_resumes_it() {
+    use crate::application::mind::set_test_now;
+    use crate::llm::Embedding;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    set_test_now(1_800_000_000);
+    let app = crate::bootstrap::application(store.clone(), "t".into());
+    let rig_dir = temp.path().join("rig");
+    std::fs::create_dir_all(&rig_dir).unwrap();
+    crate::bootstrap::attach_kernel(&app, rig_dir).unwrap();
+    let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+        rig_core::test_utils::MockStreamEvent::text("unused"),
+        rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+    ]]);
+    app.application.set_test_model(Arc::new(move |_, _| {
+        let spec = rig_core::catalog::Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .expect("catalog")
+            .shared();
+        let handler =
+            rig_core::serve::ErasedHandler::new(rig_core::serve::adapters::ModelAdapter::<
+                rig_core::operation::Completion,
+            >::new(spec.reference(), model.clone()));
+        Ok(rig_ecs::model::Connection {
+            spec,
+            handler: rig_ecs::effects::Handler(handler),
+        })
+    }));
+    store
+        .mind_update(
+            companion.clone(),
+            "retry-budget-op".into(),
+            "retry-budget-hash".into(),
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: 1,
+                memories: vec![crate::domain::mind::NewMemory {
+                    content: "索引待ちの記憶".into(),
+                    description: String::new(),
+                    appraisal: String::new(),
+                    acquisition: crate::domain::mind::Acquisition::DirectExperience,
+                    supersedes: Vec::new(),
+                    sources: Vec::new(),
+                    occurred_at: None,
+                }],
+                state: None,
+            },
+            Vec::new(),
+            "parent".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .await
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fail = Arc::new(AtomicBool::new(true));
+    let hook_calls = calls.clone();
+    let hook_fail = fail.clone();
+    app.application
+        .set_embedding_hook(Arc::new(move |_companion, _input| {
+            let calls = hook_calls.clone();
+            let fail = hook_fail.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if fail.load(Ordering::SeqCst) {
+                    return Err(crate::domain::Error::new(
+                        crate::domain::ErrorKind::ProviderFailure,
+                    ));
+                }
+                Ok(Embedding {
+                    vectors: vec![vec![1.0, 0.0]],
+                    input_tokens: 1,
+                })
+            })
+        }));
+    app.application.start_mind_worker();
+    app.application.notify_mind_work();
+    let wait_for = |calls: Arc<AtomicUsize>, expected: usize| async move {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while calls.load(Ordering::SeqCst) < expected && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        calls.load(Ordering::SeqCst)
+    };
+    assert_eq!(wait_for(calls.clone(), 1).await, 1);
+    for expected in 2..=5 {
+        set_test_now(1_800_000_000 + expected as u64 * 1_000);
+        app.application.notify_mind_work();
+        assert_eq!(wait_for(calls.clone(), expected).await, expected);
+    }
+    // The fifth attempt is the budget limit; later time and self-notifies
+    // must not call the provider again.
+    set_test_now(1_800_000_000 + 60_000);
+    app.application.notify_mind_work();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+
+    fail.store(false, Ordering::SeqCst);
+    store
+        .mind_retry_index(crate::application::mind::now())
+        .await
+        .unwrap();
+    app.application.notify_mind_work();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while calls.load(Ordering::SeqCst) < 6 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        6,
+        "retry reset did not resume"
+    );
+    assert_eq!(
+        store
+            .mind_index_status(companion.clone(), "2026-01-01T00:00:00Z".into())
+            .await
+            .unwrap()
+            .pending_vectors,
+        0
+    );
+    set_test_now(0);
+    app.application.stop().await.unwrap();
+}

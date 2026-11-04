@@ -117,7 +117,12 @@ pub(super) fn index_status(db: &mut Connection, companion: &str, now: &str) -> R
     Ok(status)
 }
 
-fn unix_seconds(_value: &str) -> Result<u64> {
+fn unix_seconds(value: &str) -> Result<u64> {
+    if let Ok(time) =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+    {
+        return Ok(time.unix_timestamp().max(0) as u64);
+    }
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
