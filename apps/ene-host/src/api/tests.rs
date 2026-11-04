@@ -2687,10 +2687,41 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     bootstrap::attach_kernel(&app, rig_dir).unwrap();
-    let model = MockCompletionModel::from_stream_turns([vec![
-        rig_core::test_utils::MockStreamEvent::text("ページ境界の応答"),
-        rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-    ]]);
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            rig_core::test_utils::MockStreamEvent::text("ページ境界の応答"),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            rig_core::test_utils::MockStreamEvent::text("長文の応答"),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            rig_core::test_utils::MockStreamEvent::text("短文の応答"),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            rig_core::test_utils::MockStreamEvent::ToolCall {
+                id: "invalid-tool-call".into(),
+                name: String::new(),
+                arguments: serde_json::json!({}),
+                call_id: None,
+            },
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            rig_core::test_utils::MockStreamEvent::text("失敗後の応答"),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            rig_core::test_utils::MockStreamEvent::text("Steer応答"),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            rig_core::test_utils::MockStreamEvent::text("Steer二つ目の応答"),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
     app.application.set_test_model(Arc::new(move |_, _| {
         let spec = Catalog::builtin()
             .resolve("deepseek/deepseek-flash")
@@ -2844,5 +2875,253 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
             .map(|message| (message.sequence, message.id.as_str()))
             .collect::<Vec<_>>()
     );
+
+    let long = format!("{}{}", "長".repeat(9000), "長文末尾");
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":long}),
+        Some("page-long"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"長文の後の短文"}),
+        Some("page-short"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+    let mut cursor = (result.status.last_sequence, result.status.last_offset);
+    let mut saw_long_tail = false;
+    let mut saw_short = false;
+    for _ in 0..20 {
+        let tail_page = app
+            .application
+            .pending_messages(&companion, cursor.0, cursor.1)
+            .await
+            .expect("tail history");
+        if tail_page.messages.is_empty() {
+            break;
+        }
+        let (tail_batch, tail_sources, tail_through, tail_offset, tail_chars) =
+            crate::application::memory::batch_chunks(tail_page.messages, cursor.0, cursor.1);
+        for chunk in &tail_batch {
+            saw_long_tail |= chunk.text.contains("長文末尾");
+            saw_short |= chunk.text.contains("長文の後の短文");
+        }
+        let tail = store
+            .mind_consolidate(
+                companion.clone(),
+                format!("page-tail-op-{}", cursor.0),
+                "page-tail-hash".into(),
+                crate::domain::mind::MindUpdateRequest {
+                    expected_revision: 1,
+                    memories: Vec::new(),
+                    state: None,
+                },
+                tail_sources,
+                tail_through,
+                tail_offset,
+                "consolidation-v1".into(),
+                0,
+                tail_chars,
+                "2026-01-01T00:00:01Z".into(),
+            )
+            .await
+            .expect("apply tail cursor");
+        assert!(tail.advanced);
+        let next = (tail.status.last_sequence, tail.status.last_offset);
+        assert!(next > cursor, "the tail cursor did not advance");
+        cursor = next;
+    }
+    assert!(saw_long_tail, "the long message tail was not processed");
+    assert!(
+        saw_short,
+        "the short message after the long tail was dropped"
+    );
+    let tail_after = app
+        .application
+        .pending_messages(&companion, cursor.0, cursor.1)
+        .await
+        .expect("tail next scan");
+    assert!(tail_after.messages.is_empty(), "tail range repeated");
+
+    // A failed terminal entry must not be treated as a completed assistant
+    // experience, and the next confirmed input must still advance.
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"失敗する終端の発言"}),
+        Some("terminal-failed"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notification = subscription.receiver.recv().await.unwrap();
+            if let Some(ene_rpc::notification::Event::TurnEvent(event)) = notification.event
+                && matches!(event.state.as_str(), "failed" | "stopped")
+            {
+                return event.state;
+            }
+        }
+    })
+    .await
+    .expect("failed terminal");
+    assert!(matches!(failed.as_str(), "failed" | "stopped"));
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"終端の後の確定入力"}),
+        Some("terminal-after"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+    let terminal = app
+        .application
+        .pending_messages(&companion, cursor.0, cursor.1)
+        .await
+        .expect("terminal history");
+    assert!(
+        terminal
+            .messages
+            .iter()
+            .all(|message| message.text != "失敗する終端の発言"),
+        "a failed terminal user was treated as a confirmed experience"
+    );
+    let confirmed = terminal
+        .messages
+        .iter()
+        .filter(|message| message.text == "終端の後の確定入力")
+        .count();
+    assert_eq!(
+        confirmed, 1,
+        "the confirmed input after the terminal was lost"
+    );
+    let (terminal_batch, terminal_sources, terminal_through, terminal_offset, terminal_chars) =
+        crate::application::memory::batch_chunks(terminal.messages, cursor.0, cursor.1);
+    assert!(
+        terminal_batch
+            .iter()
+            .any(|chunk| chunk.text.contains("終端の後の確定入力"))
+    );
+    let terminal_result = store
+        .mind_consolidate(
+            companion.clone(),
+            "terminal-op".into(),
+            "terminal-hash".into(),
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: 1,
+                memories: Vec::new(),
+                state: None,
+            },
+            terminal_sources,
+            terminal_through,
+            terminal_offset,
+            "consolidation-v1".into(),
+            0,
+            terminal_chars,
+            "2026-01-01T00:00:02Z".into(),
+        )
+        .await
+        .expect("apply terminal cursor");
+    assert!(terminal_result.advanced);
+    let terminal_after = app
+        .application
+        .pending_messages(
+            &companion,
+            terminal_result.status.last_sequence,
+            terminal_result.status.last_offset,
+        )
+        .await
+        .expect("terminal next scan");
+    assert!(
+        terminal_after.messages.is_empty(),
+        "the terminal range repeated: {:?}",
+        terminal_after
+            .messages
+            .iter()
+            .map(|message| (message.sequence, message.text.as_str()))
+            .collect::<Vec<_>>()
+    );
+
+    // Two inputs accepted while the turn is live must both survive as user
+    // entries, with no requirement that each has its own assistant reply.
+    let steer_path = format!("SendMessage/{companion}");
+    let (first, second) = tokio::join!(
+        mutate(
+            &app,
+            "POST",
+            &steer_path,
+            json!({"text":"Steer入力1"}),
+            Some("steer-one"),
+        ),
+        mutate(
+            &app,
+            "POST",
+            &steer_path,
+            json!({"text":"Steer入力2"}),
+            Some("steer-two"),
+        )
+    );
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(second.0, StatusCode::OK);
+    let steer_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut steer_messages = Vec::new();
+    while tokio::time::Instant::now() < steer_deadline {
+        let pending = app
+            .application
+            .pending_messages(
+                &companion,
+                terminal_result.status.last_sequence,
+                terminal_result.status.last_offset,
+            )
+            .await
+            .expect("steer history");
+        let has_one = pending
+            .messages
+            .iter()
+            .any(|message| message.text == "Steer入力1");
+        let has_two = pending
+            .messages
+            .iter()
+            .any(|message| message.text == "Steer入力2");
+        if has_one && has_two {
+            steer_messages = pending.messages;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let one = steer_messages
+        .iter()
+        .position(|message| message.text == "Steer入力1")
+        .expect("first steer input");
+    let two = steer_messages
+        .iter()
+        .position(|message| message.text == "Steer入力2")
+        .expect("second steer input");
+    assert_eq!(
+        two,
+        one + 1,
+        "the second input was not accepted into the same live turn: {:?}",
+        steer_messages
+            .iter()
+            .map(|message| (
+                message.sequence,
+                message.role.as_str(),
+                message.text.as_str()
+            ))
+            .collect::<Vec<_>>()
+    );
+
     app.application.stop().await.unwrap();
 }

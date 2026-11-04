@@ -639,6 +639,9 @@ fn classify_message(message: &ene_rpc::Message) -> EntryClass {
         {
             EntryClass::Target
         }
+        "user" if matches!(message.turn_status.as_str(), "failed" | "cancelled") => {
+            EntryClass::Terminal
+        }
         "assistant" if message.status == "completed" && !message.text.trim().is_empty() => {
             EntryClass::Target
         }
