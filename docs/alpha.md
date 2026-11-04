@@ -143,7 +143,7 @@ OpenAIの実ホスト経路とOpenRouterのネイティブ接続で、実モデ�
 
 ##### 機械検証（ステップ3）
 
-- `ene-host` libテスト155件（実ホストプロセスの統合テストを含む）。追加の重点:
+- `ene-host` libテスト156件（実ホストプロセスの統合テストを含む）。追加の重点:
   - FTS/vectorをpendingから構築し、ownerで絞り、共有時は私的出所を落とし、共有解除後は古いFTS行があっても返さない。
   - 忘却は行を残したまま通常想起から外れ、`include_forgotten`で過去として読める。再索引で復活しない。
   - 整理は同じ操作ID・範囲の再試行で重複せず、カーソルと記憶を同一トランザクションで進める。state変更・古いrevision・保存失敗ではカーソルを進めない。
@@ -179,7 +179,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 - 正常・早期完了・停止・重複/遅延完了を接続テストで確認。早期結果はpendingとして保持し、モデル要求のGateで適用。停止後・二重完了では再送しない。
 - 検索失敗・期限切れのローカル結果保持、モデル一度だけ、遅延完了の非再送は`automatic_semantic_recall_holds_the_model_until_the_embedding_completes`で確認。検索中のMindProfile更新が最終モデル入力を巻き戻さないことも同テストで確認。
 - 履歴接続は`consolidation_connection_walks_a_page_boundary_into_sqlite_cursor`一本で、テストページサイズ1のユーザー/次ページ応答、同一ターンへ同時受付したSteer二入力、失敗終端の後の確定入力、9000文字超の長文末尾＋後続短文を実際の`pending_messages`→batch→`mind_consolidate`→SQLiteカーソル→次回走査へ通した。失敗終端ユーザーをWaiting扱いして後続を止める分類不具合を修正し、終端範囲の再適用がないことを確認。
-- 索引ワーカーは`automatic_semantic_recall_holds_the_model_until_the_embedding_completes`内で失敗埋め込みモックへ接続。許容回数後に呼び出しが増えないこと、設定Grant変更で再開しpendingが解消することを確認。
+- 索引ワーカーは失敗埋め込みモックへ接続。5回のバックオフ予算を使い切った後、追加時刻・自己通知では呼び出さず、retry gateのリセット後に再開してpendingが解消することを`index_worker_retry_budget_is_finite_and_reset_resumes_it`で確認。設定/Grantの通常commitは同じ`mind_retry_index`を呼ぶ。
 - 旧PromptState/版付きブリッジは削除した。active_request/active_recallとSetMindPrompt/RecallCompletedの所有・寿命は接続テストで確認。完全な構造一本化はしていない。
 
 ##### ステップ3の判定
