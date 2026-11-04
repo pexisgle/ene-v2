@@ -179,7 +179,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 - 正常・早期完了・停止・重複/遅延完了を接続テストで確認。早期結果はpendingとして保持し、モデル要求のGateで適用。停止後・二重完了では再送しない。
 - 検索失敗・期限切れのローカル結果保持、モデル一度だけ、遅延完了の非再送は`automatic_semantic_recall_holds_the_model_until_the_embedding_completes`で確認。検索中のMindProfile更新が最終モデル入力を巻き戻さないことも同テストで確認。
 - 履歴接続は`consolidation_connection_walks_a_page_boundary_into_sqlite_cursor`一本で、テストページサイズ1のユーザー/次ページ応答、同一ターンへ同時受付したSteer二入力、失敗終端の後の確定入力、9000文字超の長文末尾＋後続短文を実際の`pending_messages`→batch→`mind_consolidate`→SQLiteカーソル→次回走査へ通した。失敗終端ユーザーをWaiting扱いして後続を止める分類不具合を修正し、終端範囲の再適用がないことを確認。
-- 索引ワーカーは失敗埋め込みモックへ接続。5回のバックオフ予算を使い切った後、追加時刻・自己通知では呼び出さず、retry gateのリセット後に再開してpendingが解消することを`index_worker_retry_budget_is_finite_and_reset_resumes_it`で確認。設定/Grantの通常commitは同じ`mind_retry_index`を呼ぶ。
+- 索引ワーカーは失敗埋め込みモックへ接続。5回のバックオフ予算を使い切った後、追加時刻・自己通知では呼び出さず、**通常のSettings commit**から再開してpendingが解消することを`index_worker_retry_budget_is_finite_and_config_resumes_it`で確認。
 - 旧PromptState/版付きブリッジは削除した。active_request/active_recallとSetMindPrompt/RecallCompletedの所有・寿命は接続テストで確認。完全な構造一本化はしていない。
 
 ##### ステップ3の判定

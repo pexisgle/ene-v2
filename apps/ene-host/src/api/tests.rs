@@ -3207,7 +3207,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
 }
 
 #[tokio::test]
-async fn index_worker_retry_budget_is_finite_and_reset_resumes_it() {
+async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
     use crate::application::mind::set_test_now;
     use crate::llm::Embedding;
     use std::sync::Arc;
@@ -3217,7 +3217,7 @@ async fn index_worker_retry_budget_is_finite_and_reset_resumes_it() {
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
     set_test_now(1_800_000_000);
-    let app = crate::bootstrap::application(store.clone(), "t".into());
+    let app = crate::bootstrap::application(store.clone(), "private-token".into());
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     crate::bootstrap::attach_kernel(&app, rig_dir).unwrap();
@@ -3307,11 +3307,16 @@ async fn index_worker_retry_budget_is_finite_and_reset_resumes_it() {
     assert_eq!(calls.load(Ordering::SeqCst), 5);
 
     fail.store(false, Ordering::SeqCst);
-    store
-        .mind_retry_index(crate::application::mind::now())
-        .await
-        .unwrap();
-    app.application.notify_mind_work();
+    let revision = store.configuration().await.unwrap().settings.revision;
+    let (status, body) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":revision,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while calls.load(Ordering::SeqCst) < 6 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3319,7 +3324,7 @@ async fn index_worker_retry_budget_is_finite_and_reset_resumes_it() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         6,
-        "retry reset did not resume"
+        "config change did not resume"
     );
     assert_eq!(
         store
