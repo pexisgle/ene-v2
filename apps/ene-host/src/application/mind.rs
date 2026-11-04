@@ -729,6 +729,7 @@ impl HostApplication {
                 return;
             }
         };
+        let core = self.current_core(&companion, &core).await;
         let prompt =
             compose_prompt_with(&companion, &core, &stored, &memories, &lexical, &semantic);
         if self.active_request(&companion).as_deref() == Some(request_id.as_str()) {
@@ -745,6 +746,22 @@ impl HostApplication {
         } else {
             cancel(self);
         }
+    }
+
+    async fn current_core(&self, companion: &str, fallback: &str) -> String {
+        self.0
+            .repository
+            .snapshot()
+            .await
+            .ok()
+            .and_then(|snapshot| {
+                snapshot
+                    .companions
+                    .into_iter()
+                    .find(|item| item.id == companion)
+                    .map(|item| item.mind)
+            })
+            .unwrap_or_else(|| fallback.to_owned())
     }
 
     async fn finish_local(
@@ -769,9 +786,10 @@ impl HostApplication {
             finish(local_prompt.to_owned());
             return;
         };
+        let core = self.current_core(companion, core).await;
         let prompt = compose_prompt_with(
             companion,
-            core,
+            &core,
             &stored,
             &local.memories,
             &local.lexical,
