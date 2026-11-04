@@ -65,6 +65,20 @@ pub(crate) fn application_with_plugins(
     token: String,
     plugins: std::sync::Arc<super::infrastructure::plugins::Manager>,
 ) -> App {
+    application_with_credentials(
+        store,
+        token,
+        plugins,
+        std::sync::Arc::new(super::infrastructure::credentials::Store::default()),
+    )
+}
+
+fn application_with_credentials(
+    store: Store,
+    token: String,
+    plugins: std::sync::Arc<super::infrastructure::plugins::Manager>,
+    credentials: std::sync::Arc<dyn crate::ports::Credentials>,
+) -> App {
     let shutdown = tokio::sync::watch::channel(false).0;
     let devices = store.clone();
     let providers: std::sync::Arc<dyn crate::llm::ProviderRegistry> = std::sync::Arc::new(
@@ -73,7 +87,7 @@ pub(crate) fn application_with_plugins(
     let application = crate::application::HostApplication::with_plugins(
         std::sync::Arc::new(store),
         providers,
-        std::sync::Arc::new(super::infrastructure::credentials::Store::default()),
+        credentials,
         shutdown,
         Some(plugins.clone()),
     );
@@ -81,4 +95,16 @@ pub(crate) fn application_with_plugins(
     let mut app = App::new(application, token);
     app.devices = crate::devices::Devices::new(Some(devices));
     app
+}
+
+#[cfg(test)]
+pub(crate) fn application_with_test_credentials(
+    store: Store,
+    token: String,
+    credentials: std::sync::Arc<dyn crate::ports::Credentials>,
+) -> App {
+    let plugins = std::sync::Arc::new(super::infrastructure::plugins::Manager::discover(
+        store.clone(),
+    ));
+    application_with_credentials(store, token, plugins, credentials)
 }

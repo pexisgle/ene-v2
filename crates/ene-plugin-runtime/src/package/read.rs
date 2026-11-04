@@ -47,7 +47,7 @@ pub(super) fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
         && metadata.ctime_nsec() == stamp.ctime_nsec
 }
 #[cfg(not(unix))]
-fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
+pub(super) fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
     metadata.is_file() && metadata.len() == stamp.len && metadata.modified().ok() == stamp.modified
 }
 pub(super) fn owned(path: &Path, directory: bool) -> Result<()> {

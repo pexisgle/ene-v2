@@ -36,6 +36,14 @@ fn host_app(
     )
 }
 
+fn app_with_test_credentials(store: Store) -> App {
+    crate::bootstrap::application_with_test_credentials(
+        store,
+        "private-token".into(),
+        std::sync::Arc::new(StoredCredentials::default()),
+    )
+}
+
 async fn request_method(
     app: &App,
     method: &str,
@@ -1288,7 +1296,7 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     let state_dir = temp.path().to_path_buf();
     let store = Store::open(state_dir.join("host.sqlite3")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    let app = crate::bootstrap::application(store.clone(), "private-token".into());
+    let app = app_with_test_credentials(store.clone());
     let rig_dir = state_dir.join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1735,7 +1743,7 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    let app = crate::bootstrap::application(store.clone(), "private-token".into());
+    let app = app_with_test_credentials(store.clone());
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     crate::bootstrap::attach_kernel(&app, rig_dir).unwrap();
@@ -1980,7 +1988,7 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    let app = bootstrap::application(store.clone(), "private-token".into());
+    let app = app_with_test_credentials(store.clone());
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     bootstrap::attach_kernel(&app, rig_dir.clone()).unwrap();
@@ -2311,7 +2319,7 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
         .await
         .unwrap();
 
-    let app = bootstrap::application(store.clone(), "private-token".into());
+    let app = app_with_test_credentials(store.clone());
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     bootstrap::attach_kernel(&app, rig_dir).unwrap();
@@ -2697,7 +2705,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    let app = bootstrap::application(store.clone(), "private-token".into());
+    let app = app_with_test_credentials(store.clone());
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     bootstrap::attach_kernel(&app, rig_dir).unwrap();
@@ -3367,7 +3375,7 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
-    let app = bootstrap::application(store.clone(), "private-token".into());
+    let app = app_with_test_credentials(store.clone());
     let rig_dir = temp.path().join("rig");
     std::fs::create_dir_all(&rig_dir).unwrap();
     bootstrap::attach_kernel(&app, rig_dir).unwrap();
