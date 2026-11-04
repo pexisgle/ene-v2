@@ -914,7 +914,9 @@ async fn fail(shared: &Arc<Mutex<State>>, reason: &str, writer: &mpsc::Sender<Va
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     fn agent_script() -> String {
         r#"
 import json, sys

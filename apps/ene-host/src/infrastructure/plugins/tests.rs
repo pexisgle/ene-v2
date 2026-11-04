@@ -7,7 +7,9 @@ use ene_plugin::{
     CharacterEvent, CharacterTarget, ContentBlock, ContentChunk, GenerationRequest, HarnessEvent,
     HarnessInput, Operation, RequestPermissionOutcome, Service, ServiceRequest, SessionUpdate,
 };
+#[cfg(unix)]
 use ene_plugin_runtime::limits::MAX_EVENTS;
+#[cfg(unix)]
 use ene_rpc::TerminalPolicy;
 use futures_util::future::BoxFuture;
 use std::sync::atomic::Ordering;
