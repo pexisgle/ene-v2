@@ -118,14 +118,6 @@ fn view(
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ActiveRecall {
-    pub request_id: String,
-    pub memories: Vec<MemoryRecord>,
-    pub lexical: String,
-    pub reason: Option<String>,
-}
-
 pub(crate) struct RecallResult {
     pub memories: Vec<MemoryRecord>,
     pub lexical: String,
@@ -137,17 +129,10 @@ pub(crate) struct RecallResult {
 /// What the model needs to know: authored material, the current mind, and how
 /// to use the three host tools. This is a view; SQLite stays canonical.
 pub(crate) fn compose_prompt(core: &str, stored: &StoredMind) -> String {
-    compose_prompt_with("", core, stored, &[], "unchecked", "unchecked")
+    compose_mind_prompt(core, stored)
 }
 
-pub(crate) fn compose_prompt_with(
-    companion: &str,
-    core: &str,
-    stored: &StoredMind,
-    recalled: &[MemoryRecord],
-    lexical: &str,
-    semantic: &str,
-) -> String {
+pub(crate) fn compose_mind_prompt(core: &str, stored: &StoredMind) -> String {
     let mut out = String::with_capacity(12_000);
     out.push_str(
         "あなたは次の人格設定を持つコンパニオンとして、この会話の相手と話す。\n\
@@ -187,33 +172,6 @@ pub(crate) fn compose_prompt_with(
         stored.state_revision
     ));
     render_current_state(&mut out, &stored.state);
-    out.push_str(&format!(
-        "\n[いまの話題で思い出した記憶]\n検索状態: 語句={lexical} 意味={semantic}\n"
-    ));
-    if recalled.is_empty() {
-        out.push_str("該当する記憶はない。想起できていない場合と混同しないため、必要なら mind_recall を使う。\n");
-    } else {
-        for memory in recalled.iter().take(3) {
-            let shared = if memory.owner != companion {
-                "（共有された記憶）"
-            } else {
-                ""
-            };
-            out.push_str(&format!(
-                "- id: {} {} revision {}\n  {}\n",
-                memory.id,
-                shared,
-                memory.revision,
-                memory.content.chars().take(600).collect::<String>()
-            ));
-            if !memory.description.is_empty() {
-                out.push_str(&format!(
-                    "  説明: {}\n",
-                    memory.description.chars().take(300).collect::<String>()
-                ));
-            }
-        }
-    }
     out.push_str(
         "\n[心と記憶の操作]\n\
          - mind_recall: 保存済みの記憶を語句で検索する。必要なときだけ使う。\n\
@@ -483,20 +441,7 @@ impl HostApplication {
             .and_then(|active| active.get(companion).cloned())
     }
 
-    fn set_active_recall(&self, companion: &str, recall: ActiveRecall) {
-        if let Ok(mut cache) = self.0.active_recall.lock() {
-            cache.insert(companion.to_owned(), recall);
-        }
-    }
-
     pub(crate) fn clear_active_recall(&self, companion: &str, request_id: &str) {
-        if let Ok(mut cache) = self.0.active_recall.lock()
-            && cache
-                .get(companion)
-                .is_some_and(|recall| recall.request_id == request_id)
-        {
-            cache.remove(companion);
-        }
         if let Ok(mut active) = self.0.active_request.lock()
             && active
                 .get(companion)
@@ -505,14 +450,6 @@ impl HostApplication {
             active.remove(companion);
         }
         self.cancel_semantic(companion, request_id);
-    }
-
-    fn active_recall(&self, companion: &str) -> Option<ActiveRecall> {
-        self.0
-            .active_recall
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(companion).cloned())
     }
 
     pub(crate) async fn mind_recall(
@@ -633,18 +570,14 @@ impl HostApplication {
             Some(reason) => format!("{lexical}({reason})"),
             None => lexical.clone(),
         };
-        let prompt = compose_prompt_with(
-            companion,
-            core,
-            &stored,
-            &memories,
-            &lexical_status,
-            "lexical_only",
-        );
+        let mind = compose_mind_prompt(core, &stored);
+        let recall = compose_recall_fragment(companion, &memories, &lexical_status, "lexical_only");
+        let prompt = format!("{mind}\n\n{recall}");
         self.set_active_request(companion, request_id);
         let sequence = self.next_prompt_sequence();
         if let Ok(runtime) = self.rig() {
-            let _ = runtime.set_mind_prompt(companion.to_owned(), prompt.clone(), sequence);
+            let _ = runtime.set_mind_prompt(companion.to_owned(), mind, sequence);
+            let _ = runtime.set_recall_section(companion.to_owned(), recall);
             let _ = runtime.hold_recall(
                 companion.to_owned(),
                 request_id.to_owned(),
@@ -662,28 +595,10 @@ impl HostApplication {
         let companion_owned = companion.to_owned();
         let request_owned = request_id.to_owned();
         let text_owned = text.to_owned();
-        let core_owned = core.to_owned();
-        let local_prompt = prompt.clone();
         self.0.background.spawn(async move {
-            app.semantic_recall(
-                companion_owned,
-                core_owned,
-                text_owned,
-                request_owned,
-                local,
-                local_prompt,
-            )
-            .await;
+            app.semantic_recall(companion_owned, text_owned, request_owned, local)
+                .await;
         });
-        self.set_active_recall(
-            companion,
-            ActiveRecall {
-                request_id: request_id.to_owned(),
-                memories,
-                lexical,
-                reason,
-            },
-        );
         Ok(prompt)
     }
 
@@ -703,11 +618,9 @@ impl HostApplication {
     async fn semantic_recall(
         &self,
         companion: String,
-        core: String,
         text: String,
         request_id: String,
         local: RecallResult,
-        local_prompt: String,
     ) {
         let finish = |prompt: String| {
             if let Ok(runtime) = self.rig() {
@@ -726,8 +639,7 @@ impl HostApplication {
             .await
             .unwrap_or(0);
         if count == 0 || text.chars().count() < 4 {
-            self.finish_local(&companion, &core, local, &local_prompt, &request_id)
-                .await;
+            self.finish_local(&companion, local, &request_id).await;
             return;
         }
         let query = text.chars().take(2000).collect::<String>();
@@ -740,7 +652,7 @@ impl HostApplication {
             cancel(self);
             return;
         }
-        let (memories, lexical, semantic, reason) = match result {
+        let (memories, lexical, semantic, _reason) = match result {
             Ok(Ok(result)) => (
                 result.memories,
                 result.lexical,
@@ -762,35 +674,18 @@ impl HostApplication {
         };
         let fragment = compose_recall_fragment(&companion, &memories, &lexical, &semantic);
         if self.active_request(&companion).as_deref() == Some(request_id.as_str()) {
-            self.set_active_recall(
-                &companion,
-                ActiveRecall {
-                    request_id: request_id.clone(),
-                    memories,
-                    lexical,
-                    reason,
-                },
-            );
             finish(fragment);
         } else {
             cancel(self);
         }
     }
 
-    async fn finish_local(
-        &self,
-        companion: &str,
-        core: &str,
-        local: RecallResult,
-        local_prompt: &str,
-        request_id: &str,
-    ) {
+    async fn finish_local(&self, companion: &str, local: RecallResult, request_id: &str) {
         let finish = |prompt: String| {
             if let Ok(runtime) = self.rig() {
                 let _ = runtime.complete_recall(request_id.to_owned(), prompt);
             }
         };
-        let _ = (core, local_prompt);
         finish(compose_recall_fragment(
             companion,
             &local.memories,
@@ -829,25 +724,7 @@ pub(super) async fn publish_mind(
         .await?;
     let view = view(companion, core, stored.clone(), index, consolidation);
     if let Ok(runtime) = app.rig() {
-        let active = app.active_recall(companion);
-        let lexical = active
-            .as_ref()
-            .map(|recall| match &recall.reason {
-                Some(reason) => format!("{}({reason})", recall.lexical),
-                None => recall.lexical.clone(),
-            })
-            .unwrap_or_else(|| "idle".into());
-        let prompt = compose_prompt_with(
-            companion,
-            core,
-            &stored,
-            active
-                .as_ref()
-                .map(|recall| recall.memories.as_slice())
-                .unwrap_or_default(),
-            &lexical,
-            "lexical_only",
-        );
+        let prompt = compose_mind_prompt(core, &stored);
         if let Err(error) = runtime.set_mind_prompt(companion.to_owned(), prompt, sequence) {
             // The next connect composes from SQLite; the update is not rolled
             // back for a missing kernel.

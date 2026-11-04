@@ -1994,6 +1994,7 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
             MockStreamEvent::final_response_with_default_usage(),
         ],
     ]);
+    let captured = model.clone();
     app.application.set_test_model(Arc::new(move |_, _| {
         let spec = Catalog::builtin()
             .resolve("deepseek/deepseek-flash")
@@ -2142,21 +2143,25 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     .await;
     assert_eq!(status, StatusCode::OK);
     wait_for_answered(&mut subscription).await;
-    let log_path = rig_dir.join("logs").join(format!("{companion}.jsonl"));
-    let raw = std::fs::read_to_string(&log_path).unwrap();
-    let prompts = raw
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|value| value["type"] == "state" && value["key"] == "rig_ecs::agent::SystemPrompt")
-        .filter_map(|value| value["value"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
+    let requests = captured.requests();
+    assert!(requests.len() >= 2);
+    let system = requests[1]
+        .chat_history
+        .iter()
+        .find_map(|message| match &**message {
+            rig_core::completion::Message::System { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("second model system prompt");
     assert!(
-        prompts
-            .iter()
-            .any(|prompt| prompt.contains("一緒に柚子ジャムを作った経験")),
-        "automatic recall missing from the model input: {prompts:?}"
+        system.contains("一緒に柚子ジャムを作った経験"),
+        "automatic recall missing from the actual model request: {system}"
     );
-
+    assert_eq!(
+        system.matches("いまの話題で思い出した記憶").count(),
+        1,
+        "automatic recall was duplicated: {system}"
+    );
     app.application.stop().await.unwrap();
 }
 
@@ -2495,8 +2500,11 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     assert!(
         system.contains("柚子ジャム")
             && system.contains(&memory_id)
-            && system.contains("検索中に更新された側面"),
-        "the final model request lost the newer mind or recall: {system}"
+            && system.contains("検索中に更新された側面")
+            && system.contains("意味=ok")
+            && system.matches("いまの話題で思い出した記憶").count() == 1
+            && !system.contains("該当する記憶はない"),
+        "the final model request lost the newer mind or duplicated recall: {system}"
     );
 
     // A search failure must keep the local lexical result and still send once.
@@ -2522,8 +2530,11 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
         })
         .expect("failure system prompt");
     assert!(
-        system.contains("柚子ジャム") && system.contains("意味=error"),
-        "local results were lost on search failure: {system}"
+        system.contains("柚子ジャム")
+            && system.contains("意味=error")
+            && system.matches("いまの話題で思い出した記憶").count() == 1
+            && !system.contains("意味=lexical_only"),
+        "local results were lost or duplicated on search failure: {system}"
     );
 
     // A pending search that outlives the production budget must send once
@@ -2556,8 +2567,11 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
         })
         .expect("timeout system prompt");
     assert!(
-        system.contains("柚子ジャム") && system.contains("意味=timeout"),
-        "timeout did not keep the local result: {system}"
+        system.contains("柚子ジャム")
+            && system.contains("意味=timeout")
+            && system.matches("いまの話題で思い出した記憶").count() == 1
+            && !system.contains("意味=lexical_only"),
+        "timeout did not keep one local recall: {system}"
     );
     gate.notify_one();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

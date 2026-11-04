@@ -178,7 +178,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 
 - 正常・早期完了・停止・重複/遅延完了を接続テストで確認。早期結果はpendingとして保持し、モデル要求のGateで適用。停止後・二重完了では再送しない。
 - 古い`StoredMind`を保持した`publish_mind`を適用前に待機させ、新しいprofile適用後に遅れて完了させる`a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt`を追加。`publish_mind`はホスト内prompt sequenceで古い全文を無視する。
-- 検索完了は**想起フラグメントだけ**を返し、カーネルがその時点のagent SystemPromptへ追記する。これにより古い検索処理が全文（古い心を含む）でモデル入力を上書きする経路自体を削除した。完了・早着とも保留解除は失わない。ホスト内の単調なprompt sequenceを`SetMindPrompt`で比較し、古い全文の後着を無視する。実際に直接モデル接続へ渡した要求で新profileのみを確認。
+- モデル入力は「最新の人格・心（agent SystemPrompt）」＋「対象入力の想起一枠（RecallSection）」から一度だけ合成する。検索完了は想起フラグメントでその一枠を置換し、追記しない。これにより古い全文・古い「該当なし」・語句/意味の想起欄が併存する経路を削除した。完了・早着とも保留解除は失わない。ホスト内の単調なprompt sequenceを`SetMindPrompt`で比較し、古い全文の後着を無視する。実際に直接モデル接続へ渡した要求で新profileのみを確認。
 - `unix_seconds`はRFC3339解析失敗時に実時間へ置き換えずエラーとし、旧テストの`"now"`値を有効な時刻へ修正。テスト時計はプロセスstaticではなく`HostApplication`のワーカー時計に限定。
 - 検索失敗・期限切れのローカル結果保持、モデル一度だけ、遅延完了の非再送は`automatic_semantic_recall_holds_the_model_until_the_embedding_completes`で確認。検索中のMindProfile更新が最終モデル入力を巻き戻さないことも同テストで確認。
 - 履歴接続は`consolidation_connection_walks_a_page_boundary_into_sqlite_cursor`一本で、テストページサイズ1のユーザー/次ページ応答、同一ターンへ同時受付したSteer二入力、失敗終端の後の確定入力、9000文字超の長文末尾＋後続短文を実際の`pending_messages`→batch→`mind_consolidate`→SQLiteカーソル→次回走査へ通した。失敗終端ユーザーをWaiting扱いして後続を止める分類不具合を修正し、終端範囲の再適用がないことを確認。

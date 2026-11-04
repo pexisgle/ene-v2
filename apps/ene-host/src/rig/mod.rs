@@ -98,6 +98,10 @@ enum Command {
         prompt: String,
         sequence: u64,
     },
+    SetRecallSection {
+        companion: String,
+        section: String,
+    },
     Deliver {
         companion: String,
         text: String,
@@ -281,6 +285,17 @@ impl Runtime {
     /// accepted here; its end arrives as a finished turn.
     pub(crate) fn stop(&self, companion: String, reason: Option<String>) -> Result<(), Error> {
         self.send(Signal::Command(Command::Stop { companion, reason }))
+    }
+
+    pub(crate) fn set_recall_section(
+        &self,
+        companion: String,
+        section: String,
+    ) -> Result<(), Error> {
+        self.send(Signal::Command(Command::SetRecallSection {
+            companion,
+            section,
+        }))
     }
 
     pub(crate) fn hold_recall(

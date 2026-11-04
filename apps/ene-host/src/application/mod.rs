@@ -105,8 +105,6 @@ struct Inner {
     mind_notify: tokio::sync::Notify,
     mind_started: std::sync::atomic::AtomicBool,
     prompt_sequence: std::sync::atomic::AtomicU64,
-    active_recall:
-        std::sync::Mutex<std::collections::HashMap<String, crate::application::mind::ActiveRecall>>,
     active_request: std::sync::Mutex<std::collections::HashMap<String, String>>,
     #[cfg(test)]
     embedding_hook: std::sync::OnceLock<EmbeddingHook>,
@@ -147,7 +145,6 @@ impl HostApplication {
             mind_notify: tokio::sync::Notify::new(),
             mind_started: std::sync::atomic::AtomicBool::new(false),
             prompt_sequence: std::sync::atomic::AtomicU64::new(0),
-            active_recall: std::sync::Mutex::new(std::collections::HashMap::new()),
             active_request: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
             embedding_hook: std::sync::OnceLock::new(),
