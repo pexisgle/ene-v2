@@ -22,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const METHOD_REVISION: &str = "consolidation-v1";
 const BATCH_MESSAGES: usize = 12;
 const BATCH_CHARS: usize = 8_000;
+#[cfg(test)]
+const HISTORY_PAGE: usize = 1;
+#[cfg(not(test))]
 const HISTORY_PAGE: usize = 64;
 const SCAN_PAGES: usize = 8;
 const RETRY_ATTEMPTS: u32 = 2;
@@ -506,7 +509,7 @@ impl HostApplication {
         }
     }
 
-    async fn pending_messages(
+    pub(crate) async fn pending_messages(
         &self,
         companion: &str,
         last_sequence: u64,
@@ -588,14 +591,14 @@ impl HostApplication {
 }
 
 #[derive(Clone, Debug)]
-struct Chunk {
-    id: String,
-    request_id: Option<String>,
-    role: String,
-    created_at: String,
-    text: String,
-    offset: usize,
-    total: usize,
+pub(crate) struct Chunk {
+    pub id: String,
+    pub request_id: Option<String>,
+    pub role: String,
+    pub created_at: String,
+    pub text: String,
+    pub offset: usize,
+    pub total: usize,
 }
 
 struct RelatedMemories {
@@ -614,10 +617,10 @@ fn confirmed_message(message: &ene_rpc::Message) -> bool {
         && !message.text.trim().is_empty()
 }
 
-struct PendingPage {
-    messages: Vec<ene_rpc::Message>,
-    terminal_through: Option<(u64, u64)>,
-    waiting: bool,
+pub(crate) struct PendingPage {
+    pub messages: Vec<ene_rpc::Message>,
+    pub terminal_through: Option<(u64, u64)>,
+    pub waiting: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -696,7 +699,7 @@ fn retryable(error: &Error) -> bool {
     )
 }
 
-fn batch_chunks(
+pub(crate) fn batch_chunks(
     messages: Vec<ene_rpc::Message>,
     from_sequence: u64,
     from_offset: u64,

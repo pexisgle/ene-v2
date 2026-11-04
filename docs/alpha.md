@@ -143,7 +143,7 @@ OpenAIの実ホスト経路とOpenRouterのネイティブ接続で、実モデ�
 
 ##### 機械検証（ステップ3）
 
-- `ene-host` libテスト154件（実ホストプロセスの統合テストを含む）。追加の重点:
+- `ene-host` libテスト155件（実ホストプロセスの統合テストを含む）。追加の重点:
   - FTS/vectorをpendingから構築し、ownerで絞り、共有時は私的出所を落とし、共有解除後は古いFTS行があっても返さない。
   - 忘却は行を残したまま通常想起から外れ、`include_forgotten`で過去として読める。再索引で復活しない。
   - 整理は同じ操作ID・範囲の再試行で重複せず、カーソルと記憶を同一トランザクションで進める。state変更・古いrevision・保存失敗ではカーソルを進めない。
@@ -177,10 +177,10 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 ##### 自動意味想起の現在地
 
 - 正常・早期完了・停止・重複/遅延完了を接続テストで確認。早期結果はpendingとして保持し、モデル要求のGateで適用。停止後・二重完了では再送しない。
-- 検索失敗のローカル結果保持はホスト接続テストで確認（`automatic_semantic_recall_holds_the_model_until_the_embedding_completes`）。期限切れの遅い埋め込みモック接続は未実施。
-- ページ境界は、応答が次ページにある場合に走査を続け、末尾で未対応ユーザーを有限再確認後に処理する形へ変更。ただし全履歴を実際に流す接続テストは未実施。
-- 索引ワーカーの有限再試行を失敗モックで接続する検証は未実施（store待ち行列まで）。
-- 旧PromptState/版付きブリッジは削除した。active_request/active_recallとSetMindPrompt/RecallCompletedの完全な一本化はさらに整理余地がある。
+- 検索失敗・期限切れのローカル結果保持、モデル一度だけ、遅延完了の非再送は`automatic_semantic_recall_holds_the_model_until_the_embedding_completes`で確認。検索中のMindProfile更新が最終モデル入力を巻き戻さないことも同テストで確認。
+- ページ境界は、テストページサイズ1でユーザーと次ページ応答を実際の`pending_messages`→batch→SQLite→次回走査へ通す`consolidation_connection_walks_a_page_boundary_into_sqlite_cursor`で確認。Steer・終端skip・長文後短文の全履歴接続は未実施。
+- 索引ワーカーは`automatic_semantic_recall_holds_the_model_until_the_embedding_completes`内で失敗埋め込みモックへ接続。許容回数後に呼び出しが増えないこと、設定Grant変更で再開しpendingが解消することを確認。
+- 旧PromptState/版付きブリッジは削除した。active_request/active_recallとSetMindPrompt/RecallCompletedの所有・寿命は接続テストで確認。完全な構造一本化はしていない。
 
 ##### ステップ3の判定
 

@@ -1642,6 +1642,7 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error["error"]["code"], "unsupported_capability");
+
     app.application.stop().await.unwrap();
 }
 
@@ -2155,6 +2156,7 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
             .any(|prompt| prompt.contains("一緒に柚子ジャムを作った経験")),
         "automatic recall missing from the model input: {prompts:?}"
     );
+
     app.application.stop().await.unwrap();
 }
 
@@ -2317,6 +2319,10 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
             MockStreamEvent::text("ローカル結果で答えました。"),
             MockStreamEvent::final_response_with_default_usage(),
         ],
+        vec![
+            MockStreamEvent::text("期限のローカル結果で答えました。"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
     ]);
     let captured = model.clone();
     app.application.set_test_model(Arc::new(move |_, _| {
@@ -2387,15 +2393,40 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     let gate = Arc::new(tokio::sync::Notify::new());
     let calls = Arc::new(AtomicUsize::new(0));
     let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let index_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let index_calls = Arc::new(AtomicUsize::new(0));
     let hook_gate = gate.clone();
     let hook_calls = calls.clone();
     let hook_fail = fail.clone();
+    let hook_index_mode = index_mode.clone();
+    let hook_index_calls = index_calls.clone();
     app.application
-        .set_embedding_hook(Arc::new(move |_companion, _input| {
+        .set_embedding_hook(Arc::new(move |_companion, input| {
             let gate = hook_gate.clone();
             let calls = hook_calls.clone();
             let fail = hook_fail.clone();
+            let index_mode = hook_index_mode.clone();
+            let index_calls = hook_index_calls.clone();
             Box::pin(async move {
+                let is_index = input.iter().any(|text| text.contains("索引待ちの記憶"));
+                if is_index {
+                    index_calls.fetch_add(1, Ordering::SeqCst);
+                    if fail.load(Ordering::SeqCst) {
+                        return Err(crate::domain::Error::new(
+                            crate::domain::ErrorKind::ProviderFailure,
+                        ));
+                    }
+                    return Ok(Embedding {
+                        vectors: vec![vec![1.0, 0.0]],
+                        input_tokens: 1,
+                    });
+                }
+                if index_mode.load(Ordering::SeqCst) {
+                    return Ok(Embedding {
+                        vectors: vec![vec![1.0, 0.0]],
+                        input_tokens: 1,
+                    });
+                }
                 calls.fetch_add(1, Ordering::SeqCst);
                 if fail.load(Ordering::SeqCst) {
                     return Err(crate::domain::Error::new(
@@ -2434,6 +2465,21 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
         0,
         "the model was called while the semantic search was pending"
     );
+    // A mind/profile update while the search is pending must not be rolled
+    // back by an older full prompt or by the completion.
+    let (status, _) = mutate(
+        &app,
+        "PATCH",
+        &format!("MindProfile/{companion}"),
+        json!({
+            "expected_revision": 1,
+            "facets": ["検索中に更新された側面"],
+            "examples": []
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     gate.notify_one();
     wait_for_answered(&mut subscription).await;
     let requests = captured.requests();
@@ -2447,8 +2493,10 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
         })
         .expect("system prompt");
     assert!(
-        system.contains("柚子ジャム") && system.contains(&memory_id),
-        "the semantic result was not in the final model request: {system}"
+        system.contains("柚子ジャム")
+            && system.contains(&memory_id)
+            && system.contains("検索中に更新された側面"),
+        "the final model request lost the newer mind or recall: {system}"
     );
 
     // A search failure must keep the local lexical result and still send once.
@@ -2478,5 +2526,323 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
         "local results were lost on search failure: {system}"
     );
 
+    // A pending search that outlives the production budget must send once
+    // with the valid local result and ignore the late completion.
+    fail.store(false, Ordering::SeqCst);
+    let before = calls.load(Ordering::SeqCst);
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"柚子ジャムの思い出をもう一度"}),
+        Some("semantic-timeout"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let timeout_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while calls.load(Ordering::SeqCst) <= before && tokio::time::Instant::now() < timeout_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(calls.load(Ordering::SeqCst) > before);
+    wait_for_answered(&mut subscription).await;
+    let requests = captured.requests();
+    assert_eq!(requests.len(), 3);
+    let system = requests[2]
+        .chat_history
+        .iter()
+        .find_map(|message| match &**message {
+            rig_core::completion::Message::System { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("timeout system prompt");
+    assert!(
+        system.contains("柚子ジャム") && system.contains("意味=timeout"),
+        "timeout did not keep the local result: {system}"
+    );
+    gate.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        captured.requests().len(),
+        3,
+        "a late result after timeout sent another model call"
+    );
+
+    // The index worker uses the same hook. A transient failure must stop
+    // calling it until the relevant configuration change resets pending work.
+    let _ = store
+        .mind_update(
+            companion.clone(),
+            "seed-index-op".into(),
+            "seed-index-hash".into(),
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: 2,
+                memories: vec![crate::domain::mind::NewMemory {
+                    content: "索引待ちの記憶".into(),
+                    description: String::new(),
+                    appraisal: String::new(),
+                    acquisition: crate::domain::mind::Acquisition::DirectExperience,
+                    supersedes: Vec::new(),
+                    sources: Vec::new(),
+                    occurred_at: None,
+                }],
+                state: None,
+            },
+            vec![crate::domain::mind::SourceRef {
+                kind: crate::domain::mind::SourceKind::Input,
+                id: "seed-index".into(),
+                entry_id: Some("seed-index".into()),
+                speaker: Some("user".into()),
+                observed_at: Some("2026-01-01T00:00:00Z".into()),
+            }],
+            "parent".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .await
+        .unwrap()
+        .memories[0]
+        .id
+        .clone();
+    fail.store(true, Ordering::SeqCst);
+    index_mode.store(true, Ordering::SeqCst);
+    let index_before = index_calls.load(Ordering::SeqCst);
+    app.application.start_mind_worker();
+    let index_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while index_calls.load(Ordering::SeqCst) <= index_before
+        && tokio::time::Instant::now() < index_deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        index_calls.load(Ordering::SeqCst) > index_before,
+        "the index worker did not reach the embedding hook"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        index_calls.load(Ordering::SeqCst),
+        index_before + 1,
+        "the index worker retried a failed embedding without a configuration change"
+    );
+    let index_failed = store.snapshot().await.unwrap();
+    let _ = index_failed;
+    assert!(
+        store
+            .mind_index_status(companion.clone(), "2026-01-01T00:00:01Z".into())
+            .await
+            .unwrap()
+            .pending_vectors
+            > 0,
+        "the failed index must remain pending"
+    );
+
+    // A related grant/configuration commit resets the bounded wait and wakes
+    // the worker through the normal path.
+    fail.store(false, Ordering::SeqCst);
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            "Grants",
+            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            Some("index-retry-grant"),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let retry_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let status = store
+            .mind_index_status(companion.clone(), "2026-01-01T00:00:02Z".into())
+            .await
+            .unwrap();
+        if status.pending_vectors == 0 && status.embedding_model.is_some() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < retry_deadline,
+            "the index did not resume after configuration change: {status:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(index_calls.load(Ordering::SeqCst) > index_before + 1);
+
+    app.application.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
+    use crate::bootstrap;
+    use rig_core::catalog::Catalog;
+    use rig_core::operation::Completion;
+    use rig_core::serve::ErasedHandler;
+    use rig_core::serve::adapters::ModelAdapter;
+    use rig_core::test_utils::MockCompletionModel;
+    use rig_ecs::effects::Handler;
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("host.db")).await.unwrap();
+    let companion = store.snapshot().await.unwrap().companions[0].id.clone();
+    let app = bootstrap::application(store.clone(), "private-token".into());
+    let rig_dir = temp.path().join("rig");
+    std::fs::create_dir_all(&rig_dir).unwrap();
+    bootstrap::attach_kernel(&app, rig_dir).unwrap();
+    let model = MockCompletionModel::from_stream_turns([vec![
+        rig_core::test_utils::MockStreamEvent::text("ページ境界の応答"),
+        rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+    ]]);
+    app.application.set_test_model(Arc::new(move |_, _| {
+        let spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .expect("catalog")
+            .shared();
+        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
+            spec.reference(),
+            model.clone(),
+        ));
+        Ok(rig_ecs::model::Connection {
+            spec,
+            handler: Handler(handler),
+        })
+    }));
+    let (status, saved) = mutate(
+        &app,
+        "PATCH",
+        "Settings",
+        json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let connection = saved["connections"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mutate(
+            &app,
+            "PATCH",
+            &format!("Companion/{companion}"),
+            json!({"revision":1,"mind":"静かな助手","model_assignments":{"companion":{"connection_id":connection,"model_id":"deepseek/deepseek-flash"}}}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "PUT",
+            &format!("Credentials/{connection}"),
+            json!({"secret":"test-only"}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        mutate(
+            &app,
+            "POST",
+            "Grants",
+            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            Some("page-grant"),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let mut subscription = app.application.subscribe().await;
+    let (status, _) = mutate(
+        &app,
+        "POST",
+        &format!("SendMessage/{companion}"),
+        json!({"text":"ページ境界の発言"}),
+        Some("page-boundary"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_answered(&mut subscription).await;
+
+    // The test page is four messages. The last user is on page one and its
+    // saved answer is on page two; the real pending scan must cross it.
+    let page = app
+        .application
+        .pending_messages(&companion, 0, 0)
+        .await
+        .expect("pending history");
+    let ids = page
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.sequence,
+                message.role.as_str(),
+                message.text.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        ids.iter()
+            .any(|(_, role, text)| *role == "user" && *text == "ページ境界の発言"),
+        "page-boundary user missing: {ids:?}"
+    );
+    assert!(
+        ids.iter()
+            .any(|(_, role, text)| *role == "assistant" && *text == "ページ境界の応答"),
+        "next-page reply missing: {ids:?}"
+    );
+    assert!(ids.len() >= 2, "the accepted user/answer was lost: {ids:?}");
+
+    let (batch, sources, through, offset, chars) =
+        crate::application::memory::batch_chunks(page.messages, 0, 0);
+    assert!(
+        batch
+            .iter()
+            .any(|chunk| chunk.text.contains("ページ境界の発言"))
+    );
+    assert!(
+        batch
+            .iter()
+            .any(|chunk| chunk.text.contains("ページ境界の応答"))
+    );
+    let result = store
+        .mind_consolidate(
+            companion.clone(),
+            "page-boundary-op".into(),
+            "page-boundary-hash".into(),
+            crate::domain::mind::MindUpdateRequest {
+                expected_revision: 1,
+                memories: Vec::new(),
+                state: None,
+            },
+            sources,
+            through,
+            offset,
+            "consolidation-v1".into(),
+            0,
+            chars,
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .await
+        .expect("apply cursor");
+    assert!(result.advanced);
+    let after = app
+        .application
+        .pending_messages(
+            &companion,
+            result.status.last_sequence,
+            result.status.last_offset,
+        )
+        .await
+        .expect("next pending scan");
+    assert!(
+        after.messages.is_empty(),
+        "the next scan repeated a processed range: {:?}",
+        after
+            .messages
+            .iter()
+            .map(|message| (message.sequence, message.id.as_str()))
+            .collect::<Vec<_>>()
+    );
     app.application.stop().await.unwrap();
 }
