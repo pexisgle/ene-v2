@@ -61,4 +61,4 @@ jobs:
         run: |
           npm install --no-save --package-lock=false @extism/extism@2.0.0-rc13
           node examples/plugins/openrouter-wasm/test.cjs target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm
-          WGPU_BACKEND=vulkan cargo test --profile ci -p ene-vrm --all-features --locked --lib material::tests -- --ignored --nocapture --test-threads=1
+          WGPU_BACKEND=vulkan cargo test --profile ci -p ene-vrm --locked --lib material::tests -- --ignored --nocapture --test-threads=1
