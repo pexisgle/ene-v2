@@ -89,7 +89,7 @@ HarnessはACP v1相当のセッションをbindingごとに1件保持し、`runn
 
 ### 端末（明示オプトイン）
 
-ACPバインディングの`terminal`ポリシーを有効にした場合だけ、ACPの`terminal/create`・`output`・`wait_for_exit`・`kill`・`release`を処理します。コマンドは`allowed_commands`（実行ファイル名または絶対パスの完全一致）に限定し、シェルを介さず、`workspace_root`配下の`cwd`だけを許可します。直前の`session/request_permission`でユーザーがallowを選んだ直後の1コマンドだけを受け付けます。出力は`max_output_bytes`で打ち切り、`max_seconds`で強制終了します。**サンドボックスはなく、ホストのOSユーザー権限で実行されます**（コンテナ・seccomp・ネットワーク制限なし）。信頼できるエージェントとコマンドだけを許可してください。
+ACPバインディングの`terminal`ポリシーを有効にした場合だけ、ACPの`terminal/create`・`output`・`wait_for_exit`・`kill`・`release`を処理します。コマンドは`allowed_commands`（実行ファイル名または絶対パスの完全一致）に限定し、シェルを介さず、`workspace_root`配下の`cwd`だけを許可します。実行ファイル名はホストの`PATH`で絶対パスに解決し、子プロセスの`PATH`では解決しません。`request.env`による`PATH`・`PATHEXT`・`COMSPEC`・`SYSTEMROOT`・`WINDIR`・`LD_*`・`DYLD_*`・`GLIBC_TUNABLES`の上書きは拒否します。許可は該当ターンの直前の`session/request_permission`に対するone-shotで、未使用のままターン終了・cancel・timeout・失敗した場合は破棄されます。出力は`max_output_bytes`で打ち切り、`max_seconds`で強制終了します。`terminal/output`と`wait_for_exit`は同じ終了監視を参照し、自然終了でも`exitStatus`を返します。**サンドボックスはなく、ホストのOSユーザー権限で実行されます**（コンテナ・seccomp・ネットワーク制限なし）。信頼できるエージェントとコマンドだけを許可してください。
 
 ### ハーネス状態の取得と通知
 

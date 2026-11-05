@@ -32,13 +32,16 @@ fn call_options() -> CallOptions {
 
 /// The variables this test uses, from the repository `.env`; values never
 /// leave this map except into the credential RPC.
-fn dotenv() -> BTreeMap<String, String> {
+fn dotenv() -> Result<BTreeMap<String, String>, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
-    dotenvy::from_path_iter(path)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .collect()
+    let mut values = BTreeMap::new();
+    let entries =
+        dotenvy::from_path_iter(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    for entry in entries {
+        let (key, value) = entry.map_err(|error| format!("{}: {error}", path.display()))?;
+        values.insert(key, value);
+    }
+    Ok(values)
 }
 
 mod common;
@@ -489,7 +492,7 @@ fn choose_model(vendor: &str, available: &[String], preferred: Option<&str>) -> 
 #[ignore = "live provider call; needs .env keys and spends a few cents"]
 async fn provider_acceptance_through_the_host() {
     let provider = std::env::var("ENE_LIVE_PROVIDER").unwrap_or_else(|_| "openai".into());
-    let keys = dotenv();
+    let keys = dotenv().expect("read .env");
     let (env_name, adapter, endpoint) = match provider.as_str() {
         "openai" => ("OPENAI_API_KEY", "openai", "https://api.openai.com/v1"),
         "openrouter" => (
@@ -897,7 +900,7 @@ async fn recall_result(facts: &LogFacts) -> Option<serde_json::Value> {
 #[tokio::test]
 #[ignore = "live mind acceptance; needs .env keys and spends a few cents"]
 async fn mind_acceptance_through_the_host() {
-    let keys = dotenv();
+    let keys = dotenv().expect("read .env");
     let Some(openai_key) = keys.get("OPENAI_API_KEY").filter(|key| !key.is_empty()) else {
         panic!("OPENAI_API_KEY is missing; the mind acceptance cannot be verified without it");
     };
@@ -1425,7 +1428,7 @@ async fn mind_acceptance_through_the_host() {
 #[tokio::test]
 #[ignore = "live automatic memory acceptance; needs .env keys and spends a small amount"]
 async fn automatic_memory_acceptance_through_the_host() {
-    let keys = dotenv();
+    let keys = dotenv().expect("read .env");
     let Some(key) = keys.get("OPENAI_API_KEY").filter(|key| !key.is_empty()) else {
         panic!("OPENAI_API_KEY is missing; automatic memory cannot be verified");
     };

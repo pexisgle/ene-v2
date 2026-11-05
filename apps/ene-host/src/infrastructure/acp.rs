@@ -27,16 +27,13 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
     io::AsyncReadExt,
     process::Command,
-    sync::{Mutex, oneshot},
+    sync::{Mutex, mpsc, oneshot, watch},
     task::JoinHandle,
     time::timeout,
 };
@@ -70,11 +67,15 @@ pub(crate) struct TerminalLimits {
 }
 
 struct Terminal {
-    child: Arc<Mutex<Box<dyn ChildWrapper>>>,
-    output: Arc<Mutex<Vec<u8>>>,
-    truncated: Arc<AtomicBool>,
-    exit: Arc<Mutex<Option<Option<i32>>>>,
-    readers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    commands: mpsc::Sender<()>,
+    output: Arc<Mutex<TerminalOutput>>,
+    exit: watch::Receiver<Option<Option<i32>>>,
+}
+
+#[derive(Default)]
+struct TerminalOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 struct Permission {
@@ -115,7 +116,9 @@ struct State {
     updates: Vec<SessionUpdate>,
     turn: Option<oneshot::Sender<Result<Turn, String>>>,
     permission: Option<Permission>,
-    approved: bool,
+    /// The one-shot terminal permission for the current prompt turn.
+    /// The turn sequence makes a stale approval unusable in a later turn.
+    approved: Option<u64>,
     /// Increments for every prompt so a stale completion cannot resolve a
     /// later turn.
     sequence: u64,
@@ -130,7 +133,7 @@ impl State {
             updates: Vec::new(),
             turn: None,
             permission: None,
-            approved: false,
+            approved: None,
             sequence: 0,
             active: false,
             failed: None,
@@ -240,8 +243,8 @@ impl AcpSession {
                         let context = driver_context.clone();
                         async move |request: schema::ReadTextFileRequest,
                                     responder: Responder<schema::ReadTextFileResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_read_file(&context, request, responder).await
+                                    cx: ConnectionTo<Agent>| {
+                            on_read_file(&context, request, responder, cx).await
                         }
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -251,8 +254,8 @@ impl AcpSession {
                         let context = driver_context.clone();
                         async move |request: schema::WriteTextFileRequest,
                                     responder: Responder<schema::WriteTextFileResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_write_file(&context, request, responder).await
+                                    cx: ConnectionTo<Agent>| {
+                            on_write_file(&context, request, responder, cx).await
                         }
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -385,6 +388,7 @@ impl AcpSession {
             }
             state.sequence += 1;
             state.active = true;
+            state.approved = None;
             state.updates.clear();
             let (tx, rx) = oneshot::channel();
             state.turn = Some(tx);
@@ -435,7 +439,7 @@ impl AcpSession {
                         )
                 })
             {
-                state.approved = true;
+                state.approved = Some(state.sequence);
             }
             let (tx, rx) = oneshot::channel();
             state.turn = Some(tx);
@@ -453,7 +457,11 @@ impl AcpSession {
     }
 
     pub(crate) async fn cancel(&mut self) -> Result<(), Error> {
-        let session = self.shared.lock().await.session.clone();
+        let (session, _) = {
+            let mut state = self.shared.lock().await;
+            state.approved = None;
+            (state.session.clone(), ())
+        };
         let Some(session) = session else {
             return Ok(());
         };
@@ -473,7 +481,7 @@ impl AcpSession {
         let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
         let terminals = self.terminals.lock().await;
         for terminal in terminals.values() {
-            let _ = terminal.child.lock().await.start_kill();
+            let _ = terminal.commands.try_send(());
         }
     }
 
@@ -526,9 +534,7 @@ impl Drop for AcpSession {
         let _ = self.child.start_kill();
         if let Ok(terminals) = self.terminals.try_lock() {
             for terminal in terminals.values() {
-                if let Ok(mut child) = terminal.child.try_lock() {
-                    let _ = child.start_kill();
-                }
+                let _ = terminal.commands.try_send(());
             }
         }
     }
@@ -559,6 +565,7 @@ async fn finish(
         return;
     }
     state.active = false;
+    state.approved = None;
     let updates = std::mem::take(&mut state.updates);
     if let Some(permission) = state.permission.take() {
         let _ = permission
@@ -586,6 +593,7 @@ async fn finish(
 async fn reset_turn(shared: &Arc<Mutex<State>>) {
     let mut state = shared.lock().await;
     state.active = false;
+    state.approved = None;
     state.sequence += 1;
     state.updates.clear();
     state.turn = None;
@@ -601,6 +609,7 @@ async fn reset_turn(shared: &Arc<Mutex<State>>) {
 async fn fail(shared: &Arc<Mutex<State>>, stderr: &Arc<Mutex<Vec<u8>>>, reason: String) {
     let mut state = shared.lock().await;
     state.active = false;
+    state.approved = None;
     state.failed = Some("acp_agent_failed");
     state.sequence += 1;
     state.updates.clear();
@@ -621,6 +630,25 @@ async fn fail(shared: &Arc<Mutex<State>>, stderr: &Arc<Mutex<Vec<u8>>>, reason: 
     );
 }
 
+fn fail_active(state: &mut State, reason: &'static str) {
+    state.active = false;
+    state.failed = Some(reason);
+    state.approved = None;
+    state.sequence += 1;
+    state.updates.clear();
+    if let Some(turn) = state.turn.take() {
+        let _ = turn.send(Err(reason.into()));
+    }
+    if let Some(permission) = state.permission.take() {
+        let _ = permission
+            .responder
+            .respond(schema::RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+    }
+    eprintln!("ene-host acp: {reason}");
+}
+
 async fn on_update(
     context: &ClientContext,
     notification: schema::SessionNotification,
@@ -630,11 +658,13 @@ async fn on_update(
         return Ok(());
     }
     if state.session.as_ref() != Some(&notification.session_id) {
-        return Err(AcpError::invalid_request());
+        fail_active(&mut state, "acp_invalid_update");
+        return Ok(());
     }
     if let Some(update) = map_update(notification.update) {
         if state.updates.len() >= MAX_UPDATES {
-            return Err(AcpError::internal_error().data("update_limit"));
+            fail_active(&mut state, "acp_update_limit");
+            return Ok(());
         }
         state.updates.push(update);
     }
@@ -657,6 +687,9 @@ async fn on_permission(
         ));
         return Ok(());
     }
+    // A new permission request invalidates a previous, unused terminal
+    // approval even within the same turn.
+    state.approved = None;
     let request_id = uuid::Uuid::new_v4().to_string();
     state.permission = Some(Permission {
         request_id: request_id.clone(),
@@ -683,17 +716,30 @@ async fn on_read_file(
     context: &ClientContext,
     request: schema::ReadTextFileRequest,
     responder: Responder<schema::ReadTextFileResponse>,
+    cx: ConnectionTo<Agent>,
 ) -> Result<(), AcpError> {
-    match relative_to(&context.workspace, &request.path)
-        .and_then(|path| context.workspace.read(&path, request.line, request.limit))
-    {
-        Ok(read) => {
-            let _ = responder.respond(schema::ReadTextFileResponse::new(read.content));
+    let workspace = context.workspace.clone();
+    let path = request.path;
+    let line = request.line;
+    let limit = request.limit;
+    let _ = cx.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            relative_to(&workspace, &path).and_then(|path| workspace.read(&path, line, limit))
+        })
+        .await;
+        match result {
+            Ok(Ok(read)) => {
+                let _ = responder.respond(schema::ReadTextFileResponse::new(read.content));
+            }
+            Ok(Err(error)) => {
+                let _ = responder.respond_with_error(acp_error(error));
+            }
+            Err(_) => {
+                let _ = responder.respond_with_error(AcpError::internal_error());
+            }
         }
-        Err(error) => {
-            let _ = responder.respond_with_error(acp_error(error));
-        }
-    }
+        Ok(())
+    });
     Ok(())
 }
 
@@ -701,17 +747,29 @@ async fn on_write_file(
     context: &ClientContext,
     request: schema::WriteTextFileRequest,
     responder: Responder<schema::WriteTextFileResponse>,
+    cx: ConnectionTo<Agent>,
 ) -> Result<(), AcpError> {
-    match relative_to(&context.workspace, &request.path)
-        .and_then(|path| context.workspace.write(&path, &request.content))
-    {
-        Ok(()) => {
-            let _ = responder.respond(schema::WriteTextFileResponse::new());
+    let workspace = context.workspace.clone();
+    let path = request.path;
+    let content = request.content;
+    let _ = cx.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            relative_to(&workspace, &path).and_then(|path| workspace.write(&path, &content))
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {
+                let _ = responder.respond(schema::WriteTextFileResponse::new());
+            }
+            Ok(Err(error)) => {
+                let _ = responder.respond_with_error(acp_error(error));
+            }
+            Err(_) => {
+                let _ = responder.respond_with_error(AcpError::internal_error());
+            }
         }
-        Err(error) => {
-            let _ = responder.respond_with_error(acp_error(error));
-        }
-    }
+        Ok(())
+    });
     Ok(())
 }
 
@@ -726,20 +784,21 @@ async fn on_create_terminal(
     };
     let approved = {
         let mut state = context.shared.lock().await;
-        let approved = state.approved;
-        state.approved = false;
-        approved
+        let sequence = state.sequence;
+        state.approved.take() == Some(sequence)
     };
     if !approved {
         let _ = responder
             .respond_with_error(AcpError::new(ErrorCode::new(-32000), "permission required"));
         return Ok(());
     }
-    if !command_allowed(policy, &request.command) {
-        let _ = responder
-            .respond_with_error(AcpError::new(ErrorCode::new(-32000), "command not allowed"));
-        return Ok(());
-    }
+    let executable = match resolve_executable(policy, &request.command) {
+        Ok(executable) => executable,
+        Err(error) => {
+            let _ = responder.respond_with_error(acp_error(error));
+            return Ok(());
+        }
+    };
     let cwd = match request.cwd {
         Some(cwd) if !cwd.as_os_str().is_empty() => {
             match cwd
@@ -756,7 +815,7 @@ async fn on_create_terminal(
         }
         _ => context.workspace.root().to_path_buf(),
     };
-    let mut command = Command::new(&request.command);
+    let mut command = Command::new(&executable);
     command
         .args(&request.args)
         .current_dir(&cwd)
@@ -774,8 +833,12 @@ async fn on_create_terminal(
             || variable.name.len() > 256
             || variable.name.contains(['=', '\0'])
             || variable.name.chars().any(char::is_control)
+            || !environment_allowed(&variable.name)
         {
-            let _ = responder.respond_with_error(AcpError::invalid_params());
+            let _ = responder.respond_with_error(AcpError::new(
+                ErrorCode::INVALID_PARAMS,
+                "environment not allowed",
+            ));
             return Ok(());
         }
         command.env(&variable.name, &variable.value);
@@ -796,35 +859,84 @@ async fn on_create_terminal(
             return Ok(());
         }
     };
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let truncated = Arc::new(AtomicBool::new(false));
+    let output = Arc::new(Mutex::new(TerminalOutput::default()));
     let mut readers = Vec::new();
     if let Some(stdout) = child.stdout().take() {
-        readers.push(tap(stdout, output.clone(), truncated.clone(), limit));
+        readers.push(tap(stdout, output.clone(), limit));
     }
     if let Some(stderr) = child.stderr().take() {
-        readers.push(tap(stderr, output.clone(), truncated.clone(), limit));
+        readers.push(tap(stderr, output.clone(), limit));
     }
-    let child = Arc::new(Mutex::new(child));
-    let exit = Arc::new(Mutex::new(None));
+    let (commands, command_rx) = mpsc::channel(1);
+    let (exit_tx, exit_rx) = watch::channel(None);
+    tokio::spawn(run_terminal(
+        child,
+        readers,
+        exit_tx,
+        command_rx,
+        policy.max_seconds,
+    ));
     let terminal_id = uuid::Uuid::new_v4().to_string();
     context.terminals.lock().await.insert(
         terminal_id.clone(),
         Terminal {
-            child: child.clone(),
+            commands,
             output,
-            truncated,
-            exit,
-            readers: Arc::new(Mutex::new(readers)),
+            exit: exit_rx,
         },
     );
-    let seconds = policy.max_seconds;
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(seconds)).await;
-        let _ = child.lock().await.start_kill();
-    });
     let _ = responder.respond(schema::CreateTerminalResponse::new(terminal_id));
     Ok(())
+}
+
+async fn run_terminal(
+    mut child: Box<dyn ChildWrapper>,
+    readers: Vec<JoinHandle<()>>,
+    exit: watch::Sender<Option<Option<i32>>>,
+    mut commands: mpsc::Receiver<()>,
+    max_seconds: u64,
+) {
+    let timer = tokio::time::sleep(Duration::from_secs(max_seconds));
+    tokio::pin!(timer);
+    let mut timed_out = false;
+    let mut commands_open = true;
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // The leader is done; terminate any background members so the
+                // output pipes close and the terminal leaves no orphans.
+                let _ = child.start_kill();
+                break status.code();
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.start_kill();
+                break None;
+            }
+        }
+        tokio::select! {
+            command = commands.recv(), if commands_open => {
+                match command {
+                    Some(()) => {
+                        let _ = child.start_kill();
+                    }
+                    None => {
+                        commands_open = false;
+                        let _ = child.start_kill();
+                    }
+                }
+            }
+            _ = &mut timer, if !timed_out => {
+                timed_out = true;
+                let _ = child.start_kill();
+            }
+            _ = tokio::time::sleep(TERMINAL_POLL) => {}
+        }
+    };
+    for reader in readers {
+        let _ = reader.await;
+    }
+    let _ = exit.send(Some(code));
 }
 
 async fn on_terminal_output(
@@ -839,10 +951,11 @@ async fn on_terminal_output(
             let _ = responder.respond_with_error(AcpError::invalid_params());
             return Ok(());
         };
+        let output = terminal.output.lock().await;
         (
-            terminal.output.lock().await.clone(),
-            terminal.truncated.load(Ordering::Relaxed),
-            *terminal.exit.lock().await,
+            output.bytes.clone(),
+            output.truncated,
+            *terminal.exit.borrow(),
         )
     };
     let exit_status = exit
@@ -863,35 +976,28 @@ async fn on_wait_for_exit(
     cx: ConnectionTo<Agent>,
 ) -> Result<(), AcpError> {
     let id = request.terminal_id.to_string();
-    let (child, exit, readers) = {
+    let mut exit = {
         let terminals = context.terminals.lock().await;
         let Some(terminal) = terminals.get(&id) else {
             let _ = responder.respond_with_error(AcpError::invalid_params());
             return Ok(());
         };
-        (
-            terminal.child.clone(),
-            terminal.exit.clone(),
-            terminal.readers.clone(),
-        )
+        terminal.exit.clone()
     };
     let _ = cx.spawn(async move {
-        let status = loop {
-            match child.lock().await.try_wait() {
-                Ok(Some(status)) => break Some(status.code()),
-                Ok(None) => tokio::time::sleep(TERMINAL_POLL).await,
-                Err(_) => break None,
+        let code = loop {
+            let current = *exit.borrow();
+            if let Some(code) = current {
+                break Some(code);
+            }
+            if exit.changed().await.is_err() {
+                break None;
             }
         };
-        let Some(code) = status else {
+        let Some(code) = code else {
             let _ = responder.respond_with_error(AcpError::internal_error());
             return Ok(());
         };
-        *exit.lock().await = Some(code);
-        let readers = std::mem::take(&mut *readers.lock().await);
-        for reader in readers {
-            let _ = reader.await;
-        }
         let _ = responder.respond(schema::WaitForTerminalExitResponse::new(
             schema::TerminalExitStatus::new()
                 .exit_code(code.and_then(|code| u32::try_from(code).ok())),
@@ -907,12 +1013,12 @@ async fn on_kill_terminal(
     responder: Responder<schema::KillTerminalResponse>,
 ) -> Result<(), AcpError> {
     let id = request.terminal_id.to_string();
-    let child = {
+    let commands = {
         let terminals = context.terminals.lock().await;
-        terminals.get(&id).map(|terminal| terminal.child.clone())
+        terminals.get(&id).map(|terminal| terminal.commands.clone())
     };
-    if let Some(child) = child {
-        let _ = child.lock().await.start_kill();
+    if let Some(commands) = commands {
+        let _ = commands.try_send(());
     }
     let _ = responder.respond(schema::KillTerminalResponse::new());
     Ok(())
@@ -926,7 +1032,7 @@ async fn on_release_terminal(
     let id = request.terminal_id.to_string();
     let terminal = context.terminals.lock().await.remove(&id);
     if let Some(terminal) = terminal {
-        let _ = terminal.child.lock().await.start_kill();
+        let _ = terminal.commands.try_send(());
     }
     let _ = responder.respond(schema::ReleaseTerminalResponse::new());
     Ok(())
@@ -976,10 +1082,39 @@ fn command_allowed(policy: &TerminalLimits, command: &str) -> bool {
     policy.allowed.iter().any(|allowed| allowed == command)
 }
 
+/// Resolves a bare allowed command with the host's PATH, never the child's
+/// environment. An absolute allowlist entry is used as-is.
+fn resolve_executable(policy: &TerminalLimits, command: &str) -> Result<PathBuf, Error> {
+    if !command_allowed(policy, command) {
+        return Err(Error::new(ErrorKind::PermissionRequired));
+    }
+    let path = Path::new(command);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    if path.components().count() != 1 {
+        return Err(Error::new(ErrorKind::PermissionRequired));
+    }
+    which::which(command).map_err(|_| Error::new(ErrorKind::Unavailable))
+}
+
+/// Variables that can redirect executable or loader resolution must not be
+/// supplied by the agent; the host's allowlist is the trust boundary.
+fn environment_allowed(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    !(name == "PATH"
+        || name == "PATHEXT"
+        || name == "COMSPEC"
+        || name == "SYSTEMROOT"
+        || name == "WINDIR"
+        || name == "GLIBC_TUNABLES"
+        || name.starts_with("LD_")
+        || name.starts_with("DYLD_"))
+}
+
 fn tap(
     mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    output: Arc<Mutex<Vec<u8>>>,
-    truncated: Arc<AtomicBool>,
+    output: Arc<Mutex<TerminalOutput>>,
     limit: usize,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -989,12 +1124,12 @@ fn tap(
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
                     let mut output = output.lock().await;
-                    let room = limit.saturating_sub(output.len());
+                    let room = limit.saturating_sub(output.bytes.len());
                     if room > 0 {
-                        output.extend_from_slice(&buffer[..read.min(room)]);
+                        output.bytes.extend_from_slice(&buffer[..read.min(room)]);
                     }
                     if read > room {
-                        truncated.store(true, Ordering::Relaxed);
+                        output.truncated = true;
                     }
                 }
             }
@@ -1203,13 +1338,19 @@ for line in sys.stdin:
         on_update(&context, notification()).await.unwrap();
         assert!(shared.lock().await.updates.is_empty());
 
+        let (tx, rx) = oneshot::channel();
         {
             let mut state = shared.lock().await;
             state.active = true;
+            state.sequence = 2;
             state.updates = vec![SessionUpdate::Plan(schema::Plan::new(vec![])); MAX_UPDATES];
+            state.turn = Some(tx);
         }
-        let error = on_update(&context, notification()).await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        on_update(&context, notification()).await.unwrap();
+        assert!(rx.await.unwrap().is_err());
+        let state = shared.lock().await;
+        assert_eq!(state.failed, Some("acp_update_limit"));
+        assert!(!state.active);
     }
 
     #[test]
@@ -1410,6 +1551,350 @@ for line in sys.stdin:
         })
         .await;
         assert!(gone.is_ok(), "grandchild {pid} survived terminal/kill");
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    async fn start_agent(
+        dir: &std::path::Path,
+        script: &str,
+        terminal: Option<TerminalLimits>,
+    ) -> AcpSession {
+        let script_path = dir.join("agent.py");
+        std::fs::write(&script_path, script).unwrap();
+        AcpSession::start(AcpConfig {
+            command: vec![
+                "python3".into(),
+                script_path.to_str().unwrap().into(),
+                dir.to_str().unwrap().into(),
+            ],
+            workspace: Workspace::open(dir.to_str().unwrap()).unwrap(),
+            cwd: std::fs::canonicalize(dir).unwrap(),
+            terminal,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn unused_approval_agent_script() -> String {
+        r#"
+import json, sys
+
+session = "s1"
+prompt_id = None
+turn = 0
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        turn += 1
+        if turn == 1:
+            send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "allow"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+        else:
+            send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create", "params": {"sessionId": session, "command": "touch", "args": [sys.argv[1] + "/created"]}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+    elif mid == 901:
+        text = "denied" if "error" in msg else "ran"
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unused_terminal_approval_does_not_survive_the_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = start_agent(
+            temp.path(),
+            &unused_approval_agent_script(),
+            Some(TerminalLimits {
+                allowed: vec!["touch".into()],
+                max_seconds: 5,
+                max_output: 4096,
+            }),
+        )
+        .await;
+        let turn = session.prompt(&[text_block("first")]).await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let turn = session
+            .respond(
+                &waiting.request_id,
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            turn.state,
+            TurnState::Stopped(StopReason::EndTurn)
+        ));
+
+        let turn = session.prompt(&[text_block("second")]).await.unwrap();
+        assert!(turn.updates.iter().any(|update| matches!(
+            update,
+            SessionUpdate::AgentMessageChunk(chunk)
+                if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "denied")
+        )));
+        assert!(!temp.path().join("created").exists());
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    fn path_override_agent_script() -> String {
+        r#"
+import json, sys
+
+session = "s1"
+prompt_id = None
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "run"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create", "params": {"sessionId": session, "command": "sh", "args": ["-c", "touch " + sys.argv[1] + "/pwned"], "env": [{"name": "PATH", "value": sys.argv[1] + "/evil"}]}})
+    elif mid == 901:
+        text = "rejected" if "error" in msg else "ran"
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminal_cannot_override_path_to_redirect_the_allowlisted_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let evil = temp.path().join("evil");
+        std::fs::create_dir(&evil).unwrap();
+        let mut session = start_agent(
+            temp.path(),
+            &path_override_agent_script(),
+            Some(TerminalLimits {
+                allowed: vec!["sh".into()],
+                max_seconds: 5,
+                max_output: 4096,
+            }),
+        )
+        .await;
+        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let turn = session
+            .respond(
+                &waiting.request_id,
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
+            )
+            .await
+            .unwrap();
+        assert!(turn.updates.iter().any(|update| matches!(
+            update,
+            SessionUpdate::AgentMessageChunk(chunk)
+                if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "rejected")
+        )));
+        assert!(!temp.path().join("pwned").exists());
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    fn flood_agent_script() -> String {
+        r#"
+import json, sys
+
+session = "s1"
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        for index in range(4097):
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x"}}}})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn too_many_updates_fail_the_turn_even_when_the_agent_ends_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = start_agent(temp.path(), &flood_agent_script(), None).await;
+        let error = session.prompt(&[text_block("go")]).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ExternalFailure);
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    fn natural_exit_agent_script() -> String {
+        r#"
+import json, sys, time
+
+session = "s1"
+prompt_id = None
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "run"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create", "params": {"sessionId": session, "command": "sh", "args": ["-c", "exit 7"]}})
+    elif mid == 901:
+        time.sleep(0.3)
+        send({"jsonrpc": "2.0", "id": 902, "method": "terminal/output", "params": {"sessionId": session, "terminalId": msg["result"]["terminalId"]}})
+    elif mid == 902:
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": json.dumps(msg.get("result", {}).get("exitStatus"))}}}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_output_reports_a_natural_exit_without_wait_for_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = start_agent(
+            temp.path(),
+            &natural_exit_agent_script(),
+            Some(TerminalLimits {
+                allowed: vec!["sh".into()],
+                max_seconds: 5,
+                max_output: 4096,
+            }),
+        )
+        .await;
+        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let turn = session
+            .respond(
+                &waiting.request_id,
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
+            )
+            .await
+            .unwrap();
+        let report = turn
+            .updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(report.contains("exitCode"), "missing exit status: {report}");
+        assert!(report.contains('7'), "wrong exit status: {report}");
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_release_terminates_the_whole_process_group() {
+        use rustix::process::{Pid, test_kill_process};
+        let temp = tempfile::tempdir().unwrap();
+        let script = process_group_agent_script().replace("terminal/kill", "terminal/release");
+        let pid_file = temp.path().join("grandchild.pid");
+        let mut session = start_agent(
+            temp.path(),
+            &script,
+            Some(TerminalLimits {
+                allowed: vec!["sh".into()],
+                max_seconds: 10,
+                max_output: 4096,
+            }),
+        )
+        .await;
+        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let turn = session
+            .respond(
+                &waiting.request_id,
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            turn.state,
+            TurnState::Stopped(StopReason::EndTurn)
+        ));
+
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = text.trim().parse::<i32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the terminal child did not record its background pid");
+        let gone = tokio::time::timeout(Duration::from_secs(2), async move {
+            loop {
+                if test_kill_process(Pid::from_raw(pid).unwrap()).is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "grandchild {pid} survived terminal/release");
         session.kill().await;
     }
 }
