@@ -90,14 +90,21 @@ pub const MAX_INPUT_BYTES: usize = 65_536;
 pub const MAX_MODEL_ID_BYTES: usize = 512;
 pub const MAX_MODELS: usize = 4096;
 
-pub fn validate_model_id(value: &str) -> Result<(), Error> {
-    if value.trim().is_empty()
-        || value.len() > MAX_MODEL_ID_BYTES
+fn validate_bounded_id(value: &str, max: usize, reject_blank: bool) -> Result<(), Error> {
+    if (if reject_blank {
+        value.trim().is_empty()
+    } else {
+        value.is_empty()
+    }) || value.len() > max
         || value.chars().any(char::is_control)
     {
         return Err(Error::invalid());
     }
     Ok(())
+}
+
+pub fn validate_model_id(value: &str) -> Result<(), Error> {
+    validate_bounded_id(value, MAX_MODEL_ID_BYTES, true)
 }
 
 /// Revisions never wrap and never silently return to an earlier value.
@@ -109,10 +116,7 @@ pub fn next_revision(value: u64) -> Result<u64, Error> {
 
 /// A host-meaningful id: non-empty, bounded and free of control characters.
 pub fn validate_id(value: &str) -> Result<(), Error> {
-    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
-        return Err(Error::invalid());
-    }
-    Ok(())
+    validate_bounded_id(value, 512, false)
 }
 pub fn validate_request_key(value: &str) -> Result<(), Error> {
     if value.is_empty()

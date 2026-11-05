@@ -267,10 +267,7 @@ fn document_change(
 fn document_object(
     document: &ene_rpc::JsonDocument,
 ) -> Result<serde_json::Map<String, Value>, Error> {
-    serde_json::from_str::<Value>(&document.json)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .ok_or_else(Error::invalid)
+    serde_json::from_str(&document.json).map_err(|_| Error::invalid())
 }
 
 fn reference<'a>(

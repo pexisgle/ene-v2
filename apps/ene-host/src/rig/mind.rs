@@ -131,10 +131,7 @@ pub(crate) fn operation_id(companion: &str, turn_start: &str, call_id: &str) -> 
     hash.update(turn_start.as_bytes());
     hash.update([0]);
     hash.update(call_id.as_bytes());
-    hash.finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    format!("{:x}", hash.finalize())
 }
 
 /// The user inputs the turn answers, from its saved conversation entries. Tool

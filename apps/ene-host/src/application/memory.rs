@@ -827,10 +827,7 @@ fn consolidation_operation_id(
     hash.update(from_offset.to_le_bytes());
     hash.update(through.to_le_bytes());
     hash.update(through_offset.to_le_bytes());
-    hash.finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    format!("{:x}", hash.finalize())
 }
 
 fn consolidation_instructions() -> String {
