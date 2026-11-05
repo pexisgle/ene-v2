@@ -34,7 +34,6 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
     ])
 }
 fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
-    let unavailable = |reason: &str| json!({"ready":false,"reasons":[{"code":reason,"message":"未設定または未対応です"}]});
     let companion = Companion {
         id: Uuid::new_v4().to_string(),
         name: "ene".into(),
@@ -42,9 +41,13 @@ fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
         voice: Default::default(),
         mind: "日本語で、簡潔で親しみやすく応答する。".into(),
         model_assignments: ModelAssignments::default().into(),
-        availability: ene_rpc::JsonDocument { json: json!({"chat":unavailable("model_unset"),"task":unavailable("unsupported_capability"),"speech":unavailable("unsupported_capability")}).to_string(), ..Default::default() }.into(),
+        availability: ene_rpc::JsonDocument::from(crate::domain::rules::capability_document(Some(
+            "model_unset",
+        )))
+        .into(),
         revision: 1,
-     ..Default::default() };
+        ..Default::default()
+    };
     for (key, value) in [
         ("generated_messages_seed", "1".into()),
         ("host_id", Uuid::new_v4().to_string()),

@@ -8,31 +8,17 @@ use crate::{
 };
 use futures_util::{StreamExt, stream::BoxStream};
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
-use serde_json::{Value, json};
+use serde_json::json;
 
 pub const ID: &str = "openai";
 pub const MODEL: &str = "gpt-6-luna";
 pub const ENDPOINT: &str = "https://api.openai.com/v1";
 const REVISION: &str = "builtin-openai-v2-model-catalog";
+const ENVIRONMENT_VARIABLE: &str = "OPENAI_API_KEY";
 
 pub fn descriptor() -> Descriptor {
     Descriptor {
-        id: ID.into(),
-        name: "OpenAI".into(),
-        kind: "builtin".into(),
-        endpoint: ENDPOINT.into(),
-        options: ene_rpc::JsonDocument {
-            json: "{}".into(),
-            ..Default::default()
-        }
-        .into(),
-        settings: vec![],
-        requires_credentials: true,
-        environment_variable: Some("OPENAI_API_KEY".into()),
         destinations: vec!["https://api.openai.com".into(), catalog::ORIGIN.into()],
-        state: "ready".into(),
-        error: None,
-        revision: REVISION.into(),
         models: vec![Model {
             id: MODEL.into(),
             name: MODEL.into(),
@@ -44,25 +30,19 @@ pub fn descriptor() -> Descriptor {
             ..Default::default()
         }
         .into(),
-        ..Default::default()
+        ..super::builtin_descriptor(ID, "OpenAI", ENDPOINT, ENVIRONMENT_VARIABLE, REVISION)
     }
 }
 
 pub fn policy(c: &Connection) -> Result<Policy> {
-    if c.kind != "llm"
-        || c.adapter != ID
-        || c.endpoint != ENDPOINT
-        || crate::infrastructure::llm::explicit_tool_calling(c).is_err()
-    {
-        return Err(Error::new(ErrorKind::UnsupportedCapability));
-    }
-    Ok(Policy {
-        revision: REVISION.into(),
-        fingerprint: json!({"adapter":c.adapter,"endpoint":c.endpoint,"options":serde_json::from_str::<Value>(&c.options.json).unwrap_or(Value::Null),"implementation":REVISION}),
-        destinations: descriptor().destinations,
-        requires_credentials: true,
-        environment_variable: Some("OPENAI_API_KEY".into()),
-    })
+    super::compatible_policy(
+        c,
+        ID,
+        ENDPOINT,
+        REVISION,
+        ENVIRONMENT_VARIABLE,
+        descriptor().destinations,
+    )
 }
 
 pub async fn generate(input: Invocation) -> Result<BoxStream<'static, Result<Event>>> {
@@ -118,46 +98,26 @@ pub async fn models(input: Invocation) -> Result<Vec<Model>> {
     let input = std::sync::Arc::new(input);
     let transport =
         crate::llm::AuthorizedTransport::new(input.clone(), CredentialPlacement::Bearer)?;
-    let mut models = fetch_models(transport, ENDPOINT).await?;
+    let mut models = Vec::new();
+    for item in super::catalog_items(transport, ENDPOINT).await? {
+        let id = item["id"]
+            .as_str()
+            .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
+        models.push(Model {
+            id: id.into(),
+            name: id.into(),
+            metadata: ene_rpc::ModelMetadata {
+                source: format!("{ENDPOINT}/models"),
+                scope: "route".into(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        });
+    }
     validate_models(&models)?;
     catalog::enrich(&mut models, input, catalog::URL).await?;
     Ok(models)
-}
-
-async fn fetch_models(
-    transport: crate::llm::AuthorizedTransport,
-    endpoint: &str,
-) -> Result<Vec<Model>> {
-    let request = http::Request::get(format!("{endpoint}/models"))
-        .body(bytes::Bytes::new())
-        .map_err(|_| Error::invalid())?;
-    let response = transport.send(request).await?;
-    if !response.status().is_success() {
-        return Err(Error::new(ErrorKind::ProviderFailure));
-    }
-    let value: Value = serde_json::from_slice(&response.bytes().await?)
-        .map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
-    value["data"]
-        .as_array()
-        .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?
-        .iter()
-        .map(|v| {
-            let id = v["id"]
-                .as_str()
-                .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
-            Ok(Model {
-                id: id.into(),
-                name: id.into(),
-                metadata: ene_rpc::ModelMetadata {
-                    source: format!("{endpoint}/models"),
-                    scope: "route".into(),
-                    ..Default::default()
-                }
-                .into(),
-                ..Default::default()
-            })
-        })
-        .collect()
 }
 
 pub struct Provider;

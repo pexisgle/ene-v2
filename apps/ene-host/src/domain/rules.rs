@@ -130,6 +130,13 @@ pub fn allowed(
     })
 }
 
+/// The companion's capability document. `chat_reason` is chat's blocking
+/// reason; `None` means chat is ready.
+pub fn capability_document(chat_reason: Option<&str>) -> serde_json::Value {
+    let unsupported = |message: &str| json!({"ready": false, "reasons": [{"code": "unsupported_capability", "message": message}]});
+    json!({"chat": {"ready": chat_reason.is_none(), "reasons": chat_reason.map(|reason| vec![json!({"code": reason, "message": "接続・モデル・資格情報・送信許可を設定してください"})]).unwrap_or_default()}, "task": unsupported("ファイル作業は未対応です"), "speech": unsupported("読み上げは未対応です")})
+}
+
 pub fn refresh(
     companion: &mut Companion,
     c: &Configuration,
@@ -159,7 +166,7 @@ pub fn refresh(
             }
         }
     };
-    companion.availability = ene_rpc::JsonDocument { json: json!({"chat":{"ready":reason.is_none(),"reasons":reason.map(|r|vec![json!({"code":r,"message":"接続・モデル・資格情報・送信許可を設定してください"})]).unwrap_or_default()},"task":{"ready":false,"reasons":[{"code":"unsupported_capability","message":"ファイル作業は未対応です"}]},"speech":{"ready":false,"reasons":[{"code":"unsupported_capability","message":"読み上げは未対応です"}]}}).to_string(), ..Default::default() }.into();
+    companion.availability = ene_rpc::JsonDocument::from(capability_document(reason)).into();
 }
 #[cfg(test)]
 mod tests {

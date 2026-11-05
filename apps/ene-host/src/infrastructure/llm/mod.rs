@@ -25,6 +25,79 @@ pub(crate) fn can_serve_conversation(connection: &crate::domain::Connection) -> 
     connection.kind == "llm" && matches!(connection.adapter.as_str(), openai::ID | openrouter::ID)
 }
 
+/// The fields every builtin descriptor shares. Adapters override
+/// `destinations`, `models` and `capabilities`.
+fn builtin_descriptor(
+    id: &str,
+    name: &str,
+    endpoint: &str,
+    environment_variable: &str,
+    revision: &str,
+) -> crate::llm::Descriptor {
+    crate::llm::Descriptor {
+        id: id.into(),
+        name: name.into(),
+        kind: "builtin".into(),
+        endpoint: endpoint.into(),
+        options: ene_rpc::JsonDocument::from(serde_json::json!({})).into(),
+        requires_credentials: true,
+        environment_variable: Some(environment_variable.into()),
+        state: "ready".into(),
+        revision: revision.into(),
+        ..Default::default()
+    }
+}
+
+/// The adapter identity, endpoint and explicit tool-calling declaration a
+/// provider policy must match. Only the destinations differ per adapter.
+fn compatible_policy(
+    connection: &crate::domain::Connection,
+    id: &str,
+    endpoint: &str,
+    revision: &str,
+    environment_variable: &str,
+    destinations: Vec<String>,
+) -> crate::ports::Result<crate::llm::Policy> {
+    if connection.kind != "llm"
+        || connection.adapter != id
+        || connection.endpoint != endpoint
+        || explicit_tool_calling(connection).is_err()
+    {
+        return Err(crate::domain::Error::new(
+            crate::domain::ErrorKind::UnsupportedCapability,
+        ));
+    }
+    Ok(crate::llm::Policy {
+        revision: revision.into(),
+        fingerprint: serde_json::json!({"adapter": connection.adapter, "endpoint": connection.endpoint, "options": serde_json::from_str::<serde_json::Value>(&connection.options.json).unwrap_or(serde_json::Value::Null), "implementation": revision}),
+        destinations,
+        requires_credentials: true,
+        environment_variable: Some(environment_variable.into()),
+    })
+}
+
+/// One authorized `GET /models`; adapters only map the returned items.
+async fn catalog_items(
+    transport: crate::llm::AuthorizedTransport,
+    endpoint: &str,
+) -> crate::ports::Result<Vec<serde_json::Value>> {
+    let request = http::Request::get(format!("{endpoint}/models"))
+        .body(bytes::Bytes::new())
+        .map_err(|_| crate::domain::Error::invalid())?;
+    let response = transport.send(request).await?;
+    if !response.status().is_success() {
+        return Err(crate::domain::Error::new(
+            crate::domain::ErrorKind::ProviderFailure,
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&response.bytes().await?)
+        .map_err(|_| crate::domain::Error::new(crate::domain::ErrorKind::ExternalFailure))?;
+    value["data"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| crate::domain::Error::new(crate::domain::ErrorKind::ExternalFailure))
+}
+
 /// Resolves the parent conversation's catalog model and refuses one that cannot
 /// call tools. Shared by the built-in adapters, which differ only in wire.
 pub(crate) fn tool_spec(

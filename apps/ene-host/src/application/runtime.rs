@@ -23,9 +23,7 @@ impl MutationExecutor {
             slots: Arc::new(Semaphore::new(capacity)),
         }
     }
-}
 
-impl MutationExecutor {
     pub fn close(&self) {
         let mut closed = self.closed.lock().expect("admission lock");
         *closed = true;

@@ -14,32 +14,17 @@ use rig_core::providers::openai::wire::OPENROUTER;
 use rig_core::serve::ErasedHandler;
 use rig_core::serve::adapters::ModelAdapter;
 use rig_ecs::effects::Handler;
-use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub const ID: &str = "openrouter";
 pub const ENDPOINT: &str = "https://openrouter.ai/api/v1";
 const REVISION: &str = "builtin-openrouter-v1-catalog";
+const ENVIRONMENT_VARIABLE: &str = "OPENROUTER_API_KEY";
 const DESTINATIONS: [&str; 1] = ["https://openrouter.ai"];
 
 pub fn descriptor() -> Descriptor {
     Descriptor {
-        id: ID.into(),
-        name: "OpenRouter".into(),
-        kind: "builtin".into(),
-        endpoint: ENDPOINT.into(),
-        options: ene_rpc::JsonDocument {
-            json: "{}".into(),
-            ..Default::default()
-        }
-        .into(),
-        settings: vec![],
-        requires_credentials: true,
-        environment_variable: Some("OPENROUTER_API_KEY".into()),
         destinations: DESTINATIONS.iter().map(|value| (*value).into()).collect(),
-        state: "ready".into(),
-        error: None,
-        revision: REVISION.into(),
         // The model list is read from OpenRouter's own endpoint; the catalog
         // also supplies facts for known models.
         models: vec![],
@@ -49,30 +34,19 @@ pub fn descriptor() -> Descriptor {
             ..Default::default()
         }
         .into(),
-        ..Default::default()
+        ..super::builtin_descriptor(ID, "OpenRouter", ENDPOINT, ENVIRONMENT_VARIABLE, REVISION)
     }
 }
 
 pub fn policy(c: &Connection) -> Result<Policy> {
-    if c.kind != "llm"
-        || c.adapter != ID
-        || c.endpoint != ENDPOINT
-        || crate::infrastructure::llm::explicit_tool_calling(c).is_err()
-    {
-        return Err(Error::new(ErrorKind::UnsupportedCapability));
-    }
-    Ok(Policy {
-        revision: REVISION.into(),
-        fingerprint: json!({
-            "adapter": c.adapter,
-            "endpoint": c.endpoint,
-            "options": serde_json::from_str::<Value>(&c.options.json).unwrap_or(Value::Null),
-            "implementation": REVISION,
-        }),
-        destinations: descriptor().destinations,
-        requires_credentials: true,
-        environment_variable: Some("OPENROUTER_API_KEY".into()),
-    })
+    super::compatible_policy(
+        c,
+        ID,
+        ENDPOINT,
+        REVISION,
+        ENVIRONMENT_VARIABLE,
+        descriptor().destinations,
+    )
 }
 
 /// The OpenRouter model list, with tool capability from
@@ -83,20 +57,8 @@ pub async fn models(input: Invocation) -> Result<Vec<Model>> {
         std::sync::Arc::new(input),
         crate::llm::CredentialPlacement::Bearer,
     )?;
-    let request = http::Request::get(format!("{endpoint}/models"))
-        .body(bytes::Bytes::new())
-        .map_err(|_| Error::invalid())?;
-    let response = transport.send(request).await?;
-    if !response.status().is_success() {
-        return Err(Error::new(ErrorKind::ProviderFailure));
-    }
-    let value: Value = serde_json::from_slice(&response.bytes().await?)
-        .map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
-    let items = value["data"]
-        .as_array()
-        .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
     let mut models = Vec::new();
-    for item in items {
+    for item in super::catalog_items(transport, &endpoint).await? {
         let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
             continue;
         };

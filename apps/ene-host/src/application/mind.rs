@@ -128,10 +128,6 @@ pub(crate) struct RecallResult {
 
 /// What the model needs to know: authored material, the current mind, and how
 /// to use the three host tools. This is a view; SQLite stays canonical.
-pub(crate) fn compose_prompt(core: &str, stored: &StoredMind) -> String {
-    compose_mind_prompt(core, stored)
-}
-
 pub(crate) fn compose_mind_prompt(core: &str, stored: &StoredMind) -> String {
     let mut out = String::with_capacity(12_000);
     out.push_str(
@@ -537,7 +533,7 @@ impl HostApplication {
             .repository
             .mind_view(companion.to_owned(), now())
             .await?;
-        Ok(compose_prompt(core, &stored))
+        Ok(compose_mind_prompt(core, &stored))
     }
 
     /// The prompt for an accepted input: current mind plus a small automatic
