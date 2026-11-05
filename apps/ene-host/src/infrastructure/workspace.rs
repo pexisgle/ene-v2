@@ -15,21 +15,12 @@ const MAX_READ_BYTES: usize = 256 * 1024;
 const MAX_WRITE_BYTES: usize = 256 * 1024;
 const MAX_LINES: u32 = 10_000;
 
-fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
-    #[cfg(windows)]
-    {
-        let strip = |path: &std::path::Path| {
-            path.to_string_lossy()
-                .strip_prefix(r"\\?\")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| path.to_path_buf())
-        };
-        strip(left) == strip(right)
-    }
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
+fn no_symlinks(path: &std::path::Path) -> bool {
+    path.ancestors().all(|part| {
+        std::fs::symlink_metadata(part)
+            .map(|metadata| !metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -71,10 +62,7 @@ impl Workspace {
             self.root.join(path)
         };
         let canonical = std::fs::canonicalize(&candidate).map_err(io_failure)?;
-        if !same_path(&canonical, &candidate)
-            || !canonical.starts_with(&self.root)
-            || !canonical.is_dir()
-        {
+        if !no_symlinks(&candidate) || !canonical.starts_with(&self.root) || !canonical.is_dir() {
             return Err(denied());
         }
         Ok(canonical)
@@ -121,7 +109,7 @@ impl Workspace {
         let target = self.root.join(&relative);
         let parent = target.parent().ok_or_else(Error::invalid)?;
         let canonical = std::fs::canonicalize(parent).map_err(io_failure)?;
-        if !same_path(&canonical, parent) || !canonical.starts_with(&self.root) {
+        if !no_symlinks(parent) || !canonical.starts_with(&self.root) {
             return Err(denied());
         }
         if target.exists() {
@@ -152,7 +140,7 @@ impl Workspace {
         let lexical = self.root.join(relative);
         let canonical =
             std::fs::canonicalize(&lexical).map_err(|_| Error::new(ErrorKind::NotFound))?;
-        if !same_path(&canonical, &lexical) || !canonical.starts_with(&self.root) {
+        if !no_symlinks(&lexical) || !canonical.starts_with(&self.root) {
             return Err(denied());
         }
         let metadata = std::fs::symlink_metadata(&canonical).map_err(io_failure)?;
