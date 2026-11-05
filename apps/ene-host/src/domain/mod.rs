@@ -17,7 +17,6 @@ pub use ene_rpc::{
 pub struct Grant {
     pub id: String,
     pub companion_id: String,
-    pub kind: String,
     pub connection_id: String,
     pub destinations: Vec<String>,
     pub data_kinds: Vec<String>,
@@ -119,7 +118,6 @@ impl From<Grant> for ene_rpc::Grant {
         Self {
             id: grant.id,
             companion_id: grant.companion_id,
-            kind: grant.kind,
             connection_id: grant.connection_id,
             destinations: grant.destinations,
             data_kinds: grant.data_kinds,

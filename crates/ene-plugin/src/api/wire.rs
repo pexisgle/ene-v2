@@ -1,7 +1,7 @@
 //! Shared wire enums for operations, events and service requests.
 use super::{
-    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, GenerationRequest, HarnessEvent,
-    HarnessInput, HttpRequest, SpeechInput,
+    CharacterAction, CharacterEvent, CharacterTarget, GenerationRequest, HarnessEvent,
+    HarnessInput, HttpRequest,
 };
 use crate::manifest::{Extension, Service};
 use serde::{Deserialize, Serialize};
@@ -24,9 +24,6 @@ pub enum Operation {
     Harness {
         input: HarnessInput,
     },
-    Speech {
-        input: SpeechInput,
-    },
 }
 
 impl Operation {
@@ -35,10 +32,6 @@ impl Operation {
             Self::ListModels { .. } | Self::Generate { .. } => Extension::Llm,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
-            Self::Speech {
-                input: SpeechInput::Transcribe { .. },
-            } => Extension::Stt,
-            Self::Speech { .. } => Extension::Tts,
         }
     }
 }
@@ -70,12 +63,6 @@ pub enum Event {
     Harness {
         event: HarnessEvent,
     },
-    Audio {
-        chunk: AudioChunk,
-    },
-    Transcript {
-        text: String,
-    },
 }
 
 impl Event {
@@ -87,8 +74,6 @@ impl Event {
             | Self::Finished { .. } => Extension::Llm,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
-            Self::Audio { .. } => Extension::Tts,
-            Self::Transcript { .. } => Extension::Stt,
         }
     }
 }

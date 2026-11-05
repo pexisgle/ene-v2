@@ -15,17 +15,16 @@ async fn same_key_retries_storage_and_honors_environment_lifetime() {
         Arc::new(crate::infrastructure::llm::registry::Registry::discover()),
         credentials.clone(),
     );
-    let (status, settings) = mutate(&app, "PATCH", "Settings", serde_json::json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
+    let (status, settings) = mutate(&app, "UpdateSettings", serde_json::json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
     assert_eq!(status, StatusCode::OK);
     let id = settings["connections"][0]["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let path = format!("Credentials/{id}");
+    let path = format!("RegisterCredentials/{id}");
     for (expected, saves) in [("session_only", 1), ("stored", 2), ("stored", 2)] {
         let (status, result) = mutate(
             &app,
-            "PUT",
             &path,
             serde_json::json!({"secret":"fixture-key"}),
             None,
@@ -37,7 +36,6 @@ async fn same_key_retries_storage_and_honors_environment_lifetime() {
     }
     let (status, result) = mutate(
         &app,
-        "PUT",
         &path,
         serde_json::json!({"source":"environment"}),
         None,
@@ -71,7 +69,6 @@ async fn same_key_retries_storage_and_honors_environment_lifetime() {
     );
     let (status, result) = mutate(
         &app,
-        "PUT",
         &path,
         serde_json::json!({"secret":"fixture-key"}),
         None,

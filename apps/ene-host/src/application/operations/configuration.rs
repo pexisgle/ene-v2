@@ -44,15 +44,6 @@ pub async fn patch_settings(
     let mut ids = std::collections::HashSet::new();
     let mut credential_resets = std::collections::HashSet::new();
     for input in inputs.items {
-        if input.kind != "tts"
-            && input.id.as_ref().is_some_and(|id| {
-                c.companions
-                    .values()
-                    .any(|companion| voice_connection(companion).as_ref() == Some(id))
-            })
-        {
-            return Err(Error::new(ErrorKind::StateConflict));
-        }
         if input.create
             && input
                 .id
@@ -150,9 +141,6 @@ pub async fn patch_settings(
                     .iter()
                     .any(|a| a.as_option().is_some_and(|a| a.connection_id == id))
                 })
-                || c.companions
-                    .values()
-                    .any(|companion| voice_connection(companion).as_deref() == Some(id))
                 || c.grants
                     .iter()
                     .any(|g| g.connection_id == id && g.status == GrantStatus::Active))
@@ -214,12 +202,6 @@ pub async fn patch_companion(
         }
         companion.body = body.into();
     }
-    if let Some(voice) = document_change(request.voice.into_option())? {
-        if let Some(document) = &voice {
-            validate_voice(document, &c)?;
-        }
-        companion.voice = voice.into();
-    }
     for (task, patch) in [
         (false, request.companion_assignment),
         (true, request.task_assignment),
@@ -271,17 +253,6 @@ struct BodyDocument {
     model: String,
 }
 
-#[derive(serde::Deserialize)]
-struct VoiceDocument {
-    connection_id: String,
-    voice_id: String,
-}
-
-#[derive(serde::Deserialize)]
-struct VoiceConnection {
-    connection_id: String,
-}
-
 fn parse_document<T: serde::de::DeserializeOwned>(
     document: &ene_rpc::JsonDocument,
 ) -> Result<T, Error> {
@@ -305,26 +276,6 @@ fn validate_body(document: &ene_rpc::JsonDocument, environment: &str) -> Result<
     }
     non_blank(&body.model)?;
     Ok(())
-}
-
-fn validate_voice(
-    document: &ene_rpc::JsonDocument,
-    configuration: &Configuration,
-) -> Result<(), Error> {
-    let voice: VoiceDocument = parse_document(document)?;
-    let id = non_blank(&voice.connection_id)?;
-    non_blank(&voice.voice_id)?;
-    let connection =
-        rules::connection(configuration, id).ok_or_else(|| Error::new(ErrorKind::StateConflict))?;
-    if connection.kind != "tts" {
-        return Err(Error::new(ErrorKind::UnsupportedCapability));
-    }
-    Ok(())
-}
-
-fn voice_connection(companion: &Companion) -> Option<String> {
-    let voice: VoiceConnection = parse_document(companion.voice.as_option()?).ok()?;
-    non_blank(&voice.connection_id).ok().map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -365,40 +316,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-    #[test]
-    fn voice_requires_an_existing_tts_connection_and_a_voice_reference() {
-        let mut c = Configuration {
-            companions: Default::default(),
-            settings: Settings {
-                connections: vec![
-                    Connection {
-                        id: "tts".into(),
-                        kind: "tts".into(),
-                        ..Default::default()
-                    },
-                    Connection {
-                        id: "llm".into(),
-                        kind: "llm".into(),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            },
-            grants: vec![],
-            credential_refs: Default::default(),
-        };
-        let voice = document(json!({"connection_id":"tts","voice_id":"voice1"}));
-        assert!(validate_voice(&voice, &c).is_ok());
-        for value in [
-            json!({"connection_id":"missing","voice_id":"voice1"}),
-            json!({"connection_id":"llm","voice_id":"voice1"}),
-            json!({"connection_id":"tts","voice_id":""}),
-            Value::Null,
-        ] {
-            assert!(validate_voice(&document(value), &c).is_err());
-        }
-        c.settings.connections.clear();
-        assert!(validate_voice(&voice, &c).is_err());
     }
 }

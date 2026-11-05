@@ -1,4 +1,4 @@
-//! Deterministic contract fixtures, not production speech or autonomous task engines.
+//! Deterministic contract fixtures, not a production task engine.
 #[cfg(target_family = "wasm")]
 mod guest {
     use ene_plugin::*;
@@ -161,27 +161,6 @@ mod guest {
                 let event = harness(&input)?;
                 emit(Event::Harness { event })?;
             }
-            Operation::Speech { input } => emit(match input {
-                SpeechInput::Synthesize {
-                    utterance_id,
-                    generation,
-                    ..
-                } => Event::Audio {
-                    chunk: AudioChunk {
-                        utterance_id,
-                        generation,
-                        sequence: 0,
-                        format: "pcm_s16le".into(),
-                        sample_rate: 16000,
-                        channels: 1,
-                        data_base64: "AAA=".into(),
-                        done: true,
-                    },
-                },
-                SpeechInput::Transcribe { .. } => Event::Transcript {
-                    text: "reference transcript".into(),
-                },
-            })?,
             _ => return Err(extism_pdk::Error::msg("unsupported operation").into()),
         }
         Ok(Json(json!({})))

@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 #[path = "tests/connect_fixture.rs"]
 mod connect_fixture;
 use super::*;
@@ -113,7 +112,7 @@ async fn caller_selected_connection_id_replays_without_duplicate_creation_or_rev
     let input = json!({"revision":1,"connections":[{"id":id,"create":true,"kind":"llm",
         "adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]});
     for _ in 0..2 {
-        let (status, saved) = mutate(&app, "PATCH", "Settings", input.clone(), None).await;
+        let (status, saved) = mutate(&app, "UpdateSettings", input.clone(), None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(saved["revision"], 2);
         assert_eq!(saved["connections"].as_array().unwrap().len(), 1);
@@ -122,7 +121,7 @@ async fn caller_selected_connection_id_replays_without_duplicate_creation_or_rev
     let mut conflicting = input.clone();
     conflicting["revision"] = json!(3);
     assert_eq!(
-        mutate(&app, "PATCH", "Settings", conflicting.clone(), None)
+        mutate(&app, "UpdateSettings", conflicting.clone(), None)
             .await
             .0,
         StatusCode::CONFLICT
@@ -130,7 +129,7 @@ async fn caller_selected_connection_id_replays_without_duplicate_creation_or_rev
     conflicting["revision"] = json!(1);
     conflicting["connections"][0]["id"] = json!(uuid::Uuid::new_v4().to_string());
     assert_eq!(
-        mutate(&app, "PATCH", "Settings", conflicting, None).await.0,
+        mutate(&app, "UpdateSettings", conflicting, None).await.0,
         StatusCode::CONFLICT
     );
     let mut unknown = input;
@@ -138,7 +137,7 @@ async fn caller_selected_connection_id_replays_without_duplicate_creation_or_rev
     unknown["connections"][0]["id"] = json!(uuid::Uuid::new_v4().to_string());
     unknown["connections"][0]["create"] = json!(false);
     assert_eq!(
-        mutate(&app, "PATCH", "Settings", unknown, None).await.0,
+        mutate(&app, "UpdateSettings", unknown, None).await.0,
         StatusCode::NOT_FOUND
     );
 }
@@ -260,18 +259,17 @@ impl ConversationFixture {
                 ..Default::default()
             }),
         );
-        let (status, settings) = mutate(&app, "PATCH", "Settings", json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
+        let (status, settings) = mutate(&app, "UpdateSettings", json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}), None).await;
         assert_eq!(status, StatusCode::OK);
         let connection = settings["connections"][0]["id"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(mutate(&app, "PATCH", &format!("Companion/{companion}"), json!({"revision":1,"mind":"old mind","model_assignments":{"companion":{"connection_id":connection,"model_id":"old-model"}}}),None).await.0,StatusCode::OK);
+        assert_eq!(mutate(&app, &format!("UpdateCompanion/{companion}"), json!({"revision":1,"mind":"old mind","model_assignments":{"companion":{"connection_id":connection,"model_id":"old-model"}}}),None).await.0,StatusCode::OK);
         assert_eq!(
             mutate(
                 &app,
-                "PUT",
-                &format!("Credentials/{connection}"),
+                &format!("RegisterCredentials/{connection}"),
                 json!({"secret":"fixture"}),
                 None
             )
@@ -279,7 +277,7 @@ impl ConversationFixture {
             .0,
             StatusCode::OK
         );
-        let (status, grant) = mutate(&app,"POST","Grants",json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),Some("grant")).await;
+        let (status, grant) = mutate(&app,"CreateGrant",json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),Some("grant")).await;
         assert_eq!(status, StatusCode::OK);
         Self {
             app,
@@ -299,71 +297,29 @@ impl ConversationFixture {
             .unwrap()
     }
 }
-fn operation(
-    method: &str,
-    descriptor: &str,
-    mut body: Value,
-    key: Option<&str>,
-) -> (String, Vec<u8>) {
+fn operation(rpc: &str, mut body: Value, key: Option<&str>) -> (String, Vec<u8>) {
     if body.is_null() {
         body = json!({});
     }
-    let (kind, id) = descriptor.split_once('/').unwrap_or((descriptor, ""));
-    let op = match (method, kind) {
-        ("PATCH", "Settings") => "UpdateSettings",
-        ("PATCH", "Companion") => {
-            body["id"] = json!(id);
-            "UpdateCompanion"
-        }
-        ("POST", "SendMessage") => {
-            body["companion_id"] = json!(id);
-            "SendMessage"
-        }
-        ("POST", "Grants") => "CreateGrant",
-        ("PATCH", "Grant") => {
-            body["id"] = json!(id);
-            "UpdateGrant"
-        }
-        ("DELETE", "Grant") => {
-            body["id"] = json!(id);
-            "RevokeGrant"
-        }
-        ("PUT", "Credentials") => {
-            body["id"] = json!(id);
-            "RegisterCredentials"
-        }
-        ("DELETE", "Credentials") => {
-            body["id"] = json!(id);
-            "RevokeCredentials"
-        }
-        ("POST", "CheckConnection") => {
-            body["id"] = json!(id);
-            "CheckConnection"
-        }
-        ("GET", "Mind") => {
-            body["id"] = json!(id);
-            "GetMind"
-        }
-        ("PATCH", "MindProfile") => {
-            body["companion_id"] = json!(id);
-            "UpdateMindProfile"
-        }
-        ("POST", "MemoryControl") => "ControlMemory",
-        _ => panic!("unmapped fixture {method} {descriptor}"),
-    };
+    let (rpc, id) = rpc.split_once('/').unwrap_or((rpc, ""));
+    match rpc {
+        "SendMessage" | "UpdateMindProfile" => body["companion_id"] = json!(id),
+        "UpdateCompanion"
+        | "UpdateGrant"
+        | "RevokeGrant"
+        | "RegisterCredentials"
+        | "RevokeCredentials"
+        | "CheckConnection"
+        | "GetMind" => body["id"] = json!(id),
+        _ => {}
+    }
     if let Some(key) = key {
         body["request_key"] = json!(key);
     }
-    (op.into(), connect_fixture::encode_request(op, body))
+    (rpc.into(), connect_fixture::encode_request(rpc, body))
 }
-async fn mutate(
-    app: &App,
-    method: &str,
-    descriptor: &str,
-    body: Value,
-    key: Option<&str>,
-) -> (StatusCode, Value) {
-    let (op, bytes) = operation(method, descriptor, body, key);
+async fn mutate(app: &App, rpc: &str, body: Value, key: Option<&str>) -> (StatusCode, Value) {
+    let (op, bytes) = operation(rpc, body, key);
     let response = router(app.clone())
         .oneshot(
             Request::builder()
@@ -464,8 +420,7 @@ mod grant_consent_tests {
         );
         let (status, settings) = mutate(
             &app,
-            "PATCH",
-            "Settings",
+            "UpdateSettings",
             json!({"revision":1,"connections":[
                 {"kind":"llm","adapter":"fixture","endpoint":"https://old.test/v1","options":{}}
             ]}),
@@ -474,13 +429,13 @@ mod grant_consent_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let connection = settings["connections"][0]["id"].as_str().unwrap();
-        let mut input = json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer",
+        let mut input = json!({"companion_id":companion,"connection_id":connection,
             "destinations":["https://old.test"],"data_kinds":["conversation"],"purpose":"conversation",
             "consent":{"settings_revision":2,"provider_revision":"1"}});
         let mut missing = input.clone();
         missing.as_object_mut().unwrap().remove("consent");
         assert_eq!(
-            mutate(&app, "POST", "Grants", missing, Some("missing"))
+            mutate(&app, "CreateGrant", missing, Some("missing"))
                 .await
                 .0,
             StatusCode::BAD_REQUEST
@@ -494,22 +449,15 @@ mod grant_consent_tests {
             json!(["https://old.test", "https://undisplayed.test"]),
         ] {
             input["destinations"] = destinations;
-            let (status, error) = mutate(
-                &app,
-                "POST",
-                "Grants",
-                input.clone(),
-                Some("stale-provider"),
-            )
-            .await;
+            let (status, error) =
+                mutate(&app, "CreateGrant", input.clone(), Some("stale-provider")).await;
             assert_eq!(status, StatusCode::CONFLICT);
             assert_eq!(error["error"]["code"], "revision_conflict");
         }
         assert!(app.application.grants(None).await.unwrap().is_empty());
 
         input["consent"]["provider_revision"] = json!("2");
-        let (status, saved) =
-            mutate(&app, "POST", "Grants", input.clone(), Some("confirmed")).await;
+        let (status, saved) = mutate(&app, "CreateGrant", input.clone(), Some("confirmed")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             saved["grant"]["connection_fingerprint"]["provider"]["implementation"],
@@ -518,30 +466,24 @@ mod grant_consent_tests {
         let mut changed_consent = input.clone();
         changed_consent["consent"]["provider_revision"] = json!("1");
         assert_eq!(
-            mutate(&app, "POST", "Grants", changed_consent, Some("confirmed"))
+            mutate(&app, "CreateGrant", changed_consent, Some("confirmed"))
                 .await
                 .0,
             StatusCode::CONFLICT
         );
 
         // Same adapter and destinations, but connection configuration changed.
-        assert_eq!(mutate(&app, "PATCH", "Settings", json!({"revision":2,"connections":[
+        assert_eq!(mutate(&app, "UpdateSettings", json!({"revision":2,"connections":[
             {"id":connection,"kind":"llm","adapter":"fixture","endpoint":"https://old.test/v1","options":{"changed":true}}
         ]}), None).await.0, StatusCode::OK);
-        let (status, error) = mutate(
-            &app,
-            "POST",
-            "Grants",
-            input.clone(),
-            Some("stale-settings"),
-        )
-        .await;
+        let (status, error) =
+            mutate(&app, "CreateGrant", input.clone(), Some("stale-settings")).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(error["error"]["code"], "revision_conflict");
         // Receipt replay returns the original result; it must not reauthorize
         // the modified connection with a new policy fingerprint.
         assert_eq!(
-            mutate(&app, "POST", "Grants", input.clone(), Some("confirmed"))
+            mutate(&app, "CreateGrant", input.clone(), Some("confirmed"))
                 .await
                 .1,
             saved
@@ -556,7 +498,7 @@ mod grant_consent_tests {
         );
         input["consent"]["settings_revision"] = json!(3);
         assert_eq!(
-            mutate(&app, "POST", "Grants", input, Some("reconfirmed"))
+            mutate(&app, "CreateGrant", input, Some("reconfirmed"))
                 .await
                 .0,
             StatusCode::OK
@@ -735,8 +677,7 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         );
         let (status, saved) = mutate(
             &app,
-            "PATCH",
-            "Settings",
+            "UpdateSettings",
             json!({"revision":1,"connections":[
         {"kind":"llm","adapter":"service-a","endpoint":old_endpoint,"options":{}}]}),
             None,
@@ -747,8 +688,7 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         assert_eq!(
             mutate(
                 &app,
-                "PUT",
-                &format!("Credentials/{p}"),
+                &format!("RegisterCredentials/{p}"),
                 json!({"secret":"old-service-key"}),
                 None
             )
@@ -765,11 +705,10 @@ async fn changing_service_clears_credentials_before_new_authorization() {
                 .contains_key(p)
         );
         assert_eq!(credentials.values.lock().unwrap().len(), 1);
-        assert_eq!(mutate(&app,"PATCH",&format!("Companion/{c}"),json!({"revision":1,"model_assignments":{"companion":{"connection_id":p,"model_id":"m"}}}),None).await.0,StatusCode::OK);
+        assert_eq!(mutate(&app,&format!("UpdateCompanion/{c}"),json!({"revision":1,"model_assignments":{"companion":{"connection_id":p,"model_id":"m"}}}),None).await.0,StatusCode::OK);
         let (status, saved) = mutate(
             &app,
-            "PATCH",
-            "Settings",
+            "UpdateSettings",
             json!({"revision":2,"connections":[
         {"id":p,"kind":"llm","adapter":adapter,"endpoint":endpoint,"options":{}}]}),
             None,
@@ -789,9 +728,8 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         assert_eq!(
             mutate(
                 &app,
-                "POST",
-                "Grants",
-                json!({"companion_id":c,"connection_id":p,"kind":"data_transfer",
+                "CreateGrant",
+                json!({"companion_id":c,"connection_id":p,
         "consent":{"settings_revision":3,"provider_revision":"routed-v1"},"destinations":[destination],"data_kinds":["test_input"],"purpose":"connection_check"}),
                 Some("new-grant")
             )
@@ -802,7 +740,6 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         assert_eq!(
             mutate(
                 &app,
-                "POST",
                 &format!("CheckConnection/{p}"),
                 json!({"companion_id":c,"purpose":"companion","model_id":"m"}),
                 Some("new-message")
@@ -815,8 +752,7 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         assert_eq!(
             mutate(
                 &app,
-                "PUT",
-                &format!("Credentials/{p}"),
+                &format!("RegisterCredentials/{p}"),
                 json!({"secret":"new-service-key"}),
                 None
             )
@@ -827,7 +763,6 @@ async fn changing_service_clears_credentials_before_new_authorization() {
         assert_eq!(
             mutate(
                 &app,
-                "POST",
                 &format!("CheckConnection/{p}"),
                 json!({"companion_id":c,"purpose":"companion","model_id":"m"}),
                 Some("new-message")
@@ -906,7 +841,6 @@ async fn disconnected_revocation_finishes_disk_authority_and_notifications() {
     assert_eq!(
         mutate(
             &f.app,
-            "POST",
             &format!("SendMessage/{}", f.companion),
             json!({"text":"after revocation"}),
             Some("after-revocation")
@@ -941,14 +875,12 @@ async fn revoking_credentials_cancels_a_running_connection_check_without_waiting
     assert_eq!(
         mutate(
             &f.app,
-            "POST",
-            "Grants",
+            "CreateGrant",
             json!({
                 "companion_id": f.companion,
                 "connection_id": f.connection,
-                "kind": "data_transfer",
                 "consent": {"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},
-                "destinations": ["https://api.openai.com", "https://models.dev"],
+                "destinations": ["https://api.openai.com"],
                 "data_kinds": ["test_input", "metadata"],
                 "purpose": "connection_check"
             }),
@@ -963,9 +895,7 @@ async fn revoking_credentials_cancels_a_running_connection_check_without_waiting
     let input =
         json!({"companion_id": f.companion, "purpose": "companion", "model_id": "check-model"});
     let check =
-        tokio::spawn(
-            async move { mutate(&app, "POST", &path, input, Some("check-request")).await },
-        );
+        tokio::spawn(async move { mutate(&app, &path, input, Some("check-request")).await });
     tokio::time::timeout(std::time::Duration::from_secs(1), f.started.recv())
         .await
         .unwrap()
@@ -974,8 +904,7 @@ async fn revoking_credentials_cancels_a_running_connection_check_without_waiting
         std::time::Duration::from_secs(1),
         mutate(
             &f.app,
-            "DELETE",
-            &format!("Credentials/{}", f.connection),
+            &format!("RevokeCredentials/{}", f.connection),
             Value::Null,
             None,
         ),
@@ -1001,12 +930,11 @@ async fn abandoned_connection_check_finishes_the_original_receipt_after_revocati
     let mut fixture = ConversationFixture::new().await;
     let companion = fixture.companion.clone();
     let connection = fixture.connection.clone();
-    let grant = json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["test_input"],"purpose":"connection_check"});
+    let grant = json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["test_input"],"purpose":"connection_check"});
     assert_eq!(
         mutate(
             &fixture.app,
-            "POST",
-            "Grants",
+            "CreateGrant",
             grant,
             Some("owned-check-grant")
         )
@@ -1085,8 +1013,7 @@ async fn review_configuration_storage_failure_notifies_without_publishing_unsave
     f.store.run(|db| { db.execute_batch("CREATE TRIGGER fail_config BEFORE INSERT ON companions BEGIN SELECT RAISE(FAIL,'disk full'); END;")?; Ok(()) }).await.unwrap();
     let (status, _) = mutate(
         &f.app,
-        "PATCH",
-        &format!("Companion/{}", f.companion),
+        &format!("UpdateCompanion/{}", f.companion),
         json!({"revision":before.stored.companions[0].revision,"name":"unsaved"}),
         None,
     )
@@ -1124,7 +1051,6 @@ async fn review_configuration_storage_failure_notifies_without_publishing_unsave
     assert_eq!(
         mutate(
             &f.app,
-            "POST",
             &format!("SendMessage/{}", f.companion),
             json!({"text":"blocked"}),
             Some("after-failure")
@@ -1161,8 +1087,7 @@ async fn task_inference_uses_the_task_assignment_and_grant() {
     assert_eq!(
         mutate(
             &f.app,
-            "PATCH",
-            &format!("Companion/{}", f.companion),
+            &format!("UpdateCompanion/{}", f.companion),
             json!({
                 "revision": 2,
                 "model_assignments": {
@@ -1178,17 +1103,15 @@ async fn task_inference_uses_the_task_assignment_and_grant() {
     assert_eq!(
         mutate(
             &f.app,
-            "POST",
-            "Grants",
+            "CreateGrant",
             json!({
                 "companion_id": f.companion,
                 "connection_id": f.connection,
-                "kind": "data_transfer",
                 "consent": {
                     "settings_revision": 2,
                     "provider_revision": "builtin-openai-v2-model-catalog"
                 },
-                "destinations": ["https://api.openai.com", "https://models.dev"],
+                "destinations": ["https://api.openai.com"],
                 "data_kinds": ["task"],
                 "purpose": "task"
             }),
@@ -1344,8 +1267,7 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
 
     let (status, saved) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
         None,
     )
@@ -1355,8 +1277,7 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("Companion/{companion}"),
+            &format!("UpdateCompanion/{companion}"),
             json!({"revision":1,"mind":"日本語で簡潔に答える。","model_assignments":{"companion":{"connection_id":connection,"model_id":"gpt-6-luna"}}}),
             None
         )
@@ -1367,8 +1288,7 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     assert_eq!(
         mutate(
             &app,
-            "PUT",
-            &format!("Credentials/{connection}"),
+            &format!("RegisterCredentials/{connection}"),
             json!({"secret":"test-only"}),
             None
         )
@@ -1378,9 +1298,8 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     );
     let (status, grant) = mutate(
         &app,
-        "POST",
-        "Grants",
-        json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+        "CreateGrant",
+        json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),
         Some("grant"),
     )
     .await;
@@ -1390,7 +1309,6 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     let mut subscription = app.application.subscribe().await;
     let (status, accepted) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"いま何時？"}),
         Some("first"),
@@ -1433,7 +1351,6 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     // The same accepted key replays the same acceptance without a new turn.
     let (status, replayed) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"いま何時？"}),
         Some("first"),
@@ -1451,7 +1368,6 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
         .unwrap();
     let (status, recovered) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"いま何時？"}),
         Some("crash-key"),
@@ -1469,7 +1385,6 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     for _ in 0..2 {
         let (status, _) = mutate(
             &app,
-            "POST",
             &format!("SendMessage/{companion}"),
             json!({"text":"失われた入力"}),
             Some("lost-key"),
@@ -1487,7 +1402,6 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     // A turn waiting in the held tool stops without waiting for it.
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"止めて"}),
         Some("second"),
@@ -1519,7 +1433,6 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     // next input is refused rather than sent under the old grant.
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"権限を取り消して"}),
         Some("third"),
@@ -1531,7 +1444,7 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
         .await
         .expect("the held tool started again");
     assert_eq!(
-        mutate(&app, "DELETE", &format!("Grant/{grant}"), json!({}), None)
+        mutate(&app, &format!("RevokeGrant/{grant}"), json!({}), None)
             .await
             .0,
         StatusCode::OK
@@ -1545,7 +1458,6 @@ async fn host_api_drives_the_rig_kernel_and_reports_its_turns() {
     assert_eq!(
         mutate(
             &app,
-            "POST",
             &format!("SendMessage/{companion}"),
             json!({"text":"まだ送れる？"}),
             Some("fourth"),
@@ -1596,8 +1508,7 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     let app = host_app(store, std::sync::Arc::new(RoutedRegistry), credentials);
     let (status, saved) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":1,"connections":[{"kind":"llm","adapter":"service-a","endpoint":"https://service.test/v1","options":{}}]}),
         None,
     )
@@ -1607,8 +1518,7 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     assert_eq!(
         mutate(
             &app,
-            "PUT",
-            &format!("Credentials/{connection}"),
+            &format!("RegisterCredentials/{connection}"),
             json!({"secret":"test-key"}),
             None
         )
@@ -1619,8 +1529,7 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("Companion/{companion}"),
+            &format!("UpdateCompanion/{companion}"),
             json!({"revision":1,"model_assignments":{"companion":{"connection_id":connection,"model_id":"m"}}}),
             None
         )
@@ -1631,9 +1540,8 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     assert_eq!(
         mutate(
             &app,
-            "POST",
-            "Grants",
-            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"routed-v1"},"destinations":["https://service.test"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            "CreateGrant",
+            json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"routed-v1"},"destinations":["https://service.test"],"data_kinds":["conversation"],"purpose":"conversation"}),
             Some("grant")
         )
         .await
@@ -1642,7 +1550,6 @@ async fn a_plugin_adapter_is_refused_for_the_parent_conversation() {
     );
     let (status, error) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"hello"}),
         Some("first"),
@@ -1660,8 +1567,7 @@ async fn mind_profile_is_revisioned_notified_and_persists_across_hosts() {
     let store = Store::open(temp.path().join("host.db")).await.unwrap();
     let companion = store.snapshot().await.unwrap().companions[0].id.clone();
     let app = crate::bootstrap::application(store.clone(), "private-token".into());
-    let (status, initial) =
-        mutate(&app, "GET", &format!("Mind/{companion}"), json!(null), None).await;
+    let (status, initial) = mutate(&app, &format!("GetMind/{companion}"), json!(null), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(initial["state"]["revision"], 1);
     assert_eq!(initial["profile"]["revision"], 1);
@@ -1670,8 +1576,7 @@ async fn mind_profile_is_revisioned_notified_and_persists_across_hosts() {
     let mut subscription = app.application.subscribe().await;
     let (status, updated) = mutate(
         &app,
-        "PATCH",
-        &format!("MindProfile/{companion}"),
+        &format!("UpdateMindProfile/{companion}"),
         json!({
             "expected_revision": 1,
             "facets": ["静かだがよく見ている"],
@@ -1703,8 +1608,7 @@ async fn mind_profile_is_revisioned_notified_and_persists_across_hosts() {
 
     let (status, _) = mutate(
         &app,
-        "PATCH",
-        &format!("MindProfile/{companion}"),
+        &format!("UpdateMindProfile/{companion}"),
         json!({"expected_revision": 1, "facets": ["古い版"]}),
         None,
     )
@@ -1715,8 +1619,7 @@ async fn mind_profile_is_revisioned_notified_and_persists_across_hosts() {
     let restarted = crate::bootstrap::application(store, "private-token".into());
     let (status, after) = mutate(
         &restarted,
-        "GET",
-        &format!("Mind/{companion}"),
+        &format!("GetMind/{companion}"),
         json!(null),
         None,
     )
@@ -1800,8 +1703,7 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
 
     let (status, saved) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
         None,
     )
@@ -1811,8 +1713,7 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("Companion/{companion}"),
+            &format!("UpdateCompanion/{companion}"),
             json!({
                 "revision": 1,
                 "mind": "日本語で、落ち着いて答える。",
@@ -1827,8 +1728,7 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
     assert_eq!(
         mutate(
             &app,
-            "PUT",
-            &format!("Credentials/{connection}"),
+            &format!("RegisterCredentials/{connection}"),
             json!({"secret":"test-only"}),
             None
         )
@@ -1839,9 +1739,8 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
     assert_eq!(
         mutate(
             &app,
-            "POST",
-            "Grants",
-            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            "CreateGrant",
+            json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),
             Some("mind-grant"),
         )
         .await
@@ -1852,8 +1751,7 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("MindProfile/{companion}"),
+            &format!("UpdateMindProfile/{companion}"),
             json!({
                 "expected_revision": 1,
                 "examples": ["「なるほど」と短く返す"],
@@ -1869,7 +1767,6 @@ async fn a_parent_mind_update_reaches_sqlite_and_the_next_model_call() {
     let mut subscription = app.application.subscribe().await;
     let (status, accepted) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"柚子が好きです。覚えておいて。"}),
         Some("mind-first"),
@@ -2019,8 +1916,7 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     }));
     let (status, saved) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
         None,
     )
@@ -2030,8 +1926,7 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("Companion/{companion}"),
+            &format!("UpdateCompanion/{companion}"),
             json!({
                 "revision": 1,
                 "mind": "静かな助手",
@@ -2046,8 +1941,7 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     assert_eq!(
         mutate(
             &app,
-            "PUT",
-            &format!("Credentials/{connection}"),
+            &format!("RegisterCredentials/{connection}"),
             json!({"secret":"test-only"}),
             None
         )
@@ -2058,9 +1952,8 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     assert_eq!(
         mutate(
             &app,
-            "POST",
-            "Grants",
-            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            "CreateGrant",
+            json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),
             Some("auto-memory-grant"),
         )
         .await
@@ -2091,7 +1984,6 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     let mut subscription = app.application.subscribe().await;
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"一緒に柚子ジャムを作った。楽しかった。"}),
         Some("auto-first"),
@@ -2143,7 +2035,6 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
     // automatic recall, without a mind_recall tool call.
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"ジャムの思い出は？"}),
         Some("auto-second"),
@@ -2215,8 +2106,7 @@ async fn memory_forget_and_share_are_owner_only_and_idempotent() {
     let app = crate::bootstrap::application(store.clone(), "private-token".into());
     let (status, forgotten) = mutate(
         &app,
-        "POST",
-        "MemoryControl",
+        "ControlMemory",
         json!({"companion_id": companion, "memory_id": id, "action": "forget"}),
         None,
     )
@@ -2225,8 +2115,7 @@ async fn memory_forget_and_share_are_owner_only_and_idempotent() {
     assert_eq!(forgotten["recall_preference"], "forgotten");
     let (status, again) = mutate(
         &app,
-        "POST",
-        "MemoryControl",
+        "ControlMemory",
         json!({"companion_id": companion, "memory_id": id, "action": "forget"}),
         None,
     )
@@ -2235,8 +2124,7 @@ async fn memory_forget_and_share_are_owner_only_and_idempotent() {
     assert_eq!(again["revision"], forgotten["revision"]);
     let (status, shared) = mutate(
         &app,
-        "POST",
-        "MemoryControl",
+        "ControlMemory",
         json!({"companion_id": companion, "memory_id": id, "action": "share"}),
         None,
     )
@@ -2245,8 +2133,7 @@ async fn memory_forget_and_share_are_owner_only_and_idempotent() {
     assert_eq!(shared["audience"], "shared");
     let (status, _) = mutate(
         &app,
-        "POST",
-        "MemoryControl",
+        "ControlMemory",
         json!({"companion_id": companion, "memory_id": "00000000-0000-0000-0000-000000000001", "action": "share"}),
         None,
     )
@@ -2354,8 +2241,7 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     }));
     let (status, saved) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
         None,
     )
@@ -2365,8 +2251,7 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("Companion/{companion}"),
+            &format!("UpdateCompanion/{companion}"),
             json!({
                 "revision": 1,
                 "mind": "静かな助手",
@@ -2381,8 +2266,7 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     assert_eq!(
         mutate(
             &app,
-            "PUT",
-            &format!("Credentials/{connection}"),
+            &format!("RegisterCredentials/{connection}"),
             json!({"secret":"test-only"}),
             None
         )
@@ -2393,9 +2277,8 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     assert_eq!(
         mutate(
             &app,
-            "POST",
-            "Grants",
-            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            "CreateGrant",
+            json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),
             Some("semantic-grant"),
         )
         .await
@@ -2457,7 +2340,6 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     let mut subscription = app.application.subscribe().await;
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"あの黄色い果実の甘い保存食は何だった？"}),
         Some("semantic-wait"),
@@ -2482,8 +2364,7 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     // back by an older full prompt or by the completion.
     let (status, _) = mutate(
         &app,
-        "PATCH",
-        &format!("MindProfile/{companion}"),
+        &format!("UpdateMindProfile/{companion}"),
         json!({
             "expected_revision": 1,
             "facets": ["検索中に更新された側面"],
@@ -2519,7 +2400,6 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     fail.store(true, Ordering::SeqCst);
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"柚子ジャムの思い出は？"}),
         Some("semantic-failure"),
@@ -2551,7 +2431,6 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     let before = calls.load(Ordering::SeqCst);
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"柚子ジャムの思い出をもう一度"}),
         Some("semantic-timeout"),
@@ -2662,9 +2541,8 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
     assert_eq!(
         mutate(
             &app,
-            "POST",
-            "Grants",
-            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            "CreateGrant",
+            json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),
             Some("index-retry-grant"),
         )
         .await
@@ -2760,8 +2638,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     }));
     let (status, saved) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
         None,
     )
@@ -2771,8 +2648,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("Companion/{companion}"),
+            &format!("UpdateCompanion/{companion}"),
             json!({"revision":1,"mind":"静かな助手","model_assignments":{"companion":{"connection_id":connection,"model_id":"deepseek/deepseek-flash"}}}),
             None
         )
@@ -2783,8 +2659,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     assert_eq!(
         mutate(
             &app,
-            "PUT",
-            &format!("Credentials/{connection}"),
+            &format!("RegisterCredentials/{connection}"),
             json!({"secret":"test-only"}),
             None
         )
@@ -2795,9 +2670,8 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     assert_eq!(
         mutate(
             &app,
-            "POST",
-            "Grants",
-            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            "CreateGrant",
+            json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),
             Some("page-grant"),
         )
         .await
@@ -2807,7 +2681,6 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     let mut subscription = app.application.subscribe().await;
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"ページ境界の発言"}),
         Some("page-boundary"),
@@ -2901,7 +2774,6 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     let long = format!("{}{}", "長".repeat(9000), "長文末尾");
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":long}),
         Some("page-long"),
@@ -2911,7 +2783,6 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     wait_for_answered(&mut subscription).await;
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"長文の後の短文"}),
         Some("page-short"),
@@ -2978,7 +2849,6 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     // experience, and the next confirmed input must still advance.
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"失敗する終端の発言"}),
         Some("terminal-failed"),
@@ -3000,7 +2870,6 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     assert!(matches!(failed.as_str(), "failed" | "stopped"));
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"終端の後の確定入力"}),
         Some("terminal-after"),
@@ -3082,14 +2951,12 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     let (first, second) = tokio::join!(
         mutate(
             &app,
-            "POST",
             &steer_path,
             json!({"text":"Steer入力1"}),
             Some("steer-one"),
         ),
         mutate(
             &app,
-            "POST",
             &steer_path,
             json!({"text":"Steer入力2"}),
             Some("steer-two"),
@@ -3332,8 +3199,7 @@ async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
     let revision = store.configuration().await.unwrap().settings.revision;
     let (status, body) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":revision,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
         None,
     )
@@ -3406,8 +3272,7 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     }));
     let (status, saved) = mutate(
         &app,
-        "PATCH",
-        "Settings",
+        "UpdateSettings",
         json!({"revision":1,"connections":[{"kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":{}}]}),
         None,
     )
@@ -3417,8 +3282,7 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("Companion/{companion}"),
+            &format!("UpdateCompanion/{companion}"),
             json!({"revision":1,"mind":"古い人格","model_assignments":{"companion":{"connection_id":connection,"model_id":"deepseek/deepseek-flash"}}}),
             None
         )
@@ -3429,8 +3293,7 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     assert_eq!(
         mutate(
             &app,
-            "PUT",
-            &format!("Credentials/{connection}"),
+            &format!("RegisterCredentials/{connection}"),
             json!({"secret":"test-only"}),
             None
         )
@@ -3441,9 +3304,8 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     assert_eq!(
         mutate(
             &app,
-            "POST",
-            "Grants",
-            json!({"companion_id":companion,"connection_id":connection,"kind":"data_transfer","consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com","https://models.dev"],"data_kinds":["conversation"],"purpose":"conversation"}),
+            "CreateGrant",
+            json!({"companion_id":companion,"connection_id":connection,"consent":{"settings_revision":2,"provider_revision":"builtin-openai-v2-model-catalog"},"destinations":["https://api.openai.com"],"data_kinds":["conversation"],"purpose":"conversation"}),
             Some("stale-grant"),
         )
         .await
@@ -3453,7 +3315,6 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     let mut subscription = app.application.subscribe().await;
     let (status, _) = mutate(
         &app,
-        "POST",
         &format!("SendMessage/{companion}"),
         json!({"text":"事前入力"}),
         Some("stale-before"),
@@ -3464,10 +3325,9 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     let gate = Arc::new(PublishGate::default());
     app.application.set_publish_gate(gate.clone());
 
-    let profile_path = format!("MindProfile/{companion}");
+    let profile_path = format!("UpdateMindProfile/{companion}");
     let old = mutate(
         &app,
-        "PATCH",
         &profile_path,
         json!({"expected_revision":1,"facets":["古い心の側面"],"examples":[]}),
         None,
@@ -3480,8 +3340,7 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
     assert_eq!(
         mutate(
             &app,
-            "PATCH",
-            &format!("MindProfile/{companion}"),
+            &format!("UpdateMindProfile/{companion}"),
             json!({"expected_revision":2,"facets":["新しい心の側面"],"examples":[]}),
             None
         )

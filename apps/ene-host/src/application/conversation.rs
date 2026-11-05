@@ -64,7 +64,6 @@ fn signature(
         .filter(|grant| {
             grant.companion_id == companion
                 && grant.connection_id == connection.id
-                && grant.kind == "data_transfer"
                 && grant.purpose == GrantPurpose::Conversation
         })
         .map(|grant| {
@@ -107,11 +106,9 @@ pub(crate) async fn accept(
     if request.text.trim().is_empty() || request.text.len() > MAX_INPUT_BYTES {
         return Err(Error::invalid());
     }
-    if !request.resources.is_empty() || request.question_id.is_some() || request.decision.is_some()
-    {
-        return Err(Error::new(ErrorKind::UnsupportedCapability));
-    }
-    let body = json!({"text":request.text,"resources":request.resources,"question_id":request.question_id,"decision":request.decision});
+    // The receipt keeps the historical body shape so requests accepted by an
+    // older host still replay with the same key.
+    let body = json!({"text":request.text,"resources":[],"question_id":null,"decision":null});
     let target = format!("/v1/companions/{companion}/messages");
     let request_id = Uuid::new_v4().to_string();
     let acceptance = MessageAcceptance {

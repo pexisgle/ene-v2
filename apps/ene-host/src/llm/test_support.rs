@@ -3,6 +3,20 @@ use super::*;
 use crate::ports::Secret;
 use tokio::sync::watch;
 
+/// A provider that answers no request; policy and transport contracts use it.
+pub struct TestProvider(pub Policy);
+impl LlmProvider for TestProvider {
+    fn policy(&self, _: &Connection) -> Result<Policy> {
+        Ok(self.0.clone())
+    }
+    fn generate(&self, _: Invocation) -> BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>> {
+        Box::pin(async { Err(Error::unavailable()) })
+    }
+    fn models(&self, _: Invocation) -> BoxFuture<'_, Result<Vec<Model>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
 pub struct InvocationFixture {
     pub id: String,
     pub connection: Connection,
@@ -56,21 +70,6 @@ impl InvocationFixture {
         )
     }
     pub fn with_destinations(self, destinations: Vec<String>) -> Invocation {
-        struct FixtureProvider(Policy);
-        impl LlmProvider for FixtureProvider {
-            fn policy(&self, _: &Connection) -> Result<Policy> {
-                Ok(self.0.clone())
-            }
-            fn generate(
-                &self,
-                _: Invocation,
-            ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>> {
-                Box::pin(async { Err(Error::unavailable()) })
-            }
-            fn models(&self, _: Invocation) -> BoxFuture<'_, Result<Vec<Model>>> {
-                Box::pin(async { Err(Error::unavailable()) })
-            }
-        }
         let policy = Policy {
             revision: "fixture".into(),
             fingerprint: serde_json::json!({"fixture":true}),
@@ -78,7 +77,7 @@ impl InvocationFixture {
             requires_credentials: self.secret.is_some(),
             environment_variable: None,
         };
-        let binding = ProviderBinding::resolve(Arc::new(FixtureProvider(policy)), &self.connection)
+        let binding = ProviderBinding::resolve(Arc::new(TestProvider(policy)), &self.connection)
             .expect("fixture policy");
         self.build(binding)
     }

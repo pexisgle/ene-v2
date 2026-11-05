@@ -78,10 +78,6 @@ struct GrantSetup<'a> {
     purpose: &'a str,
 }
 
-async fn official_grant(client: &w::HostServiceClient<HttpClient>, setup: GrantSetup<'_>) {
-    grant(client, setup).await;
-}
-
 async fn insert_distractors(path: &Path, companion: &str) {
     let db = tokio_rusqlite::Connection::open(path).await.unwrap();
     let owner = companion.to_owned();
@@ -113,7 +109,6 @@ async fn grant(client: &w::HostServiceClient<HttpClient>, setup: GrantSetup<'_>)
                 request_key: setup.key.into(),
                 companion_id: setup.companion.into(),
                 connection_id: setup.connection.into(),
-                kind: "data_transfer".into(),
                 destinations: setup.destinations.to_vec(),
                 data_kinds: setup.data_kinds.iter().map(|kind| (*kind).into()).collect(),
                 purpose: setup.purpose.into(),
@@ -1573,7 +1568,7 @@ async fn automatic_memory_acceptance_through_the_host() {
     );
     assert_eq!(failure.jobs, 0);
     assert_eq!(failure.last_sequence, 0);
-    official_grant(
+    grant(
         &client,
         GrantSetup {
             key: "auto-memory",

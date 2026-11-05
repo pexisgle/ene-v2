@@ -195,14 +195,6 @@ impl Manager {
         // terminal record must still be a failure, not a client cancellation.
         let rejected = Arc::new(AtomicBool::new(false));
         let outcome = async {
-            if session.is_some() && matches!(&operation, Operation::Speech { .. }) {
-                session
-                    .as_mut()
-                    .unwrap()
-                    .initialize(&cancel)
-                    .await
-                    .map_err(failure)?;
-            }
             if session.is_none() {
                 let verified = entry.package.clone();
                 *session = Some(

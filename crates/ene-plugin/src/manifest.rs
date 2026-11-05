@@ -18,8 +18,6 @@ pub enum Target {
 #[serde(rename_all = "snake_case")]
 pub enum Extension {
     Llm,
-    Tts,
-    Stt,
     Character,
     Harness,
 }

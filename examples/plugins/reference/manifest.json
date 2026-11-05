@@ -26,16 +26,6 @@
         "models",
         "tools"
       ]
-    },
-    {
-      "id": "speech",
-      "target": "host",
-      "file": "reference.wasm",
-      "provides": [
-        "tts",
-        "stt"
-      ],
-      "uses": []
     }
   ]
 }

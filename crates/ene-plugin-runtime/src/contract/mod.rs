@@ -2,7 +2,6 @@
 mod character;
 mod harness;
 mod llm;
-mod speech;
 
 use crate::{Error, Result, limits::MAX_STREAM_EVENTS};
 use ene_plugin::*;
@@ -13,43 +12,21 @@ pub struct Events {
     terminal: bool,
     harness_pending: bool,
     count: u64,
-    speech: Option<(String, u64)>,
     character: Option<CharacterTarget>,
-    audio_sequence: u64,
 }
 
 impl Events {
     pub fn new(operation: &Operation) -> Self {
-        let speech = match operation {
-            Operation::Speech {
-                input:
-                    SpeechInput::Synthesize {
-                        utterance_id,
-                        generation,
-                        ..
-                    },
-            } => Some((utterance_id.clone(), *generation)),
-            Operation::Speech {
-                input:
-                    SpeechInput::Transcribe {
-                        utterance_id,
-                        audio,
-                    },
-            } => Some((utterance_id.clone(), audio.generation)),
-            _ => None,
-        };
         Self {
             extension: operation.extension(),
             models: matches!(operation, Operation::ListModels { .. }),
             terminal: false,
             harness_pending: false,
             count: 0,
-            speech,
             character: match operation {
                 Operation::Character { target, .. } => Some(target.clone()),
                 _ => None,
             },
-            audio_sequence: 0,
         }
     }
 
@@ -65,10 +42,8 @@ impl Events {
         }
         match event {
             Event::Character { target, action } => self.accept_character(target, action)?,
-            Event::Audio { chunk } => self.accept_audio(chunk)?,
             Event::Harness { event } => self.accept_harness(event)?,
             Event::Finished { .. } | Event::Models { .. } => self.accept_llm(event)?,
-            Event::Transcript { .. } => self.terminal = true,
             _ => {}
         }
         self.count += 1;
@@ -76,11 +51,7 @@ impl Events {
     }
 
     pub fn finish(&self) -> Result<()> {
-        if matches!(
-            self.extension,
-            Extension::Llm | Extension::Tts | Extension::Stt
-        ) && !self.terminal
-        {
+        if matches!(self.extension, Extension::Llm) && !self.terminal {
             return Err(Error::Protocol);
         }
         Ok(())
@@ -108,21 +79,6 @@ mod tests {
             endpoint: String::new(),
             options: serde_json::json!({}),
         };
-        let transcribe = Operation::Speech {
-            input: SpeechInput::Transcribe {
-                utterance_id: "u".into(),
-                audio: AudioChunk {
-                    utterance_id: "u".into(),
-                    generation: 1,
-                    sequence: 0,
-                    format: "pcm_s16le".into(),
-                    sample_rate: 16000,
-                    channels: 1,
-                    data_base64: "AAA=".into(),
-                    done: true,
-                },
-            },
-        };
         for (operation, terminal, wrong) in [
             (
                 generate,
@@ -136,15 +92,6 @@ mod tests {
                 Event::Models { models: vec![] },
                 Event::Delta {
                     text: "wrong".into(),
-                },
-            ),
-            (
-                transcribe,
-                Event::Transcript {
-                    text: String::new(),
-                },
-                Event::Finished {
-                    reason: "stop".into(),
                 },
             ),
         ] {
@@ -237,52 +184,5 @@ mod tests {
             assert!(events.accept(&event(other)).is_err());
         }
         events.accept(&event(target)).unwrap();
-    }
-
-    #[test]
-    fn speech_generations_sequences_and_terminal_state_are_checked() {
-        let operation = Operation::Speech {
-            input: SpeechInput::Synthesize {
-                utterance_id: "u".into(),
-                generation: 4,
-                text: "hello".into(),
-                voice: "v".into(),
-            },
-        };
-        let mut events = Events::new(&operation);
-        let mut chunk = AudioChunk {
-            utterance_id: "u".into(),
-            generation: 3,
-            sequence: 0,
-            format: "pcm_s16le".into(),
-            sample_rate: 16000,
-            channels: 1,
-            data_base64: "AAA=".into(),
-            done: true,
-        };
-        assert!(
-            events
-                .accept(&Event::Audio {
-                    chunk: chunk.clone()
-                })
-                .is_err()
-        );
-        chunk.generation = 4;
-        chunk.sequence = 1;
-        assert!(
-            events
-                .accept(&Event::Audio {
-                    chunk: chunk.clone()
-                })
-                .is_err()
-        );
-        chunk.sequence = 0;
-        events
-            .accept(&Event::Audio {
-                chunk: chunk.clone(),
-            })
-            .unwrap();
-        events.finish().unwrap();
-        assert!(events.accept(&Event::Audio { chunk }).is_err());
     }
 }

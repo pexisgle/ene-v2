@@ -50,7 +50,7 @@ fn package(code: &[u8], target: Target, services: &[Service]) -> (Package, tempf
     let root = temp.path().join("plugin");
     directory(&root);
     write_file(&root.join("main.wasm"), code);
-    write_file(&root.join("manifest.json"), json!({"contract_version":CONTRACT_VERSION,"id":"test","name":"Test","version":"1","entrypoints":[{"id":"main","file":"main.wasm","target":target,"provides":["character","harness","tts","stt"],"uses":services}]}).to_string().as_bytes());
+    write_file(&root.join("manifest.json"), json!({"contract_version":CONTRACT_VERSION,"id":"test","name":"Test","version":"1","entrypoints":[{"id":"main","file":"main.wasm","target":target,"provides":["character","harness"],"uses":services}]}).to_string().as_bytes());
     (Package::load(&root).unwrap(), temp)
 }
 fn character() -> Operation {

@@ -90,7 +90,6 @@ impl Outbound {
         &self,
         request: &mut http::Request<bytes::Bytes>,
         placement: &CredentialPlacement,
-        scope: &TransportScope,
     ) -> Result<()> {
         self.authorization.check().await?;
         let denied = || Error::new(ErrorKind::PermissionRequired);
@@ -106,54 +105,34 @@ impl Outbound {
         {
             return Err(denied());
         }
-        match scope {
-            TransportScope::Catalog(source) => {
-                if target.as_str() != source.as_str()
-                    || *request.method() != http::Method::GET
-                    || !request.body().is_empty()
-                    || !self
-                        .policy()
-                        .destinations
-                        .contains(&source.origin().ascii_serialization())
-                {
-                    return Err(denied());
-                }
-            }
-            TransportScope::Provider => {
-                if target.origin() != base.origin() {
-                    return Err(denied());
-                }
-                let base_path = base.path().trim_end_matches('/');
-                let path = target.path();
-                let allowed = match self.operation {
-                    OperationKind::ModelList => {
-                        *request.method() == http::Method::GET
-                            && request.body().is_empty()
-                            && path == format!("{base_path}/models")
-                    }
-                    OperationKind::Conversation
-                    | OperationKind::ConnectionCheck
-                    | OperationKind::Task
-                    | OperationKind::Consolidation => {
-                        *request.method() == http::Method::POST
-                            && (path == format!("{base_path}/chat/completions")
-                                || path == format!("{base_path}/responses"))
-                    }
-                    OperationKind::Embedding => {
-                        *request.method() == http::Method::POST
-                            && path == format!("{base_path}/embeddings")
-                    }
-                };
-                if !allowed {
-                    return Err(denied());
-                }
-            }
+        if target.origin() != base.origin() {
+            return Err(denied());
         }
-        // SDK-generated auth is replaced; it can never be forwarded to a public catalog.
+        let base_path = base.path().trim_end_matches('/');
+        let path = target.path();
+        let allowed = match self.operation {
+            OperationKind::ModelList => {
+                *request.method() == http::Method::GET
+                    && request.body().is_empty()
+                    && path == format!("{base_path}/models")
+            }
+            OperationKind::Conversation
+            | OperationKind::ConnectionCheck
+            | OperationKind::Task
+            | OperationKind::Consolidation => {
+                *request.method() == http::Method::POST
+                    && (path == format!("{base_path}/chat/completions")
+                        || path == format!("{base_path}/responses"))
+            }
+            OperationKind::Embedding => {
+                *request.method() == http::Method::POST && path == format!("{base_path}/embeddings")
+            }
+        };
+        if !allowed {
+            return Err(denied());
+        }
+        // SDK-generated auth is replaced; the host alone attaches credentials.
         request.headers_mut().remove(http::header::AUTHORIZATION);
-        if matches!(scope, TransportScope::Catalog(_)) {
-            return Ok(());
-        }
         let secret = || self.secret.as_ref().ok_or_else(denied);
         let header = |value: &str| {
             let mut header = http::HeaderValue::from_str(value).map_err(|_| denied())?;
@@ -202,12 +181,6 @@ pub enum CredentialPlacement {
     Header(String),
     Query(String),
 }
-#[derive(Clone)]
-pub(crate) enum TransportScope {
-    Provider,
-    Catalog(url::Url),
-}
-
 impl Invocation {
     pub(crate) fn new(
         id: String,

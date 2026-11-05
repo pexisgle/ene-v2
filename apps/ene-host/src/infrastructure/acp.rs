@@ -1206,19 +1206,7 @@ for line in sys.stdin:
     async fn prompt_updates_permission_and_stop_are_mapped() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("note.txt"), "file-content").unwrap();
-        let script_path = temp.path().join("agent.py");
-        std::fs::write(&script_path, agent_script()).unwrap();
-        let config = AcpConfig {
-            command: vec![
-                "python3".into(),
-                script_path.to_str().unwrap().into(),
-                temp.path().to_str().unwrap().into(),
-            ],
-            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
-            cwd: std::fs::canonicalize(temp.path()).unwrap(),
-            terminal: None,
-        };
-        let mut session = AcpSession::start(config).await.unwrap();
+        let mut session = start_agent(temp.path(), &agent_script(), None).await;
         let turn = session.prompt(&[text_block("go")]).await.unwrap();
         assert!(matches!(turn.state, TurnState::Waiting(_)));
         let TurnState::Waiting(waiting) = turn.state else {
@@ -1279,19 +1267,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn an_unknown_stop_reason_fails_instead_of_ending_the_turn() {
         let temp = tempfile::tempdir().unwrap();
-        let script_path = temp.path().join("agent.py");
-        std::fs::write(&script_path, unknown_stop_agent_script()).unwrap();
-        let config = AcpConfig {
-            command: vec![
-                "python3".into(),
-                script_path.to_str().unwrap().into(),
-                temp.path().to_str().unwrap().into(),
-            ],
-            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
-            cwd: std::fs::canonicalize(temp.path()).unwrap(),
-            terminal: None,
-        };
-        let mut session = AcpSession::start(config).await.unwrap();
+        let mut session = start_agent(temp.path(), &unknown_stop_agent_script(), None).await;
         let error = session.prompt(&[text_block("go")]).await.unwrap_err();
         assert_eq!(error.kind, ErrorKind::ExternalFailure);
         session.kill().await;
@@ -1408,23 +1384,16 @@ for line in sys.stdin:
     #[tokio::test]
     async fn terminal_kill_is_processed_while_wait_for_exit_is_pending() {
         let temp = tempfile::tempdir().unwrap();
-        let script_path = temp.path().join("agent.py");
-        std::fs::write(&script_path, terminal_kill_agent_script()).unwrap();
-        let config = AcpConfig {
-            command: vec![
-                "python3".into(),
-                script_path.to_str().unwrap().into(),
-                temp.path().to_str().unwrap().into(),
-            ],
-            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
-            cwd: std::fs::canonicalize(temp.path()).unwrap(),
-            terminal: Some(TerminalLimits {
+        let mut session = start_agent(
+            temp.path(),
+            &terminal_kill_agent_script(),
+            Some(TerminalLimits {
                 allowed: vec!["sleep".into()],
                 max_seconds: 10,
                 max_output: 64,
             }),
-        };
-        let mut session = AcpSession::start(config).await.unwrap();
+        )
+        .await;
         let turn = session.prompt(&[text_block("go")]).await.unwrap();
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
@@ -1492,24 +1461,17 @@ for line in sys.stdin:
     async fn terminal_kill_terminates_the_whole_process_group() {
         use rustix::process::{Pid, test_kill_process};
         let temp = tempfile::tempdir().unwrap();
-        let script_path = temp.path().join("agent.py");
-        std::fs::write(&script_path, process_group_agent_script()).unwrap();
         let pid_file = temp.path().join("grandchild.pid");
-        let config = AcpConfig {
-            command: vec![
-                "python3".into(),
-                script_path.to_str().unwrap().into(),
-                temp.path().to_str().unwrap().into(),
-            ],
-            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
-            cwd: std::fs::canonicalize(temp.path()).unwrap(),
-            terminal: Some(TerminalLimits {
+        let mut session = start_agent(
+            temp.path(),
+            &process_group_agent_script(),
+            Some(TerminalLimits {
                 allowed: vec!["sh".into()],
                 max_seconds: 10,
                 max_output: 4096,
             }),
-        };
-        let mut session = AcpSession::start(config).await.unwrap();
+        )
+        .await;
         let turn = session.prompt(&[text_block("go")]).await.unwrap();
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");

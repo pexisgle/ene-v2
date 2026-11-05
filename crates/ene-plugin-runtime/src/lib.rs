@@ -10,8 +10,6 @@ pub enum Error {
     Changed,
     #[error("unsupported_capability")]
     Unsupported,
-    #[error("permission_required")]
-    Denied,
     #[error("plugin_unavailable")]
     Unavailable,
     #[error("plugin_execution_failed: {0:#}")]

@@ -14,15 +14,17 @@ message ModelAssignments { ModelAssignment companion = 1; ModelAssignment task =
 message Message {
   string id = 1; string companion_id = 2; string role = 3; string text = 4;
   string status = 5; string created_at = 6; uint64 sequence = 7;
-  repeated JsonDocument resources = 8; optional string in_reply_to = 9;
-  optional string task_id = 10; optional string question_id = 11; Failure failure = 12;
+  reserved 8, 10, 11;
+  reserved "resources", "task_id", "question_id";
+  optional string in_reply_to = 9;
+  Failure failure = 12;
   // The accepted input this entry or reply belongs to. A reply carries the id
   // of the input it answers; the id is the same value SendMessage returned.
   optional string request_id = 13;
   string turn_status = 14;
 }
 message Companion {
-  string id = 1; string name = 2; JsonDocument body = 3; JsonDocument voice = 4;
+  string id = 1; string name = 2; JsonDocument body = 3; reserved 4; reserved "voice";
   string mind = 5; ModelAssignments model_assignments = 6;
   JsonDocument availability = 7; uint64 revision = 8;
 }
@@ -72,7 +74,7 @@ message Connection {
 }
 message Settings { uint64 revision = 1; repeated Connection connections = 2; }
 message Grant {
-  string id = 1; string companion_id = 2; string kind = 3; string connection_id = 4;
+  string id = 1; string companion_id = 2; reserved 3; reserved "kind"; string connection_id = 4;
   repeated string destinations = 5; repeated string data_kinds = 6;
   string purpose = 7; string status = 8; uint64 revision = 9;
   optional string invalidation_reason = 10; JsonDocument connection_fingerprint = 11;
@@ -110,7 +112,7 @@ message JsonDocumentPatch { oneof change { JsonDocument set = 1; Empty clear = 2
 message UpdateCompanionRequest {
   string id = 1; uint64 revision = 2; optional string name = 3; optional string mind = 4;
   AssignmentPatch companion_assignment = 5; AssignmentPatch task_assignment = 6;
-  JsonDocumentPatch body = 7; JsonDocumentPatch voice = 8;
+  JsonDocumentPatch body = 7; reserved 8; reserved "voice";
 }
 message HistoryRequest {
   string companion_id = 1; optional string cursor = 2; optional uint32 limit = 3;
@@ -119,7 +121,8 @@ message History { repeated Message items = 1; optional string next_cursor = 2; }
 message MessageRequest { string companion_id = 1; string message_id = 2; }
 message SendMessageRequest {
   string companion_id = 1; string text = 2; string request_key = 3;
-  repeated JsonDocument resources = 4; optional string question_id = 5; optional string decision = 6;
+  reserved 4, 5, 6;
+  reserved "resources", "question_id", "decision";
 }
 // The host has taken responsibility for the input. Delivery, execution and its
 // end are confirmed by MessageCreated, TurnEvent and GetHistory, not here.
@@ -128,7 +131,7 @@ message GrantsRequest { optional string companion_id = 1; }
 message Grants { repeated Grant items = 1; }
 message Consent { uint64 settings_revision = 1; string provider_revision = 2; }
 message CreateGrantRequest {
-  string request_key = 1; string companion_id = 2; string kind = 3; string connection_id = 4;
+  string request_key = 1; string companion_id = 2; reserved 3; reserved "kind"; string connection_id = 4;
   repeated string destinations = 5; repeated string data_kinds = 6;
   string purpose = 7; Consent consent = 8;
 }

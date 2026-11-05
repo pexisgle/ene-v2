@@ -5,7 +5,6 @@ mod character;
 mod harness;
 mod http;
 mod llm;
-mod speech;
 mod wire;
 
 pub use character::{CharacterAction, CharacterEvent, CharacterTarget};
@@ -18,5 +17,4 @@ pub use harness::{
 };
 pub use http::{HttpChunk, HttpRequest};
 pub use llm::{GenerationRequest, LlmCapabilities, ModelResponse, ToolDefinition};
-pub use speech::{AudioChunk, SpeechInput};
 pub use wire::{Event, Operation, ServiceRequest};

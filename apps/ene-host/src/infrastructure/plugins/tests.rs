@@ -842,7 +842,7 @@ async fn moved_packages_use_the_new_root_and_bad_packages_do_not_hide_good_ones(
     );
 }
 #[tokio::test]
-async fn harness_and_speech_share_the_wasm_contract() {
+async fn harness_turn_uses_the_wasm_contract() {
     let (manager, _temp, companion) = manager().await;
     let revision = manager.entries.read().unwrap()["reference"]
         .package
@@ -894,36 +894,6 @@ async fn harness_and_speech_share_the_wasm_contract() {
             .unwrap()
             .contains("参照タスクを完了しました。")
     );
-    manager
-        .bind(binding(&manager, &companion, "speech", "speech", vec![]))
-        .await
-        .unwrap();
-    let result=invoke_plugin(&manager, PluginInvocation {binding_id:"speech".into(),operation:document(json!({"type":"speech","input":{"type":"synthesize","utterance_id":"u","text":"test","voice":"reference"}})).into(), ..Default::default() }).await.unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&result.events[0].json).unwrap()["chunk"]["sequence"],
-        0
-    );
-    assert_eq!(
-        serde_json::from_str::<Value>(&result.events[0].json).unwrap()["chunk"]["done"],
-        true
-    );
-    let before = manager
-        .sessions
-        .lock()
-        .unwrap()
-        .get("speech")
-        .cloned()
-        .unwrap();
-    let second=invoke_plugin(&manager, PluginInvocation {binding_id:"speech".into(),operation:document(json!({"type":"speech","input":{"type":"synthesize","utterance_id":"v","text":"again","voice":"reference"}})).into(), ..Default::default() }).await.unwrap();
-    assert_eq!(second.generation, result.generation);
-    let after = manager
-        .sessions
-        .lock()
-        .unwrap()
-        .get("speech")
-        .cloned()
-        .unwrap();
-    assert!(Arc::ptr_eq(&before, &after));
     manager.shutdown().await.unwrap();
 }
 
@@ -1524,10 +1494,6 @@ async fn failed_starts_release_instance_slots() {
         .state = "ready".into();
 
     manager
-        .bind(binding(&manager, &companion, "speech", "speech", vec![]))
-        .await
-        .unwrap();
-    manager
         .bind(binding(
             &manager,
             &companion,
@@ -1544,24 +1510,31 @@ async fn failed_starts_release_instance_slots() {
     for _ in 0..32 {
         for input in [
             PluginInvocation {
-                binding_id: "speech".into(),
-                operation: document(json!({"type":"speech","input":{"type":"synthesize","utterance_id":"u","text":"test","voice":"reference"}})).into(),
-             ..Default::default() },
-            PluginInvocation {
                 binding_id: "task".into(),
-                operation: document(serde_json::to_value(Operation::Harness {
-                    input: task_start("test"),
-                })
-                .unwrap()).into(),
-             ..Default::default() },
+                operation: document(
+                    serde_json::to_value(Operation::Harness {
+                        input: task_start("test"),
+                    })
+                    .unwrap(),
+                )
+                .into(),
+                ..Default::default()
+            },
             PluginInvocation {
                 binding_id: "behavior".into(),
-                operation: document(serde_json::to_value(Operation::Character {
-                target: CharacterTarget { device_id: "device".into(), character_id: companion.clone() },
-                    event: CharacterEvent::Activated,
-                })
-                .unwrap()).into(),
-             ..Default::default() },
+                operation: document(
+                    serde_json::to_value(Operation::Character {
+                        target: CharacterTarget {
+                            device_id: "device".into(),
+                            character_id: companion.clone(),
+                        },
+                        event: CharacterEvent::Activated,
+                    })
+                    .unwrap(),
+                )
+                .into(),
+                ..Default::default()
+            },
         ] {
             assert!(invoke_plugin(&manager, input).await.is_err());
             assert!(manager.sessions.lock().unwrap().is_empty());

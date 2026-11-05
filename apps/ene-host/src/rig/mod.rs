@@ -981,40 +981,10 @@ mod tests {
     #[tokio::test]
     async fn the_openai_responses_wire_sends_with_the_host_credential() {
         use crate::domain::OperationKind;
-        use crate::llm::{LlmProvider, ProviderBinding};
+        use crate::llm::ProviderBinding;
         use crate::ports::Secret;
         use std::sync::{Arc, Mutex};
 
-        struct PolicyOnly(crate::llm::Policy);
-        impl LlmProvider for PolicyOnly {
-            fn policy(
-                &self,
-                _: &crate::domain::Connection,
-            ) -> crate::ports::Result<crate::llm::Policy> {
-                Ok(self.0.clone())
-            }
-            fn generate(
-                &self,
-                _: crate::llm::Invocation,
-            ) -> futures_util::future::BoxFuture<
-                '_,
-                crate::ports::Result<
-                    futures_util::stream::BoxStream<
-                        'static,
-                        crate::ports::Result<crate::llm::Event>,
-                    >,
-                >,
-            > {
-                Box::pin(async { Err(crate::domain::Error::unavailable()) })
-            }
-            fn models(
-                &self,
-                _: crate::llm::Invocation,
-            ) -> futures_util::future::BoxFuture<'_, crate::ports::Result<Vec<crate::llm::Model>>>
-            {
-                Box::pin(async { Ok(Vec::new()) })
-            }
-        }
         struct Allow;
         impl crate::llm::Authorization for Allow {
             fn check(&self) -> futures_util::future::BoxFuture<'_, crate::ports::Result<()>> {
@@ -1081,8 +1051,11 @@ mod tests {
             requires_credentials: true,
             environment_variable: None,
         };
-        let binding =
-            ProviderBinding::resolve(Arc::new(PolicyOnly(policy.clone())), &connection).unwrap();
+        let binding = ProviderBinding::resolve(
+            Arc::new(crate::llm::test_support::TestProvider(policy.clone())),
+            &connection,
+        )
+        .unwrap();
         let outbound = Arc::new(crate::llm::Outbound::new(
             "test".into(),
             connection,

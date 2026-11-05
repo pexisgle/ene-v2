@@ -155,12 +155,9 @@ fn entry_message(spans: &[TurnSpan], entry: &EntryRef<'_>, companion: &str) -> O
         .into(),
         created_at: created_at(entry.made),
         sequence: entry.index as u64 + 1,
-        resources: Vec::new(),
         in_reply_to: (role == "assistant")
             .then(|| span.and_then(|span| span.request_entry.clone()))
             .flatten(),
-        task_id: None,
-        question_id: None,
         failure: failure.into(),
         turn_status: span.map(TurnSpan::status).unwrap_or(OPEN).into(),
         request_id: if role == "assistant" {

@@ -481,7 +481,6 @@ async fn omitted_settings_preserve_connections_credentials_grants_and_notificati
     config.grants.push(crate::domain::Grant {
         id: uuid::Uuid::new_v4().to_string(),
         companion_id: companion.id.clone(),
-        kind: "llm".into(),
         connection_id: id,
         destinations: vec!["https://api.openai.com".into()],
         data_kinds: vec!["messages".into()],
@@ -618,20 +617,6 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("host.db");
     let store = Store::open(path.clone()).await.unwrap();
-    let mut config = store.configuration().await.unwrap();
-    let tts = uuid::Uuid::new_v4().to_string();
-    config.settings.connections = vec![w::Connection {
-        id: tts.clone(),
-        kind: "tts".into(),
-        adapter: "fixture".into(),
-        endpoint: "https://tts.test".into(),
-        options: document(json!({})).into(),
-        ..Default::default()
-    }];
-    store
-        .commit_configuration(ConfigurationCommit::Update(config))
-        .await
-        .unwrap();
     let host = Host::serve(
         crate::bootstrap::application(store.clone(), "private-token".into()),
         temp,
@@ -661,22 +646,18 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
     let stored_original = store.snapshot().await.unwrap().companions[0].clone();
     let body =
         json!({"format":"vrm1", "environment_id":before.environment_id, "model":"avatar.vrm"});
-    let voice = json!({"connection_id":tts, "voice_id":"voice1"});
     let valid = w::UpdateCompanionRequest {
         revision: original.revision,
         name: Some("configured".into()),
         body: set_document(body.clone()).into(),
-        voice: set_document(voice.clone()).into(),
         ..Default::default()
     };
-    let mut bad_voice = valid.clone();
-    bad_voice.voice = set_document(json!({"connection_id":"missing", "voice_id":"voice1"})).into();
     let mut bad_body = valid.clone();
     bad_body.body =
         set_document(json!({"format":"vrm1", "environment_id":"other", "model":"avatar.vrm"}))
             .into();
     let mut empty_patch = valid.clone();
-    empty_patch.voice = w::JsonDocumentPatch::default().into();
+    empty_patch.body = w::JsonDocumentPatch::default().into();
     let mut bad_assignment = valid.clone();
     bad_assignment.companion_assignment = w::AssignmentPatch {
         change: Some(w::assignment_patch::Change::Set(Box::new(
@@ -689,7 +670,7 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
         ..Default::default()
     }
     .into();
-    for invalid in [bad_voice, bad_body, empty_patch, bad_assignment] {
+    for invalid in [bad_body, empty_patch, bad_assignment] {
         assert!(
             host.client
                 .host
@@ -753,7 +734,6 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
         .into_owned();
     assert_eq!(saved.revision, original.revision + 1);
     assert_eq!(saved.body, document(body).into());
-    assert_eq!(saved.voice, document(voice).into());
     let Some(w::host_event::Event::Notification(event)) =
         timeout(Duration::from_secs(2), events.message::<w::HostEvent>())
             .await
@@ -798,10 +778,9 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
         "revision_conflict"
     );
     // JSON null is omission, so a name-only edit cannot erase the documents.
-    let rename: w::UpdateCompanionRequest = serde_json::from_value(
-        json!({"revision":saved.revision, "name":"renamed", "body":null, "voice":null}),
-    )
-    .unwrap();
+    let rename: w::UpdateCompanionRequest =
+        serde_json::from_value(json!({"revision":saved.revision, "name":"renamed", "body":null}))
+            .unwrap();
     let renamed = host
         .client
         .host
@@ -816,7 +795,6 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
         .unwrap()
         .into_owned();
     assert_eq!(renamed.body, saved.body);
-    assert_eq!(renamed.voice, saved.voice);
     let settings = host
         .client
         .host
@@ -832,14 +810,6 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
         connections: w::ConnectionInputs::default().into(),
         ..Default::default()
     };
-    let error = host
-        .client
-        .host
-        .update_settings_with_options(remove.clone(), crate::api::test_client::call_options(10))
-        .await
-        .map(|response| response.into_owned())
-        .unwrap_err();
-    assert_eq!(error.code, ErrorCode::FailedPrecondition);
     let cleared = host
         .client
         .host
@@ -848,7 +818,6 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
                 id: saved.id.clone(),
                 revision: renamed.revision,
                 body: clear_document().into(),
-                voice: clear_document().into(),
                 ..Default::default()
             },
             crate::api::test_client::call_options(10),
@@ -856,7 +825,7 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
         .await
         .unwrap()
         .into_owned();
-    assert!(!cleared.body.is_set() && !cleared.voice.is_set());
+    assert!(!cleared.body.is_set());
     assert!(
         host.client
             .host
@@ -870,10 +839,7 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
     let restarted =
         crate::bootstrap::application(Store::open(path).await.unwrap(), "other-token".into());
     let snapshot = restarted.application.snapshot(None).await.unwrap();
-    assert!(
-        !snapshot.stored.companions[0].body.is_set()
-            && !snapshot.stored.companions[0].voice.is_set()
-    );
+    assert!(!snapshot.stored.companions[0].body.is_set());
     assert!(snapshot.stored.settings.connections.is_empty());
 }
 

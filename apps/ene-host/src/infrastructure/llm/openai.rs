@@ -1,5 +1,4 @@
 //! Builtin adapter for the official OpenAI Responses API.
-mod catalog;
 
 use crate::{
     domain::{Connection, Error, ErrorKind},
@@ -18,7 +17,7 @@ const ENVIRONMENT_VARIABLE: &str = "OPENAI_API_KEY";
 
 pub fn descriptor() -> Descriptor {
     Descriptor {
-        destinations: vec!["https://api.openai.com".into(), catalog::ORIGIN.into()],
+        destinations: vec!["https://api.openai.com".into()],
         models: vec![Model {
             id: MODEL.into(),
             name: MODEL.into(),
@@ -95,9 +94,10 @@ fn stream(input: Generation, client: OpenAI) -> Result<BoxStream<'static, Result
 }
 
 pub async fn models(input: Invocation) -> Result<Vec<Model>> {
-    let input = std::sync::Arc::new(input);
-    let transport =
-        crate::llm::AuthorizedTransport::new(input.clone(), CredentialPlacement::Bearer)?;
+    let transport = crate::llm::AuthorizedTransport::new(
+        std::sync::Arc::new(input),
+        CredentialPlacement::Bearer,
+    )?;
     let mut models = Vec::new();
     for item in super::catalog_items(transport, ENDPOINT).await? {
         let id = item["id"]
@@ -116,7 +116,6 @@ pub async fn models(input: Invocation) -> Result<Vec<Model>> {
         });
     }
     validate_models(&models)?;
-    catalog::enrich(&mut models, input, catalog::URL).await?;
     Ok(models)
 }
 

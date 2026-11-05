@@ -22,10 +22,7 @@ pub fn evaluate(
 ) -> OperationAvailability {
     let spec = operation.spec();
     let grants = configuration.grants.iter().filter(|g| {
-        g.companion_id == companion
-            && g.connection_id == connection.id
-            && g.kind == "data_transfer"
-            && g.purpose == spec.purpose
+        g.companion_id == companion && g.connection_id == connection.id && g.purpose == spec.purpose
     });
     let authorization = match policy {
         None => "unavailable",
@@ -118,7 +115,6 @@ pub fn allowed(
     c.grants.iter().any(|g| {
         g.status == GrantStatus::Active
             && g.companion_id == companion_id
-            && g.kind == "data_transfer"
             && g.connection_id == connection.id
             && g.purpose.as_str() == purpose
             && g.connection_fingerprint == policy.fingerprint
@@ -134,7 +130,7 @@ pub fn allowed(
 /// reason; `None` means chat is ready.
 pub fn capability_document(chat_reason: Option<&str>) -> serde_json::Value {
     let unsupported = |message: &str| json!({"ready": false, "reasons": [{"code": "unsupported_capability", "message": message}]});
-    json!({"chat": {"ready": chat_reason.is_none(), "reasons": chat_reason.map(|reason| vec![json!({"code": reason, "message": "接続・モデル・資格情報・送信許可を設定してください"})]).unwrap_or_default()}, "task": unsupported("ファイル作業は未対応です"), "speech": unsupported("読み上げは未対応です")})
+    json!({"chat": {"ready": chat_reason.is_none(), "reasons": chat_reason.map(|reason| vec![json!({"code": reason, "message": "接続・モデル・資格情報・送信許可を設定してください"})]).unwrap_or_default()}, "task": unsupported("ファイル作業は未対応です")})
 }
 
 pub fn refresh(
@@ -192,7 +188,6 @@ mod tests {
             grants: vec![Grant {
                 id: "g".into(),
                 companion_id: "c".into(),
-                kind: "data_transfer".into(),
                 connection_id: "p".into(),
                 destinations: vec!["https://gateway.test".into()],
                 data_kinds: vec!["conversation".into()],

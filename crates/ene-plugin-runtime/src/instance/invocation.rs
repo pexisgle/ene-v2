@@ -38,13 +38,12 @@ pub(super) fn ene_service(
     output: &mut [extism::Val],
     _: extism::UserData<()>,
 ) -> std::result::Result<(), extism::Error> {
-    let (request, raw_len) = {
-        let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-        if raw.len() > MAX_MESSAGE_BYTES {
-            return Err(Error::Protocol.into());
-        }
-        (serde_json::from_slice::<ServiceRequest>(raw)?, raw.len())
-    };
+    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+    if raw.len() > MAX_MESSAGE_BYTES {
+        return Err(Error::Protocol.into());
+    }
+    let raw_len = raw.len();
+    let request = serde_json::from_slice::<ServiceRequest>(raw)?;
     let invocation = plugin.host_context::<Arc<Invocation>>()?.clone();
     // Charge the bytes actually received and sent, not their re-encoded form.
     invocation.charge(&invocation.bytes, raw_len, MAX_SERVICE_BYTES)?;
@@ -62,13 +61,12 @@ pub(super) fn ene_emit(
     _: &mut [extism::Val],
     _: extism::UserData<()>,
 ) -> std::result::Result<(), extism::Error> {
-    let (event, raw_len) = {
-        let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-        if raw.len() > MAX_CHUNK {
-            return Err(Error::Protocol.into());
-        }
-        (serde_json::from_slice::<Event>(raw)?, raw.len())
-    };
+    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+    if raw.len() > MAX_CHUNK {
+        return Err(Error::Protocol.into());
+    }
+    let raw_len = raw.len();
+    let event = serde_json::from_slice::<Event>(raw)?;
     let invocation = plugin.host_context::<Arc<Invocation>>()?.clone();
     invocation.charge(&invocation.stream_bytes, raw_len, MAX_STREAM_BYTES)?;
     invocation.emit(event)?;

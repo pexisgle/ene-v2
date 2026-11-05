@@ -38,7 +38,6 @@ fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
         id: Uuid::new_v4().to_string(),
         name: "ene".into(),
         body: Default::default(),
-        voice: Default::default(),
         mind: "日本語で、簡潔で親しみやすく応答する。".into(),
         model_assignments: ModelAssignments::default().into(),
         availability: ene_rpc::JsonDocument::from(crate::domain::rules::capability_document(Some(
@@ -132,13 +131,8 @@ mod companion_migration_tests {
             ..Default::default()
         }
         .into();
-        original.voice = ene_rpc::JsonDocument {
-            json: json!({"voice":"saved-voice"}).to_string(),
-            ..Default::default()
-        }
-        .into();
         let mut old = serde_json::to_value(&original).unwrap();
-        for field in ["body", "voice", "availability"] {
+        for field in ["body", "availability"] {
             old[field] = serde_json::from_str(old[field]["json"].as_str().unwrap()).unwrap();
         }
         db.execute(
@@ -148,7 +142,7 @@ mod companion_migration_tests {
         .unwrap();
         let options = json!({"region":"saved", "temperature":0.5});
         db.execute("UPDATE metadata SET value=?1 WHERE key='settings'", [json!({"revision":7,"connections":[{"id":"saved-connection","kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":options,"credential_state":"registered","capabilities":{"streaming_text":true},"last_check":null}]}).to_string()]).unwrap();
-        db.execute("INSERT INTO messages VALUES ('saved-message',?1,1,'failed',?2)", params![original.id,json!({"id":"saved-message","companion_id":original.id,"role":"companion","status":"failed","text":"saved text","sequence":1,"resources":[{"uri":"saved-resource"}],"failure":{"code":"saved-failure","message":"saved error","details":{"reason":"saved-reason"}}}).to_string()]).unwrap();
+        db.execute("INSERT INTO messages VALUES ('saved-message',?1,1,'failed',?2)", params![original.id,json!({"id":"saved-message","companion_id":original.id,"role":"companion","status":"failed","text":"saved text","sequence":1,"failure":{"code":"saved-failure","message":"saved error","details":{"reason":"saved-reason"}}}).to_string()]).unwrap();
         db.execute("INSERT INTO plugin_records VALUES ('bindings','saved-binding',?1)", [json!({"id":"saved-binding","plugin_id":"reference","entrypoint":"behavior","revision":"saved-revision","companion_id":original.id,"configuration":{"mode":"saved"}}).to_string()]).unwrap();
         db.execute("INSERT INTO receipts VALUES ('saved-principal','saved-key','POST','saved-target','{}',503,?1)", [json!({"request_id":"saved-request","error":{"code":"saved-failure","message":"saved error","details":{"reason":"saved-reason"}}}).to_string()]).unwrap();
         migrations().to_latest(&mut db).unwrap();
@@ -172,10 +166,6 @@ mod companion_migration_tests {
         )
         .unwrap();
         assert_eq!(saved.text, "saved text");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&saved.resources[0].json).unwrap(),
-            json!({"uri":"saved-resource"})
-        );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved.failure.details.json).unwrap(),
             json!({"reason":"saved-reason"})

@@ -211,26 +211,15 @@ pub trait LlmProvider: Send + Sync {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
-    struct MinimalProvider;
-    impl LlmProvider for MinimalProvider {
-        fn policy(&self, _: &Connection) -> Result<Policy> {
-            Ok(Policy {
-                revision: "same".into(),
-                fingerprint: Value::Null,
-                destinations: vec!["https://example.test".into()],
-                requires_credentials: false,
-                environment_variable: None,
-            })
-        }
-        fn generate(
-            &self,
-            _: Invocation,
-        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>> {
-            Box::pin(async { Err(Error::unavailable()) })
-        }
-        fn models(&self, _: Invocation) -> BoxFuture<'_, Result<Vec<Model>>> {
-            Box::pin(async { Ok(vec![]) })
-        }
+    use crate::llm::test_support::TestProvider;
+    fn minimal_provider() -> TestProvider {
+        TestProvider(Policy {
+            revision: "same".into(),
+            fingerprint: Value::Null,
+            destinations: vec!["https://example.test".into()],
+            requires_credentials: false,
+            environment_variable: None,
+        })
     }
     #[test]
     fn host_scope_changes_even_when_an_adapter_omits_its_fingerprint() {
@@ -250,7 +239,7 @@ mod contract_tests {
             ..Default::default()
         };
         let policy = |connection: &Connection| {
-            ProviderBinding::resolve(Arc::new(MinimalProvider), connection)
+            ProviderBinding::resolve(Arc::new(minimal_provider()), connection)
                 .unwrap()
                 .policy()
                 .fingerprint
@@ -324,7 +313,7 @@ mod contract_tests {
             last_check: Default::default(),
             ..Default::default()
         };
-        let binding = ProviderBinding::resolve(Arc::new(MinimalProvider), &connection).unwrap();
+        let binding = ProviderBinding::resolve(Arc::new(minimal_provider()), &connection).unwrap();
         let original = Arc::new(Permission(AtomicBool::new(true)));
         let runtime = Arc::new(Permission(AtomicBool::new(true)));
         let (_cancel, receiver) = tokio::sync::watch::channel(false);

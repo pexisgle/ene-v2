@@ -157,33 +157,14 @@ pub(crate) fn explicit_tool_calling(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::test_support::TestProvider;
     use crate::{
         domain::{Connection, OperationKind},
-        llm::{Authorization, LlmProvider, Outbound, Policy, ProviderBinding},
+        llm::{Authorization, Outbound, Policy, ProviderBinding},
         ports::Result,
     };
     use futures_util::future::BoxFuture;
-    use futures_util::stream::BoxStream;
     use std::sync::Arc;
-
-    struct FakeProvider(Policy);
-    impl LlmProvider for FakeProvider {
-        fn policy(&self, _: &Connection) -> Result<Policy> {
-            Ok(self.0.clone())
-        }
-        fn generate(
-            &self,
-            _: crate::llm::Invocation,
-        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<crate::llm::Event>>>> {
-            Box::pin(async { Err(crate::domain::Error::unavailable()) })
-        }
-        fn models(
-            &self,
-            _: crate::llm::Invocation,
-        ) -> BoxFuture<'_, Result<Vec<crate::llm::Model>>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-    }
     struct Allow;
     impl Authorization for Allow {
         fn check(&self) -> BoxFuture<'_, Result<()>> {
@@ -216,7 +197,7 @@ mod tests {
             environment_variable: None,
         };
         let binding =
-            ProviderBinding::resolve(Arc::new(FakeProvider(policy)), &connection).unwrap();
+            ProviderBinding::resolve(Arc::new(TestProvider(policy)), &connection).unwrap();
         Arc::new(Outbound::new(
             "test".into(),
             connection,

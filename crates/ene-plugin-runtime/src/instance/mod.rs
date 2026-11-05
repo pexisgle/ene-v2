@@ -188,7 +188,7 @@ impl Instance {
     }
     pub async fn invoke(
         &mut self,
-        mut operation: Operation,
+        operation: Operation,
         services: Arc<dyn Services>,
         events: mpsc::Sender<Event>,
         cancel: &CancellationToken,
@@ -196,12 +196,6 @@ impl Instance {
         let entry = self.package.entry(&self.entrypoint)?;
         if !entry.provides.contains(&operation.extension()) {
             return Err(Error::Unsupported);
-        }
-        if let Operation::Speech {
-            input: SpeechInput::Synthesize { generation, .. },
-        } = &mut operation
-        {
-            *generation = self.generation;
         }
         let timeout = extension_timeout(operation.extension());
         tokio::select! { biased;

@@ -5,8 +5,10 @@ pub async fn post_grant(
     request: GrantInput,
 ) -> Result<(Outcome, Value), Error> {
     let consent = request.consent.as_option().ok_or_else(Error::invalid)?;
+    // Keep the historical receipt body shape so grants accepted by an older
+    // host still replay with the same key.
     let body = json!({
-        "companion_id": request.companion_id, "kind": request.kind,
+        "companion_id": request.companion_id, "kind": "data_transfer",
         "connection_id": request.connection_id, "destinations": request.destinations,
         "data_kinds": request.data_kinds, "purpose": request.purpose,
         "consent": { "settings_revision": consent.settings_revision, "provider_revision": consent.provider_revision },
@@ -35,9 +37,7 @@ pub async fn post_grant(
     {
         return Err(Error::new(ErrorKind::RevisionConflict));
     }
-    if request.kind != "data_transfer"
-        || !["conversation", "connection_check", "task", "memory"]
-            .contains(&request.purpose.as_str())
+    if !["conversation", "connection_check", "task", "memory"].contains(&request.purpose.as_str())
         || request
             .destinations
             .iter()
@@ -53,7 +53,6 @@ pub async fn post_grant(
     let grant = Grant {
         id: Uuid::new_v4().to_string(),
         companion_id: request.companion_id,
-        kind: request.kind,
         connection_id: request.connection_id,
         destinations: request.destinations,
         data_kinds: request.data_kinds,

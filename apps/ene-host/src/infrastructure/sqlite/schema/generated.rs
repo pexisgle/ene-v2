@@ -26,14 +26,6 @@ fn failure(value: &mut Value) -> Result<()> {
     }
     Ok(())
 }
-fn resources(value: &mut Value) -> Result<()> {
-    if let Some(items) = value.get_mut("resources").and_then(Value::as_array_mut) {
-        for item in items {
-            document(item)?;
-        }
-    }
-    Ok(())
-}
 pub(super) fn migrate(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
     // The seed already constructs generated messages. This transient marker
     // distinguishes fresh databases from old arbitrary JSON, even {"json":"1"}.
@@ -54,9 +46,8 @@ pub(super) fn migrate(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<
         for (id, body) in rows {
             let mut value: Value = serde_json::from_str(&body)?;
             if table == "companions" {
-                fields(&mut value, &["body", "voice", "availability"])?;
+                fields(&mut value, &["body", "availability"])?;
             } else {
-                resources(&mut value)?;
                 failure(&mut value)?;
             }
             tx.execute(
@@ -88,8 +79,6 @@ pub(super) fn migrate(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<
             .collect::<std::result::Result<_, _>>()?
     };
     for (principal, key, request, response) in receipts {
-        let mut request: Value = serde_json::from_str(&request)?;
-        resources(&mut request)?;
         let mut response: Value = serde_json::from_str(&response)?;
         failure(&mut response)?;
         fields(&mut response, &["capabilities"])?;
