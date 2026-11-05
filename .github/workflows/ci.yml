@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          cache-on-failure: false
+          cache-on-failure: true
           cache-key: v2
 
       - name: Linux checks
