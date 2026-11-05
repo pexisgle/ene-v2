@@ -1139,9 +1139,7 @@ fn acp_error(error: Error) -> AcpError {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
-    #[cfg(unix)]
     use ene_plugin::{ContentChunk, text_block};
 
     #[cfg(unix)]
