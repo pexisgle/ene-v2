@@ -35,10 +35,10 @@ direnvを使う場合は、リポジトリのルートで一度`direnv allow`を
 
 rustupと、そのOSでRustプログラムをリンクするための開発ツールを用意します。Linux（x86_64）ではClangとLLD、WindowsではMSVCのC++ビルドツールが必要です。
 
-リポジトリのルートでnightlyツールチェーンをインストールし、通常のCargoで検査できます。
+リポジトリのルートで固定バージョンのツールチェーンをインストールし、通常のCargoで検査できます。
 
 ```sh
-rustup toolchain install nightly-2026-10-07 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src --component rustc-codegen-cranelift-preview --target wasm32-unknown-unknown
+rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src --target wasm32-unknown-unknown
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -52,13 +52,12 @@ cargo run --locked -p ene-host
 
 ## ビルド高速化
 
-[Bevyのセットアップガイド](https://bevy.org/learn/quick-start/getting-started/setup/)に沿って、nightlyと次の設定を使います。
+[Bevyのセットアップガイド](https://bevy.org/learn/quick-start/getting-started/setup/)に沿って、次の設定を使います。
 
-- Linux（x86_64）ではClang＋LLDでリンクし、`-Zshare-generics=y`でジェネリックのインスタンス化を共有します。
-- 開発ビルドのワークスペース内クレートはCranelift、依存ライブラリはLLVMでコンパイルします。releaseビルドはLLVMを使います。
-- 開発時の最適化はワークスペース内クレートを`opt-level = 1`、依存ライブラリを`opt-level = 3`に設定しています。
+- Linux（x86_64）ではClang＋LLDでリンクします。
+- 開発時の最適化はワークスペース内クレートを`opt-level = 1`、依存ライブラリを`opt-level = 3`に設定しています。CIでは依存ライブラリも`opt-level = 0`で検査し、コンパイル時間を優先します。
 
-Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じnightlyを使うため、日付を`nightly-2026-10-07`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドの日付を揃えて変更します。
+Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じツールチェーンを使うため、バージョンを`1.99.1`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドのバージョンを揃えて変更します。
 
 Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設定に含めます。プラグイン実行にbubblewrapは不要です。
 
