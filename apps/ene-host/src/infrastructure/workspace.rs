@@ -19,7 +19,7 @@ fn no_symlinks(path: &std::path::Path) -> bool {
     path.ancestors().all(|part| {
         std::fs::symlink_metadata(part)
             .map(|metadata| !metadata.file_type().is_symlink())
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
@@ -217,6 +217,29 @@ mod tests {
                 .content
                 .is_empty()
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[test]
+    fn rejects_a_windows_file_symlink() {
+        let (temp, workspace) = workspace();
+        std::fs::write(temp.path().join("real"), "x").unwrap();
+        std::os::windows::fs::symlink_file(temp.path().join("real"), temp.path().join("link"))
+            .unwrap();
+        assert!(workspace.read("link", None, None).is_err());
+        assert!(
+            workspace
+                .directory(temp.path().join("link").to_str().unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_uninspectable_component_is_denied() {
+        let (temp, workspace) = workspace();
+        let missing = temp.path().join("missing-component").join("child");
+        assert!(workspace.directory(missing.to_str().unwrap()).is_err());
     }
 
     #[test]
