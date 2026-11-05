@@ -219,7 +219,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[cfg(windows)]
     #[test]
     fn rejects_a_windows_file_symlink() {
