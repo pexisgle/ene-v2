@@ -794,8 +794,11 @@ fn on_turn_settled(
             messages: take_new(conversation, &id.0, &mut emitted),
         });
     }
-    let messages = take_new(conversation, &id.0, &mut emitted);
+    let mut messages = take_new(conversation, &id.0, &mut emitted);
     let over_limit = turn_state.as_ref().is_some_and(|state| state.over_limit);
+    if over_limit {
+        messages.retain(|message| message.role != "assistant");
+    }
     let (state_name, failure) = if over_limit {
         (
             "failed",

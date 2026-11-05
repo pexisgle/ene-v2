@@ -45,6 +45,11 @@ jobs:
           cargo check --profile ci --locked -p ene-rpc --target wasm32-unknown-unknown --all-features
           cargo build --release --locked -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown
 
+      - name: Build test Wasm plugin
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release --locked -p ene-reference-wasm --target wasm32-unknown-unknown
+
       - name: Clippy and tests
         run: |
           cargo clippy --profile ci --workspace --all-targets --all-features --locked -- -D warnings
