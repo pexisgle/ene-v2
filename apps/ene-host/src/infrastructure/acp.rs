@@ -661,13 +661,23 @@ async fn on_update(
         fail_active(&mut state, "acp_invalid_update");
         return Ok(());
     }
-    if let Some(update) = map_update(notification.update) {
-        if state.updates.len() >= MAX_UPDATES {
-            fail_active(&mut state, "acp_update_limit");
-            return Ok(());
-        }
-        state.updates.push(update);
+    // ACP may send update kinds the harness does not record. Ignore them
+    // instead of counting them against the turn's update limit.
+    if !matches!(
+        &notification.update,
+        schema::SessionUpdate::AgentMessageChunk(_)
+            | schema::SessionUpdate::AgentThoughtChunk(_)
+            | schema::SessionUpdate::ToolCall(_)
+            | schema::SessionUpdate::ToolCallUpdate(_)
+            | schema::SessionUpdate::Plan(_)
+    ) {
+        return Ok(());
     }
+    if state.updates.len() >= MAX_UPDATES {
+        fail_active(&mut state, "acp_update_limit");
+        return Ok(());
+    }
+    state.updates.push(notification.update);
     Ok(())
 }
 
@@ -1036,17 +1046,6 @@ async fn on_release_terminal(
     }
     let _ = responder.respond(schema::ReleaseTerminalResponse::new());
     Ok(())
-}
-
-fn map_update(update: schema::SessionUpdate) -> Option<SessionUpdate> {
-    Some(match update {
-        schema::SessionUpdate::AgentMessageChunk(chunk) => SessionUpdate::AgentMessageChunk(chunk),
-        schema::SessionUpdate::AgentThoughtChunk(chunk) => SessionUpdate::AgentThoughtChunk(chunk),
-        schema::SessionUpdate::ToolCall(call) => SessionUpdate::ToolCall(call),
-        schema::SessionUpdate::ToolCallUpdate(update) => SessionUpdate::ToolCallUpdate(update),
-        schema::SessionUpdate::Plan(plan) => SessionUpdate::Plan(plan),
-        _ => return None,
-    })
 }
 
 async fn drain_stderr(mut stderr: tokio::process::ChildStderr, captured: Arc<Mutex<Vec<u8>>>) {

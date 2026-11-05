@@ -220,6 +220,8 @@ impl Session {
                 self.plan = Some(plan.clone());
                 Ok(())
             }
+            // ACP-only update kinds are not part of the saved harness journal.
+            _ => Ok(()),
         }
     }
     fn append_text(&mut self, chunk: &ene_plugin::ContentChunk) -> Result<()> {

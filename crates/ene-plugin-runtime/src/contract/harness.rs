@@ -52,6 +52,9 @@ fn validate_update(update: &SessionUpdate) -> Result<()> {
         SessionUpdate::ToolCall(call) => validate_tool_call(call),
         SessionUpdate::ToolCallUpdate(update) => validate_tool_update(update),
         SessionUpdate::Plan(plan) => validate_plan(plan),
+        // The schema type is wider than the harness contract; the other
+        // session-update kinds are not part of the guest ABI.
+        _ => Err(Error::Protocol),
     }
 }
 
@@ -282,5 +285,16 @@ mod tests {
         }))
         .unwrap();
         assert!(accept(&mut events, image).is_err());
+    }
+
+    #[test]
+    fn session_update_kinds_outside_the_harness_contract_are_rejected() {
+        let mut events = events();
+        let update: HarnessEvent = serde_json::from_value(serde_json::json!({
+            "type": "update",
+            "update": {"sessionUpdate": "available_commands_update", "availableCommands": []}
+        }))
+        .unwrap();
+        assert!(accept(&mut events, update).is_err());
     }
 }

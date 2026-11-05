@@ -296,7 +296,7 @@ mod tests {
             let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
             let mut app = App::new();
             app.add_plugins(AssetPlugin {
-                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Deny,
                 ..default()
             })
             .init_asset::<Shader>()

@@ -105,7 +105,7 @@ ACPバインディングの`terminal`ポリシーを有効にした場合だけ�
 
 タスク推論・接続確認のLLM実行は無効化・生成キャンセル・実行失敗で出力転送も終了し、受信が止まっていても実行管理枠を解放します。完了イベントなしで閉じたストリームは失敗として扱います。
 
-プラグイン契約はv4です。Harnessの入力・イベントはACP v1の語彙（`Start` / `Respond` / `Cancel`、`Update` / `RequestPermission` / `Stop`）で、Rust SDKの型は公式`agent-client-protocol-schema`を再exportします。受理するJSONは従来のv4と同じで、harnessが受け付ける`sessionUpdate`は`agent_message_chunk`・`agent_thought_chunk`・`tool_call`・`tool_call_update`・`plan`だけです。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。
+プラグイン契約はv4です。Harnessの入力・イベントはACP v1の語彙（`Start` / `Respond` / `Cancel`、`Update` / `RequestPermission` / `Stop`）で、Rust SDKの型は公式`agent-client-protocol-schema`を再exportし、`SessionUpdate`も独自型を作らず同schema型を直接使います。受理するJSONは従来のv4と同じで、harnessが受け付ける`sessionUpdate`は`agent_message_chunk`・`agent_thought_chunk`・`tool_call`・`tool_call_update`・`plan`だけで、それ以外はruntimeが拒否します。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。
 
 デスクトップUI、音声認識・合成、ファイル操作ワーカー、完成版の自律タスクループはこのホストの実装完了範囲に含みません。
 

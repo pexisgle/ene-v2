@@ -7,8 +7,8 @@
 pub use agent_client_protocol_schema::v1::{
     Content, ContentBlock, ContentChunk, MessageId, PermissionOption, PermissionOptionId,
     PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    RequestPermissionOutcome, SelectedPermissionOutcome, StopReason, TextContent, ToolCall,
-    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
+    RequestPermissionOutcome, SelectedPermissionOutcome, SessionUpdate, StopReason, TextContent,
+    ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind,
 };
 use serde::{Deserialize, Serialize};
@@ -16,17 +16,6 @@ use serde::{Deserialize, Serialize};
 /// ACP carries arbitrary content; the harness speaks text.
 pub fn text_block(text: impl Into<String>) -> ContentBlock {
     ContentBlock::Text(TextContent::new(text))
-}
-
-/// Different kinds of session updates the harness may stream.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "sessionUpdate", rename_all = "snake_case")]
-pub enum SessionUpdate {
-    AgentMessageChunk(ContentChunk),
-    AgentThoughtChunk(ContentChunk),
-    ToolCall(ToolCall),
-    ToolCallUpdate(ToolCallUpdate),
-    Plan(Plan),
 }
 
 pub type RequestId = String;
@@ -197,10 +186,12 @@ mod tests {
             }))
             .is_err()
         );
+        // The schema owns the update type; the runtime rejects variants outside
+        // the harness contract.
         assert!(
             serde_json::from_value::<HarnessEvent>(json!({
                 "type": "update",
-                "update": {"sessionUpdate": "available_commands_update", "availableCommands": []}
+                "update": {"sessionUpdate": "unknown_update"}
             }))
             .is_err()
         );
