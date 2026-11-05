@@ -472,7 +472,7 @@ impl HostApplication {
             .map(|chunk| chunk.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let query = query.chars().take(2000).collect::<String>();
+        let query = crate::truncate_chars(&query, 2000);
         let vector = self
             .embed_memory(companion, vec![query.clone()])
             .await

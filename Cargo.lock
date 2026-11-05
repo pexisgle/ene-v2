@@ -2990,6 +2990,7 @@ dependencies = [
  "tokio-rusqlite",
  "tokio-util",
  "tower",
+ "unicode-segmentation",
  "url",
  "uuid",
  "wat",

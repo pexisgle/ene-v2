@@ -44,12 +44,12 @@ fn compose_recall_fragment(
                 memory.id,
                 shared,
                 memory.revision,
-                memory.content.chars().take(600).collect::<String>()
+                crate::truncate_chars(&memory.content, 600)
             ));
             if !memory.description.is_empty() {
                 out.push_str(&format!(
                     "  説明: {}\n",
-                    memory.description.chars().take(300).collect::<String>()
+                    crate::truncate_chars(&memory.description, 300)
                 ));
             }
         }
@@ -392,7 +392,7 @@ impl HostApplication {
         let mut reason = None;
         let length = query.chars().count();
         if length > 4000 {
-            query = query.chars().take(4000).collect();
+            query = crate::truncate_chars(&query, 4000);
             reason = Some("query_truncated".to_owned());
         }
         if query.trim().is_empty() {
@@ -638,7 +638,7 @@ impl HostApplication {
             self.finish_local(&companion, local, &request_id).await;
             return;
         }
-        let query = text.chars().take(2000).collect::<String>();
+        let query = crate::truncate_chars(&text, 2000);
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             self.mind_recall(companion.clone(), query, 3, false, None, None),

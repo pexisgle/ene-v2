@@ -17,7 +17,7 @@ const OPEN: &str = "incomplete";
 pub(super) fn failure(code: &str, message: &str) -> w::Failure {
     w::Failure {
         code: code.into(),
-        message: message.chars().take(1024).collect(),
+        message: crate::truncate_chars(message, 1024),
         details: w::JsonDocument {
             json: "{}".into(),
             ..Default::default()

@@ -92,7 +92,7 @@ impl Controls {
                 ene_rpc::PersistenceFailure {
                     code: "storage_error".into(),
                     message: reason
-                        .map(|reason| reason.chars().take(1024).collect())
+                        .map(|reason| crate::truncate_chars(&reason, 1024))
                         .unwrap_or_default(),
                     ..Default::default()
                 },

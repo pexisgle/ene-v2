@@ -1036,7 +1036,7 @@ fn report_log_failure(log: Res<SessionLog>, mut reported: Local<bool>, events: R
     };
     *reported = true;
     events.send(Event::StorageFailed {
-        reason: failure.chars().take(1024).collect(),
+        reason: crate::truncate_chars(&failure, 1024),
     });
 }
 
