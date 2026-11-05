@@ -44,8 +44,15 @@ opt-level = 1
 debug = "line-tables-only"
 incremental = false
 
-# Keep dependency runtime performance while reducing debug/link work.
-# The test profile inherits these settings from dev.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
+
+[profile.ci]
+inherits = "dev"
+opt-level = 0
+debug = "line-tables-only"
+
+[profile.ci.package."*"]
+opt-level = 0
 debug = false
