@@ -94,6 +94,7 @@ impl Manager {
                     .filter(|policy| policy.enabled)
                     .map(|policy| crate::infrastructure::acp::TerminalLimits {
                         allowed: policy.allowed_commands.clone(),
+                        allowed_env: policy.allowed_env.clone(),
                         max_seconds: policy.max_seconds as u64,
                         max_output: policy.max_output_bytes as usize,
                     });

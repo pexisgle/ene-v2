@@ -186,12 +186,15 @@ message Plugin {
 message Plugins { repeated Plugin items = 1; }
 message EnablePluginRequest { string id = 1; bool enabled = 2; string revision = 3; }
 // Explicit opt-in for the ACP terminal capability. Commands are executed
-// directly (no shell) as the host user; there is no sandbox.
+// directly (no shell) as the host user; there is no sandbox. The terminal
+// request may add only the environment names listed here: an empty list passes
+// no request-supplied environment at all.
 message TerminalPolicy {
   bool enabled = 1;
   repeated string allowed_commands = 2;
   uint32 max_seconds = 3;
   uint32 max_output_bytes = 4;
+  repeated string allowed_env = 5;
 }
 message PluginBinding {
   string id = 1; string plugin_id = 2; string entrypoint = 3; string revision = 4;

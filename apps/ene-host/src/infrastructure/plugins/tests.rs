@@ -2782,7 +2782,24 @@ async fn an_acp_agent_runs_a_permission_gated_terminal_command() {
     })
     .into();
     assert_eq!(
-        manager.bind(bad_policy).await.unwrap_err().kind,
+        manager.bind(bad_policy.clone()).await.unwrap_err().kind,
+        ErrorKind::InvalidRequest
+    );
+
+    // A malformed environment name is refused like any other invalid policy.
+    let mut bad_env = bad_policy;
+    bad_env.id = "terminal-bad-env".into();
+    bad_env.terminal = Some(TerminalPolicy {
+        enabled: true,
+        allowed_commands: vec!["echo".into()],
+        allowed_env: vec!["A=B".into()],
+        max_seconds: 5,
+        max_output_bytes: 1024,
+        ..Default::default()
+    })
+    .into();
+    assert_eq!(
+        manager.bind(bad_env).await.unwrap_err().kind,
         ErrorKind::InvalidRequest
     );
     manager.shutdown().await.unwrap();

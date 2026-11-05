@@ -77,6 +77,8 @@ impl Manager {
                 || policy.max_seconds > 300
                 || policy.max_output_bytes == 0
                 || policy.max_output_bytes > 1024 * 1024
+                || policy.allowed_env.len() > 64
+                || policy.allowed_env.iter().any(|name| !env_name(name))
             {
                 return Err(Error::invalid());
             }
@@ -111,6 +113,16 @@ impl Manager {
             .map_err(storage_failure)?;
         Ok(())
     }
+}
+
+/// A portable environment variable name: the terminal request may set only
+/// names the binding lists, so the name itself must be unambiguous.
+fn env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        })
 }
 
 /// Canonical absolute directory; the filesystem root is not a workspace.

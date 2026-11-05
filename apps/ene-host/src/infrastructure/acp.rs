@@ -62,6 +62,10 @@ pub(crate) struct AcpConfig {
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalLimits {
     pub(crate) allowed: Vec<String>,
+    /// Additional environment names the terminal request may set. Anything
+    /// else is refused, so a command cannot inherit an unlisted interpreter
+    /// hook such as `PYTHONSTARTUP` or `NODE_OPTIONS`.
+    pub(crate) allowed_env: Vec<String>,
     pub(crate) max_seconds: u64,
     pub(crate) max_output: usize,
 }
@@ -828,7 +832,7 @@ async fn on_create_terminal(
             || variable.name.len() > 256
             || variable.name.contains(['=', '\0'])
             || variable.name.chars().any(char::is_control)
-            || !environment_allowed(&variable.name)
+            || !environment_allowed(policy, &variable.name)
         {
             let _ = responder.respond_with_error(AcpError::new(
                 ErrorCode::INVALID_PARAMS,
@@ -1077,18 +1081,11 @@ fn resolve_executable(policy: &TerminalLimits, command: &str) -> Result<PathBuf,
     which::which(command).map_err(|_| Error::new(ErrorKind::Unavailable))
 }
 
-/// Variables that can redirect executable or loader resolution must not be
-/// supplied by the agent; the host's allowlist is the trust boundary.
-fn environment_allowed(name: &str) -> bool {
-    let name = name.to_ascii_uppercase();
-    !(name == "PATH"
-        || name == "PATHEXT"
-        || name == "COMSPEC"
-        || name == "SYSTEMROOT"
-        || name == "WINDIR"
-        || name == "GLIBC_TUNABLES"
-        || name.starts_with("LD_")
-        || name.starts_with("DYLD_"))
+/// Only names the binding lists may be set by the terminal request. A
+/// denylist cannot enumerate every interpreter hook (`PYTHONSTARTUP`,
+/// `NODE_OPTIONS`, `BASH_ENV`, ...), so the unlisted default is refusal.
+fn environment_allowed(policy: &TerminalLimits, name: &str) -> bool {
+    policy.allowed_env.iter().any(|allowed| allowed == name)
 }
 
 fn tap(
@@ -1366,6 +1363,7 @@ for line in sys.stdin:
             &terminal_kill_agent_script(),
             Some(TerminalLimits {
                 allowed: vec!["sleep".into()],
+                allowed_env: vec![],
                 max_seconds: 10,
                 max_output: 64,
             }),
@@ -1444,6 +1442,7 @@ for line in sys.stdin:
             &process_group_agent_script(),
             Some(TerminalLimits {
                 allowed: vec!["sh".into()],
+                allowed_env: vec![],
                 max_seconds: 10,
                 max_output: 4096,
             }),
@@ -1561,6 +1560,7 @@ for line in sys.stdin:
             &unused_approval_agent_script(),
             Some(TerminalLimits {
                 allowed: vec!["touch".into()],
+                allowed_env: vec![],
                 max_seconds: 5,
                 max_output: 4096,
             }),
@@ -1637,6 +1637,7 @@ for line in sys.stdin:
             &path_override_agent_script(),
             Some(TerminalLimits {
                 allowed: vec!["sh".into()],
+                allowed_env: vec![],
                 max_seconds: 5,
                 max_output: 4096,
             }),
@@ -1661,6 +1662,80 @@ for line in sys.stdin:
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "rejected")
         )));
         assert!(!temp.path().join("pwned").exists());
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    fn allowed_env_agent_script() -> String {
+        r#"
+import json, sys
+
+session = "s1"
+prompt_id = None
+terminal_id = None
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "run"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create", "params": {"sessionId": session, "command": "sh", "args": ["-c", "echo $MARKER"], "env": [{"name": "MARKER", "value": "passed"}]}})
+    elif mid == 901:
+        terminal_id = msg["result"]["terminalId"]
+        send({"jsonrpc": "2.0", "id": 902, "method": "terminal/wait_for_exit", "params": {"sessionId": session, "terminalId": terminal_id}})
+    elif mid == 902:
+        send({"jsonrpc": "2.0", "id": 903, "method": "terminal/output", "params": {"sessionId": session, "terminalId": terminal_id}})
+    elif mid == 903:
+        text = "passed" if "passed" in msg["result"]["output"] else "missing"
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_allowed_environment_name_reaches_the_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = start_agent(
+            temp.path(),
+            &allowed_env_agent_script(),
+            Some(TerminalLimits {
+                allowed: vec!["sh".into()],
+                allowed_env: vec!["MARKER".into()],
+                max_seconds: 5,
+                max_output: 4096,
+            }),
+        )
+        .await;
+        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let turn = session
+            .respond(
+                &waiting.request_id,
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
+            )
+            .await
+            .unwrap();
+        assert!(turn.updates.iter().any(|update| matches!(
+            update,
+            SessionUpdate::AgentMessageChunk(chunk)
+                if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "passed")
+        )));
         session.kill().await;
     }
 
@@ -1743,6 +1818,7 @@ for line in sys.stdin:
             &natural_exit_agent_script(),
             Some(TerminalLimits {
                 allowed: vec!["sh".into()],
+                allowed_env: vec![],
                 max_seconds: 5,
                 max_output: 4096,
             }),
@@ -1789,6 +1865,7 @@ for line in sys.stdin:
             &script,
             Some(TerminalLimits {
                 allowed: vec!["sh".into()],
+                allowed_env: vec![],
                 max_seconds: 10,
                 max_output: 4096,
             }),
