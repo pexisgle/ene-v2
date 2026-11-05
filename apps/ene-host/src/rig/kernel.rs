@@ -794,45 +794,31 @@ fn on_turn_settled(
             messages: take_new(conversation, &id.0, &mut emitted),
         });
     }
-    let mut messages = take_new(conversation, &id.0, &mut emitted);
-    let over_limit = turn_state.as_ref().is_some_and(|state| state.over_limit);
-    if over_limit {
-        messages.retain(|message| message.role != "assistant");
-    }
-    let (state_name, failure) = if over_limit {
-        (
-            "failed",
-            Some(messages::failure(
-                "output_limit",
-                "返答が出力上限を超えたため破棄しました",
-            )),
-        )
-    } else {
-        match &outcome {
-            TurnOutcome::Answered(_) => ("answered", None),
-            TurnOutcome::Failed(why) => {
-                let (code, message) = if why == "output_limit" {
-                    ("output_limit", "返答が出力上限を超えたため破棄しました")
-                } else {
-                    ("generation_failed", why.as_str())
-                };
-                ("failed", Some(messages::failure(code, message)))
-            }
-            TurnOutcome::Stopped(reason) => (
-                "stopped",
-                Some(messages::failure(
-                    "cancelled",
-                    reason
-                        .as_deref()
-                        .unwrap_or("停止操作により生成を停止しました"),
-                )),
-            ),
+    let messages = take_new(conversation, &id.0, &mut emitted);
+    let (state_name, failure) = match &outcome {
+        TurnOutcome::Answered(_) => ("answered", None),
+        TurnOutcome::Failed(why) => {
+            eprintln!("[settle-failed] {why:?}");
+            let (code, message) = if why == "output_limit" {
+                ("output_limit", "返答が出力上限を超えたため破棄しました")
+            } else {
+                ("generation_failed", why.as_str())
+            };
+            ("failed", Some(messages::failure(code, message)))
         }
+        TurnOutcome::Stopped(reason) => (
+            "stopped",
+            Some(messages::failure(
+                "cancelled",
+                reason
+                    .as_deref()
+                    .unwrap_or("停止操作により生成を停止しました"),
+            )),
+        ),
     };
-    let message_id = (!over_limit
-        && matches!(outcome, TurnOutcome::Answered(_) | TurnOutcome::Stopped(_)))
-    .then(|| messages::reply_entry(conversation, turn.start))
-    .flatten();
+    let message_id = matches!(outcome, TurnOutcome::Answered(_) | TurnOutcome::Stopped(_))
+        .then(|| messages::reply_entry(conversation, turn.start))
+        .flatten();
     events.send(Event::TurnFinished {
         companion: id.0.clone(),
         stream_id,

@@ -1273,6 +1273,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_limit_accumulates_small_chunks_and_returns_the_input() {
+        let limit = crate::domain::OperationKind::Conversation
+            .spec()
+            .output_bytes;
+        let chunk = "x".repeat(limit / 2 + 1);
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, mut received) = start(temp.path().join("rig"));
+        runtime
+            .connect(
+                "companion".into(),
+                "簡潔に答える。".into(),
+                connection(vec![vec![
+                    MockStreamEvent::text(chunk.clone()),
+                    MockStreamEvent::text(chunk),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ]]),
+                false,
+            )
+            .unwrap();
+        runtime
+            .deliver(
+                "companion".into(),
+                "累積で長すぎる返答".into(),
+                "request-1".into(),
+            )
+            .await
+            .unwrap();
+        let mut recalled = None;
+        let finished = loop {
+            match next(&mut received).await {
+                Event::Recalled { text, .. } => recalled = Some(text),
+                Event::TurnFinished {
+                    state,
+                    failure,
+                    messages,
+                    ..
+                } => break (state, failure, messages),
+                _ => {}
+            }
+        };
+        assert_eq!(finished.0, "failed");
+        assert_eq!(
+            finished.1.as_ref().map(|failure| failure.code.as_str()),
+            Some("output_limit")
+        );
+        assert!(finished.2.iter().all(|message| message.role != "assistant"));
+        if recalled.is_none() {
+            recalled = loop {
+                match tokio::time::timeout(Duration::from_secs(2), received.recv()).await {
+                    Ok(Some(Event::Recalled { text, .. })) => break Some(text),
+                    Ok(Some(Event::StorageFailed { reason } | Event::Fatal { reason })) => {
+                        panic!("kernel failed: {reason}")
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break None,
+                }
+            };
+        }
+        assert_eq!(recalled.as_deref(), Some("累積で長すぎる返答"));
+        let history = runtime.history("companion".into(), None, 50).await.unwrap();
+        assert!(history.items.is_empty());
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_exact_output_limit_reply_is_answered() {
+        let limit = crate::domain::OperationKind::Conversation
+            .spec()
+            .output_bytes;
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, mut received) = start(temp.path().join("rig"));
+        runtime
+            .connect(
+                "companion".into(),
+                "簡潔に答える。".into(),
+                connection(vec![vec![
+                    MockStreamEvent::text("x".repeat(limit)),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ]]),
+                false,
+            )
+            .unwrap();
+        runtime
+            .deliver(
+                "companion".into(),
+                "上限ちょうど".into(),
+                "request-1".into(),
+            )
+            .await
+            .unwrap();
+        let finished = loop {
+            if let Event::TurnFinished {
+                state,
+                failure,
+                messages,
+                ..
+            } = next(&mut received).await
+            {
+                break (state, failure, messages);
+            }
+        };
+        assert_eq!(finished.0, "answered");
+        assert!(finished.1.is_none());
+        assert!(finished.2.iter().any(|message| message.role == "assistant"));
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_result_arriving_before_the_model_request_is_not_lost() {
         let temp = tempfile::tempdir().unwrap();
         let model = MockCompletionModel::from_stream_turns([vec![

@@ -491,7 +491,15 @@ async fn a_finished_enable_cannot_persist_over_a_later_disable() {
                 .await
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The disable has entered the enable/disable path before we release the
+    // old enable's blocked save. This is a control point, not a time guess.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while manager.enable_entries.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the later disable did not start");
     assert_eq!(state(), "ready", "a later disable must wait for the commit");
     {
         let (lock, condvar) = &*release;

@@ -59,6 +59,8 @@ pub struct Manager {
     inference: Arc<std::sync::OnceLock<Arc<dyn TaskInference>>>,
     // External ACP agent processes keyed by binding id.
     acp: Arc<std::sync::Mutex<BTreeMap<String, Arc<sessions::AcpSlot>>>>,
+    #[cfg(test)]
+    pub(crate) enable_entries: Arc<std::sync::atomic::AtomicUsize>,
 }
 pub(crate) fn failure(error: impl std::fmt::Display) -> Error {
     eprintln!("ene-host plugin: {error:#}");
@@ -114,6 +116,8 @@ impl Manager {
             invocation_slots: Arc::new(tokio::sync::Semaphore::new(MAX_INSTANCES)),
             inference: Arc::default(),
             acp: Arc::default(),
+            #[cfg(test)]
+            enable_entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         // Malformed packages are reported by reload; no code is executed during discovery.
         if manager.scan().is_err() {

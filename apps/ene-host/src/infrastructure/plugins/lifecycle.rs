@@ -12,6 +12,8 @@ use std::{collections::BTreeMap, sync::atomic::Ordering};
 
 impl Manager {
     pub async fn enable(&self, id: String, input: EnablePluginRequest) -> Result<()> {
+        #[cfg(test)]
+        self.enable_entries.fetch_add(1, Ordering::SeqCst);
         if input.enabled {
             let package = self
                 .entries
