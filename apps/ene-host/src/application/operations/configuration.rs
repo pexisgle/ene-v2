@@ -264,32 +264,46 @@ fn document_change(
     }
 }
 
-fn document_object(
+#[derive(serde::Deserialize)]
+struct BodyDocument {
+    format: String,
+    environment_id: String,
+    model: String,
+}
+
+#[derive(serde::Deserialize)]
+struct VoiceDocument {
+    connection_id: String,
+    voice_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct VoiceConnection {
+    connection_id: String,
+}
+
+fn parse_document<T: serde::de::DeserializeOwned>(
     document: &ene_rpc::JsonDocument,
-) -> Result<serde_json::Map<String, Value>, Error> {
+) -> Result<T, Error> {
     serde_json::from_str(&document.json).map_err(|_| Error::invalid())
 }
 
-fn reference<'a>(
-    object: &'a serde_json::Map<String, Value>,
-    field: &str,
-) -> Result<&'a str, Error> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_control))
-        .ok_or_else(Error::invalid)
+fn non_blank(value: &str) -> Result<&str, Error> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        return Err(Error::invalid());
+    }
+    Ok(value)
 }
 
 fn validate_body(document: &ene_rpc::JsonDocument, environment: &str) -> Result<(), Error> {
-    let object = document_object(document)?;
-    if reference(&object, "format")? != "vrm1" {
+    let body: BodyDocument = parse_document(document)?;
+    if body.format != "vrm1" {
         return Err(Error::new(ErrorKind::UnsupportedCapability));
     }
-    if reference(&object, "environment_id")? != environment {
+    if body.environment_id != environment {
         return Err(Error::new(ErrorKind::StateConflict));
     }
-    reference(&object, "model")?;
+    non_blank(&body.model)?;
     Ok(())
 }
 
@@ -297,9 +311,9 @@ fn validate_voice(
     document: &ene_rpc::JsonDocument,
     configuration: &Configuration,
 ) -> Result<(), Error> {
-    let object = document_object(document)?;
-    let id = reference(&object, "connection_id")?;
-    reference(&object, "voice_id")?;
+    let voice: VoiceDocument = parse_document(document)?;
+    let id = non_blank(&voice.connection_id)?;
+    non_blank(&voice.voice_id)?;
     let connection =
         rules::connection(configuration, id).ok_or_else(|| Error::new(ErrorKind::StateConflict))?;
     if connection.kind != "tts" {
@@ -309,9 +323,8 @@ fn validate_voice(
 }
 
 fn voice_connection(companion: &Companion) -> Option<String> {
-    let document = companion.voice.as_option()?;
-    let object = document_object(document).ok()?;
-    reference(&object, "connection_id").ok().map(str::to_owned)
+    let voice: VoiceConnection = parse_document(companion.voice.as_option()?).ok()?;
+    non_blank(&voice.connection_id).ok().map(str::to_owned)
 }
 
 #[cfg(test)]
