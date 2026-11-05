@@ -24,7 +24,7 @@ fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| path.to_path_buf())
         };
-        return strip(left) == strip(right);
+        strip(left) == strip(right)
     }
     #[cfg(not(windows))]
     {
