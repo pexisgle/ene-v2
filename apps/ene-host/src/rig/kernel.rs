@@ -826,9 +826,10 @@ fn on_turn_settled(
             ),
         }
     };
-    let message_id = matches!(outcome, TurnOutcome::Answered(_) | TurnOutcome::Stopped(_))
-        .then(|| messages::reply_entry(conversation, turn.start))
-        .flatten();
+    let message_id = (!over_limit
+        && matches!(outcome, TurnOutcome::Answered(_) | TurnOutcome::Stopped(_)))
+    .then(|| messages::reply_entry(conversation, turn.start))
+    .flatten();
     events.send(Event::TurnFinished {
         companion: id.0.clone(),
         stream_id,
