@@ -101,11 +101,11 @@ ACPバインディングの`terminal`ポリシーを有効にした場合だけ�
 
 ### 外部ACPエージェント
 
-`target: "acp"` の entrypoint を持つパッケージは、`command` の子プロセスをACPエージェントとして起動します。シェルを介さず、環境変数は許可リスト（`PATH`・`HOME`・`USERPROFILE`・`LANG`・`LC_ALL`・`TERM`・`SYSTEMROOT`）だけを渡し、ホストの資格情報は渡しません。`workspace_root` が必須で、fs client capability はそのルートに限定し、terminal はバインディングのポリシーが有効な場合だけ advertise します。`initialize`・`session/new`・`session/prompt`・`session/update`・`session/request_permission` を共通ジャーナルへ写像し、`GetHarness` と通知はWasmハーネスと共通です。Cancel・無効化・再バインド・終了ではプロセスを停止して終端化し、initialize等の失敗は `acp_failed` としてタスクを終了します。旧ホストはACP entrypointを無効なmanifestとして拒否します。
+`target: "acp"` の entrypoint を持つパッケージは、`command` の子プロセスをACPエージェントとして起動します。シェルを介さず、環境変数は許可リスト（`PATH`・`HOME`・`USERPROFILE`・`LANG`・`LC_ALL`・`TERM`・`SYSTEMROOT`）だけを渡し、ホストの資格情報は渡しません。`workspace_root` が必須で、fs client capability はそのルートに限定し、terminal はバインディングのポリシーが有効な場合だけ advertise します。ACP v1のJSON-RPC・要求ID・応答対応付けは公式SDK（`agent-client-protocol 5.0.0`）へ委譲し、ホストは子プロセス、workspace、terminal権限、上限、ターン状態だけを持ちます。`initialize`・`session/new`・`session/prompt`・`session/update`・`session/request_permission` を共通ジャーナルへ写像し、`GetHarness` と通知はWasmハーネスと共通です。未知の`stopReason`は`end_turn`ではなく `acp_failed` として失敗し、`terminal/wait_for_exit` 中でも `terminal/kill`/`release` は処理されます。Cancel・無効化・再バインド・終了ではプロセスを停止して終端化し、initialize等の失敗は `acp_failed` としてタスクを終了します。旧ホストはACP entrypointを無効なmanifestとして拒否します。
 
 タスク推論・接続確認のLLM実行は無効化・生成キャンセル・実行失敗で出力転送も終了し、受信が止まっていても実行管理枠を解放します。完了イベントなしで閉じたストリームは失敗として扱います。
 
-プラグイン契約はv4です。Harnessの入力・イベントはACP v1の語彙（`Start` / `Respond` / `Cancel`、`Update` / `RequestPermission` / `Stop`）に変わりました。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。
+プラグイン契約はv4です。Harnessの入力・イベントはACP v1の語彙（`Start` / `Respond` / `Cancel`、`Update` / `RequestPermission` / `Stop`）で、Rust SDKの型は公式`agent-client-protocol-schema`を再exportします。受理するJSONは従来のv4と同じで、harnessが受け付ける`sessionUpdate`は`agent_message_chunk`・`agent_thought_chunk`・`tool_call`・`tool_call_update`・`plan`だけです。Characterのバインドには `device_id` と `companion_id` を明示し、呼び出しと返された操作の対象が一致することを検証します。旧バインドにはデバイスを自動補完せず、再設定が必要です。
 
 デスクトップUI、音声認識・合成、ファイル操作ワーカー、完成版の自律タスクループはこのホストの実装完了範囲に含みません。
 

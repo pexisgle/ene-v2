@@ -5,9 +5,8 @@ use crate::{
     ports::Result,
 };
 use bytes::Bytes;
-use std::future::Future;
-use std::pin::pin;
 use std::{sync::Arc, time::Duration};
+use tokio_util::context::TokioContext;
 
 pub const MAX_REQUEST_BYTES: usize = 512 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -81,15 +80,18 @@ impl AuthorizedTransport {
         let client = self.client.clone();
         let timeout = self.timeout;
         let runtime = self.runtime.clone();
-        let response = poll_in(runtime, async move {
-            client
-                .request(parts.method, parts.uri.to_string())
-                .timeout(timeout)
-                .headers(parts.headers)
-                .body(body)
-                .send()
-                .await
-        })
+        let response = TokioContext::new(
+            async move {
+                client
+                    .request(parts.method, parts.uri.to_string())
+                    .timeout(timeout)
+                    .headers(parts.headers)
+                    .body(body)
+                    .send()
+                    .await
+            },
+            runtime,
+        )
         .await
         .map_err(|_| external())?;
         if response.status().is_redirection() {
@@ -111,16 +113,6 @@ impl AuthorizedTransport {
     }
 }
 
-/// Polls `future` with `runtime` entered, wherever the caller's executor runs.
-async fn poll_in<T>(runtime: tokio::runtime::Handle, future: impl Future<Output = T>) -> T {
-    let mut future = pin!(future);
-    std::future::poll_fn(|cx| {
-        let _entered = runtime.enter();
-        future.as_mut().poll(cx)
-    })
-    .await
-}
-
 pub struct Response {
     response: reqwest::Response,
     outbound: Arc<Outbound>,
@@ -137,7 +129,7 @@ impl Response {
     }
     pub async fn chunk(&mut self) -> Result<Option<Bytes>> {
         self.outbound.authorization().check().await?;
-        let chunk = poll_in(self.runtime.clone(), self.response.chunk())
+        let chunk = TokioContext::new(self.response.chunk(), self.runtime.clone())
             .await
             .map_err(|_| external())?;
         self.outbound.authorization().check().await?;

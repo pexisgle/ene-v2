@@ -34,29 +34,11 @@ fn call_options() -> CallOptions {
 /// leave this map except into the credential RPC.
 fn dotenv() -> BTreeMap<String, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    let mut values = BTreeMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .or_else(|| {
-                value
-                    .strip_prefix('\'')
-                    .and_then(|value| value.strip_suffix('\''))
-            })
-            .unwrap_or(value);
-        values.insert(key.trim().to_owned(), value.to_owned());
-    }
-    values
+    dotenvy::from_path_iter(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
 }
 
 mod common;

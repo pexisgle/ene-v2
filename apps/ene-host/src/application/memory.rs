@@ -805,26 +805,12 @@ struct ConsolidationOutput {
 }
 
 fn parse_consolidation(text: &str) -> std::result::Result<ConsolidationOutput, ()> {
-    let value: serde_json::Value = serde_json::from_str(text.trim()).map_err(|_| ())?;
-    let object = value.as_object().ok_or(())?;
-    // An empty or partial object is not an explicit no-change decision.
-    if !object.contains_key("memories") || !object.contains_key("reason") {
+    let output: ConsolidationOutput = serde_json::from_str(text.trim()).map_err(|_| ())?;
+    // An empty reason is not an explicit no-change decision.
+    if output.reason.is_empty() {
         return Err(());
     }
-    if object
-        .keys()
-        .any(|key| key != "memories" && key != "reason")
-    {
-        return Err(());
-    }
-    if object
-        .get("reason")
-        .and_then(serde_json::Value::as_str)
-        .is_none_or(str::is_empty)
-    {
-        return Err(());
-    }
-    serde_json::from_value(value).map_err(|_| ())
+    Ok(output)
 }
 
 fn consolidation_operation_id(

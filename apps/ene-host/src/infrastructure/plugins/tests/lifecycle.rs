@@ -16,15 +16,15 @@ async fn invoke(manager: &Manager, input: HarnessInput) -> Result<PluginResult> 
 
 fn start(prompt: &str) -> HarnessInput {
     HarnessInput::Start {
-        prompt: vec![ene_plugin::ContentBlock::text(prompt)],
+        prompt: vec![ene_plugin::text_block(prompt)],
     }
 }
 fn allow() -> HarnessInput {
     HarnessInput::Respond {
         request_id: "permission-1".into(),
-        outcome: ene_plugin::RequestPermissionOutcome::Selected {
-            option_id: "allow".into(),
-        },
+        outcome: ene_plugin::RequestPermissionOutcome::Selected(
+            ene_plugin::SelectedPermissionOutcome::new("allow"),
+        ),
     }
 }
 
@@ -128,9 +128,9 @@ async fn rejected_harness_inputs_preserve_the_pending_guest_and_journal() {
         (
             HarnessInput::Respond {
                 request_id: "permission-1".into(),
-                outcome: ene_plugin::RequestPermissionOutcome::Selected {
-                    option_id: "unknown".into(),
-                },
+                outcome: ene_plugin::RequestPermissionOutcome::Selected(
+                    ene_plugin::SelectedPermissionOutcome::new("unknown"),
+                ),
             },
             ErrorKind::InvalidRequest,
         ),
@@ -634,11 +634,7 @@ async fn respond_without_a_live_guest_is_rejected() {
     manager.bind(binding.clone()).await.unwrap();
     let mut journal = HarnessSession::start("orphan");
     let call = HarnessEvent::Update {
-        update: SessionUpdate::ToolCall(ene_plugin::ToolCall {
-            tool_call_id: "call-1".into(),
-            title: "step".into(),
-            ..Default::default()
-        }),
+        update: SessionUpdate::ToolCall(ene_plugin::ToolCall::new("call-1", "step")),
     };
     manager
         .harness_apply(&binding.id, &mut journal, &call)
@@ -646,15 +642,15 @@ async fn respond_without_a_live_guest_is_rejected() {
         .unwrap();
     let permission = HarnessEvent::RequestPermission {
         request_id: "permission-1".into(),
-        tool_call: ene_plugin::ToolCallUpdate {
-            tool_call_id: "call-1".into(),
-            ..Default::default()
-        },
-        options: vec![ene_plugin::PermissionOption {
-            option_id: "allow".into(),
-            name: "Allow".into(),
-            kind: ene_plugin::PermissionOptionKind::AllowOnce,
-        }],
+        tool_call: ene_plugin::ToolCallUpdate::new(
+            "call-1",
+            ene_plugin::ToolCallUpdateFields::new(),
+        ),
+        options: vec![ene_plugin::PermissionOption::new(
+            "allow",
+            "Allow",
+            ene_plugin::PermissionOptionKind::AllowOnce,
+        )],
     };
     manager
         .harness_apply(&binding.id, &mut journal, &permission)
@@ -688,9 +684,9 @@ async fn a_denied_permission_fails_the_task() {
         &manager,
         HarnessInput::Respond {
             request_id: "permission-1".into(),
-            outcome: ene_plugin::RequestPermissionOutcome::Selected {
-                option_id: "deny".into(),
-            },
+            outcome: ene_plugin::RequestPermissionOutcome::Selected(
+                ene_plugin::SelectedPermissionOutcome::new("deny"),
+            ),
         },
     )
     .await

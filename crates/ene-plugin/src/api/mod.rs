@@ -10,10 +10,11 @@ mod wire;
 
 pub use character::{CharacterAction, CharacterEvent, CharacterTarget};
 pub use harness::{
-    ContentBlock, ContentChunk, HarnessEvent, HarnessInput, MessageId, PermissionOption,
+    Content, ContentBlock, ContentChunk, HarnessEvent, HarnessInput, MessageId, PermissionOption,
     PermissionOptionId, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    RequestId, RequestPermissionOutcome, SessionUpdate, StopReason, TextContent, ToolCall,
-    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind,
+    RequestId, RequestPermissionOutcome, SelectedPermissionOutcome, SessionUpdate, StopReason,
+    TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, text_block,
 };
 pub use http::{HttpChunk, HttpRequest};
 pub use llm::{GenerationRequest, LlmCapabilities, ModelResponse, ToolDefinition};

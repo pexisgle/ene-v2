@@ -112,23 +112,23 @@ impl Session {
                 tool_call,
                 options,
             } => {
-                if self.pending.is_some() || tool_call.tool_call_id.is_empty() {
+                if self.pending.is_some() || tool_call.tool_call_id.0.is_empty() {
                     return Err(invalid());
                 }
                 // ACP carries display details on the request itself; an agent
                 // is not required to announce the call first.
-                if !self.tool_calls.contains_key(&tool_call.tool_call_id) {
-                    self.tool_calls.insert(
-                        tool_call.tool_call_id.clone(),
-                        ToolCall {
-                            tool_call_id: tool_call.tool_call_id.clone(),
-                            title: tool_call.title.clone().unwrap_or_else(|| "tool".into()),
-                            kind: tool_call.kind,
-                            status: tool_call.status.unwrap_or_default(),
-                            ..Default::default()
-                        },
-                    );
-                }
+                self.tool_calls
+                    .entry(tool_call.tool_call_id.to_string())
+                    .or_insert_with(|| {
+                        ToolCall::new(
+                            tool_call.tool_call_id.clone(),
+                            tool_call
+                                .fields
+                                .title
+                                .clone()
+                                .unwrap_or_else(|| "tool".into()),
+                        )
+                    });
                 self.patch_tool_call(tool_call)?;
                 self.pending = Some(PendingPermission {
                     request_id: request_id.clone(),
@@ -157,11 +157,11 @@ impl Session {
         if pending.request_id != request_id {
             return Err(conflict());
         }
-        if let RequestPermissionOutcome::Selected { option_id } = outcome
+        if let RequestPermissionOutcome::Selected(selected) = outcome
             && !pending
                 .options
                 .iter()
-                .any(|option| &option.option_id == option_id)
+                .any(|option| option.option_id == selected.option_id)
         {
             return Err(invalid());
         }
@@ -197,7 +197,7 @@ impl Session {
         self.status = match stop_reason {
             StopReason::EndTurn => Status::Completed,
             StopReason::Cancelled => Status::Cancelled,
-            StopReason::MaxTokens | StopReason::MaxTurnRequests | StopReason::Refusal => {
+            _ => {
                 self.failure = Some(stop_name(stop_reason).into());
                 Status::Failed
             }
@@ -208,12 +208,11 @@ impl Session {
             SessionUpdate::AgentMessageChunk(chunk) => self.append_text(chunk),
             SessionUpdate::AgentThoughtChunk(_) => Ok(()),
             SessionUpdate::ToolCall(call) => {
-                if call.tool_call_id.is_empty() || self.tool_calls.contains_key(&call.tool_call_id)
-                {
+                let key = call.tool_call_id.to_string();
+                if call.tool_call_id.0.is_empty() || self.tool_calls.contains_key(&key) {
                     return Err(invalid());
                 }
-                self.tool_calls
-                    .insert(call.tool_call_id.clone(), call.clone());
+                self.tool_calls.insert(key, call.clone());
                 Ok(())
             }
             SessionUpdate::ToolCallUpdate(update) => self.patch_tool_call(update),
@@ -224,9 +223,12 @@ impl Session {
         }
     }
     fn append_text(&mut self, chunk: &ene_plugin::ContentChunk) -> Result<()> {
-        let ContentBlock::Text(text) = &chunk.content;
-        if chunk.message_id.is_some() && chunk.message_id != self.message_id {
-            self.message_id = chunk.message_id.clone();
+        let ContentBlock::Text(text) = &chunk.content else {
+            return Ok(());
+        };
+        let message_id = chunk.message_id.as_ref().map(ToString::to_string);
+        if message_id.is_some() && message_id != self.message_id {
+            self.message_id = message_id;
             self.report.clear();
         }
         if self.report.len() + text.text.len() > MAX_REPORT_BYTES {
@@ -238,33 +240,33 @@ impl Session {
     fn patch_tool_call(&mut self, update: &ToolCallUpdate) -> Result<()> {
         let call = self
             .tool_calls
-            .get_mut(&update.tool_call_id)
+            .get_mut(&update.tool_call_id.to_string())
             .ok_or_else(invalid)?;
-        if let Some(status) = update.status {
+        if let Some(status) = update.fields.status {
             if !advances(call.status, status) {
                 return Err(invalid());
             }
             call.status = status;
         }
-        if let Some(title) = &update.title {
+        if let Some(title) = &update.fields.title {
             call.title = title.clone();
         }
-        if let Some(name) = &update.name {
+        if let Some(name) = &update.fields.name {
             call.name = Some(name.clone());
         }
-        if let Some(kind) = update.kind {
-            call.kind = Some(kind);
+        if let Some(kind) = update.fields.kind {
+            call.kind = kind;
         }
-        if let Some(content) = &update.content {
+        if let Some(content) = &update.fields.content {
             call.content = content.clone();
         }
-        if let Some(locations) = &update.locations {
+        if let Some(locations) = &update.fields.locations {
             call.locations = locations.clone();
         }
-        if let Some(raw) = &update.raw_input {
+        if let Some(raw) = &update.fields.raw_input {
             call.raw_input = Some(raw.clone());
         }
-        if let Some(raw) = &update.raw_output {
+        if let Some(raw) = &update.fields.raw_output {
             call.raw_output = Some(raw.clone());
         }
         Ok(())
@@ -291,6 +293,7 @@ fn advances(from: ToolCallStatus, to: ToolCallStatus) -> bool {
         ),
         ToolCallStatus::Completed => to == ToolCallStatus::Completed,
         ToolCallStatus::Failed => to == ToolCallStatus::Failed,
+        _ => false,
     }
 }
 
@@ -301,6 +304,7 @@ fn stop_name(reason: StopReason) -> &'static str {
         StopReason::MaxTurnRequests => "max_turn_requests",
         StopReason::Refusal => "refusal",
         StopReason::Cancelled => "cancelled",
+        _ => "unsupported_stop_reason",
     }
 }
 
@@ -318,42 +322,42 @@ type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
     use ene_plugin::{
-        ContentChunk, PermissionOptionKind, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-        ToolCallContent, ToolKind,
+        Content, ContentChunk, MessageId, PermissionOptionKind, PlanEntry, PlanEntryPriority,
+        PlanEntryStatus, SelectedPermissionOutcome, ToolCallContent, ToolCallUpdateFields,
+        ToolKind, text_block,
     };
 
     fn message(id: Option<&str>, text: &str) -> HarnessEvent {
+        let mut chunk = ContentChunk::new(text_block(text));
+        chunk.message_id = id.map(MessageId::new);
         HarnessEvent::Update {
-            update: SessionUpdate::AgentMessageChunk(ContentChunk {
-                content: ContentBlock::text(text),
-                message_id: id.map(str::to_owned),
-            }),
+            update: SessionUpdate::AgentMessageChunk(chunk),
         }
     }
 
     fn tool_call(id: &str) -> HarnessEvent {
         HarnessEvent::Update {
-            update: SessionUpdate::ToolCall(ToolCall {
-                tool_call_id: id.into(),
-                title: "Read the workspace".into(),
-                kind: Some(ToolKind::Read),
-                ..Default::default()
-            }),
+            update: SessionUpdate::ToolCall(
+                ToolCall::new(id.to_owned(), "Read the workspace").kind(ToolKind::Read),
+            ),
+        }
+    }
+
+    fn tool_update(id: &str, fields: ToolCallUpdateFields) -> HarnessEvent {
+        HarnessEvent::Update {
+            update: SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id.to_owned(), fields)),
         }
     }
 
     fn permission(id: &str, call: &str, allow: bool) -> HarnessEvent {
         HarnessEvent::RequestPermission {
             request_id: id.into(),
-            tool_call: ToolCallUpdate {
-                tool_call_id: call.into(),
-                ..Default::default()
-            },
-            options: vec![PermissionOption {
-                option_id: if allow { "allow" } else { "deny" }.into(),
-                name: "answer".into(),
-                kind: PermissionOptionKind::AllowOnce,
-            }],
+            tool_call: ToolCallUpdate::new(call.to_owned(), ToolCallUpdateFields::new()),
+            options: vec![PermissionOption::new(
+                if allow { "allow" } else { "deny" },
+                "answer",
+                PermissionOptionKind::AllowOnce,
+            )],
         }
     }
 
@@ -378,25 +382,20 @@ mod tests {
         let mut session = new_session();
         session.apply(&tool_call("call-1")).unwrap();
         session
-            .apply(&HarnessEvent::Update {
-                update: SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                    tool_call_id: "call-1".into(),
-                    status: Some(ToolCallStatus::InProgress),
-                    content: Some(vec![ToolCallContent::Content {
-                        content: ContentBlock::text("partial"),
-                    }]),
-                    ..Default::default()
-                }),
-            })
+            .apply(&tool_update(
+                "call-1",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::InProgress)
+                    .content(vec![ToolCallContent::Content(Content::new(text_block(
+                        "partial",
+                    )))]),
+            ))
             .unwrap();
         session
-            .apply(&HarnessEvent::Update {
-                update: SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                    tool_call_id: "call-1".into(),
-                    status: Some(ToolCallStatus::Completed),
-                    ..Default::default()
-                }),
-            })
+            .apply(&tool_update(
+                "call-1",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            ))
             .unwrap();
         assert_eq!(
             session.tool_calls["call-1"].status,
@@ -404,23 +403,15 @@ mod tests {
         );
         assert!(
             session
-                .apply(&HarnessEvent::Update {
-                    update: SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                        tool_call_id: "call-1".into(),
-                        status: Some(ToolCallStatus::InProgress),
-                        ..Default::default()
-                    }),
-                })
+                .apply(&tool_update(
+                    "call-1",
+                    ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
+                ))
                 .is_err()
         );
         assert!(
             session
-                .apply(&HarnessEvent::Update {
-                    update: SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                        tool_call_id: "unknown".into(),
-                        ..Default::default()
-                    }),
-                })
+                .apply(&tool_update("unknown", ToolCallUpdateFields::new()))
                 .is_err()
         );
     }
@@ -444,9 +435,7 @@ mod tests {
             session
                 .respond(
                     "permission-1",
-                    &RequestPermissionOutcome::Selected {
-                        option_id: "allow".into()
-                    }
+                    &RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow",)),
                 )
                 .is_err()
         );
@@ -458,9 +447,7 @@ mod tests {
             session
                 .respond(
                     "permission-2",
-                    &RequestPermissionOutcome::Selected {
-                        option_id: "allow".into()
-                    }
+                    &RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow",)),
                 )
                 .is_err()
         );
@@ -479,18 +466,14 @@ mod tests {
             session
                 .respond(
                     "permission-1",
-                    &RequestPermissionOutcome::Selected {
-                        option_id: "other".into()
-                    }
+                    &RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("other",)),
                 )
                 .is_err()
         );
         session
             .respond(
                 "permission-1",
-                &RequestPermissionOutcome::Selected {
-                    option_id: "allow".into(),
-                },
+                &RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
             )
             .unwrap();
         assert_eq!(session.status, Status::Running);
@@ -566,12 +549,12 @@ mod tests {
     #[test]
     fn plans_replace_the_previous_plan() {
         let mut session = new_session();
-        let plan = |status| Plan {
-            entries: vec![PlanEntry {
-                content: "step".into(),
-                priority: PlanEntryPriority::High,
+        let plan = |status| {
+            Plan::new(vec![PlanEntry::new(
+                "step",
+                PlanEntryPriority::High,
                 status,
-            }],
+            )])
         };
         session
             .apply(&HarnessEvent::Update {
@@ -586,6 +569,57 @@ mod tests {
         assert_eq!(
             session.plan.as_ref().unwrap().entries[0].status,
             PlanEntryStatus::Completed
+        );
+    }
+
+    #[test]
+    fn stored_acp_payloads_load_after_the_schema_swap() {
+        let stored = serde_json::json!({
+            "contract_version": 4,
+            "session_id": "session-1",
+            "status": "running",
+            "tool_calls": {
+                "call-1": {
+                    "toolCallId": "call-1",
+                    "title": "Read the workspace",
+                    "name": "read_file",
+                    "kind": "read",
+                    "status": "in_progress",
+                    "content": [{
+                        "type": "content",
+                        "content": {"type": "text", "text": "partial"}
+                    }],
+                    "locations": [{"path": "/tmp/ene.toml", "line": 4}]
+                }
+            },
+            "plan": {
+                "entries": [{"content": "step", "priority": "high", "status": "pending"}]
+            },
+            "message_id": "progress",
+            "report": "partial",
+            "stop_reason": null,
+            "failure": null,
+            "events": [{
+                "type": "update",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "partial"},
+                    "messageId": "progress"
+                }
+            }]
+        });
+        let session: Session = serde_json::from_value(stored).unwrap();
+        assert_eq!(session.tool_calls["call-1"].kind, ToolKind::Read);
+        assert_eq!(session.message_id.as_deref(), Some("progress"));
+        assert_eq!(
+            session.plan.as_ref().unwrap().entries[0].status,
+            PlanEntryStatus::Pending
+        );
+        let round = serde_json::to_value(&session).unwrap();
+        assert_eq!(round["tool_calls"]["call-1"]["kind"], "read");
+        assert_eq!(
+            round["tool_calls"]["call-1"]["content"][0]["content"]["text"],
+            "partial"
         );
     }
 }

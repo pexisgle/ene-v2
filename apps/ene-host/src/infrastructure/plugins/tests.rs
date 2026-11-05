@@ -4,8 +4,9 @@ use super::sessions::{ActiveInvocation, Session, SessionState};
 use super::*;
 use crate::domain::harness::{MAX_TRANSCRIPT, Session as HarnessSession, Status as HarnessStatus};
 use ene_plugin::{
-    CharacterEvent, CharacterTarget, ContentBlock, ContentChunk, GenerationRequest, HarnessEvent,
-    HarnessInput, Operation, RequestPermissionOutcome, Service, ServiceRequest, SessionUpdate,
+    CharacterEvent, CharacterTarget, ContentChunk, GenerationRequest, HarnessEvent, HarnessInput,
+    Operation, RequestPermissionOutcome, SelectedPermissionOutcome, Service, ServiceRequest,
+    SessionUpdate, ToolCall, ToolCallUpdate, ToolCallUpdateFields, text_block,
 };
 #[cfg(unix)]
 use ene_plugin_runtime::limits::MAX_EVENTS;
@@ -33,15 +34,13 @@ fn harness_invocation(input: HarnessInput) -> PluginInvocation {
 }
 fn task_start(prompt: &str) -> HarnessInput {
     HarnessInput::Start {
-        prompt: vec![ContentBlock::text(prompt)],
+        prompt: vec![text_block(prompt)],
     }
 }
 fn allow() -> HarnessInput {
     HarnessInput::Respond {
         request_id: "permission-1".into(),
-        outcome: RequestPermissionOutcome::Selected {
-            option_id: "allow".into(),
-        },
+        outcome: RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
     }
 }
 pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
@@ -936,10 +935,7 @@ async fn a_long_harness_turn_keeps_the_newest_events() {
     let chunk = kernel_bytes(
         &serde_json::to_string(&ene_plugin::Event::Harness {
             event: HarnessEvent::Update {
-                update: SessionUpdate::AgentMessageChunk(ContentChunk {
-                    content: ContentBlock::text("x"),
-                    message_id: None,
-                }),
+                update: SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block("x"))),
             },
         })
         .unwrap(),
@@ -1029,10 +1025,7 @@ async fn harness_transcript_is_bounded_and_a_terminal_turn_allows_a_new_task() {
     )
     .unwrap();
     let extra = HarnessEvent::Update {
-        update: SessionUpdate::AgentMessageChunk(ContentChunk {
-            content: ContentBlock::text("step"),
-            message_id: None,
-        }),
+        update: SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block("step"))),
     };
     for _ in 0..MAX_TRANSCRIPT + 5 {
         manager
@@ -1595,11 +1588,7 @@ async fn cancel_waiter(abort_waiter: bool) {
     manager.bind(binding.clone()).await.unwrap();
     let mut journal = HarnessSession::start("task-session");
     let call = HarnessEvent::Update {
-        update: SessionUpdate::ToolCall(ene_plugin::ToolCall {
-            tool_call_id: "call-1".into(),
-            title: "step".into(),
-            ..Default::default()
-        }),
+        update: SessionUpdate::ToolCall(ToolCall::new("call-1", "step")),
     };
     manager
         .harness_apply(&binding.id, &mut journal, &call)
@@ -1607,15 +1596,12 @@ async fn cancel_waiter(abort_waiter: bool) {
         .unwrap();
     let permission = HarnessEvent::RequestPermission {
         request_id: "q".into(),
-        tool_call: ene_plugin::ToolCallUpdate {
-            tool_call_id: "call-1".into(),
-            ..Default::default()
-        },
-        options: vec![ene_plugin::PermissionOption {
-            option_id: "allow".into(),
-            name: "Allow".into(),
-            kind: ene_plugin::PermissionOptionKind::AllowOnce,
-        }],
+        tool_call: ToolCallUpdate::new("call-1", ToolCallUpdateFields::new()),
+        options: vec![ene_plugin::PermissionOption::new(
+            "allow",
+            "Allow",
+            ene_plugin::PermissionOptionKind::AllowOnce,
+        )],
     };
     manager
         .harness_apply(&binding.id, &mut journal, &permission)
@@ -2615,7 +2601,7 @@ async fn an_acp_agent_drives_a_harness_turn_and_permission() {
     invoke_plugin(
         &manager,
         invoke(HarnessInput::Start {
-            prompt: vec![ContentBlock::text("go")],
+            prompt: vec![text_block("go")],
         }),
     )
     .await
@@ -2626,15 +2612,17 @@ async fn an_acp_agent_drives_a_harness_turn_and_permission() {
         .await
         .unwrap();
     assert_eq!(journal["status"], "waiting_for_input");
-    assert_eq!(journal["pending"]["request_id"], "900");
+    let request_id = journal["pending"]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!request_id.is_empty());
     assert!(journal["report"].as_str().unwrap().contains("started"));
     invoke_plugin(
         &manager,
         invoke(HarnessInput::Respond {
-            request_id: "900".into(),
-            outcome: RequestPermissionOutcome::Selected {
-                option_id: "allow".into(),
-            },
+            request_id,
+            outcome: RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
         }),
     )
     .await
@@ -2652,7 +2640,7 @@ async fn an_acp_agent_drives_a_harness_turn_and_permission() {
     invoke_plugin(
         &manager,
         invoke(HarnessInput::Start {
-            prompt: vec![ContentBlock::text("again")],
+            prompt: vec![text_block("again")],
         }),
     )
     .await
@@ -2789,18 +2777,25 @@ async fn an_acp_agent_runs_a_permission_gated_terminal_command() {
     invoke_plugin(
         &manager,
         invoke(HarnessInput::Start {
-            prompt: vec![ContentBlock::text("go")],
+            prompt: vec![text_block("go")],
         }),
     )
     .await
     .unwrap();
+    let journal = manager
+        .store
+        .plugin_get("harness".into(), "terminal-task".into())
+        .await
+        .unwrap();
+    let request_id = journal["pending"]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     invoke_plugin(
         &manager,
         invoke(HarnessInput::Respond {
-            request_id: "900".into(),
-            outcome: RequestPermissionOutcome::Selected {
-                option_id: "allow".into(),
-            },
+            request_id,
+            outcome: RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
         }),
     )
     .await

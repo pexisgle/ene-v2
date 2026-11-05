@@ -3,7 +3,7 @@ use super::Events;
 use crate::{Error, Result, limits::MAX_CHUNK};
 use ene_plugin::{
     ContentBlock, HarnessEvent, PermissionOption, Plan, SessionUpdate, ToolCall, ToolCallContent,
-    ToolCallUpdate,
+    ToolCallLocation, ToolCallUpdate,
 };
 
 const MAX_IDENTIFIER: usize = 128;
@@ -62,27 +62,27 @@ fn validate_tool_call(call: &ToolCall) -> Result<()> {
         bounded(name, MAX_IDENTIFIER)?;
     }
     content(&call.content)?;
-    locations(call.locations.iter().map(|location| &location.path))?;
+    locations(call.locations.iter())?;
     raw(call.raw_input.as_ref())?;
     raw(call.raw_output.as_ref())
 }
 
 fn validate_tool_update(update: &ToolCallUpdate) -> Result<()> {
     identifier(&update.tool_call_id)?;
-    if let Some(title) = &update.title {
+    if let Some(title) = &update.fields.title {
         bounded(title, MAX_TITLE)?;
     }
-    if let Some(name) = &update.name {
+    if let Some(name) = &update.fields.name {
         bounded(name, MAX_IDENTIFIER)?;
     }
-    if let Some(items) = &update.content {
+    if let Some(items) = &update.fields.content {
         content(items)?;
     }
-    if let Some(paths) = &update.locations {
-        locations(paths.iter().map(|location| &location.path))?;
+    if let Some(paths) = &update.fields.locations {
+        locations(paths.iter())?;
     }
-    raw(update.raw_input.as_ref())?;
-    raw(update.raw_output.as_ref())
+    raw(update.fields.raw_input.as_ref())?;
+    raw(update.fields.raw_output.as_ref())
 }
 
 fn validate_plan(plan: &Plan) -> Result<()> {
@@ -99,7 +99,7 @@ fn validate_options(options: &[PermissionOption]) -> Result<()> {
     if options.is_empty() || options.len() > MAX_OPTIONS {
         return Err(Error::Protocol);
     }
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = std::collections::HashSet::new();
     for option in options {
         identifier(&option.option_id)?;
         bounded(&option.name, MAX_TITLE)?;
@@ -115,25 +115,29 @@ fn content(items: &[ToolCallContent]) -> Result<()> {
         return Err(Error::Protocol);
     }
     for item in items {
-        let ToolCallContent::Content { content } = item;
-        text(content)?;
+        match item {
+            ToolCallContent::Content(content) => text(&content.content)?,
+            _ => return Err(Error::Protocol),
+        }
     }
     Ok(())
 }
 
-fn locations<'a>(paths: impl ExactSizeIterator<Item = &'a String>) -> Result<()> {
+fn locations<'a>(paths: impl ExactSizeIterator<Item = &'a ToolCallLocation>) -> Result<()> {
     if paths.len() > MAX_TOOL_LOCATIONS {
         return Err(Error::Protocol);
     }
-    for path in paths {
-        bounded(path, MAX_PATH)?;
+    for location in paths {
+        bounded(location.path.to_str().ok_or(Error::Protocol)?, MAX_PATH)?;
     }
     Ok(())
 }
 
 fn text(block: &ContentBlock) -> Result<()> {
-    let ContentBlock::Text(text) = block;
-    bounded(&text.text, MAX_CHUNK)
+    match block {
+        ContentBlock::Text(text) => bounded(&text.text, MAX_CHUNK),
+        _ => Err(Error::Protocol),
+    }
 }
 
 fn raw(value: Option<&serde_json::Value>) -> Result<()> {
@@ -145,7 +149,8 @@ fn raw(value: Option<&serde_json::Value>) -> Result<()> {
     Ok(())
 }
 
-fn identifier(value: &str) -> Result<()> {
+fn identifier(value: &impl std::fmt::Display) -> Result<()> {
+    let value = value.to_string();
     if value.is_empty() || value.len() > MAX_IDENTIFIER || value.chars().any(char::is_control) {
         return Err(Error::Protocol);
     }
@@ -164,8 +169,8 @@ mod tests {
     use super::*;
     use crate::contract::Events;
     use ene_plugin::{
-        ContentChunk, HarnessInput, Operation, PermissionOptionKind, StopReason, ToolCallLocation,
-        ToolCallStatus,
+        ContentChunk, HarnessInput, Operation, PermissionOptionKind, StopReason, ToolCall,
+        ToolCallLocation, ToolCallStatus, ToolCallUpdateFields, text_block,
     };
 
     fn events() -> Events {
@@ -175,20 +180,13 @@ mod tests {
     }
 
     fn option(id: &str) -> PermissionOption {
-        PermissionOption {
-            option_id: id.into(),
-            name: "Allow".into(),
-            kind: PermissionOptionKind::AllowOnce,
-        }
+        PermissionOption::new(id.to_owned(), "Allow", PermissionOptionKind::AllowOnce)
     }
 
     fn permission(request_id: &str, options: Vec<PermissionOption>) -> HarnessEvent {
         HarnessEvent::RequestPermission {
             request_id: request_id.into(),
-            tool_call: ToolCallUpdate {
-                tool_call_id: "call-1".into(),
-                ..Default::default()
-            },
+            tool_call: ToolCallUpdate::new("call-1", ToolCallUpdateFields::new()),
             options,
         }
     }
@@ -246,20 +244,15 @@ mod tests {
     fn identifiers_and_tool_content_are_bounded() {
         let mut events = events();
         let empty = HarnessEvent::Update {
-            update: SessionUpdate::ToolCall(ToolCall {
-                tool_call_id: String::new(),
-                title: "title".into(),
-                ..Default::default()
-            }),
+            update: SessionUpdate::ToolCall(ToolCall::new(String::new(), "title")),
         };
         assert!(accept(&mut events, empty).is_err());
 
         let mut events = self::events();
         let long = HarnessEvent::Update {
-            update: SessionUpdate::AgentMessageChunk(ContentChunk {
-                content: ContentBlock::text("x".repeat(MAX_CHUNK + 1)),
-                message_id: None,
-            }),
+            update: SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block(
+                "x".repeat(MAX_CHUNK + 1),
+            ))),
         };
         assert!(accept(&mut events, long).is_err());
     }
@@ -268,16 +261,27 @@ mod tests {
     fn a_tool_update_cannot_carry_invalid_locations() {
         let mut events = events();
         let update = HarnessEvent::Update {
-            update: SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                tool_call_id: "call-1".into(),
-                status: Some(ToolCallStatus::InProgress),
-                locations: Some(vec![ToolCallLocation {
-                    path: "/".repeat(MAX_PATH + 1),
-                    line: None,
-                }]),
-                ..Default::default()
-            }),
+            update: SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "call-1",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::InProgress)
+                    .locations(vec![ToolCallLocation::new("/".repeat(MAX_PATH + 1))]),
+            )),
         };
         assert!(accept(&mut events, update).is_err());
+    }
+
+    #[test]
+    fn non_text_content_is_rejected_at_the_contract_boundary() {
+        let mut events = events();
+        let image: HarnessEvent = serde_json::from_value(serde_json::json!({
+            "type": "update",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "image", "data": "AA==", "mimeType": "image/png"}
+            }
+        }))
+        .unwrap();
+        assert!(accept(&mut events, image).is_err());
     }
 }

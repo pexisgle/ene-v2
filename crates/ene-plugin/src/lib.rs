@@ -6,13 +6,13 @@ mod manifest;
 pub mod provider;
 
 pub use api::{
-    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, ContentBlock, ContentChunk,
-    Event, GenerationRequest, HarnessEvent, HarnessInput, HttpChunk, HttpRequest, LlmCapabilities,
-    MessageId, ModelResponse, Operation, PermissionOption, PermissionOptionId,
+    AudioChunk, CharacterAction, CharacterEvent, CharacterTarget, Content, ContentBlock,
+    ContentChunk, Event, GenerationRequest, HarnessEvent, HarnessInput, HttpChunk, HttpRequest,
+    LlmCapabilities, MessageId, ModelResponse, Operation, PermissionOption, PermissionOptionId,
     PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, RequestId,
-    RequestPermissionOutcome, ServiceRequest, SessionUpdate, SpeechInput, StopReason, TextContent,
-    ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolDefinition, ToolKind,
+    RequestPermissionOutcome, SelectedPermissionOutcome, ServiceRequest, SessionUpdate,
+    SpeechInput, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolDefinition, ToolKind, text_block,
 };
 pub use failure::Failure;
 pub use manifest::{

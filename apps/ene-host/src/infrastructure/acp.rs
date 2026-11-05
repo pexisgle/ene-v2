@@ -1,18 +1,23 @@
 //! Minimal ACP v1 client over an explicit stdio subprocess.
 //!
 //! The process is configured by the host (never a shell), receives only a
-//! filtered environment, and advertises `fs` read/write with `terminal` off.
-//! Session updates, permission requests and stop reasons are mapped to the
-//! host's ACP-shaped harness vocabulary.
+//! filtered environment, and advertises `fs` read/write with `terminal` off
+//! unless the binding opts in. The official ACP SDK owns JSON-RPC framing,
+//! request ids and response routing; this module owns the process lifecycle,
+//! terminal registry, workspace boundary and the host's turn state.
 use crate::{
     domain::{Error, ErrorKind},
     infrastructure::workspace::Workspace,
 };
-use ene_plugin::{
-    ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, Plan,
-    RequestPermissionOutcome, SessionUpdate, StopReason, ToolCall, ToolCallUpdate,
+use agent_client_protocol::{
+    Agent, ByteStreams, Client, Error as AcpError, ErrorCode,
+    schema::ProtocolVersion,
+    v1::{ConnectionTo, Responder, schema},
 };
-use serde_json::{Value, json};
+use ene_plugin::{
+    ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionOutcome, SessionUpdate,
+    StopReason, ToolCallUpdate,
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -24,17 +29,22 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::AsyncReadExt,
     process::{Child, Command},
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, oneshot},
     task::JoinHandle,
     time::timeout,
+};
+use tokio_util::{
+    compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt},
+    sync::CancellationToken,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_UPDATES: usize = 4096;
 const STDERR_BYTES: usize = 4096;
+const TERMINAL_POLL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug)]
 pub(crate) struct AcpConfig {
@@ -64,14 +74,13 @@ struct Terminal {
 
 struct Permission {
     request_id: String,
-    rpc_id: u64,
     options: Vec<PermissionOption>,
+    responder: Responder<schema::RequestPermissionResponse>,
 }
 
 #[derive(Clone)]
 struct ClientContext {
     shared: Arc<Mutex<State>>,
-    writer: mpsc::Sender<Value>,
     workspace: Workspace,
     terminal: Option<Arc<TerminalLimits>>,
     terminals: Arc<Mutex<HashMap<String, Terminal>>>,
@@ -97,42 +106,42 @@ pub(crate) struct Waiting {
 }
 
 struct State {
-    session_id: String,
+    session: Option<schema::SessionId>,
     updates: Vec<SessionUpdate>,
-    turn: Option<oneshot::Sender<std::result::Result<Turn, String>>>,
-    prompt_id: Option<u64>,
+    turn: Option<oneshot::Sender<Result<Turn, String>>>,
     permission: Option<Permission>,
     approved: bool,
-    pending: HashMap<u64, oneshot::Sender<std::result::Result<Value, String>>>,
-    next_id: u64,
+    /// Increments for every prompt so a stale completion cannot resolve a
+    /// later turn.
+    sequence: u64,
+    active: bool,
+    failed: Option<&'static str>,
 }
 
 impl State {
     fn new() -> Self {
         Self {
-            session_id: String::new(),
+            session: None,
             updates: Vec::new(),
             turn: None,
-            prompt_id: None,
             permission: None,
             approved: false,
-            pending: HashMap::new(),
-            next_id: 1,
+            sequence: 0,
+            active: false,
+            failed: None,
         }
-    }
-    fn request_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
     }
 }
 
 pub(crate) struct AcpSession {
     child: Child,
-    writer: mpsc::Sender<Value>,
+    connection: ConnectionTo<Agent>,
+    driver: JoinHandle<()>,
+    prompt_task: Option<JoinHandle<()>>,
     shared: Arc<Mutex<State>>,
-    tasks: Vec<JoinHandle<()>>,
     stderr: Arc<Mutex<Vec<u8>>>,
+    stderr_task: JoinHandle<()>,
+    shutdown: CancellationToken,
 }
 
 impl AcpSession {
@@ -171,95 +180,226 @@ impl AcpSession {
         let stdin = child.stdin.take().ok_or_else(Error::unavailable)?;
         let stdout = child.stdout.take().ok_or_else(Error::unavailable)?;
         let stderr = child.stderr.take().ok_or_else(Error::unavailable)?;
+
         let shared = Arc::new(Mutex::new(State::new()));
         let terminals = Arc::new(Mutex::new(HashMap::<String, Terminal>::new()));
-        let terminal_enabled = config.terminal.is_some();
         let terminal = config.terminal.map(Arc::new);
-        let (writer_tx, mut writer_rx) = mpsc::channel::<Value>(64);
-        let writer = tokio::spawn(async move {
-            let mut stdin = stdin;
-            while let Some(value) = writer_rx.recv().await {
-                let Ok(mut line) = serde_json::to_vec(&value) else {
-                    break;
-                };
-                line.push(b'\n');
-                if stdin.write_all(&line).await.is_err() {
-                    break;
-                }
-            }
-        });
+        let terminal_enabled = terminal.is_some();
+        let context = ClientContext {
+            shared: shared.clone(),
+            workspace: config.workspace,
+            terminal,
+            terminals,
+        };
         let captured = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = tokio::spawn(drain_stderr(stderr, captured.clone()));
-        let reader = tokio::spawn(read_loop(
-            stdout,
-            shared.clone(),
-            writer_tx.clone(),
-            config.workspace.clone(),
-            terminal.clone(),
-            terminals.clone(),
-        ));
-        let mut session = Self {
-            child,
-            writer: writer_tx,
-            shared,
-            tasks: vec![writer, stderr_task, reader],
-            stderr: captured,
-        };
-        // Drop the filtered environment: only the configured child sees it.
-        session
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": 1,
-                    "clientCapabilities": {
-                        "fs": {"readTextFile": true, "writeTextFile": true},
-                        "terminal": terminal_enabled
+        let shutdown = CancellationToken::new();
+        let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
+        let (ready_tx, ready_rx) =
+            oneshot::channel::<Result<(ConnectionTo<Agent>, schema::SessionId), AcpError>>();
+        let cwd = config.cwd;
+
+        let driver_shared = shared.clone();
+        let driver_stderr = captured.clone();
+        let driver_shutdown = shutdown.clone();
+        let session_shutdown = driver_shutdown.clone();
+        let driver_context = context.clone();
+        let driver = tokio::spawn(async move {
+            let result = Client
+                .v1()
+                .name("ene")
+                .on_receive_notification(
+                    {
+                        let context = driver_context.clone();
+                        async move |notification: schema::SessionNotification,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_update(&context, notification).await
+                        }
                     },
-                    "clientInfo": {"name": "ene", "version": env!("CARGO_PKG_VERSION")}
-                }),
-            )
-            .await?;
-        let cwd = config
-            .cwd
-            .to_str()
-            .ok_or_else(|| Error::new(ErrorKind::PermissionRequired))?;
-        let created = session
-            .request("session/new", json!({"cwd": cwd, "mcpServers": []}))
-            .await?;
-        let session_id = created["sessionId"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
-        session.shared.lock().await.session_id = session_id.into();
-        Ok(session)
+                    agent_client_protocol::on_receive_notification!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::RequestPermissionRequest,
+                                    responder: Responder<schema::RequestPermissionResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_permission(&context, request, responder).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::ReadTextFileRequest,
+                                    responder: Responder<schema::ReadTextFileResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_read_file(&context, request, responder).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::WriteTextFileRequest,
+                                    responder: Responder<schema::WriteTextFileResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_write_file(&context, request, responder).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::CreateTerminalRequest,
+                                    responder: Responder<schema::CreateTerminalResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_create_terminal(&context, request, responder).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::TerminalOutputRequest,
+                                    responder: Responder<schema::TerminalOutputResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_terminal_output(&context, request, responder).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::WaitForTerminalExitRequest,
+                                    responder: Responder<schema::WaitForTerminalExitResponse>,
+                                    cx: ConnectionTo<Agent>| {
+                            on_wait_for_exit(&context, request, responder, cx).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::KillTerminalRequest,
+                                    responder: Responder<schema::KillTerminalResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_kill_terminal(&context, request, responder).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    {
+                        let context = driver_context.clone();
+                        async move |request: schema::ReleaseTerminalRequest,
+                                    responder: Responder<schema::ReleaseTerminalResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            on_release_terminal(&context, request, responder).await
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
+                    let initialize = timeout(
+                        REQUEST_TIMEOUT,
+                        cx.send_request(initialize_request(terminal_enabled))
+                            .block_task(),
+                    )
+                    .await
+                    .map_err(|_| AcpError::request_cancelled())??;
+                    let _ = initialize;
+                    let created = timeout(
+                        REQUEST_TIMEOUT,
+                        cx.send_request(schema::NewSessionRequest::new(cwd))
+                            .block_task(),
+                    )
+                    .await
+                    .map_err(|_| AcpError::request_cancelled())??;
+                    if session_shutdown.is_cancelled() {
+                        return Ok(());
+                    }
+                    let _ = ready_tx.send(Ok((cx.clone(), created.session_id)));
+                    session_shutdown.cancelled().await;
+                    Ok(())
+                })
+                .await;
+            if !driver_shutdown.is_cancelled() {
+                let reason = result
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "agent_exited".into());
+                fail(&driver_shared, &driver_stderr, reason).await;
+            }
+        });
+
+        match timeout(REQUEST_TIMEOUT, ready_rx).await {
+            Ok(Ok(Ok((connection, session_id)))) => {
+                shared.lock().await.session = Some(session_id);
+                Ok(Self {
+                    child,
+                    connection,
+                    driver,
+                    prompt_task: None,
+                    shared,
+                    stderr: captured,
+                    stderr_task,
+                    shutdown,
+                })
+            }
+            _ => {
+                shutdown.cancel();
+                driver.abort();
+                stderr_task.abort();
+                let _ = child.start_kill();
+                let _ = timeout(Duration::from_secs(2), child.wait()).await;
+                Err(Error {
+                    kind: ErrorKind::ExternalFailure,
+                    reason: Some("acp_agent_failed"),
+                })
+            }
+        }
     }
 
     pub(crate) async fn prompt(&mut self, prompt: &[ContentBlock]) -> Result<Turn, Error> {
-        let prompt = prompt
-            .iter()
-            .map(|block| match block {
-                ContentBlock::Text(text) => json!({"type": "text", "text": text.text}),
-            })
-            .collect::<Vec<_>>();
-        let (rx, id) = {
+        let (rx, sequence, session) = {
             let mut state = self.shared.lock().await;
+            if state.failed.is_some() {
+                return Err(Error::new(ErrorKind::ExternalFailure));
+            }
             if state.turn.is_some() || state.permission.is_some() {
                 return Err(Error::new(ErrorKind::StateConflict));
             }
+            state.sequence += 1;
+            state.active = true;
+            state.updates.clear();
             let (tx, rx) = oneshot::channel();
             state.turn = Some(tx);
-            let id = state.request_id();
-            state.prompt_id = Some(id);
-            (rx, id)
+            (
+                rx,
+                state.sequence,
+                state
+                    .session
+                    .clone()
+                    .ok_or_else(|| Error::new(ErrorKind::StateConflict))?,
+            )
         };
-        let session_id = self.session_id().await?;
-        self.send(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "session/prompt",
-            "params": {"sessionId": session_id, "prompt": prompt}
-        }))
-        .await?;
+        if let Some(task) = self.prompt_task.take() {
+            task.abort();
+        }
+        let request = schema::PromptRequest::new(session, prompt.to_vec());
+        let connection = self.connection.clone();
+        let shared = self.shared.clone();
+        self.prompt_task = Some(tokio::spawn(async move {
+            let result = connection.send_request(request).block_task().await;
+            finish(&shared, sequence, result).await;
+        }));
         self.await_turn(rx).await
     }
 
@@ -268,21 +408,20 @@ impl AcpSession {
         request_id: &str,
         outcome: &RequestPermissionOutcome,
     ) -> Result<Turn, Error> {
-        let (rpc_id, rx) = {
+        let (permission, rx) = {
             let mut state = self.shared.lock().await;
-            let permission = state
-                .permission
-                .take()
-                .ok_or_else(|| Error::new(ErrorKind::StateConflict))?;
+            let Some(permission) = state.permission.take() else {
+                return Err(Error::new(ErrorKind::StateConflict));
+            };
             if permission.request_id != request_id {
                 state.permission = Some(permission);
                 return Err(Error::new(ErrorKind::StateConflict));
             }
             // A terminal command is only accepted immediately after the user
             // selected an allow option for the agent's permission request.
-            if let RequestPermissionOutcome::Selected { option_id } = outcome
+            if let RequestPermissionOutcome::Selected(selected) = outcome
                 && permission.options.iter().any(|option| {
-                    &option.option_id == option_id
+                    option.option_id == selected.option_id
                         && matches!(
                             option.kind,
                             PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
@@ -293,105 +432,487 @@ impl AcpSession {
             }
             let (tx, rx) = oneshot::channel();
             state.turn = Some(tx);
-            (permission.rpc_id, rx)
+            (permission, rx)
         };
-        let outcome = serde_json::to_value(outcome).map_err(|_| Error::invalid())?;
-        self.send(json!({
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "result": {"outcome": outcome}
-        }))
-        .await?;
+        if permission
+            .responder
+            .respond(schema::RequestPermissionResponse::new(outcome.clone()))
+            .is_err()
+        {
+            self.shared.lock().await.turn = None;
+            return Err(Error::unavailable());
+        }
         self.await_turn(rx).await
     }
 
     pub(crate) async fn cancel(&mut self) -> Result<(), Error> {
-        let session_id = self.session_id().await?;
-        self.send(json!({
-            "jsonrpc": "2.0",
-            "method": "session/cancel",
-            "params": {"sessionId": session_id}
-        }))
-        .await
+        let session = self.shared.lock().await.session.clone();
+        let Some(session) = session else {
+            return Ok(());
+        };
+        self.connection
+            .send_notification(schema::CancelNotification::new(session))
+            .map_err(|_| Error::unavailable())
     }
 
     pub(crate) async fn kill(mut self) {
-        let _ = self.child.start_kill();
-        let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
-        for task in &self.tasks {
+        self.shutdown.cancel();
+        if let Some(task) = self.prompt_task.take() {
             task.abort();
         }
-    }
-
-    async fn session_id(&self) -> Result<String, Error> {
-        let session_id = self.shared.lock().await.session_id.clone();
-        if session_id.is_empty() {
-            return Err(Error::new(ErrorKind::StateConflict));
-        }
-        Ok(session_id)
-    }
-
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, Error> {
-        let (id, rx) = {
-            let mut state = self.shared.lock().await;
-            let id = state.request_id();
-            let (tx, rx) = oneshot::channel();
-            state.pending.insert(id, tx);
-            (id, rx)
-        };
-        self.send(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params
-        }))
-        .await?;
-        timeout(REQUEST_TIMEOUT, rx)
-            .await
-            .map_err(|_| Error::new(ErrorKind::Unavailable))?
-            .map_err(|_| Error::new(ErrorKind::Unavailable))?
-            .map_err(|_| Error {
-                kind: ErrorKind::ExternalFailure,
-                reason: Some("acp_request_failed"),
-            })
-    }
-
-    async fn send(&self, value: Value) -> Result<(), Error> {
-        self.writer
-            .send(value)
-            .await
-            .map_err(|_| Error::new(ErrorKind::Unavailable))
+        self.driver.abort();
+        self.stderr_task.abort();
+        let _ = self.child.start_kill();
+        let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
     }
 
     async fn await_turn(
         &mut self,
-        rx: oneshot::Receiver<std::result::Result<Turn, String>>,
+        rx: oneshot::Receiver<Result<Turn, String>>,
     ) -> Result<Turn, Error> {
         match timeout(TURN_TIMEOUT, rx).await {
             Ok(Ok(Ok(turn))) => Ok(turn),
             Ok(Ok(Err(reason))) => {
                 let captured = self.stderr.lock().await;
-                let stderr = String::from_utf8_lossy(&captured);
-                eprintln!("ene-host acp: {reason}: {stderr}");
+                eprintln!(
+                    "ene-host acp: {reason}: {}",
+                    String::from_utf8_lossy(&captured)
+                );
                 drop(captured);
                 Err(Error {
                     kind: ErrorKind::ExternalFailure,
                     reason: Some("acp_agent_failed"),
                 })
             }
-            Ok(Err(_)) => Err(Error::new(ErrorKind::Unavailable)),
+            Ok(Err(_)) => {
+                reset_turn(&self.shared).await;
+                Err(Error::new(ErrorKind::Unavailable))
+            }
             Err(_) => {
                 let _ = self.cancel().await;
+                if let Some(task) = self.prompt_task.take() {
+                    task.abort();
+                }
+                reset_turn(&self.shared).await;
                 Err(Error::new(ErrorKind::Unavailable))
             }
         }
     }
 }
 
+fn initialize_request(terminal: bool) -> schema::InitializeRequest {
+    schema::InitializeRequest::new(ProtocolVersion::V1)
+        .client_capabilities(
+            schema::ClientCapabilities::new()
+                .fs(schema::FileSystemCapabilities::new()
+                    .read_text_file(true)
+                    .write_text_file(true))
+                .terminal(terminal),
+        )
+        .client_info(schema::Implementation::new(
+            "ene",
+            env!("CARGO_PKG_VERSION"),
+        ))
+}
+
+async fn finish(
+    shared: &Arc<Mutex<State>>,
+    sequence: u64,
+    result: Result<schema::PromptResponse, AcpError>,
+) {
+    let mut state = shared.lock().await;
+    if state.sequence != sequence {
+        return;
+    }
+    state.active = false;
+    let updates = std::mem::take(&mut state.updates);
+    if let Some(permission) = state.permission.take() {
+        let _ = permission
+            .responder
+            .respond(schema::RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+    }
+    let Some(turn) = state.turn.take() else {
+        return;
+    };
+    match result {
+        Ok(response) => {
+            let _ = turn.send(Ok(Turn {
+                updates,
+                state: TurnState::Stopped(response.stop_reason),
+            }));
+        }
+        Err(error) => {
+            let _ = turn.send(Err(format!("acp_agent_failed: {error}")));
+        }
+    }
+}
+
+async fn reset_turn(shared: &Arc<Mutex<State>>) {
+    let mut state = shared.lock().await;
+    state.active = false;
+    state.sequence += 1;
+    state.updates.clear();
+    state.turn = None;
+    if let Some(permission) = state.permission.take() {
+        let _ = permission
+            .responder
+            .respond(schema::RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+    }
+}
+
+async fn fail(shared: &Arc<Mutex<State>>, stderr: &Arc<Mutex<Vec<u8>>>, reason: String) {
+    let mut state = shared.lock().await;
+    state.active = false;
+    state.failed = Some("acp_agent_failed");
+    state.sequence += 1;
+    state.updates.clear();
+    if let Some(turn) = state.turn.take() {
+        let _ = turn.send(Err(reason.clone()));
+    }
+    if let Some(permission) = state.permission.take() {
+        let _ = permission
+            .responder
+            .respond(schema::RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+    }
+    let captured = stderr.lock().await;
+    eprintln!(
+        "ene-host acp: {reason}: {}",
+        String::from_utf8_lossy(&captured)
+    );
+}
+
+async fn on_update(
+    context: &ClientContext,
+    notification: schema::SessionNotification,
+) -> Result<(), AcpError> {
+    let mut state = context.shared.lock().await;
+    if !state.active {
+        return Ok(());
+    }
+    if state.session.as_ref() != Some(&notification.session_id) {
+        return Err(AcpError::invalid_request());
+    }
+    if let Some(update) = map_update(notification.update) {
+        if state.updates.len() >= MAX_UPDATES {
+            return Err(AcpError::internal_error().data("update_limit"));
+        }
+        state.updates.push(update);
+    }
+    Ok(())
+}
+
+async fn on_permission(
+    context: &ClientContext,
+    request: schema::RequestPermissionRequest,
+    responder: Responder<schema::RequestPermissionResponse>,
+) -> Result<(), AcpError> {
+    let mut state = context.shared.lock().await;
+    if !state.active
+        || state.session.as_ref() != Some(&request.session_id)
+        || state.permission.is_some()
+        || state.turn.is_none()
+    {
+        let _ = responder.respond(schema::RequestPermissionResponse::new(
+            RequestPermissionOutcome::Cancelled,
+        ));
+        return Ok(());
+    }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    state.permission = Some(Permission {
+        request_id: request_id.clone(),
+        options: request.options.clone(),
+        responder,
+    });
+    let turn = state
+        .turn
+        .take()
+        .expect("a permission request requires an active turn");
+    let updates = std::mem::take(&mut state.updates);
+    let _ = turn.send(Ok(Turn {
+        updates,
+        state: TurnState::Waiting(Box::new(Waiting {
+            request_id,
+            tool_call: request.tool_call,
+            options: request.options,
+        })),
+    }));
+    Ok(())
+}
+
+async fn on_read_file(
+    context: &ClientContext,
+    request: schema::ReadTextFileRequest,
+    responder: Responder<schema::ReadTextFileResponse>,
+) -> Result<(), AcpError> {
+    match relative_to(&context.workspace, &request.path)
+        .and_then(|path| context.workspace.read(&path, request.line, request.limit))
+    {
+        Ok(read) => {
+            let _ = responder.respond(schema::ReadTextFileResponse::new(read.content));
+        }
+        Err(error) => {
+            let _ = responder.respond_with_error(acp_error(error));
+        }
+    }
+    Ok(())
+}
+
+async fn on_write_file(
+    context: &ClientContext,
+    request: schema::WriteTextFileRequest,
+    responder: Responder<schema::WriteTextFileResponse>,
+) -> Result<(), AcpError> {
+    match relative_to(&context.workspace, &request.path)
+        .and_then(|path| context.workspace.write(&path, &request.content))
+    {
+        Ok(()) => {
+            let _ = responder.respond(schema::WriteTextFileResponse::new());
+        }
+        Err(error) => {
+            let _ = responder.respond_with_error(acp_error(error));
+        }
+    }
+    Ok(())
+}
+
+async fn on_create_terminal(
+    context: &ClientContext,
+    request: schema::CreateTerminalRequest,
+    responder: Responder<schema::CreateTerminalResponse>,
+) -> Result<(), AcpError> {
+    let Some(policy) = context.terminal.as_deref() else {
+        let _ = responder.respond_with_error(AcpError::method_not_found());
+        return Ok(());
+    };
+    let approved = {
+        let mut state = context.shared.lock().await;
+        let approved = state.approved;
+        state.approved = false;
+        approved
+    };
+    if !approved {
+        let _ = responder
+            .respond_with_error(AcpError::new(ErrorCode::new(-32000), "permission required"));
+        return Ok(());
+    }
+    if !command_allowed(policy, &request.command) {
+        let _ = responder
+            .respond_with_error(AcpError::new(ErrorCode::new(-32000), "command not allowed"));
+        return Ok(());
+    }
+    let cwd = match request.cwd {
+        Some(cwd) if !cwd.as_os_str().is_empty() => {
+            match cwd
+                .to_str()
+                .ok_or_else(Error::invalid)
+                .and_then(|cwd| context.workspace.directory(cwd))
+            {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    let _ = responder.respond_with_error(acp_error(error));
+                    return Ok(());
+                }
+            }
+        }
+        _ => context.workspace.root().to_path_buf(),
+    };
+    let mut command = Command::new(&request.command);
+    command
+        .args(&request.args)
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear()
+        .kill_on_drop(true);
+    for key in BASE_ENV {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    for variable in &request.env {
+        if variable.name.is_empty()
+            || variable.name.len() > 256
+            || variable.name.contains(['=', '\0'])
+            || variable.name.chars().any(char::is_control)
+        {
+            let _ = responder.respond_with_error(AcpError::invalid_params());
+            return Ok(());
+        }
+        command.env(&variable.name, &variable.value);
+    }
+    let limit = request
+        .output_byte_limit
+        .map(|value| value as usize)
+        .unwrap_or(policy.max_output)
+        .clamp(1, policy.max_output);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            let _ = responder.respond_with_error(AcpError::new(
+                ErrorCode::new(-32000),
+                "failed to start command",
+            ));
+            return Ok(());
+        }
+    };
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let truncated = Arc::new(AtomicBool::new(false));
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(tap(stdout, output.clone(), truncated.clone(), limit));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(tap(stderr, output.clone(), truncated.clone(), limit));
+    }
+    let child = Arc::new(Mutex::new(child));
+    let exit = Arc::new(Mutex::new(None));
+    let terminal_id = uuid::Uuid::new_v4().to_string();
+    context.terminals.lock().await.insert(
+        terminal_id.clone(),
+        Terminal {
+            child: child.clone(),
+            output,
+            truncated,
+            exit,
+            readers: Arc::new(Mutex::new(readers)),
+        },
+    );
+    let seconds = policy.max_seconds;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(seconds)).await;
+        let _ = child.lock().await.start_kill();
+    });
+    let _ = responder.respond(schema::CreateTerminalResponse::new(terminal_id));
+    Ok(())
+}
+
+async fn on_terminal_output(
+    context: &ClientContext,
+    request: schema::TerminalOutputRequest,
+    responder: Responder<schema::TerminalOutputResponse>,
+) -> Result<(), AcpError> {
+    let id = request.terminal_id.to_string();
+    let (output, truncated, exit) = {
+        let terminals = context.terminals.lock().await;
+        let Some(terminal) = terminals.get(&id) else {
+            let _ = responder.respond_with_error(AcpError::invalid_params());
+            return Ok(());
+        };
+        (
+            terminal.output.lock().await.clone(),
+            terminal.truncated.load(Ordering::Relaxed),
+            *terminal.exit.lock().await,
+        )
+    };
+    let exit_status = exit
+        .flatten()
+        .and_then(|code| u32::try_from(code).ok())
+        .map(|code| schema::TerminalExitStatus::new().exit_code(code));
+    let _ = responder.respond(
+        schema::TerminalOutputResponse::new(String::from_utf8_lossy(&output), truncated)
+            .exit_status(exit_status),
+    );
+    Ok(())
+}
+
+async fn on_wait_for_exit(
+    context: &ClientContext,
+    request: schema::WaitForTerminalExitRequest,
+    responder: Responder<schema::WaitForTerminalExitResponse>,
+    cx: ConnectionTo<Agent>,
+) -> Result<(), AcpError> {
+    let id = request.terminal_id.to_string();
+    let (child, exit, readers) = {
+        let terminals = context.terminals.lock().await;
+        let Some(terminal) = terminals.get(&id) else {
+            let _ = responder.respond_with_error(AcpError::invalid_params());
+            return Ok(());
+        };
+        (
+            terminal.child.clone(),
+            terminal.exit.clone(),
+            terminal.readers.clone(),
+        )
+    };
+    let _ = cx.spawn(async move {
+        let status = loop {
+            match child.lock().await.try_wait() {
+                Ok(Some(status)) => break Some(status.code()),
+                Ok(None) => tokio::time::sleep(TERMINAL_POLL).await,
+                Err(_) => break None,
+            }
+        };
+        let Some(code) = status else {
+            let _ = responder.respond_with_error(AcpError::internal_error());
+            return Ok(());
+        };
+        *exit.lock().await = Some(code);
+        let readers = std::mem::take(&mut *readers.lock().await);
+        for reader in readers {
+            let _ = reader.await;
+        }
+        let _ = responder.respond(schema::WaitForTerminalExitResponse::new(
+            schema::TerminalExitStatus::new()
+                .exit_code(code.and_then(|code| u32::try_from(code).ok())),
+        ));
+        Ok(())
+    });
+    Ok(())
+}
+
+async fn on_kill_terminal(
+    context: &ClientContext,
+    request: schema::KillTerminalRequest,
+    responder: Responder<schema::KillTerminalResponse>,
+) -> Result<(), AcpError> {
+    let id = request.terminal_id.to_string();
+    let child = {
+        let terminals = context.terminals.lock().await;
+        terminals.get(&id).map(|terminal| terminal.child.clone())
+    };
+    if let Some(child) = child {
+        let _ = child.lock().await.start_kill();
+    }
+    let _ = responder.respond(schema::KillTerminalResponse::new());
+    Ok(())
+}
+
+async fn on_release_terminal(
+    context: &ClientContext,
+    request: schema::ReleaseTerminalRequest,
+    responder: Responder<schema::ReleaseTerminalResponse>,
+) -> Result<(), AcpError> {
+    let id = request.terminal_id.to_string();
+    let terminal = context.terminals.lock().await.remove(&id);
+    if let Some(terminal) = terminal {
+        let _ = terminal.child.lock().await.start_kill();
+    }
+    let _ = responder.respond(schema::ReleaseTerminalResponse::new());
+    Ok(())
+}
+
+fn map_update(update: schema::SessionUpdate) -> Option<SessionUpdate> {
+    Some(match update {
+        schema::SessionUpdate::AgentMessageChunk(chunk) => SessionUpdate::AgentMessageChunk(chunk),
+        schema::SessionUpdate::AgentThoughtChunk(chunk) => SessionUpdate::AgentThoughtChunk(chunk),
+        schema::SessionUpdate::ToolCall(call) => SessionUpdate::ToolCall(call),
+        schema::SessionUpdate::ToolCallUpdate(update) => SessionUpdate::ToolCallUpdate(update),
+        schema::SessionUpdate::Plan(plan) => SessionUpdate::Plan(plan),
+        _ => return None,
+    })
+}
+
 async fn drain_stderr(mut stderr: tokio::process::ChildStderr, captured: Arc<Mutex<Vec<u8>>>) {
     let mut buffer = [0_u8; 1024];
     loop {
-        match tokio::io::AsyncReadExt::read(&mut stderr, &mut buffer).await {
+        match stderr.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
             Ok(read) => {
                 let mut captured = captured.lock().await;
@@ -402,424 +923,6 @@ async fn drain_stderr(mut stderr: tokio::process::ChildStderr, captured: Arc<Mut
                 }
             }
         }
-    }
-}
-
-async fn read_loop(
-    stdout: tokio::process::ChildStdout,
-    shared: Arc<Mutex<State>>,
-    writer: mpsc::Sender<Value>,
-    workspace: Workspace,
-    terminal: Option<Arc<TerminalLimits>>,
-    terminals: Arc<Mutex<HashMap<String, Terminal>>>,
-) {
-    let context = ClientContext {
-        shared: shared.clone(),
-        writer: writer.clone(),
-        workspace,
-        terminal,
-        terminals,
-    };
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            fail(&shared, "invalid_json", &writer).await;
-            return;
-        };
-        if let Some(method) = value.get("method").and_then(Value::as_str) {
-            if let Some(id) = value.get("id").and_then(Value::as_u64) {
-                let params = value.get("params").cloned().unwrap_or(Value::Null);
-                handle_client_request(id, method, params, &context).await;
-            } else if method == "session/update"
-                && !accept_update(&shared, value.get("params").unwrap_or(&Value::Null)).await
-            {
-                fail(&shared, "invalid_update", &writer).await;
-                return;
-            }
-            continue;
-        }
-        if let Some(id) = value.get("id").and_then(Value::as_u64) {
-            let mut state = shared.lock().await;
-            if state.prompt_id == Some(id) {
-                state.prompt_id = None;
-                let stop = value
-                    .get("result")
-                    .and_then(|result| result.get("stopReason"))
-                    .and_then(Value::as_str)
-                    .and_then(stop_reason)
-                    .unwrap_or(StopReason::EndTurn);
-                if let Some(turn) = state.turn.take() {
-                    let updates = std::mem::take(&mut state.updates);
-                    let _ = turn.send(Ok(Turn {
-                        updates,
-                        state: TurnState::Stopped(stop),
-                    }));
-                }
-                continue;
-            }
-            if let Some(sender) = state.pending.remove(&id) {
-                let result = match value.get("error") {
-                    Some(error) => Err(error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("rpc error")
-                        .to_owned()),
-                    None => Ok(value.get("result").cloned().unwrap_or(Value::Null)),
-                };
-                let _ = sender.send(result);
-            }
-        }
-    }
-    fail(&shared, "agent_exited", &writer).await;
-}
-
-async fn accept_update(shared: &Arc<Mutex<State>>, params: &Value) -> bool {
-    let Some(update) = params.get("update") else {
-        return false;
-    };
-    let Some(mapped) = map_update(update) else {
-        // Updates outside the supported subset are ignored, as ACP clients do.
-        return true;
-    };
-    let mut state = shared.lock().await;
-    if state.session_id.is_empty() {
-        return false;
-    }
-    if let Some(session) = params.get("sessionId").and_then(Value::as_str)
-        && session != state.session_id
-    {
-        return false;
-    }
-    state.updates.push(mapped);
-    state.updates.len() <= MAX_UPDATES
-}
-
-fn map_update(update: &Value) -> Option<SessionUpdate> {
-    match update.get("sessionUpdate").and_then(Value::as_str)? {
-        "agent_message_chunk" | "agent_thought_chunk" => {
-            let content = update.get("content")?;
-            if content.get("type").and_then(Value::as_str) != Some("text") {
-                return None;
-            }
-            let content = ContentBlock::text(content.get("text").and_then(Value::as_str)?);
-            let chunk = ContentChunk {
-                content,
-                message_id: update
-                    .get("messageId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            };
-            Some(match update.get("sessionUpdate").and_then(Value::as_str) {
-                Some("agent_thought_chunk") => SessionUpdate::AgentThoughtChunk(chunk),
-                _ => SessionUpdate::AgentMessageChunk(chunk),
-            })
-        }
-        "tool_call" => serde_json::from_value::<ToolCall>(update.clone())
-            .ok()
-            .map(SessionUpdate::ToolCall),
-        "tool_call_update" => serde_json::from_value::<ToolCallUpdate>(update.clone())
-            .ok()
-            .map(SessionUpdate::ToolCallUpdate),
-        "plan" => serde_json::from_value::<Plan>(update.clone())
-            .ok()
-            .map(SessionUpdate::Plan),
-        _ => None,
-    }
-}
-
-fn stop_reason(value: &str) -> Option<StopReason> {
-    Some(match value {
-        "end_turn" => StopReason::EndTurn,
-        "max_tokens" => StopReason::MaxTokens,
-        "max_turn_requests" => StopReason::MaxTurnRequests,
-        "refusal" => StopReason::Refusal,
-        "cancelled" => StopReason::Cancelled,
-        _ => return None,
-    })
-}
-
-async fn handle_client_request(id: u64, method: &str, params: Value, context: &ClientContext) {
-    let ClientContext {
-        shared,
-        writer,
-        workspace,
-        terminal,
-        terminals,
-    } = context.clone();
-    match method {
-        "session/request_permission" => {
-            let Some(tool_call) = params
-                .get("toolCall")
-                .cloned()
-                .and_then(|value| serde_json::from_value::<ToolCallUpdate>(value).ok())
-            else {
-                respond_error(&writer, id, -32602, "invalid tool call").await;
-                return;
-            };
-            let options = params
-                .get("options")
-                .cloned()
-                .and_then(|value| serde_json::from_value::<Vec<PermissionOption>>(value).ok())
-                .unwrap_or_default();
-            let mut state = shared.lock().await;
-            state.permission = Some(Permission {
-                request_id: id.to_string(),
-                rpc_id: id,
-                options: options.clone(),
-            });
-            if let Some(turn) = state.turn.take() {
-                let updates = std::mem::take(&mut state.updates);
-                let _ = turn.send(Ok(Turn {
-                    updates,
-                    state: TurnState::Waiting(Box::new(Waiting {
-                        request_id: id.to_string(),
-                        tool_call,
-                        options,
-                    })),
-                }));
-            }
-        }
-        "terminal/create" => {
-            let Some(policy) = terminal.as_deref() else {
-                respond_error(&writer, id, -32601, "terminal is not enabled").await;
-                return;
-            };
-            let approved = {
-                let mut state = shared.lock().await;
-                let approved = state.approved;
-                state.approved = false;
-                approved
-            };
-            if !approved {
-                respond_error(&writer, id, -32000, "permission required").await;
-                return;
-            }
-            let Some(command) = params.get("command").and_then(Value::as_str) else {
-                respond_error(&writer, id, -32602, "missing command").await;
-                return;
-            };
-            if !command_allowed(policy, command) {
-                respond_error(&writer, id, -32000, "command not allowed").await;
-                return;
-            }
-            let args: Vec<String> = params
-                .get("args")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let cwd = match params.get("cwd").and_then(Value::as_str) {
-                Some(cwd) if !cwd.is_empty() => match workspace.directory(cwd) {
-                    Ok(cwd) => cwd,
-                    Err(error) => {
-                        respond_error(&writer, id, rpc_error(error), "invalid cwd").await;
-                        return;
-                    }
-                },
-                _ => workspace.root().to_path_buf(),
-            };
-            let mut envs = Vec::new();
-            if let Some(values) = params.get("env").and_then(Value::as_array) {
-                for value in values {
-                    let (Some(name), Some(value)) = (
-                        value.get("name").and_then(Value::as_str),
-                        value.get("value").and_then(Value::as_str),
-                    ) else {
-                        respond_error(&writer, id, -32602, "invalid env").await;
-                        return;
-                    };
-                    if name.is_empty()
-                        || name.len() > 256
-                        || name.contains(['=', '\0'])
-                        || name.chars().any(char::is_control)
-                    {
-                        respond_error(&writer, id, -32602, "invalid env name").await;
-                        return;
-                    }
-                    envs.push((name.to_owned(), value.to_owned()));
-                }
-            }
-            let limit = params
-                .get("outputByteLimit")
-                .and_then(Value::as_u64)
-                .map(|value| value as usize)
-                .unwrap_or(policy.max_output)
-                .clamp(1, policy.max_output);
-            let mut command = Command::new(command);
-            command
-                .args(&args)
-                .current_dir(&cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .env_clear()
-                .kill_on_drop(true);
-            for key in BASE_ENV {
-                if let Some(value) = std::env::var_os(key) {
-                    command.env(key, value);
-                }
-            }
-            for (name, value) in envs {
-                command.env(name, value);
-            }
-            let mut child = match command.spawn() {
-                Ok(child) => child,
-                Err(_) => {
-                    respond_error(&writer, id, -32000, "failed to start command").await;
-                    return;
-                }
-            };
-            let output = Arc::new(Mutex::new(Vec::new()));
-            let truncated = Arc::new(AtomicBool::new(false));
-            let mut readers = Vec::new();
-            if let Some(stdout) = child.stdout.take() {
-                readers.push(tap(stdout, output.clone(), truncated.clone(), limit));
-            }
-            if let Some(stderr) = child.stderr.take() {
-                readers.push(tap(stderr, output.clone(), truncated.clone(), limit));
-            }
-            let child = Arc::new(Mutex::new(child));
-            let exit = Arc::new(Mutex::new(None));
-            let readers = Arc::new(Mutex::new(readers));
-            let terminal_id = uuid::Uuid::new_v4().to_string();
-            terminals.lock().await.insert(
-                terminal_id.clone(),
-                Terminal {
-                    child: child.clone(),
-                    output,
-                    truncated,
-                    exit,
-                    readers,
-                },
-            );
-            let seconds = policy.max_seconds;
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(seconds)).await;
-                let mut child = child.lock().await;
-                let _ = child.start_kill();
-            });
-            respond(&writer, id, json!({"terminalId": terminal_id})).await;
-        }
-        "terminal/output" => {
-            let Some(terminal_id) = params.get("terminalId").and_then(Value::as_str) else {
-                respond_error(&writer, id, -32602, "missing terminal").await;
-                return;
-            };
-            let (output, truncated, exited) = {
-                let terminals = terminals.lock().await;
-                let Some(terminal) = terminals.get(terminal_id) else {
-                    respond_error(&writer, id, -32602, "unknown terminal").await;
-                    return;
-                };
-                (
-                    terminal.output.lock().await.clone(),
-                    terminal.truncated.load(Ordering::Relaxed),
-                    *terminal.exit.lock().await,
-                )
-            };
-            let mut result = json!({
-                "output": String::from_utf8_lossy(&output),
-                "truncated": truncated,
-            });
-            if let Some(code) = exited {
-                result["exitStatus"] =
-                    code.map_or_else(|| json!({}), |code| json!({"exitCode": code}));
-            }
-            respond(&writer, id, result).await;
-        }
-        "terminal/wait_for_exit" => {
-            let Some(terminal_id) = params.get("terminalId").and_then(Value::as_str) else {
-                respond_error(&writer, id, -32602, "missing terminal").await;
-                return;
-            };
-            let (child, exit, readers) = {
-                let terminals = terminals.lock().await;
-                let Some(terminal) = terminals.get(terminal_id) else {
-                    respond_error(&writer, id, -32602, "unknown terminal").await;
-                    return;
-                };
-                (
-                    terminal.child.clone(),
-                    terminal.exit.clone(),
-                    terminal.readers.clone(),
-                )
-            };
-            let status = child.lock().await.wait().await;
-            let code = status.ok().and_then(|status| status.code());
-            *exit.lock().await = Some(code);
-            let readers = std::mem::take(&mut *readers.lock().await);
-            for reader in readers {
-                let _ = reader.await;
-            }
-            respond(
-                &writer,
-                id,
-                json!({"exitStatus": code.map_or_else(|| json!({}), |code| json!({"exitCode": code}))}),
-            )
-            .await;
-        }
-        "terminal/kill" => {
-            let Some(terminal_id) = params.get("terminalId").and_then(Value::as_str) else {
-                respond_error(&writer, id, -32602, "missing terminal").await;
-                return;
-            };
-            let child = {
-                let terminals = terminals.lock().await;
-                terminals
-                    .get(terminal_id)
-                    .map(|terminal| terminal.child.clone())
-            };
-            if let Some(child) = child {
-                let _ = child.lock().await.start_kill();
-            }
-            respond(&writer, id, Value::Null).await;
-        }
-        "terminal/release" => {
-            let Some(terminal_id) = params.get("terminalId").and_then(Value::as_str) else {
-                respond_error(&writer, id, -32602, "missing terminal").await;
-                return;
-            };
-            let terminal = terminals.lock().await.remove(terminal_id);
-            if let Some(terminal) = terminal {
-                let _ = terminal.child.lock().await.start_kill();
-            }
-            respond(&writer, id, Value::Null).await;
-        }
-        "fs/read_text_file" => {
-            let Some(path) = params.get("path").and_then(Value::as_str) else {
-                respond_error(&writer, id, -32602, "invalid path").await;
-                return;
-            };
-            let line = params.get("line").and_then(Value::as_u64).map(|v| v as u32);
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .map(|v| v as u32);
-            match relative_to(&workspace, path).and_then(|path| workspace.read(&path, line, limit))
-            {
-                Ok(read) => respond(&writer, id, json!({"content": read.content})).await,
-                Err(error) => respond_error(&writer, id, rpc_error(error), "read failed").await,
-            }
-        }
-        "fs/write_text_file" => {
-            let (Some(path), Some(content)) = (
-                params.get("path").and_then(Value::as_str),
-                params.get("content").and_then(Value::as_str),
-            ) else {
-                respond_error(&writer, id, -32602, "invalid write").await;
-                return;
-            };
-            match relative_to(&workspace, path).and_then(|path| workspace.write(&path, content)) {
-                Ok(()) => respond(&writer, id, Value::Null).await,
-                Err(error) => respond_error(&writer, id, rpc_error(error), "write failed").await,
-            }
-        }
-        _ => respond_error(&writer, id, -32601, "method not supported").await,
     }
 }
 
@@ -865,8 +968,7 @@ fn tap(
     })
 }
 
-fn relative_to(workspace: &Workspace, path: &str) -> Result<String, Error> {
-    let path = Path::new(path);
+fn relative_to(workspace: &Workspace, path: &Path) -> Result<String, Error> {
     let relative = path.strip_prefix(workspace.root()).map_err(|_| Error {
         kind: ErrorKind::PermissionRequired,
         reason: Some("outside_workspace"),
@@ -878,44 +980,22 @@ fn relative_to(workspace: &Workspace, path: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::new(ErrorKind::PermissionRequired))
 }
 
-fn rpc_error(error: Error) -> i64 {
-    match error.kind {
-        ErrorKind::PermissionRequired => -32000,
-        ErrorKind::NotFound => -32602,
-        ErrorKind::InvalidRequest => -32602,
-        _ => -32603,
-    }
-}
-
-async fn respond(writer: &mpsc::Sender<Value>, id: u64, result: Value) {
-    let _ = writer
-        .send(json!({"jsonrpc": "2.0", "id": id, "result": result}))
-        .await;
-}
-
-async fn respond_error(writer: &mpsc::Sender<Value>, id: u64, code: i64, message: &str) {
-    let _ = writer
-        .send(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": code, "message": message}
-        }))
-        .await;
-}
-
-async fn fail(shared: &Arc<Mutex<State>>, reason: &str, writer: &mpsc::Sender<Value>) {
-    let _ = writer; // keep the writer alive for pending responses
-    let mut state = shared.lock().await;
-    if let Some(turn) = state.turn.take() {
-        let _ = turn.send(Err(reason.into()));
-    }
-    state.pending.clear();
+fn acp_error(error: Error) -> AcpError {
+    let code = match error.kind {
+        ErrorKind::PermissionRequired => ErrorCode::new(-32000),
+        ErrorKind::NotFound | ErrorKind::InvalidRequest => ErrorCode::INVALID_PARAMS,
+        _ => ErrorCode::INTERNAL_ERROR,
+    };
+    AcpError::new(code, "request failed")
 }
 
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
+    use ene_plugin::{ContentChunk, text_block};
+
     #[cfg(unix)]
     fn agent_script() -> String {
         r#"
@@ -970,14 +1050,14 @@ for line in sys.stdin:
             terminal: None,
         };
         let mut session = AcpSession::start(config).await.unwrap();
-        let turn = session.prompt(&[ContentBlock::text("go")]).await.unwrap();
+        let turn = session.prompt(&[text_block("go")]).await.unwrap();
         assert!(matches!(turn.state, TurnState::Waiting(_)));
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
         let request_id = waiting.request_id;
         let options = waiting.options;
-        assert_eq!(options[0].option_id, "allow");
+        assert_eq!(options[0].option_id.to_string(), "allow");
         assert!(turn.updates.iter().any(|update| matches!(
             update,
             SessionUpdate::AgentMessageChunk(chunk)
@@ -986,9 +1066,9 @@ for line in sys.stdin:
         let turn = session
             .respond(
                 &request_id,
-                &RequestPermissionOutcome::Selected {
-                    option_id: "allow".into(),
-                },
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
             )
             .await
             .unwrap();
@@ -1001,6 +1081,195 @@ for line in sys.stdin:
             SessionUpdate::AgentMessageChunk(chunk)
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text.contains("allow"))
         )));
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    fn unknown_stop_agent_script() -> String {
+        r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "s1"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"stopReason": "bogus"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unknown_stop_reason_fails_instead_of_ending_the_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("agent.py");
+        std::fs::write(&script_path, unknown_stop_agent_script()).unwrap();
+        let config = AcpConfig {
+            command: vec![
+                "python3".into(),
+                script_path.to_str().unwrap().into(),
+                temp.path().to_str().unwrap().into(),
+            ],
+            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
+            cwd: std::fs::canonicalize(temp.path()).unwrap(),
+            terminal: None,
+        };
+        let mut session = AcpSession::start(config).await.unwrap();
+        let error = session.prompt(&[text_block("go")]).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ExternalFailure);
+        session.kill().await;
+    }
+
+    #[tokio::test]
+    async fn late_updates_are_dropped_and_the_update_limit_is_enforced() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Mutex::new(State::new()));
+        {
+            let mut state = shared.lock().await;
+            state.session = Some(schema::SessionId::new("s"));
+            state.active = true;
+        }
+        let context = ClientContext {
+            shared: shared.clone(),
+            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
+            terminal: None,
+            terminals: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let notification = || {
+            schema::SessionNotification::new(
+                "s",
+                schema::SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block("hi"))),
+            )
+        };
+        on_update(&context, notification()).await.unwrap();
+        assert_eq!(shared.lock().await.updates.len(), 1);
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut state = shared.lock().await;
+            state.turn = Some(tx);
+            state.sequence = 1;
+        }
+        finish(
+            &shared,
+            1,
+            Ok(schema::PromptResponse::new(StopReason::EndTurn)),
+        )
+        .await;
+        let turn = rx.await.unwrap().unwrap();
+        assert_eq!(turn.updates.len(), 1);
+        on_update(&context, notification()).await.unwrap();
+        assert!(shared.lock().await.updates.is_empty());
+
+        {
+            let mut state = shared.lock().await;
+            state.active = true;
+            state.updates = vec![SessionUpdate::Plan(schema::Plan::new(vec![])); MAX_UPDATES];
+        }
+        let error = on_update(&context, notification()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn acp_error_mapping_preserves_host_error_kinds() {
+        assert_eq!(
+            acp_error(Error::new(ErrorKind::PermissionRequired)).code,
+            ErrorCode::new(-32000)
+        );
+        assert_eq!(acp_error(Error::invalid()).code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            acp_error(Error::unavailable()).code,
+            ErrorCode::INTERNAL_ERROR
+        );
+    }
+
+    #[cfg(unix)]
+    fn terminal_kill_agent_script() -> String {
+        r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+session = "s1"
+prompt_id = None
+terminal_id = None
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "started"}}}})
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "run"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create", "params": {"sessionId": session, "command": "sleep", "args": ["30"]}})
+    elif mid == 901:
+        terminal_id = msg["result"]["terminalId"]
+        send({"jsonrpc": "2.0", "id": 902, "method": "terminal/wait_for_exit", "params": {"sessionId": session, "terminalId": terminal_id}})
+        send({"jsonrpc": "2.0", "id": 903, "method": "terminal/kill", "params": {"sessionId": session, "terminalId": terminal_id}})
+    elif mid == 903:
+        send({"jsonrpc": "2.0", "id": 904, "method": "terminal/output", "params": {"sessionId": session, "terminalId": terminal_id}})
+    elif mid == 904:
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_kill_is_processed_while_wait_for_exit_is_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("agent.py");
+        std::fs::write(&script_path, terminal_kill_agent_script()).unwrap();
+        let config = AcpConfig {
+            command: vec![
+                "python3".into(),
+                script_path.to_str().unwrap().into(),
+                temp.path().to_str().unwrap().into(),
+            ],
+            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
+            cwd: std::fs::canonicalize(temp.path()).unwrap(),
+            terminal: Some(TerminalLimits {
+                allowed: vec!["sleep".into()],
+                max_seconds: 10,
+                max_output: 64,
+            }),
+        };
+        let mut session = AcpSession::start(config).await.unwrap();
+        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let turn = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.respond(
+                &waiting.request_id,
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
+            ),
+        )
+        .await
+        .expect("terminal/kill must not wait for the pending wait_for_exit")
+        .unwrap();
+        assert!(matches!(
+            turn.state,
+            TurnState::Stopped(StopReason::EndTurn)
+        ));
         session.kill().await;
     }
 }

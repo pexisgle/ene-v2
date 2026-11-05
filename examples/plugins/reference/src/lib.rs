@@ -33,55 +33,40 @@ mod guest {
                 })?;
                 let instruction = prompt
                     .iter()
-                    .map(|block| match block {
-                        ContentBlock::Text(text) => text.text.clone(),
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(text) => Some(text.text.clone()),
+                        _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                emit_update(SessionUpdate::Plan(Plan {
-                    entries: vec![
-                        PlanEntry {
-                            content: "参照データを確認する".into(),
-                            priority: PlanEntryPriority::High,
-                            status: PlanEntryStatus::InProgress,
-                        },
-                        PlanEntry {
-                            content: "結果をまとめる".into(),
-                            priority: PlanEntryPriority::Medium,
-                            status: PlanEntryStatus::Pending,
-                        },
-                    ],
-                }))?;
-                emit_update(SessionUpdate::AgentMessageChunk(ContentChunk {
-                    content: ContentBlock::text(format!(
-                        "{instruction} の参照データを確認します。"
-                    )),
-                    message_id: Some("progress".into()),
-                }))?;
-                emit_update(SessionUpdate::ToolCall(ToolCall {
-                    tool_call_id: "tool-1".into(),
-                    title: "参照データを確認".into(),
-                    name: Some("reference.inspect".into()),
-                    kind: Some(ToolKind::Read),
-                    ..Default::default()
-                }))?;
+                emit_update(SessionUpdate::Plan(Plan::new(vec![
+                    PlanEntry::new(
+                        "参照データを確認する",
+                        PlanEntryPriority::High,
+                        PlanEntryStatus::InProgress,
+                    ),
+                    PlanEntry::new(
+                        "結果をまとめる",
+                        PlanEntryPriority::Medium,
+                        PlanEntryStatus::Pending,
+                    ),
+                ])))?;
+                let mut chunk = ContentChunk::new(text_block(format!(
+                    "{instruction} の参照データを確認します。"
+                )));
+                chunk.message_id = Some("progress".into());
+                emit_update(SessionUpdate::AgentMessageChunk(chunk))?;
+                emit_update(SessionUpdate::ToolCall(
+                    ToolCall::new("tool-1", "参照データを確認")
+                        .name("reference.inspect")
+                        .kind(ToolKind::Read),
+                ))?;
                 HarnessEvent::RequestPermission {
                     request_id: PERMISSION.into(),
-                    tool_call: ToolCallUpdate {
-                        tool_call_id: "tool-1".into(),
-                        ..Default::default()
-                    },
+                    tool_call: ToolCallUpdate::new("tool-1", ToolCallUpdateFields::new()),
                     options: vec![
-                        PermissionOption {
-                            option_id: "allow".into(),
-                            name: "許可する".into(),
-                            kind: PermissionOptionKind::AllowOnce,
-                        },
-                        PermissionOption {
-                            option_id: "deny".into(),
-                            name: "拒否する".into(),
-                            kind: PermissionOptionKind::RejectOnce,
-                        },
+                        PermissionOption::new("allow", "許可する", PermissionOptionKind::AllowOnce),
+                        PermissionOption::new("deny", "拒否する", PermissionOptionKind::RejectOnce),
                     ],
                 }
             }
@@ -101,26 +86,25 @@ mod guest {
                 })?;
                 let allowed = matches!(
                     outcome,
-                    RequestPermissionOutcome::Selected { option_id } if option_id == "allow"
+                    RequestPermissionOutcome::Selected(selected)
+                        if selected.option_id.to_string() == "allow"
                 );
                 if allowed {
-                    emit_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                        tool_call_id: "tool-1".into(),
-                        status: Some(ToolCallStatus::InProgress),
-                        ..Default::default()
-                    }))?;
-                    emit_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                        tool_call_id: "tool-1".into(),
-                        status: Some(ToolCallStatus::Completed),
-                        content: Some(vec![ToolCallContent::Content {
-                            content: ContentBlock::text("参照データを確認しました。"),
-                        }]),
-                        ..Default::default()
-                    }))?;
-                    emit_update(SessionUpdate::AgentMessageChunk(ContentChunk {
-                        content: ContentBlock::text("参照タスクを完了しました。"),
-                        message_id: Some("report".into()),
-                    }))?;
+                    emit_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        "tool-1",
+                        ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
+                    )))?;
+                    emit_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        "tool-1",
+                        ToolCallUpdateFields::new()
+                            .status(ToolCallStatus::Completed)
+                            .content(vec![ToolCallContent::Content(Content::new(text_block(
+                                "参照データを確認しました。",
+                            )))]),
+                    )))?;
+                    let mut chunk = ContentChunk::new(text_block("参照タスクを完了しました。"));
+                    chunk.message_id = Some("report".into());
+                    emit_update(SessionUpdate::AgentMessageChunk(chunk))?;
                     HarnessEvent::Stop {
                         stop_reason: StopReason::EndTurn,
                     }

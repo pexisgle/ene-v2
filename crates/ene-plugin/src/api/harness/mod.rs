@@ -4,15 +4,30 @@
 //! inside an invocation, so a `request_permission` ends the invocation and the
 //! host resumes it with [`HarnessInput::Respond`]. `sessionId` is host-owned
 //! and never travels over the guest ABI.
-mod acp;
-
-pub use acp::{
-    ContentBlock, ContentChunk, MessageId, PermissionOption, PermissionOptionId,
+pub use agent_client_protocol_schema::v1::{
+    Content, ContentBlock, ContentChunk, MessageId, PermissionOption, PermissionOptionId,
     PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    RequestPermissionOutcome, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind,
+    RequestPermissionOutcome, SelectedPermissionOutcome, StopReason, TextContent, ToolCall,
+    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind,
 };
 use serde::{Deserialize, Serialize};
+
+/// ACP carries arbitrary content; the harness speaks text.
+pub fn text_block(text: impl Into<String>) -> ContentBlock {
+    ContentBlock::Text(TextContent::new(text))
+}
+
+/// Different kinds of session updates the harness may stream.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "sessionUpdate", rename_all = "snake_case")]
+pub enum SessionUpdate {
+    AgentMessageChunk(ContentChunk),
+    AgentThoughtChunk(ContentChunk),
+    ToolCall(ToolCall),
+    ToolCallUpdate(ToolCallUpdate),
+    Plan(Plan),
+}
 
 pub type RequestId = String;
 
@@ -76,8 +91,8 @@ mod tests {
         let SessionUpdate::ToolCall(call) = parsed else {
             panic!("expected tool call");
         };
-        assert_eq!(call.tool_call_id, "call_001");
-        assert_eq!(call.kind, Some(ToolKind::Read));
+        assert_eq!(call.tool_call_id.to_string(), "call_001");
+        assert_eq!(call.kind, ToolKind::Read);
         assert_eq!(call.status, ToolCallStatus::Pending);
 
         let update = json!({
@@ -189,16 +204,15 @@ mod tests {
             }))
             .is_err()
         );
-        // Only text content blocks are part of the current subset.
-        assert!(
-            serde_json::from_value::<HarnessEvent>(json!({
-                "type": "update",
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "image", "data": "AA==", "mimeType": "image/png"}
-                }
-            }))
-            .is_err()
-        );
+        // Only text content blocks are part of the harness contract. The ACP
+        // payload accepts other variants; the runtime rejects them.
+        serde_json::from_value::<HarnessEvent>(json!({
+            "type": "update",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "image", "data": "AA==", "mimeType": "image/png"}
+            }
+        }))
+        .unwrap();
     }
 }
