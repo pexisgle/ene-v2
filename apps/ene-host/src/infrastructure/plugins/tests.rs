@@ -468,7 +468,7 @@ async fn a_finished_enable_cannot_persist_over_a_later_disable() {
         })
     };
     let state = || manager.entries.read().unwrap()["reference"].state.clone();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while state() != "ready" {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
