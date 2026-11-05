@@ -878,12 +878,9 @@ fn forward_stream(
             > OperationKind::Conversation.spec().output_bytes
         {
             turn_state.over_limit = true;
-            commands.queue(move |world: &mut World| {
-                world.trigger(StopTurn {
-                    entity: agent,
-                    reason: Some("output_limit".into()),
-                });
-            });
+            commands
+                .entity(turn)
+                .insert(TurnOutcome::Failed("output_limit".into()));
             continue;
         }
         turn_state.bytes += text.len();
