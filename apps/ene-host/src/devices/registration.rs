@@ -111,41 +111,34 @@ impl Devices {
                 }
             }
             this.commit(&mut state, journal).await?;
-            if let Some(signal) = state.changes.get(&id) {
-                signal.cancel();
-            }
-            if !allowed {
-                state.connections.remove(&id);
+            if let Some(session) = state.sessions.get_mut(&id) {
+                session.changed.cancel();
+                if !allowed {
+                    session.connection = None;
+                }
             }
             Ok(())
         })
         .await
     }
-    pub async fn changes(&self, id: &str) -> Result<CancellationToken, ConnectError> {
-        let mut state = self.lock().await?;
-        permitted(&state.journal, id, None)?;
-        Ok(state.changes.entry(id.into()).or_default().clone())
-    }
     pub async fn subscribe(&self, id: String) -> Result<Subscription, ConnectError> {
         let mut state = self.lock().await?;
         permitted(&state.journal, &id, None)?;
-        if state
-            .connections
-            .get(&id)
+        let entry = state.sessions.entry(id).or_default();
+        if entry
+            .connection
+            .as_ref()
             .is_some_and(|c| !c.queue.is_closed())
         {
             return Err(conflict());
         }
         let session = Uuid::new_v4().to_string();
         let (queue, incoming) = mpsc::channel(32);
-        let changed = state.changes.entry(id.clone()).or_default().clone();
-        state.connections.insert(
-            id,
-            Connection {
-                id: session.clone(),
-                queue,
-            },
-        );
+        let changed = entry.changed.clone();
+        entry.connection = Some(Connection {
+            id: session.clone(),
+            queue,
+        });
         Ok(Subscription {
             id: session,
             queue: incoming,

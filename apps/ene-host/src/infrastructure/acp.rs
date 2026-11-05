@@ -590,13 +590,21 @@ async fn finish(
     }
 }
 
-async fn reset_turn(shared: &Arc<Mutex<State>>) {
-    let mut state = shared.lock().await;
+/// Ends the active turn. `failed` marks the session as unusable; `turn_error`
+/// answers a turn that still waits. A reset passes neither and drops the turn.
+fn abandon(state: &mut State, failed: Option<&'static str>, turn_error: Option<&str>) {
     state.active = false;
     state.approved = None;
+    if let Some(failed) = failed {
+        state.failed = Some(failed);
+    }
     state.sequence += 1;
     state.updates.clear();
-    state.turn = None;
+    if let Some(turn) = state.turn.take()
+        && let Some(error) = turn_error
+    {
+        let _ = turn.send(Err(error.into()));
+    }
     if let Some(permission) = state.permission.take() {
         let _ = permission
             .responder
@@ -606,23 +614,14 @@ async fn reset_turn(shared: &Arc<Mutex<State>>) {
     }
 }
 
+async fn reset_turn(shared: &Arc<Mutex<State>>) {
+    let mut state = shared.lock().await;
+    abandon(&mut state, None, None);
+}
+
 async fn fail(shared: &Arc<Mutex<State>>, stderr: &Arc<Mutex<Vec<u8>>>, reason: String) {
     let mut state = shared.lock().await;
-    state.active = false;
-    state.approved = None;
-    state.failed = Some("acp_agent_failed");
-    state.sequence += 1;
-    state.updates.clear();
-    if let Some(turn) = state.turn.take() {
-        let _ = turn.send(Err(reason.clone()));
-    }
-    if let Some(permission) = state.permission.take() {
-        let _ = permission
-            .responder
-            .respond(schema::RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
-    }
+    abandon(&mut state, Some("acp_agent_failed"), Some(&reason));
     let captured = stderr.lock().await;
     eprintln!(
         "ene-host acp: {reason}: {}",
@@ -631,21 +630,7 @@ async fn fail(shared: &Arc<Mutex<State>>, stderr: &Arc<Mutex<Vec<u8>>>, reason: 
 }
 
 fn fail_active(state: &mut State, reason: &'static str) {
-    state.active = false;
-    state.failed = Some(reason);
-    state.approved = None;
-    state.sequence += 1;
-    state.updates.clear();
-    if let Some(turn) = state.turn.take() {
-        let _ = turn.send(Err(reason.into()));
-    }
-    if let Some(permission) = state.permission.take() {
-        let _ = permission
-            .responder
-            .respond(schema::RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
-    }
+    abandon(state, Some(reason), Some(reason));
     eprintln!("ene-host acp: {reason}");
 }
 
@@ -995,16 +980,11 @@ async fn on_wait_for_exit(
         terminal.exit.clone()
     };
     let _ = cx.spawn(async move {
-        let code = loop {
-            let current = *exit.borrow();
-            if let Some(code) = current {
-                break Some(code);
-            }
-            if exit.changed().await.is_err() {
-                break None;
-            }
+        let Ok(code) = exit.wait_for(|value| value.is_some()).await else {
+            let _ = responder.respond_with_error(AcpError::internal_error());
+            return Ok(());
         };
-        let Some(code) = code else {
+        let Some(code) = *code else {
             let _ = responder.respond_with_error(AcpError::internal_error());
             return Ok(());
         };

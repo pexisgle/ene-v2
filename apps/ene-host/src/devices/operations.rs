@@ -38,8 +38,9 @@ impl Devices {
                 return Err(ConnectError::resource_exhausted("端末操作履歴の上限です"));
             }
             let connection = state
-                .connections
+                .sessions
                 .get(&request.device_id)
+                .and_then(|session| session.connection.as_ref())
                 .filter(|c| !c.queue.is_closed())
                 .ok_or_else(conflict)?;
             let permit = connection
@@ -77,8 +78,9 @@ impl Devices {
         let mut result = (*op.state).clone();
         if result.status == w::OperationStatus::Dispatched
             && !state
-                .connections
+                .sessions
                 .get(&op.request.device_id)
+                .and_then(|session| session.connection.as_ref())
                 .is_some_and(|c| c.id == op.subscription_id && !c.queue.is_closed())
         {
             result.status = w::OperationStatus::Uncertain.into();

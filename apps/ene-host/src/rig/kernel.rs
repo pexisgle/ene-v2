@@ -227,16 +227,24 @@ fn agent_entity(world: &mut World, companion: &str) -> Option<Entity> {
 #[derive(Component, Clone, Copy, Default)]
 struct PromptSequence(u64);
 
-#[derive(Component, Clone, Default)]
-struct RecallSection(String);
+/// The tag rig renders the automatic recall under.
+const RECALL_TAG: &str = "recall";
 
-fn combine_prompt(base: &str, section: &str) -> String {
-    if section.trim().is_empty() {
-        base.to_owned()
-    } else if base.trim().is_empty() {
-        section.to_owned()
-    } else {
-        format!("{base}\n\n{section}")
+fn recall_section(text: String) -> PromptSection {
+    PromptSection {
+        order: 100,
+        tag: RECALL_TAG.into(),
+        text,
+    }
+}
+
+/// Replaces the recall section on a request that was already built.
+fn replace_recall(request: &mut ModelRequest, fragment: &str) {
+    if let Some(prompt) = request.prompt.as_mut() {
+        prompt.sections.retain(|section| section.tag != RECALL_TAG);
+        prompt
+            .sections
+            .push(rig_core::completion::Section::new(RECALL_TAG, fragment));
     }
 }
 
@@ -251,28 +259,6 @@ struct RecallResults {
     cancelled: HashSet<String>,
 }
 
-fn owned_prompt(role: String) -> rig_core::completion::SystemPrompt {
-    rig_core::completion::SystemPrompt {
-        role,
-        sections: Vec::new(),
-    }
-}
-
-fn apply_recall_prompt(world: &mut World, entity: Entity, fragment: String) {
-    let agent = world.get::<ForAgent>(entity).map(|agent| agent.0);
-    let base = agent
-        .and_then(|agent| world.get::<SystemPrompt>(agent))
-        .map(|prompt| prompt.0.clone())
-        .unwrap_or_default();
-    let combined = combine_prompt(&base, &fragment);
-    if let Some(agent) = agent {
-        world.entity_mut(agent).insert(RecallSection(fragment));
-    }
-    if let Some(mut request) = world.get_mut::<ModelRequest>(entity) {
-        request.prompt = Some(owned_prompt(combined));
-    }
-}
-
 struct HeldRecall {
     companion: String,
     entity: Entity,
@@ -285,22 +271,9 @@ fn hold_recall(
     mut holds: ResMut<RecallHolds>,
     mut results: ResMut<RecallResults>,
     mut calls: Query<(Entity, &mut ModelRequest, Option<&ForAgent>)>,
-    agent_state: Query<(&SystemPrompt, &RecallSection)>,
     held: Query<&HoldOf>,
     agents: Query<&AgentId, With<Agent>>,
 ) {
-    let now = Instant::now();
-    let expired = holds
-        .held
-        .iter()
-        .filter(|(_, value)| value.deadline <= now)
-        .map(|(request, _)| request.clone())
-        .collect::<Vec<_>>();
-    for request in expired {
-        if let Some(value) = holds.held.remove(&request) {
-            commands.entity(value.entity).despawn();
-        }
-    }
     for (call, mut request, agent) in &mut calls {
         let Some(id) = request
             .history
@@ -317,29 +290,13 @@ fn hold_recall(
         else {
             continue;
         };
-        let (agent_base, current_recall) = agent
-            .and_then(|agent| agent_state.get(agent.0).ok())
-            .map(|(base, recall)| (base.0.clone(), recall.0.clone()))
-            .unwrap_or_default();
-        let base = if agent_base.is_empty() {
-            request
-                .prompt
-                .as_ref()
-                .map(|prompt| prompt.role.clone())
-                .unwrap_or_default()
-        } else {
-            agent_base
-        };
-        if agent.is_some() {
-            request.prompt = Some(owned_prompt(combine_prompt(&base, &current_recall)));
-        }
         if let Some(fragment) = results.pending.remove(&id) {
             if let Some(agent) = agent {
                 commands
                     .entity(agent.0)
-                    .insert(RecallSection(fragment.clone()));
+                    .insert((recall_section(fragment.clone()), SectionOf(agent.0)));
+                replace_recall(&mut request, &fragment);
             }
-            request.prompt = Some(owned_prompt(combine_prompt(&base, &fragment)));
             if let Some(value) = holds.held.remove(&id) {
                 commands.entity(value.entity).despawn();
             }
@@ -455,7 +412,14 @@ fn apply_commands(world: &mut World) {
                 }
                 if let Some(entity) = target {
                     if has_hold || had_pending {
-                        apply_recall_prompt(world, entity, prompt);
+                        if let Some(agent) = world.get::<ForAgent>(entity).map(|agent| agent.0) {
+                            world
+                                .entity_mut(agent)
+                                .insert((recall_section(prompt.clone()), SectionOf(agent)));
+                        }
+                        if let Some(mut request) = world.get_mut::<ModelRequest>(entity) {
+                            replace_recall(&mut request, &prompt);
+                        }
                         world
                             .resource_mut::<RecallResults>()
                             .pending
@@ -502,13 +466,25 @@ fn apply_commands(world: &mut World) {
                     if sequence >= current {
                         world
                             .entity_mut(entity)
-                            .insert((SystemPrompt(prompt), PromptSequence(sequence)));
+                            .insert((SystemPrompt(prompt.clone()), PromptSequence(sequence)));
+                        // A request already built for this turn keeps the newest
+                        // mind; only the role is host-owned, the sections stay.
+                        let mut requests = world.query::<(Entity, &ForAgent, &mut ModelRequest)>();
+                        for (_, agent, mut request) in requests.iter_mut(world) {
+                            if agent.0 == entity
+                                && let Some(built) = request.prompt.as_mut()
+                            {
+                                built.role.clone_from(&prompt);
+                            }
+                        }
                     }
                 }
             }
             Command::SetRecallSection { companion, section } => {
                 if let Some(entity) = agent_entity(world, &companion) {
-                    world.entity_mut(entity).insert(RecallSection(section));
+                    world
+                        .entity_mut(entity)
+                        .insert((recall_section(section), SectionOf(entity)));
                 }
             }
             Command::Deliver {
@@ -797,24 +773,8 @@ fn on_turn_settled(
     let messages = take_new(conversation, &id.0, &mut emitted);
     let (state_name, failure) = match &outcome {
         TurnOutcome::Answered(_) => ("answered", None),
-        TurnOutcome::Failed(why) => {
-            eprintln!("[settle-failed] {why:?}");
-            let (code, message) = if why == "output_limit" {
-                ("output_limit", "返答が出力上限を超えたため破棄しました")
-            } else {
-                ("generation_failed", why.as_str())
-            };
-            ("failed", Some(messages::failure(code, message)))
-        }
-        TurnOutcome::Stopped(reason) => (
-            "stopped",
-            Some(messages::failure(
-                "cancelled",
-                reason
-                    .as_deref()
-                    .unwrap_or("停止操作により生成を停止しました"),
-            )),
-        ),
+        TurnOutcome::Failed(why) => ("failed", Some(messages::turn_failure(why))),
+        TurnOutcome::Stopped(reason) => ("stopped", Some(messages::stopped(reason.as_deref()))),
     };
     let message_id = matches!(outcome, TurnOutcome::Answered(_) | TurnOutcome::Stopped(_))
         .then(|| messages::reply_entry(conversation, turn.start))
@@ -944,7 +904,7 @@ fn bind_mind_calls(
 /// Confirms each delivery only once the frame's log write succeeded and the
 /// kernel started the message. A pending delivery is retried next frame.
 fn confirm_deliveries(log: Res<SessionLog>, mut acks: ResMut<Acks>) {
-    if let Some(failure) = log.failure() {
+    if log.failure().is_some() {
         for ack in acks.pending.drain(..) {
             let _ = ack.reply.send(Err(Error {
                 kind: ErrorKind::StorageFailure,
@@ -952,7 +912,6 @@ fn confirm_deliveries(log: Res<SessionLog>, mut acks: ResMut<Acks>) {
             }));
         }
         acks.accepted.clear();
-        let _ = failure;
         return;
     }
     let Acks {

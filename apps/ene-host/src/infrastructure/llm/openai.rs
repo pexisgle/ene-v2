@@ -44,25 +44,12 @@ pub fn policy(c: &Connection) -> Result<Policy> {
     )
 }
 
-pub async fn generate(input: Invocation) -> Result<BoxStream<'static, Result<Event>>> {
-    let request = input.generation()?.clone();
-    let transport = crate::llm::AuthorizedTransport::new(
-        std::sync::Arc::new(input),
-        CredentialPlacement::Bearer,
-    )?;
-    // The SDK sees a placeholder; only the transport can attach real credentials.
-    let client = OpenAIConfig::new("managed-by-host")
-        .with_base_url(ENDPOINT)
-        .connect(transport);
-    stream(request, client)
-}
-
 fn stream(input: Generation, client: OpenAI) -> Result<BoxStream<'static, Result<Event>>> {
     use rig_core::{
         completion::CompletionRequest,
         streaming::{Item, StreamEvent},
     };
-    let mut all = input.messages().to_vec();
+    let mut all = input.messages.clone();
     let prompt = all.pop().ok_or_else(Error::invalid)?.text;
     let history = all.into_iter().map(|m| {
         if m.role == crate::llm::ChatRole::User {
@@ -72,12 +59,12 @@ fn stream(input: Generation, client: OpenAI) -> Result<BoxStream<'static, Result
         }
     });
     let request = CompletionRequest::new(prompt)
-        .preamble(input.preamble().to_owned())
+        .preamble(input.preamble.clone())
         .messages(history)
-        .max_tokens(input.max_tokens())
+        .max_tokens(input.max_tokens)
         .additional_params(json!({"store":false}));
     let mut stream = client
-        .responses(input.model().to_owned())
+        .responses(input.model.clone())
         .stream(request)
         .map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
     Ok(Box::pin(async_stream::try_stream! {
@@ -93,93 +80,100 @@ fn stream(input: Generation, client: OpenAI) -> Result<BoxStream<'static, Result
     }))
 }
 
-pub async fn models(input: Invocation) -> Result<Vec<Model>> {
-    let transport = crate::llm::AuthorizedTransport::new(
-        std::sync::Arc::new(input),
-        CredentialPlacement::Bearer,
-    )?;
-    let mut models = Vec::new();
-    for item in super::catalog_items(transport, ENDPOINT).await? {
-        let id = item["id"]
-            .as_str()
-            .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
-        models.push(Model {
-            id: id.into(),
-            name: id.into(),
-            metadata: ene_rpc::ModelMetadata {
-                source: format!("{ENDPOINT}/models"),
-                scope: "route".into(),
-                ..Default::default()
-            }
-            .into(),
-            ..Default::default()
-        });
-    }
-    validate_models(&models)?;
-    Ok(models)
-}
-
 pub struct Provider;
-pub async fn embed(input: Invocation) -> Result<crate::llm::Embedding> {
-    let request = input.embedding_request()?.clone();
-    let endpoint = input.connection().endpoint.trim_end_matches('/').to_owned();
-    let transport = crate::llm::AuthorizedTransport::new(
-        std::sync::Arc::new(input),
-        CredentialPlacement::Bearer,
-    )?;
-    // Use Rig's OpenAI embedding wire through the same authorized transport
-    // as the conversation and tool requests. The host owns only the consent,
-    // destination and size checks; encoding/response parsing stay in Rig.
-    let client = OpenAIConfig::new("managed-by-host")
-        .with_base_url(&endpoint)
-        .connect(transport);
-    let model = client.embedding(request.model, None);
-    let response = model
-        .call(request.input)
-        .await
-        .map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
-    let vectors = response
-        .embeddings
-        .into_iter()
-        .map(|embedding| {
-            embedding
-                .vec
-                .into_iter()
-                .map(|value| value as f32)
-                .collect::<Vec<f32>>()
-        })
-        .collect::<Vec<_>>();
-    let dimension = vectors.first().map(Vec::len).unwrap_or_default();
-    if vectors.is_empty()
-        || dimension == 0
-        || vectors.iter().any(|vector| vector.len() != dimension)
-    {
-        return Err(Error::new(ErrorKind::ExternalFailure));
-    }
-    Ok(crate::llm::Embedding {
-        vectors,
-        input_tokens: response.usage.input_tokens.unwrap_or_default(),
-    })
-}
-
 impl LlmProvider for Provider {
     fn policy(&self, c: &Connection) -> Result<Policy> {
         policy(c)
     }
     fn generate(
         &self,
-        i: Invocation,
+        input: Invocation,
     ) -> futures_util::future::BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>> {
-        Box::pin(generate(i))
+        Box::pin(async move {
+            let request = input.generation()?.clone();
+            let transport = crate::llm::AuthorizedTransport::new(
+                std::sync::Arc::new(input),
+                CredentialPlacement::Bearer,
+            )?;
+            // The SDK sees a placeholder; only the transport can attach real credentials.
+            let client = OpenAIConfig::new("managed-by-host")
+                .with_base_url(ENDPOINT)
+                .connect(transport);
+            stream(request, client)
+        })
     }
-    fn models(&self, i: Invocation) -> futures_util::future::BoxFuture<'_, Result<Vec<Model>>> {
-        Box::pin(models(i))
+    fn models(&self, input: Invocation) -> futures_util::future::BoxFuture<'_, Result<Vec<Model>>> {
+        Box::pin(async move {
+            let transport = crate::llm::AuthorizedTransport::new(
+                std::sync::Arc::new(input),
+                CredentialPlacement::Bearer,
+            )?;
+            let mut models = Vec::new();
+            for item in super::catalog_items(transport, ENDPOINT).await? {
+                let id = item["id"]
+                    .as_str()
+                    .ok_or_else(|| Error::new(ErrorKind::ExternalFailure))?;
+                models.push(Model {
+                    id: id.into(),
+                    name: id.into(),
+                    metadata: ene_rpc::ModelMetadata {
+                        source: format!("{ENDPOINT}/models"),
+                        scope: "route".into(),
+                        ..Default::default()
+                    }
+                    .into(),
+                    ..Default::default()
+                });
+            }
+            validate_models(&models)?;
+            Ok(models)
+        })
     }
     fn embed(
         &self,
-        i: Invocation,
+        input: Invocation,
     ) -> futures_util::future::BoxFuture<'_, Result<crate::llm::Embedding>> {
-        Box::pin(embed(i))
+        Box::pin(async move {
+            let request = input.embedding_request()?.clone();
+            let endpoint = input.connection().endpoint.trim_end_matches('/').to_owned();
+            let transport = crate::llm::AuthorizedTransport::new(
+                std::sync::Arc::new(input),
+                CredentialPlacement::Bearer,
+            )?;
+            // Use Rig's OpenAI embedding wire through the same authorized transport
+            // as the conversation and tool requests. The host owns only the consent,
+            // destination and size checks; encoding/response parsing stay in Rig.
+            let client = OpenAIConfig::new("managed-by-host")
+                .with_base_url(&endpoint)
+                .connect(transport);
+            let model = client.embedding(request.model, None);
+            let response = model
+                .call(request.input)
+                .await
+                .map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
+            let vectors = response
+                .embeddings
+                .into_iter()
+                .map(|embedding| {
+                    embedding
+                        .vec
+                        .into_iter()
+                        .map(|value| value as f32)
+                        .collect::<Vec<f32>>()
+                })
+                .collect::<Vec<_>>();
+            let dimension = vectors.first().map(Vec::len).unwrap_or_default();
+            if vectors.is_empty()
+                || dimension == 0
+                || vectors.iter().any(|vector| vector.len() != dimension)
+            {
+                return Err(Error::new(ErrorKind::ExternalFailure));
+            }
+            Ok(crate::llm::Embedding {
+                vectors,
+                input_tokens: response.usage.input_tokens.unwrap_or_default(),
+            })
+        })
     }
 }
 

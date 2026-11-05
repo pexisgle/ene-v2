@@ -78,7 +78,7 @@ async fn service_budget_counts_received_json_bytes() {
     ));
     let (package, _temp) = package(&code, Target::Host, &[Service::State]);
     let cancel = CancellationToken::new();
-    let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
         .await
         .unwrap();
     let (tx, _rx) = mpsc::channel(1);
@@ -92,20 +92,30 @@ async fn service_budget_counts_received_json_bytes() {
 }
 #[tokio::test]
 async fn embedded_host_instance_preserves_event_order_under_backpressure() {
-    let target = Target::Host;
     let code = wasm(&format!(
         "(loop $next {} {} local.get $i i32.const 1 i32.add local.tee $i i32.const 100 i32.lt_u br_if $next)",
         emit("a"),
         emit("b")
     ));
-    let (package, _temp) = package(&code, target, &[]);
     let cancel = CancellationToken::new();
+    // An ACP entrypoint is a subprocess, not a Wasm instance: load refuses it.
+    let acp_temp = tempfile::tempdir().unwrap();
+    let acp_root = acp_temp.path().join("plugin");
+    directory(&acp_root);
+    write_file(
+        &acp_root.join("manifest.json"),
+        json!({"contract_version":CONTRACT_VERSION,"id":"acp","name":"Acp","version":"1","entrypoints":[{"id":"main","target":"acp","command":["/bin/true"],"provides":["harness"]}]})
+            .to_string()
+            .as_bytes(),
+    );
+    let acp = Package::load(&acp_root).unwrap();
     assert!(
-        Instance::load(package.clone(), "main".into(), Target::Acp, 1, &cancel)
+        Instance::load(acp, "main".into(), 1, &cancel)
             .await
             .is_err()
     );
-    let mut instance = Instance::load(package, "main".into(), target, 1, &cancel)
+    let (package, _temp) = package(&code, Target::Host, &[]);
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
         .await
         .unwrap();
     let (tx, mut rx) = mpsc::channel(1);
@@ -152,7 +162,7 @@ async fn cancellation_and_dropped_futures_release_waiting_host_functions() {
         ));
         let (package, _temp) = package(&code, Target::Host, &[Service::State]);
         let cancel = CancellationToken::new();
-        let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+        let mut instance = Instance::load(package, "main".into(), 1, &cancel)
             .await
             .unwrap();
         let services = Arc::new(Waiting {
@@ -198,7 +208,7 @@ async fn undeclared_services_do_not_reach_the_application() {
     );
     let (package, _temp) = package(&wasm(&body), Target::Host, &[]);
     let cancel = CancellationToken::new();
-    let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
         .await
         .unwrap();
     let (tx, _rx) = mpsc::channel(1);
@@ -227,7 +237,7 @@ async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
     ] {
         let (package, _temp) = package(&wasm(&body), Target::Host, &[]);
         let cancel = CancellationToken::new();
-        let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+        let mut instance = Instance::load(package, "main".into(), 1, &cancel)
             .await
             .unwrap();
         let (tx, _rx) = mpsc::channel(1);
@@ -253,7 +263,7 @@ async fn guest_memory_is_bounded_and_wasi_is_unavailable() {
         &[],
     );
     let cancel = CancellationToken::new();
-    let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
         .await
         .unwrap();
     let (tx, _rx) = mpsc::channel(1);
@@ -268,7 +278,7 @@ async fn guest_memory_is_bounded_and_wasi_is_unavailable() {
     let wasi=wat::parse_str(r#"(module (import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32))))"#).unwrap();
     let (package, _temp) = self::package(&wasi, Target::Host, &[]);
     assert!(
-        Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+        Instance::load(package, "main".into(), 1, &cancel)
             .await
             .is_err()
     );
@@ -303,7 +313,7 @@ async fn table_limits_cover_initial_size_count_and_growth() {
         .unwrap();
         let (package, _temp) = package(&code, Target::Host, &[]);
         let cancel = CancellationToken::new();
-        let result = Instance::load(package, "main".into(), Target::Host, 1, &cancel).await;
+        let result = Instance::load(package, "main".into(), 1, &cancel).await;
         if allowed {
             let mut instance = result.unwrap();
             let (tx, _rx) = mpsc::channel(1);
@@ -347,7 +357,7 @@ async fn revocation_during_a_host_function_prevents_subsequent_guest_output() {
     );
     let (package, _temp) = package(&wasm(&body), Target::Host, &[Service::State]);
     let cancel = CancellationToken::new();
-    let mut instance = Instance::load(package, "main".into(), Target::Host, 1, &cancel)
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
         .await
         .unwrap();
     let (tx, mut rx) = mpsc::channel(1);
@@ -395,10 +405,10 @@ async fn concurrent_instances_receive_their_own_host_context() {
     ));
     let (package, _temp) = package(&code, Target::Host, &[Service::State]);
     let cancel = CancellationToken::new();
-    let mut first = Instance::load(package.clone(), "main".into(), Target::Host, 1, &cancel)
+    let mut first = Instance::load(package.clone(), "main".into(), 1, &cancel)
         .await
         .unwrap();
-    let mut second = Instance::load(package, "main".into(), Target::Host, 2, &cancel)
+    let mut second = Instance::load(package, "main".into(), 2, &cancel)
         .await
         .unwrap();
     let first_seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));

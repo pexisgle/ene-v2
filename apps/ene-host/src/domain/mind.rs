@@ -91,8 +91,6 @@ pub struct MemoryRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<String>,
     #[serde(default)]
-    pub related: Vec<String>,
-    #[serde(default)]
     pub supersedes: Vec<String>,
     /// Memories that correct this one, computed from the owner's records.
     #[serde(default)]

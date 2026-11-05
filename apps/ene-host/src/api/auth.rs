@@ -36,15 +36,10 @@ pub(crate) async fn authenticate(
     let principal = if owner(&app, headers) {
         Some(Principal::Owner)
     } else if let Some(token) = bearer(headers) {
-        if let Some(id) = app.devices.authenticate(token).await {
-            app.devices
-                .changes(&id)
-                .await
-                .ok()
-                .map(|changed| Principal::Device(id, changed))
-        } else {
-            None
-        }
+        app.devices
+            .authenticate(token)
+            .await
+            .map(|(id, changed)| Principal::Device(id, changed))
     } else {
         None
     };

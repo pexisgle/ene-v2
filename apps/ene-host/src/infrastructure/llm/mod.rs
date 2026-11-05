@@ -199,7 +199,6 @@ mod tests {
         let binding =
             ProviderBinding::resolve(Arc::new(TestProvider(policy)), &connection).unwrap();
         Arc::new(Outbound::new(
-            "test".into(),
             connection,
             None,
             Arc::new(Allow),

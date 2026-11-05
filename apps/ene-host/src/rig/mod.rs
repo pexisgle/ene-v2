@@ -424,6 +424,17 @@ impl Drop for Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The system prompt the model request carried, when it had one.
+    fn system(request: &rig_core::completion::CompletionRequest) -> Option<String> {
+        request
+            .chat_history
+            .iter()
+            .find_map(|message| match &**message {
+                rig_core::completion::Message::System { content } => Some(content.clone()),
+                _ => None,
+            })
+    }
     use rig_core::catalog::Catalog;
     use rig_core::operation::Completion;
     use rig_core::serve::ErasedHandler;
@@ -876,7 +887,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_mind_prompt_change_reaches_the_next_model_call_without_a_reconnect() {
-        use rig_core::completion::Message as RigMessage;
         let temp = tempfile::tempdir().unwrap();
         let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
@@ -940,15 +950,6 @@ mod tests {
             2,
             "the prompt change reconnected or retried"
         );
-        let system = |request: &rig_core::completion::CompletionRequest| {
-            request
-                .chat_history
-                .iter()
-                .find_map(|message| match &**message {
-                    RigMessage::System { content } => Some(content.clone()),
-                    _ => None,
-                })
-        };
         assert_eq!(system(&requests[0]).as_deref(), Some("古い心"));
         assert_eq!(
             system(&requests[1]).as_deref(),
@@ -1057,7 +1058,6 @@ mod tests {
         )
         .unwrap();
         let outbound = Arc::new(crate::llm::Outbound::new(
-            "test".into(),
             connection,
             Some(Secret {
                 value: "test-key".into(),
@@ -1402,14 +1402,7 @@ mod tests {
         assert_eq!(finished.0, "answered");
         assert!(finished.1.is_none(), "{:?}", finished.1);
         assert_eq!(requests.requests().len(), 1);
-        let prompt = requests.requests()[0]
-            .chat_history
-            .iter()
-            .find_map(|message| match &**message {
-                rig_core::completion::Message::System { content } => Some(content.clone()),
-                _ => None,
-            })
-            .expect("system prompt");
+        let prompt = system(&requests.requests()[0]).expect("system prompt");
         assert!(
             prompt.contains("EARLY-RECALL"),
             "an early result was lost: {prompt}"
@@ -1493,15 +1486,7 @@ mod tests {
         assert_eq!(finished.0, "answered");
         assert!(finished.1.is_none(), "{:?}", finished.1);
         assert_eq!(requests.requests().len(), 1);
-        let request = &requests.requests()[0];
-        let prompt = request
-            .chat_history
-            .iter()
-            .find_map(|message| match &**message {
-                rig_core::completion::Message::System { content } => Some(content.clone()),
-                _ => None,
-            })
-            .expect("system prompt");
+        let prompt = system(&requests.requests()[0]).expect("system prompt");
         assert!(
             prompt.contains("RECALL-FIXED-42"),
             "the async result was not in the model request: {prompt}"
@@ -1638,14 +1623,7 @@ mod tests {
         };
         assert_eq!(finished, "answered");
         assert_eq!(requests.requests().len(), 1);
-        let system = requests.requests()[0]
-            .chat_history
-            .iter()
-            .find_map(|message| match &**message {
-                rig_core::completion::Message::System { content } => Some(content.clone()),
-                _ => None,
-            })
-            .expect("system");
+        let system = system(&requests.requests()[0]).expect("system");
         assert!(
             system.contains("NEW-PROMPT") && !system.contains("OLD-COMPLETION"),
             "{system}"
@@ -1698,14 +1676,7 @@ mod tests {
         };
         assert_eq!(finished, "answered");
         assert_eq!(requests.requests().len(), 1);
-        let system = requests.requests()[0]
-            .chat_history
-            .iter()
-            .find_map(|message| match &**message {
-                rig_core::completion::Message::System { content } => Some(content.clone()),
-                _ => None,
-            })
-            .expect("system");
+        let system = system(&requests.requests()[0]).expect("system");
         assert!(
             system.contains("NEW-EARLY") && !system.contains("OLD-EARLY"),
             "{system}"

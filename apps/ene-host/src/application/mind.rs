@@ -3,7 +3,7 @@
 
 use super::{Boundary, HostApplication, generation::publish};
 use crate::application::inference::EMBEDDING_MODEL;
-use crate::rig::mind::{MindCall, MindCallKind, ReadArgs, RecallArgs};
+use crate::rig::mind::{MindCall, MindRequest};
 use crate::{
     domain::{
         Error, ErrorKind,
@@ -88,32 +88,8 @@ fn view(
         companion_id: companion.into(),
         profile: profile.into(),
         state: state.into(),
-        index: w::MindIndexStatus {
-            state: index.state,
-            reason: index.reason,
-            pending_fts: index.pending_fts,
-            pending_vectors: index.pending_vectors,
-            embedding_model: index.embedding_model,
-            embedding_calls: index.embedding_calls,
-            embedding_tokens: index.embedding_tokens,
-            updated_at: index.updated_at,
-            ..Default::default()
-        }
-        .into(),
-        consolidation: w::MindConsolidationStatus {
-            last_sequence: consolidation.last_sequence,
-            last_offset: consolidation.last_offset,
-            method_revision: consolidation.method_revision,
-            state: consolidation.state,
-            reason: consolidation.reason,
-            jobs: consolidation.jobs,
-            skipped: consolidation.skipped,
-            model_calls: consolidation.model_calls,
-            input_chars: consolidation.input_chars,
-            updated_at: consolidation.updated_at,
-            ..Default::default()
-        }
-        .into(),
+        index: index.into(),
+        consolidation: consolidation.into(),
         ..Default::default()
     }
 }
@@ -419,7 +395,7 @@ impl HostApplication {
             lexical: result.fts.to_owned(),
             semantic: "not_requested".into(),
             pending: result.pending,
-            reason: reason.or(result.reason),
+            reason,
         })
     }
 
@@ -512,7 +488,7 @@ impl HostApplication {
             lexical: result.fts.to_owned(),
             semantic,
             pending: result.pending,
-            reason: reason.or(result.reason),
+            reason,
         })
     }
 
@@ -545,7 +521,7 @@ impl HostApplication {
         core: &str,
         text: &str,
         request_id: &str,
-    ) -> Result<String> {
+    ) -> Result<()> {
         let recall = self
             .mind_recall_lexical(companion.to_owned(), text.to_owned(), 3)
             .await;
@@ -568,7 +544,6 @@ impl HostApplication {
         };
         let mind = compose_mind_prompt(core, &stored);
         let recall = compose_recall_fragment(companion, &memories, &lexical_status, "lexical_only");
-        let prompt = format!("{mind}\n\n{recall}");
         self.set_active_request(companion, request_id);
         let sequence = self.next_prompt_sequence();
         if let Ok(runtime) = self.rig() {
@@ -595,7 +570,7 @@ impl HostApplication {
             app.semantic_recall(companion_owned, text_owned, request_owned, local)
                 .await;
         });
-        Ok(prompt)
+        Ok(())
     }
 
     /// Cancel any hold and drop the per-input search state without touching
@@ -757,56 +732,47 @@ impl HostApplication {
             return;
         }
         let companion = scope.companion.clone();
-        let result = match call.kind {
-            MindCallKind::Recall => match serde_json::from_value::<RecallArgs>(call.args) {
-                Ok(args) => match self
-                    .mind_recall(
-                        companion,
-                        args.query,
-                        args.limit.unwrap_or(8).clamp(1, 20) as usize,
-                        args.include_forgotten.unwrap_or(false),
-                        args.since,
-                        args.until,
-                    )
-                    .await
-                {
-                    Ok(result) => Ok(json!({
-                        "count": result.memories.len(),
-                        "memories": result.memories,
-                        "search": {
-                            "lexical": result.lexical,
-                            "semantic": result.semantic,
-                            "pending": result.pending,
-                            "reason": result.reason,
-                        }
-                    })
-                    .to_string()),
-                    Err(error) => Err(tool_error(error)),
-                },
-                Err(_) => Err(tool_error(Error::invalid())),
+        let result = match call.request {
+            MindRequest::Recall(args) => match self
+                .mind_recall(
+                    companion,
+                    args.query,
+                    args.limit.unwrap_or(8).clamp(1, 20) as usize,
+                    args.include_forgotten.unwrap_or(false),
+                    args.since,
+                    args.until,
+                )
+                .await
+            {
+                Ok(result) => Ok(json!({
+                    "count": result.memories.len(),
+                    "memories": result.memories,
+                    "search": {
+                        "lexical": result.lexical,
+                        "semantic": result.semantic,
+                        "pending": result.pending,
+                        "reason": result.reason,
+                    }
+                })
+                .to_string()),
+                Err(error) => Err(tool_error(error)),
             },
-            MindCallKind::Read => match serde_json::from_value::<ReadArgs>(call.args) {
-                Ok(args) => match self.mind_read(companion, args.id).await {
-                    Ok(Some(memory)) => Ok(json!({"found": true, "memory": memory}).to_string()),
-                    Ok(None) => Ok(json!({"found": false}).to_string()),
-                    Err(error) => Err(tool_error(error)),
-                },
-                Err(_) => Err(tool_error(Error::invalid())),
+            MindRequest::Read(args) => match self.mind_read(companion, args.id).await {
+                Ok(Some(memory)) => Ok(json!({"found": true, "memory": memory}).to_string()),
+                Ok(None) => Ok(json!({"found": false}).to_string()),
+                Err(error) => Err(tool_error(error)),
             },
-            MindCallKind::Update => match serde_json::from_value(call.args) {
-                Ok(request) => match self
-                    .apply_mind_update(
-                        companion,
-                        scope.operation_id().to_owned(),
-                        request,
-                        scope.sources.clone(),
-                    )
-                    .await
-                {
-                    Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
-                    Err(error) => Err(tool_error(error)),
-                },
-                Err(_) => Err(tool_error(Error::invalid())),
+            MindRequest::Update(request) => match self
+                .apply_mind_update(
+                    companion,
+                    scope.operation_id().to_owned(),
+                    request,
+                    scope.sources.clone(),
+                )
+                .await
+            {
+                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                Err(error) => Err(tool_error(error)),
             },
         };
         let _ = call.reply.send(result);

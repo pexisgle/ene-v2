@@ -10,10 +10,7 @@ mod runtime;
 mod schema;
 
 use bevy::{app::AnimationSystems, prelude::*, transform::TransformSystems};
-pub use expressions::ExpressionName;
-pub use material::{MToonExtension, MToonMaterial};
-pub use runtime::{SpringJointProps, SpringRig, Vrm};
-pub use schema::{ExpressionPresetName, HumanBoneName};
+pub use runtime::{SpringRig, Vrm};
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VrmSystems {
@@ -55,6 +52,7 @@ impl Plugin for VrmPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{runtime::SpringJointProps, schema::HumanBoneName};
     use bevy::{
         animation::{AnimatedBy, AnimationTargetId},
         asset::LoadState,

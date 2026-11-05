@@ -168,6 +168,15 @@ pub(crate) fn invalid(
 ) -> std::io::Error {
     std::io::Error::other(error)
 }
+
+/// Every VRM 1.0 extension this loader reads requires the same version.
+fn require_v1(version: &str, extension: &str) -> std::io::Result<()> {
+    if version == "1.0" {
+        Ok(())
+    } else {
+        Err(invalid(format!("{extension} requires specVersion 1.0")))
+    }
+}
 pub(crate) fn extension<T: serde::de::DeserializeOwned>(
     value: Option<&serde_json::Value>,
     name: &str,
@@ -333,24 +342,18 @@ impl GltfExtensionHandler for VrmExtensions {
                     source.extension_value(VRMC_VRM_ANIMATION),
                     "VRMC_vrm_animation",
                 )?;
-                if motion.spec_version != "1.0" {
-                    return Err(invalid("VRMC_vrm_animation requires specVersion 1.0"));
-                }
+                require_v1(&motion.spec_version, "VRMC_vrm_animation")?;
                 validate_motion(&motion)?;
                 return Ok(Definition::Motion(Arc::new(motion)));
             }
             let model: schema::Model = extension(source.extension_value(VRMC_VRM), "VRMC_vrm")?;
-            if model.spec_version != "1.0" {
-                return Err(invalid("VRMC_vrm requires specVersion 1.0"));
-            }
+            require_v1(&model.spec_version, "VRMC_vrm")?;
             for material in source.materials() {
                 let Some(value) = material.extension_value(VRMC_MATERIALS_MTOON) else {
                     continue;
                 };
                 let toon: schema::Toon = schema::Toon::deserialize(value).map_err(invalid)?;
-                if toon.schema.spec_version != "1.0" {
-                    return Err(invalid("VRMC_materials_mtoon requires specVersion 1.0"));
-                }
+                require_v1(&toon.schema.spec_version, "VRMC_materials_mtoon")?;
                 self.materials
                     .insert(material.index().expect("indexed material"), toon);
             }
@@ -359,10 +362,8 @@ impl GltfExtensionHandler for VrmExtensions {
                 .map(schema::Springs::deserialize)
                 .transpose()
                 .map_err(invalid)?;
-            if let Some(springs) = &self.springs
-                && springs.spec_version != "1.0"
-            {
-                return Err(invalid("VRMC_springBone requires specVersion 1.0"));
+            if let Some(springs) = &self.springs {
+                require_v1(&springs.spec_version, "VRMC_springBone")?;
             }
             for node in source.nodes() {
                 let Some(value) = node.extension_value(VRMC_NODE_CONSTRAINT) else {
@@ -370,9 +371,7 @@ impl GltfExtensionHandler for VrmExtensions {
                 };
                 let constraint: schema::NodeConstraint =
                     extension(Some(value), VRMC_NODE_CONSTRAINT)?;
-                if constraint.spec_version != "1.0" {
-                    return Err(invalid("VRMC_node_constraint requires specVersion 1.0"));
-                }
+                require_v1(&constraint.spec_version, "VRMC_node_constraint")?;
                 self.constraints.push((node.index(), constraint));
             }
             Ok(Definition::Model(Box::new(model)))

@@ -100,12 +100,11 @@ pub(super) fn memory_from_row(row: &tokio_rusqlite::rusqlite::Row<'_>) -> Result
         sources: serde_json::from_str(&sources).map_err(Error::Json)?,
         recorded_at: row.get(8)?,
         occurred_at: row.get(9)?,
-        related: serde_json::from_str(&row.get::<_, String>(10)?).map_err(Error::Json)?,
-        supersedes: serde_json::from_str(&row.get::<_, String>(11)?).map_err(Error::Json)?,
+        supersedes: serde_json::from_str(&row.get::<_, String>(10)?).map_err(Error::Json)?,
         superseded_by: Vec::new(),
-        recall_preference: row.get(12)?,
-        created_by: row.get(13)?,
-        audience: row.get(14)?,
+        recall_preference: row.get(11)?,
+        created_by: row.get(12)?,
+        audience: row.get(13)?,
     })
 }
 
@@ -227,8 +226,8 @@ pub(super) fn apply_tx(
         };
         tx.execute(
             "INSERT INTO mind_memories \
-             (id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,updated_at) \
-             VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?8)",
+             (id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,supersedes,recall_preference,created_by,updated_at) \
+             VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?8)",
             params![
                 id,
                 owner,
@@ -239,7 +238,6 @@ pub(super) fn apply_tx(
                 serde_json::to_string(&attached)?,
                 now,
                 memory.occurred_at,
-                "[]",
                 serde_json::to_string(&memory.supersedes)?,
                 recall_preference,
                 actor,
@@ -413,80 +411,6 @@ pub(super) fn superseded_by(
     Ok(map)
 }
 
-#[cfg(test)]
-pub(super) fn recall(
-    db: &mut tokio_rusqlite::rusqlite::Connection,
-    owner: &str,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<MemoryRecord>> {
-    let terms = search_terms(query);
-    let mut sql = String::from(
-        "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,audience \
-         FROM mind_memories WHERE owner=?1 AND (",
-    );
-    let mut values: Vec<tokio_rusqlite::rusqlite::types::Value> = vec![owner.to_owned().into()];
-    for (index, term) in terms.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(" OR ");
-        }
-        let placeholder = index + 2;
-        sql.push_str(&format!(
-            "(content LIKE ?{placeholder} ESCAPE '\\' OR description LIKE ?{placeholder} ESCAPE '\\' OR appraisal LIKE ?{placeholder} ESCAPE '\\')"
-        ));
-        values.push(like(term).into());
-    }
-    sql.push_str(&format!(
-        ") ORDER BY recorded_at DESC,id LIMIT ?{}",
-        values.len() + 1
-    ));
-    values.push((limit as i64).into());
-    let mut statement = db.prepare(&sql)?;
-    let mut memories = statement
-        .query_map(tokio_rusqlite::rusqlite::params_from_iter(values), |row| {
-            memory_from_row(row).map_err(|error| match error {
-                Error::Sql(error) => error,
-                _ => tokio_rusqlite::rusqlite::Error::InvalidQuery,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    drop(statement);
-    let superseded = superseded_by(db, owner)?;
-    for memory in &mut memories {
-        memory.superseded_by = superseded.get(&memory.id).cloned().unwrap_or_default();
-    }
-    Ok(memories)
-}
-
-#[cfg(test)]
-pub(super) fn read(
-    db: &mut tokio_rusqlite::rusqlite::Connection,
-    owner: &str,
-    id: &str,
-) -> Result<Option<MemoryRecord>> {
-    let memory = db
-        .query_row(
-            "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,audience \
-             FROM mind_memories WHERE owner=?1 AND id=?2",
-            params![owner, id],
-            |row| {
-                memory_from_row(row).map_err(|error| match error {
-                    Error::Sql(error) => error,
-                    _ => tokio_rusqlite::rusqlite::Error::InvalidQuery,
-                })
-            },
-        )
-        .optional()?;
-    let Some(mut memory) = memory else {
-        return Ok(None);
-    };
-    memory.superseded_by = superseded_by(db, owner)?
-        .get(id)
-        .cloned()
-        .unwrap_or_default();
-    Ok(Some(memory))
-}
-
 pub(super) fn update_profile(
     db: &mut tokio_rusqlite::rusqlite::Connection,
     companion: &str,
@@ -518,6 +442,7 @@ mod tests {
     use super::*;
     use crate::domain::mind::{Acquisition, Emotion, MindUpdateRequest, NewMemory, SourceKind};
     use crate::infrastructure::sqlite::Store;
+    use crate::infrastructure::sqlite::memory::{read_visible, search};
 
     fn source() -> SourceRef {
         SourceRef {
@@ -812,9 +737,9 @@ mod tests {
             .unwrap();
         store
             .run(move |db| {
-                let old = read(db, "a", &old_id)?.expect("old memory");
+                let old = read_visible(db, "a", &old_id)?.expect("old memory");
                 assert_eq!(old.superseded_by, vec![new_id.clone()]);
-                let new = read(db, "a", &new_id)?.expect("new memory");
+                let new = read_visible(db, "a", &new_id)?.expect("new memory");
                 assert_eq!(new.supersedes, vec![old_id.clone()]);
                 assert_eq!(old.content, "柚子が好き");
                 Ok(())
@@ -851,12 +776,39 @@ mod tests {
                     "parent",
                     "2026-01-01T00:00:01Z",
                 )?;
-                let found = recall(db, "a", "柚子", 10)?;
+                let found = search(
+                    db,
+                    "a",
+                    "柚子",
+                    None,
+                    None,
+                    10,
+                    false,
+                    None,
+                    None,
+                    "2026-01-01T00:00:02Z",
+                )?
+                .memories;
                 assert_eq!(found.len(), 1);
                 assert_eq!(found[0].owner, "a");
                 assert!(found[0].content.contains("柚子"));
-                assert!(recall(db, "a", "qqqq", 10)?.is_empty());
-                assert!(read(db, "a", "b-memory")?.is_none());
+                assert!(
+                    search(
+                        db,
+                        "a",
+                        "qqqq",
+                        None,
+                        None,
+                        10,
+                        false,
+                        None,
+                        None,
+                        "2026-01-01T00:00:02Z"
+                    )?
+                    .memories
+                    .is_empty()
+                );
+                assert!(read_visible(db, "a", "b-memory")?.is_none());
                 Ok(())
             })
             .await
@@ -902,7 +854,19 @@ mod tests {
                 assert_eq!(stored.state_revision, 2);
                 assert_eq!(stored.profile_revision, 2);
                 assert_eq!(stored.profile, profile);
-                let found = recall(db, "a", "山", 10)?;
+                let found = search(
+                    db,
+                    "a",
+                    "山",
+                    None,
+                    None,
+                    10,
+                    false,
+                    None,
+                    None,
+                    "2026-01-01T00:00:02Z",
+                )?
+                .memories;
                 assert_eq!(found.len(), 1);
                 assert_eq!(found[0].content, "一緒に山へ行った");
                 Ok(())

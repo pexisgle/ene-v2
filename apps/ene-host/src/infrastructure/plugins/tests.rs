@@ -801,14 +801,7 @@ async fn stale_revisions_undeclared_grants_and_missing_targets_are_rejected() {
     // Authorization uses the captured revision; executable verification happens at invocation boundaries.
     assert!(manager.ready("reference", None).is_ok());
     assert!(matches!(
-        Instance::load(
-            package,
-            "behavior".into(),
-            Target::Host,
-            1,
-            &CancellationToken::new()
-        )
-        .await,
+        Instance::load(package, "behavior".into(), 1, &CancellationToken::new()).await,
         Err(ene_plugin_runtime::Error::Changed)
     ));
 }
@@ -1104,7 +1097,6 @@ async fn backpressured_provider_releases_slots_on_disable_cancel_and_trap() {
         let (stop, receiver) = tokio::sync::watch::channel(false);
         let fixture = InvocationFixture {
             operation: OperationKind::Conversation,
-            id: "backpressure".into(),
             connection: crate::domain::Connection {
                 id: "connection".into(),
                 kind: "llm".into(),
@@ -1255,7 +1247,6 @@ async fn concurrent_provider_generations_do_not_share_a_worker() {
     };
     let make = |cancel| InvocationFixture {
         operation: crate::domain::OperationKind::Conversation,
-        id: "generation".into(),
         connection: connection.clone(),
         request: Some(Generation::for_test(
             connection.endpoint.clone(),
@@ -1405,7 +1396,6 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
         let (stop, receiver) = tokio::sync::watch::channel(false);
         let fixture = InvocationFixture {
             operation: OperationKind::Conversation,
-            id: "generate".into(),
             connection: crate::domain::Connection {
                 id: "connection".into(),
                 kind: "llm".into(),
@@ -2279,7 +2269,6 @@ fn model_request() -> GenerationRequest {
             text: "hi".into(),
         }],
         max_tokens: 512,
-        tools: vec![],
     }
 }
 

@@ -134,7 +134,6 @@ mod tests {
             .ascii_serialization();
         let (_, cancel) = tokio::sync::watch::channel(false);
         let invocation = InvocationFixture {
-            id: "test".into(),
             connection: Connection {
                 id: "c".into(),
                 kind: "llm".into(),

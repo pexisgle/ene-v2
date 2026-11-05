@@ -281,12 +281,10 @@ impl Manager {
         Ok(())
     }
     pub async fn harness(&self, binding_id: String) -> Result<Option<Value>> {
-        let Some(loaded) = self.harness_load(&binding_id).await? else {
+        let Some(session) = self.harness_load(&binding_id).await? else {
             return Ok(None);
         };
-        serde_json::to_value(loaded.session)
-            .map(Some)
-            .map_err(failure)
+        serde_json::to_value(session).map(Some).map_err(failure)
     }
     pub fn cancel(&self) {
         self.stopped.cancel();

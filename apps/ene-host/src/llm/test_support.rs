@@ -18,7 +18,6 @@ impl LlmProvider for TestProvider {
 }
 
 pub struct InvocationFixture {
-    pub id: String,
     pub connection: Connection,
     pub request: Option<Generation>,
     pub secret: Option<Secret>,
@@ -30,7 +29,7 @@ impl InvocationFixture {
     pub fn build(self, binding: ProviderBinding) -> Invocation {
         let input = match self.operation {
             OperationKind::Conversation => {
-                InvocationInput::Conversation(self.request.unwrap_or_else(|| {
+                InvocationInput::ConnectionCheck(self.request.unwrap_or_else(|| {
                     Generation::for_test(
                         self.connection.endpoint.clone(),
                         self.connection
@@ -60,7 +59,6 @@ impl InvocationFixture {
             }),
         };
         Invocation::new(
-            self.id,
             self.connection,
             input,
             self.secret,

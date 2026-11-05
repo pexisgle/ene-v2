@@ -9,17 +9,12 @@ mod guest {
         Ok(Json(LlmCapabilities {
             streaming_text: true,
             model_list: true,
-            tools: false,
-            cancellation: true,
         }))
     }
     #[plugin_fn]
     pub fn ene_invoke(Json(operation): Json<Operation>) -> FnResult<Json<Value>> {
         let (endpoint, body, models) = match operation {
             Operation::Generate { request } => {
-                if !request.tools.is_empty() {
-                    return Err(extism_pdk::Error::msg("sample does not support tools").into());
-                }
                 let mut messages: Vec<Value> = request
                     .messages
                     .iter()

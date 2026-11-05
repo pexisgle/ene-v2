@@ -72,7 +72,6 @@ mod tests {
                 preamble: String::new(),
                 messages: vec![],
                 max_tokens: 1,
-                tools: vec![],
             },
         };
         let list = Operation::ListModels {

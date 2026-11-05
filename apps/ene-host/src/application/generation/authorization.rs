@@ -167,7 +167,6 @@ pub(crate) fn invocation(
         id: id.clone(),
     });
     Invocation::new(
-        id,
         connection,
         input,
         context.secret,

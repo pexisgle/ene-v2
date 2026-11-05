@@ -27,6 +27,23 @@ pub(super) fn failure(code: &str, message: &str) -> w::Failure {
     }
 }
 
+/// A failed turn in the wire shape: a discarded output is not a provider error.
+pub(super) fn turn_failure(why: &str) -> w::Failure {
+    if why == "output_limit" {
+        failure("output_limit", "返答が出力上限を超えたため破棄しました")
+    } else {
+        failure("generation_failed", why)
+    }
+}
+
+/// A stopped turn in the wire shape.
+pub(super) fn stopped(reason: Option<&str>) -> w::Failure {
+    failure(
+        "cancelled",
+        reason.unwrap_or("停止操作により生成を停止しました"),
+    )
+}
+
 struct TurnSpan {
     start: usize,
     request_entry: Option<String>,
@@ -45,22 +62,11 @@ impl TurnSpan {
     }
 
     fn failure(&self) -> Option<w::Failure> {
-        let (code, message) = match &self.end {
-            Some(TurnEnd::Failed { why }) => (
-                if why == "output_limit" {
-                    "output_limit"
-                } else {
-                    "generation_failed"
-                },
-                why.as_str(),
-            ),
-            Some(TurnEnd::Stopped { why, .. }) => (
-                "cancelled",
-                why.as_deref().unwrap_or("停止操作により生成を停止しました"),
-            ),
-            _ => return None,
-        };
-        Some(failure(code, message))
+        match &self.end {
+            Some(TurnEnd::Failed { why }) => Some(turn_failure(why)),
+            Some(TurnEnd::Stopped { why, .. }) => Some(stopped(why.as_deref())),
+            _ => None,
+        }
     }
 }
 

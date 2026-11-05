@@ -8,17 +8,9 @@ use crate::domain::mind::{MemoryRecord, MindUpdateRequest, SourceRef};
 use std::collections::HashMap;
 use tokio_rusqlite::rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-#[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct IndexStatus {
-    pub state: String,
-    pub reason: Option<String>,
-    pub pending_fts: u64,
-    pub pending_vectors: u64,
-    pub embedding_model: Option<String>,
-    pub embedding_calls: u64,
-    pub embedding_tokens: u64,
-    pub updated_at: String,
-}
+pub(crate) use ene_rpc::{
+    MindConsolidationStatus as ConsolidationStatus, MindIndexStatus as IndexStatus,
+};
 
 pub(crate) struct ConsolidationOutcome {
     pub result: crate::domain::mind::MindUpdateResult,
@@ -26,24 +18,10 @@ pub(crate) struct ConsolidationOutcome {
     pub advanced: bool,
 }
 
-pub(crate) struct ConsolidationStatus {
-    pub last_sequence: u64,
-    pub last_offset: u64,
-    pub method_revision: String,
-    pub state: String,
-    pub reason: Option<String>,
-    pub jobs: u64,
-    pub skipped: u64,
-    pub model_calls: u64,
-    pub input_chars: u64,
-    pub updated_at: String,
-}
-
 pub(crate) struct SearchResult {
     pub memories: Vec<MemoryRecord>,
     pub fts: &'static str,
     pub pending: u64,
-    pub reason: Option<String>,
 }
 
 pub(crate) struct VectorEntry {
@@ -110,6 +88,7 @@ pub(super) fn index_status(db: &mut Connection, companion: &str, now: &str) -> R
                 embedding_calls: row.get::<_, i64>(3)? as u64,
                 embedding_tokens: row.get::<_, i64>(4)? as u64,
                 updated_at: row.get(5)?,
+                ..Default::default()
             })
         },
     )?;
@@ -203,6 +182,7 @@ fn read_consolidation(tx: &Transaction<'_>, companion: &str) -> Result<Consolida
                 updated_at: row.get(7)?,
                 last_offset: row.get::<_, i64>(8)? as u64,
                 skipped: row.get::<_, i64>(9)? as u64,
+                ..Default::default()
             })
         },
     )?)
@@ -580,7 +560,6 @@ pub(super) fn search(
         memories,
         fts: fts_state,
         pending,
-        reason: None,
     })
 }
 
@@ -590,7 +569,7 @@ fn hydrate(tx: &Transaction<'_>, caller: &str, ids: &[String]) -> Result<Vec<Mem
     for id in ids {
         let row = tx
             .query_row(
-                "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,related,supersedes,recall_preference,created_by,audience \
+                "SELECT id,owner,revision,content,description,appraisal,acquisition,sources,recorded_at,occurred_at,supersedes,recall_preference,created_by,audience \
                  FROM mind_memories WHERE id=?1 AND (owner=?2 OR audience='shared')",
                 params![id, caller],
                 |row| {

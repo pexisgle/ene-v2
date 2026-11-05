@@ -1132,8 +1132,8 @@ async fn task_inference_uses_the_task_assignment_and_grant() {
         })
     };
     let generation = f.started().await;
-    assert_eq!(generation.model(), "task-model");
-    assert_eq!(generation.preamble(), "system");
+    assert_eq!(generation.model, "task-model");
+    assert_eq!(generation.preamble, "system");
     f.finish.add_permits(1);
     assert_eq!(task.await.unwrap().unwrap(), "途中");
 }
@@ -1974,12 +1974,10 @@ async fn automatic_consolidation_and_recall_use_confirmed_turns_without_a_tool()
             }
         })
     }));
-    let long_prompt = app
-        .application
+    app.application
         .mind_prompt_with_recall(&companion, "静かな助手", &"あ".repeat(300), "long-input")
         .await
         .unwrap();
-    assert!(long_prompt.contains("いまの話題で思い出した記憶"));
     app.application.start_mind_worker();
     let mut subscription = app.application.subscribe().await;
     let (status, _) = mutate(

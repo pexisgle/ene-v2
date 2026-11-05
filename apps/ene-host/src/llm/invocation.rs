@@ -19,10 +19,6 @@ impl Authorization for RestrictedAuthorization {
     }
 }
 pub(crate) enum InvocationInput {
-    /// Only the transport's contract tests build a one-shot conversation
-    /// invocation now that the kernel sends its own requests.
-    #[cfg(test)]
-    Conversation(Generation),
     ConnectionCheck(Generation),
     ModelList,
     Task(Generation),
@@ -31,8 +27,6 @@ pub(crate) enum InvocationInput {
 impl InvocationInput {
     fn operation(&self) -> OperationKind {
         match self {
-            #[cfg(test)]
-            Self::Conversation(_) => OperationKind::Conversation,
             Self::ConnectionCheck(_) => OperationKind::ConnectionCheck,
             Self::ModelList => OperationKind::ModelList,
             Self::Task(_) => OperationKind::Task,
@@ -46,7 +40,6 @@ impl InvocationInput {
 /// so an execution kernel can build its own requests and still go through the
 /// one signing and destination-checking boundary.
 pub(crate) struct Outbound {
-    id: String,
     connection: Connection,
     secret: Option<Secret>,
     authorization: Arc<dyn Authorization>,
@@ -56,7 +49,6 @@ pub(crate) struct Outbound {
 
 impl Outbound {
     pub(crate) fn new(
-        id: String,
         connection: Connection,
         secret: Option<Secret>,
         authorization: Arc<dyn Authorization>,
@@ -64,7 +56,6 @@ impl Outbound {
         operation: OperationKind,
     ) -> Self {
         Self {
-            id,
             connection,
             secret,
             authorization,
@@ -183,7 +174,6 @@ pub enum CredentialPlacement {
 }
 impl Invocation {
     pub(crate) fn new(
-        id: String,
         connection: Connection,
         input: InvocationInput,
         secret: Option<Secret>,
@@ -192,7 +182,6 @@ impl Invocation {
         binding: ProviderBinding,
     ) -> Self {
         let outbound = Outbound::new(
-            id,
             connection,
             secret,
             authorization,
@@ -213,7 +202,6 @@ impl Invocation {
     }
     fn restricted(outbound: &Outbound, scope: Arc<dyn Authorization>) -> Arc<Outbound> {
         Arc::new(Outbound {
-            id: outbound.id.clone(),
             connection: outbound.connection.clone(),
             secret: outbound.secret.clone(),
             authorization: Arc::new(RestrictedAuthorization {
@@ -241,8 +229,6 @@ impl Invocation {
 
     pub fn generation(&self) -> Result<&Generation> {
         match &self.input {
-            #[cfg(test)]
-            InvocationInput::Conversation(request) => Ok(request),
             InvocationInput::ConnectionCheck(request) | InvocationInput::Task(request) => {
                 Ok(request)
             }

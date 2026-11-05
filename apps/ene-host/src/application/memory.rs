@@ -621,17 +621,6 @@ struct RelatedMemories {
     forgotten: Vec<MemoryRecord>,
 }
 
-#[cfg(test)]
-fn confirmed_message(message: &ene_rpc::Message) -> bool {
-    // A user's completed entry is an accepted experience even when the turn
-    // later failed. An assistant entry is spoken experience only when the
-    // conversation records an answered turn; failed, stopped and open replies
-    // stay out.
-    message.status == "completed"
-        && matches!(message.role.as_str(), "user" | "assistant")
-        && !message.text.trim().is_empty()
-}
-
 pub(crate) struct PendingPage {
     pub messages: Vec<ene_rpc::Message>,
     pub terminal_through: Option<(u64, u64)>,
@@ -931,33 +920,31 @@ mod tests {
     }
 
     #[test]
-    fn only_completed_user_and_answered_assistant_entries_are_confirmed() {
-        assert!(confirmed_message(&message(1, "user", "completed", "経験")));
-        assert!(!confirmed_message(&message(
-            2,
-            "assistant",
-            "failed",
-            "失敗"
-        )));
-        assert!(!confirmed_message(&message(
-            3,
-            "assistant",
-            "cancelled",
-            "停止"
-        )));
-        assert!(!confirmed_message(&message(
-            4,
-            "assistant",
-            "incomplete",
-            "未完了"
-        )));
-        assert!(confirmed_message(&message(
-            5,
-            "assistant",
-            "completed",
-            "答えた"
-        )));
-        assert!(!confirmed_message(&message(6, "user", "completed", "  ")));
+    fn only_completed_user_and_answered_assistant_entries_are_targets() {
+        assert!(matches!(
+            classify_message(&message(1, "user", "completed", "経験")),
+            EntryClass::Target
+        ));
+        assert!(matches!(
+            classify_message(&message(2, "assistant", "failed", "失敗")),
+            EntryClass::Terminal
+        ));
+        assert!(matches!(
+            classify_message(&message(3, "assistant", "cancelled", "停止")),
+            EntryClass::Terminal
+        ));
+        assert!(matches!(
+            classify_message(&message(4, "assistant", "incomplete", "未完了")),
+            EntryClass::Waiting
+        ));
+        assert!(matches!(
+            classify_message(&message(5, "assistant", "completed", "答えた")),
+            EntryClass::Target
+        ));
+        assert!(matches!(
+            classify_message(&message(6, "user", "completed", "  ")),
+            EntryClass::Waiting
+        ));
     }
 
     #[tokio::test]

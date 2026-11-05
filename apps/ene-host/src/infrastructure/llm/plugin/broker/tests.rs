@@ -78,7 +78,6 @@ async fn metadata_authorization_cannot_generate_on_the_credential_origin() {
             nonce: "n".into(),
         });
         let conversation = InvocationFixture {
-            id: input.id.clone(),
             connection: input.connection.clone(),
             request: Some(Generation::for_test(
                 input.connection.endpoint.clone(),
@@ -158,7 +157,6 @@ fn invocation(
     (
         cancel,
         InvocationFixture {
-            id: "generation".into(),
             connection: Connection {
                 id: "c".into(),
                 kind: "llm".into(),

@@ -16,5 +16,5 @@ pub use harness::{
     ToolCallUpdate, ToolCallUpdateFields, ToolKind, text_block,
 };
 pub use http::{HttpChunk, HttpRequest};
-pub use llm::{GenerationRequest, LlmCapabilities, ModelResponse, ToolDefinition};
+pub use llm::{GenerationRequest, LlmCapabilities};
 pub use wire::{Event, Operation, ServiceRequest};

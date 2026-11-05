@@ -54,7 +54,7 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
     // Keep the shipped routing/auth rules, using a local upstream for this test.
     bundle.manifest.destinations = vec![origin.clone()];
     let cancel = CancellationToken::new();
-    let mut worker = Instance::load(package, "llm".into(), Target::Host, 1, &cancel)
+    let mut worker = Instance::load(package, "llm".into(), 1, &cancel)
         .await
         .unwrap();
     for models in [true, false] {
@@ -62,7 +62,6 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
         let (_stop, receiver) = tokio::sync::watch::channel(false);
         let input = Arc::new(
             InvocationFixture {
-                id: "pdk".into(),
                 operation: if models {
                     OperationKind::ModelList
                 } else {
@@ -109,7 +108,6 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
                         text: "x".repeat(200 * 1024),
                     }],
                     max_tokens: 64,
-                    tools: vec![],
                 },
             }
         };

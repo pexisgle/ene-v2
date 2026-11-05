@@ -241,20 +241,19 @@ impl Provider {
             let request = input.generation()?;
             Operation::Generate {
                 request: ene_plugin::GenerationRequest {
-                    endpoint: request.endpoint().into(),
-                    options: request.options().clone(),
-                    model: request.model().into(),
-                    preamble: request.preamble().into(),
+                    endpoint: request.endpoint.clone(),
+                    options: request.options.clone(),
+                    model: request.model.clone(),
+                    preamble: request.preamble.clone(),
                     messages: request
-                        .messages()
+                        .messages
                         .iter()
                         .map(|m| ene_plugin::provider::ChatMessage {
                             role: m.role.as_str().into(),
                             text: m.text.clone(),
                         })
                         .collect(),
-                    max_tokens: request.max_tokens(),
-                    tools: Vec::new(),
+                    max_tokens: request.max_tokens,
                 },
             }
         };
@@ -277,10 +276,9 @@ impl Provider {
             .supervisor
             .spawn(async move {
                 let run = async {
-                    let mut worker =
-                        Instance::load(package, entrypoint, Target::Host, generation, &cancel)
-                            .await
-                            .map_err(failure)?;
+                    let mut worker = Instance::load(package, entrypoint, generation, &cancel)
+                        .await
+                        .map_err(failure)?;
                     let (tx, mut rx) = mpsc::channel(16);
                     let execute = worker
                         .invoke(operation, services, tx, &cancel)

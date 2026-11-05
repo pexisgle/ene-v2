@@ -48,11 +48,6 @@ pub enum Event {
     Models {
         models: Vec<crate::provider::Model>,
     },
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: Value,
-    },
     Finished {
         reason: String,
     },
@@ -68,10 +63,7 @@ pub enum Event {
 impl Event {
     pub fn extension(&self) -> Extension {
         match self {
-            Self::Delta { .. }
-            | Self::Models { .. }
-            | Self::ToolCall { .. }
-            | Self::Finished { .. } => Extension::Llm,
+            Self::Delta { .. } | Self::Models { .. } | Self::Finished { .. } => Extension::Llm,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
         }
@@ -81,37 +73,15 @@ impl Event {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServiceRequest {
-    Log {
-        message: String,
-    },
+    Log { message: String },
     Configuration,
-    StateRead {
-        key: String,
-    },
-    StateWrite {
-        key: String,
-        value: Value,
-    },
-    HttpOpen {
-        request: HttpRequest,
-    },
-    HttpRead {
-        handle: String,
-    },
-    HttpClose {
-        handle: String,
-    },
-    Models {
-        request: GenerationRequest,
-    },
-    Tool {
-        name: String,
-        arguments: Value,
-    },
-    Character {
-        target: CharacterTarget,
-        action: CharacterAction,
-    },
+    StateRead { key: String },
+    StateWrite { key: String, value: Value },
+    HttpOpen { request: HttpRequest },
+    HttpRead { handle: String },
+    HttpClose { handle: String },
+    Models { request: GenerationRequest },
+    Tool { name: String, arguments: Value },
 }
 
 impl ServiceRequest {
@@ -123,7 +93,6 @@ impl ServiceRequest {
             Self::HttpOpen { .. } | Self::HttpRead { .. } | Self::HttpClose { .. } => Service::Http,
             Self::Models { .. } => Service::Models,
             Self::Tool { .. } => Service::Tools,
-            Self::Character { .. } => Service::CharacterActions,
         }
     }
 }

@@ -49,48 +49,6 @@ pub fn policy(c: &Connection) -> Result<Policy> {
     )
 }
 
-/// The OpenRouter model list, with tool capability from
-/// `supported_parameters`. The transport still authorizes and signs the GET.
-pub async fn models(input: Invocation) -> Result<Vec<Model>> {
-    let endpoint = input.connection().endpoint.trim_end_matches('/').to_owned();
-    let transport = crate::llm::AuthorizedTransport::new(
-        std::sync::Arc::new(input),
-        crate::llm::CredentialPlacement::Bearer,
-    )?;
-    let mut models = Vec::new();
-    for item in super::catalog_items(transport, &endpoint).await? {
-        let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
-            continue;
-        };
-        let supports_tools = item["supported_parameters"]
-            .as_array()
-            .is_some_and(|parameters| parameters.iter().any(|parameter| parameter == "tools"));
-        models.push(Model {
-            id: id.into(),
-            name: item["name"].as_str().unwrap_or(id).into(),
-            metadata: ene_rpc::ModelMetadata {
-                source: format!("{endpoint}/models"),
-                scope: "route".into(),
-                context_window: item["context_length"].as_u64(),
-                max_output_tokens: item["top_provider"]["max_completion_tokens"].as_u64(),
-                supported_parameters: if supports_tools {
-                    ene_rpc::StringList {
-                        values: vec!["tools".into()],
-                        ..Default::default()
-                    }
-                    .into()
-                } else {
-                    Default::default()
-                },
-                ..Default::default()
-            }
-            .into(),
-            ..Default::default()
-        });
-    }
-    Ok(models)
-}
-
 pub struct Provider;
 impl LlmProvider for Provider {
     fn policy(&self, c: &Connection) -> Result<Policy> {
@@ -105,8 +63,51 @@ impl LlmProvider for Provider {
         // to OpenRouter yet and report that explicitly.
         Box::pin(async { Err(Error::new(ErrorKind::UnsupportedCapability)) })
     }
-    fn models(&self, i: Invocation) -> BoxFuture<'_, Result<Vec<Model>>> {
-        Box::pin(models(i))
+    /// The OpenRouter model list, with tool capability from
+    /// `supported_parameters`. The transport still authorizes and signs the GET.
+    fn models(&self, input: Invocation) -> BoxFuture<'_, Result<Vec<Model>>> {
+        Box::pin(async move {
+            let endpoint = input.connection().endpoint.trim_end_matches('/').to_owned();
+            let transport = crate::llm::AuthorizedTransport::new(
+                std::sync::Arc::new(input),
+                crate::llm::CredentialPlacement::Bearer,
+            )?;
+            let mut models = Vec::new();
+            for item in super::catalog_items(transport, &endpoint).await? {
+                let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
+                    continue;
+                };
+                let supports_tools =
+                    item["supported_parameters"]
+                        .as_array()
+                        .is_some_and(|parameters| {
+                            parameters.iter().any(|parameter| parameter == "tools")
+                        });
+                models.push(Model {
+                    id: id.into(),
+                    name: item["name"].as_str().unwrap_or(id).into(),
+                    metadata: ene_rpc::ModelMetadata {
+                        source: format!("{endpoint}/models"),
+                        scope: "route".into(),
+                        context_window: item["context_length"].as_u64(),
+                        max_output_tokens: item["top_provider"]["max_completion_tokens"].as_u64(),
+                        supported_parameters: if supports_tools {
+                            ene_rpc::StringList {
+                                values: vec!["tools".into()],
+                                ..Default::default()
+                            }
+                            .into()
+                        } else {
+                            Default::default()
+                        },
+                        ..Default::default()
+                    }
+                    .into(),
+                    ..Default::default()
+                });
+            }
+            Ok(models)
+        })
     }
 }
 

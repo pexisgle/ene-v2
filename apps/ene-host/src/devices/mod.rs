@@ -45,9 +45,15 @@ struct State {
     failed: bool,
     activation_not_before: Option<Instant>,
     journal: w::DeviceJournal,
-    connections: HashMap<String, Connection>,
-    changes: HashMap<String, CancellationToken>,
+    /// One entry per authenticated device: its live operation stream, if any,
+    /// and the cancellation signal that ends that device's RPC streams.
+    sessions: HashMap<String, DeviceSession>,
     activations: HashMap<String, (w::Activation, Instant)>,
+}
+#[derive(Default)]
+struct DeviceSession {
+    connection: Option<Connection>,
+    changed: CancellationToken,
 }
 struct Connection {
     id: String,
@@ -190,18 +196,19 @@ impl Devices {
             && store.save_rpc_state(journal.encode_to_vec()).await.is_err()
         {
             state.failed = true;
-            for signal in state.changes.values() {
-                signal.cancel();
+            for session in state.sessions.values() {
+                session.changed.cancel();
             }
             return Err(unavailable());
         }
         state.journal = journal;
         Ok(())
     }
-    pub async fn authenticate(&self, token: &str) -> Option<String> {
+    /// The authenticated device and the signal that ends its streams.
+    pub async fn authenticate(&self, token: &str) -> Option<(String, CancellationToken)> {
         let hash = Sha256::digest(token.as_bytes());
-        let state = self.lock().await.ok()?;
-        state
+        let mut state = self.lock().await.ok()?;
+        let id = state
             .journal
             .devices
             .iter()
@@ -210,7 +217,9 @@ impl Devices {
                     && r.device.approved
                     && !r.device.revoked
             })
-            .map(|r| r.device.id.clone())
+            .map(|r| r.device.id.clone())?;
+        let session = state.sessions.entry(id.clone()).or_default();
+        Some((id, session.changed.clone()))
     }
 }
 mod operations;

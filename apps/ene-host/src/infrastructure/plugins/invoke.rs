@@ -201,7 +201,6 @@ impl Manager {
                     Instance::load(
                         verified,
                         binding.entrypoint.clone(),
-                        Target::Host,
                         self.generations.fetch_add(1, Ordering::Relaxed),
                         &cancel,
                     )

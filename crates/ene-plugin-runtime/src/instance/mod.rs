@@ -77,7 +77,6 @@ impl Instance {
     pub async fn load(
         package: Package,
         entrypoint: String,
-        target: Target,
         generation: u64,
         cancel: &CancellationToken,
     ) -> Result<Self> {
@@ -85,7 +84,7 @@ impl Instance {
             return Err(Error::Cancelled);
         }
         let entry = package.entry(&entrypoint)?;
-        if entry.target != target {
+        if entry.target != Target::Host {
             return Err(Error::Unsupported);
         }
         let file = entry.file.clone();

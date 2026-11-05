@@ -8,11 +8,11 @@ pub mod provider;
 pub use api::{
     CharacterAction, CharacterEvent, CharacterTarget, Content, ContentBlock, ContentChunk, Event,
     GenerationRequest, HarnessEvent, HarnessInput, HttpChunk, HttpRequest, LlmCapabilities,
-    MessageId, ModelResponse, Operation, PermissionOption, PermissionOptionId,
-    PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, RequestId,
-    RequestPermissionOutcome, SelectedPermissionOutcome, ServiceRequest, SessionUpdate, StopReason,
-    TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolDefinition, ToolKind, text_block,
+    MessageId, Operation, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
+    PlanEntry, PlanEntryPriority, PlanEntryStatus, RequestId, RequestPermissionOutcome,
+    SelectedPermissionOutcome, ServiceRequest, SessionUpdate, StopReason, TextContent, ToolCall,
+    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind, text_block,
 };
 pub use failure::Failure;
 pub use manifest::{

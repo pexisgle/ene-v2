@@ -66,7 +66,7 @@ pub struct Embedding {
     pub input_tokens: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Generation {
     pub(crate) endpoint: String,
     pub(crate) options: Value,
@@ -114,24 +114,6 @@ impl Generation {
         };
         request.bound_history()?;
         Ok(request)
-    }
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-    pub fn options(&self) -> &Value {
-        &self.options
-    }
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-    pub fn preamble(&self) -> &str {
-        &self.preamble
-    }
-    pub fn messages(&self) -> &[ChatMessage] {
-        &self.messages
-    }
-    pub fn max_tokens(&self) -> u64 {
-        self.max_tokens
     }
 }
 
@@ -318,7 +300,6 @@ mod contract_tests {
         let runtime = Arc::new(Permission(AtomicBool::new(true)));
         let (_cancel, receiver) = tokio::sync::watch::channel(false);
         let invocation = Invocation::new(
-            "i".into(),
             connection,
             InvocationInput::ModelList,
             None,

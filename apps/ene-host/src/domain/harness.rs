@@ -89,13 +89,6 @@ impl Session {
             events: Vec::new(),
         }
     }
-    /// A session that cannot be resumed, used when a stored journal predates
-    /// the current contract or no longer parses.
-    pub fn interrupted(session_id: impl Into<String>) -> Self {
-        let mut session = Self::start(session_id);
-        session.fail("host_interrupted");
-        session
-    }
     pub fn terminal(&self) -> bool {
         self.status.terminal()
     }

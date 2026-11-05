@@ -163,7 +163,7 @@ impl Manager {
                 }
                 self.acp_remove(&binding.id);
                 if !slot.cancel.is_cancelled() {
-                    self.harness_fail(&binding.id, "acp_failed").await?;
+                    self.harness_stop(&binding.id, "acp_failed").await?;
                 }
                 Err(error)
             }

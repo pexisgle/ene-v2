@@ -12,11 +12,13 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum MindCallKind {
-    Recall,
-    Read,
-    Update,
+/// One typed mind request. The tool's arguments were already parsed from the
+/// model's JSON by Rig, so no `Value` crosses the bridge.
+#[derive(Debug)]
+pub(crate) enum MindRequest {
+    Recall(RecallArgs),
+    Read(ReadArgs),
+    Update(MindUpdateRequest),
 }
 
 /// Immutable facts the kernel binds to one tool call. The tool cannot choose
@@ -41,9 +43,8 @@ impl MindCallScope {
 }
 
 pub(crate) struct MindCall {
-    pub kind: MindCallKind,
+    pub request: MindRequest,
     pub scope: Arc<MindCallScope>,
-    pub args: serde_json::Value,
     pub reply: oneshot::Sender<Result<String, String>>,
 }
 
@@ -61,9 +62,8 @@ impl MindBridge {
 
     async fn call(
         &self,
-        kind: MindCallKind,
+        request: MindRequest,
         scope: Arc<MindCallScope>,
-        args: serde_json::Value,
     ) -> Result<String, String> {
         if !scope.allowed {
             return Err("mind_not_permitted".into());
@@ -71,9 +71,8 @@ impl MindBridge {
         let (reply, answer) = oneshot::channel();
         self.calls
             .send(MindCall {
-                kind,
+                request,
                 scope,
-                args,
                 reply,
             })
             .map_err(|_| "mind_unavailable".to_owned())?;
@@ -246,11 +245,7 @@ impl Tool for MindRecall {
     ) -> Result<String, MindToolError> {
         let scope = mind_scope(context)?;
         self.0
-            .call(
-                MindCallKind::Recall,
-                scope,
-                serde_json::to_value(args).map_err(|error| MindToolError(error.to_string()))?,
-            )
+            .call(MindRequest::Recall(args), scope)
             .await
             .map_err(MindToolError)
     }
@@ -286,11 +281,7 @@ impl Tool for MindRead {
     ) -> Result<String, MindToolError> {
         let scope = mind_scope(context)?;
         self.0
-            .call(
-                MindCallKind::Read,
-                scope,
-                serde_json::to_value(args).map_err(|error| MindToolError(error.to_string()))?,
-            )
+            .call(MindRequest::Read(args), scope)
             .await
             .map_err(MindToolError)
     }
@@ -364,11 +355,7 @@ impl Tool for MindUpdate {
     ) -> Result<String, MindToolError> {
         let scope = mind_scope(context)?;
         self.0
-            .call(
-                MindCallKind::Update,
-                scope,
-                serde_json::to_value(args).map_err(|error| MindToolError(error.to_string()))?,
-            )
+            .call(MindRequest::Update(args), scope)
             .await
             .map_err(MindToolError)
     }

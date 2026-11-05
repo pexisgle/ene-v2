@@ -31,7 +31,6 @@ pub enum Service {
     Http,
     Models,
     Tools,
-    CharacterActions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

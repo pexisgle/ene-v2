@@ -43,7 +43,6 @@ CREATE TABLE mind_memories (
   sources TEXT NOT NULL,
   recorded_at TEXT NOT NULL,
   occurred_at TEXT,
-  related TEXT NOT NULL,
   supersedes TEXT NOT NULL,
   recall_preference TEXT NOT NULL,
   created_by TEXT NOT NULL,

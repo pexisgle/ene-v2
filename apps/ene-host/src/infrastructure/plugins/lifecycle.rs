@@ -59,15 +59,9 @@ impl Manager {
                     .filter(|e| e.target == Target::Host)
                 {
                     let verified = package.clone();
-                    let worker = Instance::load(
-                        verified,
-                        entry.id.clone(),
-                        Target::Host,
-                        generation,
-                        &cancel,
-                    )
-                    .await
-                    .map_err(failure)?;
+                    let worker = Instance::load(verified, entry.id.clone(), generation, &cancel)
+                        .await
+                        .map_err(failure)?;
                     capabilities.insert(entry.id.clone(), worker.capabilities);
                 }
             }

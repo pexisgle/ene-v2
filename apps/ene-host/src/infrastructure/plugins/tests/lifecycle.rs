@@ -3,29 +3,7 @@ use ene_plugin::Operation;
 use std::time::Duration;
 
 async fn invoke(manager: &Manager, input: HarnessInput) -> Result<PluginResult> {
-    invoke_plugin(
-        manager,
-        PluginInvocation {
-            binding_id: "task".into(),
-            operation: document(serde_json::to_value(Operation::Harness { input }).unwrap()).into(),
-            ..Default::default()
-        },
-    )
-    .await
-}
-
-fn start(prompt: &str) -> HarnessInput {
-    HarnessInput::Start {
-        prompt: vec![ene_plugin::text_block(prompt)],
-    }
-}
-fn allow() -> HarnessInput {
-    HarnessInput::Respond {
-        request_id: "permission-1".into(),
-        outcome: ene_plugin::RequestPermissionOutcome::Selected(
-            ene_plugin::SelectedPermissionOutcome::new("allow"),
-        ),
-    }
+    invoke_plugin(manager, harness_invocation(input)).await
 }
 
 async fn pending() -> (Manager, tempfile::TempDir, PluginBinding) {
@@ -43,7 +21,7 @@ async fn pending() -> (Manager, tempfile::TempDir, PluginBinding) {
         .await
         .unwrap();
     manager.bind(binding.clone()).await.unwrap();
-    invoke(&manager, start("test")).await.unwrap();
+    invoke(&manager, task_start("test")).await.unwrap();
     (manager, temp, binding)
 }
 
@@ -117,7 +95,7 @@ async fn rejected_harness_inputs_preserve_the_pending_guest_and_journal() {
         .await
         .unwrap();
     for (input, kind) in [
-        (start("duplicate"), ErrorKind::StateConflict),
+        (task_start("duplicate"), ErrorKind::StateConflict),
         (
             HarnessInput::Respond {
                 request_id: "wrong-id".into(),
@@ -187,7 +165,7 @@ async fn rebind_finishes_the_old_harness_before_starting_another() {
             .unwrap(),
         saved
     );
-    invoke(&manager, start("new task")).await.unwrap();
+    invoke(&manager, task_start("new task")).await.unwrap();
     assert_ne!(
         manager
             .store
@@ -410,7 +388,7 @@ async fn rebind_recovers_a_task_after_failed_shutdown_and_restart() {
             .unwrap();
         assert_eq!(journal["status"], "failed");
         assert!(journal["pending"].is_null());
-        let retry = invoke(&restarted, start("after restart")).await;
+        let retry = invoke(&restarted, task_start("after restart")).await;
         app.stop().await.unwrap();
         assert!(
             retry.is_ok(),
@@ -740,7 +718,7 @@ async fn an_event_that_cannot_be_persisted_fails_the_turn() {
 }
 
 #[tokio::test]
-async fn a_legacy_journal_is_finalized_without_resume() {
+async fn a_legacy_journal_is_not_resumed_or_rewritten() {
     let (manager, _temp, _) = pending().await;
     manager
         .store
@@ -758,6 +736,8 @@ async fn a_legacy_journal_is_finalized_without_resume() {
         )
         .await
         .unwrap();
+    // The old contract cannot be resumed; the host reports no live session.
+    assert!(manager.harness("task".into()).await.unwrap().is_none());
     manager
         .harness_stop("task", "host_interrupted")
         .await
@@ -767,11 +747,6 @@ async fn a_legacy_journal_is_finalized_without_resume() {
         .plugin_get("harness".into(), "task".into())
         .await
         .unwrap();
-    assert_eq!(journal["contract_version"], 4);
-    assert_eq!(journal["session_id"], "legacy-task");
-    assert_eq!(journal["status"], "failed");
-    assert_eq!(journal["failure"], "host_interrupted");
-    assert!(journal["pending"].is_null());
-    assert!(journal["events"].as_array().unwrap().is_empty());
+    assert_eq!(journal["task_id"], "legacy-task");
     manager.shutdown().await.unwrap();
 }

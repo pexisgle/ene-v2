@@ -249,7 +249,6 @@ pub(crate) async fn accept(
             nonce: nonce.clone(),
         });
         let outbound = Arc::new(Outbound::new(
-            format!("conversation:{companion}"),
             connection.clone(),
             context.secret,
             authority,
@@ -298,12 +297,10 @@ pub(crate) async fn accept(
     let runtime = app.rig()?;
     // The turn's model input gets a small automatic recall for the accepted
     // text. It is a best-effort view; a missing index never blocks the turn.
-    if let Ok(core) = app.companion(&companion).await
-        && let Ok(prompt) = app
+    if let Ok(core) = app.companion(&companion).await {
+        let _ = app
             .mind_prompt_with_recall(&companion, &core.mind, &request.text, &request_id)
-            .await
-    {
-        let _ = prompt;
+            .await;
     }
     if let Err(error) = runtime
         .deliver(companion.clone(), request.text.clone(), request_id.clone())
