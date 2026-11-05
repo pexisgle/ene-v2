@@ -139,8 +139,8 @@ Rig との接続は通信実装の子モジュールに置き、ストリーミ�
 
 ```sh
 cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
-cargo test -p ene-host -p ene-platform -p ene-plugin-runtime --locked
-cargo clippy -p ene-host -p ene-platform -p ene-plugin-runtime --all-targets --all-features --locked -- -D warnings
+cargo test -p ene-host -p ene-plugin-runtime --locked
+cargo clippy -p ene-host -p ene-plugin-runtime --all-targets --all-features --locked -- -D warnings
 # 実プロバイダーの受入（課金あり、既定は無視）。ENE_LIVE_PROVIDER=openai|openrouter
 cargo test -p ene-host --test live_acceptance -- --ignored --nocapture
 # 待機時CPUの実測（約11秒）

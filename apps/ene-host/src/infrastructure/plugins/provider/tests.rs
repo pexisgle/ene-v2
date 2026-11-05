@@ -31,9 +31,9 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("pdk");
-    ene_platform::storage::create_private_dir_all(&root).unwrap();
-    ene_platform::storage::write_atomic(
-        &root.join("manifest.json"),
+    crate::test_support::create_directory(&root).unwrap();
+    crate::test_support::write(
+        root.join("manifest.json"),
         include_bytes!("../../../../../../examples/plugins/openrouter-wasm/manifest.json"),
     )
     .unwrap();
@@ -43,9 +43,9 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm")
         });
-    ene_platform::storage::write_atomic(
-        &root.join("provider.wasm"),
-        &std::fs::read(wasm).expect("build ene-openrouter-wasm before host tests"),
+    crate::test_support::write(
+        root.join("provider.wasm"),
+        std::fs::read(wasm).expect("build ene-openrouter-wasm before host tests"),
     )
     .unwrap();
     let package = Package::load(&root).unwrap();

@@ -18,7 +18,8 @@ ene-plugin.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
 buffa.workspace = true
 bytes.workspace = true
-ene-platform.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 ene-plugin-runtime.workspace = true
 rig-core = { version = "0.46", default-features = false, features = [] }
 rig-ecs = "0.46"
@@ -53,6 +54,5 @@ http.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]
-atomic-write-file.workspace = true
 xdg.workspace = true
 rustix.workspace = true

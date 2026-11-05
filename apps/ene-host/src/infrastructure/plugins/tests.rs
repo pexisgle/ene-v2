@@ -47,13 +47,13 @@ fn allow() -> HarnessInput {
 pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("plugins");
-    ene_platform::storage::create_private_dir_all(&root).unwrap();
+    crate::test_support::create_directory(&root).unwrap();
     let package = root.join("reference");
-    ene_platform::storage::create_private_dir_all(&package).unwrap();
+    crate::test_support::create_directory(&package).unwrap();
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/reference");
-    ene_platform::storage::write_atomic(
-        &package.join("manifest.json"),
-        &std::fs::read(source.join("manifest.json")).unwrap(),
+    crate::test_support::write(
+        package.join("manifest.json"),
+        std::fs::read(source.join("manifest.json")).unwrap(),
     )
     .unwrap();
     let wasm = std::env::var_os("ENE_TEST_REFERENCE_WASM")
@@ -61,9 +61,9 @@ pub(crate) async fn manager() -> (Manager, tempfile::TempDir, String) {
         .unwrap_or_else(|| {
             source.join("../../../target/wasm32-unknown-unknown/release/ene_reference_wasm.wasm")
         });
-    ene_platform::storage::write_atomic(
-        &package.join("reference.wasm"),
-        &std::fs::read(wasm)
+    crate::test_support::write(
+        package.join("reference.wasm"),
+        std::fs::read(wasm)
             .expect("build ene-reference-wasm for wasm32-unknown-unknown before host tests"),
     )
     .unwrap();
@@ -534,7 +534,7 @@ async fn reload_accepts_identical_code_rewritten_on_disk() {
         .unwrap();
     let file = manager.root.join("reference/reference.wasm");
     let code = std::fs::read(&file).unwrap();
-    ene_platform::storage::write_atomic(&file, &code).unwrap();
+    crate::test_support::write(&file, &code).unwrap();
     let state = |manager: &Manager| {
         manager
             .list()
@@ -621,7 +621,7 @@ async fn changed_or_missing_code_can_be_disabled_and_stays_disabled() {
         if remove {
             std::fs::remove_file(&file).unwrap();
         } else {
-            ene_platform::storage::write_atomic(&file, b"changed").unwrap();
+            crate::test_support::write(&file, b"changed").unwrap();
         }
         manager
             .enable(
@@ -644,7 +644,7 @@ async fn changed_or_missing_code_can_be_disabled_and_stays_disabled() {
             .unwrap();
         let saved: EnablePluginRequest = serde_json::from_value(saved["input"].clone()).unwrap();
         assert!(!saved.enabled);
-        ene_platform::storage::write_atomic(&file, &original).unwrap();
+        crate::test_support::write(&file, &original).unwrap();
         manager.restore().await.unwrap();
         assert!(manager.ready("reference", None).is_err());
     }
@@ -960,8 +960,7 @@ async fn a_long_harness_turn_keeps_the_newest_events() {
           {init} local.get $p i64.const 2 call $output i32.const 0))"#
     ))
     .unwrap();
-    ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
-        .unwrap();
+    crate::test_support::write(manager.root.join("reference/reference.wasm"), &wasm).unwrap();
     manager.scan().unwrap();
     manager
         .entries
@@ -1509,8 +1508,8 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
 #[tokio::test]
 async fn failed_starts_release_instance_slots() {
     let (manager, _temp, companion) = manager().await;
-    ene_platform::storage::write_atomic(
-        &manager.root.join("reference/reference.wasm"),
+    crate::test_support::write(
+        manager.root.join("reference/reference.wasm"),
         b"invalid wasm",
     )
     .unwrap();
@@ -1840,8 +1839,7 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
         (func (export "ene_invoke") (result i32) i32.const 0))"#,
         )
         .unwrap();
-        ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
-            .unwrap();
+        crate::test_support::write(manager.root.join("reference/reference.wasm"), &wasm).unwrap();
         manager.scan().unwrap();
         manager
             .entries
@@ -1980,8 +1978,7 @@ async fn cancel_interrupts_a_running_harness_turn() {
         (func (export "ene_invoke") (result i32) (loop $forever br $forever) i32.const 0))"#
     ))
     .unwrap();
-    ene_platform::storage::write_atomic(&manager.root.join("reference/reference.wasm"), &wasm)
-        .unwrap();
+    crate::test_support::write(manager.root.join("reference/reference.wasm"), &wasm).unwrap();
     manager.scan().unwrap();
     manager
         .entries
@@ -2242,7 +2239,7 @@ async fn event_count_and_byte_overflow_stop_the_invocation_promptly() {
             {empty} local.get $p i64.const 2 call $output i32.const 0))"#
         ))
         .unwrap();
-        ene_platform::storage::write_atomic(&root.join("reference.wasm"), &code).unwrap();
+        crate::test_support::write(root.join("reference.wasm"), &code).unwrap();
         manager.scan().unwrap();
         let revision = manager.entries.read().unwrap()["reference"]
             .package

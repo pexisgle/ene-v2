@@ -6,10 +6,26 @@ use ene_plugin_runtime::{
 };
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
+fn directory(path: &Path) {
+    std::fs::create_dir_all(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+fn write_file(path: &Path, bytes: impl AsRef<[u8]>) {
+    std::fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 fn write(data: &str) -> String {
     let mut code = format!("i64.const {} call $alloc local.set $p\n", data.len());
     for (i, b) in data.bytes().enumerate() {
@@ -32,9 +48,9 @@ fn wasm(body: &str) -> Vec<u8> {
 fn package(code: &[u8], target: Target, services: &[Service]) -> (Package, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("plugin");
-    ene_platform::storage::create_private_dir_all(&root).unwrap();
-    ene_platform::storage::write_atomic(&root.join("main.wasm"), code).unwrap();
-    ene_platform::storage::write_atomic(&root.join("manifest.json"), json!({"contract_version":CONTRACT_VERSION,"id":"test","name":"Test","version":"1","entrypoints":[{"id":"main","file":"main.wasm","target":target,"provides":["character","harness","tts","stt"],"uses":services}]}).to_string().as_bytes()).unwrap();
+    directory(&root);
+    write_file(&root.join("main.wasm"), code);
+    write_file(&root.join("manifest.json"), json!({"contract_version":CONTRACT_VERSION,"id":"test","name":"Test","version":"1","entrypoints":[{"id":"main","file":"main.wasm","target":target,"provides":["character","harness","tts","stt"],"uses":services}]}).to_string().as_bytes());
     (Package::load(&root).unwrap(), temp)
 }
 fn character() -> Operation {

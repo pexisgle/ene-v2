@@ -5,7 +5,7 @@ mod read;
 
 pub use paths::identifier;
 use paths::{portable_name, relative};
-use read::{Stamp, owned, read, unchanged};
+use read::{Stamp, open_root, read, unchanged};
 
 use crate::{Error, Result, limits::MAX_CODE};
 use ene_plugin::*;
@@ -26,8 +26,8 @@ pub struct Package {
 }
 impl Package {
     pub fn load(root: &Path) -> Result<Self> {
-        owned(root, true)?;
-        let (raw, manifest_stamp) = read(root, "manifest.json", 65536)?;
+        let directory = open_root(root)?;
+        let (raw, manifest_stamp) = read(&directory, "manifest.json", 65536)?;
         let manifest: Manifest = serde_json::from_slice(&raw)?;
         if manifest.contract_version != CONTRACT_VERSION
             || !identifier(&manifest.id)
@@ -97,7 +97,7 @@ impl Package {
                 return Err(Error::Invalid);
             }
             portable_name(&mut portable_names, path)?;
-            let (data, stamp) = read(root, path, MAX_CODE)?;
+            let (data, stamp) = read(&directory, path, MAX_CODE)?;
             total += data.len() as u64;
             if total > MAX_CODE {
                 return Err(Error::Invalid);
@@ -169,6 +169,22 @@ mod tests {
         assert!(super::relative("日本語/main.wasm"));
     }
     use super::*;
+    fn directory(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    fn write_file(path: &Path, bytes: impl AsRef<[u8]>) {
+        std::fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
     #[test]
     fn package_components_reject_case_aliases_and_file_directory_collisions() {
         let mut names = BTreeMap::new();
@@ -179,17 +195,17 @@ mod tests {
         }
     }
     fn fixture(dir: &Path) {
-        ene_platform::storage::create_private_dir_all(dir).unwrap();
-        ene_platform::storage::write_atomic(&dir.join("main.wasm"), b"return {}").unwrap();
-        ene_platform::storage::write_atomic(&dir.join("manifest.json"), serde_json::json!({"contract_version":ene_plugin::CONTRACT_VERSION,"id":"sample","name":"Sample","version":"1","entrypoints":[{"id":"behavior","target":"host","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes()).unwrap();
+        directory(dir);
+        write_file(&dir.join("main.wasm"), b"return {}");
+        write_file(&dir.join("manifest.json"), serde_json::json!({"contract_version":ene_plugin::CONTRACT_VERSION,"id":"sample","name":"Sample","version":"1","entrypoints":[{"id":"behavior","target":"host","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes());
     }
     #[test]
     fn acp_entrypoints_require_a_command_and_no_code_file() {
         let source = tempfile::tempdir().unwrap();
         let root = source.path().join("package");
-        ene_platform::storage::create_private_dir_all(&root).unwrap();
+        directory(&root);
         let write = |entry: serde_json::Value| {
-            ene_platform::storage::write_atomic(
+            write_file(
                 &root.join("manifest.json"),
                 serde_json::json!({
                     "contract_version": ene_plugin::CONTRACT_VERSION,
@@ -198,8 +214,7 @@ mod tests {
                 })
                 .to_string()
                 .as_bytes(),
-            )
-            .unwrap();
+            );
         };
         write(serde_json::json!({
             "id": "main", "target": "acp", "provides": ["harness"],
@@ -260,8 +275,7 @@ mod tests {
         let mut entry = manifest.entrypoints[0].clone();
         entry.id = "second".into();
         manifest.entrypoints.push(entry);
-        ene_platform::storage::write_atomic(&path, &serde_json::to_vec(&manifest).unwrap())
-            .unwrap();
+        write_file(&path, serde_json::to_vec(&manifest).unwrap());
         let code = std::fs::OpenOptions::new()
             .write(true)
             .open(root.join("main.wasm"))
@@ -291,8 +305,7 @@ mod tests {
                 "runtime" => manifest["entrypoints"][0][field] = "extism".into(),
                 _ => manifest[field] = serde_json::json!(["main.wasm"]),
             }
-            ene_platform::storage::write_atomic(&path, &serde_json::to_vec(&manifest).unwrap())
-                .unwrap();
+            write_file(&path, serde_json::to_vec(&manifest).unwrap());
             assert!(Package::load(&root).is_err(), "{field}");
         }
     }
@@ -305,14 +318,34 @@ mod tests {
         let source_root = source.path().join("package");
         fixture(&source_root);
         std::fs::remove_file(source_root.join("main.wasm")).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("/etc/passwd", source_root.join("main.wasm")).unwrap();
-        #[cfg(windows)]
         std::fs::hard_link(
             source_root.join("manifest.json"),
             source_root.join("main.wasm"),
         )
         .unwrap();
         assert!(Package::load(&source_root).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(source_root.join("main.wasm")).unwrap();
+            std::os::unix::fs::symlink("/etc/passwd", source_root.join("main.wasm")).unwrap();
+            assert!(Package::load(&source_root).is_err());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn packages_in_public_directories_are_rejected() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        fixture(&root);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(Package::load(&root), Err(Error::Invalid)));
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            root.join("main.wasm"),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        assert!(matches!(Package::load(&root), Err(Error::Invalid)));
     }
 }

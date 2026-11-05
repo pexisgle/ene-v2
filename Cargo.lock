@@ -460,16 +460,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-write-file"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae67d5c03ee972c101a1d8db3ddbf8a9c819ad1ea9d6fd9cd385605547b60edb"
-dependencies = [
- "nix",
- "rand",
-]
-
-[[package]]
 name = "atomicow"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1946,6 +1936,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-fs-ext"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f"
+dependencies = [
+ "cap-primitives",
+ "cap-std",
+ "io-lifetimes 3.0.1",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "cap-primitives"
 version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1961,6 +1963,18 @@ dependencies = [
  "rustix-linux-procfs",
  "windows-sys 0.61.2",
  "winx",
+]
+
+[[package]]
+name = "cap-std"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8"
+dependencies = [
+ "cap-primitives",
+ "io-extras",
+ "io-lifetimes 3.0.1",
+ "rustix 1.1.5",
 ]
 
 [[package]]
@@ -2804,14 +2818,14 @@ name = "ene-host"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "atomic-write-file",
  "axum",
  "base64 0.23.1",
  "bevy_ecs",
  "buffa",
  "bytes",
+ "cap-fs-ext",
+ "cap-std",
  "connectrpc",
- "ene-platform",
  "ene-plugin",
  "ene-plugin-runtime",
  "ene-rpc",
@@ -2852,16 +2866,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-platform"
-version = "0.1.0"
-dependencies = [
- "rustix 1.1.5",
- "tempfile",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "ene-plugin"
 version = "0.1.0"
 dependencies = [
@@ -2876,10 +2880,12 @@ name = "ene-plugin-runtime"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
- "ene-platform",
+ "cap-fs-ext",
+ "cap-std",
  "ene-plugin",
  "extism",
  "futures-util",
+ "rustix 1.1.5",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

@@ -37,9 +37,8 @@ pub(crate) fn data() -> PathBuf {
 pub(crate) fn runtime() -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
-        let home = home();
-        let root = home.join("runtime");
-        ene_platform::storage::create_private_dir_all(&root)?;
+        let root = home().join("runtime");
+        crate::infrastructure::runtime::private_directory(&root)?;
         Ok(root)
     }
     #[cfg(unix)]
