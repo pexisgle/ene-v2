@@ -18,6 +18,11 @@ use ene_plugin::{
     ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionOutcome, SessionUpdate,
     StopReason, ToolCallUpdate,
 };
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -30,7 +35,7 @@ use std::{
 };
 use tokio::{
     io::AsyncReadExt,
-    process::{Child, Command},
+    process::Command,
     sync::{Mutex, oneshot},
     task::JoinHandle,
     time::timeout,
@@ -65,7 +70,7 @@ pub(crate) struct TerminalLimits {
 }
 
 struct Terminal {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     output: Arc<Mutex<Vec<u8>>>,
     truncated: Arc<AtomicBool>,
     exit: Arc<Mutex<Option<Option<i32>>>>,
@@ -134,7 +139,8 @@ impl State {
 }
 
 pub(crate) struct AcpSession {
-    child: Child,
+    child: Box<dyn ChildWrapper>,
+    terminals: Arc<Mutex<HashMap<String, Terminal>>>,
     connection: ConnectionTo<Agent>,
     driver: JoinHandle<()>,
     prompt_task: Option<JoinHandle<()>>,
@@ -162,14 +168,14 @@ impl AcpSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env_clear()
-            .kill_on_drop(true);
+            .env_clear();
         for key in BASE_ENV {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
         }
-        let mut child = command.spawn().map_err(|error| Error {
+        let mut wrapped = grouped(command);
+        let mut child = wrapped.spawn().map_err(|error| Error {
             kind: ErrorKind::ExternalFailure,
             reason: Some(if error.kind() == std::io::ErrorKind::NotFound {
                 "acp_command_not_found"
@@ -177,9 +183,9 @@ impl AcpSession {
                 "acp_spawn_failed"
             }),
         })?;
-        let stdin = child.stdin.take().ok_or_else(Error::unavailable)?;
-        let stdout = child.stdout.take().ok_or_else(Error::unavailable)?;
-        let stderr = child.stderr.take().ok_or_else(Error::unavailable)?;
+        let stdin = child.stdin().take().ok_or_else(Error::unavailable)?;
+        let stdout = child.stdout().take().ok_or_else(Error::unavailable)?;
+        let stderr = child.stderr().take().ok_or_else(Error::unavailable)?;
 
         let shared = Arc::new(Mutex::new(State::new()));
         let terminals = Arc::new(Mutex::new(HashMap::<String, Terminal>::new()));
@@ -189,7 +195,7 @@ impl AcpSession {
             shared: shared.clone(),
             workspace: config.workspace,
             terminal,
-            terminals,
+            terminals: terminals.clone(),
         };
         let captured = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = tokio::spawn(drain_stderr(stderr, captured.clone()));
@@ -344,6 +350,7 @@ impl AcpSession {
                 shared.lock().await.session = Some(session_id);
                 Ok(Self {
                     child,
+                    terminals,
                     connection,
                     driver,
                     prompt_task: None,
@@ -464,6 +471,10 @@ impl AcpSession {
         self.stderr_task.abort();
         let _ = self.child.start_kill();
         let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
+        let terminals = self.terminals.lock().await;
+        for terminal in terminals.values() {
+            let _ = terminal.child.lock().await.start_kill();
+        }
     }
 
     async fn await_turn(
@@ -495,6 +506,29 @@ impl AcpSession {
                 }
                 reset_turn(&self.shared).await;
                 Err(Error::new(ErrorKind::Unavailable))
+            }
+        }
+    }
+}
+
+fn grouped(command: Command) -> CommandWrap {
+    let mut wrapped = CommandWrap::from(command);
+    #[cfg(unix)]
+    wrapped.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    wrapped.wrap(JobObject);
+    wrapped.wrap(KillOnDrop);
+    wrapped
+}
+
+impl Drop for AcpSession {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+        if let Ok(terminals) = self.terminals.try_lock() {
+            for terminal in terminals.values() {
+                if let Ok(mut child) = terminal.child.try_lock() {
+                    let _ = child.start_kill();
+                }
             }
         }
     }
@@ -729,8 +763,7 @@ async fn on_create_terminal(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_clear()
-        .kill_on_drop(true);
+        .env_clear();
     for key in BASE_ENV {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
@@ -752,7 +785,8 @@ async fn on_create_terminal(
         .map(|value| value as usize)
         .unwrap_or(policy.max_output)
         .clamp(1, policy.max_output);
-    let mut child = match command.spawn() {
+    let mut wrapped = grouped(command);
+    let mut child = match wrapped.spawn() {
         Ok(child) => child,
         Err(_) => {
             let _ = responder.respond_with_error(AcpError::new(
@@ -765,10 +799,10 @@ async fn on_create_terminal(
     let output = Arc::new(Mutex::new(Vec::new()));
     let truncated = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
+    if let Some(stdout) = child.stdout().take() {
         readers.push(tap(stdout, output.clone(), truncated.clone(), limit));
     }
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = child.stderr().take() {
         readers.push(tap(stderr, output.clone(), truncated.clone(), limit));
     }
     let child = Arc::new(Mutex::new(child));
@@ -1270,6 +1304,112 @@ for line in sys.stdin:
             turn.state,
             TurnState::Stopped(StopReason::EndTurn)
         ));
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    fn process_group_agent_script() -> String {
+        r#"
+import json, os, sys, time
+
+session = "s1"
+prompt_id = None
+pid_file = os.path.join(sys.argv[1], "grandchild.pid")
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "run"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create", "params": {"sessionId": session, "command": "sh", "args": ["-c", "sleep 30 & echo $! > " + pid_file + "; wait"]}})
+    elif mid == 901:
+        terminal_id = msg["result"]["terminalId"]
+        for _ in range(200):
+            if os.path.exists(pid_file):
+                break
+            time.sleep(0.01)
+        send({"jsonrpc": "2.0", "id": 902, "method": "terminal/kill", "params": {"sessionId": session, "terminalId": terminal_id}})
+    elif mid == 902:
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_kill_terminates_the_whole_process_group() {
+        use rustix::process::{Pid, test_kill_process};
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("agent.py");
+        std::fs::write(&script_path, process_group_agent_script()).unwrap();
+        let pid_file = temp.path().join("grandchild.pid");
+        let config = AcpConfig {
+            command: vec![
+                "python3".into(),
+                script_path.to_str().unwrap().into(),
+                temp.path().to_str().unwrap().into(),
+            ],
+            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
+            cwd: std::fs::canonicalize(temp.path()).unwrap(),
+            terminal: Some(TerminalLimits {
+                allowed: vec!["sh".into()],
+                max_seconds: 10,
+                max_output: 4096,
+            }),
+        };
+        let mut session = AcpSession::start(config).await.unwrap();
+        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let turn = session
+            .respond(
+                &waiting.request_id,
+                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
+                    "allow",
+                )),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            turn.state,
+            TurnState::Stopped(StopReason::EndTurn)
+        ));
+
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = text.trim().parse::<i32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the terminal child did not record its background pid");
+
+        let gone = tokio::time::timeout(Duration::from_secs(2), async move {
+            loop {
+                if test_kill_process(Pid::from_raw(pid).unwrap()).is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "grandchild {pid} survived terminal/kill");
         session.kill().await;
     }
 }
