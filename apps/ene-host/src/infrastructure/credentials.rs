@@ -11,6 +11,9 @@ use std::{
     },
     time::Duration,
 };
+/// A platform credential call that outlives this deadline is reported as
+/// unavailable; the blocking thread still owns the slot until it returns.
+const TIMEOUT: Duration = Duration::from_secs(5);
 /// Keyring operations are serialized: the platform stores are blocking and a
 /// second same-key write would otherwise race the first one's cleanup.
 pub struct Store {
@@ -35,14 +38,17 @@ impl Credentials for Store {
             // Loads wait for the single slot instead of being skipped: startup
             // loads several credentials concurrently and must not lose the
             // ones that do not win a try_acquire race.
-            let slot = self
-                .slots
-                .clone()
-                .acquire_owned()
+            //
+            // A platform call that hangs keeps the slot until the blocking
+            // thread returns, so the deadline covers the wait for the slot and
+            // the call itself instead of bounding them separately.
+            let deadline = tokio::time::Instant::now() + TIMEOUT;
+            let slot = tokio::time::timeout_at(deadline, self.slots.clone().acquire_owned())
                 .await
+                .map_err(|_| Error::unavailable())?
                 .map_err(|_| Error::unavailable())?;
-            tokio::time::timeout(
-                Duration::from_secs(5),
+            tokio::time::timeout_at(
+                deadline,
                 tokio::task::spawn_blocking(move || {
                     let _slot = slot;
                     keyring::Entry::new("ene-v2", &reference).and_then(|e| e.get_password())
@@ -84,10 +90,7 @@ impl Credentials for Store {
                     r
                 })
             });
-            if matches!(
-                tokio::time::timeout(Duration::from_secs(5), job).await,
-                Ok(Ok(Ok(())))
-            ) {
+            if matches!(tokio::time::timeout(TIMEOUT, job).await, Ok(Ok(Ok(())))) {
                 guard.1 = false;
                 Ok(())
             } else {
@@ -108,7 +111,7 @@ impl Credentials for Store {
                 .map_err(|_| Error::unavailable())?;
             let target = reference.clone();
             let result = tokio::time::timeout(
-                Duration::from_secs(5),
+                TIMEOUT,
                 tokio::task::spawn_blocking(move || {
                     let _slot = slot;
                     keyring::Entry::new("ene-v2", &target).and_then(|e| e.delete_credential())
@@ -152,5 +155,17 @@ mod tests {
         let loaded = futures_util::future::join_all(loads).await;
         assert!(loaded.iter().all(|item| item.is_ok()));
         keyring_core::unset_default_store();
+    }
+
+    /// A platform call that never releases its slot must not make the next
+    /// load wait forever: the deadline covers the wait as well as the call.
+    #[tokio::test(start_paused = true)]
+    async fn a_load_behind_a_stuck_slot_fails_instead_of_waiting_forever() {
+        let store = Store::default();
+        let stuck = store.slots.clone().acquire_owned().await.unwrap();
+        let error = store.load("ref".into()).await.expect_err("no result");
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        drop(stuck);
+        assert!(store.load("ref".into()).await.is_err());
     }
 }
