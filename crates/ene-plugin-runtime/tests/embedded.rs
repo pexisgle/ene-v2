@@ -363,3 +363,68 @@ async fn revocation_during_a_host_function_prevents_subsequent_guest_output() {
     assert!(error.to_string().contains("revoked"), "{error:#}");
     assert!(rx.recv().await.is_none());
 }
+
+struct Tagged {
+    seen: Arc<tokio::sync::Mutex<Vec<String>>>,
+}
+
+impl Services for Tagged {
+    fn handle(
+        &self,
+        request: ServiceRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, Failure>> {
+        let seen = self.seen.clone();
+        Box::pin(async move {
+            if let ServiceRequest::StateRead { key } = request {
+                seen.lock().await.push(key);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok(json!({}))
+        })
+    }
+    fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn concurrent_instances_receive_their_own_host_context() {
+    let code = wasm(&format!(
+        "{} local.get $p call $service drop",
+        write(&json!({"type":"state_read","key":"a"}).to_string())
+    ));
+    let (package, _temp) = package(&code, Target::Host, &[Service::State]);
+    let cancel = CancellationToken::new();
+    let mut first = Instance::load(package.clone(), "main".into(), Target::Host, 1, &cancel)
+        .await
+        .unwrap();
+    let mut second = Instance::load(package, "main".into(), Target::Host, 2, &cancel)
+        .await
+        .unwrap();
+    let first_seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let second_seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let (first_tx, _first_rx) = mpsc::channel(1);
+    let (second_tx, _second_rx) = mpsc::channel(1);
+    let (first_result, second_result) = tokio::join!(
+        first.invoke(
+            character(),
+            Arc::new(Tagged {
+                seen: first_seen.clone()
+            }),
+            first_tx,
+            &cancel
+        ),
+        second.invoke(
+            character(),
+            Arc::new(Tagged {
+                seen: second_seen.clone()
+            }),
+            second_tx,
+            &cancel
+        )
+    );
+    first_result.unwrap();
+    second_result.unwrap();
+    assert_eq!(*first_seen.lock().await, vec!["a"]);
+    assert_eq!(*second_seen.lock().await, vec!["a"]);
+}

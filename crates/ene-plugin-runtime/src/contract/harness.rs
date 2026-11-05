@@ -25,7 +25,7 @@ impl Events {
                 tool_call,
                 options,
             } => {
-                identifier(request_id)?;
+                identifier(request_id.as_str())?;
                 validate_tool_update(tool_call)?;
                 validate_options(options)?;
                 // The host answers through a separate invocation; nothing can
@@ -45,7 +45,7 @@ fn validate_update(update: &SessionUpdate) -> Result<()> {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk) => {
             if let Some(message) = &chunk.message_id {
-                identifier(message)?;
+                identifier(message.0.as_ref())?;
             }
             text(&chunk.content)
         }
@@ -56,7 +56,7 @@ fn validate_update(update: &SessionUpdate) -> Result<()> {
 }
 
 fn validate_tool_call(call: &ToolCall) -> Result<()> {
-    identifier(&call.tool_call_id)?;
+    identifier(call.tool_call_id.0.as_ref())?;
     bounded(&call.title, MAX_TITLE)?;
     if let Some(name) = &call.name {
         bounded(name, MAX_IDENTIFIER)?;
@@ -68,7 +68,7 @@ fn validate_tool_call(call: &ToolCall) -> Result<()> {
 }
 
 fn validate_tool_update(update: &ToolCallUpdate) -> Result<()> {
-    identifier(&update.tool_call_id)?;
+    identifier(update.tool_call_id.0.as_ref())?;
     if let Some(title) = &update.fields.title {
         bounded(title, MAX_TITLE)?;
     }
@@ -101,7 +101,7 @@ fn validate_options(options: &[PermissionOption]) -> Result<()> {
     }
     let mut ids = std::collections::HashSet::new();
     for option in options {
-        identifier(&option.option_id)?;
+        identifier(option.option_id.0.as_ref())?;
         bounded(&option.name, MAX_TITLE)?;
         if !ids.insert(&option.option_id) {
             return Err(Error::Protocol);
@@ -149,8 +149,7 @@ fn raw(value: Option<&serde_json::Value>) -> Result<()> {
     Ok(())
 }
 
-fn identifier(value: &impl std::fmt::Display) -> Result<()> {
-    let value = value.to_string();
+fn identifier(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > MAX_IDENTIFIER || value.chars().any(char::is_control) {
         return Err(Error::Protocol);
     }

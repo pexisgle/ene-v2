@@ -34,7 +34,7 @@ time.workspace = true
 thiserror.workspace = true
 rusqlite_migration = "2"
 axum.workspace = true
-futures-util = { workspace = true, features = ["sink"] }
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 subtle = "2"
@@ -53,6 +53,7 @@ rig-core = { version = "0.46", default-features = false, features = ["test-utils
 tempfile.workspace = true
 wat = "1"
 dotenvy = "0.15"
+keyring-core = "1"
 tokio = { workspace = true, default-features = true, features = ["test-util"] }
 ene-rpc = { workspace = true, features = ["client"] }
 http.workspace = true

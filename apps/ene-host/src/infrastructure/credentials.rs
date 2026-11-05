@@ -11,15 +11,15 @@ use std::{
     },
     time::Duration,
 };
+/// Keyring operations are serialized: the platform stores are blocking and a
+/// second same-key write would otherwise race the first one's cleanup.
 pub struct Store {
-    writes: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Arc<AtomicBool>>>>,
     slots: Arc<tokio::sync::Semaphore>,
 }
 impl Default for Store {
     fn default() -> Self {
         Self {
-            writes: Arc::new(std::sync::Mutex::new(Default::default())),
-            slots: Arc::new(tokio::sync::Semaphore::new(8)),
+            slots: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 }
@@ -32,10 +32,14 @@ impl Credentials for Store {
     }
     fn load(&self, reference: String) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
+            // Loads wait for the single slot instead of being skipped: startup
+            // loads several credentials concurrently and must not lose the
+            // ones that do not win a try_acquire race.
             let slot = self
                 .slots
                 .clone()
-                .try_acquire_owned()
+                .acquire_owned()
+                .await
                 .map_err(|_| Error::unavailable())?;
             tokio::time::timeout(
                 Duration::from_secs(5),
@@ -58,11 +62,6 @@ impl Credentials for Store {
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| Error::unavailable())?;
-            let finished = Arc::new(AtomicBool::new(false));
-            self.writes
-                .lock()
-                .expect("credential writes")
-                .insert(reference.clone(), finished.clone());
             let abandoned = Arc::new(AtomicBool::new(false));
             struct Abandonment(Arc<AtomicBool>, bool);
             impl Drop for Abandonment {
@@ -77,13 +76,6 @@ impl Credentials for Store {
             let target = reference.clone();
             let job = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
-                struct Finished(Arc<AtomicBool>);
-                impl Drop for Finished {
-                    fn drop(&mut self) {
-                        self.0.store(true, Ordering::Release);
-                    }
-                }
-                let _finished = Finished(finished);
                 keyring::Entry::new("ene-v2", &target).and_then(|e| {
                     let r = e.set_password(&value);
                     if cleanup.load(Ordering::SeqCst) {
@@ -97,10 +89,6 @@ impl Credentials for Store {
                 Ok(Ok(Ok(())))
             ) {
                 guard.1 = false;
-                self.writes
-                    .lock()
-                    .expect("credential writes")
-                    .remove(&reference);
                 Ok(())
             } else {
                 abandoned.store(true, Ordering::SeqCst);
@@ -111,17 +99,8 @@ impl Credentials for Store {
     }
     fn forget(&self, reference: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            // A timed out blocking save can still finish later. Never report
-            // NoEntry as successful cleanup while that write is in flight.
-            if self
-                .writes
-                .lock()
-                .expect("credential writes")
-                .get(&reference)
-                .is_some_and(|finished| !finished.load(Ordering::Acquire))
-            {
-                return Err(Error::unavailable());
-            }
+            // A timed out blocking save can still hold the single slot, so a
+            // concurrent forget must not report NoEntry as successful cleanup.
             let slot = self
                 .slots
                 .clone()
@@ -137,15 +116,35 @@ impl Credentials for Store {
             )
             .await;
             match result {
-                Ok(Ok(Ok(()))) | Ok(Ok(Err(keyring::Error::NoEntry))) => {
-                    self.writes
-                        .lock()
-                        .expect("credential writes")
-                        .remove(&reference);
-                    Ok(())
-                }
+                Ok(Ok(Ok(()))) | Ok(Ok(Err(keyring::Error::NoEntry))) => Ok(()),
                 _ => Err(Error::unavailable()),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn save_load_and_forget_use_the_platform_store_in_sequence() {
+        keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap());
+        let store = Store::default();
+        store.save("ref".into(), "secret".into()).await.unwrap();
+        assert_eq!(store.load("ref".into()).await.unwrap(), "secret");
+        store.forget("ref".into()).await.unwrap();
+        assert!(store.load("ref".into()).await.is_err());
+
+        for index in 0..8 {
+            store
+                .save(format!("ref-{index}"), format!("secret-{index}"))
+                .await
+                .unwrap();
+        }
+        let loads = (0..8).map(|index| store.load(format!("ref-{index}")));
+        let loaded = futures_util::future::join_all(loads).await;
+        assert!(loaded.iter().all(|item| item.is_ok()));
+        keyring_core::unset_default_store();
     }
 }

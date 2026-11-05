@@ -7,7 +7,7 @@ pub use supervisor::Supervisor;
 
 use crate::{Error, Package, Result, contract::Events, limits::*};
 use ene_plugin::*;
-use invocation::{ActiveGuard, Cancellation, Invocation, SLOTS, ene_emit, ene_service};
+use invocation::{Cancellation, Invocation, SLOTS, ene_emit, ene_service};
 use serde_json::Value;
 use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
@@ -162,10 +162,13 @@ impl Instance {
                 if token.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                let _active = ActiveGuard::set(invocation);
-                let raw = plugin
-                    .call::<_, &[u8]>(function, input)
-                    .map_err(Error::Execution)?;
+                let raw = match invocation {
+                    Some(invocation) => {
+                        plugin.call_with_host_context::<_, &[u8], _>(function, input, invocation)
+                    }
+                    None => plugin.call::<_, &[u8]>(function, input),
+                }
+                .map_err(Error::Execution)?;
                 if raw.len() > MAX_CHUNK {
                     return Err(Error::Protocol);
                 }

@@ -4,7 +4,6 @@ use ene_plugin::*;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::{
-    cell::RefCell,
     future::Future,
     sync::{
         Arc, LazyLock, Mutex,
@@ -33,39 +32,22 @@ impl Services for DenyServices {
 // A cancelled compilation still holds its slot until the native compiler returns.
 pub(super) static SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_INSTANCES)));
-thread_local! {
-    static ACTIVE: RefCell<Option<Arc<Invocation>>> = const { RefCell::new(None) };
-}
-fn active() -> Result<Arc<Invocation>> {
-    ACTIVE
-        .with(|slot| slot.borrow().clone())
-        .ok_or(Error::Denied)
-}
-pub(super) struct ActiveGuard(Option<Arc<Invocation>>);
-impl ActiveGuard {
-    pub(super) fn set(value: Option<Arc<Invocation>>) -> Self {
-        Self(ACTIVE.with(|slot| slot.replace(value)))
-    }
-}
-impl Drop for ActiveGuard {
-    fn drop(&mut self) {
-        ACTIVE.with(|slot| *slot.borrow_mut() = self.0.take());
-    }
-}
 pub(super) fn ene_service(
     plugin: &mut extism::CurrentPlugin,
     input: &[extism::Val],
     output: &mut [extism::Val],
     _: extism::UserData<()>,
 ) -> std::result::Result<(), extism::Error> {
-    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-    if raw.len() > MAX_MESSAGE_BYTES {
-        return Err(Error::Protocol.into());
-    }
-    let invocation = active()?;
+    let (request, raw_len) = {
+        let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+        if raw.len() > MAX_MESSAGE_BYTES {
+            return Err(Error::Protocol.into());
+        }
+        (serde_json::from_slice::<ServiceRequest>(raw)?, raw.len())
+    };
+    let invocation = plugin.host_context::<Arc<Invocation>>()?.clone();
     // Charge the bytes actually received and sent, not their re-encoded form.
-    invocation.charge(&invocation.bytes, raw.len(), MAX_SERVICE_BYTES)?;
-    let request = serde_json::from_slice(raw)?;
+    invocation.charge(&invocation.bytes, raw_len, MAX_SERVICE_BYTES)?;
     let result = invocation.service(request)?;
     let bytes = serde_json::to_vec(&result)?;
     if bytes.len() > MAX_CHUNK {
@@ -80,13 +62,16 @@ pub(super) fn ene_emit(
     _: &mut [extism::Val],
     _: extism::UserData<()>,
 ) -> std::result::Result<(), extism::Error> {
-    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
-    if raw.len() > MAX_CHUNK {
-        return Err(Error::Protocol.into());
-    }
-    let invocation = active()?;
-    invocation.charge(&invocation.stream_bytes, raw.len(), MAX_STREAM_BYTES)?;
-    invocation.emit(serde_json::from_slice(raw)?)?;
+    let (event, raw_len) = {
+        let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+        if raw.len() > MAX_CHUNK {
+            return Err(Error::Protocol.into());
+        }
+        (serde_json::from_slice::<Event>(raw)?, raw.len())
+    };
+    let invocation = plugin.host_context::<Arc<Invocation>>()?.clone();
+    invocation.charge(&invocation.stream_bytes, raw_len, MAX_STREAM_BYTES)?;
+    invocation.emit(event)?;
     Ok(())
 }
 pub(super) struct Invocation {

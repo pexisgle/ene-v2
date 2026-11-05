@@ -2971,6 +2971,7 @@ dependencies = [
  "futures-util",
  "http",
  "keyring",
+ "keyring-core",
  "process-wrap",
  "reqwest",
  "rig-core",
