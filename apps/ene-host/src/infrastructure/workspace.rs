@@ -1,13 +1,19 @@
 //! Workspace-scoped text file access for host-mediated tools.
 //!
-//! Paths are relative to a canonical workspace root. Absolute paths, `..`,
-//! `.`, symlinks and non-regular files are rejected; writes are atomic and
-//! never create directories implicitly.
+//! Every access is resolved through a capability on the canonical workspace
+//! root: one component at a time, with symlinks refused on every step, so a
+//! replaced path element cannot redirect a checked path to another file.
+//! Writes are atomic and never create directories implicitly.
 use crate::domain::{Error, ErrorKind};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 use std::{
-    fs::OpenOptions,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 const MAX_PATH: usize = 4096;
@@ -15,17 +21,10 @@ const MAX_READ_BYTES: usize = 256 * 1024;
 const MAX_WRITE_BYTES: usize = 256 * 1024;
 const MAX_LINES: u32 = 10_000;
 
-fn no_symlinks(path: &std::path::Path) -> bool {
-    path.ancestors().all(|part| {
-        std::fs::symlink_metadata(part)
-            .map(|metadata| !metadata.file_type().is_symlink())
-            .unwrap_or(false)
-    })
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct Workspace {
     root: PathBuf,
+    dir: Arc<Dir>,
 }
 
 pub(crate) struct ReadText {
@@ -46,26 +45,30 @@ impl Workspace {
         if !std::fs::metadata(&root).is_ok_and(|metadata| metadata.is_dir()) {
             return Err(Error::new(ErrorKind::Unavailable));
         }
-        Ok(Self { root })
+        let dir = Dir::open_ambient_dir(&root, ambient_authority()).map_err(io_failure)?;
+        Ok(Self {
+            root,
+            dir: Arc::new(dir),
+        })
     }
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Canonical directory inside the workspace; symlinks and escapes are rejected.
+    /// Directory inside the workspace whose every component is a real
+    /// directory; symlinks and escapes are rejected. The returned path is the
+    /// verified one, for callers that need a process-level path.
     pub(crate) fn directory(&self, path: &str) -> Result<PathBuf, Error> {
-        let path = Path::new(path);
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.root.join(path)
-        };
-        let canonical = std::fs::canonicalize(&candidate).map_err(io_failure)?;
-        if !no_symlinks(&candidate) || !canonical.starts_with(&self.root) || !canonical.is_dir() {
-            return Err(denied());
+        let relative = self.beneath(path)?;
+        let mut dir = self.dir.try_clone().map_err(io_failure)?;
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(denied());
+            };
+            dir = dir.open_dir_nofollow(name).map_err(|_| denied())?;
         }
-        Ok(canonical)
+        Ok(self.root.join(relative))
     }
 
     pub(crate) fn read(
@@ -78,11 +81,27 @@ impl Workspace {
         if line == Some(0) || limit == Some(0) || limit.is_some_and(|limit| limit > MAX_LINES) {
             return Err(Error::invalid());
         }
-        let file = self.existing(&relative)?;
-        let content = std::fs::read_to_string(&file).map_err(io_failure)?;
-        if content.len() > MAX_READ_BYTES {
+        let (parent, name) = self.parent(&relative)?;
+        let metadata = parent
+            .symlink_metadata(name)
+            .map_err(|_| Error::new(ErrorKind::NotFound))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(denied());
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = parent.open_with(name, &options).map_err(io_failure)?;
+        // Read one byte past the limit so an oversized file is refused without
+        // trusting its current size.
+        let mut bytes = Vec::new();
+        file.take((MAX_READ_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(io_failure)?;
+        if bytes.len() > MAX_READ_BYTES {
             return Err(Error::new(ErrorKind::ResourceLimit));
         }
+        let content =
+            String::from_utf8(bytes).map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         let start = line.unwrap_or(1).saturating_sub(1) as usize;
         if start >= lines.len() {
@@ -106,48 +125,65 @@ impl Workspace {
             return Err(Error::new(ErrorKind::ResourceLimit));
         }
         let relative = relative(path)?;
-        let target = self.root.join(&relative);
-        let parent = target.parent().ok_or_else(Error::invalid)?;
-        let canonical = std::fs::canonicalize(parent).map_err(io_failure)?;
-        if !no_symlinks(parent) || !canonical.starts_with(&self.root) {
+        let (parent, name) = self.parent(&relative)?;
+        if let Ok(metadata) = parent.symlink_metadata(name)
+            && (metadata.file_type().is_symlink() || !metadata.is_file())
+        {
             return Err(denied());
         }
-        if target.exists() {
-            let metadata = std::fs::symlink_metadata(&target).map_err(io_failure)?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(denied());
-            }
-        }
-        let tmp = parent.join(format!(".ene-{}.tmp", uuid::Uuid::new_v4()));
+        // The temporary file and the rename share one directory handle, so the
+        // commit lands in the checked directory even if the path is replaced.
+        let temporary = format!(".ene-{}.tmp", uuid::Uuid::new_v4());
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
         let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
-            }
-            let mut file = options.open(&tmp).map_err(io_failure)?;
+            let mut file = parent.open_with(&temporary, &options).map_err(io_failure)?;
             file.write_all(content.as_bytes()).map_err(io_failure)?;
             file.sync_all().map_err(io_failure)?;
-            std::fs::rename(&tmp, &target).map_err(io_failure)
+            parent.rename(&temporary, &parent, name).map_err(io_failure)
         })();
-        let _ = std::fs::remove_file(&tmp);
+        let _ = parent.remove_file_or_symlink(&temporary);
         result
     }
 
-    fn existing(&self, relative: &Path) -> Result<PathBuf, Error> {
-        let lexical = self.root.join(relative);
-        let canonical =
-            std::fs::canonicalize(&lexical).map_err(|_| Error::new(ErrorKind::NotFound))?;
-        if !no_symlinks(&lexical) || !canonical.starts_with(&self.root) {
+    /// The workspace-relative form of a path that is either relative or
+    /// absolute beneath the root.
+    fn beneath(&self, path: &str) -> Result<PathBuf, Error> {
+        if path.len() > MAX_PATH || path.chars().any(char::is_control) {
             return Err(denied());
         }
-        let metadata = std::fs::symlink_metadata(&canonical).map_err(io_failure)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        let path = Path::new(path);
+        let relative = match path.strip_prefix(&self.root) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) if path.is_absolute() => return Err(denied()),
+            Err(_) => path.to_path_buf(),
+        };
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
             return Err(denied());
         }
-        Ok(canonical)
+        Ok(relative)
+    }
+
+    /// The verified parent directory and the final file name, so the open that
+    /// follows uses the object that was checked.
+    fn parent<'a>(&self, relative: &'a Path) -> Result<(Dir, &'a std::ffi::OsStr), Error> {
+        let name = relative.file_name().ok_or_else(denied)?;
+        let mut dir = self.dir.try_clone().map_err(io_failure)?;
+        for component in relative.parent().unwrap_or(Path::new("")).components() {
+            let Component::Normal(name) = component else {
+                return Err(denied());
+            };
+            dir = dir
+                .open_dir_nofollow(name)
+                .map_err(|error| match error.kind() {
+                    std::io::ErrorKind::NotFound => Error::new(ErrorKind::NotFound),
+                    _ => denied(),
+                })?;
+        }
+        Ok((dir, name))
     }
 }
 
@@ -217,6 +253,12 @@ mod tests {
                 .content
                 .is_empty()
         );
+        // A rewrite replaces the file through the same directory handle.
+        workspace.write("notes/a.txt", "four").unwrap();
+        assert_eq!(
+            workspace.read("notes/a.txt", None, None).unwrap().content,
+            "four"
+        );
     }
 
     #[cfg(windows)]
@@ -227,6 +269,7 @@ mod tests {
         std::os::windows::fs::symlink_file(temp.path().join("real"), temp.path().join("link"))
             .unwrap();
         assert!(workspace.read("link", None, None).is_err());
+        assert!(workspace.write("link", "x").is_err());
         assert!(
             workspace
                 .directory(temp.path().join("link").to_str().unwrap())
@@ -239,6 +282,11 @@ mod tests {
         let (temp, workspace) = workspace();
         let missing = temp.path().join("missing-component").join("child");
         assert!(workspace.directory(missing.to_str().unwrap()).is_err());
+        assert!(
+            workspace
+                .read("missing-component/child", None, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -256,7 +304,9 @@ mod tests {
             std::os::unix::fs::symlink(temp.path().join("dir"), temp.path().join("dirlink"))
                 .unwrap();
             assert!(workspace.read("link", None, None).is_err());
+            assert!(workspace.write("link", "x").is_err());
             assert!(workspace.read("dirlink/real", None, None).is_err());
+            assert!(workspace.write("dirlink/new", "x").is_err());
         }
         assert!(workspace.write("dir", "x").is_err());
         assert!(workspace.write("missing/target", "x").is_err());
