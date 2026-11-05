@@ -19,13 +19,6 @@ pub(crate) fn router(app: App) -> Router {
         .fallback(|| async {
             ApiError::new(StatusCode::NOT_FOUND, "not_found", "未対応のAPIです")
         })
-        .method_not_allowed_fallback(|| async {
-            ApiError::new(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "method_not_allowed",
-                "未対応のHTTPメソッドです",
-            )
-        })
         // `layer` also protects unknown paths; `route_layer` would bypass them.
         .layer(middleware::from_fn_with_state(
             app.clone(),
