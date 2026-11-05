@@ -336,9 +336,11 @@ mod tests {
     /// update so the synthetic GPU tests are deterministic.
     fn gpu_app(clear: ClearColor) -> App {
         use bevy::render::RenderPlugin;
-        let plugins = DefaultPlugins
-            .build()
-            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+        let mut plugins = DefaultPlugins.build();
+        if plugins.contains::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>() {
+            plugins =
+                plugins.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+        }
         #[cfg(windows)]
         let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
         let mut app = App::new();
