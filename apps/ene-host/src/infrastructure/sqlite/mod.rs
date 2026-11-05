@@ -48,6 +48,8 @@ pub enum Error {
     InvalidRequest,
     #[error("database schema {0} is newer than this host")]
     FutureSchema(usize),
+    #[error("database schema predates the consolidated baseline; delete the development database")]
+    IncompatibleSchema,
 }
 type Result<T> = std::result::Result<T, Error>;
 

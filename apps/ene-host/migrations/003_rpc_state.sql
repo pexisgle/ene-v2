@@ -1,1 +1,0 @@
-CREATE TABLE rpc_state (key TEXT PRIMARY KEY, body BLOB NOT NULL);

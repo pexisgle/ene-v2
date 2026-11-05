@@ -3357,7 +3357,7 @@ async fn a_stale_mind_publish_cannot_overwrite_a_newer_model_prompt() {
         .await
         .unwrap();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while captured.requests().is_empty() && tokio::time::Instant::now() < deadline {
+    while captured.requests().len() < 2 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     let requests = captured.requests();

@@ -1,37 +1,21 @@
 use super::*;
-mod generated;
+use tokio_rusqlite::rusqlite::OptionalExtension;
+
+/// Marker that distinguishes this consolidated baseline from the historical
+/// migration chain, whose first version was also 1.
+const BASELINE: &str = "2026-11-consolidated";
+
 fn migrations() -> rusqlite_migration::Migrations<'static> {
     use rusqlite_migration::{HookError, M, Migrations};
-    Migrations::new(vec![
-        M::up_with_hook(include_str!("../../../migrations/001_initial.sql"), |tx| {
+    Migrations::new(vec![M::up_with_hook(
+        include_str!("../../../migrations/001_initial.sql"),
+        |tx| {
             seed(tx).map_err(|error| match error {
                 Error::Sql(error) => HookError::RusqliteError(error),
                 error => HookError::Hook(error.to_string()),
             })
-        }),
-        M::up(include_str!("../../../migrations/002_companions.sql")),
-        M::up(include_str!("../../../migrations/003_rpc_state.sql")),
-        M::up(include_str!("../../../migrations/004_plugins.sql")),
-        M::up_with_hook(
-            include_str!("../../../migrations/005_generated_messages.sql"),
-            |tx| {
-                generated::migrate(tx).map_err(|error| match error {
-                    Error::Sql(error) => HookError::RusqliteError(error),
-                    error => HookError::Hook(error.to_string()),
-                })
-            },
-        ),
-        M::up(include_str!("../../../migrations/006_mind.sql")),
-        M::up(include_str!("../../../migrations/007_memory_index.sql")),
-        M::up(include_str!("../../../migrations/008_memory_revision.sql")),
-        M::up(include_str!(
-            "../../../migrations/009_consolidation_cursor_offset.sql"
-        )),
-        M::up(include_str!(
-            "../../../migrations/010_consolidation_skipped.sql"
-        )),
-        M::up(include_str!("../../../migrations/011_index_retry.sql")),
-    ])
+        },
+    )])
 }
 fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
     let companion = Companion {
@@ -48,11 +32,10 @@ fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
         ..Default::default()
     };
     for (key, value) in [
-        ("generated_messages_seed", "1".into()),
+        ("schema_baseline", BASELINE.into()),
         ("host_id", Uuid::new_v4().to_string()),
         ("environment_id", Uuid::new_v4().to_string()),
         ("principal", Uuid::new_v4().to_string()),
-        ("companion", serde_json::to_string(&companion)?),
         (
             "settings",
             serde_json::to_string(&Settings {
@@ -64,12 +47,33 @@ fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
     ] {
         tx.execute("INSERT INTO metadata VALUES (?1,?2)", params![key, value])?;
     }
+    tx.execute(
+        "INSERT INTO companions VALUES (?1,?2)",
+        params![companion.id, serde_json::to_string(&companion)?],
+    )?;
     Ok(())
 }
 pub(super) fn initialize(db: &mut Connection) -> Result<()> {
     let migrations = migrations();
-    if let rusqlite_migration::SchemaVersion::Outside(version) = migrations.current_version(db)? {
-        return Err(Error::FutureSchema(version.get()));
+    match migrations.current_version(db)? {
+        rusqlite_migration::SchemaVersion::Outside(version) => {
+            return Err(Error::FutureSchema(version.get()));
+        }
+        // The historical chain also reported version 1 after its first step.
+        // Only the consolidated baseline carries the marker.
+        rusqlite_migration::SchemaVersion::Inside(_) => {
+            let baseline: Option<String> = db
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_baseline'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if baseline.as_deref() != Some(BASELINE) {
+                return Err(Error::IncompatibleSchema);
+            }
+        }
+        rusqlite_migration::SchemaVersion::NoneSet => {}
     }
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
     migrations.to_latest(db)?;
@@ -112,101 +116,48 @@ pub(super) fn initialize(db: &mut Connection) -> Result<()> {
 }
 
 #[cfg(test)]
-mod companion_migration_tests {
+mod tests {
     use super::*;
+
+    fn count(db: &Connection, sql: &str) -> i64 {
+        db.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
     #[test]
-    fn migration_keeps_existing_companion_identity_and_storage_updates_are_id_scoped() {
+    fn a_fresh_database_gets_the_baseline_without_the_legacy_messages_table() {
         let mut db = Connection::open_in_memory().unwrap();
-        migrations().to_version(&mut db, 1).unwrap();
-        let mut original: Companion =
-            serde_json::from_str(&meta(&db, "companion").unwrap()).unwrap();
-        migrations().to_version(&mut db, 4).unwrap();
-        db.execute(
-            "DELETE FROM metadata WHERE key='generated_messages_seed'",
-            [],
-        )
-        .unwrap();
-        original.body = ene_rpc::JsonDocument {
-            json: json!({"model":"saved-body"}).to_string(),
-            ..Default::default()
-        }
-        .into();
-        let mut old = serde_json::to_value(&original).unwrap();
-        for field in ["body", "availability"] {
-            old[field] = serde_json::from_str(old[field]["json"].as_str().unwrap()).unwrap();
-        }
-        db.execute(
-            "UPDATE companions SET body=?1 WHERE id=?2",
-            params![old.to_string(), original.id],
-        )
-        .unwrap();
-        let options = json!({"region":"saved", "temperature":0.5});
-        db.execute("UPDATE metadata SET value=?1 WHERE key='settings'", [json!({"revision":7,"connections":[{"id":"saved-connection","kind":"llm","adapter":"openai","endpoint":"https://api.openai.com/v1","options":options,"credential_state":"registered","capabilities":{"streaming_text":true},"last_check":null}]}).to_string()]).unwrap();
-        db.execute("INSERT INTO messages VALUES ('saved-message',?1,1,'failed',?2)", params![original.id,json!({"id":"saved-message","companion_id":original.id,"role":"companion","status":"failed","text":"saved text","sequence":1,"failure":{"code":"saved-failure","message":"saved error","details":{"reason":"saved-reason"}}}).to_string()]).unwrap();
-        db.execute("INSERT INTO plugin_records VALUES ('bindings','saved-binding',?1)", [json!({"id":"saved-binding","plugin_id":"reference","entrypoint":"behavior","revision":"saved-revision","companion_id":original.id,"configuration":{"mode":"saved"}}).to_string()]).unwrap();
-        db.execute("INSERT INTO receipts VALUES ('saved-principal','saved-key','POST','saved-target','{}',503,?1)", [json!({"request_id":"saved-request","error":{"code":"saved-failure","message":"saved error","details":{"reason":"saved-reason"}}}).to_string()]).unwrap();
-        migrations().to_latest(&mut db).unwrap();
-        let mut config = conversation::load(&db).unwrap();
-        assert_eq!(config.companions[&original.id], original);
-        assert_eq!(config.settings.revision, 7);
+        initialize(&mut db).unwrap();
+        assert_eq!(meta(&db, "schema_baseline").unwrap(), BASELINE);
+        assert_eq!(count(&db, "SELECT count(*) FROM companions"), 1);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&config.settings.connections[0].options.json)
-                .unwrap(),
-            options
+            count(
+                &db,
+                "SELECT count(*) FROM sqlite_master WHERE name='messages'"
+            ),
+            0
         );
-        // The legacy messages table is kept by the migrations and is not
-        // rewritten; new conversations are saved by Rig.
-        let saved: ene_rpc::Message = serde_json::from_str(
-            &db.query_row(
-                "SELECT body FROM messages WHERE companion_id=?1",
-                [&original.id],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap(),
+        // Reopening an initialized database is a no-op, not a reseed.
+        initialize(&mut db).unwrap();
+        assert_eq!(count(&db, "SELECT count(*) FROM companions"), 1);
+    }
+
+    #[test]
+    fn a_database_from_the_historical_chain_is_rejected_instead_of_used() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version=1;",
         )
         .unwrap();
-        assert_eq!(saved.text, "saved text");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&saved.failure.details.json).unwrap(),
-            json!({"reason":"saved-reason"})
-        );
-        let binding: ene_rpc::PluginBinding = serde_json::from_str(
-            &db.query_row(
-                "SELECT value FROM plugin_records WHERE namespace='bindings'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&binding.configuration.json).unwrap(),
-            json!({"mode":"saved"})
-        );
-        let receipt: ene_rpc::ApiFailure = serde_json::from_str(
-            &db.query_row(
-                "SELECT response FROM receipts WHERE key='saved-key'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(receipt.request_id, "saved-request");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&receipt.error.details.json).unwrap(),
-            json!({"reason":"saved-reason"})
-        );
-        let mut other = original.clone();
-        other.id = "other".into();
-        other.mind = "separate mind".into();
-        config.companions.insert(other.id.clone(), other.clone());
-        conversation::write_configuration(&db, &config).unwrap();
-        config.companions.get_mut(&original.id).unwrap().mind = "updated mind".into();
-        conversation::write_configuration(&db, &config).unwrap();
-        let loaded = conversation::load(&db).unwrap();
-        assert_eq!(loaded.companions["other"], other);
-        assert_eq!(loaded.companions[&original.id].mind, "updated mind");
-        assert!(meta(&db, "companion").is_err());
+        assert!(matches!(
+            initialize(&mut db),
+            Err(Error::IncompatibleSchema)
+        ));
+    }
+
+    #[test]
+    fn a_newer_schema_is_rejected() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.pragma_update(None, "user_version", 2).unwrap();
+        assert!(matches!(initialize(&mut db), Err(Error::FutureSchema(2))));
     }
 }
