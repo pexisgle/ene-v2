@@ -24,7 +24,14 @@ impl Supervisor {
         Ok(())
     }
     pub async fn shutdown(&self) {
-        self.tracker.close();
+        {
+            // `TaskTracker::close` only releases `wait`; it does not refuse a
+            // later `spawn`. Closing under the lock `spawn` takes keeps a task
+            // from slipping in after the last `wait` check.
+            let gate = self.tasks.lock();
+            self.tracker.close();
+            drop(gate);
+        }
         if tokio::time::timeout(Duration::from_secs(4), self.tracker.wait())
             .await
             .is_err()
