@@ -18,7 +18,7 @@ impl Devices {
         }
         let this = self.clone();
         self.owned(async move {
-            let state = this.lock().await?;
+            let mut state = this.lock().await?;
             let existing = this
                 .0
                 .store
@@ -74,13 +74,11 @@ impl Devices {
                 subscription_id,
                 ..Default::default()
             };
-            if !this
-                .0
-                .store
-                .device_operation_insert(record)
-                .await
-                .map_err(|_| unavailable())?
-            {
+            let inserted = match this.0.store.device_operation_insert(record).await {
+                Ok(inserted) => inserted,
+                Err(_) => return Err(fail_closed(&mut state)),
+            };
+            if !inserted {
                 return Err(conflict());
             }
             // The record is durable before the device can see the operation.
@@ -131,7 +129,7 @@ impl Devices {
         }
         let this = self.clone();
         self.owned(async move {
-            let state = this.lock().await?;
+            let mut state = this.lock().await?;
             let previous = this
                 .0
                 .store
@@ -165,13 +163,11 @@ impl Devices {
                 state: response.clone().into(),
                 ..previous
             };
-            if !this
-                .0
-                .store
-                .device_operation_complete(record)
-                .await
-                .map_err(|_| unavailable())?
-            {
+            let completed = match this.0.store.device_operation_complete(record).await {
+                Ok(completed) => completed,
+                Err(_) => return Err(fail_closed(&mut state)),
+            };
+            if !completed {
                 // A revoke or another completion reached the row first.
                 return Err(conflict());
             }
@@ -213,11 +209,9 @@ impl Devices {
                 .activation_revision
                 .checked_add(1)
                 .ok_or_else(unavailable)?;
-            this.0
-                .store
-                .device_activate(revision)
-                .await
-                .map_err(|_| unavailable())?;
+            if this.0.store.device_activate(revision).await.is_err() {
+                return Err(fail_closed(&mut state));
+            }
             state.activation_revision = revision;
             let result = w::Activation {
                 companion_id: request.companion_id,

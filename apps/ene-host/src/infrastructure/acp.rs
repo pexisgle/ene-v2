@@ -28,7 +28,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 use tokio::{
@@ -122,6 +122,9 @@ struct State {
     /// Increments for every prompt and answer, so an approval never outlives
     /// the turn it was given in.
     turn: u64,
+    /// Updates this turn has delivered or is holding, whether or not the host
+    /// is reading them right now.
+    updates: usize,
     waiting: Option<Waiting>,
     permission: Option<Permission>,
     approved: Option<u64>,
@@ -132,6 +135,7 @@ impl State {
     fn new() -> Self {
         Self {
             turn: 0,
+            updates: 0,
             waiting: None,
             permission: None,
             approved: None,
@@ -148,6 +152,10 @@ pub(crate) struct AcpSession {
     /// The one session this process serves; its routing lives until it drops.
     session: Option<ActiveSession<'static, Agent>>,
     session_id: schema::SessionId,
+    /// Updates the agent sent before the host started reading them again
+    /// (while it answers a permission request). Bounded and counted before
+    /// the SDK's unbounded session queue sees them.
+    backlog: mpsc::Receiver<SessionUpdate>,
     driver: JoinHandle<()>,
     shared: Arc<Mutex<State>>,
     stderr: Arc<Mutex<Vec<u8>>>,
@@ -217,6 +225,41 @@ impl AcpSession {
             >,
         >();
         let cwd = config.cwd;
+        // Count and bound updates here, before the SDK's session route queues
+        // them. Its queue is unbounded and keeps growing while the host is
+        // busy answering a permission request.
+        let (backlog_tx, backlog) = mpsc::channel::<SessionUpdate>(MAX_UPDATES);
+        let backlog_tx = Arc::new(StdMutex::new(Some(backlog_tx)));
+        let recorded = {
+            let shared = shared.clone();
+            let backlog_tx = backlog_tx.clone();
+            move |notification: schema::SessionNotification, _: ConnectionTo<Agent>| {
+                let shared = shared.clone();
+                let backlog_tx = backlog_tx.clone();
+                async move {
+                    let Some(update) = accepted(notification) else {
+                        return Ok(());
+                    };
+                    let mut state = shared.lock().await;
+                    if state.failed.is_some() {
+                        return Ok(());
+                    }
+                    state.updates = state.updates.saturating_add(1);
+                    let mut backlog = backlog_tx
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let full = match backlog.as_ref() {
+                        Some(sender) => sender.try_send(update).is_err(),
+                        None => true,
+                    };
+                    if state.updates > MAX_UPDATES || full {
+                        state.failed = Some("acp_update_limit");
+                        *backlog = None;
+                    }
+                    Ok(())
+                }
+            }
+        };
 
         let driver_shared = shared.clone();
         let driver_stderr = captured.clone();
@@ -226,6 +269,10 @@ impl AcpSession {
             let result = Client
                 .v1()
                 .name("ene")
+                .on_receive_notification(
+                    recorded,
+                    agent_client_protocol::on_receive_notification!(),
+                )
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
                     let initialized = timeout(
                         REQUEST_TIMEOUT,
@@ -270,6 +317,7 @@ impl AcpSession {
                 connection,
                 session: Some(session),
                 session_id,
+                backlog,
                 driver,
                 shared,
                 stderr: captured,
@@ -375,6 +423,7 @@ impl AcpSession {
             return Err(conflict());
         }
         state.turn += 1;
+        state.updates = 0;
         state.approved = None;
         state.waiting = None;
         Ok(())
@@ -385,39 +434,70 @@ impl AcpSession {
         session: &mut ActiveSession<'static, Agent>,
         updates: &mpsc::Sender<SessionUpdate>,
     ) -> Result<Turn, Error> {
-        match timeout(
+        let result = timeout(
             TURN_TIMEOUT,
-            read_until_end(&self.context, &self.connection, session, updates),
+            read_until_end(
+                &self.context,
+                &self.connection,
+                session,
+                &mut self.backlog,
+                updates,
+            ),
         )
-        .await
-        {
-            Ok(Ok(turn)) => Ok(turn),
-            Ok(Err(reason)) => {
-                self.shared.lock().await.failed = Some("acp_agent_failed");
-                let captured = self.stderr.lock().await;
-                eprintln!(
-                    "ene-host acp: {reason}: {}",
-                    String::from_utf8_lossy(&captured)
-                );
-                Err(Error {
-                    kind: ErrorKind::ExternalFailure,
-                    reason: Some("acp_agent_failed"),
-                })
+        .await;
+        let reason = match result {
+            Ok(Ok(turn)) => {
+                // A flood can race the prompt response. The handler marks the
+                // session failed even when the response already won.
+                match self.shared.lock().await.failed {
+                    Some(reason) => reason.to_owned(),
+                    None => return Ok(turn),
+                }
             }
+            Ok(Err(reason)) => reason,
             Err(_) => {
                 // The agent is still working on a turn nobody waits for.
                 let _ = self
                     .connection
                     .send_notification(schema::CancelNotification::new(self.session_id.clone()));
                 self.shared.lock().await.waiting = None;
-                Err(Error::new(ErrorKind::Unavailable))
+                return Err(Error::new(ErrorKind::Unavailable));
             }
-        }
+        };
+        self.shared
+            .lock()
+            .await
+            .failed
+            .get_or_insert("acp_agent_failed");
+        let captured = self.stderr.lock().await;
+        eprintln!(
+            "ene-host acp: {reason}: {}",
+            String::from_utf8_lossy(&captured)
+        );
+        Err(Error {
+            kind: ErrorKind::ExternalFailure,
+            reason: Some("acp_agent_failed"),
+        })
     }
 }
 
 fn conflict() -> Error {
     Error::new(ErrorKind::StateConflict)
+}
+
+/// Delivers updates the capture handler already took out of the SDK queue.
+/// The SDK dispatches in order, so a prompt response or permission request
+/// implies every update sent before it is already queued here.
+fn forward_queued(
+    backlog: &mut mpsc::Receiver<SessionUpdate>,
+    updates: &mpsc::Sender<SessionUpdate>,
+) -> std::result::Result<(), String> {
+    while let Ok(update) = backlog.try_recv() {
+        if updates.try_send(update).is_err() {
+            return Err("update backlog".into());
+        }
+    }
+    Ok(())
 }
 
 /// One turn's messages: the updates the journal records, the request answers
@@ -426,33 +506,34 @@ async fn read_until_end(
     context: &ClientContext,
     connection: &ConnectionTo<Agent>,
     session: &mut ActiveSession<'static, Agent>,
+    backlog: &mut mpsc::Receiver<SessionUpdate>,
     updates: &mpsc::Sender<SessionUpdate>,
 ) -> std::result::Result<Turn, String> {
     loop {
-        let dispatch = match session
-            .read_update()
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            SessionMessage::PromptResponse(result) => {
-                let response = result.map_err(|error| error.to_string())?;
-                return Ok(Turn {
-                    state: TurnState::Stopped(response.stop_reason),
-                });
-            }
-            SessionMessage::Message(dispatch) => dispatch,
-            _ => continue,
-        };
-        let recorded = {
-            let updates = updates.clone();
-            async move |notification: schema::SessionNotification| {
-                if let Some(update) = accepted(notification)
-                    && updates.try_send(update).is_err()
-                {
-                    return Err(AcpError::new(ErrorCode::new(-32000), "update backlog"));
+        let dispatch = tokio::select! {
+            biased;
+            message = session.read_update() => match message.map_err(|error| error.to_string())? {
+                SessionMessage::PromptResponse(result) => {
+                    forward_queued(backlog, updates)?;
+                    let response = result.map_err(|error| error.to_string())?;
+                    return Ok(Turn {
+                        state: TurnState::Stopped(response.stop_reason),
+                    });
                 }
-                Ok(())
-            }
+                SessionMessage::Message(dispatch) => dispatch,
+                _ => continue,
+            },
+            // Updates were taken out of the SDK's queue before it could grow.
+            update = backlog.recv() => match update {
+                Some(update) => {
+                    if updates.try_send(update).is_err() {
+                        return Err("update backlog".into());
+                    }
+                    continue;
+                }
+                // The capture handler closed the backlog after a flood.
+                None => return Err("update limit".into()),
+            },
         };
         let permission = {
             let context = context.clone();
@@ -543,8 +624,6 @@ async fn read_until_end(
             }
         };
         MatchDispatch::new(dispatch.into_raw())
-            .if_notification(recorded)
-            .await
             .if_request(permission)
             .await
             .if_request(read_file)
@@ -564,6 +643,7 @@ async fn read_until_end(
             .otherwise_ignore()
             .map_err(|error| error.to_string())?;
         if let Some(waiting) = context.shared.lock().await.waiting.take() {
+            forward_queued(backlog, updates)?;
             return Ok(Turn {
                 state: TurnState::Waiting(Box::new(waiting)),
             });
@@ -1702,18 +1782,79 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn too_many_updates_fail_the_turn_even_when_the_agent_ends_it() {
+    async fn too_many_updates_fail_the_turn_even_when_the_consumer_keeps_up() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = start_agent(temp.path(), &flood_agent_script(), None).await;
-        // The receiver is alive but never drained: the bound stops the agent,
-        // not a cancelled reader.
-        let (updates, _received) = mpsc::channel(MAX_UPDATES);
+        // Drain as fast as the turn produces: the per-turn count, not the
+        // intermediate channel, must end the turn.
+        let (updates, mut received) = mpsc::channel(MAX_UPDATES);
+        let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
         let error = session
             .prompt(&[text_block("go")], updates)
             .await
             .unwrap_err();
+        drain.await.unwrap();
         assert_eq!(error.kind, ErrorKind::ExternalFailure);
-        assert_eq!(session.shared.lock().await.failed, Some("acp_agent_failed"));
+        assert_eq!(session.shared.lock().await.failed, Some("acp_update_limit"));
+        session.kill().await;
+    }
+
+    #[cfg(unix)]
+    fn waiting_flood_agent_script() -> String {
+        r#"
+import json, sys
+
+session = "s1"
+prompt_id = None
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": session}})
+    elif method == "session/prompt":
+        prompt_id = mid
+        send({"jsonrpc": "2.0", "id": 900, "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "run"}, "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+        for index in range(4097):
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x"}}}})
+    elif mid == 900:
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#
+        .into()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_flood_while_waiting_for_permission_ends_the_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = start_agent(temp.path(), &waiting_flood_agent_script(), None).await;
+        let (updates, mut received) = mpsc::channel(MAX_UPDATES);
+        let collect = tokio::spawn(async move { while received.recv().await.is_some() {} });
+        let turn = session.prompt(&[text_block("go")], updates).await.unwrap();
+        collect.await.unwrap();
+        let TurnState::Waiting(waiting) = turn.state else {
+            panic!("expected permission");
+        };
+        let allowed =
+            RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new("allow"));
+        let (updates, mut received) = mpsc::channel(MAX_UPDATES);
+        let collect = tokio::spawn(async move { while received.recv().await.is_some() {} });
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.respond(&waiting.request_id, &allowed, updates),
+        )
+        .await
+        .expect("the backlog bound must end a waiting turn")
+        .unwrap_err();
+        collect.await.unwrap();
+        assert_eq!(error.kind, ErrorKind::ExternalFailure);
+        assert!(session.shared.lock().await.failed.is_some());
         session.kill().await;
     }
 

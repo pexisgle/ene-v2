@@ -97,6 +97,41 @@ async fn revoking_a_capability_revokes_its_dispatched_operations() {
 }
 
 #[tokio::test]
+async fn a_failed_permission_write_stops_serving_device_actions() {
+    let (devices, id, subscription, _temp) = connected().await;
+    devices
+        .0
+        .store
+        .run(|db| {
+            db.execute_batch("PRAGMA query_only=ON")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        devices
+            .permission(id, Some("write".into()), false)
+            .await
+            .is_err()
+    );
+    assert!(subscription.changed.is_cancelled());
+    // The store can no longer prove a permission change; serve nothing.
+    assert!(devices.list().await.is_err());
+}
+
+#[tokio::test]
+async fn a_subscription_after_a_permission_change_gets_a_fresh_token() {
+    let (devices, id, subscription, _temp) = connected().await;
+    devices
+        .permission(id.clone(), Some("write".into()), false)
+        .await
+        .unwrap();
+    assert!(subscription.changed.is_cancelled());
+    let next = devices.subscribe(id).await.unwrap();
+    assert!(!next.changed.is_cancelled());
+}
+
+#[tokio::test]
 async fn a_restarted_host_reports_dispatched_operations_as_uncertain() {
     let (devices, id, mut subscription, temp) = connected().await;
     devices.request(request(&id, "first")).await.unwrap();

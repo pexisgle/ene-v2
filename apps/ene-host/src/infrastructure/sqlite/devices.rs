@@ -1,6 +1,7 @@
 //! Device authorization records. Each device and operation is one row, so a
 //! change rewrites that row instead of the whole journal.
 use super::{OptionalExtension, Result, Store, params};
+use buffa::Message;
 use ene_rpc::rpc as w;
 
 const REVISION: &str = "device_activation_revision";
@@ -18,6 +19,62 @@ fn decode<T: serde::de::DeserializeOwned>(body: &str) -> std::result::Result<T, 
 }
 
 impl Store {
+    /// Moves the pre-row `DeviceJournal` into the device tables. A host that
+    /// has never written the journal has nothing to move.
+    pub async fn device_migrate_legacy(&self) -> Result<()> {
+        self.call(|db| {
+            let bytes: Option<Vec<u8>> = db
+                .query_row("SELECT body FROM rpc_state WHERE key='devices'", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let Some(bytes) = bytes else {
+                return Ok(());
+            };
+            let journal = w::DeviceJournal::decode_from_slice(&bytes)
+                .map_err(|_| super::Error::CorruptDeviceJournal)?;
+            let tx = db.transaction()?;
+            for record in &journal.devices {
+                let Some(device) = record.device.as_option() else {
+                    continue;
+                };
+                tx.execute(
+                    "INSERT INTO devices(id,token_hash,body) VALUES (?1,?2,?3) ON CONFLICT(id) DO NOTHING",
+                    params![device.id, record.token_hash, encode(device)?],
+                )?;
+            }
+            for record in &journal.operations {
+                let Some(request) = record.request.as_option() else {
+                    continue;
+                };
+                let status = record
+                    .state
+                    .as_option()
+                    .map_or(0, |state| state.status.to_i32());
+                tx.execute(
+                    "INSERT INTO device_operations(operation_id,device_id,subscription_id,status,body) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(operation_id) DO NOTHING",
+                    params![
+                        request.operation_id,
+                        request.device_id,
+                        record.subscription_id,
+                        status,
+                        encode(record)?
+                    ],
+                )?;
+            }
+            if journal.activation_revision > 0 {
+                tx.execute(
+                    "INSERT INTO metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(metadata.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
+                    params![REVISION, journal.activation_revision.to_string()],
+                )?;
+            }
+            tx.execute("DELETE FROM rpc_state WHERE key='devices'", [])?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     /// The device `id`, as the host saved it.
     pub async fn device_get(&self, id: String) -> Result<Option<w::Device>> {
         self.call(move |db| {

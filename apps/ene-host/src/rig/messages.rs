@@ -6,7 +6,7 @@
 
 use crate::domain::{Error, ErrorKind};
 use ene_rpc as w;
-use rig_core::completion::Message;
+use rig_core::completion::{AssistantContent, Message};
 use rig_core::conversation::{Entry, EntryRef, MessageId, TurnEnd};
 use rig_ecs::prelude::*;
 
@@ -119,13 +119,35 @@ fn assistant_text(message: &Message) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.trim().to_owned())
 }
 
-/// An entry the client shows, with the role and text the wire shape needs.
+/// Whether the entry carries the text its role shows, without building it.
+fn has_text(entry: &EntryRef<'_>) -> bool {
+    if entry.is_users_own() {
+        let Message::User { content } = entry.message else {
+            return false;
+        };
+        content.iter().any(|item| {
+            matches!(
+                item,
+                rig_core::message::UserContent::Text(text) if !text.text.trim().is_empty()
+            )
+        })
+    } else {
+        let Message::Assistant(reply) = entry.message else {
+            return false;
+        };
+        reply.content.iter().any(
+            |part| matches!(part, AssistantContent::Text(text) if !text.text.trim().is_empty()),
+        )
+    }
+}
+
+/// An entry the client shows, with the role the wire shape needs. Its text is
+/// only built for the page that is actually converted.
 /// Tool results and tool-call-only replies are kept by Rig but are not
 /// conversation messages.
 struct Shown<'a> {
     entry: EntryRef<'a>,
     role: &'static str,
-    text: String,
 }
 
 /// The text of an entry the client shows: the user's own input or a model
@@ -140,14 +162,13 @@ fn shown_text(entry: &EntryRef<'_>) -> Option<String> {
 
 /// The messages the client shows, oldest first.
 fn shown(conversation: &Conversation) -> impl Iterator<Item = Shown<'_>> + '_ {
-    conversation.entries().filter_map(|entry| {
-        let text = shown_text(&entry)?;
-        let role = if entry.is_users_own() {
+    conversation.entries().filter(has_text).map(|entry| Shown {
+        entry,
+        role: if entry.is_users_own() {
             "user"
         } else {
             "assistant"
-        };
-        Some(Shown { entry, role, text })
+        },
     })
 }
 
@@ -163,7 +184,7 @@ fn created_at(made: u64) -> String {
 
 fn entry_message(spans: &[TurnSpan], shown: &Shown<'_>, companion: &str) -> w::Message {
     let entry = shown.entry;
-    let (role, text) = (shown.role, shown.text.clone());
+    let (role, text) = (shown.role, shown_text(&shown.entry).unwrap_or_default());
     let span = span_of(spans, entry.index);
     let failure = (role == "assistant")
         .then(|| span.and_then(TurnSpan::failure))
@@ -342,7 +363,9 @@ fn history_entry(
     entry: &EntryRef<'_>,
     conversation: &Conversation,
 ) -> Option<HistoryEntry> {
-    shown_text(entry)?;
+    if !has_text(entry) {
+        return None;
+    }
     let span = span_of(spans, entry.index);
     Some(HistoryEntry {
         sequence: entry.index as u64 + 1,

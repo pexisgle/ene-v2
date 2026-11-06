@@ -65,6 +65,16 @@ fn conflict() -> ConnectError {
 fn unavailable() -> ConnectError {
     ConnectError::unavailable("端末の保存処理を利用できません")
 }
+/// Stops serving device actions when the store can no longer prove the
+/// device state it last read. A failed authorization write must never leave
+/// the affected streams running.
+fn fail_closed(state: &mut State) -> ConnectError {
+    state.failed = true;
+    for session in state.sessions.values() {
+        session.changed.cancel();
+    }
+    unavailable()
+}
 fn validate(value: &str) -> Result<(), ConnectError> {
     if value.is_empty() || value.len() > 200 || value.chars().any(char::is_control) {
         Err(ConnectError::invalid_argument("識別子が不正です"))

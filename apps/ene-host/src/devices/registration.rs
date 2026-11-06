@@ -15,7 +15,7 @@ impl Devices {
         }
         let this = self.clone();
         self.owned(async move {
-            let _state = this.lock().await?;
+            let mut state = this.lock().await?;
             if this
                 .0
                 .store
@@ -34,11 +34,15 @@ impl Devices {
                 capabilities: request.capabilities,
                 ..Default::default()
             };
-            this.0
+            if this
+                .0
                 .store
                 .device_register(d.clone(), Sha256::digest(token.as_bytes()).to_vec())
                 .await
-                .map_err(|_| unavailable())?;
+                .is_err()
+            {
+                return Err(fail_closed(&mut state));
+            }
             Ok(w::DeviceRegistration {
                 device: d.into(),
                 token,
@@ -65,17 +69,21 @@ impl Devices {
     pub async fn approve(&self, id: String) -> Result<w::Device, ConnectError> {
         let this = self.clone();
         self.owned(async move {
-            let _state = this.lock().await?;
+            let mut state = this.lock().await?;
             let mut device = this.device(&id).await?;
             if device.revoked {
                 return Err(conflict());
             }
             device.approved = true;
-            this.0
+            if this
+                .0
                 .store
                 .device_write(device.clone(), None, false)
                 .await
-                .map_err(|_| unavailable())?;
+                .is_err()
+            {
+                return Err(fail_closed(&mut state));
+            }
             Ok(device)
         })
         .await
@@ -107,13 +115,20 @@ impl Devices {
                 device.permissions.clear();
             }
             // The device and the operations its change revokes move together.
-            this.0
+            if this
+                .0
                 .store
                 .device_write(device, capability.clone(), !allowed)
                 .await
-                .map_err(|_| unavailable())?;
+                .is_err()
+            {
+                return Err(fail_closed(&mut state));
+            }
             if let Some(session) = state.sessions.get_mut(&id) {
                 session.changed.cancel();
+                // The old token stays cancelled for the streams it ends; a
+                // reconnecting subscription must not inherit it.
+                session.changed = CancellationToken::new();
                 if !allowed {
                     session.connection = None;
                 }
