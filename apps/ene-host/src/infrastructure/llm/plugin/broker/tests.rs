@@ -79,14 +79,7 @@ async fn metadata_authorization_cannot_generate_on_the_credential_origin() {
         });
         let conversation = InvocationFixture {
             connection: input.connection.clone(),
-            request: Some(Generation::for_test(
-                input.connection.endpoint.clone(),
-                json!({}),
-                "model".into(),
-                String::new(),
-                vec![],
-                128,
-            )),
+            request: Some(crate::llm::test_support::completion_for_test("model", 128)),
             secret: Some(crate::ports::Secret {
                 value: "fixture-secret".into(),
                 nonce: "n".into(),
@@ -172,14 +165,7 @@ fn invocation(
                 last_check: Default::default(),
                 ..Default::default()
             },
-            request: Some(Generation::for_test(
-                "https://example.com/api".into(),
-                json!({}),
-                "model".into(),
-                String::new(),
-                vec![],
-                128,
-            )),
+            request: Some(crate::llm::test_support::completion_for_test("model", 128)),
             operation: OperationKind::Conversation,
             secret: None,
             authorization,

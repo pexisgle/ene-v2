@@ -1,24 +1,16 @@
-//! Host-mediated task inference for plugin harnesses.
+//! Task inference consumes Rig's native request; no host-specific chat wire.
 use futures_util::future::BoxFuture;
+use rig_core::completion::CompletionRequest;
 use tokio_util::sync::CancellationToken;
 
 use super::Result;
 
-/// One non-streaming task inference request. The host owns the connection,
-/// model, credentials and authorization; the guest only supplies the dialogue.
-#[derive(Clone, Debug)]
-pub struct InferenceRequest {
-    pub companion_id: String,
-    pub preamble: String,
-    /// `(is_user, text)` pairs in conversation order.
-    pub messages: Vec<(bool, String)>,
-    pub max_tokens: u64,
-}
-
+/// The companion identity is host-owned; the model request is Rig's own type.
 pub trait TaskInference: Send + Sync {
     fn complete<'a>(
         &'a self,
-        request: InferenceRequest,
+        companion_id: String,
+        request: CompletionRequest,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<String>>;
 }

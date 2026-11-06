@@ -2,11 +2,7 @@
 //! wire. Route selection and provider credentials stay OpenRouter's own; they
 //! are not reused from the OpenAI connection.
 
-use crate::{
-    domain::{Connection, Error, ErrorKind},
-    llm::*,
-    ports::Result,
-};
+use crate::{domain::Connection, llm::*, ports::Result};
 use futures_util::future::BoxFuture;
 use rig_core::operation::Completion;
 use rig_core::providers::openai::OpenAIConfig;
@@ -53,15 +49,6 @@ pub struct Provider;
 impl LlmProvider for Provider {
     fn policy(&self, c: &Connection) -> Result<Policy> {
         policy(c)
-    }
-    fn generate(
-        &self,
-        _: Invocation,
-    ) -> BoxFuture<'_, Result<futures_util::stream::BoxStream<'static, Result<Event>>>> {
-        // The parent conversation uses the native Rig connection. One-shot
-        // provider calls (connection check and task inference) are not wired
-        // to OpenRouter yet and report that explicitly.
-        Box::pin(async { Err(Error::new(ErrorKind::UnsupportedCapability)) })
     }
     /// The OpenRouter model list, with tool capability from
     /// `supported_parameters`. The transport still authorizes and signs the GET.

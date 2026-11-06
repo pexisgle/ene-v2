@@ -19,7 +19,7 @@ impl LlmProvider for TestProvider {
 
 pub struct InvocationFixture {
     pub connection: Connection,
-    pub request: Option<Generation>,
+    pub request: Option<rig_core::completion::CompletionRequest>,
     pub secret: Option<Secret>,
     pub authorization: Arc<dyn Authorization>,
     pub cancel: watch::Receiver<bool>,
@@ -28,24 +28,10 @@ pub struct InvocationFixture {
 impl InvocationFixture {
     pub fn build(self, binding: ProviderBinding) -> Invocation {
         let input = match self.operation {
-            OperationKind::Conversation => {
-                InvocationInput::ConnectionCheck(self.request.unwrap_or_else(|| {
-                    Generation::for_test(
-                        self.connection.endpoint.clone(),
-                        self.connection
-                            .options
-                            .as_option()
-                            .map(|options| {
-                                serde_json::from_str(&options.json).expect("fixture options")
-                            })
-                            .unwrap_or_else(|| serde_json::json!({})),
-                        "fixture".into(),
-                        String::new(),
-                        vec![],
-                        128,
-                    )
-                }))
-            }
+            OperationKind::Conversation => InvocationInput::ConnectionCheck(
+                self.request
+                    .unwrap_or_else(|| completion_for_test("fixture", 128)),
+            ),
             OperationKind::ConnectionCheck => {
                 InvocationInput::ConnectionCheck(self.request.expect("check fixture generation"))
             }
@@ -80,23 +66,13 @@ impl InvocationFixture {
         self.build(binding)
     }
 }
-impl Generation {
-    /// Allows malformed payloads only for testing the next protocol boundary.
-    pub fn for_test(
-        endpoint: String,
-        options: Value,
-        model: String,
-        preamble: String,
-        messages: Vec<ChatMessage>,
-        max_tokens: u64,
-    ) -> Self {
-        Self {
-            endpoint,
-            options,
-            model,
-            preamble,
-            messages,
-            max_tokens,
-        }
-    }
+
+pub fn completion_for_test(
+    model: &str,
+    max_tokens: u64,
+) -> rig_core::completion::CompletionRequest {
+    let mut request =
+        rig_core::completion::CompletionRequest::new("fixture").max_tokens(max_tokens);
+    request.model = Some(model.into());
+    request
 }

@@ -1017,10 +1017,14 @@ mod tests {
             body.push_str(&format!("data: {event}\n\n"));
         }
         let service = axum::Router::new().fallback(axum::routing::post(
-            move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+            move |uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap,
+                  bytes: axum::body::Bytes| {
                 let recorded = recorded.clone();
                 let body = body.clone();
                 async move {
+                    let sent: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(sent["store"], false, "Rig must encode stateless requests");
                     recorded.lock().unwrap().push((
                         uri.path().to_owned(),
                         headers

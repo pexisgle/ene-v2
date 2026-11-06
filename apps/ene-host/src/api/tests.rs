@@ -144,12 +144,12 @@ async fn caller_selected_connection_id_replays_without_duplicate_creation_or_rev
 
 struct ControlledRegistry {
     registry: crate::infrastructure::llm::registry::Registry,
-    started: tokio::sync::mpsc::UnboundedSender<crate::llm::Generation>,
+    started: tokio::sync::mpsc::UnboundedSender<rig_core::completion::CompletionRequest>,
     finish: std::sync::Arc<tokio::sync::Semaphore>,
 }
 struct FixtureProvider {
     policy: crate::llm::Policy,
-    started: Option<tokio::sync::mpsc::UnboundedSender<crate::llm::Generation>>,
+    started: Option<tokio::sync::mpsc::UnboundedSender<rig_core::completion::CompletionRequest>>,
     finish: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     send_outbound: bool,
 }
@@ -169,7 +169,7 @@ impl crate::llm::LlmProvider for FixtureProvider {
         Box::pin(async move {
             input.authorization().check().await?;
             if let Some(started) = &self.started {
-                started.send(input.generation()?.clone()).unwrap();
+                started.send(input.completion_request()?.clone()).unwrap();
             }
             if self.send_outbound {
                 let request = http::Request::builder()
@@ -236,7 +236,7 @@ struct ConversationFixture {
     companion: String,
     connection: String,
     grant: String,
-    started: tokio::sync::mpsc::UnboundedReceiver<crate::llm::Generation>,
+    started: tokio::sync::mpsc::UnboundedReceiver<rig_core::completion::CompletionRequest>,
     finish: std::sync::Arc<tokio::sync::Semaphore>,
     _temp: tempfile::TempDir,
 }
@@ -290,7 +290,7 @@ impl ConversationFixture {
             _temp: temp,
         }
     }
-    async fn started(&mut self) -> crate::llm::Generation {
+    async fn started(&mut self) -> rig_core::completion::CompletionRequest {
         tokio::time::timeout(std::time::Duration::from_secs(2), self.started.recv())
             .await
             .unwrap()
@@ -1067,19 +1067,17 @@ async fn review_configuration_storage_failure_notifies_without_publishing_unsave
 
 #[tokio::test]
 async fn task_inference_uses_the_task_assignment_and_grant() {
-    use crate::ports::inference::InferenceRequest;
     use tokio_util::sync::CancellationToken;
 
     let mut f = ConversationFixture::new().await;
     let inference = f.app.application.inference();
-    let request = |companion: &str| InferenceRequest {
-        companion_id: companion.into(),
-        preamble: "system".into(),
-        messages: vec![(true, "hello".into())],
-        max_tokens: 128,
+    let request = || {
+        rig_core::completion::CompletionRequest::new("hello")
+            .preamble("system")
+            .max_tokens(128)
     };
     let missing = inference
-        .complete(request(&f.companion), CancellationToken::new())
+        .complete(f.companion.clone(), request(), CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(missing.reason, Some("model_unset"));
@@ -1127,13 +1125,13 @@ async fn task_inference_uses_the_task_assignment_and_grant() {
         let companion = f.companion.clone();
         tokio::spawn(async move {
             inference
-                .complete(request(&companion), CancellationToken::new())
+                .complete(companion, request(), CancellationToken::new())
                 .await
         })
     };
     let generation = f.started().await;
-    assert_eq!(generation.model, "task-model");
-    assert_eq!(generation.preamble, "system");
+    assert_eq!(generation.model.as_deref(), Some("task-model"));
+    assert_eq!(generation.system_instructions(), Some("system"));
     f.finish.add_permits(1);
     assert_eq!(task.await.unwrap().unwrap(), "途中");
 }

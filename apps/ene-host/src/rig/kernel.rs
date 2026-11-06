@@ -86,6 +86,7 @@ fn run_app(
         .add_systems(Last, confirm_deliveries.after(WriteLogs))
         .add_systems(Last, report_log_failure.after(WriteLogs))
         .add_systems(AgentPass, enforce_output_limit.in_set(ReviewSystems::Edit))
+        .add_systems(AgentPass, stateless_openai.in_set(PrepareSystems::Edit))
         .add_systems(
             AgentPass,
             bind_mind_calls
@@ -588,6 +589,32 @@ fn tool_access(mind_tools: bool, bridge_present: bool) -> ToolAccess {
         ToolAccess::Only(vec!["current_time".into()])
     } else {
         ToolAccess::All
+    }
+}
+
+/// Edit Rig's request *before* it encodes the Responses wire.
+/// Leaving store unset uses OpenAI's server-side default and makes conversation
+/// replay depend on remote retained state. This modifies the native type at
+/// Rig's official Prepare extension point, not the encoded HTTP body.
+fn stateless_openai(
+    mut calls: Query<(&mut ModelRequest, Option<&ForAgent>), Added<Admitted>>,
+    agents: Query<&rig_ecs::model::Connection, With<Agent>>,
+) {
+    for (mut call, for_agent) in &mut calls {
+        let connected = call
+            .connection
+            .as_ref()
+            .or_else(|| for_agent.and_then(|ForAgent(agent)| agents.get(*agent).ok()));
+        if connected.is_none_or(|connection| !connection.spec.reference().starts_with("openai/")) {
+            continue;
+        }
+        let request = call.request_mut();
+        let options = request
+            .additional_params
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(fields) = options.as_object_mut() {
+            fields.insert("store".into(), serde_json::Value::Bool(false));
+        }
     }
 }
 
