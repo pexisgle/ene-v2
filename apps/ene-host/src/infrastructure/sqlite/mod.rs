@@ -14,6 +14,7 @@ use queries::snapshot;
 use schema::initialize;
 
 pub(crate) mod conversation;
+mod devices;
 use crate::domain::{Companion, Failure, ModelAssignments, Settings};
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc};
@@ -104,21 +105,5 @@ impl Store {
                 tokio_rusqlite::Error::Close((_, error)) => Error::Sql(error),
                 _ => Error::Stopped,
             })
-    }
-}
-
-impl Store {
-    pub async fn rpc_state(&self) -> Result<Option<Vec<u8>>> {
-        self.call(|db| {
-            Ok(db
-                .query_row("SELECT body FROM rpc_state WHERE key='devices'", [], |r| {
-                    r.get(0)
-                })
-                .optional()?)
-        })
-        .await
-    }
-    pub async fn save_rpc_state(&self, bytes: Vec<u8>) -> Result<()> {
-        self.call(move |db| { db.execute("INSERT INTO rpc_state VALUES ('devices',?1) ON CONFLICT(key) DO UPDATE SET body=excluded.body", params![bytes])?; Ok(()) }).await
     }
 }

@@ -1,7 +1,8 @@
-//! Host-owned device authorization and durable operation receipts.
-//! Network cancellation does not cancel an admitted write or repeat an operation.
+//! Host-owned device authorization and durable operation receipts. Each record
+//! is one SQLite row; the live streams and activation leases are the only
+//! state the host keeps. Network cancellation does not cancel an admitted
+//! write or repeat an operation.
 use crate::infrastructure::sqlite::Store;
-use buffa::Message;
 use connectrpc::ConnectError;
 use ene_rpc::rpc as w;
 use sha2::{Digest, Sha256};
@@ -13,29 +14,15 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
-const MAX_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 64 * 1024;
-// Reserve the largest result plus the nested protobuf tags/length prefixes.
-const COMPLETION_RESERVATION: usize = MAX_RESULT_BYTES + 32;
-
-fn journal_budget(journal: &w::DeviceJournal) -> usize {
-    journal.encoded_len() as usize
-        + journal
-            .operations
-            .iter()
-            .filter(|op| {
-                op.state.status == w::OperationStatus::Dispatched
-                    || op.state.status == w::OperationStatus::Uncertain
-            })
-            .count()
-            * COMPLETION_RESERVATION
-}
+const MAX_OPERATIONS: i64 = 2048;
+const MAX_DEVICES: usize = 64;
 
 #[derive(Clone)]
 pub(crate) struct Devices(Arc<Inner>);
 struct Inner {
     state: Mutex<State>,
-    store: Option<Store>,
+    store: Store,
     tasks: TaskTracker,
     slots: Arc<Semaphore>,
 }
@@ -43,8 +30,10 @@ struct Inner {
 struct State {
     loaded: bool,
     failed: bool,
+    /// A restart makes an older activation unusable for a moment, so a
+    /// client cannot keep a lease it did not renew.
     activation_not_before: Option<Instant>,
-    journal: w::DeviceJournal,
+    activation_revision: u64,
     /// One entry per authenticated device: its live operation stream, if any,
     /// and the cancellation signal that ends that device's RPC streams.
     sessions: HashMap<String, DeviceSession>,
@@ -83,43 +72,32 @@ fn validate(value: &str) -> Result<(), ConnectError> {
         Ok(())
     }
 }
-fn device<'a>(journal: &'a w::DeviceJournal, id: &str) -> Result<&'a w::Device, ConnectError> {
-    journal
-        .devices
-        .iter()
-        .find_map(|r| r.device.as_option().filter(|d| d.id == id))
-        .ok_or_else(missing)
-}
-fn device_mut<'a>(
-    journal: &'a mut w::DeviceJournal,
-    id: &str,
-) -> Result<&'a mut w::Device, ConnectError> {
-    journal
-        .devices
-        .iter_mut()
-        .find_map(|r| r.device.as_option_mut().filter(|d| d.id == id))
-        .ok_or_else(missing)
-}
-fn permitted(
-    journal: &w::DeviceJournal,
-    id: &str,
-    capability: Option<&str>,
-) -> Result<(), ConnectError> {
-    let d = device(journal, id)?;
-    if !d.approved || d.revoked || capability.is_some_and(|c| !d.permissions.iter().any(|p| p == c))
+/// Whether `device` may run `capability` now.
+fn permitted(device: &w::Device, capability: Option<&str>) -> Result<(), ConnectError> {
+    if !device.approved
+        || device.revoked
+        || capability.is_some_and(|c| !device.permissions.iter().any(|p| p == c))
     {
         return Err(denied());
     }
     Ok(())
 }
 impl Devices {
-    pub fn new(store: Option<Store>) -> Self {
+    pub fn new(store: Store) -> Self {
         Self(Arc::new(Inner {
             state: Mutex::new(State::default()),
             store,
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(64)),
         }))
+    }
+    async fn device(&self, id: &str) -> Result<w::Device, ConnectError> {
+        self.0
+            .store
+            .device_get(id.into())
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or_else(missing)
     }
     pub async fn stop(&self) {
         self.0.slots.close();
@@ -151,73 +129,36 @@ impl Devices {
             return Err(unavailable());
         }
         if !state.loaded {
-            if let Some(store) = &self.0.store {
-                if let Some(bytes) = store.rpc_state().await.map_err(|_| unavailable())? {
-                    state.journal =
-                        w::DeviceJournal::decode_from_slice(&bytes).map_err(|_| unavailable())?;
-                }
-                if state.journal.activation_revision > 0 {
-                    state.activation_not_before = Some(Instant::now() + Duration::from_secs(15));
-                }
-                for operation in &mut state.journal.operations {
-                    if operation.state.status == w::OperationStatus::Dispatched {
-                        operation
-                            .state
-                            .as_option_mut()
-                            .ok_or_else(unavailable)?
-                            .status = w::OperationStatus::Uncertain.into();
-                    }
-                }
-                store
-                    .save_rpc_state(state.journal.encode_to_vec())
-                    .await
-                    .map_err(|_| unavailable())?;
+            // A write that failed leaves the store uncertain; the host serves
+            // no device action until it restarts.
+            state.activation_revision = self
+                .0
+                .store
+                .device_recover()
+                .await
+                .map_err(|_| unavailable())?;
+            if state.activation_revision > 0 {
+                state.activation_not_before = Some(Instant::now() + Duration::from_secs(15));
             }
             state.loaded = true;
         }
         Ok(state)
     }
-    async fn commit(
-        &self,
-        state: &mut State,
-        journal: w::DeviceJournal,
-    ) -> Result<(), ConnectError> {
-        let budget = journal_budget(&journal);
-        // Older hosts admitted operations without reservations. Allow their
-        // completion/revocation to reduce an over-budget journal.
-        if journal.encoded_len() as usize > MAX_JOURNAL_BYTES
-            || (budget > MAX_JOURNAL_BYTES && budget > journal_budget(&state.journal))
-        {
-            return Err(ConnectError::resource_exhausted(
-                "端末操作履歴の容量上限です",
-            ));
-        }
-        if let Some(store) = &self.0.store
-            && store.save_rpc_state(journal.encode_to_vec()).await.is_err()
-        {
-            state.failed = true;
-            for session in state.sessions.values() {
-                session.changed.cancel();
-            }
-            return Err(unavailable());
-        }
-        state.journal = journal;
-        Ok(())
-    }
     /// The authenticated device and the signal that ends its streams.
     pub async fn authenticate(&self, token: &str) -> Option<(String, CancellationToken)> {
         let hash = Sha256::digest(token.as_bytes());
         let mut state = self.lock().await.ok()?;
-        let id = state
-            .journal
-            .devices
-            .iter()
-            .find(|r| {
-                bool::from(hash.as_slice().ct_eq(&r.token_hash))
-                    && r.device.approved
-                    && !r.device.revoked
+        let id = self
+            .0
+            .store
+            .device_records()
+            .await
+            .ok()?
+            .into_iter()
+            .find(|(device, token_hash)| {
+                bool::from(hash.as_slice().ct_eq(token_hash)) && device.approved && !device.revoked
             })
-            .map(|r| r.device.id.clone())?;
+            .map(|(device, _)| device.id)?;
         let session = state.sessions.entry(id.clone()).or_default();
         Some((id, session.changed.clone()))
     }

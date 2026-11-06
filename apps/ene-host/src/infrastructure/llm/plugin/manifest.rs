@@ -63,7 +63,7 @@ impl Bundle {
     pub fn descriptor(
         &self,
         state: &str,
-        capabilities: Capabilities,
+        capabilities: ene_plugin::LlmCapabilities,
         error: Option<String>,
     ) -> Descriptor {
         Descriptor {
@@ -83,7 +83,12 @@ impl Bundle {
             state: state.into(),
             error,
             revision: self.revision.clone(),
-            capabilities: capabilities.into(),
+            capabilities: ene_rpc::ProviderCapabilities {
+                streaming_text: capabilities.streaming_text,
+                model_list: capabilities.model_list,
+                ..Default::default()
+            }
+            .into(),
             models: self.manifest.models.clone(),
             ..Default::default()
         }

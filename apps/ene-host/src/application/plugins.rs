@@ -58,7 +58,7 @@ impl HostApplication {
     pub async fn harness_state(
         &self,
         binding_id: String,
-    ) -> Result<Option<serde_json::Value>, Error> {
+    ) -> Result<Option<crate::domain::harness::Session>, Error> {
         match &self.0.plugins {
             Some(plugins) => plugins.harness(binding_id).await,
             None => Ok(None),
@@ -76,21 +76,34 @@ impl HostApplication {
         &self,
         input: ene_rpc::PluginInvocation,
     ) -> Result<ene_rpc::PluginResult, Error> {
+        let operation: ene_plugin::Operation =
+            serde_json::from_str(&input.operation.json).map_err(|_| Error::invalid())?;
+        self.invoke_operation(&input.binding_id, operation)
+            .await?
+            .into_result()
+    }
+    /// One operation of a bound plugin, in host types.
+    async fn invoke_operation(
+        &self,
+        binding_id: &str,
+        operation: ene_plugin::Operation,
+    ) -> Result<crate::infrastructure::plugins::Completed, Error> {
         let bindings = self.plugin_port()?.bindings().await?;
         let binding = bindings
             .iter()
-            .find(|b| b.id == input.binding_id)
+            .find(|b| b.id == binding_id)
+            .cloned()
             .ok_or_else(|| Error::new(ErrorKind::NotFound))?;
-        let result = self
+        let completed = self
             .plugin_port()?
-            .invoke(input, Arc::new(self.clone()))
+            .invoke(&binding.id, operation, Arc::new(self.clone()))
             .await?;
         if !self
             .plugin_port()?
             .bindings()
             .await?
             .iter()
-            .any(|b| b == binding)
+            .any(|b| b == &binding)
         {
             return Err(Error::new(ErrorKind::StateConflict));
         }
@@ -100,10 +113,10 @@ impl HostApplication {
             .as_millis()
             + 5000;
         let mut boundary = self.0.boundary.lock().await;
-        for event in &result.events {
-            let value: serde_json::Value = serde_json::from_str(&event.json)
-                .map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
-            if value.get("type").and_then(serde_json::Value::as_str) == Some("character") {
+        for event in &completed.events {
+            if matches!(event, ene_plugin::Event::Character { .. }) {
+                let document = serde_json::to_value(event)
+                    .map_err(|_| Error::new(ErrorKind::ExternalFailure))?;
                 generation::publish(
                     &mut boundary,
                     self,
@@ -112,9 +125,9 @@ impl HostApplication {
                         ene_rpc::CharacterActionNotification {
                             binding_id: binding.id.clone(),
                             revision: binding.revision.clone(),
-                            generation: result.generation,
+                            generation: completed.generation,
                             expires_at_ms: expires_at_ms as u64,
-                            event: event.clone().into(),
+                            event: ene_rpc::JsonDocument::from(document).into(),
                             ..Default::default()
                         },
                     )),
@@ -122,10 +135,7 @@ impl HostApplication {
             }
         }
         // Harness turns publish a compact hint; the journal stays authoritative.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&result.result.json)
-            && let (Some(task_id), Some(status)) =
-                (value["task_id"].as_str(), value["status"].as_str())
-        {
+        if let crate::infrastructure::plugins::Answer::Harness(journal) = &completed.answer {
             generation::publish(
                 &mut boundary,
                 self,
@@ -134,16 +144,18 @@ impl HostApplication {
                     ene_rpc::HarnessTaskNotification {
                         binding_id: binding.id.clone(),
                         companion_id: binding.companion_id.clone(),
-                        task_id: task_id.into(),
-                        status: status.into(),
-                        stop_reason: value["stop_reason"].as_str().map(str::to_owned),
+                        task_id: journal.session_id.clone(),
+                        status: journal.status.name().into(),
+                        stop_reason: journal
+                            .stop_reason
+                            .and_then(crate::infrastructure::plugins::stop_reason_name),
                         failure: None,
                         ..Default::default()
                     },
                 )),
             );
         }
-        Ok(result)
+        Ok(completed)
     }
     pub(crate) fn character_event(&self, companion: &str, event: ene_plugin::CharacterEvent) {
         self.character_event_for(Some(companion.into()), None, event);
@@ -183,24 +195,21 @@ impl HostApplication {
                                     && e.provides.iter().any(|extension| extension == "character")
                             })
                     }) {
+                        let inner = app.clone();
+                        let event = event.clone();
                         let _ = app
-                            .invoke_plugin(ene_rpc::PluginInvocation {
-                                binding_id: binding.id,
-                                operation: ene_rpc::JsonDocument {
-                                    json: serde_json::to_string(
-                                        &ene_plugin::Operation::Character {
-                                            target: ene_plugin::CharacterTarget {
-                                                device_id: binding.device_id.clone(),
-                                                character_id: binding.companion_id.clone(),
-                                            },
-                                            event: event.clone(),
-                                        },
-                                    )
-                                    .expect("serializable character operation"),
-                                    ..Default::default()
-                                }
-                                .into(),
-                                ..Default::default()
+                            .owned(async move {
+                                let operation = ene_plugin::Operation::Character {
+                                    target: ene_plugin::CharacterTarget {
+                                        device_id: binding.device_id.clone(),
+                                        character_id: binding.companion_id.clone(),
+                                    },
+                                    event: event.clone(),
+                                };
+                                inner
+                                    .invoke_operation(&binding.id, operation)
+                                    .await
+                                    .map(|_| ())
                             })
                             .await;
                     }

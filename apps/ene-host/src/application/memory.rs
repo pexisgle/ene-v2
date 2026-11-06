@@ -8,8 +8,9 @@ use crate::{
         mind::{MemoryRecord, MindUpdateRequest, NewMemory, SourceKind, SourceRef, StoredMind},
     },
     infrastructure::sqlite::memory::VectorEntry,
-    llm::Embedding,
+    rig::HistoryEntry,
 };
+use rig_core::conversation::TurnEnd;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -121,13 +122,13 @@ impl HostApplication {
                 .map(|(_, content)| content)
                 .collect::<Vec<_>>();
             match self.embed_memory(&owner, contents).await {
-                Ok(Embedding { vectors, .. }) => {
+                Ok(vectors) => {
                     let entries = ids
                         .iter()
                         .zip(vectors)
                         .map(|(memory_id, vector)| VectorEntry {
                             memory_id: memory_id.clone(),
-                            model: super::inference::EMBEDDING_MODEL.into(),
+                            model: crate::llm::EMBEDDING_MODEL.into(),
                             preprocess: crate::infrastructure::sqlite::memory::TEXT_PREPROCESS
                                 .into(),
                             vector,
@@ -138,7 +139,7 @@ impl HostApplication {
                         .repository
                         .mind_store_vectors(
                             entries,
-                            super::inference::EMBEDDING_MODEL.into(),
+                            crate::llm::EMBEDDING_MODEL.into(),
                             self.worker_now(),
                         )
                         .await
@@ -476,7 +477,7 @@ impl HostApplication {
             .embed_memory(companion, vec![query.clone()])
             .await
             .ok()
-            .and_then(|embedding| embedding.vectors.into_iter().next());
+            .and_then(|vectors| vectors.into_iter().next());
         let relevant = self
             .0
             .repository
@@ -484,7 +485,7 @@ impl HostApplication {
                 companion.to_owned(),
                 query.clone(),
                 vector,
-                Some(super::inference::EMBEDDING_MODEL.into()),
+                Some(crate::llm::EMBEDDING_MODEL.into()),
                 8,
                 false,
                 None,
@@ -540,8 +541,7 @@ impl HostApplication {
             )
             .await
             .map_err(|_| Error::unavailable())??;
-            let (targets, last_terminal, waiting) =
-                scan_page(&page.items, last_sequence, last_offset);
+            let (targets, last_terminal, waiting) = scan_page(&page, last_sequence, last_offset);
             picked.extend(targets);
             if waiting {
                 break;
@@ -553,10 +553,10 @@ impl HostApplication {
             if let Some(position) = last_terminal {
                 terminal_through = Some(position);
             }
-            let Some(last) = page.items.last().map(|message| message.sequence) else {
+            let Some(last) = page.last().map(|message| message.sequence) else {
                 break;
             };
-            if page.next_cursor.is_none() || last <= after {
+            if page.len() < HISTORY_PAGE || last <= after {
                 break;
             }
             after = last;
@@ -606,7 +606,8 @@ impl HostApplication {
 pub(crate) struct Chunk {
     pub id: String,
     pub request_id: Option<String>,
-    pub role: String,
+    /// The user's own input, rather than a model reply.
+    pub input: bool,
     pub created_at: String,
     pub text: String,
     pub offset: usize,
@@ -619,7 +620,8 @@ struct RelatedMemories {
 }
 
 pub(crate) struct PendingPage {
-    pub messages: Vec<ene_rpc::Message>,
+    /// The confirmed entries, in the order the kernel's conversation holds them.
+    pub messages: Vec<HistoryEntry>,
     pub terminal_through: Option<(u64, u64)>,
     pub waiting: bool,
 }
@@ -631,64 +633,52 @@ enum EntryClass {
     Waiting,
 }
 
-fn classify_message(message: &ene_rpc::Message) -> EntryClass {
-    match message.role.as_str() {
-        "user"
-            if message.status == "completed"
-                && !message.text.trim().is_empty()
-                && message.turn_status != "incomplete" =>
-        {
-            EntryClass::Target
-        }
-        "user" if matches!(message.turn_status.as_str(), "failed" | "cancelled") => {
-            EntryClass::Terminal
-        }
-        "assistant" if message.status == "completed" && !message.text.trim().is_empty() => {
-            EntryClass::Target
-        }
-        "assistant" if matches!(message.status.as_str(), "failed" | "cancelled") => {
-            EntryClass::Terminal
-        }
-        "user" | "assistant" => EntryClass::Waiting,
-        _ => EntryClass::Terminal,
+fn classify_message(message: &HistoryEntry) -> EntryClass {
+    match (message.is_input(), &message.turn) {
+        // The user's own text is an accepted message once its turn ended.
+        (true, Some(_)) => EntryClass::Target,
+        (false, Some(TurnEnd::Answered { .. })) => EntryClass::Target,
+        (false, Some(TurnEnd::Failed { .. } | TurnEnd::Stopped { .. })) => EntryClass::Terminal,
+        // The turn this entry belongs to has not ended: wait for it.
+        _ => EntryClass::Waiting,
     }
 }
 
-fn unpaired_user(messages: &[ene_rpc::Message]) -> bool {
+fn unpaired_user(messages: &[HistoryEntry]) -> bool {
     let Some(last) = messages.last() else {
         return false;
     };
-    if last.role != "user" || last.turn_status != "completed" {
+    if !last.is_input() || !matches!(last.turn, Some(TurnEnd::Answered { .. })) {
         return false;
     }
     let Some(request) = last.request_id.as_deref() else {
         return false;
     };
     !messages.iter().any(|message| {
-        message.role == "assistant"
+        !message.is_input()
             && message.request_id.as_deref() == Some(request)
-            && message.status == "completed"
+            && matches!(message.turn, Some(TurnEnd::Answered { .. }))
     })
 }
 
 fn scan_page(
-    messages: &[ene_rpc::Message],
+    messages: &[HistoryEntry],
     last_sequence: u64,
     last_offset: u64,
-) -> (Vec<ene_rpc::Message>, Option<(u64, u64)>, bool) {
+) -> (Vec<HistoryEntry>, Option<(u64, u64)>, bool) {
     let mut targets = Vec::new();
     let mut terminal = None;
     for message in messages {
         if message.sequence < last_sequence
             || (message.sequence == last_sequence
-                && message.text.chars().count() <= last_offset as usize)
+                && message.text().chars().count() <= last_offset as usize)
         {
             continue;
         }
         match classify_message(message) {
             EntryClass::Target => targets.push(message.clone()),
             EntryClass::Terminal => {
-                terminal = Some((message.sequence, message.text.chars().count() as u64));
+                terminal = Some((message.sequence, message.text().chars().count() as u64));
             }
             EntryClass::Waiting => return (targets, terminal, true),
         }
@@ -704,7 +694,7 @@ fn retryable(error: &Error) -> bool {
 }
 
 pub(crate) fn batch_chunks(
-    messages: Vec<ene_rpc::Message>,
+    messages: Vec<HistoryEntry>,
     from_sequence: u64,
     from_offset: u64,
 ) -> (Vec<Chunk>, Vec<SourceRef>, u64, u64, u64) {
@@ -713,7 +703,9 @@ pub(crate) fn batch_chunks(
     let mut through_sequence = from_sequence;
     let mut through_offset = from_offset;
     for message in messages {
-        let total = message.text.chars().count();
+        let input = message.is_input();
+        let full = message.text();
+        let total = full.chars().count();
         let start = if message.sequence == from_sequence {
             from_offset as usize
         } else {
@@ -728,17 +720,12 @@ pub(crate) fn batch_chunks(
             break;
         }
         let take = remaining.min(room.max(1));
-        let text = message
-            .text
-            .chars()
-            .skip(start)
-            .take(take)
-            .collect::<String>();
+        let text = full.chars().skip(start).take(take).collect::<String>();
         chunks.push(Chunk {
-            id: message.id.clone(),
+            id: message.id().to_string(),
             request_id: message.request_id.clone(),
-            role: message.role.clone(),
-            created_at: message.created_at.clone(),
+            input,
+            created_at: message.created_at(),
             text,
             offset: start,
             total,
@@ -755,24 +742,22 @@ pub(crate) fn batch_chunks(
     }
     let mut sources = Vec::new();
     for chunk in &chunks {
-        let observed = Some(chunk.created_at.clone());
-        match chunk.role.as_str() {
-            "user" => sources.push(SourceRef {
-                kind: SourceKind::Input,
-                id: chunk.request_id.clone().unwrap_or_else(|| chunk.id.clone()),
-                entry_id: Some(chunk.id.clone()),
-                speaker: Some("user".into()),
-                observed_at: observed,
-            }),
-            "assistant" => sources.push(SourceRef {
-                kind: SourceKind::Reply,
-                id: chunk.id.clone(),
-                entry_id: Some(chunk.id.clone()),
-                speaker: Some("assistant".into()),
-                observed_at: observed,
-            }),
-            _ => {}
-        }
+        let (kind, id, speaker) = if chunk.input {
+            (
+                SourceKind::Input,
+                chunk.request_id.clone().unwrap_or_else(|| chunk.id.clone()),
+                "user",
+            )
+        } else {
+            (SourceKind::Reply, chunk.id.clone(), "assistant")
+        };
+        sources.push(SourceRef {
+            kind,
+            id,
+            entry_id: Some(chunk.id.clone()),
+            speaker: Some(speaker.into()),
+            observed_at: Some(chunk.created_at.clone()),
+        });
     }
     (
         chunks,
@@ -841,7 +826,7 @@ fn consolidation_payload(
             serde_json::json!({
                 "id": chunk.id,
                 "time": chunk.created_at,
-                "role": chunk.role,
+                "role": if chunk.input { "user" } else { "assistant" },
                 "text": chunk.text,
                 "part_offset": chunk.offset,
                 "message_chars": chunk.total,
@@ -883,23 +868,33 @@ fn consolidation_payload(
 mod tests {
     use super::*;
 
-    fn message(sequence: u64, role: &str, status: &str, text: &str) -> ene_rpc::Message {
-        ene_rpc::Message {
-            id: format!("m{sequence}"),
-            role: role.into(),
-            text: text.into(),
-            status: status.into(),
+    /// One conversation entry as the kernel hands it to memory.
+    fn message(sequence: u64, input: bool, turn: Option<TurnEnd>, text: &str) -> HistoryEntry {
+        HistoryEntry {
             sequence,
-            created_at: "2026-01-01T00:00:00Z".into(),
-            ..Default::default()
+            entry: rig_core::conversation::Entry {
+                message: std::sync::Arc::new(if input {
+                    rig_core::completion::Message::user(text)
+                } else {
+                    rig_core::completion::Message::assistant(text)
+                }),
+                author: None,
+                id: format!("m{sequence}").parse().ok(),
+                made: Some(0),
+            },
+            turn,
+            request_id: None,
         }
+    }
+    fn answered() -> Option<TurnEnd> {
+        Some(TurnEnd::Answered { answer: None })
     }
 
     #[test]
     fn long_entries_are_split_without_marking_the_tail_processed() {
         let long = "あ".repeat(10_000);
         let (chunks, sources, through, offset, chars) =
-            batch_chunks(vec![message(1, "user", "completed", &long)], 0, 0);
+            batch_chunks(vec![message(1, true, answered(), &long)], 0, 0);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text.chars().count(), 8_000);
         assert_eq!(through, 1);
@@ -907,7 +902,7 @@ mod tests {
         assert_eq!(chars, 8_000);
         assert_eq!(sources.len(), 1);
         let (chunks, _, through, offset, chars) =
-            batch_chunks(vec![message(1, "user", "completed", &long)], 1, 8_000);
+            batch_chunks(vec![message(1, true, answered(), &long)], 1, 8_000);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text.chars().count(), 2_000);
         assert_eq!(through, 1);
@@ -917,29 +912,46 @@ mod tests {
     }
 
     #[test]
-    fn only_completed_user_and_answered_assistant_entries_are_targets() {
+    fn only_settled_turns_carry_confirmed_experience() {
         assert!(matches!(
-            classify_message(&message(1, "user", "completed", "経験")),
+            classify_message(&message(1, true, answered(), "経験")),
             EntryClass::Target
         ));
         assert!(matches!(
-            classify_message(&message(2, "assistant", "failed", "失敗")),
+            classify_message(&message(
+                2,
+                false,
+                Some(TurnEnd::Failed {
+                    why: "失敗".into()
+                }),
+                "失敗"
+            )),
             EntryClass::Terminal
         ));
         assert!(matches!(
-            classify_message(&message(3, "assistant", "cancelled", "停止")),
+            classify_message(&message(
+                3,
+                false,
+                Some(TurnEnd::Stopped {
+                    why: None,
+                    at: None,
+                    calls: Vec::new(),
+                }),
+                "停止"
+            )),
             EntryClass::Terminal
         ));
         assert!(matches!(
-            classify_message(&message(4, "assistant", "incomplete", "未完了")),
+            classify_message(&message(4, false, None, "未完了")),
             EntryClass::Waiting
         ));
         assert!(matches!(
-            classify_message(&message(5, "assistant", "completed", "答えた")),
+            classify_message(&message(5, false, answered(), "答えた")),
             EntryClass::Target
         ));
+        // An input whose turn has not ended is not a target yet.
         assert!(matches!(
-            classify_message(&message(6, "user", "completed", "  ")),
+            classify_message(&message(6, true, None, "入力")),
             EntryClass::Waiting
         ));
     }
@@ -984,7 +996,7 @@ mod tests {
             .await
             .unwrap();
         let text = "終".repeat(10_000);
-        let message = message(1, "user", "completed", &text);
+        let message = message(1, true, answered(), &text);
         let (chunks, sources, through, offset, chars) = batch_chunks(vec![message.clone()], 0, 0);
         assert_eq!(chunks.len(), 1);
         assert_eq!((through, offset, chars), (1, 8_000, 8_000));
@@ -1064,23 +1076,39 @@ mod tests {
     #[test]
     fn terminal_failed_pages_are_skipped_but_open_replies_wait() {
         assert_eq!(
-            classify_message(&message(1, "assistant", "failed", "失敗")),
+            classify_message(&message(
+                1,
+                false,
+                Some(TurnEnd::Failed {
+                    why: "失敗".into()
+                }),
+                "失敗"
+            )),
             EntryClass::Terminal
         );
         assert_eq!(
-            classify_message(&message(2, "assistant", "cancelled", "停止")),
+            classify_message(&message(
+                2,
+                false,
+                Some(TurnEnd::Stopped {
+                    why: None,
+                    at: None,
+                    calls: Vec::new(),
+                }),
+                "停止"
+            )),
             EntryClass::Terminal
         );
         assert_eq!(
-            classify_message(&message(3, "assistant", "incomplete", "未完了")),
+            classify_message(&message(3, false, None, "未完了")),
             EntryClass::Waiting
         );
         assert_eq!(
-            classify_message(&message(4, "user", "completed", "確定した発言")),
+            classify_message(&message(4, true, answered(), "確定した発言")),
             EntryClass::Target
         );
         assert_eq!(
-            classify_message(&message(5, "assistant", "completed", "答えた")),
+            classify_message(&message(5, false, answered(), "答えた")),
             EntryClass::Target
         );
     }
@@ -1088,9 +1116,18 @@ mod tests {
     #[test]
     fn failed_pages_are_passed_until_a_later_confirmed_user_input() {
         let failed = (1..=3)
-            .map(|sequence| message(sequence, "assistant", "failed", "失敗"))
+            .map(|sequence| {
+                message(
+                    sequence,
+                    false,
+                    Some(TurnEnd::Failed {
+                        why: "失敗".into()
+                    }),
+                    "失敗",
+                )
+            })
             .collect::<Vec<_>>();
-        let user = vec![message(4, "user", "completed", "確定した発言")];
+        let user = vec![message(4, true, answered(), "確定した発言")];
         let (targets, terminal, waiting) = scan_page(&failed, 0, 0);
         assert!(targets.is_empty());
         assert_eq!(terminal, Some((3, 2)));
@@ -1103,9 +1140,16 @@ mod tests {
     #[test]
     fn an_open_reply_stops_the_scan_instead_of_being_skipped() {
         let page = vec![
-            message(1, "assistant", "failed", "失敗"),
-            message(2, "assistant", "incomplete", "未完了"),
-            message(3, "user", "completed", "後続"),
+            message(
+                1,
+                false,
+                Some(TurnEnd::Failed {
+                    why: "失敗".into()
+                }),
+                "失敗",
+            ),
+            message(2, false, None, "未完了"),
+            message(3, true, answered(), "後続"),
         ];
         let (targets, terminal, waiting) = scan_page(&page, 0, 0);
         assert!(targets.is_empty());

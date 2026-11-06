@@ -1,5 +1,6 @@
 //! Operation dispatch, completion and activation receipts.
 use super::*;
+use buffa::Message;
 
 impl Devices {
     pub async fn request(
@@ -17,24 +18,30 @@ impl Devices {
         }
         let this = self.clone();
         self.owned(async move {
-            let mut state = this.lock().await?;
-            if let Some(op) = state
-                .journal
-                .operations
-                .iter()
-                .find(|o| o.request.operation_id == request.operation_id)
-            {
+            let state = this.lock().await?;
+            let existing = this
+                .0
+                .store
+                .device_operation(request.operation_id.clone())
+                .await
+                .map_err(|_| unavailable())?;
+            if let Some(op) = existing {
                 if *op.request != request {
                     return Err(conflict());
                 }
-                return Ok(this.current(&state, op));
+                return Ok(this.current(&state, &op));
             }
             permitted(
-                &state.journal,
-                &request.device_id,
+                &this.device(&request.device_id).await?,
                 Some(&request.capability),
             )?;
-            if state.journal.operations.len() >= 2048 {
+            let operations = this
+                .0
+                .store
+                .device_operations()
+                .await
+                .map_err(|_| unavailable())?;
+            if operations >= MAX_OPERATIONS {
                 return Err(ConnectError::resource_exhausted("端末操作履歴の上限です"));
             }
             let connection = state
@@ -61,14 +68,22 @@ impl Devices {
                 subscription_id: subscription_id.clone(),
                 ..Default::default()
             };
-            let mut journal = state.journal.clone();
-            journal.operations.push(w::OperationRecord {
+            let record = w::OperationRecord {
                 request: request.into(),
                 state: result.clone().into(),
                 subscription_id,
                 ..Default::default()
-            });
-            this.commit(&mut state, journal).await?;
+            };
+            if !this
+                .0
+                .store
+                .device_operation_insert(record)
+                .await
+                .map_err(|_| unavailable())?
+            {
+                return Err(conflict());
+            }
+            // The record is durable before the device can see the operation.
             permit.send(command);
             Ok(result)
         })
@@ -93,13 +108,15 @@ impl Devices {
         id: &str,
     ) -> Result<w::DeviceOperationState, ConnectError> {
         let state = self.lock().await?;
-        let op = state
-            .journal
-            .operations
-            .iter()
-            .find(|o| o.request.operation_id == id && o.request.device_id == device_id)
+        let op = self
+            .0
+            .store
+            .device_operation(id.into())
+            .await
+            .map_err(|_| unavailable())?
+            .filter(|op| op.request.device_id == device_id)
             .ok_or_else(missing)?;
-        Ok(self.current(&state, op))
+        Ok(self.current(&state, &op))
     }
     pub async fn complete(
         &self,
@@ -114,17 +131,15 @@ impl Devices {
         }
         let this = self.clone();
         self.owned(async move {
-            let mut state = this.lock().await?;
-            let index = state
-                .journal
-                .operations
-                .iter()
-                .position(|o| {
-                    o.request.operation_id == result.operation_id
-                        && o.request.device_id == result.device_id
-                })
+            let state = this.lock().await?;
+            let previous = this
+                .0
+                .store
+                .device_operation(result.operation_id.clone())
+                .await
+                .map_err(|_| unavailable())?
+                .filter(|op| op.request.device_id == result.device_id)
                 .ok_or_else(missing)?;
-            let previous = &state.journal.operations[index];
             if previous.state.status == w::OperationStatus::Completed {
                 if previous.state.result.as_option() == Some(&result) {
                     return Ok((*previous.state).clone());
@@ -132,11 +147,10 @@ impl Devices {
                 return Err(conflict());
             }
             permitted(
-                &state.journal,
-                &result.device_id,
+                &this.device(&result.device_id).await?,
                 Some(&previous.request.capability),
             )?;
-            if this.current(&state, previous).status != w::OperationStatus::Dispatched
+            if this.current(&state, &previous).status != w::OperationStatus::Dispatched
                 || previous.subscription_id != result.subscription_id
             {
                 return Err(conflict());
@@ -147,9 +161,20 @@ impl Devices {
                 result: result.into(),
                 ..Default::default()
             };
-            let mut journal = state.journal.clone();
-            journal.operations[index].state = response.clone().into();
-            this.commit(&mut state, journal).await?;
+            let record = w::OperationRecord {
+                state: response.clone().into(),
+                ..previous
+            };
+            if !this
+                .0
+                .store
+                .device_operation_complete(record)
+                .await
+                .map_err(|_| unavailable())?
+            {
+                // A revoke or another completion reached the row first.
+                return Err(conflict());
+            }
             Ok(response)
         })
         .await
@@ -162,8 +187,7 @@ impl Devices {
         self.owned(async move {
             let mut state = this.lock().await?;
             permitted(
-                &state.journal,
-                &request.device_id,
+                &this.device(&request.device_id).await?,
                 Some("companion.display"),
             )?;
             if state
@@ -185,19 +209,23 @@ impl Devices {
             } else if request.release {
                 return Err(conflict());
             }
-            let mut journal = state.journal.clone();
-            journal.activation_revision = journal
+            let revision = state
                 .activation_revision
                 .checked_add(1)
                 .ok_or_else(unavailable)?;
+            this.0
+                .store
+                .device_activate(revision)
+                .await
+                .map_err(|_| unavailable())?;
+            state.activation_revision = revision;
             let result = w::Activation {
                 companion_id: request.companion_id,
                 device_id: request.device_id,
-                revision: journal.activation_revision,
+                revision,
                 lease_ms: if request.release { 0 } else { 15_000 },
                 ..Default::default()
             };
-            this.commit(&mut state, journal).await?;
             if request.release {
                 state.activations.remove(&result.companion_id);
             } else {

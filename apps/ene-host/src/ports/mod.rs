@@ -5,6 +5,14 @@ use crate::domain::*;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 pub type Result<T> = std::result::Result<T, Error>;
+/// The result of a request a receipt records. A success is already the type
+/// the API returns; anything else is the body the receipt holds, which only
+/// the API boundary decides how to read.
+pub enum Answer<T> {
+    Success(T),
+    Stored(Outcome, Value),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Pending,

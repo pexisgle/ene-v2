@@ -7,7 +7,7 @@ impl HostApplication {
         {
             let controls = self.0.controls.lock().await;
             for run in controls.running.values() {
-                run.cancel.send_replace(true);
+                run.cancel.cancel();
             }
         }
         self.0.providers.reload().await?;
@@ -60,13 +60,14 @@ impl HostApplication {
             OperationKind::ModelList,
         )?;
         let job = Uuid::new_v4().to_string();
-        let mut cancelled = register(
+        let cancelled = register(
             &mut controls,
             job.clone(),
             companion,
             &p,
             &context,
             OperationKind::ModelList,
+            None,
         );
         let input = invocation(
             self,
@@ -83,12 +84,12 @@ impl HostApplication {
             let result = tokio::select! {
                 biased;
                 _ = reply.closed() => Err(Error::new(ErrorKind::PermissionRequired)),
-                result = execute(&app, OperationKind::ModelList, &mut cancelled, input.models()) => result,
+                result = execute(&app, OperationKind::ModelList, &cancelled, input.models()) => result,
             };
             let mut controls = app.0.controls.lock().await;
             let result = result.and_then(|models| { check_run(&app, &controls, &job)?; Ok(models) });
             // The final authority check, removal and reply are one serialized completion.
-            if let Some(run) = controls.running.remove(&job) { run.cancel.send_replace(true); }
+            if let Some(run) = controls.running.remove(&job) { run.cancel.cancel(); }
             let _ = reply.send(result);
         });
         drop(controls);

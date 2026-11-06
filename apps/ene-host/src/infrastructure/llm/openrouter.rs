@@ -2,7 +2,11 @@
 //! wire. Route selection and provider credentials stay OpenRouter's own; they
 //! are not reused from the OpenAI connection.
 
-use crate::{domain::Connection, llm::*, ports::Result};
+use crate::{
+    domain::{Connection, Error, ErrorKind},
+    llm::*,
+    ports::Result,
+};
 use futures_util::future::BoxFuture;
 use rig_core::operation::Completion;
 use rig_core::providers::openai::OpenAIConfig;
@@ -96,6 +100,28 @@ impl LlmProvider for Provider {
             Ok(models)
         })
     }
+}
+
+/// The task stream's model on Rig's native chat wire.
+pub(crate) fn task_stream(
+    outbound: Arc<Outbound>,
+    request: rig_core::completion::CompletionRequest,
+) -> BoxFuture<'static, Result<rig_core::streaming::CompletionStream>> {
+    Box::pin(async move {
+        let model = request.model.clone().ok_or_else(Error::invalid)?;
+        let endpoint = outbound.connection().endpoint.clone();
+        let transport = crate::llm::AuthorizedTransport::for_outbound(
+            outbound,
+            crate::llm::CredentialPlacement::Bearer,
+        )?;
+        let client = OpenAIConfig::with_key(&OPENROUTER, "managed-by-host")
+            .with_base_url(endpoint)
+            .connect(transport);
+        client
+            .chat(model)
+            .stream(request)
+            .map_err(|_| Error::new(ErrorKind::ProviderFailure))
+    })
 }
 
 /// The parent conversation's OpenRouter model on Rig's native chat wire.

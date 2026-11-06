@@ -1,6 +1,8 @@
 //! Host invocation path: one binding, one operation, validated events and services.
 use super::sessions::{ActiveInvocation, Session, SessionState};
-use super::{Manager, conflict, failure, invocation_failure, storage_failure, unsupported};
+use super::{
+    Answer, Completed, Manager, conflict, failure, invocation_failure, storage_failure, unsupported,
+};
 use crate::infrastructure::workspace::Workspace;
 use crate::{
     domain::{Error, ErrorKind, harness::Session as HarnessSession},
@@ -11,7 +13,7 @@ use ene_plugin_runtime::{
     instance::{Instance, Services},
     limits::{MAX_EVENTS, MAX_MESSAGE_BYTES, MAX_SESSIONS, MAX_STREAM_BYTES},
 };
-use ene_rpc::{PluginBinding, PluginInvocation, PluginResult};
+use ene_rpc::PluginBinding;
 use futures_util::{TryFutureExt, future::BoxFuture};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,23 +25,23 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 impl Manager {
+    /// Runs one operation of a bound plugin. The operation is already the host's
+    /// own type: only the Connect API decodes it from a document.
     pub async fn invoke(
         &self,
-        input: PluginInvocation,
+        binding_id: &str,
+        operation: Operation,
         mutations: Arc<dyn Mutations>,
-    ) -> Result<PluginResult> {
+    ) -> Result<Completed> {
         // The binding read and the session it produces must not straddle a rebind.
         let binding_lock = self.binding.lock().await;
-        let binding: PluginBinding = serde_json::from_value(
-            self.store
-                .plugin_get("bindings".into(), input.binding_id)
-                .await
-                .map_err(storage_failure)?,
-        )
-        .map_err(failure)?;
+        let binding = self
+            .store
+            .plugin_get::<PluginBinding>("bindings".into(), binding_id.into())
+            .await
+            .map_err(storage_failure)?
+            .ok_or_else(|| failure("no such binding"))?;
         let entry = self.ready(&binding.plugin_id, Some(&binding.revision))?;
-        let operation: Operation =
-            serde_json::from_str(&input.operation.json).map_err(|_| Error::invalid())?;
         let endpoint = entry.package.entry(&binding.entrypoint).map_err(failure)?;
         if !endpoint.provides.contains(&operation.extension())
             || matches!(
@@ -154,11 +156,10 @@ impl Manager {
                 })?;
             session.retain = false;
             session.take();
-            return Ok(PluginResult {
+            return Ok(Completed {
                 generation: entry.generation,
                 events: harness_terminal(&journal),
-                result: ene_rpc::JsonDocument::from(super::harness_result(&journal)).into(),
-                ..Default::default()
+                answer: Answer::Harness(Box::new(journal)),
             });
         }
         let cancel = lifetime.child_token();
@@ -222,7 +223,7 @@ impl Manager {
             let work = worker
                 .invoke(operation, services, tx, &cancel)
                 .map_err(invocation_failure);
-            let (events, result, journal) = if let Some(journal) = journal {
+            let (events, answer) = if let Some(journal) = journal {
                 let manager = self.clone();
                 let binding_id = binding.id.clone();
                 let stop = cancel.clone();
@@ -268,8 +269,7 @@ impl Manager {
                 let (worked, applied) = tokio::join!(work, applier);
                 let (journal, events) = applied?;
                 worked?;
-                let result = super::harness_result(&journal);
-                (events, result, Some(journal))
+                (events, Answer::Harness(Box::new(journal)))
             } else {
                 let collect = async move {
                     let mut events = Vec::new();
@@ -284,7 +284,7 @@ impl Manager {
                     Ok::<_, Error>(events)
                 };
                 let (events, result) = tokio::try_join!(collect, work)?;
-                (events, result, None::<HarnessSession>)
+                (events, Answer::Guest(result))
             };
             validation.check().await.map_err(|failure| {
                 if failure.code == "state_unavailable" {
@@ -300,17 +300,17 @@ impl Manager {
             {
                 return Err(conflict());
             }
-            Ok((generation, events, result, journal))
+            Ok((generation, events, answer))
         }
         .await;
         let rejected = rejected.load(Ordering::Relaxed);
         let terminal = matches!(
             &outcome,
-            Ok((_, _, _, Some(journal))) if journal.terminal()
+            Ok((_, _, Answer::Harness(journal))) if journal.terminal()
         );
         let stalled = matches!(
             &outcome,
-            Ok((_, _, _, Some(journal))) if !journal.terminal() && journal.pending.is_none()
+            Ok((_, _, Answer::Harness(journal))) if !journal.terminal() && journal.pending.is_none()
         );
         if stopping || terminal || stalled || outcome.is_err() || cancel.is_cancelled() {
             session.take();
@@ -332,37 +332,26 @@ impl Manager {
             }
             return Err(outcome.err().unwrap_or_else(conflict));
         }
-        let (instance_generation, events, result, _) = outcome?;
+        let (instance_generation, events, answer) = outcome?;
         session.retain = !stopping && !terminal;
-        Ok(PluginResult {
+        Ok(Completed {
             generation: instance_generation,
-            events: events
-                .into_iter()
-                .map(|event| {
-                    serde_json::to_value(event)
-                        .map(ene_rpc::JsonDocument::from)
-                        .map_err(failure)
-                })
-                .collect::<Result<_>>()?,
-            result: ene_rpc::JsonDocument::from(result).into(),
-            ..Default::default()
+            events,
+            answer,
         })
     }
 }
 
-fn harness_terminal(journal: &HarnessSession) -> Vec<ene_rpc::JsonDocument> {
+fn harness_terminal(journal: &HarnessSession) -> Vec<Event> {
     journal
         .events
         .iter()
         .rev()
         .find(|event| matches!(event, HarnessEvent::Stop { .. }))
         .map(|event| {
-            vec![ene_rpc::JsonDocument::from(
-                serde_json::to_value(Event::Harness {
-                    event: event.clone(),
-                })
-                .expect("serializable harness event"),
-            )]
+            vec![Event::Harness {
+                event: event.clone(),
+            }]
         })
         .unwrap_or_default()
 }
@@ -387,10 +376,10 @@ impl Services for LocalServices {
             let current = self
                 .manager
                 .store
-                .plugin_get("bindings".into(), self.binding.id.clone())
+                .plugin_get::<PluginBinding>("bindings".into(), self.binding.id.clone())
                 .await
                 .map_err(|_| Failure::new("state_unavailable"))?;
-            if current != serde_json::to_value(&self.binding).unwrap_or_default() {
+            if current.as_ref() != Some(&self.binding) {
                 return Err(Failure::new("revoked"));
             }
             Ok(())
@@ -425,8 +414,9 @@ impl Services for LocalServices {
                 ServiceRequest::StateRead { key } if valid_key(&key) => self
                     .manager
                     .store
-                    .plugin_get(namespace, key)
+                    .plugin_get::<Value>(namespace, key)
                     .await
+                    .map(Option::unwrap_or_default)
                     .map_err(|_| Failure::new("state_unavailable")),
                 ServiceRequest::Tool { name, arguments } => {
                     let root = self

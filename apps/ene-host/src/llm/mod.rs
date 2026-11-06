@@ -5,7 +5,6 @@ use crate::domain::{
 use crate::ports::Result;
 pub use ene_rpc::{Model, Provider as Descriptor, ProviderCapabilities as Capabilities};
 use futures_util::{future::BoxFuture, stream::BoxStream};
-use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -35,30 +34,24 @@ impl Policy {
         self
     }
 }
-#[derive(Clone, Debug, Serialize)]
-pub struct EmbeddingRequest {
-    pub model: String,
-    pub input: Vec<String>,
-}
+/// The model id the index embeds with. The vector store records it with every
+/// vector, so a different model never shares a space.
+pub(crate) const EMBEDDING_MODEL: &str = "text-embedding-3-small";
 
-#[derive(Clone, Debug)]
-pub struct Embedding {
-    pub vectors: Vec<Vec<f32>>,
-    pub input_tokens: u64,
-}
+/// A builtin adapter's native Rig wire, built by the adapter that owns it.
+/// Only the built-in registry attaches one, so injected test providers and
+/// Wasm guests keep their own text stream.
+pub(crate) type NativeStream =
+    fn(
+        Arc<Outbound>,
+        rig_core::completion::CompletionRequest,
+    ) -> BoxFuture<'static, Result<rig_core::streaming::CompletionStream>>;
 
-/// Native Rig provider routes. Only the built-in registry can mark a binding
-/// native, so injected test providers and Wasm guests keep their own behavior.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NativeWire {
-    OpenAiResponses,
-    OpenRouterChat,
-}
 #[derive(Clone)]
 pub struct ProviderBinding {
     provider: Arc<dyn LlmProvider>,
     policy: Policy,
-    native: Option<NativeWire>,
+    native: Option<NativeStream>,
 }
 impl ProviderBinding {
     /// Registry resolves a concrete implementation and its policy together.
@@ -74,11 +67,11 @@ impl ProviderBinding {
     pub fn policy(&self) -> &Policy {
         &self.policy
     }
-    pub(crate) fn with_native(mut self, wire: NativeWire) -> Self {
-        self.native = Some(wire);
+    pub(crate) fn with_native(mut self, native: NativeStream) -> Self {
+        self.native = Some(native);
         self
     }
-    pub(crate) fn native(&self) -> Option<NativeWire> {
+    pub(crate) fn native(&self) -> Option<NativeStream> {
         self.native
     }
     pub(crate) fn provider(&self) -> Arc<dyn LlmProvider> {
@@ -133,7 +126,10 @@ pub trait LlmProvider: Send + Sync {
         Box::pin(async { Err(Error::new(ErrorKind::UnsupportedCapability)) })
     }
     fn models(&self, invocation: Invocation) -> BoxFuture<'_, Result<Vec<Model>>>;
-    fn embed(&self, _: Invocation) -> BoxFuture<'_, Result<crate::llm::Embedding>> {
+    fn embed(
+        &self,
+        _: Invocation,
+    ) -> BoxFuture<'_, Result<rig_core::embeddings::EmbeddingResponse>> {
         Box::pin(async { Err(Error::new(ErrorKind::UnsupportedCapability)) })
     }
 }
@@ -246,13 +242,13 @@ mod contract_tests {
         let binding = ProviderBinding::resolve(Arc::new(minimal_provider()), &connection).unwrap();
         let original = Arc::new(Permission(AtomicBool::new(true)));
         let runtime = Arc::new(Permission(AtomicBool::new(true)));
-        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let invocation = Invocation::new(
             connection,
             InvocationInput::ModelList,
             None,
             original.clone(),
-            receiver,
+            cancel,
             binding,
         )
         .restrict(runtime.clone());

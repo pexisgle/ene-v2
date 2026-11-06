@@ -49,7 +49,7 @@ pub struct PendingPermission {
     pub options: Vec<PermissionOption>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
     pub contract_version: u32,

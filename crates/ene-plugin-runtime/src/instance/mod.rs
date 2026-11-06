@@ -22,7 +22,9 @@ pub struct Instance {
     entrypoint: String,
     generation: u64,
     permit: Arc<OwnedSemaphorePermit>,
-    pub capabilities: Value,
+    /// What a provider entry declared at `ene_initialize`; guests that are not
+    /// providers declare nothing the host reads.
+    pub capabilities: Option<LlmCapabilities>,
 }
 fn extension_timeout(extension: Extension) -> Duration {
     if extension == Extension::Harness {
@@ -119,7 +121,7 @@ impl Instance {
                 entrypoint,
                 generation,
                 permit: Arc::new(permit),
-                capabilities: Value::Null,
+                capabilities: None,
             })
         });
         let mut instance = tokio::select! { biased;
@@ -237,9 +239,10 @@ impl Instance {
     pub fn generation(&self) -> u64 {
         self.generation
     }
-    /// Run the guest's initialization hook and validate its declared capabilities.
+    /// Run the guest's initialization hook. A provider entry declares its
+    /// capabilities here; they are decoded once and the document is dropped.
     pub async fn initialize(&mut self, cancel: &CancellationToken) -> Result<()> {
-        self.capabilities = self
+        let document = self
             .call(
                 "ene_initialize",
                 b"{}".to_vec(),
@@ -248,17 +251,14 @@ impl Instance {
                 INITIALIZE_TIMEOUT,
             )
             .await?;
-        if self
-            .package
-            .entry(&self.entrypoint)?
-            .provides
-            .contains(&Extension::Llm)
-        {
-            let capabilities: LlmCapabilities = serde_json::from_value(self.capabilities.clone())?;
-            if !capabilities.streaming_text {
-                return Err(Error::Unsupported);
-            }
+        if self.package.entry(&self.entrypoint)?.provider.is_none() {
+            return Ok(());
         }
+        let capabilities: LlmCapabilities = serde_json::from_value(document)?;
+        if !capabilities.streaming_text {
+            return Err(Error::Unsupported);
+        }
+        self.capabilities = Some(capabilities);
         Ok(())
     }
 }

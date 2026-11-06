@@ -3,7 +3,7 @@ use super::generation::{authorize, config, execute, invocation, register};
 use super::*;
 use crate::{
     domain::rules,
-    llm::{Embedding, EmbeddingRequest, Event, InvocationInput},
+    llm::{Event, InvocationInput},
     ports::inference::TaskInference,
 };
 use futures_util::{FutureExt, StreamExt, future::BoxFuture};
@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 const MAX_TASK_TOKENS: u64 = 8192;
 /// The one embedding model the built-in OpenAI adapter knows how to price and
 /// store. Its version is part of the vector index key.
-pub(crate) const EMBEDDING_MODEL: &str = "text-embedding-3-small";
 /// The structured output of a host memory call. The finish reason is kept so
 /// a truncated reply is not parsed as a valid no-change decision.
 pub(crate) struct InferenceOutput {
@@ -153,46 +152,34 @@ impl HostApplication {
                 reason: Some("input_limit"),
             });
         }
-        let receiver = register(
+        // The run's token is a child of the caller's, so the runtime dropping
+        // the future and the host revoking the run both stop the outbound call.
+        let cancelled = register(
             &mut controls,
             id.clone(),
             companion_id.clone(),
             &connection,
             &context,
             operation,
+            Some(&cancel),
         );
-        let mut cancelled = receiver.clone();
-        let sender = controls
-            .running
-            .get(&id)
-            .map(|running| running.cancel.clone())
-            .ok_or_else(Error::unavailable)?;
         drop(controls);
         let _guard = RunGuard {
             app: self.clone(),
             id: id.clone(),
         };
-        // The runtime drops the service future on cancellation; forward the
-        // token into the provider's watch channel so the outbound call stops.
-        let forward = tokio::spawn({
-            let token = cancel.clone();
-            async move {
-                token.cancelled().await;
-                let _ = sender.send(true);
-            }
-        });
         let input = invocation(
             self,
             connection,
             context,
             id,
             InvocationInput::Task(request),
-            receiver,
+            cancelled.clone(),
         );
         let output_bytes = operation.spec().output_bytes;
         let work = async move {
             let mut text = String::new();
-            let finish = if input.native_wire().is_some() {
+            let finish = if input.is_native() {
                 // Rig decodes the native stream; no host event translation.
                 use rig_core::streaming::{Item, StreamEvent};
                 let mut stream = input.native_stream().await?;
@@ -239,9 +226,7 @@ impl HostApplication {
             };
             Ok(InferenceOutput { text, finish })
         };
-        let result = execute(self, operation, &mut cancelled, work).await;
-        forward.abort();
-        result
+        execute(self, operation, &cancelled, work).await
     }
 }
 
@@ -253,7 +238,7 @@ impl HostApplication {
         &self,
         companion_id: &str,
         input: Vec<String>,
-    ) -> Result<Embedding, Error> {
+    ) -> Result<Vec<Vec<f32>>, Error> {
         if input.is_empty()
             || input.len() > MAX_EMBEDDING_INPUTS
             || input
@@ -294,32 +279,30 @@ impl HostApplication {
             &connection,
             OperationKind::Embedding,
         )?;
-        let receiver = register(
+        let cancelled = register(
             &mut controls,
             id.clone(),
             companion_id.to_owned(),
             &connection,
             &context,
             OperationKind::Embedding,
+            None,
         );
-        let mut cancelled = receiver.clone();
         drop(controls);
         let _guard = RunGuard {
             app: self.clone(),
             id: id.clone(),
         };
+        let expected = input.len();
         let input = invocation(
             self,
             connection,
             context,
             id,
-            InvocationInput::Embedding(EmbeddingRequest {
-                model: EMBEDDING_MODEL.into(),
-                input,
-            }),
-            receiver,
+            InvocationInput::Embedding(input),
+            cancelled.clone(),
         );
-        let embedding = execute(self, OperationKind::Embedding, &mut cancelled, async move {
+        let response = execute(self, OperationKind::Embedding, &cancelled, async move {
             input.embed().await
         })
         .await?;
@@ -328,13 +311,41 @@ impl HostApplication {
             .repository
             .mind_record_embedding(
                 companion_id.to_owned(),
-                EMBEDDING_MODEL.into(),
-                embedding.input_tokens,
+                crate::llm::EMBEDDING_MODEL.into(),
+                response.usage.input_tokens.unwrap_or_default(),
                 super::mind::now(),
             )
             .await;
-        Ok(embedding)
+        embedding_vectors(response, expected)
     }
+}
+
+/// The vectors of a response as the vector store keeps them: f64 becomes f32
+/// here, once, and a shape the store could not line up with the inputs is
+/// rejected instead of being written short.
+fn embedding_vectors(
+    response: rig_core::embeddings::EmbeddingResponse,
+    expected: usize,
+) -> Result<Vec<Vec<f32>>, Error> {
+    let vectors = response
+        .embeddings
+        .into_iter()
+        .map(|embedding| {
+            embedding
+                .vec
+                .into_iter()
+                .map(|value| value as f32)
+                .collect::<Vec<f32>>()
+        })
+        .collect::<Vec<_>>();
+    let dimension = vectors.first().map(Vec::len).unwrap_or_default();
+    if vectors.len() != expected
+        || dimension == 0
+        || vectors.iter().any(|vector| vector.len() != dimension)
+    {
+        return Err(Error::new(ErrorKind::ExternalFailure));
+    }
+    Ok(vectors)
 }
 
 fn model_unset() -> Error {

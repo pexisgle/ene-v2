@@ -1,7 +1,7 @@
 //! Internal fixtures for hostile adapter/protocol contract tests.
 use super::*;
 use crate::ports::Secret;
-use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 /// A provider that answers no request; policy and transport contracts use it.
 pub struct TestProvider(pub Policy);
@@ -22,7 +22,7 @@ pub struct InvocationFixture {
     pub request: Option<rig_core::completion::CompletionRequest>,
     pub secret: Option<Secret>,
     pub authorization: Arc<dyn Authorization>,
-    pub cancel: watch::Receiver<bool>,
+    pub cancel: CancellationToken,
     pub operation: OperationKind,
 }
 impl InvocationFixture {
@@ -39,10 +39,7 @@ impl InvocationFixture {
             OperationKind::Task | OperationKind::Consolidation => {
                 InvocationInput::Task(self.request.expect("task fixture generation"))
             }
-            OperationKind::Embedding => InvocationInput::Embedding(EmbeddingRequest {
-                model: "fixture".into(),
-                input: vec!["fixture".into()],
-            }),
+            OperationKind::Embedding => InvocationInput::Embedding(vec!["fixture".into()]),
         };
         Invocation::new(
             self.connection,

@@ -13,6 +13,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use tokio_util::sync::CancellationToken;
 fn bundle() -> Bundle {
     Bundle {
         name: "Fixture".into(),
@@ -143,12 +144,10 @@ impl Authorization for Permit {
         })
     }
 }
-fn invocation(
-    authorization: Arc<dyn Authorization>,
-) -> (tokio::sync::watch::Sender<bool>, InvocationFixture) {
-    let (cancel, receiver) = tokio::sync::watch::channel(false);
+fn invocation(authorization: Arc<dyn Authorization>) -> (CancellationToken, InvocationFixture) {
+    let cancel = CancellationToken::new();
     (
-        cancel,
+        cancel.clone(),
         InvocationFixture {
             connection: Connection {
                 id: "c".into(),
@@ -169,7 +168,7 @@ fn invocation(
             operation: OperationKind::Conversation,
             secret: None,
             authorization,
-            cancel: receiver,
+            cancel,
         },
     )
 }

@@ -14,7 +14,7 @@ pub struct GenerationRequest {
     pub max_tokens: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlmCapabilities {
     pub streaming_text: bool,

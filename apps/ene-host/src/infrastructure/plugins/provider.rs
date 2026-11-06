@@ -172,7 +172,7 @@ impl ProviderServices {
 impl Services for ProviderServices {
     fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
         Box::pin(async {
-            if *self.input.cancellation().borrow() {
+            if self.input.cancellation().is_cancelled() {
                 return Err(Failure::new("cancelled"));
             }
             self.input
@@ -224,7 +224,7 @@ impl Provider {
         let entry = self.manager.ready(&package_id, None)?;
         let bundle = self.manager.provider_bundle(&self.id)?;
         bundle.policy(input.connection())?;
-        let mut watch = input.cancellation();
+        let invocation_cancel = input.cancellation();
         let input = Arc::new(input.restrict(Arc::new(ScopedAuthorization {
             manager: self.manager.clone(),
             package_id: package_id.clone(),
@@ -293,7 +293,7 @@ impl Provider {
                 let cancellation = async {
                     tokio::select! {
                         _ = cancel.cancelled() => {},
-                        _ = watch.wait_for(|v| *v) => {},
+                        _ = invocation_cancel.cancelled() => {},
                     }
                 };
                 let result = tokio::select! { biased;
@@ -307,6 +307,7 @@ impl Provider {
                     let _ = out.try_send(Err(error));
                 }
             })
+            .await
             .map_err(failure)?;
         Ok(Box::pin(
             async_stream::stream! {while let Some(event)=output.recv().await {yield event;}},
@@ -416,7 +417,7 @@ impl LlmProvider for Provider {
             if entry
                 .capabilities
                 .get(&entrypoint)
-                .is_some_and(|c| c["model_list"] == false)
+                .is_some_and(|c| !c.model_list)
             {
                 self.policy(input.connection())?;
                 input.authorization().check().await?;

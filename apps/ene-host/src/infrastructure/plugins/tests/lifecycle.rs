@@ -1,5 +1,5 @@
 use super::*;
-use ene_plugin::Operation;
+use ene_plugin::{Operation, StopReason};
 use std::time::Duration;
 
 async fn invoke(manager: &Manager, input: HarnessInput) -> Result<PluginResult> {
@@ -62,20 +62,11 @@ async fn shutdown_waits_for_disable_after_the_rpc_waiter_is_dropped() {
         .unwrap()
         .unwrap()
         .unwrap();
-    let saved = manager
-        .store
-        .plugin_get("enabled".into(), "reference".into())
-        .await
-        .unwrap();
-    let saved: EnablePluginRequest = serde_json::from_value(saved["input"].clone()).unwrap();
+    let saved = enabled_record(&manager, "reference").await;
     assert!(!saved.enabled);
     assert_eq!(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap()["status"],
-        "failed"
+        stored_harness(&manager, "task").await.status,
+        HarnessStatus::Failed
     );
     assert!(manager.sessions.lock().unwrap().is_empty());
     assert_eq!(
@@ -89,11 +80,7 @@ async fn rejected_harness_inputs_preserve_the_pending_guest_and_journal() {
     let (manager, _temp, _) = pending().await;
     let session = manager.sessions.lock().unwrap()["task"].clone();
     let generation = session.worker.lock().await.as_ref().unwrap().generation();
-    let before = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
+    let before = stored_harness(&manager, "task").await;
     for (input, kind) in [
         (task_start("duplicate"), ErrorKind::StateConflict),
         (
@@ -114,14 +101,7 @@ async fn rejected_harness_inputs_preserve_the_pending_guest_and_journal() {
         ),
     ] {
         assert_eq!(invoke(&manager, input).await.unwrap_err().kind, kind);
-        assert_eq!(
-            manager
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap(),
-            before
-        );
+        assert_eq!(stored_harness(&manager, "task").await, before);
         assert!(Arc::ptr_eq(
             &manager.sessions.lock().unwrap()["task"],
             &session
@@ -135,44 +115,22 @@ async fn rejected_harness_inputs_preserve_the_pending_guest_and_journal() {
 #[tokio::test]
 async fn rebind_finishes_the_old_harness_before_starting_another() {
     let (manager, _temp, mut binding) = pending().await;
-    let old = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
+    let old = stored_harness(&manager, "task").await;
     binding.configuration = document(json!({"changed": true})).into();
     manager.bind(binding.clone()).await.unwrap();
     assert!(manager.sessions.lock().unwrap().is_empty());
-    let saved = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(saved["session_id"], old["session_id"]);
-    assert_eq!(saved["status"], "failed");
-    assert_eq!(saved["failure"], "plugin_stopped");
-    assert!(saved["pending"].is_null());
-    assert_eq!(
-        saved["events"].as_array().unwrap().len(),
-        old["events"].as_array().unwrap().len()
-    );
+    let saved = stored_harness(&manager, "task").await;
+    assert_eq!(saved.session_id, old.session_id);
+    assert_eq!(saved.status, HarnessStatus::Failed);
+    assert_eq!(saved.failure.as_deref(), Some("plugin_stopped"));
+    assert!(saved.pending.is_none());
+    assert_eq!(saved.events.len(), old.events.len());
     manager.bind(binding).await.unwrap();
-    assert_eq!(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap(),
-        saved
-    );
+    assert_eq!(stored_harness(&manager, "task").await, saved);
     invoke(&manager, task_start("new task")).await.unwrap();
     assert_ne!(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap()["session_id"],
-        old["session_id"]
+        stored_harness(&manager, "task").await.session_id,
+        old.session_id
     );
     manager.shutdown().await.unwrap();
 }
@@ -184,11 +142,7 @@ async fn terminal_storage_failures_are_reported_and_retriable() {
     ] {
         let (manager, _temp, mut binding) = pending().await;
         let app = application(&manager);
-        let before = manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap();
+        let before = stored_harness(&manager, "task").await;
         manager.store.run(|db| {
             db.execute_batch("CREATE TEMP TRIGGER reject_harness BEFORE UPDATE ON plugin_records WHEN OLD.namespace='harness' AND NEW.value != OLD.value BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;")?;
             Ok(())
@@ -221,14 +175,7 @@ async fn terminal_storage_failures_are_reported_and_retriable() {
             ErrorKind::StorageFailure,
             "{ending}"
         );
-        assert_eq!(
-            manager
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap(),
-            before
-        );
+        assert_eq!(stored_harness(&manager, "task").await, before);
         let session = manager.sessions.lock().unwrap()["task"].clone();
         if ending != "invoke" {
             assert!(session.lifetime.is_cancelled());
@@ -250,27 +197,13 @@ async fn terminal_storage_failures_are_reported_and_retriable() {
             .unwrap();
         app.stop().await.unwrap();
         assert!(manager.sessions.lock().unwrap().is_empty());
-        let saved = manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap();
-        assert_eq!(saved["status"], "failed");
-        assert_eq!(saved["failure"], "plugin_stopped");
-        assert!(saved["pending"].is_null());
-        assert_eq!(
-            saved["events"].as_array().unwrap().len(),
-            before["events"].as_array().unwrap().len()
-        );
+        let saved = stored_harness(&manager, "task").await;
+        assert_eq!(saved.status, HarnessStatus::Failed);
+        assert_eq!(saved.failure.as_deref(), Some("plugin_stopped"));
+        assert!(saved.pending.is_none());
+        assert_eq!(saved.events.len(), before.events.len());
         app.stop().await.unwrap();
-        assert_eq!(
-            manager
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap(),
-            saved
-        );
+        assert_eq!(stored_harness(&manager, "task").await, saved);
     }
 }
 
@@ -309,24 +242,13 @@ async fn cancel_can_be_retried_after_storage_recovers() {
     );
     recover_writes(&manager).await;
     let retry = app.invoke_plugin(cancel_request()).await.unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "cancelled");
-    assert!(journal["pending"].is_null());
+    let journal = stored_harness(&manager, "task").await;
+    assert_eq!(journal.status, HarnessStatus::Cancelled);
+    assert!(journal.pending.is_none());
     assert!(manager.sessions.lock().unwrap().is_empty());
     let confirmed = app.invoke_plugin(cancel_request()).await.unwrap();
     assert_eq!(retry.result.json, confirmed.result.json);
-    assert_eq!(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap(),
-        journal
-    );
+    assert_eq!(stored_harness(&manager, "task").await, journal);
     assert_eq!(
         app.stop().await.unwrap_err().kind,
         ErrorKind::StorageFailure
@@ -359,13 +281,9 @@ async fn rebind_recovers_a_task_after_failed_shutdown_and_restart() {
         let app = application(&restarted);
         if recover_at_start {
             app.restore_plugins().await.unwrap();
-            let journal = restarted
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap();
-            assert_eq!(journal["status"], "failed");
-            assert_eq!(journal["failure"], "host_interrupted");
+            let journal = stored_harness(&restarted, "task").await;
+            assert_eq!(journal.status, HarnessStatus::Failed);
+            assert_eq!(journal.failure.as_deref(), Some("host_interrupted"));
         } else {
             restarted
                 .enable(
@@ -381,20 +299,16 @@ async fn rebind_recovers_a_task_after_failed_shutdown_and_restart() {
         }
         assert!(restarted.ready("reference", None).is_ok());
         restarted.bind(binding).await.unwrap();
-        let journal = restarted
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap();
-        assert_eq!(journal["status"], "failed");
-        assert!(journal["pending"].is_null());
+        let journal = stored_harness(&restarted, "task").await;
+        assert_eq!(journal.status, HarnessStatus::Failed);
+        assert!(journal.pending.is_none());
         let retry = invoke(&restarted, task_start("after restart")).await;
         app.stop().await.unwrap();
         assert!(
             retry.is_ok(),
-            "rebind after restart left an orphan task: {:?}, journal={}",
+            "rebind after restart left an orphan task: {:?}, journal={:?}",
             retry.err(),
-            journal["status"]
+            journal.status
         );
     }
 }
@@ -403,11 +317,7 @@ async fn rebind_recovers_a_task_after_failed_shutdown_and_restart() {
 async fn wrong_extension_does_not_destroy_pending_harness() {
     let (manager, _temp, binding) = pending().await;
     let app = application(&manager);
-    let before = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
+    let before = stored_harness(&manager, "task").await;
     let session = manager.sessions.lock().unwrap()["task"].clone();
     let generation = session.worker.lock().await.as_ref().unwrap().generation();
     let rejected = app
@@ -432,11 +342,7 @@ async fn wrong_extension_does_not_destroy_pending_harness() {
         &manager.sessions.lock().unwrap()["task"],
         &session
     ));
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
+    let journal = stored_harness(&manager, "task").await;
     assert_eq!(journal, before);
     let retry = invoke(&manager, allow()).await.unwrap();
     assert_eq!(retry.generation, generation);
@@ -502,7 +408,9 @@ async fn shutdown_waits_for_guest_state_write() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 if tokio::time::timeout(
                     Duration::from_millis(100),
-                    manager.store.plugin_get("probe".into(), "probe".into()),
+                    manager
+                        .store
+                        .plugin_get::<Value>("probe".into(), "probe".into()),
                 )
                 .await
                 .is_err()
@@ -528,14 +436,15 @@ async fn shutdown_waits_for_guest_state_write() {
             result.unwrap();
         }
         assert!(request.await.unwrap().is_err());
-        let saved = manager
+        let saved: Value = manager
             .store
             .plugin_get(
                 format!("state:reference:behavior:{companion}"),
                 "visits".into(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .unwrap_or_default();
         assert_eq!(saved, if fail_write { Value::Null } else { json!(1) });
     }
 }
@@ -547,11 +456,7 @@ async fn startup_recovery_reports_storage_failure_and_preserves_terminal_tasks()
         if terminal {
             invoke(&manager, HarnessInput::Cancel).await.unwrap();
         }
-        let before = manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap();
+        let before = stored_harness(&manager, "task").await;
         let restarted = reopen(&manager, &temp).await;
         drop(manager);
         let app = application(&restarted);
@@ -563,37 +468,19 @@ async fn startup_recovery_reports_storage_failure_and_preserves_terminal_tasks()
             assert_eq!(restored.unwrap_err().kind, ErrorKind::StorageFailure);
             assert!(restarted.ready("reference", None).is_err());
         }
-        assert_eq!(
-            restarted
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap(),
-            before
-        );
+        assert_eq!(stored_harness(&restarted, "task").await, before);
         recover_writes(&restarted).await;
         app.restore_plugins().await.unwrap();
-        let recovered = restarted
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap();
+        let recovered = stored_harness(&restarted, "task").await;
         if terminal {
             assert_eq!(recovered, before);
         } else {
-            assert_eq!(recovered["status"], "failed");
-            assert_eq!(recovered["failure"], "host_interrupted");
-            assert!(recovered["pending"].is_null());
+            assert_eq!(recovered.status, HarnessStatus::Failed);
+            assert_eq!(recovered.failure.as_deref(), Some("host_interrupted"));
+            assert!(recovered.pending.is_none());
         }
         app.restore_plugins().await.unwrap();
-        assert_eq!(
-            restarted
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap(),
-            recovered
-        );
+        assert_eq!(stored_harness(&restarted, "task").await, recovered);
         app.stop().await.unwrap();
     }
 }
@@ -634,23 +521,12 @@ async fn respond_without_a_live_guest_is_rejected() {
         .harness_apply(&binding.id, &mut journal, &permission)
         .await
         .unwrap();
-    let before = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
+    let before = stored_harness(&manager, "task").await;
     assert_eq!(
         invoke(&manager, allow()).await.unwrap_err().kind,
         ErrorKind::StateConflict
     );
-    assert_eq!(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap(),
-        before
-    );
+    assert_eq!(stored_harness(&manager, "task").await, before);
     assert!(manager.sessions.lock().unwrap().is_empty());
     manager.shutdown().await.unwrap();
 }
@@ -669,16 +545,12 @@ async fn a_denied_permission_fails_the_task() {
     )
     .await
     .unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
+    let journal = stored_harness(&manager, "task").await;
     assert_eq!(result.events.len(), 1);
-    assert_eq!(journal["status"], "failed");
-    assert_eq!(journal["failure"], "refusal");
-    assert_eq!(journal["stop_reason"], "refusal");
-    assert!(journal["pending"].is_null());
+    assert_eq!(journal.status, HarnessStatus::Failed);
+    assert_eq!(journal.failure.as_deref(), Some("refusal"));
+    assert_eq!(journal.stop_reason, Some(StopReason::Refusal));
+    assert!(journal.pending.is_none());
     manager.shutdown().await.unwrap();
 }
 
@@ -697,14 +569,10 @@ async fn an_event_that_cannot_be_persisted_fails_the_turn() {
         invoke(&manager, allow()).await.unwrap_err().kind,
         ErrorKind::StorageFailure
     );
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "failed");
-    assert_eq!(journal["failure"], "invocation_failed");
-    assert!(journal["pending"].is_null());
+    let journal = stored_harness(&manager, "task").await;
+    assert_eq!(journal.status, HarnessStatus::Failed);
+    assert_eq!(journal.failure.as_deref(), Some("invocation_failed"));
+    assert!(journal.pending.is_none());
     assert!(manager.sessions.lock().unwrap().is_empty());
     manager
         .store
@@ -742,10 +610,11 @@ async fn a_legacy_journal_is_not_resumed_or_rewritten() {
         .harness_stop("task", "host_interrupted")
         .await
         .unwrap();
-    let journal = manager
+    let journal: Value = manager
         .store
         .plugin_get("harness".into(), "task".into())
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(journal["task_id"], "legacy-task");
     manager.shutdown().await.unwrap();

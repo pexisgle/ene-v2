@@ -10,9 +10,10 @@ use crate::{
     infrastructure::workspace::Workspace,
 };
 use agent_client_protocol::{
-    Agent, ByteStreams, Client, Error as AcpError, ErrorCode,
+    Agent, ByteStreams, Client, Error as AcpError, ErrorCode, Raw, Responder as RawResponder, V1,
     schema::ProtocolVersion,
-    v1::{ConnectionTo, Responder, schema},
+    util::MatchDispatch,
+    v1::{ActiveSession, ConnectionTo, Responder, SessionMessage, schema},
 };
 use ene_plugin::{
     ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionOutcome, SessionUpdate,
@@ -44,7 +45,7 @@ use tokio_util::{
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
-const MAX_UPDATES: usize = 4096;
+pub(crate) const MAX_UPDATES: usize = 4096;
 const STDERR_BYTES: usize = 4096;
 const TERMINAL_POLL: Duration = Duration::from_millis(20);
 
@@ -96,9 +97,9 @@ struct ClientContext {
     terminals: Arc<Mutex<HashMap<String, Terminal>>>,
 }
 
+/// How a prompt turn ended: the agent awaits an answer, or it stopped.
 #[derive(Clone, Debug)]
 pub(crate) struct Turn {
-    pub(crate) updates: Vec<SessionUpdate>,
     pub(crate) state: TurnState,
 }
 
@@ -115,31 +116,25 @@ pub(crate) struct Waiting {
     pub(crate) options: Vec<PermissionOption>,
 }
 
+/// What the host keeps between prompts: one answer the agent is waiting for,
+/// the one-shot terminal approval, and whether this agent is usable.
 struct State {
-    session: Option<schema::SessionId>,
-    updates: Vec<SessionUpdate>,
-    turn: Option<oneshot::Sender<Result<Turn, String>>>,
+    /// Increments for every prompt and answer, so an approval never outlives
+    /// the turn it was given in.
+    turn: u64,
+    waiting: Option<Waiting>,
     permission: Option<Permission>,
-    /// The one-shot terminal permission for the current prompt turn.
-    /// The turn sequence makes a stale approval unusable in a later turn.
     approved: Option<u64>,
-    /// Increments for every prompt so a stale completion cannot resolve a
-    /// later turn.
-    sequence: u64,
-    active: bool,
     failed: Option<&'static str>,
 }
 
 impl State {
     fn new() -> Self {
         Self {
-            session: None,
-            updates: Vec::new(),
-            turn: None,
+            turn: 0,
+            waiting: None,
             permission: None,
             approved: None,
-            sequence: 0,
-            active: false,
             failed: None,
         }
     }
@@ -148,9 +143,12 @@ impl State {
 pub(crate) struct AcpSession {
     child: Box<dyn ChildWrapper>,
     terminals: Arc<Mutex<HashMap<String, Terminal>>>,
+    context: ClientContext,
     connection: ConnectionTo<Agent>,
+    /// The one session this process serves; its routing lives until it drops.
+    session: Option<ActiveSession<'static, Agent>>,
+    session_id: schema::SessionId,
     driver: JoinHandle<()>,
-    prompt_task: Option<JoinHandle<()>>,
     shared: Arc<Mutex<State>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_task: JoinHandle<()>,
@@ -208,137 +206,49 @@ impl AcpSession {
         let stderr_task = tokio::spawn(drain_stderr(stderr, captured.clone()));
         let shutdown = CancellationToken::new();
         let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
-        let (ready_tx, ready_rx) =
-            oneshot::channel::<Result<(ConnectionTo<Agent>, schema::SessionId), AcpError>>();
+        let (ready_tx, ready_rx) = oneshot::channel::<
+            Result<
+                (
+                    ActiveSession<'static, Agent>,
+                    schema::SessionId,
+                    ConnectionTo<Agent>,
+                ),
+                AcpError,
+            >,
+        >();
         let cwd = config.cwd;
 
         let driver_shared = shared.clone();
         let driver_stderr = captured.clone();
         let driver_shutdown = shutdown.clone();
         let session_shutdown = driver_shutdown.clone();
-        let driver_context = context.clone();
         let driver = tokio::spawn(async move {
             let result = Client
                 .v1()
                 .name("ene")
-                .on_receive_notification(
-                    {
-                        let context = driver_context.clone();
-                        async move |notification: schema::SessionNotification,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_update(&context, notification).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_notification!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::RequestPermissionRequest,
-                                    responder: Responder<schema::RequestPermissionResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_permission(&context, request, responder).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::ReadTextFileRequest,
-                                    responder: Responder<schema::ReadTextFileResponse>,
-                                    cx: ConnectionTo<Agent>| {
-                            on_read_file(&context, request, responder, cx).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::WriteTextFileRequest,
-                                    responder: Responder<schema::WriteTextFileResponse>,
-                                    cx: ConnectionTo<Agent>| {
-                            on_write_file(&context, request, responder, cx).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::CreateTerminalRequest,
-                                    responder: Responder<schema::CreateTerminalResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_create_terminal(&context, request, responder).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::TerminalOutputRequest,
-                                    responder: Responder<schema::TerminalOutputResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_terminal_output(&context, request, responder).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::WaitForTerminalExitRequest,
-                                    responder: Responder<schema::WaitForTerminalExitResponse>,
-                                    cx: ConnectionTo<Agent>| {
-                            on_wait_for_exit(&context, request, responder, cx).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::KillTerminalRequest,
-                                    responder: Responder<schema::KillTerminalResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_kill_terminal(&context, request, responder).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    {
-                        let context = driver_context.clone();
-                        async move |request: schema::ReleaseTerminalRequest,
-                                    responder: Responder<schema::ReleaseTerminalResponse>,
-                                    _cx: ConnectionTo<Agent>| {
-                            on_release_terminal(&context, request, responder).await
-                        }
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
-                    let initialize = timeout(
+                    let initialized = timeout(
                         REQUEST_TIMEOUT,
                         cx.send_request(initialize_request(terminal_enabled))
                             .block_task(),
                     )
                     .await
                     .map_err(|_| AcpError::request_cancelled())??;
-                    let _ = initialize;
-                    let created = timeout(
+                    let _ = initialized;
+                    // The SDK routes this session's messages, and publishes
+                    // the request only after the route is installed, so no
+                    // update can arrive unrouted.
+                    let setup = timeout(
                         REQUEST_TIMEOUT,
-                        cx.send_request(schema::NewSessionRequest::new(cwd))
-                            .block_task(),
+                        cx.build_session(cwd).block_task().start_session(),
                     )
                     .await
                     .map_err(|_| AcpError::request_cancelled())??;
+                    let session_id = setup.session.session_id().clone();
                     if session_shutdown.is_cancelled() {
                         return Ok(());
                     }
-                    let _ = ready_tx.send(Ok((cx.clone(), created.session_id)));
+                    let _ = ready_tx.send(Ok((setup.session, session_id, cx.clone())));
                     session_shutdown.cancelled().await;
                     Ok(())
                 })
@@ -353,20 +263,19 @@ impl AcpSession {
         });
 
         match timeout(REQUEST_TIMEOUT, ready_rx).await {
-            Ok(Ok(Ok((connection, session_id)))) => {
-                shared.lock().await.session = Some(session_id);
-                Ok(Self {
-                    child,
-                    terminals,
-                    connection,
-                    driver,
-                    prompt_task: None,
-                    shared,
-                    stderr: captured,
-                    stderr_task,
-                    shutdown,
-                })
-            }
+            Ok(Ok(Ok((session, session_id, connection)))) => Ok(Self {
+                child,
+                terminals,
+                context,
+                connection,
+                session: Some(session),
+                session_id,
+                driver,
+                shared,
+                stderr: captured,
+                stderr_task,
+                shutdown,
+            }),
             _ => {
                 shutdown.cancel();
                 driver.abort();
@@ -381,56 +290,39 @@ impl AcpSession {
         }
     }
 
-    pub(crate) async fn prompt(&mut self, prompt: &[ContentBlock]) -> Result<Turn, Error> {
-        let (rx, sequence, session) = {
-            let mut state = self.shared.lock().await;
-            if state.failed.is_some() {
-                return Err(Error::new(ErrorKind::ExternalFailure));
-            }
-            if state.turn.is_some() || state.permission.is_some() {
-                return Err(Error::new(ErrorKind::StateConflict));
-            }
-            state.sequence += 1;
-            state.active = true;
-            state.approved = None;
-            state.updates.clear();
-            let (tx, rx) = oneshot::channel();
-            state.turn = Some(tx);
-            (
-                rx,
-                state.sequence,
-                state
-                    .session
-                    .clone()
-                    .ok_or_else(|| Error::new(ErrorKind::StateConflict))?,
-            )
+    /// Starts a prompt turn. Confirmed updates go to `updates` as they arrive,
+    /// so the caller records them while the turn runs.
+    pub(crate) async fn prompt(
+        &mut self,
+        prompt: &[ContentBlock],
+        updates: mpsc::Sender<SessionUpdate>,
+    ) -> Result<Turn, Error> {
+        self.begin_turn().await?;
+        let mut session = self.session.take().ok_or_else(conflict)?;
+        let result = match session.send_prompt_blocks(prompt.to_vec()) {
+            Ok(()) => self.read_turn(&mut session, &updates).await,
+            Err(_) => Err(Error::new(ErrorKind::Unavailable)),
         };
-        if let Some(task) = self.prompt_task.take() {
-            task.abort();
-        }
-        let request = schema::PromptRequest::new(session, prompt.to_vec());
-        let connection = self.connection.clone();
-        let shared = self.shared.clone();
-        self.prompt_task = Some(tokio::spawn(async move {
-            let result = connection.send_request(request).block_task().await;
-            finish(&shared, sequence, result).await;
-        }));
-        self.await_turn(rx).await
+        self.session = Some(session);
+        result
     }
 
+    /// Answers the agent's pending permission request and reads the rest of
+    /// the turn.
     pub(crate) async fn respond(
         &mut self,
         request_id: &str,
         outcome: &RequestPermissionOutcome,
+        updates: mpsc::Sender<SessionUpdate>,
     ) -> Result<Turn, Error> {
-        let (permission, rx) = {
+        let permission = {
             let mut state = self.shared.lock().await;
             let Some(permission) = state.permission.take() else {
-                return Err(Error::new(ErrorKind::StateConflict));
+                return Err(conflict());
             };
             if permission.request_id != request_id {
                 state.permission = Some(permission);
-                return Err(Error::new(ErrorKind::StateConflict));
+                return Err(conflict());
             }
             // A terminal command is only accepted immediately after the user
             // selected an allow option for the agent's permission request.
@@ -443,42 +335,27 @@ impl AcpSession {
                         )
                 })
             {
-                state.approved = Some(state.sequence);
+                state.approved = Some(state.turn);
             }
-            let (tx, rx) = oneshot::channel();
-            state.turn = Some(tx);
-            (permission, rx)
+            state.waiting = None;
+            permission
         };
         if permission
             .responder
             .respond(schema::RequestPermissionResponse::new(outcome.clone()))
             .is_err()
         {
-            self.shared.lock().await.turn = None;
             return Err(Error::unavailable());
         }
-        self.await_turn(rx).await
-    }
-
-    pub(crate) async fn cancel(&mut self) -> Result<(), Error> {
-        let (session, _) = {
-            let mut state = self.shared.lock().await;
-            state.approved = None;
-            (state.session.clone(), ())
-        };
-        let Some(session) = session else {
-            return Ok(());
-        };
-        self.connection
-            .send_notification(schema::CancelNotification::new(session))
-            .map_err(|_| Error::unavailable())
+        let mut session = self.session.take().ok_or_else(conflict)?;
+        let result = self.read_turn(&mut session, &updates).await;
+        self.session = Some(session);
+        result
     }
 
     pub(crate) async fn kill(mut self) {
         self.shutdown.cancel();
-        if let Some(task) = self.prompt_task.take() {
-            task.abort();
-        }
+        self.session = None;
         self.driver.abort();
         self.stderr_task.abort();
         let _ = self.child.start_kill();
@@ -489,36 +366,207 @@ impl AcpSession {
         }
     }
 
-    async fn await_turn(
+    async fn begin_turn(&self) -> Result<(), Error> {
+        let mut state = self.shared.lock().await;
+        if state.failed.is_some() {
+            return Err(Error::new(ErrorKind::ExternalFailure));
+        }
+        if state.permission.is_some() {
+            return Err(conflict());
+        }
+        state.turn += 1;
+        state.approved = None;
+        state.waiting = None;
+        Ok(())
+    }
+
+    async fn read_turn(
         &mut self,
-        rx: oneshot::Receiver<Result<Turn, String>>,
+        session: &mut ActiveSession<'static, Agent>,
+        updates: &mpsc::Sender<SessionUpdate>,
     ) -> Result<Turn, Error> {
-        match timeout(TURN_TIMEOUT, rx).await {
-            Ok(Ok(Ok(turn))) => Ok(turn),
-            Ok(Ok(Err(reason))) => {
+        match timeout(
+            TURN_TIMEOUT,
+            read_until_end(&self.context, &self.connection, session, updates),
+        )
+        .await
+        {
+            Ok(Ok(turn)) => Ok(turn),
+            Ok(Err(reason)) => {
+                self.shared.lock().await.failed = Some("acp_agent_failed");
                 let captured = self.stderr.lock().await;
                 eprintln!(
                     "ene-host acp: {reason}: {}",
                     String::from_utf8_lossy(&captured)
                 );
-                drop(captured);
                 Err(Error {
                     kind: ErrorKind::ExternalFailure,
                     reason: Some("acp_agent_failed"),
                 })
             }
-            Ok(Err(_)) => {
-                reset_turn(&self.shared).await;
-                Err(Error::new(ErrorKind::Unavailable))
-            }
             Err(_) => {
-                let _ = self.cancel().await;
-                if let Some(task) = self.prompt_task.take() {
-                    task.abort();
-                }
-                reset_turn(&self.shared).await;
+                // The agent is still working on a turn nobody waits for.
+                let _ = self
+                    .connection
+                    .send_notification(schema::CancelNotification::new(self.session_id.clone()));
+                self.shared.lock().await.waiting = None;
                 Err(Error::new(ErrorKind::Unavailable))
             }
+        }
+    }
+}
+
+fn conflict() -> Error {
+    Error::new(ErrorKind::StateConflict)
+}
+
+/// One turn's messages: the updates the journal records, the request answers
+/// a session-scoped message needs, and where the turn ends.
+async fn read_until_end(
+    context: &ClientContext,
+    connection: &ConnectionTo<Agent>,
+    session: &mut ActiveSession<'static, Agent>,
+    updates: &mpsc::Sender<SessionUpdate>,
+) -> std::result::Result<Turn, String> {
+    loop {
+        let dispatch = match session
+            .read_update()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            SessionMessage::PromptResponse(result) => {
+                let response = result.map_err(|error| error.to_string())?;
+                return Ok(Turn {
+                    state: TurnState::Stopped(response.stop_reason),
+                });
+            }
+            SessionMessage::Message(dispatch) => dispatch,
+            _ => continue,
+        };
+        let recorded = {
+            let updates = updates.clone();
+            async move |notification: schema::SessionNotification| {
+                if let Some(update) = accepted(notification)
+                    && updates.try_send(update).is_err()
+                {
+                    return Err(AcpError::new(ErrorCode::new(-32000), "update backlog"));
+                }
+                Ok(())
+            }
+        };
+        let permission = {
+            let context = context.clone();
+            async move |request: schema::RequestPermissionRequest,
+                        responder: RawResponder<schema::RequestPermissionResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_permission(&context, request, responder).await?;
+                Ok(())
+            }
+        };
+        let read_file = {
+            let (context, connection) = (context.clone(), connection.clone());
+            async move |request: schema::ReadTextFileRequest,
+                        responder: RawResponder<schema::ReadTextFileResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_read_file(&context, request, responder, connection.clone()).await?;
+                Ok(())
+            }
+        };
+        let write_file = {
+            let (context, connection) = (context.clone(), connection.clone());
+            async move |request: schema::WriteTextFileRequest,
+                        responder: RawResponder<schema::WriteTextFileResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_write_file(&context, request, responder, connection.clone()).await?;
+                Ok(())
+            }
+        };
+        let create_terminal = {
+            let context = context.clone();
+            async move |request: schema::CreateTerminalRequest,
+                        responder: RawResponder<schema::CreateTerminalResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_create_terminal(&context, request, responder).await?;
+                Ok(())
+            }
+        };
+        let terminal_output = {
+            let context = context.clone();
+            async move |request: schema::TerminalOutputRequest,
+                        responder: RawResponder<schema::TerminalOutputResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_terminal_output(&context, request, responder).await?;
+                Ok(())
+            }
+        };
+        let wait_for_exit = {
+            let (context, connection) = (context.clone(), connection.clone());
+            async move |request: schema::WaitForTerminalExitRequest,
+                        responder: RawResponder<schema::WaitForTerminalExitResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_wait_for_exit(&context, request, responder, connection.clone()).await?;
+                Ok(())
+            }
+        };
+        let kill_terminal = {
+            let context = context.clone();
+            async move |request: schema::KillTerminalRequest,
+                        responder: RawResponder<schema::KillTerminalResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_kill_terminal(&context, request, responder).await?;
+                Ok(())
+            }
+        };
+        let release_terminal = {
+            let context = context.clone();
+            async move |request: schema::ReleaseTerminalRequest,
+                        responder: RawResponder<schema::ReleaseTerminalResponse, Raw>| {
+                let responder = responder
+                    .into_protocol::<V1>()
+                    .map_err(|_| AcpError::invalid_request())?;
+                on_release_terminal(&context, request, responder).await?;
+                Ok(())
+            }
+        };
+        MatchDispatch::new(dispatch.into_raw())
+            .if_notification(recorded)
+            .await
+            .if_request(permission)
+            .await
+            .if_request(read_file)
+            .await
+            .if_request(write_file)
+            .await
+            .if_request(create_terminal)
+            .await
+            .if_request(terminal_output)
+            .await
+            .if_request(wait_for_exit)
+            .await
+            .if_request(kill_terminal)
+            .await
+            .if_request(release_terminal)
+            .await
+            .otherwise_ignore()
+            .map_err(|error| error.to_string())?;
+        if let Some(waiting) = context.shared.lock().await.waiting.take() {
+            return Ok(Turn {
+                state: TurnState::Waiting(Box::new(waiting)),
+            });
         }
     }
 }
@@ -559,73 +607,18 @@ fn initialize_request(terminal: bool) -> schema::InitializeRequest {
         ))
 }
 
-async fn finish(
-    shared: &Arc<Mutex<State>>,
-    sequence: u64,
-    result: Result<schema::PromptResponse, AcpError>,
-) {
-    let mut state = shared.lock().await;
-    if state.sequence != sequence {
-        return;
-    }
-    state.active = false;
-    state.approved = None;
-    let updates = std::mem::take(&mut state.updates);
-    if let Some(permission) = state.permission.take() {
-        let _ = permission
-            .responder
-            .respond(schema::RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
-    }
-    let Some(turn) = state.turn.take() else {
-        return;
-    };
-    match result {
-        Ok(response) => {
-            let _ = turn.send(Ok(Turn {
-                updates,
-                state: TurnState::Stopped(response.stop_reason),
-            }));
-        }
-        Err(error) => {
-            let _ = turn.send(Err(format!("acp_agent_failed: {error}")));
-        }
-    }
-}
-
-/// Ends the active turn. `failed` marks the session as unusable; `turn_error`
-/// answers a turn that still waits. A reset passes neither and drops the turn.
-fn abandon(state: &mut State, failed: Option<&'static str>, turn_error: Option<&str>) {
-    state.active = false;
-    state.approved = None;
-    if let Some(failed) = failed {
-        state.failed = Some(failed);
-    }
-    state.sequence += 1;
-    state.updates.clear();
-    if let Some(turn) = state.turn.take()
-        && let Some(error) = turn_error
-    {
-        let _ = turn.send(Err(error.into()));
-    }
-    if let Some(permission) = state.permission.take() {
-        let _ = permission
-            .responder
-            .respond(schema::RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
-    }
-}
-
-async fn reset_turn(shared: &Arc<Mutex<State>>) {
-    let mut state = shared.lock().await;
-    abandon(&mut state, None, None);
-}
-
+/// Marks the agent unusable: nobody will answer a turn it still runs.
 async fn fail(shared: &Arc<Mutex<State>>, stderr: &Arc<Mutex<Vec<u8>>>, reason: String) {
     let mut state = shared.lock().await;
-    abandon(&mut state, Some("acp_agent_failed"), Some(&reason));
+    state.failed = Some("acp_agent_failed");
+    state.waiting = None;
+    if let Some(permission) = state.permission.take() {
+        let _ = permission
+            .responder
+            .respond(schema::RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+    }
     let captured = stderr.lock().await;
     eprintln!(
         "ene-host acp: {reason}: {}",
@@ -633,41 +626,16 @@ async fn fail(shared: &Arc<Mutex<State>>, stderr: &Arc<Mutex<Vec<u8>>>, reason: 
     );
 }
 
-fn fail_active(state: &mut State, reason: &'static str) {
-    abandon(state, Some(reason), Some(reason));
-    eprintln!("ene-host acp: {reason}");
-}
-
-async fn on_update(
-    context: &ClientContext,
-    notification: schema::SessionNotification,
-) -> Result<(), AcpError> {
-    let mut state = context.shared.lock().await;
-    if !state.active {
-        return Ok(());
+/// The session update the journal records, when this host knows its kind.
+fn accepted(notification: schema::SessionNotification) -> Option<SessionUpdate> {
+    match notification.update {
+        SessionUpdate::AgentMessageChunk(_)
+        | SessionUpdate::AgentThoughtChunk(_)
+        | SessionUpdate::ToolCall(_)
+        | SessionUpdate::ToolCallUpdate(_)
+        | SessionUpdate::Plan(_) => Some(notification.update),
+        _ => None,
     }
-    if state.session.as_ref() != Some(&notification.session_id) {
-        fail_active(&mut state, "acp_invalid_update");
-        return Ok(());
-    }
-    // ACP may send update kinds the harness does not record. Ignore them
-    // instead of counting them against the turn's update limit.
-    if !matches!(
-        &notification.update,
-        schema::SessionUpdate::AgentMessageChunk(_)
-            | schema::SessionUpdate::AgentThoughtChunk(_)
-            | schema::SessionUpdate::ToolCall(_)
-            | schema::SessionUpdate::ToolCallUpdate(_)
-            | schema::SessionUpdate::Plan(_)
-    ) {
-        return Ok(());
-    }
-    if state.updates.len() >= MAX_UPDATES {
-        fail_active(&mut state, "acp_update_limit");
-        return Ok(());
-    }
-    state.updates.push(notification.update);
-    Ok(())
 }
 
 async fn on_permission(
@@ -676,11 +644,7 @@ async fn on_permission(
     responder: Responder<schema::RequestPermissionResponse>,
 ) -> Result<(), AcpError> {
     let mut state = context.shared.lock().await;
-    if !state.active
-        || state.session.as_ref() != Some(&request.session_id)
-        || state.permission.is_some()
-        || state.turn.is_none()
-    {
+    if state.permission.is_some() {
         let _ = responder.respond(schema::RequestPermissionResponse::new(
             RequestPermissionOutcome::Cancelled,
         ));
@@ -690,24 +654,16 @@ async fn on_permission(
     // approval even within the same turn.
     state.approved = None;
     let request_id = uuid::Uuid::new_v4().to_string();
-    state.permission = Some(Permission {
+    state.waiting = Some(Waiting {
         request_id: request_id.clone(),
+        tool_call: request.tool_call,
         options: request.options.clone(),
+    });
+    state.permission = Some(Permission {
+        request_id,
+        options: request.options,
         responder,
     });
-    let turn = state
-        .turn
-        .take()
-        .expect("a permission request requires an active turn");
-    let updates = std::mem::take(&mut state.updates);
-    let _ = turn.send(Ok(Turn {
-        updates,
-        state: TurnState::Waiting(Box::new(Waiting {
-            request_id,
-            tool_call: request.tool_call,
-            options: request.options,
-        })),
-    }));
     Ok(())
 }
 
@@ -783,8 +739,8 @@ async fn on_create_terminal(
     };
     let approved = {
         let mut state = context.shared.lock().await;
-        let sequence = state.sequence;
-        state.approved.take() == Some(sequence)
+        let turn = state.turn;
+        state.approved.take() == Some(turn)
     };
     if !approved {
         let _ = responder
@@ -1137,7 +1093,7 @@ fn acp_error(error: Error) -> AcpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_plugin::{ContentChunk, text_block};
+    use ene_plugin::text_block;
 
     #[cfg(unix)]
     fn agent_script() -> String {
@@ -1175,13 +1131,43 @@ for line in sys.stdin:
         .into()
     }
 
+    /// One turn a test drives.
+    enum Drive<'a> {
+        Prompt(&'a [ContentBlock]),
+        Respond(&'a str, &'a RequestPermissionOutcome),
+    }
+
+    /// Runs one turn and returns the updates it streamed with its end. The
+    /// turn closes the update stream when it returns, so collecting cannot
+    /// wait for a turn that never ends.
+    async fn run_turn(session: &mut AcpSession, drive: Drive<'_>) -> (Vec<SessionUpdate>, Turn) {
+        let (updates, mut received) = mpsc::channel(MAX_UPDATES);
+        let collect = async {
+            let mut seen = Vec::new();
+            while let Some(update) = received.recv().await {
+                seen.push(update);
+            }
+            seen
+        };
+        let turn = async {
+            match drive {
+                Drive::Prompt(prompt) => session.prompt(prompt, updates).await,
+                Drive::Respond(request_id, outcome) => {
+                    session.respond(request_id, outcome, updates).await
+                }
+            }
+        };
+        let (seen, turn) = tokio::join!(collect, turn);
+        (seen, turn.unwrap())
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn prompt_updates_permission_and_stop_are_mapped() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("note.txt"), "file-content").unwrap();
         let mut session = start_agent(temp.path(), &agent_script(), None).await;
-        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let (updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("go")])).await;
         assert!(matches!(turn.state, TurnState::Waiting(_)));
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
@@ -1189,25 +1175,26 @@ for line in sys.stdin:
         let request_id = waiting.request_id;
         let options = waiting.options;
         assert_eq!(options[0].option_id.to_string(), "allow");
-        assert!(turn.updates.iter().any(|update| matches!(
+        assert!(updates.iter().any(|update| matches!(
             update,
             SessionUpdate::AgentMessageChunk(chunk)
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "hello")
         )));
-        let turn = session
-            .respond(
+        let (updates, turn) = run_turn(
+            &mut session,
+            Drive::Respond(
                 &request_id,
                 &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
                     "allow",
                 )),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await;
         let TurnState::Stopped(stop) = turn.state else {
             panic!("expected stop");
         };
         assert_eq!(stop, StopReason::EndTurn);
-        assert!(turn.updates.iter().any(|update| matches!(
+        assert!(updates.iter().any(|update| matches!(
             update,
             SessionUpdate::AgentMessageChunk(chunk)
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text.contains("allow"))
@@ -1242,65 +1229,13 @@ for line in sys.stdin:
     async fn an_unknown_stop_reason_fails_instead_of_ending_the_turn() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = start_agent(temp.path(), &unknown_stop_agent_script(), None).await;
-        let error = session.prompt(&[text_block("go")]).await.unwrap_err();
+        let (updates, _received) = mpsc::channel(MAX_UPDATES);
+        let error = session
+            .prompt(&[text_block("go")], updates)
+            .await
+            .unwrap_err();
         assert_eq!(error.kind, ErrorKind::ExternalFailure);
         session.kill().await;
-    }
-
-    #[tokio::test]
-    async fn late_updates_are_dropped_and_the_update_limit_is_enforced() {
-        let temp = tempfile::tempdir().unwrap();
-        let shared = Arc::new(Mutex::new(State::new()));
-        {
-            let mut state = shared.lock().await;
-            state.session = Some(schema::SessionId::new("s"));
-            state.active = true;
-        }
-        let context = ClientContext {
-            shared: shared.clone(),
-            workspace: Workspace::open(temp.path().to_str().unwrap()).unwrap(),
-            terminal: None,
-            terminals: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let notification = || {
-            schema::SessionNotification::new(
-                "s",
-                schema::SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block("hi"))),
-            )
-        };
-        on_update(&context, notification()).await.unwrap();
-        assert_eq!(shared.lock().await.updates.len(), 1);
-
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut state = shared.lock().await;
-            state.turn = Some(tx);
-            state.sequence = 1;
-        }
-        finish(
-            &shared,
-            1,
-            Ok(schema::PromptResponse::new(StopReason::EndTurn)),
-        )
-        .await;
-        let turn = rx.await.unwrap().unwrap();
-        assert_eq!(turn.updates.len(), 1);
-        on_update(&context, notification()).await.unwrap();
-        assert!(shared.lock().await.updates.is_empty());
-
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut state = shared.lock().await;
-            state.active = true;
-            state.sequence = 2;
-            state.updates = vec![SessionUpdate::Plan(schema::Plan::new(vec![])); MAX_UPDATES];
-            state.turn = Some(tx);
-        }
-        on_update(&context, notification()).await.unwrap();
-        assert!(rx.await.unwrap().is_err());
-        let state = shared.lock().await;
-        assert_eq!(state.failed, Some("acp_update_limit"));
-        assert!(!state.active);
     }
 
     #[test]
@@ -1369,22 +1304,18 @@ for line in sys.stdin:
             }),
         )
         .await;
-        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let (_updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("go")])).await;
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
-        let turn = tokio::time::timeout(
+        let allowed =
+            RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new("allow"));
+        let (_updates, turn) = tokio::time::timeout(
             Duration::from_secs(5),
-            session.respond(
-                &waiting.request_id,
-                &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
-                    "allow",
-                )),
-            ),
+            run_turn(&mut session, Drive::Respond(&waiting.request_id, &allowed)),
         )
         .await
-        .expect("terminal/kill must not wait for the pending wait_for_exit")
-        .unwrap();
+        .expect("terminal/kill must not wait for the pending wait_for_exit");
         assert!(matches!(
             turn.state,
             TurnState::Stopped(StopReason::EndTurn)
@@ -1448,19 +1379,20 @@ for line in sys.stdin:
             }),
         )
         .await;
-        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let (_updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("go")])).await;
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
-        let turn = session
-            .respond(
+        let (_updates, turn) = run_turn(
+            &mut session,
+            Drive::Respond(
                 &waiting.request_id,
                 &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
                     "allow",
                 )),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await;
         assert!(matches!(
             turn.state,
             TurnState::Stopped(StopReason::EndTurn)
@@ -1566,26 +1498,27 @@ for line in sys.stdin:
             }),
         )
         .await;
-        let turn = session.prompt(&[text_block("first")]).await.unwrap();
+        let (_updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("first")])).await;
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
-        let turn = session
-            .respond(
+        let (_updates, turn) = run_turn(
+            &mut session,
+            Drive::Respond(
                 &waiting.request_id,
                 &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
                     "allow",
                 )),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await;
         assert!(matches!(
             turn.state,
             TurnState::Stopped(StopReason::EndTurn)
         ));
 
-        let turn = session.prompt(&[text_block("second")]).await.unwrap();
-        assert!(turn.updates.iter().any(|update| matches!(
+        let (updates, _turn) = run_turn(&mut session, Drive::Prompt(&[text_block("second")])).await;
+        assert!(updates.iter().any(|update| matches!(
             update,
             SessionUpdate::AgentMessageChunk(chunk)
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "denied")
@@ -1643,20 +1576,21 @@ for line in sys.stdin:
             }),
         )
         .await;
-        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let (_updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("go")])).await;
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
-        let turn = session
-            .respond(
+        let (updates, _turn) = run_turn(
+            &mut session,
+            Drive::Respond(
                 &waiting.request_id,
                 &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
                     "allow",
                 )),
-            )
-            .await
-            .unwrap();
-        assert!(turn.updates.iter().any(|update| matches!(
+            ),
+        )
+        .await;
+        assert!(updates.iter().any(|update| matches!(
             update,
             SessionUpdate::AgentMessageChunk(chunk)
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "rejected")
@@ -1718,20 +1652,21 @@ for line in sys.stdin:
             }),
         )
         .await;
-        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let (_updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("go")])).await;
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
-        let turn = session
-            .respond(
+        let (updates, _turn) = run_turn(
+            &mut session,
+            Drive::Respond(
                 &waiting.request_id,
                 &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
                     "allow",
                 )),
-            )
-            .await
-            .unwrap();
-        assert!(turn.updates.iter().any(|update| matches!(
+            ),
+        )
+        .await;
+        assert!(updates.iter().any(|update| matches!(
             update,
             SessionUpdate::AgentMessageChunk(chunk)
                 if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "passed")
@@ -1770,8 +1705,15 @@ for line in sys.stdin:
     async fn too_many_updates_fail_the_turn_even_when_the_agent_ends_it() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = start_agent(temp.path(), &flood_agent_script(), None).await;
-        let error = session.prompt(&[text_block("go")]).await.unwrap_err();
+        // The receiver is alive but never drained: the bound stops the agent,
+        // not a cancelled reader.
+        let (updates, _received) = mpsc::channel(MAX_UPDATES);
+        let error = session
+            .prompt(&[text_block("go")], updates)
+            .await
+            .unwrap_err();
         assert_eq!(error.kind, ErrorKind::ExternalFailure);
+        assert_eq!(session.shared.lock().await.failed, Some("acp_agent_failed"));
         session.kill().await;
     }
 
@@ -1824,21 +1766,21 @@ for line in sys.stdin:
             }),
         )
         .await;
-        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let (_updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("go")])).await;
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
-        let turn = session
-            .respond(
+        let (updates, _turn) = run_turn(
+            &mut session,
+            Drive::Respond(
                 &waiting.request_id,
                 &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
                     "allow",
                 )),
-            )
-            .await
-            .unwrap();
-        let report = turn
-            .updates
+            ),
+        )
+        .await;
+        let report = updates
             .iter()
             .filter_map(|update| match update {
                 SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
@@ -1871,19 +1813,20 @@ for line in sys.stdin:
             }),
         )
         .await;
-        let turn = session.prompt(&[text_block("go")]).await.unwrap();
+        let (_updates, turn) = run_turn(&mut session, Drive::Prompt(&[text_block("go")])).await;
         let TurnState::Waiting(waiting) = turn.state else {
             panic!("expected permission");
         };
-        let turn = session
-            .respond(
+        let (_updates, turn) = run_turn(
+            &mut session,
+            Drive::Respond(
                 &waiting.request_id,
                 &RequestPermissionOutcome::Selected(ene_plugin::SelectedPermissionOutcome::new(
                     "allow",
                 )),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await;
         assert!(matches!(
             turn.state,
             TurnState::Stopped(StopReason::EndTurn)

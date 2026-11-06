@@ -3,14 +3,14 @@ use super::generation::*;
 use crate::llm::InvocationInput;
 use crate::{
     domain::{rules, *},
-    ports::{Outcome, Receipt},
+    ports::{Answer, Outcome, Receipt},
 };
 pub use ene_rpc::{
     CheckRequest as CheckInput, CreateGrantRequest as GrantInput,
     SendMessageRequest as MessageInput, UpdateCompanionRequest as CompanionPatch,
     UpdateGrantRequest as GrantPatch, UpdateSettingsRequest as SettingsPatch,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 mod checks;

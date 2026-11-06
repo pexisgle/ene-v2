@@ -1,4 +1,14 @@
 use super::*;
+
+/// The configuration that is not a companion row, stored and read as one
+/// record. Missing fields are the empty values an older host wrote.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Extras {
+    grants: Vec<crate::domain::Grant>,
+    credential_refs: std::collections::BTreeMap<String, String>,
+}
+
 pub fn load(db: &Connection) -> Result<Configuration, crate::infrastructure::sqlite::Error> {
     let mut companions = std::collections::BTreeMap::new();
     let mut query = db.prepare("SELECT id,body FROM companions")?;
@@ -15,20 +25,16 @@ pub fn load(db: &Connection) -> Result<Configuration, crate::infrastructure::sql
         )
         .optional()
         .map_err(crate::infrastructure::sqlite::Error::from)?;
-    let value: Value = extras
+    let extras: Extras = extras
         .map(|s| serde_json::from_str(&s))
         .transpose()
         .map_err(crate::infrastructure::sqlite::Error::from)?
-        .unwrap_or(json!({}));
+        .unwrap_or_default();
     Ok(Configuration {
         companions,
         settings,
-        grants: serde_json::from_value(value.get("grants").cloned().unwrap_or(json!([])))
-            .map_err(crate::infrastructure::sqlite::Error::from)?,
-        credential_refs: serde_json::from_value(
-            value.get("credential_refs").cloned().unwrap_or(json!({})),
-        )
-        .map_err(crate::infrastructure::sqlite::Error::from)?,
+        grants: extras.grants,
+        credential_refs: extras.credential_refs,
     })
 }
 
@@ -39,18 +45,15 @@ pub fn write_configuration(
     for companion in c.companions.values() {
         db.execute("INSERT INTO companions VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body", params![companion.id, serde_json::to_string(companion)?])?;
     }
+    let extras = Extras {
+        grants: c.grants.clone(),
+        credential_refs: c.credential_refs.clone(),
+    };
     for (key, value) in [
-        (
-            "settings",
-            serde_json::to_value(&c.settings)
-                .map_err(crate::infrastructure::sqlite::Error::from)?,
-        ),
-        (
-            "configuration_extras",
-            json!({"grants":c.grants,"credential_refs":c.credential_refs}),
-        ),
+        ("settings", serde_json::to_string(&c.settings)?),
+        ("configuration_extras", serde_json::to_string(&extras)?),
     ] {
-        db.execute("INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value.to_string()]).map_err(crate::infrastructure::sqlite::Error::from)?;
+        db.execute("INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value]).map_err(crate::infrastructure::sqlite::Error::from)?;
     }
     Ok(())
 }

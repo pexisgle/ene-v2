@@ -132,7 +132,7 @@ mod tests {
             .unwrap()
             .origin()
             .ascii_serialization();
-        let (_, cancel) = tokio::sync::watch::channel(false);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let invocation = InvocationFixture {
             connection: Connection {
                 id: "c".into(),

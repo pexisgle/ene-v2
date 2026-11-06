@@ -407,7 +407,7 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
             .is_err()
     );
     let store = Store::open(host.temp.path().join("host.db")).await.unwrap();
-    let recovered = crate::devices::Devices::new(Some(store));
+    let recovered = crate::devices::Devices::new(store);
     assert_eq!(
         recovered
             .operation(&device.id, &uncertain.operation_id)
@@ -957,9 +957,8 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
         .unwrap();
     assert!(next.revision > first.revision);
     assert_eq!(next.lease_ms, 15_000);
-    let restarted = crate::devices::Devices::new(Some(
-        Store::open(host.temp.path().join("host.db")).await.unwrap(),
-    ));
+    let restarted =
+        crate::devices::Devices::new(Store::open(host.temp.path().join("host.db")).await.unwrap());
     assert!(
         restarted
             .activate(w::ActivationRequest {

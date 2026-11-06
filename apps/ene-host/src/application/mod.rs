@@ -31,8 +31,7 @@ pub(crate) type EmbeddingHook = std::sync::Arc<
     dyn Fn(
             String,
             Vec<String>,
-        )
-            -> futures_util::future::BoxFuture<'static, Result<crate::llm::Embedding, Error>>
+        ) -> futures_util::future::BoxFuture<'static, Result<Vec<Vec<f32>>, Error>>
         + Send
         + Sync,
 >;
@@ -114,6 +113,10 @@ struct Inner {
 #[derive(Clone)]
 pub struct HostApplication(Arc<Inner>);
 impl HostApplication {
+    /// The durable store every subsystem shares.
+    pub(crate) fn store(&self) -> Store {
+        (*self.0.repository).clone()
+    }
     pub fn with_plugins(
         repository: Arc<Store>,
         providers: Arc<dyn ProviderRegistry>,
@@ -229,7 +232,7 @@ impl HostApplication {
         {
             let controls = self.0.controls.lock().await;
             for run in controls.running.values() {
-                run.cancel.send_replace(true);
+                run.cancel.cancel();
             }
         }
         self.0.stops.wait().await;

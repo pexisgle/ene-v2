@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     time::Duration,
 };
-use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 pub struct Running {
     pub companion: String,
@@ -18,7 +18,7 @@ pub struct Running {
     pub policy: Policy,
     pub nonce: Option<String>,
     pub operation: OperationKind,
-    pub cancel: watch::Sender<bool>,
+    pub cancel: CancellationToken,
 }
 #[derive(Default)]
 pub struct Controls {
@@ -157,7 +157,7 @@ pub(crate) fn active(controls: &Controls, id: &str) -> bool {
 }
 pub(crate) fn cancel_connection(controls: &Controls, id: &str) {
     for run in controls.running.values().filter(|r| r.connection == id) {
-        run.cancel.send_replace(true);
+        run.cancel.cancel();
     }
 }
 
@@ -175,7 +175,7 @@ pub(crate) fn cancel_unpermitted(controls: &Controls, c: &Configuration) {
         {
             continue;
         }
-        run.cancel.send_replace(true);
+        run.cancel.cancel();
     }
 }
 pub(crate) fn fingerprint(c: &ProviderConnection, providers: &dyn ProviderRegistry) -> Value {

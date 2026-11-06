@@ -14,10 +14,7 @@ impl Manager {
         self.store
             .plugin_list("bindings".into())
             .await
-            .map_err(storage_failure)?
-            .into_iter()
-            .map(|v| serde_json::from_value(v).map_err(failure))
-            .collect()
+            .map_err(storage_failure)
     }
 
     pub async fn bind(&self, mut input: PluginBinding) -> Result<()> {
@@ -104,11 +101,7 @@ impl Manager {
         }
         self.stop_acp(&input.id, "plugin_stopped").await?;
         self.store
-            .plugin_set(
-                "bindings".into(),
-                input.id.clone(),
-                serde_json::to_value(input).map_err(failure)?,
-            )
+            .plugin_set("bindings".into(), input.id.clone(), input)
             .await
             .map_err(storage_failure)?;
         Ok(())

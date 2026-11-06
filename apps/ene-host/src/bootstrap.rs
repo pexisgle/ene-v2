@@ -80,7 +80,6 @@ fn application_with_credentials(
     credentials: std::sync::Arc<dyn crate::ports::Credentials>,
 ) -> App {
     let shutdown = tokio::sync::watch::channel(false).0;
-    let devices = store.clone();
     let providers: std::sync::Arc<dyn crate::llm::ProviderRegistry> = std::sync::Arc::new(
         super::infrastructure::llm::registry::Registry::with_plugins(Some(plugins.clone())),
     );
@@ -92,9 +91,7 @@ fn application_with_credentials(
         Some(plugins.clone()),
     );
     plugins.attach_inference(application.inference());
-    let mut app = App::new(application, token);
-    app.devices = crate::devices::Devices::new(Some(devices));
-    app
+    App::new(application, token)
 }
 
 #[cfg(test)]

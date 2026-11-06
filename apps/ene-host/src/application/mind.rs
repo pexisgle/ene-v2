@@ -2,7 +2,7 @@
 //! and the host-bound recall/read/update path.
 
 use super::{Boundary, HostApplication, generation::publish};
-use crate::application::inference::EMBEDDING_MODEL;
+use crate::llm::EMBEDDING_MODEL;
 use crate::rig::mind::{MindCall, MindRequest};
 use crate::{
     domain::{
@@ -444,17 +444,11 @@ impl HostApplication {
         self.companion(&companion).await?;
         let embedded = self.embed_memory(&companion, vec![query.clone()]).await;
         let (vector, model, semantic, reason) = match embedded {
-            Ok(embedding) if embedding.vectors.len() == 1 => (
-                Some(embedding.vectors.into_iter().next().unwrap_or_default()),
+            Ok(mut vectors) => (
+                vectors.pop(),
                 Some(EMBEDDING_MODEL.to_owned()),
                 "ok".to_owned(),
                 None,
-            ),
-            Ok(_) => (
-                None,
-                None,
-                "error".to_owned(),
-                Some("embedding_shape".to_owned()),
             ),
             Err(error) => (
                 None,

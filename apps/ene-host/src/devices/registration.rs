@@ -15,8 +15,16 @@ impl Devices {
         }
         let this = self.clone();
         self.owned(async move {
-            let mut state = this.lock().await?;
-            if state.journal.devices.len() >= 64 {
+            let _state = this.lock().await?;
+            if this
+                .0
+                .store
+                .device_records()
+                .await
+                .map_err(|_| unavailable())?
+                .len()
+                >= MAX_DEVICES
+            {
                 return Err(ConnectError::resource_exhausted("端末数の上限です"));
             }
             let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -26,13 +34,11 @@ impl Devices {
                 capabilities: request.capabilities,
                 ..Default::default()
             };
-            let mut journal = state.journal.clone();
-            journal.devices.push(w::DeviceRecord {
-                device: d.clone().into(),
-                token_hash: Sha256::digest(token.as_bytes()).to_vec(),
-                ..Default::default()
-            });
-            this.commit(&mut state, journal).await?;
+            this.0
+                .store
+                .device_register(d.clone(), Sha256::digest(token.as_bytes()).to_vec())
+                .await
+                .map_err(|_| unavailable())?;
             Ok(w::DeviceRegistration {
                 device: d.into(),
                 token,
@@ -42,14 +48,16 @@ impl Devices {
         .await
     }
     pub async fn list(&self) -> Result<w::Devices, ConnectError> {
+        let _state = self.lock().await?;
         Ok(w::Devices {
             items: self
-                .lock()
-                .await?
-                .journal
-                .devices
-                .iter()
-                .map(|d| (*d.device).clone())
+                .0
+                .store
+                .device_records()
+                .await
+                .map_err(|_| unavailable())?
+                .into_iter()
+                .map(|(device, _)| device)
                 .collect(),
             ..Default::default()
         })
@@ -57,16 +65,18 @@ impl Devices {
     pub async fn approve(&self, id: String) -> Result<w::Device, ConnectError> {
         let this = self.clone();
         self.owned(async move {
-            let mut state = this.lock().await?;
-            let mut journal = state.journal.clone();
-            let d = device_mut(&mut journal, &id)?;
-            if d.revoked {
+            let _state = this.lock().await?;
+            let mut device = this.device(&id).await?;
+            if device.revoked {
                 return Err(conflict());
             }
-            d.approved = true;
-            let result = d.clone();
-            this.commit(&mut state, journal).await?;
-            Ok(result)
+            device.approved = true;
+            this.0
+                .store
+                .device_write(device.clone(), None, false)
+                .await
+                .map_err(|_| unavailable())?;
+            Ok(device)
         })
         .await
     }
@@ -82,35 +92,26 @@ impl Devices {
         let this = self.clone();
         self.owned(async move {
             let mut state = this.lock().await?;
-            let mut journal = state.journal.clone();
-            let d = device_mut(&mut journal, &id)?;
+            let mut device = this.device(&id).await?;
             if let Some(c) = &capability {
-                if d.revoked || !d.capabilities.contains(c) {
+                if device.revoked || !device.capabilities.contains(c) {
                     return Err(denied());
                 }
-                d.permissions.retain(|p| p != c);
+                device.permissions.retain(|p| p != c);
                 if allowed {
-                    d.permissions.push(c.clone());
+                    device.permissions.push(c.clone());
                 }
             } else {
-                d.approved = false;
-                d.revoked = true;
-                d.permissions.clear();
+                device.approved = false;
+                device.revoked = true;
+                device.permissions.clear();
             }
-            if !allowed {
-                for op in &mut journal.operations {
-                    if op.request.device_id == id
-                        && capability
-                            .as_ref()
-                            .is_none_or(|c| op.request.capability == *c)
-                        && op.state.status == w::OperationStatus::Dispatched
-                    {
-                        op.state.as_option_mut().ok_or_else(unavailable)?.status =
-                            w::OperationStatus::Revoked.into();
-                    }
-                }
-            }
-            this.commit(&mut state, journal).await?;
+            // The device and the operations its change revokes move together.
+            this.0
+                .store
+                .device_write(device, capability.clone(), !allowed)
+                .await
+                .map_err(|_| unavailable())?;
             if let Some(session) = state.sessions.get_mut(&id) {
                 session.changed.cancel();
                 if !allowed {
@@ -123,7 +124,7 @@ impl Devices {
     }
     pub async fn subscribe(&self, id: String) -> Result<Subscription, ConnectError> {
         let mut state = self.lock().await?;
-        permitted(&state.journal, &id, None)?;
+        permitted(&self.device(&id).await?, None)?;
         let entry = state.sessions.entry(id).or_default();
         if entry
             .connection

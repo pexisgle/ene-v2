@@ -5,7 +5,7 @@ use super::generation::{authorize, check_access, config, publish};
 use super::*;
 use crate::domain::{Error, ErrorKind, GrantPurpose, MAX_INPUT_BYTES, OperationKind, rules};
 use crate::llm::{Authorization, Outbound, Policy};
-use crate::ports::{Outcome, Receipt};
+use crate::ports::{Answer, Outcome, Receipt};
 use crate::rig::{Event, Runtime};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
@@ -102,7 +102,7 @@ pub(crate) async fn accept(
     companion: String,
     key: String,
     request: MessageInput,
-) -> crate::ports::Result<(Outcome, Value)> {
+) -> crate::ports::Result<Answer<ene_rpc::MessageAcceptance>> {
     if request.text.trim().is_empty() || request.text.len() > MAX_INPUT_BYTES {
         return Err(Error::invalid());
     }
@@ -130,7 +130,7 @@ pub(crate) async fn accept(
             .await?
         {
             return match outcome {
-                Outcome::Accepted => Ok((Outcome::Accepted, stored)),
+                Outcome::Accepted => Ok(Answer::Stored(Outcome::Accepted, stored)),
                 // A pending receipt from a live request is not resolved by a
                 // duplicate; a pending receipt after a restart is settled
                 // from the kernel's saved conversation and inbox.
@@ -160,7 +160,7 @@ pub(crate) async fn accept(
                                 response: stored.clone(),
                             })
                             .await?;
-                        return Ok((Outcome::Accepted, stored));
+                        return Ok(Answer::Stored(Outcome::Accepted, stored));
                     }
                     let failure = json!(ene_rpc::ApiFailure {
                         request_id,
@@ -324,7 +324,7 @@ pub(crate) async fn accept(
         .await;
     app.0.controls.lock().await.inflight.remove(&key);
     completed?;
-    Ok((Outcome::Accepted, response))
+    Ok(Answer::Success(acceptance))
 }
 
 /// The companions whose connected model configuration no longer matches the
@@ -374,7 +374,7 @@ pub(crate) async fn cancel(app: HostApplication, companion: String) -> crate::po
         .values()
         .filter(|run| run.companion == companion)
     {
-        run.cancel.send_replace(true);
+        run.cancel.cancel();
     }
     drop(controls);
     // Acceptance only: the turn's end is reported by its TurnEvent.

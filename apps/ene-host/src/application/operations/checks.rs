@@ -4,7 +4,7 @@ pub async fn check(
     id: String,
     key: String,
     request: CheckInput,
-) -> Result<(Outcome, Value), Error> {
+) -> Result<Answer<ene_rpc::CheckResult>, Error> {
     use crate::llm::Event;
     use futures_util::StreamExt;
     use rig_core::completion::CompletionRequest;
@@ -15,7 +15,7 @@ pub async fn check(
     // Persisted receipt identity: retain this key across transport/version changes.
     let target = format!("/v1/connections/{id}/check");
     let mut controls = app.0.controls.lock().await;
-    if let Some((outcome, response)) = app
+    if let Some((outcome, stored)) = app
         .0
         .repository
         .receipt(key.clone(), target.clone(), body.clone())
@@ -24,7 +24,7 @@ pub async fn check(
         if outcome == Outcome::Pending {
             return Err(Error::new(ErrorKind::RequestInProgress));
         }
-        return Ok((outcome, response));
+        return Ok(Answer::Stored(outcome, stored));
     }
     let c = config(&app, &mut controls).await?;
     if !c.companions.contains_key(&request.companion_id) {
@@ -81,13 +81,14 @@ pub async fn check(
         })
         .await?;
     // No fallible preparation remains after Pending is committed.
-    let mut cancelled = register(
+    let cancelled = register(
         &mut controls,
         request_id.clone(),
         request.companion_id.clone(),
         &p,
         &context,
         OperationKind::ConnectionCheck,
+        None,
     );
     drop(controls);
     let input = invocation(
@@ -101,7 +102,7 @@ pub async fn check(
     let work = async {
         let mut text = String::new();
         let mut chunks = 0;
-        let finished = if input.native_wire().is_some() {
+        let finished = if input.is_native() {
             use rig_core::streaming::{Item, StreamEvent};
             let mut stream = input.native_stream().await?;
             while let Some(item) = stream.next().await {
@@ -147,7 +148,7 @@ pub async fn check(
         }
         Ok((chunks, text.chars().count()))
     };
-    let result = execute(&app, OperationKind::ConnectionCheck, &mut cancelled, work).await;
+    let result = execute(&app, OperationKind::ConnectionCheck, &cancelled, work).await;
     if result
         .as_ref()
         .is_err_and(|error| error.kind == ErrorKind::UnsupportedCapability)
@@ -165,7 +166,7 @@ pub async fn check(
     let mut controls = app.0.controls.lock().await;
     let mut c = config(&app, &mut controls).await?;
     let cancelled_now = check_run(&app, &controls, &request_id).is_err();
-    let (outcome, response) = match result {
+    let (outcome, response, answer) = match result {
         Ok((chunks, scalars)) if !cancelled_now => {
             if let Some(mut p) = rules::connection(&c, &id) {
                 p.capabilities = ene_rpc::JsonDocument {
@@ -176,31 +177,35 @@ pub async fn check(
                 p.last_check = ene_rpc::JsonDocument { json: json!({"success":true,"model_id":model,"checked_at":time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).map_err(|_|Error::unavailable())?}).to_string(), ..Default::default() }.into();
                 update_connection(&mut c, p);
             }
-            (
-                Outcome::Completed,
-                json!(ene_rpc::CheckResult {
-                    request_id: request_id.clone(),
-                    capabilities: ene_rpc::JsonDocument {
-                        json: json!({"streaming_text":true}).to_string(),
-                        ..Default::default()
-                    }
-                    .into(),
-                    success: true,
-                    model_id: model,
-                    content_chunks: chunks,
-                    unicode_scalars: scalars as u64,
+            let checked = ene_rpc::CheckResult {
+                request_id: request_id.clone(),
+                capabilities: ene_rpc::JsonDocument {
+                    json: json!({"streaming_text":true}).to_string(),
                     ..Default::default()
-                }),
-            )
+                }
+                .into(),
+                success: true,
+                model_id: model,
+                content_chunks: chunks,
+                unicode_scalars: scalars as u64,
+                ..Default::default()
+            };
+            let response = serde_json::to_value(&checked)
+                .map_err(|_| Error::new(ErrorKind::StorageFailure))?;
+            (Outcome::Completed, response, Answer::Success(checked))
         }
-        _ => (
-            Outcome::Unavailable,
-            json!({"request_id":request_id,"error":ene_rpc::Failure {
+        _ => {
+            let failure = json!({"request_id":request_id,"error":ene_rpc::Failure {
                 code: "unavailable".into(), message: "接続確認を完了できませんでした".into(),
                 details: ene_rpc::JsonDocument { json: "{}".into(), ..Default::default() }.into(),
                 ..Default::default()
-            }}),
-        ),
+            }});
+            (
+                Outcome::Unavailable,
+                failure.clone(),
+                Answer::Stored(Outcome::Unavailable, failure),
+            )
+        }
     };
     let saved = crate::application::commit::configuration(
         &app,
@@ -211,14 +216,14 @@ pub async fn check(
             target,
             request: body,
             outcome,
-            response: response.clone(),
+            response,
         }),
     )
     .await;
     match saved {
         Ok(()) => {
             controls.running.remove(&request_id);
-            Ok((outcome, response))
+            Ok(answer)
         }
         Err(error) => {
             let mut boundary = app.0.boundary.lock().await;

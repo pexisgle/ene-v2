@@ -1,7 +1,13 @@
 use super::{OptionalExtension, Result, Store, params};
-use serde_json::Value;
+use serde::{Serialize, de::DeserializeOwned};
 impl Store {
-    pub async fn plugin_get(&self, namespace: String, key: String) -> Result<Value> {
+    /// The stored value, decoded once into the type its caller works with.
+    /// `None` when nothing is stored under `key`.
+    pub async fn plugin_get<T: DeserializeOwned + Send + 'static>(
+        &self,
+        namespace: String,
+        key: String,
+    ) -> Result<Option<T>> {
         self.call(move |db| {
             let value: Option<String> = db
                 .query_row(
@@ -10,14 +16,16 @@ impl Store {
                     |row| row.get(0),
                 )
                 .optional()?;
-            Ok(value
-                .map(|s| serde_json::from_str(&s))
-                .transpose()?
-                .unwrap_or(Value::Null))
+            Ok(value.map(|s| serde_json::from_str(&s)).transpose()?)
         })
         .await
     }
-    pub async fn plugin_set(&self, namespace: String, key: String, value: Value) -> Result<()> {
+    pub async fn plugin_set<T: Serialize + Send + 'static>(
+        &self,
+        namespace: String,
+        key: String,
+        value: T,
+    ) -> Result<()> {
         let value = serde_json::to_string(&value)?;
         self.call(move |db| {
             if namespace.starts_with("state:") {
@@ -29,7 +37,10 @@ impl Store {
             Ok(())
         }).await
     }
-    pub async fn plugin_list(&self, namespace: String) -> Result<Vec<Value>> {
+    pub async fn plugin_list<T: DeserializeOwned + Send + 'static>(
+        &self,
+        namespace: String,
+    ) -> Result<Vec<T>> {
         self.call(move |db| {
             let mut query =
                 db.prepare("SELECT value FROM plugin_records WHERE namespace=?1 ORDER BY key")?;

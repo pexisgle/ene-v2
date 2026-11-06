@@ -54,11 +54,11 @@ impl ProviderRegistry for Registry {
     fn resolve(&self, connection: &Connection) -> Result<ProviderBinding> {
         if connection.adapter == openai::ID {
             return ProviderBinding::resolve(Arc::new(openai::Provider), connection)
-                .map(|binding| binding.with_native(NativeWire::OpenAiResponses));
+                .map(|binding| binding.with_native(openai::task_stream));
         }
         if connection.adapter == openrouter::ID {
             return ProviderBinding::resolve(Arc::new(openrouter::Provider), connection)
-                .map(|binding| binding.with_native(NativeWire::OpenRouterChat));
+                .map(|binding| binding.with_native(openrouter::task_stream));
         }
         ProviderBinding::resolve(
             self.plugins()?

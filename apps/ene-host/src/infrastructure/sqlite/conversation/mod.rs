@@ -1,6 +1,6 @@
 //! Persisted configuration, acceptance receipts and message state transitions.
 //! Called on the database thread; no external service is called in a transaction.
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio_rusqlite::rusqlite::{Connection, OptionalExtension, params};
 
 pub use crate::domain::Configuration;

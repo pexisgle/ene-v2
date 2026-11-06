@@ -12,6 +12,7 @@
 mod kernel;
 mod messages;
 pub(crate) mod mind;
+pub(crate) use messages::HistoryEntry;
 
 use crate::domain::{Error, ErrorKind};
 use ene_rpc as w;
@@ -140,7 +141,7 @@ enum Command {
         companion: String,
         after: u64,
         limit: usize,
-        reply: oneshot::Sender<Result<w::History, Error>>,
+        reply: oneshot::Sender<Result<Vec<HistoryEntry>, Error>>,
     },
     Message {
         companion: String,
@@ -367,7 +368,7 @@ impl Runtime {
         companion: String,
         after: u64,
         limit: usize,
-    ) -> Result<w::History, Error> {
+    ) -> Result<Vec<HistoryEntry>, Error> {
         self.query(|reply| Command::HistoryAfter {
             companion,
             after,

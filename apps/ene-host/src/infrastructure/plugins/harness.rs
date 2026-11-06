@@ -7,18 +7,18 @@ impl Manager {
     /// A stored journal of another contract is not resumed. Guest memory is
     /// gone and the stored events use types this host no longer understands.
     pub(super) async fn harness_load(&self, binding_id: &str) -> Result<Option<Session>> {
-        let value = self
+        let session = match self
             .store
-            .plugin_get("harness".into(), binding_id.into())
+            .plugin_get::<Session>("harness".into(), binding_id.into())
             .await
-            .map_err(storage_failure)?;
-        if value.is_null() {
-            return Ok(None);
-        }
-        let Ok(session) = serde_json::from_value::<Session>(value) else {
-            return Ok(None);
+        {
+            Ok(session) => session,
+            // An unreadable journal is treated as absent, not as a stored
+            // session this host would resume.
+            Err(crate::infrastructure::sqlite::Error::Json(_)) => None,
+            Err(error) => return Err(storage_failure(error)),
         };
-        Ok((session.contract_version == CONTRACT_VERSION).then_some(session))
+        Ok(session.filter(|session| session.contract_version == CONTRACT_VERSION))
     }
     /// Creates the session for `Start` or validates the pending request for
     /// `Respond`. The returned session is already durable.
@@ -116,11 +116,7 @@ impl Manager {
     }
     async fn harness_store(&self, binding_id: &str, session: &Session) -> Result<()> {
         self.store
-            .plugin_set(
-                "harness".into(),
-                binding_id.into(),
-                serde_json::to_value(session).map_err(failure)?,
-            )
+            .plugin_set("harness".into(), binding_id.into(), session.clone())
             .await
             .map_err(storage_failure)
     }

@@ -3,7 +3,7 @@ pub async fn post_grant(
     app: HostApplication,
     key: String,
     request: GrantInput,
-) -> Result<(Outcome, Value), Error> {
+) -> Result<Answer<ene_rpc::GrantResult>, Error> {
     let consent = request.consent.as_option().ok_or_else(Error::invalid)?;
     // Keep the historical receipt body shape so grants accepted by an older
     // host still replay with the same key.
@@ -17,13 +17,13 @@ pub async fn post_grant(
     let key_lookup = key.clone();
     let lookup = body.clone();
     let mut controls = app.0.controls.lock().await;
-    if let Some(receipt) = app
+    if let Some((outcome, stored)) = app
         .0
         .repository
         .receipt(key_lookup, "/v1/grants".into(), lookup)
         .await?
     {
-        return Ok(receipt);
+        return Ok(Answer::Stored(outcome, stored));
     }
     let mut c = config(&app, &mut controls).await?;
     if !c.companions.contains_key(&request.companion_id) {
@@ -65,10 +65,12 @@ pub async fn post_grant(
         connection_fingerprint: policy.fingerprint,
     };
     c.grants.push(grant.clone());
-    let response = json!(ene_rpc::GrantResult {
+    let result = ene_rpc::GrantResult {
         grant: ene_rpc::Grant::from(grant).into(),
         ..Default::default()
-    });
+    };
+    let response =
+        serde_json::to_value(&result).map_err(|_| Error::new(ErrorKind::StorageFailure))?;
     crate::application::commit::configuration(
         &app,
         &mut controls,
@@ -82,7 +84,7 @@ pub async fn post_grant(
         }),
     )
     .await?;
-    Ok((Outcome::Created, response))
+    Ok(Answer::Success(result))
 }
 pub async fn delete_grant(app: HostApplication, id: String) -> Result<(), Error> {
     let mut controls = app.0.controls.lock().await;

@@ -106,7 +106,7 @@ impl HostApplication {
         &self,
         key: String,
         request: GrantInput,
-    ) -> Result<(crate::ports::Outcome, serde_json::Value), Error> {
+    ) -> Result<crate::ports::Answer<ene_rpc::GrantResult>, Error> {
         validate_request_key(&key)?;
         validate_id(&request.companion_id)?;
         validate_id(&request.connection_id)?;
@@ -131,7 +131,7 @@ impl HostApplication {
         id: String,
         key: String,
         request: MessageInput,
-    ) -> Result<(crate::ports::Outcome, serde_json::Value), Error> {
+    ) -> Result<crate::ports::Answer<ene_rpc::MessageAcceptance>, Error> {
         validate_id(&id)?;
         validate_request_key(&key)?;
         self.owned(super::conversation::accept(self.clone(), id, key, request))
@@ -142,7 +142,7 @@ impl HostApplication {
         id: String,
         key: String,
         request: CheckInput,
-    ) -> Result<(crate::ports::Outcome, serde_json::Value), Error> {
+    ) -> Result<crate::ports::Answer<ene_rpc::CheckResult>, Error> {
         validate_id(&id)?;
         validate_id(&request.companion_id)?;
         validate_request_key(&key)?;

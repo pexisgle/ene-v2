@@ -1,47 +1,60 @@
-//! Bounded tracker for provider generation tasks.
+//! Bounded set of provider generation tasks. One JoinSet both waits for them
+//! and aborts them, so there is one record of what is running.
 use crate::{Error, Result, limits::MAX_INSTANCES};
 use std::{sync::Arc, time::Duration};
+use tokio::{sync::Mutex, task::JoinSet};
+
+/// How long a clean shutdown waits before it aborts the remaining tasks.
+const GRACE: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Default)]
 pub struct Supervisor {
-    tracker: tokio_util::task::TaskTracker,
-    tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+    tasks: Arc<Mutex<Tasks>>,
 }
+
+#[derive(Default)]
+struct Tasks {
+    running: JoinSet<()>,
+    closed: bool,
+}
+
 impl Supervisor {
-    pub fn spawn(
+    pub async fn spawn(
         &self,
         task: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<()> {
-        let mut tasks = self.tasks.lock().map_err(|_| Error::Unavailable)?;
-        if self.tracker.is_closed() {
+        let mut tasks = self.tasks.lock().await;
+        if tasks.closed {
             return Err(Error::Unavailable);
         }
-        tasks.retain(|t| !t.is_finished());
-        if tasks.len() >= MAX_INSTANCES {
+        // Finished tasks are collected here, so the count is what is running.
+        while tasks.running.try_join_next().is_some() {}
+        if tasks.running.len() >= MAX_INSTANCES {
             return Err(Error::Unavailable);
         }
-        tasks.push(self.tracker.spawn(task).abort_handle());
+        tasks.running.spawn(task);
         Ok(())
     }
+
     pub async fn shutdown(&self) {
-        {
-            // `TaskTracker::close` only releases `wait`; it does not refuse a
-            // later `spawn`. Closing under the lock `spawn` takes keeps a task
-            // from slipping in after the last `wait` check.
-            let gate = self.tasks.lock();
-            self.tracker.close();
-            drop(gate);
-        }
-        if tokio::time::timeout(Duration::from_secs(4), self.tracker.wait())
-            .await
-            .is_err()
-        {
-            if let Ok(tasks) = self.tasks.lock() {
-                for task in tasks.iter() {
-                    task.abort();
+        // Closing under the lock `spawn` takes keeps a task from starting after
+        // the last wait; the token set is awaited without holding it.
+        let mut running = {
+            let mut tasks = self.tasks.lock().await;
+            tasks.closed = true;
+            std::mem::take(&mut tasks.running)
+        };
+        let deadline = tokio::time::Instant::now() + GRACE;
+        loop {
+            match tokio::time::timeout_at(deadline, running.join_next()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    running.abort_all();
+                    while running.join_next().await.is_some() {}
+                    break;
                 }
             }
-            self.tracker.wait().await;
         }
     }
 }

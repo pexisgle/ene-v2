@@ -7,15 +7,15 @@ const BASELINE: &str = "2026-11-consolidated";
 
 fn migrations() -> rusqlite_migration::Migrations<'static> {
     use rusqlite_migration::{HookError, M, Migrations};
-    Migrations::new(vec![M::up_with_hook(
-        include_str!("../../../migrations/001_initial.sql"),
-        |tx| {
+    Migrations::new(vec![
+        M::up_with_hook(include_str!("../../../migrations/001_initial.sql"), |tx| {
             seed(tx).map_err(|error| match error {
                 Error::Sql(error) => HookError::RusqliteError(error),
                 error => HookError::Hook(error.to_string()),
             })
-        },
-    )])
+        }),
+        M::up(include_str!("../../../migrations/002_devices.sql")),
+    ])
 }
 fn seed(tx: &tokio_rusqlite::rusqlite::Transaction<'_>) -> Result<()> {
     let companion = Companion {
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn a_newer_schema_is_rejected() {
         let mut db = Connection::open_in_memory().unwrap();
-        db.pragma_update(None, "user_version", 2).unwrap();
-        assert!(matches!(initialize(&mut db), Err(Error::FutureSchema(2))));
+        db.pragma_update(None, "user_version", 3).unwrap();
+        assert!(matches!(initialize(&mut db), Err(Error::FutureSchema(3))));
     }
 }

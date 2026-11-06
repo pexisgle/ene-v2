@@ -1,4 +1,5 @@
 use super::*;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) struct AuthorizedContext {
     pub binding: ProviderBinding,
@@ -57,8 +58,11 @@ pub(crate) fn register(
     connection: &ProviderConnection,
     context: &AuthorizedContext,
     operation: OperationKind,
-) -> watch::Receiver<bool> {
-    let (cancel, receiver) = watch::channel(false);
+    lifetime: Option<&CancellationToken>,
+) -> CancellationToken {
+    // One token per run: a caller's cancellation and the host's revocation
+    // both end it, with no channel in between.
+    let cancel = lifetime.map_or_default(CancellationToken::child_token);
     controls.running.insert(
         id,
         Running {
@@ -67,10 +71,10 @@ pub(crate) fn register(
             policy: context.binding.policy().clone(),
             nonce: context.secret.as_ref().map(|secret| secret.nonce.clone()),
             operation,
-            cancel,
+            cancel: cancel.clone(),
         },
     );
-    receiver
+    cancel
 }
 
 /// Linearization gate shared by outbound sends and successful completion.
@@ -79,7 +83,7 @@ pub(crate) fn check_run(app: &HostApplication, controls: &Controls, id: &str) ->
         .running
         .get(id)
         .ok_or_else(|| Error::new(ErrorKind::PermissionRequired))?;
-    if *run.cancel.borrow() {
+    if run.cancel.is_cancelled() {
         return Err(Error::new(ErrorKind::PermissionRequired));
     }
     check_access(
@@ -160,7 +164,7 @@ pub(crate) fn invocation(
     context: AuthorizedContext,
     id: String,
     input: InvocationInput,
-    cancel: watch::Receiver<bool>,
+    cancel: CancellationToken,
 ) -> Invocation {
     let authorization = std::sync::Arc::new(Authority {
         app: app.clone(),

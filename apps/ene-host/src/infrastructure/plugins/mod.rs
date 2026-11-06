@@ -18,9 +18,9 @@ use ene_plugin_runtime::{
     instance::{Instance, Services, Supervisor},
     limits::MAX_INSTANCES,
 };
-use ene_rpc::{EnablePluginRequest, Plugin, PluginBinding, PluginEntry};
 #[cfg(test)]
-use ene_rpc::{PluginInvocation, PluginResult};
+use ene_rpc::PluginInvocation;
+use ene_rpc::{EnablePluginRequest, Plugin, PluginBinding, PluginEntry, PluginResult};
 use serde_json::{Value, json};
 use sessions::Sessions;
 use std::{
@@ -37,7 +37,8 @@ struct Entry {
     error: Option<String>,
     cancellation: CancellationToken,
     generation: u64,
-    capabilities: BTreeMap<String, Value>,
+    /// What the loaded instance declared, per entrypoint.
+    capabilities: BTreeMap<String, ene_plugin::LlmCapabilities>,
 }
 #[derive(Clone)]
 pub struct Manager {
@@ -189,12 +190,8 @@ impl Manager {
                         }
                         let b = bundle(&e.package, &entry.id).ok()?;
                         let state = if current { &e.state } else { "changed" };
-                        let capabilities = e
-                            .capabilities
-                            .get(&entry.id)
-                            .cloned()
-                            .and_then(|c| serde_json::from_value(c).ok())
-                            .unwrap_or_default();
+                        let capabilities =
+                            e.capabilities.get(&entry.id).copied().unwrap_or_default();
                         Some(b.descriptor(state, capabilities, e.error.clone()))
                     })
             })
@@ -280,11 +277,11 @@ impl Manager {
         self.stop_sessions(None).await?;
         Ok(())
     }
-    pub async fn harness(&self, binding_id: String) -> Result<Option<Value>> {
-        let Some(session) = self.harness_load(&binding_id).await? else {
-            return Ok(None);
-        };
-        serde_json::to_value(session).map(Some).map_err(failure)
+    pub async fn harness(
+        &self,
+        binding_id: String,
+    ) -> Result<Option<crate::domain::harness::Session>> {
+        self.harness_load(&binding_id).await
     }
     pub fn cancel(&self) {
         self.stopped.cancel();
@@ -295,6 +292,50 @@ impl Manager {
         self.supervisor.shutdown().await;
         result
     }
+}
+
+/// One finished invocation in host types. Only the Connect API turns these
+/// into wire documents.
+pub(crate) struct Completed {
+    pub generation: u64,
+    pub events: Vec<ene_plugin::Event>,
+    pub answer: Answer,
+}
+
+/// What the invocation answered with.
+pub(crate) enum Answer {
+    /// The guest ABI's result document, already decoded from guest JSON.
+    Guest(Value),
+    /// The journal the host applied the turn to; it is the result.
+    Harness(Box<crate::domain::harness::Session>),
+}
+
+impl Completed {
+    /// The wire shape: the RPC is the only caller that needs one.
+    pub(crate) fn into_result(self) -> Result<PluginResult> {
+        let result = match self.answer {
+            Answer::Guest(value) => value,
+            Answer::Harness(journal) => harness_result(&journal),
+        };
+        Ok(PluginResult {
+            generation: self.generation,
+            events: self
+                .events
+                .into_iter()
+                .map(|event| serde_json::to_value(event).map_err(failure).map(Into::into))
+                .collect::<Result<_>>()?,
+            result: ene_rpc::JsonDocument::from(result).into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// The wire name of a stop reason: serde owns the ACP spelling.
+pub(crate) fn stop_reason_name(reason: ene_plugin::StopReason) -> Option<String> {
+    serde_json::to_value(reason)
+        .ok()?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// The harness task view returned to the plugin client.

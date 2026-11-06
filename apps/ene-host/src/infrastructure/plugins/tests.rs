@@ -6,7 +6,7 @@ use crate::domain::harness::{MAX_TRANSCRIPT, Session as HarnessSession, Status a
 use ene_plugin::{
     CharacterEvent, CharacterTarget, ContentChunk, GenerationRequest, HarnessEvent, HarnessInput,
     Operation, RequestPermissionOutcome, SelectedPermissionOutcome, Service, ServiceRequest,
-    SessionUpdate, ToolCall, ToolCallUpdate, ToolCallUpdateFields, text_block,
+    SessionUpdate, StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields, text_block,
 };
 #[cfg(unix)]
 use ene_plugin_runtime::limits::MAX_EVENTS;
@@ -24,6 +24,29 @@ fn application(manager: &Manager) -> crate::application::HostApplication {
 }
 async fn invoke_plugin(manager: &Manager, input: PluginInvocation) -> Result<PluginResult> {
     application(manager).invoke_plugin(input).await
+}
+/// The saved journal, read in the types the host itself uses.
+async fn stored_harness(manager: &Manager, binding_id: &str) -> HarnessSession {
+    saved_harness(manager, binding_id)
+        .await
+        .expect("saved harness journal")
+}
+/// The saved journal while a turn may not have written one yet.
+async fn saved_harness(manager: &Manager, binding_id: &str) -> Option<HarnessSession> {
+    manager
+        .store
+        .plugin_get("harness".into(), binding_id.into())
+        .await
+        .unwrap()
+}
+/// The saved enable request, as the host keeps it.
+async fn enabled_record(manager: &Manager, id: &str) -> EnablePluginRequest {
+    manager
+        .store
+        .plugin_get("enabled".into(), id.into())
+        .await
+        .unwrap()
+        .expect("saved enable request")
 }
 fn harness_invocation(input: HarnessInput) -> PluginInvocation {
     PluginInvocation {
@@ -199,11 +222,7 @@ async fn a_session_from_another_binding_is_never_reused() {
         .clone();
     manager
         .store
-        .plugin_set(
-            "bindings".into(),
-            "x".into(),
-            serde_json::to_value(&current).unwrap(),
-        )
+        .plugin_set("bindings".into(), "x".into(), current.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -385,7 +404,7 @@ async fn embedded_character_state_permissions_updates_and_disable() {
     foreign.companion_id = "other-companion".into();
     manager
         .store
-        .plugin_set("bindings".into(), foreign.id.clone(), json!(foreign))
+        .plugin_set("bindings".into(), foreign.id.clone(), foreign.clone())
         .await
         .unwrap();
     let services = LocalServices {
@@ -509,12 +528,7 @@ async fn a_finished_enable_cannot_persist_over_a_later_disable() {
     disable.await.unwrap().unwrap();
     blocked.await.unwrap().unwrap();
     assert_eq!(state(), "disabled");
-    let saved = manager
-        .store
-        .plugin_get("enabled".into(), "reference".into())
-        .await
-        .unwrap();
-    let saved: EnablePluginRequest = serde_json::from_value(saved["input"].clone()).unwrap();
+    let saved = enabled_record(&manager, "reference").await;
     assert!(!saved.enabled);
     manager.restore().await.unwrap();
     assert!(manager.ready("reference", None).is_err());
@@ -644,12 +658,7 @@ async fn changed_or_missing_code_can_be_disabled_and_stays_disabled() {
         assert!(entry.cancellation.is_cancelled());
         assert!(manager.sessions.lock().unwrap().is_empty());
         assert!(manager.ready("reference", None).is_err());
-        let saved = manager
-            .store
-            .plugin_get("enabled".into(), "reference".into())
-            .await
-            .unwrap();
-        let saved: EnablePluginRequest = serde_json::from_value(saved["input"].clone()).unwrap();
+        let saved = enabled_record(&manager, "reference").await;
         assert!(!saved.enabled);
         crate::test_support::write(&file, &original).unwrap();
         manager.restore().await.unwrap();
@@ -719,13 +728,7 @@ async fn enable_changes_survive_waiter_cancellation_and_restore() {
         drop(held);
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let saved = manager
-                    .store
-                    .plugin_get("enabled".into(), "reference".into())
-                    .await
-                    .unwrap();
-                let saved: EnablePluginRequest =
-                    serde_json::from_value(saved["input"].clone()).unwrap();
+                let saved = enabled_record(&manager, "reference").await;
                 if saved.enabled == enabled {
                     break;
                 }
@@ -860,33 +863,17 @@ async fn harness_turn_uses_the_wasm_contract() {
         .await
         .unwrap();
     assert_eq!(started.events.len(), 4);
-    let journal: HarnessSession = serde_json::from_value(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let journal: HarnessSession = stored_harness(&manager, "task").await;
     assert_eq!(journal.status, HarnessStatus::WaitingForInput);
     assert!(journal.pending.is_some());
     let finished = invoke_plugin(&manager, harness_invocation(allow()))
         .await
         .unwrap();
     assert!(!finished.events.is_empty());
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "completed");
-    assert_eq!(journal["stop_reason"], "end_turn");
-    assert!(
-        journal["report"]
-            .as_str()
-            .unwrap()
-            .contains("参照タスクを完了しました。")
-    );
+    let journal = stored_harness(&manager, "task").await;
+    assert_eq!(journal.status, HarnessStatus::Completed);
+    assert_eq!(journal.stop_reason, Some(StopReason::EndTurn));
+    assert!(journal.report.contains("参照タスクを完了しました。"));
     manager.shutdown().await.unwrap();
 }
 
@@ -942,18 +929,13 @@ async fn a_long_harness_turn_keeps_the_newest_events() {
         .await
         .unwrap();
     assert_eq!(result.events.len(), MAX_EVENTS);
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "completed");
-    assert_eq!(journal["report"], "x".repeat(300));
-    let events = journal["events"].as_array().unwrap();
-    assert_eq!(events.len(), MAX_TRANSCRIPT);
+    let journal = stored_harness(&manager, "task").await;
+    assert_eq!(journal.status, HarnessStatus::Completed);
+    assert_eq!(journal.report, "x".repeat(300));
+    assert_eq!(journal.events.len(), MAX_TRANSCRIPT);
     assert!(matches!(
-        serde_json::from_value::<HarnessEvent>(events.last().unwrap().clone()).unwrap(),
-        HarnessEvent::Stop { .. }
+        journal.events.last(),
+        Some(HarnessEvent::Stop { .. })
     ));
     assert_eq!(
         serde_json::from_str::<Value>(result.events.last().unwrap().json.as_str()).unwrap()["type"],
@@ -979,14 +961,7 @@ async fn harness_transcript_is_bounded_and_a_terminal_turn_allows_a_new_task() {
     invoke_plugin(&manager, harness_invocation(task_start("test")))
         .await
         .unwrap();
-    let mut journal: HarnessSession = serde_json::from_value(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let mut journal: HarnessSession = stored_harness(&manager, "task").await;
     let extra = HarnessEvent::Update {
         update: SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block("step"))),
     };
@@ -1000,17 +975,12 @@ async fn harness_transcript_is_bounded_and_a_terminal_turn_allows_a_new_task() {
     invoke_plugin(&manager, harness_invocation(allow()))
         .await
         .unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "completed");
-    let events = journal["events"].as_array().unwrap();
-    assert_eq!(events.len(), MAX_TRANSCRIPT);
+    let journal = stored_harness(&manager, "task").await;
+    assert_eq!(journal.status, HarnessStatus::Completed);
+    assert_eq!(journal.events.len(), MAX_TRANSCRIPT);
     assert!(matches!(
-        serde_json::from_value::<HarnessEvent>(events.last().unwrap().clone()).unwrap(),
-        HarnessEvent::Stop { .. }
+        journal.events.last(),
+        Some(HarnessEvent::Stop { .. })
     ));
     assert!(manager.sessions.lock().unwrap().is_empty());
     invoke_plugin(&manager, harness_invocation(task_start("retry")))
@@ -1094,7 +1064,7 @@ async fn backpressured_provider_releases_slots_on_disable_cancel_and_trap() {
         }).to_string()).unwrap();
         manager.scan().unwrap();
         manager.enable_provider("backpressure", true).await.unwrap();
-        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let stop = CancellationToken::new();
         let fixture = InvocationFixture {
             operation: OperationKind::Conversation,
             connection: crate::domain::Connection {
@@ -1108,7 +1078,7 @@ async fn backpressured_provider_releases_slots_on_disable_cancel_and_trap() {
             request: None,
             secret: None,
             authorization: Arc::new(Permit),
-            cancel: receiver,
+            cancel: stop.child_token(),
         };
         let provider = manager.provider("backpressure").unwrap();
         let binding = ProviderBinding::resolve(provider.clone(), &fixture.connection).unwrap();
@@ -1122,6 +1092,7 @@ async fn backpressured_provider_releases_slots_on_disable_cancel_and_trap() {
             manager
                 .supervisor
                 .spawn(async move { hold.cancelled().await })
+                .await
                 .unwrap();
         }
         match ending {
@@ -1130,7 +1101,7 @@ async fn backpressured_provider_releases_slots_on_disable_cancel_and_trap() {
                 .await
                 .unwrap(),
             "cancel" => {
-                stop.send_replace(true);
+                stop.cancel();
             }
             "trap" => release.cancel(),
             _ => unreachable!(),
@@ -1141,6 +1112,7 @@ async fn backpressured_provider_releases_slots_on_disable_cancel_and_trap() {
                 if manager
                     .supervisor
                     .spawn(async move { hold.cancelled().await })
+                    .await
                     .is_ok()
                 {
                     break;
@@ -1256,7 +1228,7 @@ async fn concurrent_provider_generations_do_not_share_a_worker() {
         authorization: Arc::new(Permit),
         cancel,
     };
-    let (_first_stop, first_cancel) = tokio::sync::watch::channel(false);
+    let first_cancel = CancellationToken::new();
     let binding = ProviderBinding::resolve(provider.clone(), &connection).unwrap();
     let mut first = provider
         .generate(make(first_cancel).build(binding))
@@ -1264,7 +1236,7 @@ async fn concurrent_provider_generations_do_not_share_a_worker() {
         .unwrap();
     // One event proves the guest owns an instance and is now blocked on backpressure.
     first.next().await.unwrap().unwrap();
-    let (_second_stop, second_cancel) = tokio::sync::watch::channel(false);
+    let second_cancel = CancellationToken::new();
     let binding = ProviderBinding::resolve(provider.clone(), &connection).unwrap();
     let mut second = provider
         .generate(make(second_cancel).build(binding))
@@ -1390,7 +1362,7 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
             )
             .await
             .unwrap();
-        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let stop = CancellationToken::new();
         let fixture = InvocationFixture {
             operation: OperationKind::Conversation,
             connection: crate::domain::Connection {
@@ -1407,7 +1379,7 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
             request: Some(completion_for_test("fixture", 64)),
             secret: None,
             authorization: Arc::new(Permit),
-            cancel: receiver,
+            cancel: stop.child_token(),
         };
         let provider = manager.provider("wasm-fixture").unwrap();
         let binding = ProviderBinding::resolve(provider.clone(), &fixture.connection).unwrap();
@@ -1427,7 +1399,7 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
             );
             server.abort();
         } else if outcome == "cancel" {
-            stop.send_replace(true);
+            stop.cancel();
             assert!(
                 tokio::time::timeout(std::time::Duration::from_secs(4), stream.next())
                     .await
@@ -1603,12 +1575,10 @@ async fn cancel_waiter(abort_waiter: bool) {
         drop(held);
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
-                let journal = manager
-                    .store
-                    .plugin_get("harness".into(), "task".into())
+                let cancelled = saved_harness(&manager, "task")
                     .await
-                    .unwrap();
-                if journal["status"] == "cancelled" && manager.sessions.lock().unwrap().is_empty() {
+                    .is_some_and(|journal| journal.status == HarnessStatus::Cancelled);
+                if cancelled && manager.sessions.lock().unwrap().is_empty() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1625,12 +1595,8 @@ async fn cancel_waiter(abort_waiter: bool) {
             .unwrap();
     }
     assert_eq!(
-        manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap()["status"],
-        "cancelled"
+        stored_harness(&manager, "task").await.status,
+        HarnessStatus::Cancelled
     );
     assert!(manager.sessions.lock().unwrap().is_empty());
     assert!(!lifetime.child_token().is_cancelled());
@@ -1821,12 +1787,9 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if manager
-                    .store
-                    .plugin_get("harness".into(), "task".into())
+                if saved_harness(&manager, "task")
                     .await
-                    .unwrap()["status"]
-                    == "running"
+                    .is_some_and(|journal| journal.status == HarnessStatus::Running)
                 {
                     break;
                 }
@@ -1848,13 +1811,9 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
                 .await
                 .unwrap()
                 .unwrap();
-            let journal = manager
-                .store
-                .plugin_get("harness".into(), "task".into())
-                .await
-                .unwrap();
-            assert_eq!(journal["status"], "failed");
-            assert_eq!(journal["failure"], "plugin_stopped");
+            let journal = stored_harness(&manager, "task").await;
+            assert_eq!(journal.status, HarnessStatus::Failed);
+            assert_eq!(journal.failure.as_deref(), Some("plugin_stopped"));
             assert!(manager.sessions.lock().unwrap().is_empty());
             continue;
         }
@@ -1877,16 +1836,12 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
         .unwrap()
         .unwrap();
         assert!(start.await.unwrap().is_err());
-        let journal = manager
-            .store
-            .plugin_get("harness".into(), "task".into())
-            .await
-            .unwrap();
-        assert_eq!(journal["status"], "cancelled");
-        assert_eq!(journal["events"].as_array().unwrap().len(), 1);
+        let journal = stored_harness(&manager, "task").await;
+        assert_eq!(journal.status, HarnessStatus::Cancelled);
+        assert_eq!(journal.events.len(), 1);
         assert_eq!(
             serde_json::from_str::<Value>(confirmed.result.json.as_str()).unwrap()["task_id"],
-            journal["session_id"]
+            journal.session_id
         );
         assert_eq!(
             serde_json::from_str::<Value>(
@@ -1898,7 +1853,7 @@ async fn cancel_during_worker_startup_is_cancelled_and_confirmation_is_idempoten
                     .as_str()
             )
             .unwrap()["task_id"],
-            journal["session_id"]
+            journal.session_id
         );
         manager
             .harness_begin(&binding, &task_start("again"))
@@ -1945,12 +1900,10 @@ async fn cancel_interrupts_a_running_harness_turn() {
     });
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            let journal = manager
-                .store
-                .plugin_get("harness".into(), "task".into())
+            let running = saved_harness(&manager, "task")
                 .await
-                .unwrap();
-            if journal["status"] == "running" {
+                .is_some_and(|journal| journal.status == HarnessStatus::Running);
+            if running {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1966,14 +1919,10 @@ async fn cancel_interrupts_a_running_harness_turn() {
     .unwrap()
     .unwrap();
     assert!(start.await.unwrap().is_err());
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "cancelled");
-    assert_eq!(journal["stop_reason"], "cancelled");
-    assert!(journal["pending"].is_null());
+    let journal = stored_harness(&manager, "task").await;
+    assert_eq!(journal.status, HarnessStatus::Cancelled);
+    assert_eq!(journal.stop_reason, Some(StopReason::Cancelled));
+    assert!(journal.pending.is_none());
     assert!(manager.sessions.lock().unwrap().is_empty());
     assert_eq!(
         serde_json::from_str::<Value>(cancelled.result.json.as_str()).unwrap()["status"],
@@ -2564,18 +2513,11 @@ async fn an_acp_agent_drives_a_harness_turn_and_permission() {
     )
     .await
     .unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "acp-task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "waiting_for_input");
-    let request_id = journal["pending"]["request_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let journal = stored_harness(&manager, "acp-task").await;
+    assert_eq!(journal.status, HarnessStatus::WaitingForInput);
+    let request_id = journal.pending.as_ref().unwrap().request_id.clone();
     assert!(!request_id.is_empty());
-    assert!(journal["report"].as_str().unwrap().contains("started"));
+    assert!(journal.report.contains("started"));
     invoke_plugin(
         &manager,
         invoke(HarnessInput::Respond {
@@ -2585,14 +2527,10 @@ async fn an_acp_agent_drives_a_harness_turn_and_permission() {
     )
     .await
     .unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "acp-task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "completed");
-    assert_eq!(journal["stop_reason"], "end_turn");
-    assert!(journal["report"].as_str().unwrap().contains("allow"));
+    let journal = stored_harness(&manager, "acp-task").await;
+    assert_eq!(journal.status, HarnessStatus::Completed);
+    assert_eq!(journal.stop_reason, Some(StopReason::EndTurn));
+    assert!(journal.report.contains("allow"));
     assert!(manager.acp.lock().unwrap().is_empty());
 
     invoke_plugin(
@@ -2606,12 +2544,8 @@ async fn an_acp_agent_drives_a_harness_turn_and_permission() {
     invoke_plugin(&manager, invoke(HarnessInput::Cancel))
         .await
         .unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "acp-task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "cancelled");
+    let journal = stored_harness(&manager, "acp-task").await;
+    assert_eq!(journal.status, HarnessStatus::Cancelled);
     assert!(manager.acp.lock().unwrap().is_empty());
 
     let mut without_root = binding.clone();
@@ -2740,15 +2674,8 @@ async fn an_acp_agent_runs_a_permission_gated_terminal_command() {
     )
     .await
     .unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "terminal-task".into())
-        .await
-        .unwrap();
-    let request_id = journal["pending"]["request_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let journal = stored_harness(&manager, "terminal-task").await;
+    let request_id = journal.pending.as_ref().unwrap().request_id.clone();
     invoke_plugin(
         &manager,
         invoke(HarnessInput::Respond {
@@ -2758,13 +2685,9 @@ async fn an_acp_agent_runs_a_permission_gated_terminal_command() {
     )
     .await
     .unwrap();
-    let journal = manager
-        .store
-        .plugin_get("harness".into(), "terminal-task".into())
-        .await
-        .unwrap();
-    assert_eq!(journal["status"], "completed");
-    assert!(journal["report"].as_str().unwrap().contains("hello"));
+    let journal = stored_harness(&manager, "terminal-task").await;
+    assert_eq!(journal.status, HarnessStatus::Completed);
+    assert!(journal.report.contains("hello"));
     assert!(manager.acp.lock().unwrap().is_empty());
 
     let mut bad_policy = binding;

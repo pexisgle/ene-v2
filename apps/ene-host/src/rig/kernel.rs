@@ -180,8 +180,10 @@ struct Turns {
     active: HashMap<Entity, Entity>,
 }
 
+/// The last message id the client was shown, per companion: ids never repeat,
+/// so the conversation itself remains the only record of what exists.
 #[derive(Resource, Default)]
-struct Emitted(HashSet<String>);
+struct Emitted(HashMap<String, MessageId>);
 
 /// Fills the announced set from the restored session and re-arms the streams
 /// of a turn that was still running when the host stopped.
@@ -192,8 +194,8 @@ fn initialize(
     mut state: ResMut<Turns>,
 ) {
     for (agent, id, conversation, active) in &agents {
-        for message in messages::visible_messages(conversation, &id.0) {
-            emitted.0.insert(message.id);
+        if let Some(last) = messages::last_shown_id(conversation) {
+            emitted.0.insert(id.0.clone(), last);
         }
         let Some(active) = active else {
             continue;
@@ -544,10 +546,10 @@ fn apply_commands(world: &mut World) {
                     Some(entity) => world
                         .get::<Conversation>(entity)
                         .map(|conversation| {
-                            messages::history_after(conversation, &companion, after, limit)
+                            messages::history_entries_after(conversation, after, limit)
                         })
                         .unwrap_or_default(),
-                    None => w::History::default(),
+                    None => Vec::new(),
                 };
                 let _ = reply.send(Ok(result));
             }
@@ -873,10 +875,12 @@ fn take_new(
     companion: &str,
     emitted: &mut Emitted,
 ) -> Vec<w::Message> {
-    messages::visible_messages(conversation, companion)
-        .into_iter()
-        .filter(|message| emitted.0.insert(message.id.clone()))
-        .collect()
+    let (messages, cursor) =
+        messages::unseen_messages(conversation, companion, emitted.0.get(companion).copied());
+    if let Some(cursor) = cursor {
+        emitted.0.insert(companion.to_owned(), cursor);
+    }
+    messages
 }
 
 const MIND_TOOLS: [&str; 3] = ["mind_recall", "mind_read", "mind_update"];

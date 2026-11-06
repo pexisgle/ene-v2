@@ -994,12 +994,11 @@ async fn abandoned_connection_check_finishes_the_original_receipt_after_revocati
     })
     .await
     .unwrap();
-    assert_eq!(confirmed.0, crate::ports::Outcome::Unavailable);
-    assert!(
-        confirmed.1["request_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-    );
+    let crate::ports::Answer::Stored(outcome, body) = confirmed else {
+        panic!("a cancelled check must be recorded as unavailable");
+    };
+    assert_eq!(outcome, crate::ports::Outcome::Unavailable);
+    assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
     assert!(fixture.started.try_recv().is_err());
     fixture.app.application.stop().await.unwrap();
 }
@@ -2140,7 +2139,6 @@ async fn memory_forget_and_share_are_owner_only_and_idempotent() {
 #[tokio::test]
 async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes() {
     use crate::bootstrap;
-    use crate::llm::Embedding;
     use rig_core::catalog::Catalog;
     use rig_core::operation::Completion;
     use rig_core::serve::ErasedHandler;
@@ -2192,11 +2190,11 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
         .mind_store_vectors(
             vec![crate::infrastructure::sqlite::memory::VectorEntry {
                 memory_id: memory_id.clone(),
-                model: crate::application::inference::EMBEDDING_MODEL.into(),
+                model: crate::llm::EMBEDDING_MODEL.into(),
                 preprocess: crate::infrastructure::sqlite::memory::TEXT_PREPROCESS.into(),
                 vector: vec![1.0, 0.0],
             }],
-            crate::application::inference::EMBEDDING_MODEL.into(),
+            crate::llm::EMBEDDING_MODEL.into(),
             "2026-01-01T00:00:00Z".into(),
         )
         .await
@@ -2308,16 +2306,10 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
                             crate::domain::ErrorKind::ProviderFailure,
                         ));
                     }
-                    return Ok(Embedding {
-                        vectors: vec![vec![1.0, 0.0]],
-                        input_tokens: 1,
-                    });
+                    return Ok(vec![vec![1.0, 0.0]]);
                 }
                 if index_mode.load(Ordering::SeqCst) {
-                    return Ok(Embedding {
-                        vectors: vec![vec![1.0, 0.0]],
-                        input_tokens: 1,
-                    });
+                    return Ok(vec![vec![1.0, 0.0]]);
                 }
                 calls.fetch_add(1, Ordering::SeqCst);
                 if fail.load(Ordering::SeqCst) {
@@ -2326,10 +2318,7 @@ async fn automatic_semantic_recall_holds_the_model_until_the_embedding_completes
                     ));
                 }
                 gate.notified().await;
-                Ok(Embedding {
-                    vectors: vec![vec![1.0, 0.0]],
-                    input_tokens: 1,
-                })
+                Ok(vec![vec![1.0, 0.0]])
             })
         }));
 
@@ -2695,22 +2684,16 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     let ids = page
         .messages
         .iter()
-        .map(|message| {
-            (
-                message.sequence,
-                message.role.as_str(),
-                message.text.as_str(),
-            )
-        })
+        .map(|message| (message.sequence, message.is_input(), message.text()))
         .collect::<Vec<_>>();
     assert!(
         ids.iter()
-            .any(|(_, role, text)| *role == "user" && *text == "ページ境界の発言"),
+            .any(|(_, input, text)| *input && text == "ページ境界の発言"),
         "page-boundary user missing: {ids:?}"
     );
     assert!(
         ids.iter()
-            .any(|(_, role, text)| *role == "assistant" && *text == "ページ境界の応答"),
+            .any(|(_, input, text)| !input && text == "ページ境界の応答"),
         "next-page reply missing: {ids:?}"
     );
     assert!(ids.len() >= 2, "the accepted user/answer was lost: {ids:?}");
@@ -2763,7 +2746,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
         after
             .messages
             .iter()
-            .map(|message| (message.sequence, message.id.as_str()))
+            .map(|message| (message.sequence, message.id().to_string()))
             .collect::<Vec<_>>()
     );
 
@@ -2882,13 +2865,13 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
         terminal
             .messages
             .iter()
-            .all(|message| message.text != "失敗する終端の発言"),
+            .all(|message| message.text() != "失敗する終端の発言"),
         "a failed terminal user was treated as a confirmed experience"
     );
     let confirmed = terminal
         .messages
         .iter()
-        .filter(|message| message.text == "終端の後の確定入力")
+        .filter(|message| message.text() == "終端の後の確定入力")
         .count();
     assert_eq!(
         confirmed, 1,
@@ -2937,7 +2920,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
         terminal_after
             .messages
             .iter()
-            .map(|message| (message.sequence, message.text.as_str()))
+            .map(|message| (message.sequence, message.text()))
             .collect::<Vec<_>>()
     );
 
@@ -2975,11 +2958,11 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
         let has_one = pending
             .messages
             .iter()
-            .any(|message| message.text == "Steer入力1");
+            .any(|message| message.text() == "Steer入力1");
         let has_two = pending
             .messages
             .iter()
-            .any(|message| message.text == "Steer入力2");
+            .any(|message| message.text() == "Steer入力2");
         if has_one && has_two {
             steer_messages = pending.messages;
             break;
@@ -2988,11 +2971,11 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     }
     let one = steer_messages
         .iter()
-        .position(|message| message.text == "Steer入力1")
+        .position(|message| message.text() == "Steer入力1")
         .expect("first steer input");
     let two = steer_messages
         .iter()
-        .position(|message| message.text == "Steer入力2")
+        .position(|message| message.text() == "Steer入力2")
         .expect("second steer input");
     assert_eq!(
         two,
@@ -3000,11 +2983,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
         "the second input was not accepted into the same live turn: {:?}",
         steer_messages
             .iter()
-            .map(|message| (
-                message.sequence,
-                message.role.as_str(),
-                message.text.as_str()
-            ))
+            .map(|message| { (message.sequence, message.is_input(), message.text()) })
             .collect::<Vec<_>>()
     );
     wait_for_answered(&mut subscription).await;
@@ -3020,13 +2999,13 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
     let first_request = steer_pending
         .messages
         .iter()
-        .find(|message| message.text == "Steer入力1")
+        .find(|message| message.text() == "Steer入力1")
         .and_then(|message| message.request_id.clone())
         .expect("first steer request id");
     let replies = steer_pending
         .messages
         .iter()
-        .filter(|message| message.role == "assistant")
+        .filter(|message| !message.is_input())
         .collect::<Vec<_>>();
     assert_eq!(
         replies.len(),
@@ -3035,7 +3014,7 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
         steer_pending
             .messages
             .iter()
-            .map(|message| (message.role.as_str(), message.text.as_str()))
+            .map(|message| (message.is_input(), message.text()))
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -3093,7 +3072,6 @@ async fn consolidation_connection_walks_a_page_boundary_into_sqlite_cursor() {
 
 #[tokio::test]
 async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
-    use crate::llm::Embedding;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -3162,10 +3140,7 @@ async fn index_worker_retry_budget_is_finite_and_config_resumes_it() {
                         crate::domain::ErrorKind::ProviderFailure,
                     ));
                 }
-                Ok(Embedding {
-                    vectors: vec![vec![1.0, 0.0]],
-                    input_tokens: 1,
-                })
+                Ok(vec![vec![1.0, 0.0]])
             })
         }));
     app.application.start_mind_worker();

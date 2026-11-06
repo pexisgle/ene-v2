@@ -3,14 +3,14 @@ use super::sessions::AcpSlot;
 use super::*;
 use crate::domain::harness::Session as HarnessSession;
 use crate::infrastructure::{
-    acp::{AcpConfig, AcpSession, TurnState},
+    acp::{AcpConfig, AcpSession, MAX_UPDATES, TurnState},
     workspace::Workspace,
 };
 use ene_plugin::{Event, HarnessEvent, HarnessInput, Operation};
 use ene_plugin_runtime::limits::MAX_EVENTS;
-use ene_rpc::{PluginBinding, PluginResult};
+use ene_rpc::PluginBinding;
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
-use tokio::sync::MutexGuard;
+use tokio::sync::{MutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
 impl Manager {
@@ -20,7 +20,7 @@ impl Manager {
         entry: Entry,
         operation: Operation,
         binding_lock: MutexGuard<'_, ()>,
-    ) -> Result<PluginResult> {
+    ) -> Result<Completed> {
         let input = match &operation {
             Operation::Harness { input } => input.clone(),
             _ => return Err(unsupported()),
@@ -54,7 +54,7 @@ impl Manager {
             drop(binding_lock);
             let journal = self.harness_cancel(&binding.id).await?;
             self.acp_remove(&binding.id);
-            return Ok(plugin_result(entry.generation, &journal, Vec::new()));
+            return Ok(completed(entry.generation, &journal, Vec::new()));
         }
         let mut session = slot.session.lock().await;
         // A response belongs to the process that asked; never resume a turn
@@ -109,24 +109,39 @@ impl Manager {
                 );
             }
             let agent = session.as_mut().ok_or_else(Error::unavailable)?;
-            let turn = tokio::select! { biased;
-                _ = slot.cancel.cancelled() => return Err(Error::new(ErrorKind::Unavailable)),
-                turn = async {
+            // Each confirmed update is durable before the turn's next event,
+            // so a long turn checkpoints its progress.
+            let turn = {
+                let (updates, mut pending) = mpsc::channel(MAX_UPDATES);
+                let apply = async {
+                    while let Some(update) = pending.recv().await {
+                        let event = HarnessEvent::Update { update };
+                        self.harness_apply(&binding.id, &mut journal, &event)
+                            .await?;
+                        remember(&mut events, event);
+                    }
+                    Ok::<_, Error>(())
+                };
+                let mut apply = std::pin::pin!(apply);
+                let turn = async {
                     match &input {
-                        HarnessInput::Start { prompt } => agent.prompt(prompt).await,
-                        HarnessInput::Respond { request_id, outcome } => {
-                            agent.respond(request_id, outcome).await
-                        }
+                        HarnessInput::Start { prompt } => agent.prompt(prompt, updates).await,
+                        HarnessInput::Respond {
+                            request_id,
+                            outcome,
+                        } => agent.respond(request_id, outcome, updates).await,
                         HarnessInput::Cancel => unreachable!("cancel is handled above"),
                     }
-                } => turn,
-            }?;
-            for update in turn.updates {
-                let event = HarnessEvent::Update { update };
-                self.harness_apply(&binding.id, &mut journal, &event)
-                    .await?;
-                remember(&mut events, event);
-            }
+                };
+                let mut turn = std::pin::pin!(turn);
+                let turn = tokio::select! { biased;
+                    _ = slot.cancel.cancelled() => return Err(Error::new(ErrorKind::Unavailable)),
+                    applied = apply.as_mut() => { applied?; turn.await }
+                    turn = &mut turn => turn,
+                }?;
+                apply.await?;
+                turn
+            };
             let event = match turn.state {
                 TurnState::Waiting(waiting) => HarnessEvent::RequestPermission {
                     request_id: waiting.request_id,
@@ -147,13 +162,13 @@ impl Manager {
                     agent.kill().await;
                 }
                 self.acp_remove(&binding.id);
-                Ok(plugin_result(
+                Ok(completed(
                     entry.generation,
                     &journal,
                     events.into_iter().collect(),
                 ))
             }
-            Ok(()) => Ok(plugin_result(
+            Ok(()) => Ok(completed(
                 entry.generation,
                 &journal,
                 events.into_iter().collect(),
@@ -229,19 +244,10 @@ fn remember(events: &mut VecDeque<Event>, event: HarnessEvent) {
     }
 }
 
-fn plugin_result(generation: u64, journal: &HarnessSession, events: Vec<Event>) -> PluginResult {
-    let result = super::harness_result(journal);
-    PluginResult {
+fn completed(generation: u64, journal: &HarnessSession, events: Vec<Event>) -> Completed {
+    Completed {
         generation,
-        events: events
-            .into_iter()
-            .filter_map(|event| {
-                serde_json::to_value(event)
-                    .ok()
-                    .map(ene_rpc::JsonDocument::from)
-            })
-            .collect(),
-        result: ene_rpc::JsonDocument::from(result).into(),
-        ..Default::default()
+        events,
+        answer: Answer::Harness(Box::new(journal.clone())),
     }
 }

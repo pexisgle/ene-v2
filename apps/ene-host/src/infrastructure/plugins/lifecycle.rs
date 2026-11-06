@@ -7,13 +7,14 @@ use crate::{
 use ene_plugin::Target;
 use ene_plugin_runtime::instance::Instance;
 use ene_rpc::EnablePluginRequest;
-use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::atomic::Ordering};
 
 impl Manager {
-    pub async fn enable(&self, id: String, input: EnablePluginRequest) -> Result<()> {
+    pub async fn enable(&self, id: String, mut input: EnablePluginRequest) -> Result<()> {
         #[cfg(test)]
         self.enable_entries.fetch_add(1, Ordering::SeqCst);
+        // The saved record names its own plugin, so restore needs no second key.
+        input.id = id.clone();
         if input.enabled {
             let package = self
                 .entries
@@ -62,7 +63,9 @@ impl Manager {
                     let worker = Instance::load(verified, entry.id.clone(), generation, &cancel)
                         .await
                         .map_err(failure)?;
-                    capabilities.insert(entry.id.clone(), worker.capabilities);
+                    if let Some(declared) = worker.capabilities {
+                        capabilities.insert(entry.id.clone(), declared);
+                    }
                 }
             }
             Ok::<_, Error>(capabilities)
@@ -90,7 +93,7 @@ impl Manager {
         }
         if result.is_ok() {
             self.store
-                .plugin_set("enabled".into(), id.clone(), json!({"id":id,"input":input}))
+                .plugin_set("enabled".into(), id.clone(), input)
                 .await
                 .map_err(storage_failure)?;
         }
@@ -101,18 +104,15 @@ impl Manager {
         for binding in self.bindings().await? {
             self.harness_stop(&binding.id, "host_interrupted").await?;
         }
-        let records = self
+        let records: Vec<EnablePluginRequest> = self
             .store
             .plugin_list("enabled".into())
             .await
             .map_err(storage_failure)?;
         // Saved identity includes the package ID; changed code never auto-enables.
-        for record in records {
-            if let (Some(id), Some(input)) = (
-                record.get("id").and_then(Value::as_str),
-                record.get("input"),
-            ) && let Ok(input) = serde_json::from_value::<EnablePluginRequest>(input.clone())
-                && let Err(error) = self.enable(id.into(), input).await
+        for input in records {
+            let id = input.id.clone();
+            if let Err(error) = self.enable(id, input).await
                 && error.kind == ErrorKind::StorageFailure
             {
                 return Err(error);

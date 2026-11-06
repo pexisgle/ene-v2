@@ -29,9 +29,13 @@ fn key(value: String) -> Result<String, ConnectError> {
     Ok(value)
 }
 fn receipt<T: serde::de::DeserializeOwned>(
-    (outcome, value): (crate::ports::Outcome, serde_json::Value),
+    answer: crate::ports::Answer<T>,
 ) -> Result<T, ConnectError> {
     use crate::ports::Outcome;
+    let (outcome, value) = match answer {
+        crate::ports::Answer::Success(value) => return Ok(value),
+        crate::ports::Answer::Stored(outcome, value) => (outcome, value),
+    };
     if matches!(outcome, Outcome::Pending | Outcome::Unavailable) {
         let mut body: w::ApiFailure = serde_json::from_value(value)
             .map_err(|_| ConnectError::internal("応答を変換できません"))?;

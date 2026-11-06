@@ -124,10 +124,12 @@ impl w::PluginService for PluginRpc {
             .await
             .map_err(failure)?
             .ok_or_else(not_found)?;
+        let json = serde_json::to_string(&state)
+            .map_err(|_| ConnectError::internal("応答を変換できません"))?;
         Response::ok(w::HarnessState {
             binding_id,
             state: ene_rpc::JsonDocument {
-                json: state.to_string(),
+                json,
                 ..Default::default()
             }
             .into(),

@@ -77,9 +77,9 @@ impl LlmProvider for Provider {
     fn embed(
         &self,
         input: Invocation,
-    ) -> futures_util::future::BoxFuture<'_, Result<crate::llm::Embedding>> {
+    ) -> futures_util::future::BoxFuture<'_, Result<rig_core::embeddings::EmbeddingResponse>> {
         Box::pin(async move {
-            let request = input.embedding_request()?.clone();
+            let texts = input.embedding_input()?.clone();
             let endpoint = input.connection().endpoint.trim_end_matches('/').to_owned();
             let transport = crate::llm::AuthorizedTransport::new(
                 std::sync::Arc::new(input),
@@ -91,35 +91,46 @@ impl LlmProvider for Provider {
             let client = OpenAIConfig::new("managed-by-host")
                 .with_base_url(&endpoint)
                 .connect(transport);
-            let model = client.embedding(request.model, None);
-            let response = model
-                .call(request.input)
+            let model = client.embedding(crate::llm::EMBEDDING_MODEL, None);
+            model
+                .call(texts)
                 .await
-                .map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
-            let vectors = response
-                .embeddings
-                .into_iter()
-                .map(|embedding| {
-                    embedding
-                        .vec
-                        .into_iter()
-                        .map(|value| value as f32)
-                        .collect::<Vec<f32>>()
-                })
-                .collect::<Vec<_>>();
-            let dimension = vectors.first().map(Vec::len).unwrap_or_default();
-            if vectors.is_empty()
-                || dimension == 0
-                || vectors.iter().any(|vector| vector.len() != dimension)
-            {
-                return Err(Error::new(ErrorKind::ExternalFailure));
-            }
-            Ok(crate::llm::Embedding {
-                vectors,
-                input_tokens: response.usage.input_tokens.unwrap_or_default(),
-            })
+                .map_err(|_| Error::new(ErrorKind::ProviderFailure))
         })
     }
+}
+
+/// The task stream's model on Rig's Responses wire.
+pub(crate) fn task_stream(
+    outbound: std::sync::Arc<crate::llm::Outbound>,
+    mut request: rig_core::completion::CompletionRequest,
+) -> futures_util::future::BoxFuture<'static, Result<rig_core::streaming::CompletionStream>> {
+    Box::pin(async move {
+        let model = request.model.clone().ok_or_else(Error::invalid)?;
+        // Rig's Responses wire must see store=false before it encodes
+        // history; changing the HTTP body downstream would be too late.
+        match request
+            .additional_params
+            .get_or_insert_with(|| serde_json::json!({}))
+        {
+            serde_json::Value::Object(params) => {
+                params.insert("store".into(), serde_json::Value::Bool(false));
+            }
+            _ => return Err(Error::invalid()),
+        }
+        let endpoint = outbound.connection().endpoint.clone();
+        let transport = crate::llm::AuthorizedTransport::for_outbound(
+            outbound,
+            crate::llm::CredentialPlacement::Bearer,
+        )?;
+        let client = OpenAIConfig::new("managed-by-host")
+            .with_base_url(endpoint)
+            .connect(transport);
+        client
+            .responses(model)
+            .stream(request)
+            .map_err(|_| Error::new(ErrorKind::ProviderFailure))
+    })
 }
 
 /// The parent conversation's model, connected as a Rig kernel agent's

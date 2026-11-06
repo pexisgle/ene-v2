@@ -59,7 +59,7 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
         .unwrap();
     for models in [true, false] {
         let endpoint = format!("{origin}/api/v1");
-        let (_stop, receiver) = tokio::sync::watch::channel(false);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let input = Arc::new(
             InvocationFixture {
                 operation: if models {
@@ -77,7 +77,7 @@ async fn pdk_uses_authorized_catalog_and_streams_with_large_history() {
                     nonce: "n".into(),
                 }),
                 authorization: Arc::new(super::super::tests::Permit),
-                cancel: receiver,
+                cancel: cancel.clone(),
             }
             .with_destinations(vec![origin.clone()]),
         );

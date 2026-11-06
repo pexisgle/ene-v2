@@ -1,7 +1,7 @@
 //! Credential-bearing execution; signing is private to this module and its transport.
 use super::*;
 use crate::ports::Secret;
-use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 mod transport;
 pub use transport::{AuthorizedTransport, Response};
@@ -22,7 +22,7 @@ pub(crate) enum InvocationInput {
     ConnectionCheck(rig_core::completion::CompletionRequest),
     ModelList,
     Task(rig_core::completion::CompletionRequest),
-    Embedding(crate::llm::EmbeddingRequest),
+    Embedding(Vec<String>),
 }
 impl InvocationInput {
     fn operation(&self) -> OperationKind {
@@ -162,7 +162,7 @@ impl Outbound {
 pub struct Invocation {
     outbound: Arc<Outbound>,
     input: InvocationInput,
-    cancel: watch::Receiver<bool>,
+    cancel: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -178,7 +178,7 @@ impl Invocation {
         input: InvocationInput,
         secret: Option<Secret>,
         authorization: Arc<dyn Authorization>,
-        cancel: watch::Receiver<bool>,
+        cancel: CancellationToken,
         binding: ProviderBinding,
     ) -> Self {
         let outbound = Outbound::new(
@@ -215,14 +215,15 @@ impl Invocation {
     pub fn connection(&self) -> &Connection {
         &self.outbound.connection
     }
-    pub fn embedding_request(&self) -> Result<&crate::llm::EmbeddingRequest> {
+    /// The texts to embed; the model is the host's single embedding model.
+    pub fn embedding_input(&self) -> Result<&Vec<String>> {
         match &self.input {
-            InvocationInput::Embedding(request) => Ok(request),
+            InvocationInput::Embedding(input) => Ok(input),
             _ => Err(Error::invalid()),
         }
     }
 
-    pub async fn embed(self) -> Result<crate::llm::Embedding> {
+    pub async fn embed(self) -> Result<rig_core::embeddings::EmbeddingResponse> {
         let binding = self.outbound.binding.clone();
         binding.provider().embed(self).await
     }
@@ -236,51 +237,24 @@ impl Invocation {
         }
     }
 
-    pub(crate) fn native_wire(&self) -> Option<NativeWire> {
-        self.outbound.binding.native()
+    /// Whether the provider answers with its own Rig wire rather than the
+    /// guest's text events.
+    pub(crate) fn is_native(&self) -> bool {
+        self.outbound.binding.native().is_some()
     }
 
     /// Run a native model with Rig's own CompletionStream: no host-specific
-    /// event type or message representation on the OpenAI/OpenRouter path.
+    /// event type or message representation on the builtin wires.
     pub(crate) async fn native_stream(self) -> Result<rig_core::streaming::CompletionStream> {
-        use rig_core::providers::openai::{OpenAIConfig, wire::OPENROUTER};
-        let wire = self.native_wire().ok_or_else(Error::invalid)?;
-        let mut request = self.completion_request()?.clone();
-        let model = request.model.clone().ok_or_else(Error::invalid)?;
-        if wire == NativeWire::OpenAiResponses {
-            // Rig's Responses wire must see store=false before it encodes
-            // history; changing the HTTP body downstream would be too late.
-            match request
-                .additional_params
-                .get_or_insert_with(|| serde_json::json!({}))
-            {
-                serde_json::Value::Object(params) => {
-                    params.insert("store".into(), serde_json::Value::Bool(false));
-                }
-                _ => return Err(Error::invalid()),
-            }
-        }
-        self.authorization().check().await?;
-        let endpoint = self.connection().endpoint.clone();
-        let transport = AuthorizedTransport::new(Arc::new(self), CredentialPlacement::Bearer)?;
-        let client = match wire {
-            NativeWire::OpenAiResponses => OpenAIConfig::new("managed-by-host")
-                .with_base_url(endpoint)
-                .connect(transport),
-            NativeWire::OpenRouterChat => OpenAIConfig::with_key(&OPENROUTER, "managed-by-host")
-                .with_base_url(endpoint)
-                .connect(transport),
-        };
-        let streamed = match wire {
-            NativeWire::OpenAiResponses => client.responses(model).stream(request),
-            NativeWire::OpenRouterChat => client.chat(model).stream(request),
-        };
-        streamed.map_err(|_| Error::new(ErrorKind::ProviderFailure))
+        let request = self.completion_request()?.clone();
+        let make = self.outbound.binding.native().ok_or_else(Error::invalid)?;
+        self.outbound.authorization.check().await?;
+        make(self.outbound.clone(), request).await
     }
     pub fn authorization(&self) -> Arc<dyn Authorization> {
         self.outbound.authorization.clone()
     }
-    pub fn cancellation(&self) -> watch::Receiver<bool> {
+    pub fn cancellation(&self) -> CancellationToken {
         self.cancel.clone()
     }
     pub fn operation(&self) -> OperationKind {

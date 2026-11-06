@@ -281,6 +281,7 @@ fn validate_body(document: &ene_rpc::JsonDocument, environment: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     fn document(json: Value) -> ene_rpc::JsonDocument {
         ene_rpc::JsonDocument {
             json: json.to_string(),

@@ -7,7 +7,7 @@
 use crate::domain::{Error, ErrorKind};
 use ene_rpc as w;
 use rig_core::completion::Message;
-use rig_core::conversation::{EntryRef, MessageId, TurnEnd};
+use rig_core::conversation::{Entry, EntryRef, MessageId, TurnEnd};
 use rig_ecs::prelude::*;
 
 /// How a turn that has no end yet is shown.
@@ -119,11 +119,36 @@ fn assistant_text(message: &Message) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.trim().to_owned())
 }
 
-/// Whether an entry is a message the client shows: the user's own text or a
-/// model reply with text. Tool results and tool-call-only replies are kept by
-/// Rig but are not conversation messages.
-fn visible(entry: &EntryRef<'_>) -> bool {
-    entry.is_users_own() || assistant_text(entry.message).is_some()
+/// An entry the client shows, with the role and text the wire shape needs.
+/// Tool results and tool-call-only replies are kept by Rig but are not
+/// conversation messages.
+struct Shown<'a> {
+    entry: EntryRef<'a>,
+    role: &'static str,
+    text: String,
+}
+
+/// The text of an entry the client shows: the user's own input or a model
+/// reply with text. Tool results and tool-call-only replies have none.
+fn shown_text(entry: &EntryRef<'_>) -> Option<String> {
+    if entry.is_users_own() {
+        user_text(entry.message)
+    } else {
+        assistant_text(entry.message)
+    }
+}
+
+/// The messages the client shows, oldest first.
+fn shown(conversation: &Conversation) -> impl Iterator<Item = Shown<'_>> + '_ {
+    conversation.entries().filter_map(|entry| {
+        let text = shown_text(&entry)?;
+        let role = if entry.is_users_own() {
+            "user"
+        } else {
+            "assistant"
+        };
+        Some(Shown { entry, role, text })
+    })
 }
 
 fn created_at(made: u64) -> String {
@@ -136,17 +161,14 @@ fn created_at(made: u64) -> String {
         .unwrap_or_default()
 }
 
-fn entry_message(spans: &[TurnSpan], entry: &EntryRef<'_>, companion: &str) -> Option<w::Message> {
+fn entry_message(spans: &[TurnSpan], shown: &Shown<'_>, companion: &str) -> w::Message {
+    let entry = shown.entry;
+    let (role, text) = (shown.role, shown.text.clone());
     let span = span_of(spans, entry.index);
-    let (role, text) = if entry.is_users_own() {
-        ("user", user_text(entry.message)?)
-    } else {
-        ("assistant", assistant_text(entry.message)?)
-    };
     let failure = (role == "assistant")
         .then(|| span.and_then(TurnSpan::failure))
         .flatten();
-    Some(w::Message {
+    w::Message {
         id: entry.id.to_string(),
         companion_id: companion.to_owned(),
         role: role.into(),
@@ -175,17 +197,33 @@ fn entry_message(spans: &[TurnSpan], entry: &EntryRef<'_>, companion: &str) -> O
                 .map(|request| request.0.clone())
         },
         ..Default::default()
-    })
+    }
 }
 
-/// Every message the client shows, oldest first.
-pub(super) fn visible_messages(conversation: &Conversation, companion: &str) -> Vec<w::Message> {
+/// The highest message id the client has already been shown.
+pub(super) fn last_shown_id(conversation: &Conversation) -> Option<MessageId> {
+    shown(conversation).map(|shown| shown.entry.id).max()
+}
+
+/// Every message the client has not been shown yet, oldest first, with the
+/// highest id they carry. Rig never reuses an id, so this one id is all the
+/// state a notification needs.
+pub(super) fn unseen_messages(
+    conversation: &Conversation,
+    companion: &str,
+    after: Option<MessageId>,
+) -> (Vec<w::Message>, Option<MessageId>) {
     let spans = spans(conversation);
-    conversation
-        .entries()
-        .filter(|entry| visible(entry))
-        .filter_map(|entry| entry_message(&spans, &entry, companion))
-        .collect()
+    let mut cursor = after;
+    let mut messages = Vec::new();
+    for shown in shown(conversation) {
+        if after.is_some_and(|after| shown.entry.id <= after) {
+            continue;
+        }
+        cursor = Some(cursor.map_or(shown.entry.id, |cursor| cursor.max(shown.entry.id)));
+        messages.push(entry_message(&spans, &shown, companion));
+    }
+    (messages, cursor)
 }
 
 fn parse_cursor(companion: &str, cursor: &str) -> Result<u64, Error> {
@@ -200,6 +238,8 @@ fn parse_cursor(companion: &str, cursor: &str) -> Result<u64, Error> {
     Ok(sequence)
 }
 
+/// One page ending at `cursor` (or at the newest message), newest last. Only
+/// the page is converted into the wire shape.
 pub(super) fn history(
     conversation: &Conversation,
     companion: &str,
@@ -209,16 +249,21 @@ pub(super) fn history(
     let before = cursor
         .map(|cursor| parse_cursor(companion, cursor))
         .transpose()?;
-    let all = visible_messages(conversation, companion);
-    let end = before
-        .map(|before| {
-            all.iter()
-                .position(|message| message.sequence >= before)
-                .unwrap_or(all.len())
-        })
-        .unwrap_or(all.len());
+    // A sequence counts the entries before it, so the cursor's position is
+    // known without building the messages before it.
+    let end = match before {
+        Some(before) => shown(conversation)
+            .take_while(|shown| shown.entry.index as u64 + 1 < before)
+            .count(),
+        None => shown(conversation).count(),
+    };
     let start = end.saturating_sub(limit);
-    let items = all[start..end].to_vec();
+    let spans = spans(conversation);
+    let items = shown(conversation)
+        .skip(start)
+        .take(end - start)
+        .map(|shown| entry_message(&spans, &shown, companion))
+        .collect::<Vec<_>>();
     let next_cursor = (start > 0)
         .then(|| {
             items
@@ -233,35 +278,85 @@ pub(super) fn history(
     })
 }
 
-fn page_after(all: Vec<w::Message>, companion: &str, after: u64, limit: usize) -> w::History {
-    let items = all
-        .into_iter()
-        .filter(|message| message.sequence > after)
-        .take(limit)
-        .collect::<Vec<_>>();
-    let next_cursor = (items.len() == limit)
-        .then(|| items.last().map(|message| message.sequence))
-        .flatten()
-        .map(|sequence| format!("{sequence}:{companion}"));
-    w::History {
-        items,
-        next_cursor,
-        ..Default::default()
+/// One conversation entry as memory reads it: Rig's own entry, its position
+/// and the end of the turn it belongs to. The kernel builds these where the
+/// conversation is readable; nothing is encoded for the wire.
+#[derive(Clone, Debug)]
+pub(crate) struct HistoryEntry {
+    /// Position in the conversation; the history cursor unit.
+    pub sequence: u64,
+    /// Rig's entry: message, author, id and when it was made.
+    pub entry: Entry,
+    /// How the turn this entry belongs to ended, when it has ended.
+    pub turn: Option<TurnEnd>,
+    /// The request that asked for it: the user's own, or the turn's for a reply.
+    pub request_id: Option<String>,
+}
+
+impl HistoryEntry {
+    /// Whether it is the user's own input, not a model reply.
+    pub(crate) fn is_input(&self) -> bool {
+        self.borrowed().is_users_own()
+    }
+    /// Its id in the conversation.
+    pub(crate) fn id(&self) -> MessageId {
+        self.entry.id.unwrap_or_default()
+    }
+    /// The text the conversation shows, trimmed as the client sees it.
+    pub(crate) fn text(&self) -> String {
+        shown_text(&self.borrowed()).unwrap_or_default()
+    }
+    /// When it was made, in the RFC 3339 form the memory record keeps.
+    pub(crate) fn created_at(&self) -> String {
+        created_at(self.entry.made.unwrap_or_default())
+    }
+    fn borrowed(&self) -> EntryRef<'_> {
+        EntryRef {
+            index: self.sequence.saturating_sub(1) as usize,
+            id: self.id(),
+            message: &self.entry.message,
+            author: self.entry.author.as_ref(),
+            made: self.entry.made.unwrap_or_default(),
+        }
     }
 }
 
-pub(super) fn history_after(
+/// The entries memory reads after `after`, oldest first. Only the unprocessed
+/// window is copied; earlier entries are not.
+pub(super) fn history_entries_after(
     conversation: &Conversation,
-    companion: &str,
     after: u64,
     limit: usize,
-) -> w::History {
-    page_after(
-        visible_messages(conversation, companion),
-        companion,
-        after,
-        limit,
-    )
+) -> Vec<HistoryEntry> {
+    let spans = spans(conversation);
+    conversation
+        .entries()
+        .filter(|entry| entry.index as u64 + 1 > after)
+        .filter_map(|entry| history_entry(&spans, &entry, conversation))
+        .take(limit)
+        .collect()
+}
+
+fn history_entry(
+    spans: &[TurnSpan],
+    entry: &EntryRef<'_>,
+    conversation: &Conversation,
+) -> Option<HistoryEntry> {
+    shown_text(entry)?;
+    let span = span_of(spans, entry.index);
+    Some(HistoryEntry {
+        sequence: entry.index as u64 + 1,
+        entry: conversation.entry(entry.index)?,
+        turn: span.and_then(|span| span.end.clone()),
+        request_id: if entry.is_users_own() {
+            entry
+                .author
+                .and_then(|author| author.request.as_ref())
+                .map(|request| request.0.clone())
+        } else {
+            span.and_then(|span| span.request_id.clone())
+        },
+    })
 }
 
 pub(super) fn message(
@@ -270,10 +365,9 @@ pub(super) fn message(
     id: &str,
 ) -> Result<w::Message, Error> {
     let spans = spans(conversation);
-    conversation
-        .entries()
-        .find(|entry| entry.id.to_string() == id && visible(entry))
-        .and_then(|entry| entry_message(&spans, &entry, companion))
+    shown(conversation)
+        .find(|shown| shown.entry.id.to_string() == id)
+        .map(|shown| entry_message(&spans, &shown, companion))
         .ok_or_else(|| Error::new(ErrorKind::NotFound))
 }
 
@@ -318,24 +412,34 @@ pub(super) fn request_entry(conversation: &Conversation, start: MessageId) -> Op
 mod tests {
     use super::*;
 
-    fn message(sequence: u64) -> w::Message {
-        w::Message {
-            id: format!("m{sequence}"),
-            sequence,
-            text: format!("message-{sequence}"),
-            ..Default::default()
-        }
+    fn conversation(count: u64) -> Conversation {
+        Conversation(rig_core::conversation::Conversation::from_messages(
+            (1..=count).map(|sequence| Message::user(format!("message-{sequence}"))),
+        ))
     }
 
     #[test]
     fn forward_pages_continue_after_the_last_page_without_skipping() {
-        let all = (1..=70).map(message).collect::<Vec<_>>();
-        let first = page_after(all.clone(), "c", 0, 64);
-        assert_eq!(first.items.len(), 64);
-        let last = first.items.last().unwrap().sequence;
-        let rest = page_after(all, "c", last, 64);
-        assert_eq!(rest.items.len(), 6);
-        assert_eq!(rest.items.first().unwrap().sequence, last + 1);
-        assert_eq!(rest.items.last().unwrap().text, "message-70");
+        let conversation = conversation(70);
+        let first = history_entries_after(&conversation, 0, 64);
+        assert_eq!(first.len(), 64);
+        let last = first.last().unwrap().sequence;
+        let rest = history_entries_after(&conversation, last, 64);
+        assert_eq!(rest.len(), 6);
+        assert_eq!(rest.first().unwrap().sequence, last + 1);
+        assert_eq!(rest.last().unwrap().text(), "message-70");
+    }
+
+    #[test]
+    fn backward_pages_end_just_before_the_cursor() {
+        let conversation = conversation(70);
+        let latest = history(&conversation, "c", None, 64).unwrap();
+        assert_eq!(latest.items.len(), 64);
+        assert_eq!(latest.items.first().unwrap().sequence, 7);
+        let cursor = latest.next_cursor.unwrap();
+        let older = history(&conversation, "c", Some(&cursor), 64).unwrap();
+        assert_eq!(older.items.len(), 6);
+        assert_eq!(older.items.first().unwrap().sequence, 1);
+        assert_eq!(older.next_cursor, None);
     }
 }

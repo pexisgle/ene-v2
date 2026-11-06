@@ -9,7 +9,7 @@ pub struct App {
 impl App {
     pub fn new(application: HostApplication, token: String) -> Self {
         Self {
-            devices: crate::devices::Devices::new(None),
+            devices: crate::devices::Devices::new(application.store()),
             application,
             token: token.into(),
         }

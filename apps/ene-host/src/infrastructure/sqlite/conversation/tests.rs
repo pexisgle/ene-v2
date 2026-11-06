@@ -1,5 +1,6 @@
 use super::*;
 use crate::infrastructure::sqlite::Store;
+use serde_json::json;
 
 #[tokio::test]
 async fn a_pending_receipt_completes_once_and_releases_only_before_completion() {
