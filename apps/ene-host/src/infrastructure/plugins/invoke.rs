@@ -4,7 +4,7 @@ use super::{Manager, conflict, failure, invocation_failure, storage_failure, uns
 use crate::infrastructure::workspace::Workspace;
 use crate::{
     domain::{Error, ErrorKind, harness::Session as HarnessSession},
-    ports::{Result, inference::InferenceRequest, plugin::Mutations},
+    ports::{Result, plugin::Mutations},
 };
 use ene_plugin::{Event, Failure, HarnessEvent, Operation, ServiceRequest, Target};
 use ene_plugin_runtime::{
@@ -461,24 +461,30 @@ impl Services for LocalServices {
                         .manager
                         .inference()
                         .ok_or_else(|| Failure::new("unavailable"))?;
-                    let messages = request
-                        .messages
-                        .iter()
-                        .map(|message| match message.role.as_str() {
-                            "user" => Some((true, message.text.clone())),
-                            "assistant" => Some((false, message.text.clone())),
-                            _ => None,
-                        })
-                        .collect::<Option<Vec<_>>>()
+                    // The guest ABI is text-only. Decode at that actual ABI boundary;
+                    // the host model path uses Rig types unchanged from here on.
+                    let mut messages = request.messages.into_iter();
+                    let last = messages
+                        .next_back()
                         .ok_or_else(|| Failure::new("invalid_request"))?;
+                    if last.role != "user" {
+                        return Err(Failure::new("invalid_request"));
+                    }
+                    let history = messages
+                        .map(|message| match message.role.as_str() {
+                            "user" => Ok(rig_core::message::Message::user(message.text)),
+                            "assistant" => Ok(rig_core::message::Message::assistant(message.text)),
+                            _ => Err(Failure::new("invalid_request")),
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    let completion = rig_core::completion::CompletionRequest::new(last.text)
+                        .preamble(request.preamble)
+                        .messages(history)
+                        .max_tokens(request.max_tokens);
                     let text = inference
                         .complete(
-                            InferenceRequest {
-                                companion_id: self.binding.companion_id.clone(),
-                                preamble: request.preamble,
-                                messages,
-                                max_tokens: request.max_tokens,
-                            },
+                            self.binding.companion_id.clone(),
+                            completion,
                             self.cancel.clone(),
                         )
                         .await

@@ -5,8 +5,9 @@ pub async fn check(
     key: String,
     request: CheckInput,
 ) -> Result<(Outcome, Value), Error> {
-    use crate::llm::{ChatMessage, Event, Generation};
+    use crate::llm::Event;
     use futures_util::StreamExt;
+    use rig_core::completion::CompletionRequest;
     if !["companion", "task"].contains(&request.purpose.as_str()) {
         return Err(Error::new(ErrorKind::UnsupportedCapability));
     }
@@ -63,16 +64,11 @@ pub async fn check(
                 .and_then(|d| d.models.first().map(|m| m.id.clone()))
         })
         .ok_or_else(Error::invalid)?;
-    let generation = Generation::new(
-        &p,
-        model.clone(),
-        String::new(),
-        vec![ChatMessage {
-            role: crate::llm::ChatRole::User,
-            text: "日本語で接続確認に成功したことを一文だけ返してください。".into(),
-        }],
-        128,
-    )?;
+    crate::domain::validate_model_id(&model)?;
+    let mut completion =
+        CompletionRequest::new("日本語で接続確認に成功したことを一文だけ返してください。")
+            .max_tokens(128);
+    completion.model = Some(model.clone());
     let request_id = Uuid::new_v4().to_string();
     app.0
         .repository
@@ -99,29 +95,53 @@ pub async fn check(
         p,
         context,
         request_id.clone(),
-        InvocationInput::ConnectionCheck(generation),
+        InvocationInput::ConnectionCheck(completion),
         cancelled.clone(),
     );
     let work = async {
-        let mut stream = input.generate().await?;
         let mut text = String::new();
         let mut chunks = 0;
-        let mut finished = false;
-        while let Some(event) = stream.next().await {
-            match event? {
-                Event::Delta(delta) => {
+        let finished = if input.native_wire().is_some() {
+            use rig_core::streaming::{Item, StreamEvent};
+            let mut stream = input.native_stream().await?;
+            while let Some(item) = stream.next().await {
+                let item = item.map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
+                if let Item::Event(StreamEvent::Text { text: delta, .. }) = item {
                     text.push_str(&delta);
                     chunks += 1;
                     if text.len() > OperationKind::ConnectionCheck.spec().output_bytes {
                         return Err(Error::new(ErrorKind::ExternalFailure));
                     }
                 }
-                Event::Finished(reason) => {
-                    finished = reason == "stop";
-                    break;
+            }
+            let response = stream
+                .finish()
+                .await
+                .map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
+            matches!(
+                response.finish_reason(),
+                Some(rig_core::completion::FinishReason::Stop)
+            )
+        } else {
+            let mut stream = input.generate().await?;
+            let mut finished = false;
+            while let Some(event) = stream.next().await {
+                match event? {
+                    Event::Delta(delta) => {
+                        text.push_str(&delta);
+                        chunks += 1;
+                        if text.len() > OperationKind::ConnectionCheck.spec().output_bytes {
+                            return Err(Error::new(ErrorKind::ExternalFailure));
+                        }
+                    }
+                    Event::Finished(reason) => {
+                        finished = reason == "stop";
+                        break;
+                    }
                 }
             }
-        }
+            finished
+        };
         if !finished || text.trim().is_empty() {
             return Err(Error::new(ErrorKind::ExternalFailure));
         }

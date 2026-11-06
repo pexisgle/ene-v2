@@ -238,23 +238,9 @@ impl Provider {
                     .map_err(|_| Error::invalid())?,
             }
         } else {
-            let request = input.generation()?;
+            let request = input.completion_request()?;
             Operation::Generate {
-                request: ene_plugin::GenerationRequest {
-                    endpoint: request.endpoint.clone(),
-                    options: request.options.clone(),
-                    model: request.model.clone(),
-                    preamble: request.preamble.clone(),
-                    messages: request
-                        .messages
-                        .iter()
-                        .map(|m| ene_plugin::provider::ChatMessage {
-                            role: m.role.as_str().into(),
-                            text: m.text.clone(),
-                        })
-                        .collect(),
-                    max_tokens: request.max_tokens,
-                },
+                request: guest_generation(request, input.connection())?,
             }
         };
         let services = Arc::new(ProviderServices {
@@ -327,6 +313,75 @@ impl Provider {
         ))
     }
 }
+/// The *only* narrowing conversion: Rig's full request to the legacy text-only
+/// Wasm ABI. Reject any native metadata, tool calls or multimodal content
+/// rather than silently losing it. Native providers never go through this.
+fn guest_generation(
+    request: &rig_core::completion::CompletionRequest,
+    connection: &Connection,
+) -> Result<ene_plugin::GenerationRequest> {
+    use rig_core::message::{AssistantContent, Message, Text, UserContent};
+    if !request.tools.is_empty()
+        || !request.documents.is_empty()
+        || request.temperature.is_some()
+        || request.tool_choice.is_some()
+        || request.additional_params.is_some()
+        || request.output_schema.is_some()
+        || !request.provider_options.is_empty()
+        || !request.options.is_default()
+        || !request.cache_points.is_empty()
+        || request.record_telemetry_content
+        || request.accept_unknown_finish_reasons
+        || request.foreign_reasoning
+    {
+        return Err(Error::new(ErrorKind::UnsupportedCapability));
+    }
+    let mut preamble = String::new();
+    let mut messages = Vec::new();
+    for (index, item) in request.chat_history.iter().enumerate() {
+        let (role, text) = match item.as_ref() {
+            Message::System { content } if index == 0 => {
+                preamble = content.clone();
+                continue;
+            }
+            Message::User { content } => {
+                let [UserContent::Text(text)] = content.as_slice() else {
+                    return Err(Error::new(ErrorKind::UnsupportedCapability));
+                };
+                ("user", text)
+            }
+            Message::Assistant(assistant) => {
+                if assistant.origin.is_some() || assistant.stop.is_some() {
+                    return Err(Error::new(ErrorKind::UnsupportedCapability));
+                }
+                let [AssistantContent::Text(text)] = assistant.content.as_slice() else {
+                    return Err(Error::new(ErrorKind::UnsupportedCapability));
+                };
+                ("assistant", text)
+            }
+            _ => return Err(Error::new(ErrorKind::UnsupportedCapability)),
+        };
+        if text != &Text::new(text.text.clone()) {
+            return Err(Error::new(ErrorKind::UnsupportedCapability));
+        }
+        messages.push(ene_plugin::provider::ChatMessage {
+            role: role.into(),
+            text: text.text.clone(),
+        });
+    }
+    if messages.last().is_none_or(|message| message.role != "user") {
+        return Err(Error::invalid());
+    }
+    Ok(ene_plugin::GenerationRequest {
+        endpoint: connection.endpoint.clone(),
+        options: serde_json::from_str(&connection.options.json).map_err(|_| Error::invalid())?,
+        model: request.model.clone().ok_or_else(Error::invalid)?,
+        preamble,
+        messages,
+        max_tokens: request.max_tokens.ok_or_else(Error::invalid)?,
+    })
+}
+
 impl LlmProvider for Provider {
     fn policy(&self, c: &Connection) -> Result<Policy> {
         self.manager.provider_policy(c)
@@ -379,5 +434,56 @@ impl LlmProvider for Provider {
             llm::validate_models(&models)?;
             Ok(models)
         })
+    }
+}
+
+#[cfg(test)]
+mod native_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn guest_abi_is_explicitly_text_only_and_never_discards_native_content() {
+        let connection = Connection {
+            endpoint: "https://example.test/api".into(),
+            options: ene_rpc::JsonDocument {
+                json: "{}".into(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let mut request = rig_core::completion::CompletionRequest::new("hello")
+            .preamble("system")
+            .max_tokens(128);
+        request.model = Some("fixture".into());
+        let guest = guest_generation(&request, &connection).unwrap();
+        assert_eq!(guest.preamble, "system");
+        assert_eq!(guest.messages[0].text, "hello");
+        assert_eq!(guest.max_tokens, 128);
+
+        let mut with_option = request.clone();
+        with_option.temperature = Some(0.7);
+        assert_eq!(
+            guest_generation(&with_option, &connection)
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnsupportedCapability
+        );
+
+        let mut with_multiple_blocks = request;
+        with_multiple_blocks
+            .chat_history
+            .push(Arc::new(rig_core::message::Message::User {
+                content: vec![
+                    rig_core::message::UserContent::text("first"),
+                    rig_core::message::UserContent::text("second"),
+                ],
+            }));
+        assert_eq!(
+            guest_generation(&with_multiple_blocks, &connection)
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnsupportedCapability
+        );
     }
 }

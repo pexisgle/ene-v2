@@ -3,10 +3,11 @@ use super::generation::{authorize, config, execute, invocation, register};
 use super::*;
 use crate::{
     domain::rules,
-    llm::{ChatMessage, ChatRole, Embedding, EmbeddingRequest, Event, Generation, InvocationInput},
-    ports::inference::{InferenceRequest, TaskInference},
+    llm::{Embedding, EmbeddingRequest, Event, InvocationInput},
+    ports::inference::TaskInference,
 };
 use futures_util::{FutureExt, StreamExt, future::BoxFuture};
+use rig_core::completion::CompletionRequest;
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
 
@@ -31,14 +32,17 @@ pub(crate) struct Inference {
 impl TaskInference for Inference {
     fn complete<'a>(
         &'a self,
-        request: InferenceRequest,
+        companion_id: String,
+        request: CompletionRequest,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<String, Error>> {
         async move {
             let Some(inner) = self.weak.upgrade() else {
                 return Err(Error::unavailable());
             };
-            HostApplication(inner).infer_task(request, cancel).await
+            HostApplication(inner)
+                .infer_task(companion_id, request, cancel)
+                .await
         }
         .boxed()
     }
@@ -67,10 +71,11 @@ impl HostApplication {
 
     pub(crate) async fn infer_task(
         &self,
-        request: InferenceRequest,
+        companion_id: String,
+        request: CompletionRequest,
         cancel: CancellationToken,
     ) -> Result<String, Error> {
-        self.infer(request, cancel, false)
+        self.infer(companion_id, request, cancel, false)
             .await
             .map(|output| output.text)
     }
@@ -79,27 +84,32 @@ impl HostApplication {
     /// configured connection and a memory grant, not the task assignment.
     pub(crate) async fn infer_memory(
         &self,
-        request: InferenceRequest,
+        companion_id: String,
+        request: CompletionRequest,
         cancel: CancellationToken,
     ) -> Result<InferenceOutput, Error> {
-        self.infer(request, cancel, true).await
+        self.infer(companion_id, request, cancel, true).await
     }
 
     async fn infer(
         &self,
-        request: InferenceRequest,
+        companion_id: String,
+        mut request: CompletionRequest,
         cancel: CancellationToken,
         memory: bool,
     ) -> Result<InferenceOutput, Error> {
-        if request.messages.is_empty() {
-            return Err(Error::invalid());
-        }
+        request
+            .validate_message_content()
+            .map_err(|_| Error::invalid())?;
         let operation = if memory {
             OperationKind::Consolidation
         } else {
             OperationKind::Task
         };
-        let max_tokens = request.max_tokens.clamp(1, MAX_TASK_TOKENS);
+        let max_tokens = request
+            .max_tokens
+            .unwrap_or(MAX_TASK_TOKENS)
+            .clamp(1, MAX_TASK_TOKENS);
         let id = Uuid::new_v4().to_string();
         let mut controls = self.0.controls.lock().await;
         if controls.failed() {
@@ -108,7 +118,7 @@ impl HostApplication {
         let configuration = config(self, &mut controls).await?;
         let companion = configuration
             .companions
-            .get(&request.companion_id)
+            .get(&companion_id)
             .ok_or_else(Error::invalid)?;
         // Plugin tasks use the task slot; memory processing uses the
         // companion connection under a separate memory purpose and grant.
@@ -124,33 +134,29 @@ impl HostApplication {
             self,
             &configuration,
             &controls,
-            &request.companion_id,
+            &companion_id,
             &connection,
             operation,
         )?;
-        let messages = request
-            .messages
-            .into_iter()
-            .map(|(user, text)| ChatMessage {
-                role: if user {
-                    ChatRole::User
-                } else {
-                    ChatRole::Assistant
-                },
-                text,
-            })
-            .collect();
-        let generation = Generation::new(
-            &connection,
-            assignment.model_id.clone(),
-            request.preamble,
-            messages,
-            max_tokens,
-        )?;
+        // The host chooses the permitted model, regardless of a caller override.
+        // Keep Rig's full content, tools and provenance rather than flattening.
+        request.model = Some(assignment.model_id.clone());
+        request.max_tokens = Some(max_tokens);
+        const MAX_TASK_REQUEST_BYTES: usize = 256 * 1024;
+        if serde_json::to_vec(&request)
+            .map_err(|_| Error::invalid())?
+            .len()
+            > MAX_TASK_REQUEST_BYTES
+        {
+            return Err(Error {
+                kind: ErrorKind::InvalidRequest,
+                reason: Some("input_limit"),
+            });
+        }
         let receiver = register(
             &mut controls,
             id.clone(),
-            request.companion_id.clone(),
+            companion_id.clone(),
             &connection,
             &context,
             operation,
@@ -180,28 +186,57 @@ impl HostApplication {
             connection,
             context,
             id,
-            InvocationInput::Task(generation),
+            InvocationInput::Task(request),
             receiver,
         );
         let output_bytes = operation.spec().output_bytes;
         let work = async move {
-            let mut stream = input.generate().await?;
             let mut text = String::new();
-            let mut finish = String::new();
-            while let Some(event) = stream.next().await {
-                match event? {
-                    Event::Delta(delta) => {
+            let finish = if input.native_wire().is_some() {
+                // Rig decodes the native stream; no host event translation.
+                use rig_core::streaming::{Item, StreamEvent};
+                let mut stream = input.native_stream().await?;
+                while let Some(item) = stream.next().await {
+                    let item = item.map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
+                    if let Item::Event(StreamEvent::Text { text: delta, .. }) = item {
                         if text.len() + delta.len() > output_bytes {
                             return Err(Error::new(ErrorKind::ResourceLimit));
                         }
                         text.push_str(&delta);
                     }
-                    Event::Finished(reason) => {
-                        finish = reason;
-                        break;
+                }
+                let response = stream
+                    .finish()
+                    .await
+                    .map_err(|_| Error::new(ErrorKind::ProviderFailure))?;
+                if matches!(
+                    response.finish_reason(),
+                    Some(rig_core::completion::FinishReason::Stop)
+                ) {
+                    "stop".to_owned()
+                } else {
+                    "incomplete".to_owned()
+                }
+            } else {
+                // The separate Wasm guest ABI remains explicitly text-only.
+                let mut stream = input.generate().await?;
+                let mut finish = String::new();
+                while let Some(event) = stream.next().await {
+                    match event? {
+                        Event::Delta(delta) => {
+                            if text.len() + delta.len() > output_bytes {
+                                return Err(Error::new(ErrorKind::ResourceLimit));
+                            }
+                            text.push_str(&delta);
+                        }
+                        Event::Finished(reason) => {
+                            finish = reason;
+                            break;
+                        }
                     }
                 }
-            }
+                finish
+            };
             Ok(InferenceOutput { text, finish })
         };
         let result = execute(self, operation, &mut cancelled, work).await;

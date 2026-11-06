@@ -1185,7 +1185,10 @@ impl crate::llm::Authorization for Permit {
 
 #[tokio::test]
 async fn concurrent_provider_generations_do_not_share_a_worker() {
-    use crate::llm::{Generation, ProviderBinding, test_support::InvocationFixture};
+    use crate::llm::{
+        ProviderBinding,
+        test_support::{InvocationFixture, completion_for_test},
+    };
     use futures_util::StreamExt;
     use std::time::Duration;
 
@@ -1248,14 +1251,7 @@ async fn concurrent_provider_generations_do_not_share_a_worker() {
     let make = |cancel| InvocationFixture {
         operation: crate::domain::OperationKind::Conversation,
         connection: connection.clone(),
-        request: Some(Generation::for_test(
-            connection.endpoint.clone(),
-            json!({}),
-            "model".into(),
-            String::new(),
-            vec![],
-            8,
-        )),
+        request: Some(completion_for_test("model", 8)),
         secret: None,
         authorization: Arc::new(Permit),
         cancel,
@@ -1292,7 +1288,8 @@ async fn concurrent_provider_generations_do_not_share_a_worker() {
 async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
     use crate::domain::OperationKind;
     use crate::llm::{
-        Event as LlmEvent, Generation, ProviderBinding, test_support::InvocationFixture,
+        Event as LlmEvent, ProviderBinding,
+        test_support::{InvocationFixture, completion_for_test},
     };
     use futures_util::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1407,14 +1404,7 @@ async fn wasm_provider_streams_through_real_broker_and_cancels_pending_reads() {
                 last_check: Default::default(),
                 ..Default::default()
             },
-            request: Some(Generation::for_test(
-                endpoint,
-                json!({}),
-                "fixture".into(),
-                "".into(),
-                vec![],
-                64,
-            )),
+            request: Some(completion_for_test("fixture", 64)),
             secret: None,
             authorization: Arc::new(Permit),
             cancel: receiver,
@@ -2234,15 +2224,18 @@ async fn event_count_and_byte_overflow_stop_the_invocation_promptly() {
     }
 }
 
-struct FixedInference(Arc<std::sync::Mutex<Option<crate::ports::inference::InferenceRequest>>>);
+struct FixedInference(
+    Arc<std::sync::Mutex<Option<(String, rig_core::completion::CompletionRequest)>>>,
+);
 impl crate::ports::inference::TaskInference for FixedInference {
     fn complete<'a>(
         &'a self,
-        request: crate::ports::inference::InferenceRequest,
+        companion_id: String,
+        request: rig_core::completion::CompletionRequest,
         _: CancellationToken,
     ) -> futures_util::future::BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            *self.0.lock().unwrap() = Some(request);
+            *self.0.lock().unwrap() = Some((companion_id, request));
             Ok("fixture".into())
         })
     }
@@ -2311,11 +2304,14 @@ async fn the_models_service_forwards_a_host_owned_request() {
         .await
         .unwrap();
     assert_eq!(value["text"], "fixture");
-    let seen = seen.lock().unwrap().clone().unwrap();
-    assert_eq!(seen.companion_id, companion);
-    assert_eq!(seen.preamble, "system");
-    assert_eq!(seen.messages, vec![(true, "hi".into())]);
-    assert_eq!(seen.max_tokens, 512);
+    let (seen_companion, seen) = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(seen_companion, companion);
+    assert_eq!(seen.system_instructions(), Some("system"));
+    assert_eq!(
+        seen.chat_history.last().unwrap().rag_text().as_deref(),
+        Some("hi")
+    );
+    assert_eq!(seen.max_tokens, Some(512));
 
     let denied = LocalServices {
         manager: manager.clone(),

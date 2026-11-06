@@ -5,7 +5,7 @@ use crate::domain::{
 use crate::ports::Result;
 pub use ene_rpc::{Model, Provider as Descriptor, ProviderCapabilities as Capabilities};
 use futures_util::{future::BoxFuture, stream::BoxStream};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -35,25 +35,6 @@ impl Policy {
         self
     }
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ChatRole {
-    User,
-    Assistant,
-}
-impl ChatRole {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Assistant => "assistant",
-        }
-    }
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub text: String,
-}
 #[derive(Clone, Debug, Serialize)]
 pub struct EmbeddingRequest {
     pub model: String,
@@ -66,77 +47,44 @@ pub struct Embedding {
     pub input_tokens: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct Generation {
-    pub(crate) endpoint: String,
-    pub(crate) options: Value,
-    pub(crate) model: String,
-    pub(crate) preamble: String,
-    pub(crate) messages: Vec<ChatMessage>,
-    pub(crate) max_tokens: u64,
+/// Native Rig provider routes. Only the built-in registry can mark a binding
+/// native, so injected test providers and Wasm guests keep their own behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeWire {
+    OpenAiResponses,
+    OpenRouterChat,
 }
-impl Generation {
-    pub fn new(
-        connection: &Connection,
-        model: String,
-        preamble: String,
-        messages: Vec<ChatMessage>,
-        max_tokens: u64,
-    ) -> Result<Self> {
-        validate_model_id(&model)?;
-        if max_tokens == 0
-            || messages.is_empty()
-            || messages.last().is_none_or(|m| m.role != ChatRole::User)
-            || messages.iter().enumerate().any(|(i, m)| {
-                m.role
-                    != if i % 2 == 0 {
-                        ChatRole::User
-                    } else {
-                        ChatRole::Assistant
-                    }
-            })
-        {
-            return Err(Error::invalid());
-        }
-        let mut request = Self {
-            endpoint: connection.endpoint.clone(),
-            options: connection
-                .options
-                .as_option()
-                .map(|options| serde_json::from_str(&options.json))
-                .transpose()
-                .map_err(|_| Error::invalid())?
-                .unwrap_or_else(|| serde_json::json!({})),
-            model,
-            preamble,
-            messages,
-            max_tokens,
-        };
-        request.bound_history()?;
-        Ok(request)
-    }
-}
-
 #[derive(Clone)]
 pub struct ProviderBinding {
     provider: Arc<dyn LlmProvider>,
     policy: Policy,
+    native: Option<NativeWire>,
 }
 impl ProviderBinding {
     /// Registry resolves a concrete implementation and its policy together.
     pub fn resolve(provider: Arc<dyn LlmProvider>, connection: &Connection) -> Result<Self> {
         let mut policy = provider.policy(connection)?;
         policy = policy.bind_connection(connection);
-        Ok(Self { provider, policy })
+        Ok(Self {
+            provider,
+            policy,
+            native: None,
+        })
     }
     pub fn policy(&self) -> &Policy {
         &self.policy
+    }
+    pub(crate) fn with_native(mut self, wire: NativeWire) -> Self {
+        self.native = Some(wire);
+        self
+    }
+    pub(crate) fn native(&self) -> Option<NativeWire> {
+        self.native
     }
     pub(crate) fn provider(&self) -> Arc<dyn LlmProvider> {
         self.provider.clone()
     }
 }
-mod budget;
 mod invocation;
 pub(crate) use invocation::InvocationInput;
 pub(crate) use invocation::Outbound;
@@ -180,10 +128,10 @@ pub trait ProviderRegistry: Send + Sync {
 /// Every builtin and plugin adapter implements this same provider-neutral boundary.
 pub trait LlmProvider: Send + Sync {
     fn policy(&self, connection: &Connection) -> Result<Policy>;
-    fn generate(
-        &self,
-        invocation: Invocation,
-    ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>>;
+    /// Guest-specific text stream. Native OpenAI/OpenRouter use Rig directly.
+    fn generate(&self, _: Invocation) -> BoxFuture<'_, Result<BoxStream<'static, Result<Event>>>> {
+        Box::pin(async { Err(Error::new(ErrorKind::UnsupportedCapability)) })
+    }
     fn models(&self, invocation: Invocation) -> BoxFuture<'_, Result<Vec<Model>>>;
     fn embed(&self, _: Invocation) -> BoxFuture<'_, Result<crate::llm::Embedding>> {
         Box::pin(async { Err(Error::new(ErrorKind::UnsupportedCapability)) })

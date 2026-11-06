@@ -9,7 +9,6 @@ use crate::{
     },
     infrastructure::sqlite::memory::VectorEntry,
     llm::Embedding,
-    ports::inference::InferenceRequest,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -592,12 +591,10 @@ impl HostApplication {
         #[cfg(not(test))]
         let _ = prompt;
         self.infer_memory(
-            InferenceRequest {
-                companion_id: companion.to_owned(),
-                preamble: instructions.to_owned(),
-                messages: vec![(true, payload.to_owned())],
-                max_tokens: 4096,
-            },
+            companion.to_owned(),
+            rig_core::completion::CompletionRequest::new(payload)
+                .preamble(instructions)
+                .max_tokens(4096),
             CancellationToken::new(),
         )
         .await
