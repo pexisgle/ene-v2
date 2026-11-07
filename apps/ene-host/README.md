@@ -1,6 +1,6 @@
 # ene-host
 
-> このREADMEは現行実装と起動方法を説明します。採用設計は[アーキテクチャ](../../docs/architecture.md)、実装順序と受入条件は[Alpha計画](../../docs/alpha.md)を参照してください。
+> このREADMEは現行実装と起動方法を説明します。採用設計は[アーキテクチャ](../../docs/architecture.md)、[ホスト接続の設計](../../docs/design/host-access.md)、実装順序と受入条件は[Alpha計画](../../docs/alpha.md)を参照してください。**接続経路への認証委譲は未実装**であり、ここに記すOwner/Device Bearer認証を現時点で外してはいけません。
 
 ホストの会話・設定・権限・生成処理、Connect API、SQLite保存、資格情報管理、プラグイン実行を持つパッケージです。親コンパニオンの会話はRig v0.46.0の実行カーネル（rig-ecs）が所有します。`src/lib.rs` に実装をまとめ、`src/main.rs` から `ene_host::run()` を呼び出します。
 

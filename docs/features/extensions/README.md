@@ -19,4 +19,6 @@
 
 参考：[nanobot](../../references.md#nanobot) のMCP連携とツール制限、および [OpenClaw](../../references.md#openclaw) の実行エンジン交換設計。
 
+ホストへの遠隔接続方式の切り替えは、ここで定義するLLM・ツール・ハーネス用のWasm/ACPプラグインとは別に、クライアント側の接続拡張として扱います。[ホスト接続の設計](../../design/host-access.md)を参照してください。
+
 Alphaの[作業相手API](../../design/work.md)は、対応機能を制限してACPへ変換しやすいene固有の契約とします。全プラグインにACP全体や同じ実行方式を強制しません。内蔵機能はRig、外部ハーネスはACP等、外部ツールはMCP等を利用し、必要な独自拡張の余地を残します。
