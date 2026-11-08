@@ -1,6 +1,6 @@
 # ene-host
 
-> このREADMEは現行実装と起動方法を説明します。採用設計は[アーキテクチャ](../../docs/architecture.md)、[ホスト接続の設計](../../docs/design/host-access.md)、実装順序と受入条件は[Alpha計画](../../docs/alpha.md)を参照してください。**接続経路への認証委譲は未実装**であり、ここに記すOwner/Device Bearer認証を現時点で外してはいけません。
+> このREADMEは現行実装と起動方法を説明します。採用設計は[アーキテクチャ](../../docs/architecture.md)、[ホスト接続の設計](../../docs/design/host-access.md)、実装順序と受入条件は[Alpha計画](../../docs/alpha.md)を参照してください。**接続経路への認証委譲は未実装**であり、ここに記すOwner Bearer認証を現時点で外してはいけません。Deviceトークン・端末登録・承認・失効・端末ごとのpermissionは削除済みです。
 
 ホストの会話・設定・権限・生成処理、Connect API、SQLite保存、資格情報管理、プラグイン実行を持つパッケージです。親コンパニオンの会話はRig v0.46.0の実行カーネル（rig-ecs）が所有します。`src/lib.rs` に実装をまとめ、`src/main.rs` から `ene_host::run()` を呼び出します。
 
@@ -15,7 +15,11 @@ ExtismのHost SDKをホストプロセス内に組み込んで実行します。
 
 ホストは `127.0.0.1` の空きポートで待ち受け、Linuxでは `$XDG_RUNTIME_DIR/ene-host/connection.json` に `endpoint` と `token` を書きます。ディレクトリは0700、ファイルは0600です。トークンは起動ごとに更新し、終了時に接続ファイルを削除します。同じランタイムディレクトリでの二重起動は拒否します。
 
-クライアントは `ene_rpc::connect(endpoint, token)` で接続し、生成された `HostServiceClient`、`DeviceServiceClient`、`PluginServiceClient` を利用します。通常のRPC・通知、デバイス認可・操作、プラグイン管理はConnectサービスで扱います。
+クライアントは `ene_rpc::connect(endpoint, token)` で接続し、生成された `HostServiceClient`、`DeviceServiceClient`、`PluginServiceClient` を利用します。通常のRPC・通知、端末操作の配送・結果・表示リース、プラグイン管理はConnectサービスで扱います。
+
+認証境界は `connection.json` の所有者トークンだけです。認証済みのクライアントは同じホスト管理権限を持ち、端末操作では要求の `device_id` で端末を指定します。`DeviceService` の `Subscribe`・`GetOperation`・`CompleteOperation`・`Activate` は端末IDで操作対象を絞り込みます。
+
+`DeviceService` から `RegisterDevice`・`List`・`Approve`・`Revoke`・`SetPermission` を削除しました。端末は最初に `Subscribe` へ `device_id` を渡します。旧Deviceトークンは使えません。ホストは端末のcapabilityを許可判定せず、要求された操作を接続中の端末へ配送します。端末内のファイル・Computer useなどの許可はクライアント側で判定します。
 
 | 環境変数 | 用途 |
 | --- | --- |
@@ -126,7 +130,7 @@ Rig の `HttpClientExt` はホストの `AuthorizedTransport` に直接実装し
 | `llm` | プロバイダー契約、生成入力、権限付き実行、HTTP通信、Rigとの接続 |
 | `api` | 認証、Connectサービス、通知 |
 | `infrastructure` | SQLite、資格情報ストア、OpenAI・プラグイン接続、接続情報の公開 |
-| `devices` | デバイス操作の認可・寿命管理 |
+| `devices` | 端末操作の配送・結果・表示リース |
 | `bootstrap` / `server` | 依存の組み立て、起動、シグナルによる停止 |
 
 `llm::invocation` は非公開モジュールです。認証情報を持つ `Invocation` と、その子モジュールの通信実装を同じ境界に置きます。APIキーをリクエストに付与するメソッドは非公開のまま、送信先検証・認証情報の付与・送信を一続きで実行します。送信前と受信中の権限確認、リダイレクト拒否、サイズ制限もここで適用します。
@@ -150,6 +154,6 @@ cargo test -p ene-host --lib measure_idle_cpu -- --ignored --nocapture --test-th
 通常のホストテストに、実際のPDK製WasmとHTTPブローカーの結合検証を含みます。
 別のWasm出力先を使う場合は `ENE_TEST_REFERENCE_WASM` / `ENE_TEST_PDK_WASM` で指定します。
 
-会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、組み込みExtism、ローカルHTTPサーバーを使って認証・取り消し・停止・サイズ制限を検証します。心は、同じ操作の再試行・異なる内容との競合・古いrevision・他コンパニオンの記憶参照・不正フィールド・保存失敗時のロールバック・訂正関係・所有者を越えた検索・変更なし・再起動後の保持・プロファイル通知・スクリプト化親の更新が次のモデル要求へ入ることを検証します。Rig実行カーネルは、スクリプト化したモデルでツール呼び出し・追加入力・停止・待機時のフレーム数・セッションログの保存失敗・再起動後の復元を検証します。ホストAPIの統合テストも同じスクリプト化モデルで、受理、通知、履歴、停止、取消、再起動を通します。組み込みOpenAI Responsesの本番接続経路は、ローカルのSSEサーバーを相手に、リクエスト先・資格情報の付与・ストリーミング解釈を検証します（実モデルは呼びません）。別に、`.env` の鍵を使う明示的な受入テスト（`live_acceptance`、既定は無視）で、OpenAIの `gpt-6-luna` とOpenRouterの `google/gemini-2.5-flash-lite` を実際に呼び、ツール要求・実行・結果の返却・最終応答・履歴・再起動を確認します。`mind_acceptance_through_the_host` は、架空の人格と合成の好みを使い、`mind_update`の保存・`MindUpdated`・訂正、会話を持たない再起動先での`mind_recall`、OpenRouterへのモデル変更後の同じ記憶の利用を確認します。`automatic_memory_acceptance_through_the_host` は、親に保存ツールを使わせない通常のターンから、memory Grantのない自動整理が権限エラーで止まりproviderを呼ばないこと、Grant作成後の新しい入力で同じ未処理範囲を再開すること、Input/Reply出所の記憶、FTS/埋め込み索引、語句の自動想起、候補複数・語彙の重ならない問いへの自動意味想起（`mind_recall`未使用）を確認します。実測（最終ツリー）は、ステップ2の明示`mind_update`経路が9呼び出し・入力15406・出力754・参考コスト0.00186208 USD、自動記憶の受入が親4呼び出し・入力4597・出力397・参考コスト0.00064517 USD、整理1モデル呼び出し（入力158文字、トークンusageは未取得）、埋め込み4呼び出し・431トークンでした。memory Grantなしの整理は`state=error/reason=PermissionRequired/jobs=0`でprovider呼び出し0回、Grant作成後の新しい入力で再開しました。受付は18〜20ms、初回応答は親推論を含み2.0〜3.1秒でした（料金はRigカタログ単価からの参考値で、請求額ではない）。鍵はテストプロセスから通常の資格情報APIへ渡し、表示・保存しません。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。通常のテスト実行では有料の外部API・実モデルを呼びません。`live_acceptance` は明示実行した場合だけ `.env` の鍵で実プロバイダーを呼びます。
+会話状態・許可判定に加え、実Connectクライアント、SQLiteの再読み込み、組み込みExtism、ローカルHTTPサーバーを使って認証・端末操作の配送・停止・サイズ制限を検証します。心は、同じ操作の再試行・異なる内容との競合・古いrevision・他コンパニオンの記憶参照・不正フィールド・保存失敗時のロールバック・訂正関係・所有者を越えた検索・変更なし・再起動後の保持・プロファイル通知・スクリプト化親の更新が次のモデル要求へ入ることを検証します。Rig実行カーネルは、スクリプト化したモデルでツール呼び出し・追加入力・停止・待機時のフレーム数・セッションログの保存失敗・再起動後の復元を検証します。ホストAPIの統合テストも同じスクリプト化モデルで、受理、通知、履歴、停止、取消、再起動を通します。組み込みOpenAI Responsesの本番接続経路は、ローカルのSSEサーバーを相手に、リクエスト先・資格情報の付与・ストリーミング解釈を検証します（実モデルは呼びません）。別に、`.env` の鍵を使う明示的な受入テスト（`live_acceptance`、既定は無視）で、OpenAIの `gpt-6-luna` とOpenRouterの `google/gemini-2.5-flash-lite` を実際に呼び、ツール要求・実行・結果の返却・最終応答・履歴・再起動を確認します。`mind_acceptance_through_the_host` は、架空の人格と合成の好みを使い、`mind_update`の保存・`MindUpdated`・訂正、会話を持たない再起動先での`mind_recall`、OpenRouterへのモデル変更後の同じ記憶の利用を確認します。`automatic_memory_acceptance_through_the_host` は、親に保存ツールを使わせない通常のターンから、memory Grantのない自動整理が権限エラーで止まりproviderを呼ばないこと、Grant作成後の新しい入力で同じ未処理範囲を再開すること、Input/Reply出所の記憶、FTS/埋め込み索引、語句の自動想起、候補複数・語彙の重ならない問いへの自動意味想起（`mind_recall`未使用）を確認します。実測（最終ツリー）は、ステップ2の明示`mind_update`経路が9呼び出し・入力15406・出力754・参考コスト0.00186208 USD、自動記憶の受入が親4呼び出し・入力4597・出力397・参考コスト0.00064517 USD、整理1モデル呼び出し（入力158文字、トークンusageは未取得）、埋め込み4呼び出し・431トークンでした。memory Grantなしの整理は`state=error/reason=PermissionRequired/jobs=0`でprovider呼び出し0回、Grant作成後の新しい入力で再開しました。受付は18〜20ms、初回応答は親推論を含み2.0〜3.1秒でした（料金はRigカタログ単価からの参考値で、請求額ではない）。鍵はテストプロセスから通常の資格情報APIへ渡し、表示・保存しません。Linuxの実ホストプロセスのテストでは起動、二重起動拒否、不正トークン拒否、変更の保存、購読中のSIGTERM、再起動後の復元を確認します。通常のテスト実行では有料の外部API・実モデルを呼びません。`live_acceptance` は明示実行した場合だけ `.env` の鍵で実プロバイダーを呼びます。
 
 旧Luauプラグインは非対応です。Rust製プラグインは `ene-plugin-sdk` への依存を `ene-plugin` に変更します。共通契約はバージョン4です。ハーネスはACP v1の入力・イベントへ移行し、`contract_version` を4に更新してください。旧v3の保存ジャーナルは起動時に`host_interrupted`として終端化され、再開しません。revisionが変わるため、再有効化とバインディングの再設定が必要です。保存データは削除しません。旧 `ENE_PLUGIN_RUNNER_BIN` / `ENE_PLUGIN_CACHE_DIR` は不要で、旧コードキャッシュを実行時に読みません。

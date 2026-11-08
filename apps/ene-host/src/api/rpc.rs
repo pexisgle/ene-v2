@@ -65,15 +65,9 @@ impl w::HostService for HostRpc {
     }
     async fn subscribe(
         &self,
-        ctx: RequestContext,
+        _: RequestContext,
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<ServiceStream<w::HostEvent>> {
-        let principal = ctx
-            .extensions()
-            .get::<super::auth::Principal>()
-            .cloned()
-            .ok_or_else(|| ConnectError::unauthenticated("認証が必要です"))?;
-        let cancelled = super::auth::cancelled(principal);
         let mut subscription = self.app.application.subscribe().await;
         let snapshot = self
             .app
@@ -92,11 +86,9 @@ impl w::HostService for HostRpc {
         Response::stream_ok(async_stream::stream! {
             let _lease = subscription.lease;
             yield Ok(w::HostEvent { event: Some(w::host_event::Event::Initial(Box::new(initial))), ..Default::default() });
-            tokio::pin!(cancelled);
             loop {
                 if *shutdown.borrow() { break; }
                 tokio::select! {
-                    _ = &mut cancelled => break,
                     _ = shutdown.changed() => break,
                     received = subscription.receiver.recv() => match received {
                         Ok(event) if event.cursor.epoch == cursor.epoch && event.cursor.seq <= cursor.seq => continue,
@@ -457,9 +449,7 @@ mod stream_tests {
             .await
             .unwrap();
         let app = crate::bootstrap::application(store, "fixture".into());
-        let mut ctx = RequestContext::new(axum::http::HeaderMap::new());
-        ctx.extensions_mut()
-            .insert(super::super::auth::Principal::Owner);
+        let ctx = RequestContext::new(axum::http::HeaderMap::new());
         let bytes = bytes::Bytes::new();
         let view = <w::Empty as HasMessageView>::View::decode_view(&bytes).unwrap();
         let service = HostRpc { app: app.clone() };

@@ -4,20 +4,7 @@ async fn connected() -> (Devices, String, Subscription, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("devices.db")).await.unwrap();
     let devices = Devices::new(store);
-    let registration = devices
-        .register(w::RegisterDeviceRequest {
-            name: "fixture".into(),
-            capabilities: vec!["write".into(), "companion.display".into()],
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let id = registration.device.id.clone();
-    devices.approve(id.clone()).await.unwrap();
-    devices
-        .permission(id.clone(), Some("write".into()), true)
-        .await
-        .unwrap();
+    let id = "fixture".to_string();
     let subscription = devices.subscribe(id.clone()).await.unwrap();
     (devices, id, subscription, temp)
 }
@@ -78,26 +65,7 @@ async fn an_admitted_operation_is_durable_before_the_device_sees_it() {
 }
 
 #[tokio::test]
-async fn revoking_a_capability_revokes_its_dispatched_operations() {
-    let (devices, id, mut subscription, _temp) = connected().await;
-    devices.request(request(&id, "first")).await.unwrap();
-    let operation = subscription.queue.recv().await.unwrap();
-    devices
-        .permission(id.clone(), Some("write".into()), false)
-        .await
-        .unwrap();
-    assert_eq!(
-        devices.operation(&id, "first").await.unwrap().status,
-        w::OperationStatus::Revoked
-    );
-    assert!(devices.complete(completed(&id, &operation)).await.is_err());
-    // Without the capability a new operation is refused before dispatch.
-    assert!(devices.request(request(&id, "second")).await.is_err());
-    assert!(subscription.queue.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn a_failed_permission_write_stops_serving_device_actions() {
+async fn a_failed_operation_write_stops_serving_device_actions() {
     let (devices, id, subscription, _temp) = connected().await;
     devices
         .0
@@ -108,27 +76,10 @@ async fn a_failed_permission_write_stops_serving_device_actions() {
         })
         .await
         .unwrap();
-    assert!(
-        devices
-            .permission(id, Some("write".into()), false)
-            .await
-            .is_err()
-    );
+    assert!(devices.request(request(&id, "first")).await.is_err());
     assert!(subscription.changed.is_cancelled());
-    // The store can no longer prove a permission change; serve nothing.
-    assert!(devices.list().await.is_err());
-}
-
-#[tokio::test]
-async fn a_subscription_after_a_permission_change_gets_a_fresh_token() {
-    let (devices, id, subscription, _temp) = connected().await;
-    devices
-        .permission(id.clone(), Some("write".into()), false)
-        .await
-        .unwrap();
-    assert!(subscription.changed.is_cancelled());
-    let next = devices.subscribe(id).await.unwrap();
-    assert!(!next.changed.is_cancelled());
+    // The store can no longer prove a change; serve nothing.
+    assert!(devices.operation(&id, "first").await.is_err());
 }
 
 #[tokio::test]
@@ -150,10 +101,6 @@ async fn a_restarted_host_reports_dispatched_operations_as_uncertain() {
 #[tokio::test]
 async fn an_activation_revision_survives_a_restart_and_blocks_reuse() {
     let (devices, id, _subscription, temp) = connected().await;
-    devices
-        .permission(id.clone(), Some("companion.display".into()), true)
-        .await
-        .unwrap();
     let first = devices
         .activate(w::ActivationRequest {
             companion_id: "companion".into(),

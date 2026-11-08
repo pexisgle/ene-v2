@@ -273,14 +273,8 @@ message HostEvent {
 
 // Device operations travel over a client-originated subscription. IDs identify
 // one operation; reconnecting never implicitly executes an uncertain command.
-message Device {
-  string id = 1; repeated string capabilities = 2; bool approved = 3;
-  string name = 4; repeated string permissions = 5; bool revoked = 6;
-}
-message DeviceRegistration { Device device = 1; string token = 2; }
-message RegisterDeviceRequest { string name = 1; repeated string capabilities = 2; }
-message Devices { repeated Device items = 1; }
-message DevicePermissionRequest { string device_id = 1; string capability = 2; bool allowed = 3; }
+// The authenticated owner is the only host credential; a client names the
+// device it acts as in the request.
 message DeviceOperationRequest {
   string device_id = 1; string operation_id = 2; string capability = 3; JsonDocument input = 4;
 }
@@ -290,12 +284,12 @@ message DeviceEvent { oneof event { DeviceSubscription ready = 1; DeviceOperatio
 message DeviceOperationResult {
   string device_id = 1; string operation_id = 2; bool success = 3; JsonDocument output = 4; string subscription_id = 5;
 }
+// REVOKED remains readable for receipts written before device permissions were
+// removed; new receipts never set it.
 enum OperationStatus { OPERATION_STATUS_UNSPECIFIED = 0; OPERATION_STATUS_DISPATCHED = 1; OPERATION_STATUS_COMPLETED = 2; OPERATION_STATUS_UNCERTAIN = 3; OPERATION_STATUS_REVOKED = 4; }
 message DeviceOperationState { string operation_id = 1; OperationStatus status = 2; DeviceOperationResult result = 3; }
 // Host-private durable records use the same generated messages, never JSON DTO copies.
-message DeviceRecord { Device device = 1; bytes token_hash = 2; }
 message OperationRecord { DeviceOperationRequest request = 1; DeviceOperationState state = 2; string subscription_id = 3; }
-message DeviceJournal { repeated DeviceRecord devices = 1; repeated OperationRecord operations = 2; uint64 activation_revision = 3; }
 message ActivationRequest { string companion_id = 1; string device_id = 2; optional uint64 expected_revision = 3; bool release = 4; }
 message Activation { string companion_id = 1; string device_id = 2; uint64 revision = 3; uint32 lease_ms = 4; }
 message StopRequest { string companion_id = 1; }
@@ -339,11 +333,6 @@ service PluginService {
   rpc GetHarness(Id) returns (HarnessState);
 }
 service DeviceService {
-  rpc RegisterDevice(RegisterDeviceRequest) returns (DeviceRegistration);
-  rpc List(Empty) returns (Devices);
-  rpc Approve(Id) returns (Device);
-  rpc Revoke(Id) returns (Empty);
-  rpc SetPermission(DevicePermissionRequest) returns (Empty);
   rpc Subscribe(Id) returns (stream DeviceEvent);
   rpc RequestOperation(DeviceOperationRequest) returns (DeviceOperationState);
   rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);

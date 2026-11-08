@@ -96,7 +96,7 @@ async fn authentication_guards_reads_mutations_and_unknown_routes() {
             StatusCode::NOT_FOUND
         );
     }
-    for service in ["HostService/GetSettings", "DeviceService/List"] {
+    for service in ["HostService/GetSettings", "DeviceService/Subscribe"] {
         let path = format!("/rpc/ene.host.v2.{service}");
         let (status, body) =
             request_method(&app, "POST", &path, Some("Bearer private-token")).await;

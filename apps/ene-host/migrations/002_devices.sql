@@ -1,11 +1,6 @@
--- Device authorization and operation receipts, one row per record: a change
--- rewrites only the row it changed. `body` holds the generated message as
--- JSON, so the host keeps one representation of each record.
-CREATE TABLE devices(
-  id TEXT PRIMARY KEY NOT NULL,
-  token_hash BLOB NOT NULL,
-  body TEXT NOT NULL
-);
+-- Device operation receipts, one row per operation: a change rewrites only the
+-- row it changed. `body` holds the generated message as JSON, so the host
+-- keeps one representation of each record.
 CREATE TABLE device_operations(
   operation_id TEXT PRIMARY KEY NOT NULL,
   device_id TEXT NOT NULL,

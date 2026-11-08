@@ -1,13 +1,11 @@
-//! Host-owned device authorization and durable operation receipts. Each record
-//! is one SQLite row; the live streams and activation leases are the only
-//! state the host keeps. Network cancellation does not cancel an admitted
-//! write or repeat an operation.
+//! Host-owned device operation delivery and durable receipts. Each record is
+//! one SQLite row; the live streams and activation leases are the only state
+//! the host keeps. Network cancellation does not cancel an admitted write or
+//! repeat an operation.
 use crate::infrastructure::sqlite::Store;
 use connectrpc::ConnectError;
 use ene_rpc::rpc as w;
-use sha2::{Digest, Sha256};
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
-use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, MutexGuard, Semaphore, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +14,6 @@ use uuid::Uuid;
 
 const MAX_RESULT_BYTES: usize = 64 * 1024;
 const MAX_OPERATIONS: i64 = 2048;
-const MAX_DEVICES: usize = 64;
 
 #[derive(Clone)]
 pub(crate) struct Devices(Arc<Inner>);
@@ -34,8 +31,8 @@ struct State {
     /// client cannot keep a lease it did not renew.
     activation_not_before: Option<Instant>,
     activation_revision: u64,
-    /// One entry per authenticated device: its live operation stream, if any,
-    /// and the cancellation signal that ends that device's RPC streams.
+    /// One entry per device ID asserted by an authenticated client: its live
+    /// operation stream, if any, and the signal that ends that device's stream.
     sessions: HashMap<String, DeviceSession>,
     activations: HashMap<String, (w::Activation, Instant)>,
 }
@@ -53,9 +50,6 @@ pub(crate) struct Subscription {
     pub queue: mpsc::Receiver<w::DeviceOperation>,
     pub changed: CancellationToken,
 }
-fn denied() -> ConnectError {
-    ConnectError::permission_denied("端末操作の許可が必要です")
-}
 fn missing() -> ConnectError {
     ConnectError::not_found("端末または操作が見つかりません")
 }
@@ -65,9 +59,9 @@ fn conflict() -> ConnectError {
 fn unavailable() -> ConnectError {
     ConnectError::unavailable("端末の保存処理を利用できません")
 }
-/// Stops serving device actions when the store can no longer prove the
-/// device state it last read. A failed authorization write must never leave
-/// the affected streams running.
+/// Stops serving device actions when the store can no longer prove the device
+/// state it last read. A failed operation write must never leave the affected
+/// streams running.
 fn fail_closed(state: &mut State) -> ConnectError {
     state.failed = true;
     for session in state.sessions.values() {
@@ -82,16 +76,6 @@ fn validate(value: &str) -> Result<(), ConnectError> {
         Ok(())
     }
 }
-/// Whether `device` may run `capability` now.
-fn permitted(device: &w::Device, capability: Option<&str>) -> Result<(), ConnectError> {
-    if !device.approved
-        || device.revoked
-        || capability.is_some_and(|c| !device.permissions.iter().any(|p| p == c))
-    {
-        return Err(denied());
-    }
-    Ok(())
-}
 impl Devices {
     pub fn new(store: Store) -> Self {
         Self(Arc::new(Inner {
@@ -100,14 +84,6 @@ impl Devices {
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(64)),
         }))
-    }
-    async fn device(&self, id: &str) -> Result<w::Device, ConnectError> {
-        self.0
-            .store
-            .device_get(id.into())
-            .await
-            .map_err(|_| unavailable())?
-            .ok_or_else(missing)
     }
     pub async fn stop(&self) {
         self.0.slots.close();
@@ -154,26 +130,32 @@ impl Devices {
         }
         Ok(state)
     }
-    /// The authenticated device and the signal that ends its streams.
-    pub async fn authenticate(&self, token: &str) -> Option<(String, CancellationToken)> {
-        let hash = Sha256::digest(token.as_bytes());
-        let mut state = self.lock().await.ok()?;
-        let id = self
-            .0
-            .store
-            .device_records()
-            .await
-            .ok()?
-            .into_iter()
-            .find(|(device, token_hash)| {
-                bool::from(hash.as_slice().ct_eq(token_hash)) && device.approved && !device.revoked
-            })
-            .map(|(device, _)| device.id)?;
-        let session = state.sessions.entry(id.clone()).or_default();
-        Some((id, session.changed.clone()))
+    /// Opens the one operation stream for a client-asserted device ID.
+    pub async fn subscribe(&self, id: String) -> Result<Subscription, ConnectError> {
+        validate(&id)?;
+        let mut state = self.lock().await?;
+        let entry = state.sessions.entry(id).or_default();
+        if entry
+            .connection
+            .as_ref()
+            .is_some_and(|c| !c.queue.is_closed())
+        {
+            return Err(conflict());
+        }
+        let session = Uuid::new_v4().to_string();
+        let (queue, incoming) = mpsc::channel(32);
+        let changed = entry.changed.clone();
+        entry.connection = Some(Connection {
+            id: session.clone(),
+            queue,
+        });
+        Ok(Subscription {
+            id: session,
+            queue: incoming,
+            changed,
+        })
     }
 }
 mod operations;
-mod registration;
 #[cfg(test)]
 mod tests;

@@ -51,8 +51,6 @@ pub enum Error {
     FutureSchema(usize),
     #[error("database schema predates the consolidated baseline; delete the development database")]
     IncompatibleSchema,
-    #[error("stored device journal is invalid")]
-    CorruptDeviceJournal,
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -72,7 +70,6 @@ impl Store {
             slots: Arc::new(Semaphore::new(64)),
         };
         store.call(initialize).await?;
-        store.device_migrate_legacy().await?;
         Ok(store)
     }
 

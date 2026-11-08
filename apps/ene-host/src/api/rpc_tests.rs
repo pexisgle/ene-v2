@@ -43,39 +43,6 @@ impl Host {
             temp,
         }
     }
-    async fn device(&self, caps: &[&str]) -> (w::Device, ApiClient) {
-        let client = &self.client.devices;
-        let registration = client
-            .register_device(w::RegisterDeviceRequest {
-                name: "fixture".into(),
-                capabilities: caps.iter().map(|s| (*s).into()).collect(),
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .into_owned();
-        let d = registration.device.into_option().unwrap();
-        client
-            .approve(w::Id {
-                id: d.id.clone(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        for cap in caps {
-            client
-                .set_permission(w::DevicePermissionRequest {
-                    device_id: d.id.clone(),
-                    capability: (*cap).into(),
-                    allowed: true,
-                    ..Default::default()
-                })
-                .await
-                .unwrap();
-        }
-        let connected = ApiClient::new(&format!("{}/rpc", self.url), &registration.token).unwrap();
-        (d, connected)
-    }
 }
 #[tokio::test]
 async fn connect_unary_streaming_and_sdk_share_a_committed_snapshot() {
@@ -270,15 +237,12 @@ async fn updates_during_subscribe_are_either_in_snapshot_or_following_events() {
 #[tokio::test]
 async fn device_operations_are_scoped_durable_and_never_requeued() {
     let host = Host::new().await;
-    let (device, client) = host.device(&["tools.test"]).await;
-    let controller = &host.client.devices;
-    let native = &client.devices;
-    assert!(
-        matches!(client.host.get_settings_with_options(ene_rpc::Empty::default(), crate::api::test_client::call_options(5)).await.map(|response| response.into_owned()), Err(error) if error.code == ErrorCode::PermissionDenied)
-    );
-    let mut stream = native
+    let device_id = "fixture-device".to_string();
+    let client = host.client.clone();
+    let mut stream = client
+        .devices
         .subscribe(w::Id {
-            id: device.id.clone(),
+            id: device_id.clone(),
             ..Default::default()
         })
         .await
@@ -294,7 +258,7 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
         Some(w::device_event::Event::Ready(_))
     ));
     let request = w::DeviceOperationRequest {
-        device_id: device.id.clone(),
+        device_id: device_id.clone(),
         operation_id: uuid::Uuid::new_v4().to_string(),
         capability: "tools.test".into(),
         input: w::JsonDocument {
@@ -304,7 +268,11 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
         .into(),
         ..Default::default()
     };
-    controller.request_operation(request.clone()).await.unwrap();
+    client
+        .devices
+        .request_operation(request.clone())
+        .await
+        .unwrap();
     let command = stream
         .message::<w::DeviceEvent>()
         .await
@@ -315,7 +283,7 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
         panic!("expected operation");
     };
     let result = w::DeviceOperationResult {
-        device_id: device.id.clone(),
+        device_id: device_id.clone(),
         operation_id: request.operation_id.clone(),
         subscription_id: command.subscription_id,
         success: true,
@@ -326,25 +294,43 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
         .into(),
         ..Default::default()
     };
-    let (_, other_client) = host.device(&["tools.test"]).await;
+    // The operation is scoped to the device named in the request.
+    let mut wrong_device = result.clone();
+    wrong_device.device_id = "other-device".into();
     assert_eq!(
-        other_client
+        client
             .devices
-            .complete_operation(result.clone())
+            .complete_operation(wrong_device)
             .await
             .err()
             .unwrap()
             .code,
-        connectrpc::ErrorCode::PermissionDenied
+        connectrpc::ErrorCode::NotFound
     );
-    let completed = native
+    assert_eq!(
+        client
+            .devices
+            .get_operation(w::DeviceOperationRequest {
+                device_id: "other-device".into(),
+                operation_id: request.operation_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .err()
+            .unwrap()
+            .code,
+        connectrpc::ErrorCode::NotFound
+    );
+    let completed = client
+        .devices
         .complete_operation(result.clone())
         .await
         .unwrap()
         .into_owned();
     assert_eq!(completed.status, w::OperationStatus::Completed);
     assert_eq!(
-        native
+        client
+            .devices
             .complete_operation(result)
             .await
             .unwrap()
@@ -352,7 +338,8 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
         completed
     );
     assert_eq!(
-        controller
+        client
+            .devices
             .request_operation(request.clone())
             .await
             .unwrap()
@@ -361,7 +348,8 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
     );
     let mut uncertain = request.clone();
     uncertain.operation_id = uuid::Uuid::new_v4().to_string();
-    controller
+    client
+        .devices
         .request_operation(uncertain.clone())
         .await
         .unwrap();
@@ -371,7 +359,7 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
             if host
                 .app
                 .devices
-                .operation(&device.id, &uncertain.operation_id)
+                .operation(&device_id, &uncertain.operation_id)
                 .await
                 .unwrap()
                 .status
@@ -384,16 +372,18 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
     })
     .await
     .unwrap();
-    let mut fresh = native
+    let mut fresh = client
+        .devices
         .subscribe(w::Id {
-            id: device.id.clone(),
+            id: device_id.clone(),
             ..Default::default()
         })
         .await
         .unwrap();
     fresh.message::<w::DeviceEvent>().await.unwrap();
     assert_eq!(
-        controller
+        client
+            .devices
             .request_operation(uncertain.clone())
             .await
             .unwrap()
@@ -410,22 +400,11 @@ async fn device_operations_are_scoped_durable_and_never_requeued() {
     let recovered = crate::devices::Devices::new(store);
     assert_eq!(
         recovered
-            .operation(&device.id, &uncertain.operation_id)
+            .operation(&device_id, &uncertain.operation_id)
             .await
             .unwrap()
             .status,
         w::OperationStatus::Uncertain
-    );
-    controller
-        .revoke(w::Id {
-            id: device.id,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert!(fresh.message::<w::DeviceEvent>().await.unwrap().is_none());
-    assert!(
-        matches!(client.devices.list(w::Empty::default()).await,Err(error) if error.code==connectrpc::ErrorCode::Unauthenticated)
     );
 }
 
@@ -844,17 +823,17 @@ async fn companion_documents_are_atomic_notified_durable_and_explicitly_clearabl
 }
 
 #[tokio::test]
-async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
+async fn device_queue_and_display_leases_are_bounded() {
     let host = Host::new().await;
-    let (device, _) = host.device(&["tools.test", "companion.display"]).await;
-    let (other, _) = host.device(&["companion.display"]).await;
+    let device = "device-a".to_string();
+    let other = "device-b".to_string();
     // Direct subscription deliberately never drains commands, exercising a slow receiver.
-    let subscription = host.app.devices.subscribe(device.id.clone()).await.unwrap();
+    let subscription = host.app.devices.subscribe(device.clone()).await.unwrap();
     for index in 0..32 {
         host.app
             .devices
             .request(w::DeviceOperationRequest {
-                device_id: device.id.clone(),
+                device_id: device.clone(),
                 operation_id: format!("op-{index}"),
                 capability: "tools.test".into(),
                 input: w::JsonDocument {
@@ -871,7 +850,7 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
         .app
         .devices
         .request(w::DeviceOperationRequest {
-            device_id: device.id.clone(),
+            device_id: device.clone(),
             operation_id: "overflow".into(),
             capability: "tools.test".into(),
             input: w::JsonDocument {
@@ -885,20 +864,6 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
         .err()
         .unwrap();
     assert_eq!(full.code, connectrpc::ErrorCode::ResourceExhausted);
-    host.app
-        .devices
-        .permission(device.id.clone(), Some("tools.test".into()), false)
-        .await
-        .unwrap();
-    assert_eq!(
-        host.app
-            .devices
-            .operation(&device.id, "op-0")
-            .await
-            .unwrap()
-            .status,
-        w::OperationStatus::Revoked
-    );
     drop(subscription);
     let companion = host
         .client
@@ -918,7 +883,7 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
         .devices
         .activate(w::ActivationRequest {
             companion_id: companion.clone(),
-            device_id: device.id.clone(),
+            device_id: device.clone(),
             ..Default::default()
         })
         .await
@@ -928,7 +893,7 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
             .devices
             .activate(w::ActivationRequest {
                 companion_id: companion.clone(),
-                device_id: other.id.clone(),
+                device_id: other.clone(),
                 ..Default::default()
             })
             .await
@@ -938,7 +903,7 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
         .devices
         .activate(w::ActivationRequest {
             companion_id: companion.clone(),
-            device_id: device.id,
+            device_id: device,
             expected_revision: Some(first.revision),
             release: true,
             ..Default::default()
@@ -950,7 +915,7 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
         .devices
         .activate(w::ActivationRequest {
             companion_id: companion,
-            device_id: other.id,
+            device_id: other,
             ..Default::default()
         })
         .await
@@ -969,71 +934,4 @@ async fn device_queue_and_display_leases_are_bounded_and_revocation_is_final() {
             .await
             .is_err()
     );
-}
-#[tokio::test]
-async fn approved_native_devices_can_sync_and_stop_but_revocation_closes_their_host_stream() {
-    let host = Host::new().await;
-    let (device, native) = host.device(&[]).await;
-    assert!(
-        matches!(native.host.get_settings_with_options(ene_rpc::Empty::default(), crate::api::test_client::call_options(5)).await.map(|response| response.into_owned()), Err(error) if error.code == ErrorCode::PermissionDenied)
-    );
-    let mut stream = native.host.subscribe(w::Empty::default()).await.unwrap();
-    let snapshot = initial(&mut stream).await.snapshot.into_option().unwrap();
-    let companion = &snapshot.companions[0];
-    assert_eq!(
-        native
-            .host
-            .list_companions_with_options(
-                ene_rpc::Empty::default(),
-                crate::api::test_client::call_options(5)
-            )
-            .await
-            .unwrap()
-            .into_owned()
-            .items[0]
-            .id,
-        companion.id
-    );
-    native
-        .host
-        .stop_with_options(
-            ene_rpc::StopRequest {
-                companion_id: companion.id.clone(),
-                ..Default::default()
-            },
-            crate::api::test_client::call_options(5),
-        )
-        .await
-        .map(|_| ())
-        .unwrap();
-    host.client
-        .devices
-        .revoke(w::Id {
-            id: device.id,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert!(
-        timeout(Duration::from_secs(2), stream.message::<w::HostEvent>())
-            .await
-            .unwrap()
-            .unwrap()
-            .is_none()
-    );
-    assert!(matches!(
-        native
-            .host
-            .get_snapshot_with_options(
-                ene_rpc::SnapshotRequest {
-                    subscription_id: None,
-                    ..Default::default()
-                },
-                crate::api::test_client::call_options(5)
-            )
-            .await
-            .map(|response| response.into_owned())
-            ,
-        Err(error) if error.code == ErrorCode::Unauthenticated
-    ));
 }

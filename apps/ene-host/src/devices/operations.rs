@@ -8,6 +8,7 @@ impl Devices {
         request: w::DeviceOperationRequest,
     ) -> Result<w::DeviceOperationState, ConnectError> {
         validate(&request.operation_id)?;
+        validate(&request.device_id)?;
         validate(&request.capability)?;
         if request.encoded_len() > 64 * 1024
             || !request.input.as_option().is_some_and(|document| {
@@ -31,10 +32,6 @@ impl Devices {
                 }
                 return Ok(this.current(&state, &op));
             }
-            permitted(
-                &this.device(&request.device_id).await?,
-                Some(&request.capability),
-            )?;
             let operations = this
                 .0
                 .store
@@ -144,10 +141,6 @@ impl Devices {
                 }
                 return Err(conflict());
             }
-            permitted(
-                &this.device(&result.device_id).await?,
-                Some(&previous.request.capability),
-            )?;
             if this.current(&state, &previous).status != w::OperationStatus::Dispatched
                 || previous.subscription_id != result.subscription_id
             {
@@ -182,10 +175,8 @@ impl Devices {
         let this = self.clone();
         self.owned(async move {
             let mut state = this.lock().await?;
-            permitted(
-                &this.device(&request.device_id).await?,
-                Some("companion.display"),
-            )?;
+            validate(&request.device_id)?;
+            validate(&request.companion_id)?;
             if state
                 .activation_not_before
                 .is_some_and(|deadline| deadline > Instant::now())

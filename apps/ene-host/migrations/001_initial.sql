@@ -3,7 +3,6 @@
 -- them.
 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE companions (id TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE TABLE rpc_state (key TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE plugin_records (
     namespace TEXT NOT NULL,
     key TEXT NOT NULL,
