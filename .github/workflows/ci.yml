@@ -29,6 +29,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: "1.73.0"
+
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache-on-failure: true

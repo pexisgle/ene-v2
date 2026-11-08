@@ -33,7 +33,7 @@ direnvを使う場合は、リポジトリのルートで一度`direnv allow`を
 
 ## Nixを使わずに開発する
 
-rustupと、そのOSでRustプログラムをリンクするための開発ツールを用意します。Linux（x86_64）ではClangとLLD、WindowsではMSVCのC++ビルドツールが必要です。
+rustupと`buf`、そのOSでRustプログラムをリンクするための開発ツールを用意します。Linux（x86_64）ではClangとLLD、WindowsではMSVCのC++ビルドツールが必要です。`buf`はプロトコル生成に使い、CIとNixの開発シェルでは1.73.0に固定しています。
 
 リポジトリのルートで固定バージョンのツールチェーンをインストールし、通常のCargoで検査できます。
 
