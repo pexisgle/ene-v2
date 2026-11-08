@@ -1,7 +1,6 @@
 fn main() {
     // connectrpc-build emits no rerun directives in buf mode.
     println!("cargo:rerun-if-changed=proto/host.proto");
-    println!("cargo:rerun-if-changed=buf.yaml");
     // Wasm guests share only the message contract; the Connect RPC client and
     // server transports are native.
     let wasm = std::env::var("CARGO_CFG_TARGET_FAMILY")
