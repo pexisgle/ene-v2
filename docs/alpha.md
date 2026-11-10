@@ -244,3 +244,42 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 設計検討の実装基準は2c2c467。その時点のコードはRig 0.44、単発のStart/Respond/Cancel、binding単位の保存、直接のACP処理などを含む。これは実装履歴であり、本書に書いた機能が実装済みである根拠ではない。ステップ1の実装後はRig 0.46.0の実行カーネルが親の会話を所有し、旧メッセージ表は読み書きしない。実装・既存テストの説明は[ene-host README](../apps/ene-host/README.md)とPRの従来の説明に残す。
 
 設計文書追加コミット（eb353d7）ではコード・Cargo.lock・protobuf・DBを変更しなかった。ステップ1の実装コミットでは依存・コード・API・保存先を変更している。設計上の採用と、ビルド・実機検証の完了を区別し、各実装変更で到達した条件を本文へ記録する。設計変更が必要になった場合は理由と影響を同じ文書へ反映する。
+
+## 2026-11-09 ホスト書き直しの実装記録
+
+`apps/ene-host` を `apps/ene-host-test` の最小構成を土台に書き直した。1つのヘッドレスRig Appを専用スレッドで動かし、APIからの読み書きを `Runtime::call` で直列化し、SQLiteは1接続、外部通信だけを非同期にした。`application` / `domain` / `ports` / `infrastructure` の層、独自エラー型、非同期DB、汎用レシート機構は削除した。
+
+- 契約：`host.proto` を `HostService` / `ChatService` / `SettingsService` / `WorkService` / `ClientService` に置き換えた。`ene-plugin` が使うモデル記述型はクレート直下へ再exportする。
+- 会話：Rigの `AgentPlugin` / `SessionLogPlugin` とセッションログを正本にし、受理は同一フレームのログ書込み成功後だけ返す。未確定レシートは再起動後に照合する。通知は `TurnEvent` / `MessageDelta` / `ConversationChanged` / `RecalledInput`。
+- 心・記憶：`mind_recall` / `mind_read` / `mind_update` をホスト束縛の開いたツールとして登録し、所有者・入力出所・操作IDをホストが決める。記憶と処理済みカーソルは同じSQLiteトランザクションで確定する。自動整理は確定ターンだけを対象にした有限の `ModelRequest` 効果で、`memory` 許可とコンパニオン接続を使う。検索はFTS5 trigram。意味検索・埋め込みは後続。
+- 設定・許可：組み込みのOpenAI Responses / OpenRouter Chat、資格情報ストア、送信許可（purpose / data kind / destination / fingerprint）、可用性を実装した。設定・許可・資格情報の変更は実行中のモデル呼び出しのpermitを失効させる。
+- 作業：親の `start_work` が子エージェントを生成し、`send_work` / `stop_work` / `list_work` / 子の `report` を持つ。子は親の心・履歴・心ツールを持たない。ターン終了時の報告は `reported_run` で一度だけにする。
+- 端末：`client_id` で端末を区別し、1コンパニオンにつきアクティブ端末1台。能力は端末が提示し、ユーザー許可済みのものだけ端末操作に使う。操作は `pending` / `dispatched` / `completed` / `uncertain` / `failed` を持ち、切断後の自動再送をしない。
+- 検証：`cargo test -p ene-host` の単体・結合テスト、`--test process` の実プロセス（discovery、Owner Bearer、SIGTERM）、`cargo clippy -- -D warnings` を通した。実プロバイダーの受入は通常テストに含めない。
+- 後続：意味検索・埋め込み、スケジュール、Web検索、音声、パッケージ、ACP/MCP/Wasm、ホスト側fs/terminal、汎用承認UI。Alpha設計のうち、これらを除くホスト側の範囲を実装した。
+
+## 2026-11-10 実プロバイダー確認（簡易）
+
+一時state/runtime（0700）と `ENE_HOST_SESSION_CREDENTIALS=1`（キーチェーンへ書かない）でホストを起動し、Connect APIを直接呼んだ。確認したのは次の経路である。
+
+1. `ListProviders`：`kind` が `llm` として広告される。
+2. `UpdateSettings`：`adapter` と `kind` を明示した接続を作成（設定revision 1→2）。
+3. `RegisterCredentials`：セッション内だけに保存し、`credentialState` が `registered` になる。
+4. `CheckConnection`：実OpenAI APIからモデル一覧を取得（96件、上限4 MiBの範囲内）。
+5. `CreateGrant`：`https://api.openai.com` と `data_kinds=["conversation"]` の許可を作成。
+6. `RevokeCredentials`、SIGTERMでの停止、`connection.json` の削除。
+
+会話の往復は確認していない（コンパニオンのモデル割当を実在するモデルIDに合わせていないため）。鍵・Authorizationヘッダー・本文は出力していない。
+
+## 2026-11-10 監査修正の実装記録
+
+[実装監査](reviews/ene-host-audit-2026-11-10.md)のA1–A5段階1、B1–B12、C1–C14を、`apps/ene-host` に最小の差分で反映した。コミットは分割せず、作業ツリーで `cargo fmt --all -- --check`、`cargo clippy -p ene-host --all-targets --all-features --locked -- -D warnings`、`cargo test -p ene-host --locked`、`cargo test -p ene-host --test process --locked` を通した。テストは43件（ライブラリ）と1件（実プロセス）。
+
+- **A1（致命的）**：`Database` の `Mutex` を `try_lock` にし、再入を `internal("database re-entered")` として返す。`ControlMemory` はトランザクション内で `Tx::get` / `Tx::get_memory` だけを使う。再入と忘却・共有の回帰テストを追加した。
+- **A2・A3（高）**：`streams` は `With<TurnCall>` の呼び出しだけを配信し、`CallOf` からターンを引く（`ActiveTurn` に依存しない）。`chat::role_of` を追加し、ホスト注入の文脈を `context` として返す。`HistoryRequest.include_context` を追加（既定`false`）。自動整理は利用者の発言・モデルの返答・作業報告だけを読み、`[作業報告]` を付け、`acquisition` を許可リストで検証する。
+- **A4（高）**：`PRAGMA user_version` を版とする連番migration（`src/host/db/migrations/001_baseline.sql`）。旧ベースラインDBは `user_version = 1` として引き継ぎ、未知・より新しいDBは拒否する。2件目以降の前に `VACUUM INTO` で `*.bak-v<版>` を作る。
+- **A5（高）**：`PrepareSystems::Fit` の `fit` が `ModelRequest.history` を窓に収め、`max_tokens` を全モデル呼び出しに設定する。窓が不明なら刈らず `Notice` を出し、未整理の範囲が落ちたら整理を優先する。段階2の圧縮は `mind/summary.rs` で、落ちた範囲を `memory` 許可の別呼び出しで要約し、エージェントのコンポーネントに持って次の要求の先頭に置く（保存keyは増やさない。再起動後は最初の刈り込みで作り直す）。会話の正本と `GetHistory` は変えない。失敗は `Notice` を出して窓だけで続行する（[設計](design/compaction.md)）。
+- **B**：起床・コマンド・停止を別チャネルに分離（`crossbeam-channel`）。`Runtime::read` を追加し読み取りRPCがフレームを進めないようにした。未知のコンパニオンはエージェントを生成しない。`ModelSource` と `Options` で本番とテストが同じ束縛経路を通る。モデル供給・自動整理の探索・プロンプト構成（`SystemPrompt` + `PromptSection`）・報告の `Queue`・`mind_update` のリビジョン表示・構造化出力（`output_schema`）・`probe` の上限・接続の `kind` と `data_kinds`・作業バックエンドの enum を反映した。
+- **C**：client別の通知フィルタ、`max_companions` の強制、`Retire` による退職、接続削除時の資格情報とGrantの後始末、環境変数キーの既定エンドポイント限定、端末操作の保存順序、`client_id` 引数の削除、`DefaultBodyLimit` の削除（Connectの既定4 MiB）、タスクプールの上限3、モジュール名の修正、keyring方針の明記、読み取り専用ツールのfootprint。
+- **未実施（決定済み）**：C13（Ownerトークン生成の差し替え。実害がないため現状維持）、B9の `WorkView.requests`（消費者不在）。圧縮の発展（明示的な圧縮操作・要約の取り消し・ツール出力の掃除）は[設計](design/compaction.md)に残した。
+- **待機時負荷（C10）**：Bevyのタスクプールを最大3スレッドにし、開発ビルドの実プロセスを空のstate/runtimeで10秒動かして測定した。アイドルCPUは1 tick（10ms、0.10%）。SIGTERMで停止し、`connection.json` が消えることも確認した。

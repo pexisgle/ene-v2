@@ -1,88 +1,70 @@
+//! A real host process: private discovery, owner auth, and graceful SIGTERM.
+
 #![cfg(unix)]
 
-mod common;
+use std::{path::Path, process::Command, time::Duration};
 
-use common::{command, start, stop};
-use connectrpc::client::{CallOptions, HttpClient};
-use ene_rpc::{HostServiceClient, SnapshotRequest, UpdateCompanionRequest};
-use std::{os::unix::fs::PermissionsExt, time::Duration};
-use tokio::time::timeout;
-
-fn client(connection: &serde_json::Value, token: &str) -> HostServiceClient<HttpClient> {
-    let (transport, config) =
-        ene_rpc::connect(connection["endpoint"].as_str().unwrap(), token).unwrap();
-    HostServiceClient::new(transport, config)
-}
-
-fn options() -> CallOptions {
-    CallOptions::default().with_timeout(Duration::from_secs(5))
+fn connection_file(runtime: &Path) -> Option<(String, String)> {
+    let bytes = std::fs::read(runtime.join("connection.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some((
+        value.get("endpoint")?.as_str()?.to_owned(),
+        value.get("token")?.as_str()?.to_owned(),
+    ))
 }
 
 #[tokio::test]
-async fn host_process_authenticates_persists_and_stops_with_an_open_subscription() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (mut child, connection) = start(root.path()).await;
-    let mut duplicate = command(root.path()).spawn().unwrap();
-    assert!(
-        !timeout(Duration::from_secs(5), duplicate.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success()
-    );
-    let unauthorized = client(&connection, "wrong-token")
-        .get_snapshot_with_options(SnapshotRequest::default(), options())
-        .await
-        .unwrap_err();
-    assert_eq!(unauthorized.code, connectrpc::ErrorCode::Unauthenticated);
-    let client = client(&connection, connection["token"].as_str().unwrap());
+async fn process_publishes_private_discovery_authenticates_and_stops() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let runtime = temp.path().join("runtime");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ene-host"))
+        .env("ENE_HOST_STATE_DIR", &state)
+        .env("ENE_HOST_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start ene-host");
+    let discovery = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(discovery) = connection_file(&runtime) {
+                return discovery;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("host did not publish discovery");
+    let (transport, config) = ene_rpc::connect(&discovery.0, &discovery.1).unwrap();
+    let client = ene_rpc::HostServiceClient::new(transport, config);
     let snapshot = client
-        .get_snapshot_with_options(SnapshotRequest::default(), options())
+        .get_snapshot(ene_rpc::SnapshotRequest::default())
         .await
-        .unwrap()
-        .into_owned();
-    let companion = &snapshot.companions[0];
-    let updated = client
-        .update_companion_with_options(
-            UpdateCompanionRequest {
-                id: companion.id.clone(),
-                revision: companion.revision,
-                name: Some("再起動しても保存".into()),
-                ..Default::default()
-            },
-            options(),
-        )
-        .await
-        .unwrap()
-        .into_owned();
-    let mut events = client.subscribe(ene_rpc::Empty::default()).await.unwrap();
+        .unwrap();
+    assert!(!snapshot.view().host_id.is_empty());
+    let (transport, config) = ene_rpc::connect(&discovery.0, "wrong-token").unwrap();
+    let wrong = ene_rpc::HostServiceClient::new(transport, config);
     assert!(
-        timeout(
-            Duration::from_secs(5),
-            events.message::<ene_rpc::HostEvent>()
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .is_some()
+        wrong
+            .get_snapshot(ene_rpc::SnapshotRequest::default())
+            .await
+            .is_err()
     );
-    stop(&mut child, root.path()).await;
-
-    let (mut child, restarted) = start(root.path()).await;
-    assert_ne!(connection["token"], restarted["token"]);
-    let (transport, config) = ene_rpc::connect(
-        restarted["endpoint"].as_str().unwrap(),
-        restarted["token"].as_str().unwrap(),
-    )
-    .unwrap();
-    let snapshot = HostServiceClient::new(transport, config)
-        .get_snapshot_with_options(SnapshotRequest::default(), options())
-        .await
-        .unwrap()
-        .into_owned();
-    assert_eq!(snapshot.companions[0].id, updated.id);
-    assert_eq!(snapshot.companions[0].name, updated.name);
-    assert_eq!(snapshot.companions[0].revision, updated.revision);
-    stop(&mut child, root.path()).await;
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let exited = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(exited.is_ok(), "host did not stop");
+    assert!(!runtime.join("connection.json").exists());
 }

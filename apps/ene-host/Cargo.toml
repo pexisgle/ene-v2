@@ -1,6 +1,6 @@
 [package]
 name = "ene-host"
-description = "Host application, authorized provider communication and process entry point"
+description = "Host application, agent execution and authenticated provider communication"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,55 +10,42 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-http.workspace = true
-reqwest.workspace = true
-rig-http = "0.46"
-ene-rpc.workspace = true
-ene-plugin.workspace = true
-agent-client-protocol.workspace = true
-process-wrap.workspace = true
-which.workspace = true
-unicode-segmentation.workspace = true
-connectrpc = { workspace = true, features = ["axum"] }
-buffa.workspace = true
-bytes.workspace = true
-cap-fs-ext.workspace = true
-cap-std.workspace = true
-ene-plugin-runtime.workspace = true
-rig-core = { version = "0.46", default-features = false, features = [] }
-rig-ecs = "0.46"
-rig-memory = { version = "0.46", features = ["fs"] }
-bevy_ecs = "=0.20.0"
-keyring = { version = "4", default-features = false, features = ["v1"] }
-time.workspace = true
-thiserror.workspace = true
-rusqlite_migration = "2"
+async-stream.workspace = true
 axum.workspace = true
+bevy_ecs = "=0.20.0"
+bytes.workspace = true
+connectrpc = { workspace = true, features = ["axum"] }
+crossbeam-channel = "0.5"
+directories = "6"
+ene-rpc.workspace = true
 futures-util.workspace = true
+http.workspace = true
+io-lifetimes = "3"
+keyring = { version = "4", default-features = false, features = ["v1"] }
+private-fs = "0.2.1"
+reqwest.workspace = true
+rig-core = { version = "=0.46.0", default-features = false }
+rig-derive = "=0.46.0"
+rig-ecs = "=0.46.0"
+rig-http = "=0.46.0"
+rig-memory = { version = "=0.46.0", features = ["fs"] }
+rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 subtle = "2"
-tokio = { workspace = true, default-features = true, features = ["rt-multi-thread", "net", "signal", "process", "io-util"] }
-tokio-rusqlite = { version = "0.8", features = ["bundled"] }
+time.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url.workspace = true
 uuid.workspace = true
 
-url.workspace = true
-async-stream.workspace = true
-base64.workspace = true
-sha2.workspace = true
-tokio-util = { workspace = true, features = ["compat"] }
-
 [dev-dependencies]
-rig-core = { version = "0.46", default-features = false, features = ["test-utils"] }
-tempfile.workspace = true
-wat = "1"
-dotenvy = "0.15"
-keyring-core = "1"
-tokio = { workspace = true, default-features = true, features = ["test-util"] }
 ene-rpc = { workspace = true, features = ["client"] }
-http.workspace = true
+rig-core = { version = "=0.46.0", default-features = false, features = ["test-utils"] }
+tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
-
-[target.'cfg(unix)'.dependencies]
-xdg.workspace = true
-rustix.workspace = true

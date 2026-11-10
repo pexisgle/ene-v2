@@ -1,0 +1,83 @@
+syntax = "proto3";
+package chat.v1;
+
+// An empty work_id addresses the companion's parent conversation.
+message Target { string companion_id = 1; string work_id = 2; }
+message SendMessageRequest { Target target = 1; string request_key = 2; string text = 3; }
+message Acceptance { string input_id = 1; }
+message Empty {}
+message StopRequest { Target target = 1; }
+message ReadRequest { Target target = 1; }
+message HistoryMessage {
+  uint64 id = 1;
+  string role = 2;
+  string text = 3;
+  uint64 made = 4;
+  string input_id = 5;
+  string author = 6;
+}
+message History { repeated HistoryMessage messages = 1; }
+message RunInfo {
+  string conversation_id = 1;
+  string run_id = 2;
+  string input_id = 3;
+  string state = 4;
+  string failure = 5;
+}
+message WorkInfo {
+  string work_id = 1;
+  string companion_id = 2;
+  string backend_profile = 3;
+  string conversation_id = 4;
+}
+message PendingRequest {
+  string request_id = 1;
+  string conversation_id = 2;
+  string run_id = 3;
+  string state = 4;
+  uint64 settings_revision = 5;
+  string value = 6;
+  uint64 expected_revision = 7;
+}
+message State { string value = 1; uint64 revision = 2; }
+message Snapshot {
+  string epoch = 1;
+  uint64 sequence = 2;
+  string conversation_id = 3;
+  History history = 4;
+  repeated RunInfo runs = 5;
+  repeated WorkInfo works = 6;
+  repeated PendingRequest requests = 7;
+  State state = 8;
+}
+message TextDelta { string text = 1; uint64 offset = 2; string call_id = 3; }
+message Recalled { string input_id = 1; string text = 2; string why = 3; }
+message Event {
+  string epoch = 1;
+  uint64 sequence = 2;
+  string companion_id = 3;
+  string conversation_id = 4;
+  string run_id = 5;
+  oneof kind {
+    Snapshot snapshot = 6;
+    TextDelta text_delta = 7;
+    // Re-read the snapshot for committed state. Deltas are provisional.
+    Empty changed = 8;
+    Recalled recalled = 9;
+  }
+}
+message RespondRequest {
+  string companion_id = 1;
+  string request_id = 2;
+  uint64 settings_revision = 3;
+  bool approve = 4;
+}
+service ChatService {
+  rpc SendMessage(SendMessageRequest) returns (Acceptance);
+  rpc Stop(StopRequest) returns (Empty);
+  rpc GetHistory(ReadRequest) returns (History);
+  rpc GetSnapshot(ReadRequest) returns (Snapshot);
+  // Always begins with an atomic snapshot + subscription. On lag, reconnect.
+  rpc Subscribe(ReadRequest) returns (stream Event);
+  rpc Respond(RespondRequest) returns (Empty);
+}

@@ -1,312 +1,593 @@
 syntax = "proto3";
+
 package ene.host.v1;
 
-// Provider and plugin-specific extension objects use JSON; API operations and events
-// have concrete protobuf types. JSON text preserves arbitrary integer precision.
-message JsonDocument { string json = 1; }
+// Small, host-owned contract. IDs are opaque strings, revisions are
+// monotonic, and every long-running operation is confirmed by a read or a
+// notification rather than by its acceptance response.
+
 message Empty {}
 message Id { string id = 1; }
+message JsonDocument { string json = 1; }
+message StringList { repeated string values = 1; }
 message Cursor { string epoch = 1; uint64 seq = 2; }
-message Failure { string code = 1; string message = 2; JsonDocument details = 3; }
-message ApiFailure { Failure error = 1; string request_id = 2; uint32 http_status = 3; }
-message ModelAssignment { string connection_id = 1; string model_id = 2; }
-message ModelAssignments { ModelAssignment companion = 1; ModelAssignment task = 2; }
-message Message {
-  string id = 1; string companion_id = 2; string role = 3; string text = 4;
-  string status = 5; string created_at = 6; uint64 sequence = 7;
-  reserved 8, 10, 11;
-  reserved "resources", "task_id", "question_id";
-  optional string in_reply_to = 9;
-  Failure failure = 12;
-  // The accepted input this entry or reply belongs to. A reply carries the id
-  // of the input it answers; the id is the same value SendMessage returned.
-  optional string request_id = 13;
-  string turn_status = 14;
+message Failure {
+  string code = 1;
+  string message = 2;
+  JsonDocument details = 3;
 }
-message Companion {
-  string id = 1; string name = 2; JsonDocument body = 3; reserved 4; reserved "voice";
-  string mind = 5; ModelAssignments model_assignments = 6;
-  JsonDocument availability = 7; uint64 revision = 8;
-}
-// The author's character material. The core lives on Companion.mind; the other
-// fields are role-play material, never the user's experience.
-message MindProfile {
-  string core = 1; uint64 revision = 2; repeated string facets = 3;
-  repeated string examples = 4; repeated string background = 5;
-  repeated string expression = 6;
-}
-// The companion's current mind. revision covers memory additions and state
-// changes; emotion/relationships/tendencies/concerns are character-specific
-// JSON objects so no universal scale is imposed.
-message MindState {
-  uint64 revision = 1; JsonDocument emotion = 2;
-  JsonDocument relationships = 3; JsonDocument tendencies = 4;
-  JsonDocument concerns = 5; string updated_at = 6;
-}
-message MindIndexStatus {
-  string state = 1; optional string reason = 2;
-  uint64 pending_fts = 3; uint64 pending_vectors = 4;
-  optional string embedding_model = 5; uint64 embedding_calls = 6;
-  uint64 embedding_tokens = 7; string updated_at = 8;
-}
-message MindConsolidationStatus {
-  uint64 last_sequence = 1; string method_revision = 2; string state = 3;
-  optional string reason = 4; uint64 jobs = 5; uint64 model_calls = 6;
-  uint64 input_chars = 7; string updated_at = 8; uint64 last_offset = 9; uint64 skipped = 10;
-}
-message MindView {
-  string companion_id = 1; MindProfile profile = 2; MindState state = 3;
-  MindIndexStatus index = 4; MindConsolidationStatus consolidation = 5;
-}
-message MemoryControlRequest { string companion_id = 1; string memory_id = 2; string action = 3; }
-message MemoryControlResult {
-  string memory_id = 1; string audience = 2; string recall_preference = 3; uint64 revision = 4;
-}
-message UpdateMindProfileRequest {
-  string companion_id = 1; uint64 expected_revision = 2;
-  repeated string facets = 3; repeated string examples = 4;
-  repeated string background = 5; repeated string expression = 6;
-}
-message Connection {
-  string id = 1; string kind = 2; string adapter = 3; string endpoint = 4;
-  JsonDocument options = 5; string credential_state = 6;
-  JsonDocument capabilities = 7; JsonDocument last_check = 8;
-}
-message Settings { uint64 revision = 1; repeated Connection connections = 2; }
-message Grant {
-  string id = 1; string companion_id = 2; reserved 3; reserved "kind"; string connection_id = 4;
-  repeated string destinations = 5; repeated string data_kinds = 6;
-  string purpose = 7; string status = 8; uint64 revision = 9;
-  optional string invalidation_reason = 10; JsonDocument connection_fingerprint = 11;
-}
+
 message HostHealth {
-  bool ready = 1; bool recovery_required = 2; bool stopping = 3;
+  bool ready = 1;
+  bool recovery_required = 2;
+  bool stopping = 3;
   uint64 credential_cleanup_pending = 4;
 }
-message HistoryCursor { optional string value = 1; }
+
+message HostCapabilities {
+  JsonDocument limits = 1;
+  repeated string features = 2;
+  repeated string adapters = 3;
+  string transport = 4;
+}
+
+// Clients ------------------------------------------------------------------
+
+// A connected terminal is identified by an asserted, host-recorded id. This
+// is not an authentication credential; the owner Bearer remains the boundary.
+message Client {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;
+  repeated string granted_capabilities = 5;
+  uint64 revision = 6;
+  string last_seen = 7;
+  bool connected = 8;
+  repeated string active_companions = 9;
+}
+message Clients { repeated Client items = 1; }
+message RegisterClientRequest {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;
+  uint64 expected_revision = 5;
+}
+message SetCapabilitiesRequest {
+  string client_id = 1;
+  repeated string capabilities = 2;
+  repeated string granted_capabilities = 3;
+  uint64 revision = 4;
+}
+message ActivationRequest {
+  string companion_id = 1;
+  string client_id = 2;
+  uint64 expected_revision = 3;
+  bool release = 4;
+}
+message Activation {
+  string companion_id = 1;
+  optional string client_id = 2;
+  uint64 revision = 3;
+}
+
+// Companions ---------------------------------------------------------------
+
+message ModelAssignment { string connection_id = 1; string model_id = 2; }
+message ModelAssignments {
+  ModelAssignment companion = 1;
+  ModelAssignment task = 2;
+}
+message AssignmentPatch {
+  oneof change {
+    ModelAssignment set = 1;
+    Empty clear = 2;
+  }
+}
+message JsonDocumentPatch {
+  oneof change {
+    JsonDocument set = 1;
+    Empty clear = 2;
+  }
+}
+message Companion {
+  string id = 1;
+  string name = 2;
+  string mind = 3;
+  JsonDocument body = 4;
+  JsonDocument voice = 5;
+  ModelAssignments assignments = 6;
+  uint64 revision = 7;
+  string created_at = 8;
+  string updated_at = 9;
+  optional string active_client = 10;
+  uint64 activation_revision = 11;
+}
+message Companions { repeated Companion items = 1; }
+message CreateCompanionRequest {
+  string name = 1;
+  string mind = 2;
+  JsonDocument body = 3;
+  JsonDocument voice = 4;
+  ModelAssignments assignments = 5;
+  MindProfile profile = 6;
+}
+message UpdateCompanionRequest {
+  string id = 1;
+  uint64 revision = 2;
+  optional string name = 3;
+  optional string mind = 4;
+  JsonDocumentPatch body = 5;
+  JsonDocumentPatch voice = 6;
+  AssignmentPatch companion_assignment = 7;
+  AssignmentPatch task_assignment = 8;
+}
+
+// Mind and memories --------------------------------------------------------
+
+message MindProfile {
+  string core = 1;
+  uint64 revision = 2;
+  repeated string facets = 3;
+  repeated string examples = 4;
+  repeated string background = 5;
+  repeated string expression = 6;
+}
+message MindState {
+  uint64 revision = 1;
+  JsonDocument emotion = 2;
+  JsonDocument relationships = 3;
+  JsonDocument tendencies = 4;
+  JsonDocument concerns = 5;
+  string updated_at = 6;
+}
+message MemoryStatus {
+  string state = 1;
+  optional string reason = 2;
+  uint64 memories = 3;
+  bool semantic = 4;
+  string updated_at = 5;
+}
+message ConsolidationStatus {
+  uint64 last_sequence = 1;
+  uint64 last_offset = 2;
+  string state = 3;
+  optional string reason = 4;
+  uint64 jobs = 5;
+  uint64 model_calls = 6;
+  uint64 input_chars = 7;
+  uint64 skipped = 8;
+  string updated_at = 9;
+}
+message MindView {
+  string companion_id = 1;
+  MindProfile profile = 2;
+  MindState state = 3;
+  uint64 memory_revision = 4;
+  MemoryStatus index = 5;
+  ConsolidationStatus consolidation = 6;
+}
+message UpdateMindProfileRequest {
+  string companion_id = 1;
+  uint64 expected_revision = 2;
+  repeated string facets = 3;
+  repeated string examples = 4;
+  repeated string background = 5;
+  repeated string expression = 6;
+}
+message MemoryControlRequest {
+  string companion_id = 1;
+  string memory_id = 2;
+  string action = 3;
+}
+message MemoryControlResult {
+  string memory_id = 1;
+  string audience = 2;
+  string recall_preference = 3;
+  uint64 revision = 4;
+}
+
+// Chat ---------------------------------------------------------------------
+
+// An empty work_id addresses the companion's parent conversation.
+message Target {
+  string companion_id = 1;
+  string work_id = 2;
+}
+message SendMessageRequest {
+  Target target = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+}
+message MessageAcceptance { string request_id = 1; }
+message StopRequest { Target target = 1; }
+message HistoryRequest {
+  Target target = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+  // Also return host-injected context (`role == "context"`), such as recall
+  // notes and the current mind. Off by default: it is not the user's speech.
+  optional bool include_context = 4;
+}
+message MessageRequest {
+  Target target = 1;
+  string message_id = 2;
+}
+message Message {
+  string id = 1;
+  string companion_id = 2;
+  string work_id = 3;
+  // Who wrote it: `user` (the user), `assistant` (the model), `agent` (a work
+  // agent's report) or `context` (host-injected context, only with
+  // HistoryRequest.include_context).
+  string role = 4;
+  string text = 5;
+  string status = 6;
+  string created_at = 7;
+  uint64 sequence = 8;
+  optional string request_id = 9;
+  optional string in_reply_to = 10;
+  Failure failure = 11;
+  string author = 12;
+  string turn_status = 13;
+}
+message History {
+  repeated Message items = 1;
+  optional string next_cursor = 2;
+}
+
+// Work sessions ------------------------------------------------------------
+
+message WorkSession {
+  string id = 1;
+  string companion_id = 2;
+  string backend = 3;
+  string status = 4;
+  optional string last_run_id = 5;
+  optional string last_report = 6;
+  string created_at = 7;
+  string updated_at = 8;
+  bool closed = 9;
+}
+message WorkSessionList { repeated WorkSession items = 1; }
+message RunInfo {
+  string run_id = 1;
+  string input_id = 2;
+  string state = 3;
+  Failure failure = 4;
+}
+message WorkView {
+  WorkSession session = 1;
+  repeated RunInfo runs = 2;
+}
+message ListWorksRequest { string companion_id = 1; }
+message WorkRequest { string work_id = 1; }
+message SendWorkRequest {
+  string work_id = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+}
+message WorkAcceptance { string request_id = 1; }
+message StopWorkRequest {
+  string work_id = 1;
+  optional string run_id = 2;
+}
+message CloseWorkRequest { string work_id = 1; }
+
+// Notifications ------------------------------------------------------------
+
+message MessageDelta {
+  string stream_id = 1;
+  uint64 offset = 2;
+  string delta = 3;
+  string call_id = 4;
+}
+message TurnEvent {
+  string companion_id = 1;
+  string work_id = 2;
+  string stream_id = 3;
+  string state = 4;
+  optional string request_id = 5;
+  optional string message_id = 6;
+  Failure failure = 7;
+}
+message RecalledInput {
+  string companion_id = 1;
+  string work_id = 2;
+  string text = 3;
+  optional string reason = 4;
+}
+message CompanionUpdated { Companion companion = 1; }
+message ConversationChanged {
+  string companion_id = 1;
+  string work_id = 2;
+}
+message SettingsUpdated { Settings settings = 1; }
+message GrantsUpdated { repeated Grant items = 1; }
+message MindUpdated { MindView mind = 1; }
+message WorkUpdated { WorkSession session = 1; }
+message ClientUpdated { Client client = 1; }
+message ActivationChanged {
+  string companion_id = 1;
+  optional string client_id = 2;
+  uint64 revision = 3;
+}
+// A host-side warning the client may show, such as a truncated context.
+message Notice {
+  string code = 1;
+  string message = 2;
+}
+message HostStorageFailed { Failure failure = 1; }
+message HostFailure { Failure failure = 1; }
+
+message Notification {
+  Cursor cursor = 1;
+  optional string companion_id = 2;
+  optional string client_id = 3;
+  oneof event {
+    Message message_created = 4;
+    MessageDelta message_delta = 5;
+    TurnEvent turn_event = 6;
+    RecalledInput recalled_input = 7;
+    CompanionUpdated companion_updated = 8;
+    SettingsUpdated settings_updated = 9;
+    GrantsUpdated grants_updated = 10;
+    MindUpdated mind_updated = 11;
+    WorkUpdated work_updated = 12;
+    ClientUpdated client_updated = 13;
+    ActivationChanged activation_changed = 14;
+    HostStorageFailed host_storage_failed = 15;
+    HostFailure host_failure = 16;
+    ConversationChanged conversation_changed = 17;
+    Notice notice = 18;
+  }
+}
+message InitialState {
+  string subscription_id = 1;
+  Snapshot snapshot = 2;
+}
+message ResyncRequired {}
+message HostEvent {
+  oneof event {
+    InitialState initial = 1;
+    Notification notification = 2;
+    ResyncRequired resync_required = 3;
+  }
+}
 message Snapshot {
-  string host_id = 1; string environment_id = 2; JsonDocument capabilities = 3;
-  Cursor cursor = 4; repeated Companion companions = 5; repeated Message messages = 6;
-  map<string, HistoryCursor> message_cursors = 7; Settings settings = 8;
-  repeated Grant grants = 9; HostHealth health = 10;
+  string host_id = 1;
+  string environment_id = 2;
+  HostCapabilities capabilities = 3;
+  Cursor cursor = 4;
+  repeated Companion companions = 5;
+  repeated Client clients = 6;
+  Settings settings = 7;
+  repeated Grant grants = 8;
+  repeated WorkSession works = 9;
+  HostHealth health = 10;
 }
 message SnapshotRequest { optional string subscription_id = 1; }
-message Companions { repeated Companion items = 1; }
+message SubscribeRequest { optional string client_id = 1; }
+
+// Settings, connections, grants, providers --------------------------------
+
+message Connection {
+  string id = 1;
+  string kind = 2;
+  string adapter = 3;
+  string endpoint = 4;
+  JsonDocument options = 5;
+  string credential_state = 6;
+  JsonDocument capabilities = 7;
+  JsonDocument last_check = 8;
+  bool enabled = 9;
+}
+message Settings {
+  uint64 revision = 1;
+  repeated Connection connections = 2;
+}
 message ConnectionInput {
-  optional string id = 1; bool create = 2; string kind = 3; string adapter = 4;
-  string endpoint = 5; JsonDocument options = 6;
+  optional string id = 1;
+  bool create = 2;
+  string kind = 3;
+  string adapter = 4;
+  string endpoint = 5;
+  JsonDocument options = 6;
 }
 message ConnectionInputs { repeated ConnectionInput items = 1; }
 message UpdateSettingsRequest {
   uint64 revision = 1;
-  // The former repeated field cannot represent omission; never reuse its tag.
   reserved 2;
-  // Absent keeps the list; a present empty message removes all unreferenced connections.
   ConnectionInputs connections = 3;
 }
-// Absent fields keep their value. Assignment changes explicitly set or clear a slot.
-message AssignmentPatch { oneof change { ModelAssignment set = 1; Empty clear = 2; } }
-// An absent patch keeps the document. A present patch must select set or clear.
-// JSON null is omission, not clear; set requires a non-null JSON object.
-message JsonDocumentPatch { oneof change { JsonDocument set = 1; Empty clear = 2; } }
-message UpdateCompanionRequest {
-  string id = 1; uint64 revision = 2; optional string name = 3; optional string mind = 4;
-  AssignmentPatch companion_assignment = 5; AssignmentPatch task_assignment = 6;
-  JsonDocumentPatch body = 7; reserved 8; reserved "voice";
+message Grant {
+  string id = 1;
+  string companion_id = 2;
+  reserved 3;
+  string connection_id = 4;
+  repeated string destinations = 5;
+  repeated string data_kinds = 6;
+  string purpose = 7;
+  string status = 8;
+  uint64 revision = 9;
+  optional string invalidation_reason = 10;
+  JsonDocument connection_fingerprint = 11;
 }
-message HistoryRequest {
-  string companion_id = 1; optional string cursor = 2; optional uint32 limit = 3;
-}
-message History { repeated Message items = 1; optional string next_cursor = 2; }
-message MessageRequest { string companion_id = 1; string message_id = 2; }
-message SendMessageRequest {
-  string companion_id = 1; string text = 2; string request_key = 3;
-  reserved 4, 5, 6;
-  reserved "resources", "question_id", "decision";
-}
-// The host has taken responsibility for the input. Delivery, execution and its
-// end are confirmed by MessageCreated, TurnEvent and GetHistory, not here.
-message MessageAcceptance { string request_id = 1; reserved 2, 3; reserved "message_id", "response_message_id"; }
 message GrantsRequest { optional string companion_id = 1; }
 message Grants { repeated Grant items = 1; }
-message Consent { uint64 settings_revision = 1; string provider_revision = 2; }
+message Consent {
+  uint64 settings_revision = 1;
+  string provider_revision = 2;
+}
 message CreateGrantRequest {
-  string request_key = 1; string companion_id = 2; reserved 3; reserved "kind"; string connection_id = 4;
-  repeated string destinations = 5; repeated string data_kinds = 6;
-  string purpose = 7; Consent consent = 8;
+  string request_key = 1;
+  string companion_id = 2;
+  string connection_id = 3;
+  repeated string destinations = 4;
+  repeated string data_kinds = 5;
+  string purpose = 6;
+  Consent consent = 7;
 }
 message UpdateGrantRequest {
-  string id = 1; uint64 revision = 2; StringList destinations = 3;
+  string id = 1;
+  uint64 revision = 2;
+  StringList destinations = 3;
   StringList data_kinds = 4;
 }
 message GrantResult { Grant grant = 1; }
-message CredentialRequest { string id = 1; optional string secret = 2; optional string source = 3; }
+message CredentialRequest {
+  string id = 1;
+  optional string secret = 2;
+  optional string source = 3;
+}
 message CredentialResult { string credential_state = 1; }
 message CheckRequest {
-  string id = 1; string request_key = 2; string companion_id = 3;
-  string purpose = 4; optional string model_id = 5;
+  string id = 1;
+  string request_key = 2;
+  string companion_id = 3;
+  optional string model_id = 4;
 }
 message CheckResult {
-  string request_id = 1; JsonDocument capabilities = 2; bool success = 3;
-  string model_id = 4; uint64 content_chunks = 5; uint64 unicode_scalars = 6;
+  string request_id = 1;
+  JsonDocument capabilities = 2;
+  bool success = 3;
+  string model_id = 4;
+  uint64 content_chunks = 5;
+  uint64 unicode_scalars = 6;
 }
-message StringList { repeated string values = 1; }
 message ModelMetadata {
-  string source = 1; string scope = 2; optional uint64 context_window = 3;
-  optional uint64 max_input_tokens = 4; optional uint64 max_output_tokens = 5;
-  StringList input_modalities = 6; StringList output_modalities = 7;
-  StringList supported_parameters = 8; map<string, string> field_sources = 9;
+  string source = 1;
+  string scope = 2;
+  optional uint64 context_window = 3;
+  optional uint64 max_input_tokens = 4;
+  optional uint64 max_output_tokens = 5;
+  StringList input_modalities = 6;
+  StringList output_modalities = 7;
+  StringList supported_parameters = 8;
+  repeated FieldSource field_sources = 9;
 }
-message Model { string id = 1; string name = 2; ModelMetadata metadata = 3; }
+message FieldSource {
+  string key = 1;
+  string value = 2;
+}
+message Model {
+  string id = 1;
+  string name = 2;
+  ModelMetadata metadata = 3;
+}
 message Models { repeated Model items = 1; }
-message ModelsRequest { string id = 1; optional string companion_id = 2; }
-message SettingField {
-  string key = 1; string label = 2; string kind = 3;
-  bool required = 4; repeated string choices = 5;
+message ModelsRequest {
+  string id = 1;
+  optional string companion_id = 2;
 }
-message ProviderCapabilities { bool streaming_text = 1; bool model_list = 2; }
+message SettingField {
+  string key = 1;
+  string label = 2;
+  string kind = 3;
+  bool required = 4;
+  repeated string choices = 5;
+}
+message ProviderCapabilities {
+  bool streaming_text = 1;
+  bool model_list = 2;
+}
 message Provider {
-  string id = 1; string name = 2; string kind = 3; string endpoint = 4;
-  JsonDocument options = 5; repeated SettingField settings = 6;
-  bool requires_credentials = 7; optional string environment_variable = 8;
-  repeated string destinations = 9; string state = 10; optional string error = 11;
-  string revision = 12; ProviderCapabilities capabilities = 13; repeated Model models = 14;
+  string id = 1;
+  string name = 2;
+  string kind = 3;
+  string endpoint = 4;
+  JsonDocument options = 5;
+  repeated SettingField settings = 6;
+  bool requires_credentials = 7;
+  optional string environment_variable = 8;
+  repeated string destinations = 9;
+  string state = 10;
+  optional string error = 11;
+  string revision = 12;
+  ProviderCapabilities capabilities = 13;
+  repeated Model models = 14;
 }
 message Providers { repeated Provider items = 1; }
-message PluginEntry {
-  string id = 1; string target = 2;
-  reserved 3;
-  reserved "runtime";
-  repeated string provides = 4; repeated string uses = 5;
+message AvailabilityRequest {
+  string connection_id = 1;
+  string companion_id = 2;
 }
-message Plugin {
-  string id = 1; string name = 2; string version = 3; string revision = 4;
-  string state = 5; optional string error = 6; repeated PluginEntry entrypoints = 7;
-}
-message Plugins { repeated Plugin items = 1; }
-message EnablePluginRequest { string id = 1; bool enabled = 2; string revision = 3; }
-// Explicit opt-in for the ACP terminal capability. Commands are executed
-// directly (no shell) as the host user; there is no sandbox. The terminal
-// request may add only the environment names listed here: an empty list passes
-// no request-supplied environment at all.
-message TerminalPolicy {
-  bool enabled = 1;
-  repeated string allowed_commands = 2;
-  uint32 max_seconds = 3;
-  uint32 max_output_bytes = 4;
-  repeated string allowed_env = 5;
-}
-message PluginBinding {
-  string id = 1; string plugin_id = 2; string entrypoint = 3; string revision = 4;
-  string companion_id = 5; repeated string services = 6; JsonDocument configuration = 7;
-  // Required for character entrypoints; actions are scoped to this device and companion_id.
-  string device_id = 8;
-  // Absolute workspace root for the `tools` fs capabilities; empty disables them.
-  optional string workspace_root = 9;
-  // ACP bindings only. Absent or disabled means terminal requests are rejected.
-  optional TerminalPolicy terminal = 10;
-}
-message PluginBindings { repeated PluginBinding items = 1; }
-message PluginInvocation { string binding_id = 1; JsonDocument operation = 2; }
-message PluginResult { uint64 generation = 1; repeated JsonDocument events = 2; JsonDocument result = 3; }
-// Harness task state is read from the host journal; the notification is a hint to re-read.
-message HarnessState { string binding_id = 1; JsonDocument state = 2; }
-message HarnessTaskNotification {
-  string binding_id = 1; string companion_id = 2; string task_id = 3;
-  string status = 4; optional string stop_reason = 5; optional string failure = 6;
-}
-message CharacterActionNotification {
-  string binding_id = 1; string revision = 2; uint64 generation = 3;
-  uint64 expires_at_ms = 4; JsonDocument event = 5;
-}
-message EnableProviderRequest { string id = 1; bool enabled = 2; }
-message AvailabilityRequest { string connection_id = 1; string companion_id = 2; }
 message OperationAvailability {
-  string operation = 1; string purpose = 2; repeated string data_kinds = 3;
-  string authorization = 4; string dependency = 5; bool busy = 6; bool runnable = 7;
+  string operation = 1;
+  string purpose = 2;
+  repeated string data_kinds = 3;
+  string authorization = 4;
+  string dependency = 5;
+  bool busy = 6;
+  bool runnable = 7;
+  optional string reason = 8;
 }
 message Availability {
-  string companion_id = 1; string connection_id = 2; uint64 settings_revision = 3;
-  optional string provider_revision = 4; repeated string destinations = 5;
-  JsonDocument connection_fingerprint = 6; repeated OperationAvailability operations = 7;
-}
-// Progress of the reply to the input its stream_id names. The final text is the
-// message TurnEvent reports; deltas are not the saved conversation.
-message MessageDelta { string stream_id = 1; uint64 offset = 2; string delta = 3; }
-// One execution of a companion from an accepted input to its end. `state` is
-// streaming, answered, stopped or failed. `message_id` is the saved reply entry
-// when one exists. Streaming is also reported as MessageDelta with this stream_id.
-message TurnEvent {
-  string companion_id = 1; string stream_id = 2; string state = 3;
-  optional string request_id = 4; optional string message_id = 5; Failure failure = 6;
-}
-message PersistenceFailure { optional string message_id = 1; string code = 2; string message = 3; }
-// The host's execution kernel stopped and no running turn will be answered.
-message HostFailure { string code = 1; string message = 2; }
-// A failed turn took the user's unanswered input out of the saved conversation;
-// the client puts this text back in its input. It is not a conversation message.
-message RecalledInput { string companion_id = 1; string text = 2; optional string reason = 3; }
-message Notification {
-  Cursor cursor = 1; optional string companion_id = 2;
-  // The former message-start/update and generation-failure events; the turn
-  // event carries their meaning now.
-  reserved 4, 5, 11;
-  reserved "message_started", "message_updated", "generation_persistence_failed";
-  oneof event {
-    Message message_created = 3;
-    MessageDelta message_delta = 6; Companion companion_updated = 7;
-    Settings settings_updated = 8; Grants grants_updated = 9;
-    PersistenceFailure host_storage_failed = 10;
-    CharacterActionNotification plugin_character_action = 12;
-    HarnessTaskNotification harness_task = 13;
-    TurnEvent turn_event = 14;
-    HostFailure host_failure = 15;
-    RecalledInput recalled_input = 16;
-    MindView mind_updated = 17;
-  }
-}
-message InitialState { string subscription_id = 1; Snapshot snapshot = 2; }
-message ResyncRequired {}
-message HostEvent {
-  oneof event { InitialState initial = 1; Notification notification = 2; ResyncRequired resync_required = 3; }
+  string companion_id = 1;
+  string connection_id = 2;
+  uint64 settings_revision = 3;
+  optional string provider_revision = 4;
+  repeated string destinations = 5;
+  JsonDocument connection_fingerprint = 6;
+  repeated OperationAvailability operations = 7;
 }
 
-// Device operations travel over a client-originated subscription. IDs identify
-// one operation; reconnecting never implicitly executes an uncertain command.
-// The authenticated owner is the only host credential; a client names the
-// device it acts as in the request.
-message DeviceOperationRequest {
-  string device_id = 1; string operation_id = 2; string capability = 3; JsonDocument input = 4;
+// Device operations --------------------------------------------------------
+// The host dispatches these to a client that advertised and was granted the
+// capability. The client executes them; the host only records the receipt.
+
+message DeviceOperation {
+  string operation_id = 1;
+  string capability = 2;
+  JsonDocument input = 3;
+  string subscription_id = 4;
 }
-message DeviceOperation { string operation_id = 1; string capability = 2; JsonDocument input = 3; string subscription_id = 4; }
-message DeviceSubscription { string subscription_id = 1; }
-message DeviceEvent { oneof event { DeviceSubscription ready = 1; DeviceOperation operation = 2; } }
+message DeviceReady { string subscription_id = 1; }
+message DeviceEvent {
+  oneof event {
+    DeviceReady ready = 1;
+    DeviceOperation operation = 2;
+  }
+}
 message DeviceOperationResult {
-  string device_id = 1; string operation_id = 2; bool success = 3; JsonDocument output = 4; string subscription_id = 5;
+  string client_id = 1;
+  string operation_id = 2;
+  bool success = 3;
+  JsonDocument output = 4;
+  optional Failure failure = 5;
 }
-// REVOKED remains readable for receipts written before device permissions were
-// removed; new receipts never set it.
-enum OperationStatus { OPERATION_STATUS_UNSPECIFIED = 0; OPERATION_STATUS_DISPATCHED = 1; OPERATION_STATUS_COMPLETED = 2; OPERATION_STATUS_UNCERTAIN = 3; OPERATION_STATUS_REVOKED = 4; }
-message DeviceOperationState { string operation_id = 1; OperationStatus status = 2; DeviceOperationResult result = 3; }
-// Host-private durable records use the same generated messages, never JSON DTO copies.
-message OperationRecord { DeviceOperationRequest request = 1; DeviceOperationState state = 2; string subscription_id = 3; }
-message ActivationRequest { string companion_id = 1; string device_id = 2; optional uint64 expected_revision = 3; bool release = 4; }
-message Activation { string companion_id = 1; string device_id = 2; uint64 revision = 3; uint32 lease_ms = 4; }
-message StopRequest { string companion_id = 1; }
+message DeviceOperationState {
+  string operation_id = 1;
+  string client_id = 2;
+  string status = 3;
+  optional DeviceOperationResult result = 4;
+}
+
+// Services -----------------------------------------------------------------
 
 service HostService {
   rpc GetSnapshot(SnapshotRequest) returns (Snapshot);
-  rpc Subscribe(Empty) returns (stream HostEvent);
+  rpc Subscribe(SubscribeRequest) returns (stream HostEvent);
   rpc ListCompanions(Empty) returns (Companions);
   rpc GetCompanion(Id) returns (Companion);
+  rpc CreateCompanion(CreateCompanionRequest) returns (Companion);
   rpc UpdateCompanion(UpdateCompanionRequest) returns (Companion);
   rpc GetMind(Id) returns (MindView);
   rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
   rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
-  rpc GetHistory(HistoryRequest) returns (History);
-  rpc GetMessage(MessageRequest) returns (Message);
+}
+
+service ChatService {
   rpc SendMessage(SendMessageRequest) returns (MessageAcceptance);
   rpc Stop(StopRequest) returns (Empty);
+  rpc GetHistory(HistoryRequest) returns (History);
+  rpc GetMessage(MessageRequest) returns (Message);
+}
+
+service SettingsService {
   rpc GetSettings(Empty) returns (Settings);
   rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
   rpc ListGrants(GrantsRequest) returns (Grants);
@@ -318,24 +599,23 @@ service HostService {
   rpc CheckConnection(CheckRequest) returns (CheckResult);
   rpc ListModels(ModelsRequest) returns (Models);
   rpc ListProviders(Empty) returns (Providers);
-  rpc ReloadProviders(Empty) returns (Providers);
-  rpc EnableProvider(EnableProviderRequest) returns (Providers);
   rpc GetAvailability(AvailabilityRequest) returns (Availability);
 }
-service PluginService {
-  rpc List(Empty) returns (Plugins);
-  rpc Get(Id) returns (Plugin);
-  rpc Reload(Empty) returns (Plugins);
-  rpc Enable(EnablePluginRequest) returns (Plugins);
-  rpc ListBindings(Empty) returns (PluginBindings);
-  rpc Bind(PluginBinding) returns (PluginBindings);
-  rpc Invoke(PluginInvocation) returns (PluginResult);
-  rpc GetHarness(Id) returns (HarnessState);
+
+service WorkService {
+  rpc ListWorks(ListWorksRequest) returns (WorkSessionList);
+  rpc GetWork(WorkRequest) returns (WorkView);
+  rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
+  rpc StopWork(StopWorkRequest) returns (Empty);
+  rpc CloseWork(CloseWorkRequest) returns (Empty);
 }
-service DeviceService {
-  rpc Subscribe(Id) returns (stream DeviceEvent);
-  rpc RequestOperation(DeviceOperationRequest) returns (DeviceOperationState);
-  rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
-  rpc GetOperation(DeviceOperationRequest) returns (DeviceOperationState);
+
+service ClientService {
+  rpc RegisterClient(RegisterClientRequest) returns (Client);
+  rpc List(Empty) returns (Clients);
   rpc Activate(ActivationRequest) returns (Activation);
+  rpc SetCapabilities(SetCapabilitiesRequest) returns (Client);
+  rpc DeviceStream(Id) returns (stream DeviceEvent);
+  rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
+  rpc GetOperation(Id) returns (DeviceOperationState);
 }
