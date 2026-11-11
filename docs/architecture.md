@@ -92,13 +92,13 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **組み込みSurrealKV**:
   - C++依存を排除した完全Rust製の組み込みストレージ（`kv-surrealkv`）。単一フォルダにデータを永続化。
 - **エピソード記憶（`MemoryRecord`）**:
-  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（1〜10）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`is_forgotten`、`embedding` を格納。
-  - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除せず想起優先度の引き下げ（`is_forgotten = true`）で自動想起から除外（過去ログの客観記録は保持）。
+  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（1〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`embedding` を格納。
+  - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除や除外フラグではなく想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（過去ログの客観記録は保持）。
   - ローカルモデル（fastembed, bge-m3等）またはクラウドモデル（OpenAI等）を選択可能。SurrealDBのHNSWインデックスによるコサイン類似度ベクトル検索。
   - **増分自動整理**: `processed_turns_cursor` より後の新規ターンのみを増分走査し、過去ログからの重複再生成を防止。
   - 想起スコア計算式：$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$
   - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、応答メタデータや明示操作で実際に引用された場合のみ更新。
-  - **Pinned Memory制約**: 重要度10であっても、忘却・訂正状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
+  - **Pinned Memory制約**: 重要度10であっても、訂正状態や優先度引き下げ状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 
 ### 3. 音声対話パイプライン
 - **プラガブルエンジン適応**:

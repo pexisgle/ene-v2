@@ -62,12 +62,11 @@ DEFINE TABLE memory SCHEMAFULL;
 DEFINE FIELD owner ON TABLE memory TYPE record<companion>;   -- 不変の原所有者（"shared"で上書きしない）
 DEFINE FIELD audiences ON TABLE memory TYPE array<string> DEFAULT []; -- 共有先コンパニオンID一覧
 DEFINE FIELD content ON TABLE memory TYPE string;            -- 記憶の要約・事実・手順本文
-DEFINE FIELD importance ON TABLE memory TYPE int ASSERT $value >= 1 AND $value <= 10; -- 1〜10: 重要度
+DEFINE FIELD importance ON TABLE memory TYPE int ASSERT $value >= 1 AND $value <= 10; -- 1〜10: 重要度・想起優先度
 DEFINE FIELD occurred_at ON TABLE memory TYPE option<datetime>; -- 出来事の発生日時（不明時はnull）
 DEFINE FIELD recorded_at ON TABLE memory TYPE datetime DEFAULT time::now() READONLY; -- 初回記録日時（更新不可）
 DEFINE FIELD last_accessed_at ON TABLE memory TYPE option<datetime>; -- 明示的引用による最終利用日時（未引用時はnull）
 DEFINE FIELD memory_revision ON TABLE memory TYPE int DEFAULT 1; -- 競合検知用の版
-DEFINE FIELD is_forgotten ON TABLE memory TYPE bool DEFAULT false; -- 忘却フラグ（通常想起・Pinned枠から除外）
 DEFINE FIELD emotion ON TABLE memory TYPE option<string>;     -- 当時の感情タグ
 DEFINE FIELD source_context ON TABLE memory FLEXIBLE TYPE object; -- 由来（turn_id, run_id, 話者等）
 DEFINE FIELD embedding ON TABLE memory TYPE option<array<float>>; -- 埋め込みベクトル（Alpha標準: 1536次元）
@@ -98,7 +97,7 @@ DEFINE INDEX idx_memory_content_fulltext ON TABLE memory FIELDS content
     FULLTEXT ANALYZER japanese_analyzer;
 
 -- 複合検索・フィルタインデックス
-DEFINE INDEX idx_memory_owner_active ON TABLE memory FIELDS owner, is_forgotten, importance;
+DEFINE INDEX idx_memory_owner_importance ON TABLE memory FIELDS owner, importance;
 ```
 
 ### 3.2 所有権と共有（Privacy & Sharing）
@@ -127,7 +126,7 @@ LET $semantic = (
     SELECT id, content, importance, occurred_at, last_accessed_at,
            vector::similarity::cosine(embedding, $query_vec) AS score
     FROM memory
-    WHERE is_forgotten = false AND embedding <|10, 40|> $query_vec
+    WHERE embedding <|10, 40|> $query_vec
     LIMIT 20
 );
 
@@ -136,7 +135,7 @@ LET $lexical = (
     SELECT id, content, importance, occurred_at, last_accessed_at,
            search::score(1) AS score
     FROM memory
-    WHERE is_forgotten = false AND content @1@ $query_text
+    WHERE content @1@ $query_text
     LIMIT 20
 );
 
@@ -169,7 +168,7 @@ RETURN search::rrf([$semantic, $lexical]);
 
 `importance == 10` のレコード、および `user_profile` は、ベクトル類似度検索をバイパスしてシステムプロンプトの中核枠へ常時注入される。ただし、以下の不変条件を厳格に適用する：
 
-1. **忘却・訂正の適用**: `is_forgotten == true` の記憶、または訂正されて `superseded_by` を持つ古い記憶は、重要度が10であっても**Pinned枠へ注入してはならない**。
+1. **優先度低下・訂正の適用**: 訂正されて `superseded_by` を持つ古い記憶や、忘却（想起優先度引き下げ）された記憶は、重要度10を満たさないためPinned枠へ注入されない。
 2. **トークン予算上限（Token Budget）**:
    - Pinned Memory枠には最大トークン予算（例: 最大 1,000 トークン）を設定する。
    - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at`（未引用時は `recorded_at`）順で収容する。
@@ -182,39 +181,44 @@ RETURN search::rrf([$semantic, $lexical]);
 親エージェントには以下のツールが提供される（主体・権限・操作IDはホストが自動束縛）：
 - `mind_recall(query: String, limit: Option<u32>) -> Vec<MemoryItem>`: 記憶の検索
 - `mind_read(memory_id: String) -> MemoryDetail`: 記憶の詳細および由来の閲覧
-- `mind_update(action: MindUpdateAction) -> MindUpdateResult`: 明示的な記憶の追加・訂正・忘却（優先度引き下げ）
+- `mind_update(action: MindUpdateAction) -> MindUpdateResult`: 明示的な記憶の追加・訂正・想起優先度引き下げ
 
 ### 5.2 自動整理（Consolidation）における内容の分割保存
 対話ログからの長期記憶形成は、**Compaction（要約）の発生を必須条件とせず、独立してバックグラウンド実行**される。
 - **起動契機**: ユーザー対話が途切れたアイドル時（60秒以上）、または未整理の確定ターン数が閾値（例: 5ターン）に達した時点。
 - **内容ごとの独立レコード分割保存**:
   - 1つの会話発言から複数の異なる事実（例: 「好きな飲み物はコーヒー」と「勤務先はTech社」）が読み取れる場合、**単一のレコードにまとめず、独立した個別の `MemoryRecord` として保存する**。
-  - 各レコードは固有のIDを持ち、出所（`source_context.turn_id`）を共有しながらも、重要度や忘却状態を完全に独立して管理できる。
+  - 各レコードは固有のIDを持ち、出所（`source_context.turn_id`）を共有しながらも、重要度（想起優先度）を完全に独立して管理できる。
 - **未処理カーソル（`processed_turns_cursor`）による増分抽出**:
   - 自動整理ジョブは、最後に抽出を完了した `processed_turns_cursor` より後の新規ターンのみを増分走査する。
-  - 過去に処理済みのターンを何度も再走査しないため、以前に抽出・忘却（`is_forgotten = true`）された事実が、過去ログから新しいレコードとして重複再生成されることは構造的に防止される。
+  - 過去に処理済みのターンを何度も再走査しないため、以前に抽出・優先度変更された事実が、過去ログから新しいレコードとして重複再生成されることは構造的に防止される。
 
 ```text
 未処理の対話ログ・子の作業報告
   → processed_turns_cursor より後の未読ターンを取得（処理済みターンは再走査をスキップ）
-  → 既存記憶と現在の版（memory_revision）・忘却状態（is_forgotten）を参照
+  → 既存記憶と現在の版（memory_revision）・想起優先度（importance）を参照
   → 経験の抽出（異なる内容は個別の独立したMemoryRecordとして分割）
   → 既存記憶の統合・訂正、引用実績に基づく重要度再評価
-  → トランザクション内で競合検証（版不一致・忘却済み記憶の再生成を拒否）
+  → トランザクション内で競合検証（版不一致・古い優先度への不当な巻き戻しを拒否）
   → 記憶・processed_turns_cursor を原子的コミット
 ```
 
 ### 5.3 「忘却」のセマンティクス（想起優先度の引き下げ）と境界
-- **人間の自然な記憶に即した忘却設計**:
-  - 忘却はデータベースからの物理削除ではなく、**「想起優先度を下げ、日常の対話で思い出しにくくする（`is_forgotten = true`）」** 運用とする。人間が過去の日記や発言した客観的事実そのものを物理抹消しないのと同様に、DBからの物理削除は行わない。
+- **人間の自然な記憶に即した忘却設計（明確な削除フラグの排除）**:
+  - **記憶に明確な削除（物理削除や除外フラグ）は存在しない**。
+  - 忘却とは、記憶レコードの**想起優先度（`importance`）を引き下げ、日常会話で自然に想起されにくくすること**である。人間が過去の経験そのものを脳内から完全に抹消できないのと同様に、DBからの物理削除や除外フラグは設けない。
+  - **想起スコア計算との連動**:
+    - 想起スコア計算式（$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency}$）において、優先度（`Importance`）が引き下げられることで総スコアが自然に低下し、日常会話の自動想起で上位に浮上しなくなる。
+    - Pinned Memory枠（重要度10）からも優先度引き下げに伴って自然に外れる。
   - **保証の明確な境界**:
-    - **保証すること**: 忘却フラグ（`is_forgotten == true`）が設定された記憶は、ベクトル類似度検索・BM25全文検索・Pinned枠の「自動想起候補」から完全に除外される。
+    - **保証すること**: 想起優先度が引き下げられた記憶は、総合スコアが低減するため日常の自動想起で上位候補にならず、Pinned枠からも外れる。
     - **保証しないこと（意図的仕様）**: 直前の会話生ログ（Recent Dialogue History）や既存の要約文（Compaction Summary）からの物理的・遡及的な削除は保証しない。対話の客観的な事実記録としては残り、対話の進展に伴って直前ログが窓から自然に押し出されるか、次回のCompaction要約で抽象化されるのを待つ。
-  - **分割保存との連携**: 内容ごとに独立した `MemoryRecord` として分割保存されているため、一方の記憶（例: 勤務先）を忘却しても、同一ターンに由来する別の記憶（例: 好きな飲み物）の想起には一切影響を与えない。
-- **遅延整理ジョブの競合解決**:
-  - ユーザーが「今の話は忘れて」と指示して `is_forgotten = true` となった後、バックグラウンドで走っていた古い整理ジョブが同じ記憶を書き戻そうとした場合：
-    - トランザクション内で `memory_revision` および `is_forgotten` を照合し、**古い整理結果を拒否（Conflict）**して破棄する。
-    - 同一の出所ターンにおいて既に抽出・忘却フラグが立っているレコードが存在する場合、そのレコードの忘却状態を上書き再有効化しない。
+  - **分割保存との連携**:
+    - 内容ごとに独立した `MemoryRecord` として分割保存されているため、一方の記憶（例: 勤務先）の優先度を引き下げても、同一ターンに由来する別の記憶（例: 好きな飲み物）の想起には一切影響を与えない。
+  - **遅延整理ジョブの競合解決**:
+    - ユーザーが「今の話は忘れて」と指示して優先度が引き下げられた後、バックグラウンドで走っていた古い整理ジョブが元の優先度で上書きしようとした場合：
+      - トランザクション内で `memory_revision` を照合し、**古い整理結果を拒否（Conflict）**して破棄する。
+      - 同一の出所ターンにおいて既に優先度が引き下げられているレコードが存在する場合、そのレコードの優先度を不当に巻き戻さない。
 
 ---
 
@@ -235,7 +239,7 @@ RETURN search::rrf([$semantic, $lexical]);
 
 | 不変条件 | 検証方法 | 合格基準 |
 | :--- | :--- | :--- |
-| **忘却のセマンティクス** | 記憶を忘却（`is_forgotten = true`）させた後、自動想起およびPinned枠を検証 | 自動想起・Pinned枠のいずれからも完全に除外され、再整理ジョブによって復活しないこと（過去ログの客観記録は保持されること） |
+| **忘却のセマンティクス** | 記憶の想起優先度（`importance`）を引き下げた後、自動想起およびPinned枠を検証 | 優先度低下に伴い想起スコアが低下して自動想起の上位やPinned枠（重要度10）から自然に外れ、再整理ジョブによって優先度が不当に巻き戻らないこと（過去ログの客観記録は保持されること） |
 | **遅延整理の競合排除** | 記憶変更後に、変更前の古い文脈から生成した整理結果をコミット試行 | 版不一致（Conflict）として安全に拒否され、最新状態が上書きされないこと |
 | **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、応答内で明示引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、応答メタデータや明示操作で引用された場合のみ更新されること |
 | **Pinned予算制限** | 重要度10の記憶を多数作成し、プロンプト生成を実行 | 予算上限（例: 1,000トークン）を超過せず、文脈窓を圧迫しないこと |

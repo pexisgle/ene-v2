@@ -66,14 +66,14 @@
           SELECT id, content, importance, occurred_at, last_accessed_at,
                  vector::similarity::cosine(embedding, $query_vec) AS score
           FROM memory
-          WHERE is_forgotten = false AND embedding <|10, 40|> $query_vec
+          WHERE embedding <|10, 40|> $query_vec
           LIMIT 20
       );
       LET $lexical = (
           SELECT id, content, importance, occurred_at, last_accessed_at,
                  search::score(1) AS score
           FROM memory
-          WHERE is_forgotten = false AND content @1@ $query_text
+          WHERE content @1@ $query_text
           LIMIT 20
       );
       RETURN search::rrf([$semantic, $lexical]);

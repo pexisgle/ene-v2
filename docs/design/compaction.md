@@ -141,7 +141,7 @@ Anthropic Claude、OpenAI、Geminiの **KVキャッシュ（Prefix Caching）** 
 
 > [!NOTE]
 > **忘却とプロンプト各要素の境界**:
-> Pinned Core Memory（枠3）および想起記憶は、`is_forgotten == false` の有効な記憶のみが厳格にフィルタされて注入される。
+> Pinned Core Memory（枠3）は重要度10を維持している中核記憶のみが厳格に注入され、訂正済みや優先度引き下げ済みの記憶は含まれない。
 > 一方、Recent Dialogue History（枠5）およびCompaction Summary（枠4）は対話の客観的事実ログとしてそのまま保持され、過去ログからの物理的・遡及的削除は行わない（対話の進展に伴い窓から自然に押し出されるか、次回の要約で抽象化されるのを待つ）。
 
 ---
