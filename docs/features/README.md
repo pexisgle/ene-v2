@@ -10,16 +10,16 @@ ene固有の概念や定義については [用語集](../terms.md) を参照し
 
 | 領域 | 概要 |
 | --- | --- |
-| [Chat](chat/README.md) | 自然なテキストチャットと、キャラクターの個性を活かした対話 |
+| [Chat](chat/README.md) | キャラクターの個性を活かした対話（テキスト・ボイス共通）と、窓口となるキャラクターAgent |
 | [Character](character/README.md) | キャラクターの「体・声・心」の登録・管理と、各クライアントでの描画・表示 |
 | [Memory](memory/README.md) | ユーザーの好み・思い出・作業文脈・手順の蓄積と、その確認・訂正・共有 |
 | [Tools](tools/README.md) | Web検索をはじめ、AIが情報収集や外部連携に用いる各種ツール |
 | [Voice](voice/README.md) | マイクによる音声入力と、キャラクター固有の声による音声合成・読み上げ |
-| [Task](task/README.md) | 実務や調査のリクエスト、サブエージェントによる実行、進捗・最終報告の確認 |
+| [Task](task/README.md) | 「頭」で考えたことを実行に移す「手」（作業エージェント）の管理と連携 |
 | [Autonomy](autonomy/README.md) | 許可された範囲で自律的に行う、キャラクターからの声かけやスケジュール実行 |
 | [Hosting](hosting/README.md) | ホストの配置・稼働と、複数クライアント（端末）からの接続・同期 |
-| [Settings](settings/README.md) | 接続先ホストや利用モデルの管理、アクセス権限・データ送信範囲の設定 |
-| [Extensions](extensions/README.md) | 外部ツール、MCPサーバー、タスク実行エンジンの追加と差し替え |
+| [Settings](settings/README.md) | 接続先ホストや利用モデルの管理、sandbox と自動判定、危険時の承認、ポリシーの設定 |
+| [Extensions](extensions/README.md) | 手・目・体の全方位を強化するプラグインの追加と差し替え（Everything is a plugin） |
 
 ## ドキュメントの記述方針
 
