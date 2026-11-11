@@ -27,7 +27,7 @@
 | 項目 | 判断 |
 | --- | --- |
 | 責務と意味 | [アーキテクチャ](architecture.md)、[技術スタック](design/tech-stack.md)、[心](design/mind.md)、[作業API](design/work.md)、[コンテキスト圧縮](design/compaction.md)、[権限](design/permissions.md)、[知覚・音声](design/voice-avatar.md)、[プラグイン](design/plugins.md)、[ホスト接続](design/host-access.md)を実装基準とする |
-| 推論基盤とループ | Rig（`rig-agent` / `rig-ecs`, `rig-memory`）による内側エージェント実行・会話管理 ＋ Tokio非同期ステートマシンによる外側調停（音声入出力・アイドル監視・複数コンパニオン調停・ACP WorkSession接続維持） |
+| 推論基盤とループ | `rig-ecs`（`AgentPlugin` / `SessionLogPlugin` + `DirStore`）による内側エージェント実行・会話ログ正本 ＋ Tokio非同期ステートマシンによる外側調停（音声入出力・アイドル監視・複数コンパニオン調停・ACP WorkSession接続維持） |
 | 保存と検索 | 組み込みSurrealDB（SurrealKV）。心・記憶・関係性をグラフで表現し、ローカル/クラウド選択可能なHNSWベクトル検索（コサイン類似度）とACID永続化を単一エンジンで統合 |
 | セキュリティ | OSネイティブ隔離（Linux Landlock/bwrap、Windows AppContainer/Job Objects、macOS Seatbelt、`cap-std`）による3層境界 |
 | 音声対話 | プラガブルSTT/TTSパイプライン（参考：Shizuku-Duplex）。TTSエンジンの仕様（文単位/ストリーミング）に合わせた先行合成と割り込み破棄 |
@@ -219,7 +219,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 
 長時間の対話を破綻なく継続するためのコンテキスト圧縮と、Prefix Cachingヒット率を最大化するプロンプト構築順序を実装する。
 
-- **追記型線形ログ ＋ `rig-memory` によるCompaction**: Rig標準の `Conversation` / `Message` 型を正本とし、`rig-memory` の `AsyncStore` トレイトをSurrealDB向けに実装して統合。ディスクへの完全な線形追記ログと、Compaction用の版スナップショットで管理。
+- **追記型線形ログ ＋ `rig-memory` によるCompaction**: 会話履歴は `rig-ecs` の `SessionLogPlugin` ＋ `SessionStore`（`DirStore`）を正本としてディスクに保存し、要約スナップショット（`SummaryState`）はSurrealDBに永続化。ディスクへの完全な線形追記ログと、Compaction用の版スナップショットで管理。
 - **厳密なアイドル検知**: ユーザーの操作・発話不在時間のみをカウントし、コンパニオン自身の自発的独り言・見守り発話はタイマーをリセットしない。
 - **割り込み耐性とPre-compaction継続**: バックグラウンドCompaction中にユーザー発話があった場合、Compaction完了を待たずに直前履歴（pre-compaction state）から即座に応答を返し、実行中Compaction結果は破棄/次回延期する。
 - **機械的コンテキスト上限検証と縮退動作**: 送信直前に `Total Input + Max Output <= Context Window` を機械的に検証。要約失敗・トークン超過時はアクティブプロンプト窓から最も古い未要約メッセージを一時的に切り詰めて対話を継続。
@@ -234,7 +234,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 - **組み込みSurrealKV**: C++依存のない完全Rust製ストレージにより、Windows/macOS/Linuxで単一フォルダ永続化を実現。
 - **MemoryRecordスキーマ不変条件**: `owner`（作成者コンパニオン不変保持）、`audiences`（共有先リスト）、`importance`（1〜10）、`memory_revision`、`is_forgotten`（忘却フラグ）、`embedding_model`、`embedding_dimensions` を保存。
 - **想起スコアリング**: $\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$ によるHNSWベクトル検索と重要度・時間減衰の統合。
-- **引用ガード（汚染ループ防止）**: `talk` の引数 `cited_memories` で明示的に引用された場合のみ `last_accessed_at` を更新し、アイドル時整理で重要度再評価に活用。
+- **引用ガード（汚染ループ防止）**: 応答メタデータや明示操作（`mind_read` 等）で明示的に引用された場合のみ `last_accessed_at` を更新し、アイドル時整理で重要度再評価に活用。
 - **Pinned Memory保護**: 重要度10であっても、忘却・訂正状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 - **認知グラフ関係性**: `companion->remembers->memory`、`memory->cited_in->turn` のグラフエッジを構築。遅延した自動整理ジョブが忘却済み記憶を書き戻す競合をトランザクション内で拒否。
 

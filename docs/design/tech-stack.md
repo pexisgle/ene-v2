@@ -60,18 +60,23 @@
           FULLTEXT ANALYZER japanese_analyzer;
   "#).await?.check()?;
 
-  // 代表的なSurrealQLハイブリッド検索クエリ（HNSW演算子 <|k, ef|> ＋ 全文検索スコア）
+  // 代表的なSurrealQLハイブリッド検索クエリ（ベクトル検索と全文検索の独立取得とRRF統合）
   let _results = db.query(r#"
-      SELECT 
-          id, content, importance, occurred_at, last_accessed_at,
-          (search::score(1) * 0.5 + vector::similarity::cosine(embedding, $query_vec) * 0.5) AS relevance
-      FROM memory
-      WHERE 
-          embedding <|10, 40|> $query_vec
-          AND content @1@ $query_text
-          AND is_forgotten = false
-      ORDER BY relevance DESC
-      LIMIT 5;
+      LET $semantic = (
+          SELECT id, content, importance, occurred_at, last_accessed_at,
+                 vector::similarity::cosine(embedding, $query_vec) AS score
+          FROM memory
+          WHERE is_forgotten = false AND embedding <|10, 40|> $query_vec
+          LIMIT 20
+      );
+      LET $lexical = (
+          SELECT id, content, importance, occurred_at, last_accessed_at,
+                 search::score(1) AS score
+          FROM memory
+          WHERE is_forgotten = false AND content @1@ $query_text
+          LIMIT 20
+      );
+      RETURN search::rrf([$semantic, $lexical]);
   "#).bind(("query_vec", vec![0.0f32; 1536])).bind(("query_text", "好きなこと")).await?.check()?;
   ```
 - **一次ドキュメント**:
@@ -83,7 +88,7 @@
 
 ### B. エージェントループ：ハイブリッド・ステートマシン
 
-エージェントループをゼロから自作せず、Rig公式の実行基盤（`rig-ecs` / `rig-agent`、`rig-memory`、`rig-rmcp`）を活用し、ene固有のライフサイクル制御（音声・知覚・アイドル）と自然に連携させるハイブリッド設計。
+エージェントループをゼロから自作せず、Rig公式の実行基盤（`rig-ecs`、`rig-memory`、`rig-rmcp`）を活用し、ene固有のライフサイクル制御（音声・知覚・アイドル）と自然に連携させるハイブリッド設計。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
@@ -92,31 +97,34 @@
   │  ・厳密なアイドル検知（ユーザー無操作時間計測・独り言除外）│
   │  ・複数コンパニオン調停（発話フロア・作業自律協調）    │
   │  ・LLM出力テキストストリームの文単位切り出しと先行TTS  │
+  │  ・外部ACP WorkSession のプロセス接続維持              │
   └───────────────────────────┬────────────────────────────┘
                               │ ユーザー入力・拡張フック
                               ▼
   ┌────────────────────────────────────────────────────────┐
-  │ 【内側：エージェント実行・会話管理】（Rig 基盤）         │
-  │  ・エージェントループ（rig-ecs / rig-agent）           │
+  │ 【内側：エージェント実行・会話管理】（rig-ecs 基盤）     │
+  │  ・エージェントループ（rig-ecs AgentPlugin）           │
   │    モデル通信、ツール反復（ReAct）、構造化出力         │
-  │  ・会話ログと短期文脈（rig-memory / Conversation）    │
-  │    AsyncStore によるSurrealDB永続化、Compaction        │
+  │  ・会話ログ正本（rig-ecs SessionLogPlugin + DirStore） │
+  │    高速な追記型線形ログ（同期 Store 契約に完全準拠）    │
   │  ・MCPツール統合（rig-rmcp）                           │
   │    McpConnection ➔ McpTool ➔ DynamicTool 直接登録     │
   └────────────────────────────────────────────────────────┘
 ```
 
 #### 実装のポイント
-- **実装量の劇的削減**:
-  - モデル呼び出しとツール実行の反復（ReActループ）、引数パース、ツール結果のモデル返却は Rig（`rig-ecs` または `rig-agent`）が担うため、エージェントループを自前で再実装する必要はない。
-  - 会話履歴は Rig の標準型（`Conversation` / `Message`）を正本とし、`rig-memory` の `AsyncStore` トレイトをSurrealDB向けに実装して永続化する。
+- **実装量の劇的削減と型契約の整合**:
+  - 親エージェントおよび内蔵の子エージェントの推論・ツール反復（ReActループ）、引数パース、ツール結果のモデル返却は `rig-ecs` の `AgentPlugin` が担うため、独自エージェントループを自作する必要はない。
+  - **保存の責務分担**:
+    - **会話セッションログ（短期正本）**: `rig-ecs` の `SessionLogPlugin` が要求する `SessionStore(Arc<dyn Store>)`（同期 `Store`）に合わせ、高速・堅牢な追記型線形ログである `DirStore` をそのまま正本として採用する（`AsyncStore` との型不一致を起こさない）。
+    - **長期記憶・心・Compaction要約**: SurrealDB（SurrealKV）に非同期永続化し、グラフ関係性・HNSWベクトル検索・要約状態を管理する。
   - MCPツール連携は `rig-rmcp` を活用し、`McpConnection` から取得したツールを Rig の `DynamicTool` として直接登録する（独自のアダプター層を作らない）。
 - **完全な外側制御権**:
-  - アイドル時間計測、複数コンパニオン間の譲り合い、音声再生と割り込みバッファ破棄（Flush）は、外側のTokioタスクが非同期に制御する。
+  - アイドル時間計測、複数コンパニオン間の譲り合い、音声再生と割り込みバッファ破棄（Flush）、ACP WorkSession接続維持は、外側のTokioタスクが非同期に制御する。
 
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
-- [`rig-agent` Examples](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-agent/examples)（フックによる実行制御）
+- [`rig-ecs` Documentation](https://docs.rs/rig-ecs)（Bevy ECSベースのエージェント実行プラグイン・SessionLog）
 - [`rig-rmcp` Documentation](https://docs.rs/rig-rmcp)（MCPサーバー接続とツール変換）
 
 ---

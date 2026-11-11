@@ -28,8 +28,8 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │                                                                            │
   │   ┌────────────────────────────────────────────────────────────────────┐   │
   │   │ 「頭」（Brain / 親エージェント）：ハイブリッド・ステートマシン     │   │
-  │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs / rig-agent）  │   │
-  │   │   ・会話ログ永続化とCompaction（rig-memory / AsyncStore）          │   │
+  │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs）              │   │
+  │   │   ・会話ログ正本（rig-ecs SessionLogPlugin + DirStore）            │   │
   │   │   ・MCPツール直接統合（rig-rmcp ➔ DynamicTool）                    │   │
   │   │   ・外側制御（Tokio）: 音声ストリーム先行TTS、アイドル検知、調停   │   │
   │   │   ・ツール群: body_motion, instruct_hand, set_eye_watch, noop     │   │
@@ -62,7 +62,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 | 境界 | 主な構成要素 | 責務と役割 |
 | :--- | :--- | :--- |
-| **「頭」<br>(Brain / 親)** | Tokio外側調停ループ<br>＋ Rig（`rig-agent`, `rig-memory`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`instruct_hand`）<br>・「目」への動的Watcher登録（`set_eye_watch`） |
+| **「頭」<br>(Brain / 親)** | Tokio外側調停ループ<br>＋ `rig-ecs`（`SessionLogPlugin`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`instruct_hand`）<br>・「目」への動的Watcher登録（`set_eye_watch`） |
 | **「手」<br>(Hands / 子)** | WorkSession / Run<br>MCP / ACP / Wasm | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けたクリーンアップと30秒タイムアウト強制終了 |
 | **「目」<br>(Eyes / 知覚)** | クライアントセンサー<br>知覚要約生成器 | ・OSイベント（フォーカス切替、ファイル保存等）の即時フック<br>・無操作時のアイドルサンプリング（15〜30秒間隔）<br>・高解像度な作業状況を簡潔なPerception Summaryへ要約<br>・動的Watcher条件合致時の優先割り込み通知（Priority Interrupt） |
 | **「体」<br>(Body / 表現)** | `ene-avatar`<br>音声ストリーミング | ・透過デスクトップウィンドウ上でのVRM 1.0 3D描画（Bevy）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
@@ -72,11 +72,12 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 ## 3. 主要サブシステムの技術アーキテクチャ
 
 ### 1. エージェントループとセッション管理
-- **Tokio外側ステートマシンとRig内側実行ループのハイブリッド構成**:
-  - 会話のReActツール反復・LLMストリーミング・プロンプト組み立てはRig公式の `rig-agent`（または `rig-ecs`）に委ね、標準の `Conversation` / `Message` 型を正本として扱う。
-  - 外側のTokioタスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、セッション管理を担当。
+- **Tokio外側ステートマシンとrig-ecs内側実行ループのハイブリッド構成**:
+  - 会話のReActツール反復・LLMストリーミング・プロンプト組み立ては `rig-ecs`（`AgentPlugin`）に委ねる。
+  - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
+  - 外側のTokioタスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
-  - 会話の生ログおよびスナップショットはSurrealDBに永続化し、`rig-memory` の `AsyncStore` トレイトをSurrealDB向けに実装して統合。
+  - 会話の生ログは `DirStore` に完全保存。要約スナップショット（`SummaryState`）および長期記憶はSurrealDBに永続化。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
   - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中結果は破棄/次回延期。
 - **作業エージェント（ACP）のセッション接続維持**:
@@ -96,7 +97,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - ローカルモデル（fastembed, bge-m3等）またはクラウドモデル（OpenAI等）を選択可能。SurrealDBのHNSWインデックスによるコサイン類似度ベクトル検索。
   - **増分自動整理**: `processed_turns_cursor` より後の新規ターンのみを増分走査し、過去ログからの重複再生成を防止。
   - 想起スコア計算式：$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$
-  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、`talk` 引数の `cited_memories` で実際に引用された場合のみ更新。
+  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、応答メタデータや明示操作で実際に引用された場合のみ更新。
   - **Pinned Memory制約**: 重要度10であっても、忘却・訂正状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 
 ### 3. 音声対話パイプライン
@@ -109,7 +110,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **複数コンパニオン調停**:
   - 全員同報配信 ＋ 自律該当性判断。
   - 同一クライアント内の他コンパニオンへの `work_started` 即時同報通知と、同時着手時の後発側自律キャンセルによる作業重複の自律解消（ホスト受付排他は行わずLLM自律協調）。
-  - 音声フロアはホスト上での `talk` ディスパッチ先着順。会話リレー（`speech_completed`）は最大5往復で自動打ち切り。クライアント再生完了（`ReportPlaybackStatus`）またはタイムアウトによる安全なフロア解放（遅延完了報告は破棄）。
+  - 音声フロアはホスト上での発話テキスト生成（文ストリーム）先着順。会話リレー（`speech_completed`）は最大5往復で自動打ち切り。クライアント再生完了（`ReportPlaybackStatus`）またはタイムアウトによる安全なフロア解放（遅延完了報告は破棄）。
 
 ### 4. セキュリティとSandbox
 - **OSネイティブ隔離**: Linux（Landlock/bwrap）、Windows（AppContainer/Job Objects）、macOS（Seatbelt）によるプロセス隔離。

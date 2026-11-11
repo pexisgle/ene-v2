@@ -117,21 +117,31 @@ Generative Agents と Mem0 の知見を統合し、想起候補の最終スコ�
 $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency}$$
 
 - **Relevance（関連度: $0.0 \sim 1.0$）**:
-  - クエリと記憶のベクトルコサイン類似度と、BM25全文検索ランクを正規化合成したスコア。
-  - SurrealDB 3.0ネイティブのHNSW演算子（`<|k, ef|>`）と全文検索スコア（`search::score`）を活用してSurrealQL内で高速に算出する。
+  - ベクトル意味検索（HNSW）とBM25全文検索を独立して取得し、SurrealDBの `search::rrf`（Reciprocal Rank Fusion）または正規化付き線形結合によって候補IDの和集合から統合したスコア。
+  - `AND` 結合で絞り込むと「語句が一致しないが意味的に合致する候補（例: 犬の記憶をペットの問いで探す）」を全文検索が除外してしまうため、**ベクトル候補と全文候補を別々に取得してRRF統合**する。
 
 ```sql
--- SurrealQL ハイブリッド検索クエリ例（HNSWベクトル検索 + BM25全文検索）
-SELECT 
-    id, content, importance, occurred_at, last_accessed_at,
-    (search::score(1) * 0.5 + vector::similarity::cosine(embedding, $query_vec) * 0.5) AS relevance
-FROM memory
-WHERE 
-    embedding <|10, 40|> $query_vec
-    AND content @1@ $query_text
-    AND is_forgotten = false
-ORDER BY relevance DESC
-LIMIT 5;
+-- SurrealQL ハイブリッド検索クエリ例（ベクトル検索と全文検索の独立取得とRRF順位統合）
+-- 1. ベクトル意味検索候補（語句不一致でも意味が近い候補を漏らさず取得）
+LET $semantic = (
+    SELECT id, content, importance, occurred_at, last_accessed_at,
+           vector::similarity::cosine(embedding, $query_vec) AS score
+    FROM memory
+    WHERE is_forgotten = false AND embedding <|10, 40|> $query_vec
+    LIMIT 20
+);
+
+-- 2. 全文検索候補（語句・キーワード完全一致候補を取得）
+LET $lexical = (
+    SELECT id, content, importance, occurred_at, last_accessed_at,
+           search::score(1) AS score
+    FROM memory
+    WHERE is_forgotten = false AND content @1@ $query_text
+    LIMIT 20
+);
+
+-- 3. search::rrf による順位融合（候補IDの和集合から統合ランクを算出し、正規化Relevanceを取得）
+RETURN search::rrf([$semantic, $lexical]);
 ```
 - **マルチプロバイダー埋め込み（ローカル / クラウド選択性）**:
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
@@ -152,7 +162,7 @@ LIMIT 5;
 
 - **更新条件の厳格性**:
   - ベクトル検索により想起候補としてプロンプトへ注入されただけでは、`last_accessed_at` は**更新されない**。
-  - 親（頭）エージェントが発話ツール `talk` の引数 `cited_memories` に明示的に記憶IDを含めた場合のみ、ホストが `last_accessed_at = time::now()` へ更新し、グラフエッジ `memory->cited_in->turn` を作成する。
+  - プロンプトに注入された想起記憶のうち、親（頭）エージェントが応答内で明示的に参照した記憶（ストリーミング応答内の参照メタデータ・引用タグ `<cite id="..."/>`、または明示的な `mind_read` / `mind_update` 操作、またはターン完了時の増分整理判定）が確認された場合のみ、ホストが `last_accessed_at = time::now()` へ更新し、グラフエッジ `memory->cited_in->turn` を作成する。
   - これにより、無関係な記憶が一度検索に引っかかっただけで直近性スコアを引き上げ続け、次回以降も過剰に想起され続ける「想起の自己汚染ループ」を遮断する。
 
 ### 4.3 常時注入記憶（Pinned / Core Memory）の制約と保護
@@ -227,6 +237,6 @@ LIMIT 5;
 | :--- | :--- | :--- |
 | **忘却のセマンティクス** | 記憶を忘却（`is_forgotten = true`）させた後、自動想起およびPinned枠を検証 | 自動想起・Pinned枠のいずれからも完全に除外され、再整理ジョブによって復活しないこと（過去ログの客観記録は保持されること） |
 | **遅延整理の競合排除** | 記憶変更後に、変更前の古い文脈から生成した整理結果をコミット試行 | 版不一致（Conflict）として安全に拒否され、最新状態が上書きされないこと |
-| **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、`talk` で引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、`cited_memories` に含まれた場合のみ更新されること |
+| **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、応答内で明示引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、応答メタデータや明示操作で引用された場合のみ更新されること |
 | **Pinned予算制限** | 重要度10の記憶を多数作成し、プロンプト生成を実行 | 予算上限（例: 1,000トークン）を超過せず、文脈窓を圧迫しないこと |
 | **埋め込み空間の隔離** | 異なる埋め込みモデル名・次元数のベクトルを登録して検索 | 次元不一致・モデル違いのベクトルが混入せず、一致する空間のみで類似度計算が行われること |

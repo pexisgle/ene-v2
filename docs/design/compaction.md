@@ -21,38 +21,20 @@
 
 ---
 
-## 2. 会話ログの構造（Rig Conversation と rig-memory の活用）
+## 2. 会話ログの構造（Rig の会話管理と rig-memory の活用）
 
-独自の会話ログ型を新設してプロバイダー固有データやツール往復の変換オーバーヘッドを作るのではなく、**Rig標準の `Message` / `Conversation` 型を正本とし、`rig-memory` の管理機構を基礎**に採用する。
+独自の会話ログ型や同期用の中間構造体を新設して変換オーバーヘッドを作るのではなく、**`rig-ecs` のセッションログ機構（`SessionLogPlugin` + `SessionStore`）と `rig-memory` の要約機構（`SummaryState` / `apply_summary`）を直接の正本**として採用する。
 
-```rust
-use rig::completion::Message;
-
-/// 会話履歴のセッション状態（Rig Conversation 型に準拠）
-pub struct ConversationSession {
-    pub session_id: String,
-    pub companion_id: String,
-    /// 直近のアクティブ会話メッセージ列（User, Assistant, ToolCall, ToolResult）
-    pub messages: Vec<Message>,
-    /// 直前のCompaction完了時点の要約テキスト
-    pub compaction_summary: Option<String>,
-    /// 要約に含まれた最終メッセージインデックス（これ以前は生ログから除外）
-    pub compacted_through_index: usize,
-    /// 最後に保存された版番号
-    pub revision: u64,
-}
-```
-
-### 2.1 責務の明確な分離
-- **Rig（`rig-core` / `rig-memory`）が担当するもの**:
-  - 会話メッセージ列（マルチパート、ツール呼び出し、プロバイダー固有メタデータ）の完全保持。
-  - `rig-memory` の `AsyncStore` トレイトによるストレージ抽象化。
-  - 最近の会話切り出し（`recent`）および要約適用（`apply_summary`）。
-- **ene-host が担当するもの**:
-  - 「いつ要約を実行するか」の厳密なアイドル判定（ユーザー無操作60秒以上の検知）。
-  - 送信前のトークン上限検証と安全余裕の確保。
-  - SurrealDB をバックエンドとする `AsyncStore` の実装。
-  - 長期的な「思い出・エピソード記憶」の抽出と重要度評価（[心と自動記憶](mind.md)）。
+### 2.1 正本と責務の明確な分離
+- **Rig（`rig-ecs` / `rig-memory`）が所有する正本**:
+  - **会話履歴の正本**: `rig-ecs` の `SessionLog` / `SessionStore`（`DirStore` による追記型線形ログ）がメッセージ列（マルチパート、ツール呼び出し、プロバイダーメタデータ）をディスク上に完全保持。
+  - **要約状態**: `rig-memory` の `SummaryState` が要約テキストおよび要約対象のメッセージ範囲を管理し、`apply_summary` によって会話文脈へ反映。
+- **ene-host が管理する追加状態**:
+  - `companion_id`（コンパニオンとセッションの対応付け）
+  - `InactivityTracker`（厳密なユーザー無操作アイドル時間の計測）
+  - `processed_turns_cursor`（SurrealDBへの長期エピソード記憶抽出の進捗位置）
+- **表示用プロジェクション（View）**:
+  - クライアントAPI等で会話履歴を外部へ提供する構造体（`ConversationView` / `MessageView`）は、正本ではなく `SessionLog` からオンデマンドで生成される**読み取り専用ビュー（Projection View）**として位置付け、ene側で可変状態として二重管理しない。
 
 ---
 
