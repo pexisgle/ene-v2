@@ -8,10 +8,10 @@
 
 | 領域 | 採用技術 / ライブラリ | 選定理由 |
 | :--- | :--- | :--- |
-| **データベース** | **`SurrealDB` (Embedded SurrealKV)** | 100% Rustネイティブ、C++ビルド不要。心・記憶・関係性をグラフで表現し、HNSWベクトル検索、BM25全文検索、ACIDトランザクションを単一エンジンで完結 |
-| **エージェント実行・推論** | **`rig-ecs` ＋ Tokio非同期ステートマシン** | 親・内蔵の子の推論・ツール反復・会話ログ正本（`SessionLogPlugin` + `DirStore`）を `rig-ecs` に委ね、外側のTokio非同期ステートマシンで音声入出力、アイドル管理、複数コンパニオン調停、ACP WorkSession接続維持を制御 |
-| **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `sandbox_run`)** | Windows（AppContainer / Job Objects）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
-| **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産を活用。透過デスクトップウィンドウ（Wayland / Windows）、VRM 1.0モデルロード、RMS音量によるローカル即時口パク |
+| **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ `sqlite-vec`（またはコサイン類似度）** | 100% Rust/Cネイティブ、省メモリ・超軽量。FTS5 trigram全文検索とベクトル検索を単一SQLiteで完結。`rig-ecs` の同期システムから `.await` なしで直接ACIDトランザクションを実行可能 |
+| **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復・会話ログ正本（`SessionLogPlugin` + `DirStore`）を `rig-ecs` のECSステージ・Observerに一本化。TokioはConnect-RPCサーバーや外部非同期I/Oに徹し、二重ループを完全排除 |
+| **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `sandbox_run`)** | Windows（Job Objects / AppContainer）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
+| **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産を活用。透過デスクトップウィンドウ（Wayland / Windows）、VRM 1.0モデルロード、RMS音量によるローカル即時口パク。クライアントからの標準入出力JSON Lines制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
 | **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、Server Streaming対応 |
 
@@ -19,115 +19,112 @@
 
 ## 2. 各コンポーネントの詳細と実装例・リファレンス
 
-### A. データベース：SurrealDB（Embedded SurrealKV）
+### A. データベース：SQLite（Embedded `rusqlite` ＋ FTS5 ＋ `sqlite-vec`）
 
 #### 特徴と利点
-- **Pure Rust（SurrealKV）**:
-  - `surrealdb` は完全Rust製の **SurrealKV**（`kv-surrealkv`）をサポート。
-  - C++コンパイラや追加ランタイム不要で、Windows・macOS・Linux共通の単一フォルダ（例: `~/.local/share/ene/data`）に埋め込み永続化。
-- **グラフ ＋ HNSWベクトル ＋ ドキュメントの統合**:
-  - **エピソード記憶のベクトル検索**: HNSW（Hierarchical Navigable Small World）インデックスによる高速コサイン類似度検索。
-  - **関係性のグラフ表現**: `companion->remembers->memory`、`memory->cited_in->turn` など、認知モデルの関係性をグラフエッジで自然に表現。
-  - **ACID保証**: 記憶の追加・更新、引用実績、処理済みカーソルを同一トランザクションで確定。
+- **超軽量・ゼロ依存肥大化**:
+  - `rusqlite`（bundled）により、追加の巨大DBエンジンやC++外部依存を持たず、単一のSQLiteファイル（例: `~/.local/share/ene/host.sqlite3`）で完結。
+  - WAL（Write-Ahead Logging）モードにより、高い並行読み取り性能と耐障害性を両立。
+- **同期ACIDトランザクションと `rig-ecs` の直結**:
+  - `rig-ecs` のECSシステム内から、非同期の複雑な `.await` や型変換（SurrealValue等）を挟むことなく、同期トランザクションで記憶の作成・更新・カーソル進行を原子的（Atomic）にコミット可能。
+- **FTS5 trigram ＋ ベクトル検索（`sqlite-vec` / BLOBコサイン類似度）**:
+  - 日本語の分かち書きエンジン不要の **FTS5 trigram（3-gram）** インデックスにより、助詞や固有名詞を含む高精度な語句検索を実現。
+  - 選択された埋め込みモデル（ローカル `fastembed` / クラウド `text-embedding-3-small` 等）のベクトルを保存し、Rust側でのRRF（Reciprocal Rank Fusion）により語句検索結果と順位融合。
+- **1ホップ認知関係性（エッジテーブル）**:
+  - 認知的関係性（`companion->remembers->memory`, `memory->cited_in->turn`, `memory->supersedes->memory`）は高々1ホップの参照であるため、外部キー制約およびシンプルな `edges(from_id, rel, to_id)` テーブルで高速・堅牢に表現可能。
 
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
   ```toml
-  surrealdb = { version = "3.0", features = ["kv-surrealkv"] }
-  tokio = { version = "1", features = ["full"] }
+  rusqlite = { version = "0.40", features = ["bundled"] }
   serde = { version = "1", features = ["derive"] }
+  serde_json = "1"
   ```
-- **初期化とクエリ例**:
+- **スキーマ定義とハイブリッド検索（Rust）**:
   ```rust
-  use surrealdb::Surreal;
-  use surrealdb::engine::local::SurrealKv;
-
-  // ローカルフォルダに組み込み初期化
-  let db = Surreal::new::<SurrealKv>("./data/ene.db").await?;
-  db.use_ns("ene").use_db("main").await?;
-
-  // HNSW ベクトルインデックス・日本語2-gram全文検索インデックスの定義
-  // ※インデックス次元数は選択されたモデル（ローカル/クラウド）に合わせて動的に設定
-  db.query(r#"
-      DEFINE TABLE memory SCHEMAFULL;
-      DEFINE FIELD content ON TABLE memory TYPE string;
-      DEFINE FIELD embedding ON TABLE memory TYPE option<array<float>>;
-      DEFINE INDEX idx_memory_embedding ON TABLE memory FIELDS embedding 
-          HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+  // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ）
+  conn.execute_batch(r#"
+      PRAGMA journal_mode = WAL;
       
-      DEFINE ANALYZER japanese_analyzer TOKENIZERS blank,punct FILTERS lowercase,ngram(2,2);
-      DEFINE INDEX idx_memory_fulltext ON TABLE memory FIELDS content 
-          FULLTEXT ANALYZER japanese_analyzer;
-  "#).await?.check()?;
+      CREATE TABLE IF NOT EXISTS memories (
+          id TEXT PRIMARY KEY,
+          owner TEXT NOT NULL,
+          audiences TEXT NOT NULL, -- JSON array
+          content TEXT NOT NULL,
+          importance INTEGER NOT NULL CHECK (importance >= 1 AND importance <= 10),
+          occurred_at TEXT,
+          recorded_at TEXT NOT NULL,
+          last_accessed_at TEXT,
+          memory_revision INTEGER NOT NULL DEFAULT 1,
+          emotion TEXT,
+          source_context TEXT,     -- JSON object
+          embedding BLOB,          -- f32 array bytes
+          embedding_model TEXT,
+          embedding_dimensions INTEGER
+      );
 
-  // 代表的なSurrealQLハイブリッド検索クエリ（ベクトル検索と全文検索の独立取得とRRF順位統合）
-  let _results = db.query(r#"
-      LET $semantic = (
-          SELECT id, content, importance, occurred_at, last_accessed_at,
-                 vector::similarity::cosine(embedding, $query_vec) AS score
-          FROM memory
-          WHERE embedding <|20, 40|> $query_vec
-          ORDER BY score DESC
-          LIMIT 20
+      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+          content,
+          tokenize='trigram'
       );
-      LET $lexical = (
-          SELECT id, content, importance, occurred_at, last_accessed_at,
-                 search::score(1) AS score
-          FROM memory
-          WHERE content @1@ $query_text
-          ORDER BY score DESC
-          LIMIT 20
+
+      CREATE TABLE IF NOT EXISTS memory_edges (
+          from_id TEXT NOT NULL,
+          relation TEXT NOT NULL, -- 'remembers', 'cited_in', 'supersedes'
+          to_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (from_id, relation, to_id)
       );
-      RETURN search::rrf([$semantic, $lexical], 20, 60);
-  "#).bind(("query_vec", vec![0.0f32; 1536])).bind(("query_text", "好きなこと")).await?.check()?;
+  "#)?;
   ```
 - **一次ドキュメント**:
-  - [SurrealDB Embedded Rust SDK Guide](https://surrealdb.com/docs/surrealdb/integration/sdks/rust)
-  - [SurrealDB Vector Search Documentation](https://surrealdb.com/docs/surrealql/functions/database/vector)
-  - [SurrealDB Index Statements](https://surrealdb.com/docs/reference/query-language/statements/define/indexes)
+  - [SQLite FTS5 Extension Documentation](https://www.sqlite.org/fts5.html)
+  - [`rusqlite` Documentation (docs.rs)](https://docs.rs/rusqlite/latest/rusqlite/)
 
 ---
 
-### B. エージェントループ：ハイブリッド・ステートマシン
+### B. エージェントループ：`rig-ecs` 単一イベント駆動アーキテクチャ
 
-エージェントループをゼロから自作せず、Rig公式の実行基盤（`rig-ecs`、`rig-memory`、`rig-rmcp`）を活用し、ene固有のライフサイクル制御（音声・知覚・アイドル）と自然に連携させるハイブリッド設計。
+エージェント状態や実行ループをTokio側で自作せず、Rig公式の `rig-ecs` にエージェント実行・状態管理・会話ログ正本を一本化する。TokioはRPCサーバー（axum + connectrpc）と外部非同期I/O（ストリーミング通信・子プロセス）の非同期ランタイムとして機能する。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
-  │ 【外側：ene-host 統括制御】（Tokio非同期ステートマシン） │
-  │  ・マイク音声入力・ストリーミングSTT監視               │
-  │  ・厳密なアイドル検知（ユーザー無操作時間計測・独り言除外）│
-  │  ・複数コンパニオン調停（発話フロア・作業自律協調）    │
-  │  ・LLM出力テキストストリームの文単位切り出しと先行TTS  │
-  │  ・外部ACP WorkSession のプロセス接続維持              │
+  │ 【ホスト外部I/O・RPCサーバー】（Tokio 非同期ランタイム） │
+  │  ・Connect-RPC 受付（ChatService / WorkService / etc.） │
+  │  ・外部ACPエージェントプロセスの標準入出力監視          │
+  │  ・マイク音声入力 / TTSエンジンへのHTTP・ストリーム送受信│
   └───────────────────────────┬────────────────────────────┘
-                              │ ユーザー入力・拡張フック
+                              │ world.trigger(Deliver::new(...))
                               ▼
   ┌────────────────────────────────────────────────────────┐
-  │ 【内側：エージェント実行・会話管理】（rig-ecs 基盤）     │
-  │  ・エージェントループ（rig-ecs AgentPlugin）           │
-  │    モデル通信、ツール反復（ReAct）、構造化出力         │
-  │  ・会話ログ正本（rig-ecs SessionLogPlugin + DirStore） │
-  │    高速な追記型線形ログ（同期 Store 契約に完全準拠）    │
-  │  ・MCPツール統合（rig-rmcp）                           │
-  │    McpConnection ➔ McpTool ➔ DynamicTool 直接登録     │
+  │ 【エージェント実行・状態管理】（rig-ecs 単一World基盤）  │
+  │  ・入力投入: Deliver(agent, text, DeliveryMode)         │
+  │  ・プロンプト準備: PrepareSystems::Fit                  │
+  │    (窓切り出し recent::view + 先頭に既存Compacted要約)   │
+  │  ・権限判定ゲート: Stage::Gate                          │
+  │    (承認保留は HoldOf(call_entity) を付与して待機)      │
+  │  ・推論・ツール反復: AgentPlugin (ReActループ)          │
+  │  ・文単位先行TTS: Stage::Review                         │
+  │    (StreamDelta を購読し、句点 。！？ でTTSキューへ投入)│
+  │  ・会話ログ正本: SessionLogPlugin ＋ DirStore (追記ログ)│
+  │  ・MCPツール統合: WorldToolsExt::spawn_tool             │
   └────────────────────────────────────────────────────────┘
 ```
 
 #### 実装のポイント
-- **実装量の劇的削減と型契約の整合**:
-  - 親エージェントおよび内蔵の子エージェントの推論・ツール反復（ReActループ）、引数パース、ツール結果のモデル返却は `rig-ecs` の `AgentPlugin` が担うため、独自エージェントループを自作する必要はない。
-  - **保存の責務分担**:
-    - **会話セッションログと要約（短期正本）**: `rig-ecs` の `SessionLogPlugin` が要求する `SessionStore(Arc<dyn Store>)`（同期 `Store`）に合わせ、高速・堅牢な追記型線形ログである `DirStore` をそのまま正本として採用する。Compaction要約も `apply_summary` により `Compacted` として `SessionLog` 内に直接記録されるため、SurrealDBへ別途二重保存する必要はない。
-    - **長期記憶・心**: SurrealDB（SurrealKV）に非同期永続化し、長期的なエピソード記憶、心（感情・関係性）、HNSWベクトル検索、および長期記憶の抽出進捗（`processed_turns_cursor`）を管理する。
-  - MCPツール連携は `rig-rmcp` を活用し、`McpConnection` から取得したツールを Rig の `DynamicTool` として直接登録する（独自のアダプター層を作らない）。
-- **完全な外側制御権**:
-  - アイドル時間計測、複数コンパニオン間の譲り合い、音声再生と割り込みバッファ破棄（Flush）、ACP WorkSession接続維持は、外側のTokioタスクが非同期に制御する。
+- **状態所有権の完全一本化（二重ループの排除）**:
+  - ユーザー発話、知覚センサー（目）の要約、タイマースケジュール、作業エージェント（手）からの報告は、すべて `world.trigger(Deliver::new(agent, text, DeliveryMode))` を通じてECS Worldへ直接投入される。
+  - 承認待ち（Approval Hold）は `Stage::Gate` でコール対象エンティティに `HoldOf` コンポーネントを付与するだけで非同期保留され、クライアントから承認RPCが届いた際に `HoldOf` を削除することで推論が再開する。
+  - 文単位先行TTSは、`Stage::Review` で `StreamDelta` の文字片を購読するシステムが句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
+- **会話ログと要約の責務分担**:
+  - **会話セッションログと要約（短期正本）**: `rig-ecs` の `SessionLogPlugin` が要求する `SessionStore(Arc<dyn Store>)` に合わせ、追記型線形ログである `DirStore` を正本とする。Compaction要約も `apply_summary` により `Compacted` として `SessionLog` 内に直接記録される。
+  - **長期エピソード記憶・心**: SQLite（`host.sqlite3`）に同期永続化し、長期的なエピソード記憶、心（感情・関係性）、および長期記憶の抽出進捗カーソル（`processed_turns_cursor`）を管理する。
+- **MCPツールの直接登録**:
+  - `rig-mcp-client` / `WorldToolsExt::spawn_tool` を活用し、MCPツールを独自変換層なしに直接ECS Worldに登録する。
 
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
 - [`rig-ecs` Documentation](https://docs.rs/rig-ecs)（Bevy ECSベースのエージェント実行プラグイン・SessionLog）
-- [`rig-rmcp` Documentation](https://docs.rs/rig-rmcp)（MCPサーバー接続とツール変換）
 
 ---
 
@@ -155,13 +152,11 @@
 エンジンの通信仕様（文単位REST API / ストリーミング / 双方向Live API）に合わせて柔軟に動作する抽象インターフェース。
 
 ```rust
-#[async_trait::async_trait]
 pub trait SttEngine: Send + Sync {
     /// 音声ストリームチャンクを受け取り、中間テキストまたは確定テキストを返す
     async fn process_chunk(&mut self, pcm_chunk: &[f32]) -> Result<Option<SttResult>, SttError>;
 }
 
-#[async_trait::async_trait]
 pub trait TtsEngine: Send + Sync {
     /// エンジンの能力を取得
     fn capabilities(&self) -> TtsCapabilities;

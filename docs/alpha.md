@@ -27,8 +27,8 @@
 | 項目 | 判断 |
 | --- | --- |
 | 責務と意味 | [アーキテクチャ](architecture.md)、[技術スタック](design/tech-stack.md)、[心](design/mind.md)、[作業API](design/work.md)、[コンテキスト圧縮](design/compaction.md)、[権限](design/permissions.md)、[知覚・音声](design/voice-avatar.md)、[プラグイン](design/plugins.md)、[ホスト接続](design/host-access.md)を実装基準とする |
-| 推論基盤とループ | `rig-ecs`（`AgentPlugin` / `SessionLogPlugin` + `DirStore`）による内側エージェント実行・会話ログ正本 ＋ Tokio非同期ステートマシンによる外側調停（音声入出力・アイドル監視・複数コンパニオン調停・ACP WorkSession接続維持） |
-| 保存と検索 | 組み込みSurrealDB（SurrealKV）。心・記憶・関係性をグラフで表現し、ローカル/クラウド選択可能なHNSWベクトル検索（コサイン類似度）とACID永続化を単一エンジンで統合 |
+| 推論基盤とループ | `rig-ecs` Bevy ECS 単一ループ（`AgentPlugin` / `SessionLogPlugin` + `DirStore`）によるエージェント実行・会話ログ正本。外側タスク（音声入出力・アイドル監視・複数コンパニオン調停・ACP WorkSession接続維持）とECSステージで協調 |
+| 保存と検索 | 組み込みSQLite（`rusqlite` WALモード ＋ FTS5 trigram ＋ `sqlite-vec` / BLOBコサイン）。心・記憶・関係性をリレーショナルに表現し、ローカル/クラウド選択可能なベクトル検索と全文検索をRust側RRFで統合 |
 | セキュリティ | OSネイティブ隔離（Linux Landlock/bwrap、Windows AppContainer/Job Objects、macOS Seatbelt、`cap-std`）による3層境界 |
 | 音声対話 | プラガブルSTT/TTSパイプライン（参考：Shizuku-Duplex）。TTSエンジンの仕様（文単位/ストリーミング）に合わせた先行合成と割り込み破棄 |
 | 調整対象 | 埋め込みモデル選択（ローカル/クラウド）、日本語分割、検索重みバランス（0.5:0.3:0.2）、半減期減衰率（$\lambda \approx 0.05$）、資源上限 |
@@ -219,7 +219,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 
 長時間の対話を破綻なく継続するためのコンテキスト圧縮と、Prefix Cachingヒット率を最大化するプロンプト構築順序を実装する。
 
-- **追記型線形ログ ＋ `rig-memory` によるCompaction**: 会話履歴および要約（`Compacted`）は `rig-ecs` の `SessionLogPlugin` ＋ `SessionStore`（`DirStore`）を正本としてディスクに保存。ディスクへの完全な線形追記ログと版スナップショットで管理し、SurrealDBへの要約二重保存は行わない。
+- **追記型線形ログ ＋ `rig-memory` によるCompaction**: 会話履歴および要約（`Compacted`）は `rig-ecs` の `SessionLogPlugin` ＋ `SessionStore`（`DirStore`）を正本としてディスクに保存。ディスクへの完全な線形追記ログと版スナップショットで管理し、SQLiteへの要約二重保存は行わない。
 - **厳密なアイドル検知**: ユーザーの操作・発話不在時間のみをカウントし、コンパニオン自身の自発的独り言・見守り発話はタイマーをリセットしない。
 - **割り込み耐性とPre-compaction継続**: バックグラウンドCompaction中にユーザー発話があった場合、Compaction完了を待たずに直前履歴（pre-compaction state）から即座に応答を返し、実行中Compaction結果は破棄/次回延期する。
 - **機械的コンテキスト上限検証と縮退動作**: 送信直前に `Total Input + Max Output <= Context Window` を機械的に検証。要約失敗・トークン超過時はアクティブプロンプト窓から最も古い未要約メッセージを一時的に切り詰めて対話を継続。
@@ -227,18 +227,18 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 
 終了条件：アイドル時Compactionおよび連続発話時の強制Compactionが正常に作動すること。要約処理中の割り込み発話に対してpre-compaction履歴から遅延なく応答が返り、トークン上限を超過しないこと。動的コンテキストが履歴の後ろに配置され、Prefix Cacheが保護されること。
 
-### 6. 記憶データモデル拡張とSurrealDB（SurrealKV）移行
+### 6. 記憶データモデル拡張とSQLite（rusqlite + sqlite-vec）移行
 
-心・記憶・関係性の表現力を高めるため、組み込みSurrealDB（SurrealKV）を採用し、エピソード記憶のデータモデルと想起スコアリングを実装する。
+心・記憶・関係性の表現力を高めるため、組み込みSQLite（`rusqlite` WALモード ＋ FTS5 ＋ `sqlite-vec`）を採用し、エピソード記憶のデータモデルと想起スコアリングを実装する。
 
-- **組み込みSurrealKV**: C++依存のない完全Rust製ストレージにより、Windows/macOS/Linuxで単一フォルダ永続化を実現。
+- **組み込みSQLite**: C++依存のない完全Rust組み込みストレージ（`rusqlite` bundled）により、Windows/macOS/Linuxで単一ファイル永続化と低メモリ消費を実現。
 - **MemoryRecordスキーマ不変条件**: `owner`（作成者コンパニオン不変保持）、`audiences`（共有先リスト）、`importance`（1〜10: 想起優先度）、`memory_revision`、`embedding_model`、`embedding_dimensions` を保存。
-- **想起スコアリング**: $\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$ によるHNSWベクトル検索と重要度・時間減衰の統合。
-- **引用ガード（汚染ループ防止）**: 応答メタデータや明示操作（`mind_read` 等）で明示的に引用された場合のみ `last_accessed_at` を更新し、アイドル時整理で重要度再評価に活用。
+- **想起スコアリング**: $\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$ によるベクトルコサイン・FTS5のRRF統合と重要度・時間減衰の統合。
+- **引用ガード（汚染ループ防止）**: ターン完了後の固定・統合処理（Consolidation）時に `cited_memory_ids` から明示引用が確認された場合のみ `last_accessed_at` を更新し、アイドル時整理で重要度再評価に活用。ストリーミングテキストへのタグ混入なし。
 - **Pinned Memory保護**: 重要度10であっても、優先度引き下げや訂正状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
-- **認知グラフ関係性**: `companion->remembers->memory`、`memory->cited_in->turn` のグラフエッジを構築。遅延した自動整理ジョブが優先度引き下げ済みの記憶を元の優先度で上書きする競合をトランザクション内で拒否。
+- **関係性テーブル（`memory_edges`）**: `companion_id` と `memory_id` の関係や記憶同士の関連をリレーショナルに管理。遅延した自動整理ジョブが優先度引き下げ済みの記憶を古い優先度で上書きする競合をトランザクション内で拒否。
 
-終了条件：SurrealDB上で記憶の作成・更新・HNSWベクトル検索が動作すること。未引用の想起でアクセス日時が更新されないこと、時間経過や優先度引き下げによる忘却（スコア低下）と重要度による保持が機能すること。優先度引き下げ済み記憶がPinned枠や再整理で不当に復活しないこと。
+終了条件：SQLite上で記憶の作成・更新・RRFハイブリッド検索が動作すること。未引用の想起でアクセス日時が更新されないこと、時間経過や優先度引き下げによる忘却（スコア低下）と重要度による保持が機能すること。優先度引き下げ済み記憶がPinned枠や再整理で不当に復活しないこと。
 
 ### 7. 権限・クロスプラットフォームSandbox・自動判定エンジン
 
@@ -287,7 +287,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 | 機械的コンテキスト上限 | 履歴を削っても収まらない過大入力時に、不正要求を送信せず明示的な `ContextExceededError` を返す |
 | アイドル計測の厳密性 | コンパニオン自身の自発的独り言や定期tickはアイドルタイマーをリセットせず、ユーザー無操作時間のみを測定する |
 | 音声世代管理と単一再生 | FlushBuffer発行後に遅れたチャンクを破棄し、クライアント側で同時に複数音声が鳴らず、切替後の旧発話チャンクが破棄され、実再生進捗が報告されること |
-| 作業重複の自律解消 | 複数コンパニオンが同時に着手した場合、開始時刻が遅い側が自ら `cancel_work` を発行して重複が自律解消されること（ホスト受付排他は行わずLLM自律協調） |
+| 作業重複の自律解消 | 複数コンパニオンが同時に着手した場合、開始時刻が遅い側が自ら `stop_work` を発行して重複が自律解消されること（ホスト受付排他は行わずLLM自律協調） |
 
 体験評価では同じモデル・予算・履歴で、人格と履歴のみ、人格の側面と例、即時記憶、自動整理と持続する心を段階的に比較する。初対面、好みの自然な学習、協働の失敗と成功、後日の想起、訂正、一部共有、実務の再依頼を通す。固定台詞の一致ではなく、根拠の連続性と人格・関係・感情・記憶を別に評価する。[研究根拠](references.md#alpha-evaluation)
 

@@ -92,9 +92,9 @@ pub enum RunStatus {
 | `Created` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
 | `Running` | 子からの質問（`WorkRequest::Input`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち |
 | `Running` | 子からの承認要求（`WorkRequest::Approval`） | `WaitingApproval` | 権限確認待ち（親が自然に対話仲介） |
-| `WaitingInput` | `RespondWork` 受信 | `Running` | 回答を子へ渡し処理再開 |
+| `WaitingInput` | `SendWork` 受信（回答または追加入力） | `Running` | 回答を子へ渡し処理再開 |
 | `WaitingApproval` | 承認 / 拒否 受信 | `Running` | 承認時は操作実行、拒否時は代替処理へ |
-| `Running` / `Waiting*` | `CancelWork` 受信 | `Cancelling` | **即座に新規ツール実行受付を遮断**し、最大30秒クリーンアップ待機 |
+| `Running` / `Waiting*` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、最大30秒クリーンアップ待機 |
 | `Cancelling` | 子プロセス終了・後片付け完了確認 | `Cancelled` | 正常中断確定 |
 | `Cancelling` | 30秒超過 ➔ 強制終了後、プロセス終了未確認 | `CancellationUnconfirmed` | 停止未確認として記録 |
 | `Running` | タスク正常完了 | `Completed` | 成果物を親へ返却 |
@@ -186,7 +186,10 @@ pub enum WorkEventPayload {
 作業が長時間に及ぶ場合、「手」は困ったときだけでなく、数十秒〜数分間隔で定期的に進捗（`Activity` または `Message`）を報告する。
 
 ### 4.1 途絶検知と親へのプロンプト注入
-- 子からの活動報告が閾値（デフォルト: **90秒**）を超えて途絶した場合、ホストは親（頭）へ**コンテキスト注入イベント（Prompt Injection）**を行う。
+- 子からの活動報告が閾値（デフォルト: **90秒**）を超えて途絶した場合、ホストは親（頭）へ**コンテキスト注入イベント（Prompt Injection / `DeliveryMode::Inform`）**を行う。
+- **1回のみの警告（`stall_warned`）**:
+  - `now - last_activity_at > 90s` かつ `stall_warned == false` のときに限り、ホストは通知を1回だけ送出し、`stall_warned = true` に設定する。これにより、親エージェントへの通知スパムを防止する。
+  - 子から新たな活動報告（`Activity` や `Message`）が到着した時点で `last_activity_at` は更新され、`stall_warned = false` にリセットされる。
   ```text
   [System Notification: 作業「手」(run_id: run_123) からの報告が90秒間途絶しています。現在の状況を確認してください。]
   ```
@@ -205,7 +208,7 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 ### 5.1 中断シーケンスと停止確認（Cancelled vs CancellationUnconfirmed）
 
 ```text
-[ユーザー / 親] ──→ cancel_work(session_id, run_id)
+[ユーザー / 親] ──→ stop_work(session_id, run_id)
                            │
                            ▼
                  RunStatus を Cancelling へ更新
@@ -249,15 +252,24 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 
 ---
 
-## 6. 親（頭）が利用する操作ツール群
+## 6. 親（頭）と子（手）が利用する操作ツール群
 
-親エージェントには以下のツールが提供される（主体・権限はホストが自動束縛）：
+主体・権限はホストがセッション文脈に基づき自動束縛する。
+
+### 6.1 親（頭）向け操作ツール（`Rig` ツール）
 
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
-| **`instruct_hand`** | `session_id: Option<String>`<br>`instruction: String` | 「手」に実務を委託。`session_id` 未指定時は新規WorkSessionを作成し、Runを開始して `(session_id, run_id)` を返す |
-| **`respond_hand`** | `session_id: String`<br>`run_id: String`<br>`request_id: String`<br>`answer: String` | 「手」からの質問（Request）に対するユーザーの回答や追加情報を返答 |
-| **`cancel_work`** | `session_id: String`<br>`run_id: String` | 実行中のRunに対する中断要求を発行 |
+| **`start_work`** | `instruction: String`<br>`session_id: Option<String>` | 「手」に実務を委託。`session_id` 未指定時は新規WorkSessionを作成し、Runを開始して `(session_id, run_id)` を返す |
+| **`send_work`** | `session_id: String`<br>`run_id: String`<br>`message: String`<br>`request_id: Option<String>` | 「手」に対する追加指示（Steering）や質問（Request）への回答を送信 |
+| **`stop_work`** | `session_id: String`<br>`run_id: String`<br>`reason: Option<String>` | 実行中のRunに対する中断要求を発行 |
+| **`list_work`** | なし | 実行中および直近のWorkSession・Runの状態一覧を取得 |
+
+### 6.2 子（手）向け報告ツール（内蔵Rig / カスタムエージェント用）
+
+| ツール | 引数 | 役割 |
+| :--- | :--- | :--- |
+| **`report`** | `session_id: String`<br>`run_id: String`<br>`kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。ACP外部プロセスの場合は `agent-client-protocol-schema` の通知へ相互変換される |
 
 ---
 
@@ -270,8 +282,8 @@ package ene.host.v1;
 service WorkService {
   rpc StartWork(StartWorkRequest) returns (StartWorkResponse);
   rpc SendWork(SendWorkRequest) returns (SendWorkResponse);
-  rpc RespondWork(RespondWorkRequest) returns (RespondWorkResponse);
-  rpc CancelWork(CancelWorkRequest) returns (CancelWorkResponse);
+  rpc StopWork(StopWorkRequest) returns (StopWorkResponse);
+  rpc ListWork(ListWorkRequest) returns (ListWorkResponse);
   rpc SubscribeWorkEvents(SubscribeWorkEventsRequest) returns (stream WorkEventEnvelope);
 }
 
@@ -285,15 +297,41 @@ message StartWorkResponse {
   string run_id = 2;
 }
 
-message CancelWorkRequest {
+message SendWorkRequest {
   string session_id = 1;
   string run_id = 2;
+  string message = 3;
+  optional string request_id = 4;
 }
 
-message CancelWorkResponse {
+message SendWorkResponse {
+  bool accepted = 1;
+}
+
+message StopWorkRequest {
+  string session_id = 1;
+  string run_id = 2;
+  optional string reason = 3;
+}
+
+message StopWorkResponse {
   string session_id = 1;
   string run_id = 2;
   bool accepted = 3;
+}
+
+message ListWorkRequest {}
+
+message WorkSessionSummary {
+  string session_id = 1;
+  string companion_id = 2;
+  string status = 3;
+  optional string active_run_id = 4;
+  string last_activity_at = 5;
+}
+
+message ListWorkResponse {
+  repeated WorkSessionSummary sessions = 1;
 }
 ```
 

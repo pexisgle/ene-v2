@@ -42,7 +42,7 @@ IDはホスト内で安定した不透明な値とする。親、バックエン
 
 MindViewは索引状態（FTS/vectorの処理待ち、埋め込みmodel・呼び出し数・トークン数）と整理状態（last_sequence、next_offset、skipped、jobs、model_calls、input_chars、error/unconfigured）も返す。索引・整理が未完了なことと、該当記憶がないことを混同しない。
 
-`ControlMemory`は所有者だけが記憶の`recall_preference`（forget/remember）と`audience`（share/unshare）を変更できる。忘却は物理削除ではなく通常想起からの除外であり、`include_forgotten`で過去として参照できる。共有記憶は他コンパニオンの想起対象になるが、所有者の私的な入力出所は共有先へ渡さない。共有解除後はcanonicalのaudience再検証で、古い索引から返さない。同じ値への操作はrevisionを増やさない。
+`ControlMemory`は所有者だけが記憶の`importance`（想起優先度: 1〜10、忘却時は重要度引き下げ）と`audience`（share/unshare）を変更できる。忘却は物理削除や二値の除外フラグではなく、想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（二値の`include_forgotten`フラグは設けない）。共有記憶は他コンパニオンの想起対象になるが、所有者の私的な入力出所は共有先へ渡さない。共有解除後はcanonicalのaudience再検証で、古い索引から返さない。同じ値への操作はrevisionを増やさない。
 
 変更はSQLiteコミット後にだけ`MindUpdated`で通知し、revisionを含める。クライアントは古いrevisionの通知で現在状態を戻さない。`mind_update`は親のRig実行内のツールであり、クライアントRPCではない。所有者・操作ID・入力出所はホストが束縛し、著者設定・権限・他コンパニオンの記憶は変更できない。同じ操作ID・同じ内容の再試行は元の結果、異なる内容は競合、古いrevisionは競合とする。変更なしも成功である。
 

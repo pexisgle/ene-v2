@@ -13,8 +13,8 @@
 1. **作者設定（Profile）と実体験（Memory）の完全分離**:
    - キャラクターの根幹（口調、世界観、価値観）は作者設定であり、日々の会話でLLMが直接書き換えることはできない。
    - 実体験（エピソード記憶）はユーザーとの交流で蓄積・成長するが、架空の会話例やロールプレイ設定を実体験として混入させない。
-2. **SurrealDB（SurrealKV組み込み）を唯一の正本とする**:
-   - 記憶の正本、ベクトルインデックス、全文検索、および認知的関係性グラフを、C++依存のないPure Rust組み込みストレージ（SurrealKV）で単一トランザクション管理する。
+2. **SQLite（Embedded `rusqlite` WAL ＋ FTS5 ＋ ベクトル検索）を唯一の正本とする**:
+   - 記憶の正本、ベクトル検索、全文検索、および認知的関係性エッジを、追加ランタイム不要のPure Rust/C組み込みストレージ（`rusqlite` WALモード）で単一同期トランザクション管理する。
 3. **境界不変条件の厳密な保証**:
    - 忘却（想起優先度の引き下げ）された記憶はPinned枠から外れて想起スコアが低下し、遅れて完了した自動整理ジョブが古い優先度で上書きする競合を防止する。
    - ベクトル検索空間はモデル名・次元数・前処理版で厳密に識別し、異種ベクトルの混線・汚染を防止する。
@@ -35,73 +35,73 @@
 
 ---
 
-## 3. SurrealDB 記憶データモデル・スキーマ
+## 3. SQLite 記憶データモデル・スキーマ
 
-SurrealDB（SurrealKV）上に構築するスキーマ定義（SurrealQL DDL）。
+`apps/ene-host` で運用される完全な同期SQLiteスキーマ定義（`host.sqlite3`）。
 
 ### 3.1 テーブル定義
 
-```surrealql
+```sql
+PRAGMA journal_mode = WAL;
+
 -- 1. コンパニオン（人格の核と現在の心）
-DEFINE TABLE companion SCHEMAFULL;
-DEFINE FIELD name ON TABLE companion TYPE string;
-DEFINE FIELD persona_profile ON TABLE companion FLEXIBLE TYPE object; -- 作者設定（核・口調・価値観）
-DEFINE FIELD current_mind ON TABLE companion FLEXIBLE TYPE object;    -- 現在の心（感情・関係理解・関心事）
-DEFINE FIELD mind_revision ON TABLE companion TYPE int DEFAULT 1;
-DEFINE FIELD updated_at ON TABLE companion TYPE datetime VALUE time::now();
+CREATE TABLE IF NOT EXISTS companions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    persona_profile TEXT NOT NULL, -- JSON: 作者設定（核・口調・価値観・会話例）
+    current_mind TEXT NOT NULL,    -- JSON: 現在の心（感情・関係理解・関心事）
+    mind_revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
 
 -- 2. ユーザー基本プロファイル
-DEFINE TABLE user_profile SCHEMAFULL;
-DEFINE FIELD name ON TABLE user_profile TYPE string;
-DEFINE FIELD preferences ON TABLE user_profile TYPE array<string> DEFAULT [];
-DEFINE FIELD static_constraints ON TABLE user_profile TYPE array<string> DEFAULT [];
-DEFINE FIELD updated_at ON TABLE user_profile TYPE datetime VALUE time::now();
+CREATE TABLE IF NOT EXISTS user_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    preferences TEXT NOT NULL,         -- JSON array
+    static_constraints TEXT NOT NULL,  -- JSON array
+    updated_at TEXT NOT NULL
+);
 
 -- 3. エピソード記憶（MemoryRecord）
-DEFINE TABLE memory SCHEMAFULL;
-DEFINE FIELD owner ON TABLE memory TYPE record<companion>;   -- 不変の原所有者（"shared"で上書きしない）
-DEFINE FIELD audiences ON TABLE memory TYPE array<string> DEFAULT []; -- 共有先コンパニオンID一覧
-DEFINE FIELD content ON TABLE memory TYPE string;            -- 記憶の要約・事実・手順本文
-DEFINE FIELD importance ON TABLE memory TYPE int ASSERT $value >= 1 AND $value <= 10; -- 1〜10: 重要度・想起優先度
-DEFINE FIELD occurred_at ON TABLE memory TYPE option<datetime>; -- 出来事の発生日時（不明時はnull）
-DEFINE FIELD recorded_at ON TABLE memory TYPE datetime DEFAULT time::now() READONLY; -- 初回記録日時（更新不可）
-DEFINE FIELD last_accessed_at ON TABLE memory TYPE option<datetime>; -- 明示的引用による最終利用日時（未引用時はnull）
-DEFINE FIELD memory_revision ON TABLE memory TYPE int DEFAULT 1; -- 競合検知用の版
-DEFINE FIELD emotion ON TABLE memory TYPE option<string>;     -- 当時の感情タグ
-DEFINE FIELD source_context ON TABLE memory FLEXIBLE TYPE object; -- 由来（turn_id, run_id, 話者等）
-DEFINE FIELD embedding ON TABLE memory TYPE option<array<float>>; -- 埋め込みベクトル（Alpha標準: 1536次元）
-DEFINE FIELD embedding_model ON TABLE memory TYPE option<string>; -- 例: "text-embedding-3-small"
-DEFINE FIELD embedding_dimensions ON TABLE memory TYPE option<int>; -- 例: 1536
-DEFINE FIELD embedding_version ON TABLE memory TYPE option<string>; -- 例: "v1"
+CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,              -- 不変の原所有者コンパニオンID
+    audiences TEXT NOT NULL,          -- JSON array: 共有先コンパニオンID一覧
+    content TEXT NOT NULL,            -- 記憶の要約・事実・手順本文
+    importance INTEGER NOT NULL CHECK (importance >= 1 AND importance <= 10), -- 想起優先度
+    occurred_at TEXT,                 -- 出来事の発生日時（ISO 8601、不明時はnull）
+    recorded_at TEXT NOT NULL,        -- 初回記録日時
+    last_accessed_at TEXT,            -- 明示的引用による最終利用日時
+    memory_revision INTEGER NOT NULL DEFAULT 1,
+    emotion TEXT,                     -- 当時の感情タグ
+    source_context TEXT NOT NULL,     -- JSON: 由来（turn_id, run_id, 話者等）
+    embedding BLOB,                   -- ベクトルバイト列 (f32 LE)
+    embedding_model TEXT,             -- 例: "text-embedding-3-small"
+    embedding_dimensions INTEGER      -- 例: 1536
+);
 
--- 会話ターン（会話ログへの参照点・引用先テーブル）
-DEFINE TABLE turn SCHEMAFULL;
-DEFINE FIELD session_id ON TABLE turn TYPE string;
-DEFINE FIELD turn_number ON TABLE turn TYPE int;
-DEFINE FIELD speaker ON TABLE turn TYPE string;
-DEFINE FIELD timestamp ON TABLE turn TYPE datetime DEFAULT time::now() READONLY;
+-- 4. 日本語 trigram 全文検索仮想テーブル
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content,
+    tokenize='trigram'
+);
 
--- 4. グラフエッジ（認知的関係性）
-DEFINE TABLE remembers SCHEMAFULL TYPE RELATION FROM companion TO memory;
-DEFINE TABLE cited_in SCHEMAFULL TYPE RELATION FROM memory TO turn;
-DEFINE TABLE supersedes SCHEMAFULL TYPE RELATION FROM memory TO memory;
+-- 5. 認知的関係性グラフ（1ホップ エッジテーブル）
+CREATE TABLE IF NOT EXISTS memory_edges (
+    from_id TEXT NOT NULL,
+    relation TEXT NOT NULL, -- 'remembers', 'cited_in', 'supersedes'
+    to_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (from_id, relation, to_id)
+);
 
--- 5. インデックス定義
--- HNSW ベクトルインデックス（セットアップ時に選択されたモデルの次元数で動的定義）
-DEFINE INDEX idx_memory_embedding ON TABLE memory FIELDS embedding 
-    HNSW DIMENSION <configured_dimensions> DIST COSINE TYPE F32;
-
--- 日本語2-gram全文検索インデックス
-DEFINE ANALYZER japanese_analyzer TOKENIZERS blank,punct FILTERS lowercase,ngram(2,2);
-DEFINE INDEX idx_memory_content_fulltext ON TABLE memory FIELDS content 
-    FULLTEXT ANALYZER japanese_analyzer;
-
--- 複合検索・フィルタインデックス
-DEFINE INDEX idx_memory_owner_importance ON TABLE memory FIELDS owner, importance;
+-- 検索インデックス
+CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
 ```
 
 ### 3.2 所有権と共有（Privacy & Sharing）
-- **原所有者（`owner`）の不変性**: 記憶の `owner` は作成したコンパニオンのIDを常に保持する。他コンパニオンへ共有する場合も `owner = "shared"` で上書きせず、`audiences` 配列に対象コンパニオンIDを追加する。
+- **原所有者（`owner`）の不変性**: 記憶の `owner` は作成したコンパニオンのIDを常に保持する。他コンパニオンへ共有する場合も `owner = "shared"` で上書きせず、`audiences` JSON配列に対象コンパニオンIDを追加する。
 - **共有解除**: `audiences` から対象IDを削除することで、共有先コンパニオンの検索クエリから即座に不可視化される（原所有者の記憶としては残る）。
 - **私的根拠の非漏洩**: 共有先が参照できるのは `content`, `importance`, `occurred_at` のみであり、プライベートな会話ログ全文や個人的感情メモは共有先へ露出させない。
 
@@ -116,42 +116,39 @@ Generative Agents と Mem0 の知見を統合し、想起候補の最終スコ�
 $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency}$$
 
 - **Relevance（関連度: $0.0 \sim 1.0$）**:
-  - ベクトル意味検索（HNSW）とBM25全文検索を独立して取得し、SurrealDBの `search::rrf`（Reciprocal Rank Fusion）または正規化付き線形結合によって候補IDの和集合から統合したスコア。
-  - `AND` 結合で絞り込むと「語句が一致しないが意味的に合致する候補（例: 犬の記憶をペットの問いで探す）」を全文検索が除外してしまうため、**ベクトル候補と全文候補を別々に取得してRRF統合**する。
+  - FTS5 trigram 語句検索とベクトル意味検索を独立して取得し、Rust側で **RRF（Reciprocal Rank Fusion）** により順位融合したスコア。
+  - 語句一致がなくても意味的に近い候補、および類似度は低くても固有名詞が完全一致する候補の双方を漏らさず取得する。
 
-```sql
--- SurrealQL ハイブリッド検索クエリ例（ベクトル検索と全文検索の独立取得とRRF順位統合）
--- 1. ベクトル意味検索候補（語句不一致でも意味が近い候補を漏らさず取得し、スコア降順で整列）
-LET $semantic = (
-    SELECT id, content, importance, occurred_at, last_accessed_at,
-           vector::similarity::cosine(embedding, $query_vec) AS score
-    FROM memory
-    WHERE embedding <|20, 40|> $query_vec
-    ORDER BY score DESC
+```rust
+// Rust側でのハイブリッド検索とRRF統合のフロー
+// 1. 全文検索候補の取得（FTS5 BM25スコア順・最大20件）
+let lexical_matches = conn.prepare(r#"
+    SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, bm25(memories_fts) AS rank
+    FROM memories m
+    JOIN memories_fts f ON m.id = f.rowid
+    WHERE (m.owner = ?1 OR m.audiences LIKE ?2)
+      AND memories_fts MATCH ?3
+    ORDER BY rank ASC
     LIMIT 20
-);
+"#)?;
 
--- 2. 全文検索候補（語句・キーワード完全一致候補を取得し、スコア降順で整列）
-LET $lexical = (
-    SELECT id, content, importance, occurred_at, last_accessed_at,
-           search::score(1) AS score
-    FROM memory
-    WHERE content @1@ $query_text
-    ORDER BY score DESC
-    LIMIT 20
-);
+// 2. ベクトル意味検索候補の取得（コサイン類似度順・最大20件）
+// ※選択された埋め込みモデル・次元数が一致するレコードのみを走査
+let semantic_matches = query_vector_similarity(&conn, companion_id, &query_vec, 20)?;
 
--- 3. search::rrf による順位融合（必須引数: 候補リスト配列、結果件数 limit=20、定数 k=60）
-RETURN search::rrf([$semantic, $lexical], 20, 60);
+// 3. RRF (Reciprocal Rank Fusion) による順位融合
+// rrf_score = sum(1.0 / (60.0 + rank_i))
+let fused_candidates = reciprocal_rank_fusion(&lexical_matches, &semantic_matches, 60.0);
+
+// 4. 正規化 Relevance (0.0 〜 1.0) の算出
+// 2リスト・k=60 の理論上限値 (2.0 / 61.0) で除算して 0.0〜1.0 にスケール合わせ
+for candidate in &mut fused_candidates {
+    candidate.relevance = (candidate.rrf_score / (2.0 / 61.0)).clamp(0.0, 1.0);
+}
 ```
-- **`search::rrf` の引数とスコア尺度合わせ（正規化）**:
-  - `search::rrf($lists, $limit, $k)` は必須引数として結果件数の `$limit` を要求し、各入力リストが `score` の降順に整列（`ORDER BY score DESC`）されていることを前提とする。
-  - RRFが返す `rrf_score` は各リストにおける順位の逆数和（2リスト・$k=60$ の理論上限は $2 / 61 \approx 0.0328$）であり、そのままでは $0.0 \sim 1.0$ の尺度にはならない。
-  - したがって、**「RRFによる順位融合」と「スコアの尺度合わせ（正規化）」は別の処理**として扱い、RRFスコアを理論上限値（$\frac{2}{1+k}$）で除算するかMin-Max正規化を行って $0.0 \sim 1.0$ の `Relevance` へ尺度合わせを行ってから、重要度（`Importance`）・直近性（`Recency`）との加重和に組み込む。
 - **マルチプロバイダー埋め込み（ローカル / クラウド選択性）**:
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
-  - SurrealDBのHNSWインデックスは、選択されたモデルの出力次元数（`configured_dimensions`）に合わせて初期化される。
-  - 設定でモデルを変更した場合は再インデックスマイグレーションが走り、切り替え完了まで検索は安全にBM25全文検索へ縮退する。
+  - 各記憶レコードは使用したモデル名と次元数を保持し、検索時は現在のモデルと一致するベクトルのみを照合する。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
   - $1 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化（忘却時はこの優先度を引き下げる）。
     - $1 \sim 3$: 日常の雑談、一時的な状況
@@ -167,7 +164,10 @@ RETURN search::rrf([$semantic, $lexical], 20, 60);
 
 - **更新条件の厳格性**:
   - ベクトル検索により想起候補としてプロンプトへ注入されただけでは、`last_accessed_at` は**更新されない**。
-  - プロンプトに注入された想起記憶のうち、親（頭）エージェントが応答内で明示的に参照した記憶（ストリーミング応答内の参照メタデータ・引用タグ `<cite id="..."/>`、または明示的な `mind_read` / `mind_update` 操作、またはターン完了時の増分整理判定）が確認された場合のみ、ホストが `last_accessed_at = time::now()` へ更新し、グラフエッジ `memory->cited_in->turn` を作成する。
+  - **発話本文を汚染しない増分整理判定**:
+    - 音声ストリーミング（TTS）を阻害しないよう、発話本文に `<cite id="..."/>` 等のタグを出力させることは行わない。
+    - ターン完了後のバックグラウンド増分整理（Consolidation）において、整理モデルがターンの会話内容を分析し、実際に参照・活用された記憶ID（`cited_memory_ids`）を構造化出力として確定する。
+    - または親が `mind_read` / `mind_update` ツールを明示的に呼び出した場合のみ、ホストが `last_accessed_at = now()` へ更新し、エッジテーブルに `(memory_id, 'cited_in', turn_id)` を追加する。
   - これにより、無関係な記憶が一度検索に引っかかっただけで直近性スコアを引き上げ続け、次回以降も過剰に想起され続ける「想起の自己汚染ループ」を遮断する。
 
 ### 4.3 常時注入記憶（Pinned / Core Memory）の制約と保護

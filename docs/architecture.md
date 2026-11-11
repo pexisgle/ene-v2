@@ -27,21 +27,21 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │ 【ホスト層（ene-host）】                                                    │
   │                                                                            │
   │   ┌────────────────────────────────────────────────────────────────────┐   │
-  │   │ 「頭」（Brain / 親エージェント）：ハイブリッド・ステートマシン     │   │
+  │   │ 「頭」（Brain / 親エージェント）：rig-ecs Bevy ECS 単一ループ       │   │
   │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs）              │   │
   │   │   ・会話ログ正本（rig-ecs SessionLogPlugin + DirStore）            │   │
   │   │   ・MCPツール直接統合（rig-rmcp ➔ DynamicTool）                    │   │
-  │   │   ・外側制御（Tokio）: 音声ストリーム先行TTS、アイドル検知、調停   │   │
-  │   │   ・ツール群: body_motion, instruct_hand, set_eye_watch, noop     │   │
+  │   │   ・ECSステージ制御: 先行TTS（Stage::Review）、承認（Stage::Gate） │   │
+  │   │   ・ツール群: start_work, send_work, stop_work, body_motion, noop   │   │
   │   └───────────────┬────────────────────────────────────┬───────────────┘   │
   │                   │                                    │                   │
-  │                   ▼ instruct_hand                      ▼ 記憶・設定アクセス │
+  │                   ▼ start_work / send_work             ▼ 記憶・設定アクセス │
   │   ┌──────────────────────────────┐     ┌───────────────────────────────┐   │
-  │   │ 「手」（Hands / 作業相手）    │     │ データベース（SurrealDB）      │   │
-  │   │   ・WorkSession と Run の分離│     │   ・Embedded SurrealKV        │   │
-  │   │   ・同一キャラクター一人称対話│    │   ・HNSWベクトル検索（記憶）  │   │
-  │   │   ・定期進捗報告と途絶検知   │     │   ・認知グラフ（remembers等） │   │
-  │   │   ・30秒タイムアウト強制終了 │     │   ・ACIDドキュメント永続化    │   │
+  │   │ 「手」（Hands / 作業相手）    │     │ データベース（SQLite）         │   │
+  │   │   ・WorkSession と Run の分離│     │   ・rusqlite WALモード        │   │
+  │   │   ・同一キャラクター一人称対話│    │   ・FTS5 + sqlite-vec (RRF)   │   │
+  │   │   ・定期進捗報告と途絶検知   │     │   ・記憶関係（memory_edges）  │   │
+  │   │   ・30秒タイムアウト強制終了 │     │   ・ACIDリレーショナル永続化  │   │
   │   └───────────────┬──────────────┘     └───────────────────────────────┘   │
   │                   │                                                        │
   │                   ▼ サンドボックス実行                                      │
@@ -62,7 +62,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 | 境界 | 主な構成要素 | 責務と役割 |
 | :--- | :--- | :--- |
-| **「頭」<br>(Brain / 親)** | Tokio外側調停ループ<br>＋ `rig-ecs`（`SessionLogPlugin`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`instruct_hand`）<br>・「目」への動的Watcher登録（`set_eye_watch`） |
+| **「頭」<br>(Brain / 親)** | `rig-ecs` Bevy ECS 単一ループ<br>（`SessionLogPlugin`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`start_work`, `send_work`, `stop_work`）<br>・「目」への動的Watcher登録（`set_eye_watch`） |
 | **「手」<br>(Hands / 子)** | WorkSession / Run<br>MCP / ACP / Wasm | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けたクリーンアップと30秒タイムアウト強制終了 |
 | **「目」<br>(Eyes / 知覚)** | クライアントセンサー<br>知覚要約生成器 | ・OSイベント（フォーカス切替、ファイル保存等）の即時フック<br>・無操作時のアイドルサンプリング（15〜30秒間隔）<br>・高解像度な作業状況を簡潔なPerception Summaryへ要約<br>・動的Watcher条件合致時の優先割り込み通知（Priority Interrupt） |
 | **「体」<br>(Body / 表現)** | `ene-avatar`<br>音声ストリーミング | ・透過デスクトップウィンドウ上でのVRM 1.0 3D描画（Bevy）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
@@ -72,32 +72,35 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 ## 3. 主要サブシステムの技術アーキテクチャ
 
 ### 1. エージェントループとセッション管理
-- **Tokio外側ステートマシンとrig-ecs内側実行ループのハイブリッド構成**:
-  - 会話のReActツール反復・LLMストリーミング・プロンプト組み立ては `rig-ecs`（`AgentPlugin`）に委ねる。
+- **`rig-ecs` による単一イベント駆動エージェントループ**:
+  - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
+    - 入力受付: `world.trigger(Deliver::new(...))`
+    - 先行TTS: `Stage::Review` で `StreamDelta` を検出し文単位で合成キューへ送出
+    - 承認待機: `Stage::Gate` で `HoldOf` による一時停止
   - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
-  - 外側のTokioタスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
+  - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
-  - 会話の生ログおよびCompaction要約（`Compacted`）は `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心はSurrealDBに永続化（要約のSurrealDB二重保存は行わない）。
+  - 会話の生ログおよびCompaction要約（`Compacted`）は `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心はSQLiteに永続化（要約のSQLite二重保存は行わない）。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
   - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中結果は破棄/次回延期。
 - **作業エージェント（ACP）のセッション接続維持**:
-  - `WorkSession ≒ ACP Session` としてプロセス接続を維持。Run（指示ごとの実行）の中断はACP標準の `session/cancel` で行い、プロセス強制終了はセッション終了時や暴走時のみ実施。内蔵Rigはホスト内Tokioタスクとして実行。
+  - `WorkSession ≒ ACP Session` としてプロセス接続を維持。Run（指示ごとの実行）の中断はACP標準の `session/cancel` で行い、プロセス強制終了はセッション終了時や暴走時のみ実施。内蔵Rigはホスト内タスクとして実行。
 - **機械的コンテキスト上限検証と縮退**:
   - 送信直前に `Total Input + Max Output <= Context Window` を機械的に保証。
   - 要約失敗時は古いログをアクティブプロンプト窓から一時的に切り詰めて対話を継続。
 - **Prefix Caching最適化順序**:
-  - プロンプトを `Tools` ➔ `System Persona` ➔ `Pinned Core Memory` ➔ `Compaction Summary` ➔ `Recent Dialogue History` ➔ `Dynamic Context` ➔ `Latest User Turn` の順で配置。動的情報を末尾に置くことで、過去ログ全体のキャッシュヒット率を最大化。
+  - プロンプトを `System Prompt`（静的ツール定義 + キャラクター設定・ペルソナ + ユーザープロファイル） ➔ `Conversation History`（`Summary` + 過去ターン生ログ） ➔ `Dynamic Tail Context`（Pinned Memory + 検索想起記憶 + 現在の心境 + Perception Summary + 現在時刻 + 最新ユーザー入力）の順で配置。動的情報を末尾に置くことで、過去ログ全体のキャッシュヒット率を最大化。
 
-### 2. 心と自動記憶（SurrealDB）
-- **組み込みSurrealKV**:
-  - C++依存を排除した完全Rust製の組み込みストレージ（`kv-surrealkv`）。単一フォルダにデータを永続化。
+### 2. 心と自動記憶（SQLite）
+- **組み込みSQLite（`rusqlite` WALモード ＋ FTS5 trigram ＋ `sqlite-vec` / BLOBコサイン）**:
+  - 外部DBデーモン不要、メモリ消費数十MB。同期トランザクションをECS内で高速実行。
 - **エピソード記憶（`MemoryRecord`）**:
   - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（1〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`embedding` を格納。
   - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除や除外フラグではなく想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（過去ログの客観記録は保持）。
-  - ローカルモデル（fastembed, bge-m3等）またはクラウドモデル（OpenAI等）を選択可能。SurrealDBのHNSWインデックスによるコサイン類似度ベクトル検索。
+  - ハイブリッド検索: FTS5 BM25 と ベクトル検索をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。
   - **増分自動整理**: `processed_turns_cursor` より後の新規ターンのみを増分走査し、過去ログからの重複再生成を防止。
   - 想起スコア計算式：$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$
-  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、応答メタデータや明示操作で実際に引用された場合のみ更新。
+  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、ターン完了後の固定・統合処理（Consolidation）時に `cited_memory_ids` を抽出して実際に引用された場合のみ更新（ストリーミング出力へのタグ混入なし）。
   - **Pinned Memory制約**: 重要度10であっても、訂正状態や優先度引き下げ状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 
 ### 3. 音声対話パイプライン
