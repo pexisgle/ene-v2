@@ -1,6 +1,6 @@
 # 技術スタック選定・ライブラリ・実装リファレンス設計
 
-状態：Alpha採用設計（2026-11-11策定）。[全体アーキテクチャ](../architecture.md)、[心と自動記憶](mind.md)、[作業相手API](work.md)、[知覚・自律ループ・音声](loop-perception-voice.md)、[権限](permissions.md)を支える具体的な技術スタック・採用ライブラリ・実装例の所在を定義する。
+状態：Alpha採用設計（2026-11-11策定）。[全体アーキテクチャ](../architecture.md)、[心と自動記憶](mind.md)、[作業相手API](work.md)、[知覚・音声](voice-avatar.md)、[権限・Sandbox](permissions.md)を支える具体的な技術スタック・採用ライブラリ・実装例の所在を定義する。
 
 ---
 
@@ -8,12 +8,12 @@
 
 | 領域 | 採用技術 / ライブラリ | 選定理由 |
 | :--- | :--- | :--- |
-| **データベース** | **`SurrealDB` (Embedded SurrealKV)** | 100% Rustネイティブ、C++ビルド不要。心・記憶・関係性をグラフ（Graph）で表現し、HNSWベクトル検索とACIDトランザクションを単一エンジンで完結 |
-| **エージェントループ** | **LLM通信基盤 (`rig-core` / `genai`) ＋ Tokio非同期ステートマシン** | API通信・ツールパースの車輪の再発明を避けつつ、ECSフレーム同期や線形配列の制約から脱却し、分岐（DAG）・割り込み・全二重を自在に制御 |
-| **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `sandbox_run`)** | Windows / Linux / macOS の主要3OSに対応。LinuxのLandlock/bwrap、WindowsのJob Objects/Tokens、macOSのSeatbeltを薄くラップ |
-| **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産を活用。透過デスクトップウィンドウ、VRM 1.0モデルロード、RMS音量によるゼロ遅延口パク |
-| **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | 最初は代表的最小セット（VOICEVOX / ローカルWhisper / 高速API）で動かし、後にsherpa-onnxやElevenLabs等へ自由に差し替え可能 |
-| **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、双方向ストリーミング対応 |
+| **データベース** | **`SurrealDB` (Embedded SurrealKV)** | 100% Rustネイティブ、C++ビルド不要。心・記憶・関係性をグラフで表現し、HNSWベクトル検索、BM25全文検索、ACIDトランザクションを単一エンジンで完結 |
+| **エージェント通信・推論** | **`rig-core` ＋ Tokio非同期ステートマシン** | OpenAI / Anthropic / Gemini / OpenRouter 等の通信・ツール定義（`#[derive(Tool)]`）・ストリーミングパースを `rig-core` に委ね、会話ターンやアイドル管理・割り込みをTokio非同期ステートマシンで直感的に制御 |
+| **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `sandbox_run`)** | Windows（AppContainer / Job Objects）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
+| **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産を活用。透過デスクトップウィンドウ（Wayland / Windows）、VRM 1.0モデルロード、RMS音量によるローカル即時口パク |
+| **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
+| **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、Server Streaming対応 |
 
 ---
 
@@ -23,12 +23,12 @@
 
 #### 特徴と利点
 - **Pure Rust（SurrealKV）**:
-  - `surrealdb` はバージョン4.0以降、従来のRocksDB（C++依存）に代わり完全Rust製の **SurrealKV**（`kv-surrealkv`）を標準採用。
-  - C++コンパイラやビルド依存がなく、Windows・macOS・Linuxで同一の単一フォルダ（例: `~/.local/share/ene/data`）に埋め込み動作可能。
+  - `surrealdb` は完全Rust製の **SurrealKV**（`kv-surrealkv`）をサポート。
+  - C++コンパイラや追加ランタイム不要で、Windows・macOS・Linux共通の単一フォルダ（例: `~/.local/share/ene/data`）に埋め込み永続化。
 - **グラフ ＋ HNSWベクトル ＋ ドキュメントの統合**:
   - **エピソード記憶のベクトル検索**: HNSW（Hierarchical Navigable Small World）インデックスによる高速コサイン類似度検索。
-  - **関係性のグラフ表現**: `companion->remembers->memory`、`memory->cited_in->turn`、`memory->relates_to->user` など、認知モデルの関係性をグラフエッジで自然に表現。
-  - **ACID保証**: 記憶の追加・更新、引用回数のインクリメントを同一トランザクションで確定。
+  - **関係性のグラフ表現**: `companion->remembers->memory`、`memory->cited_in->turn` など、認知モデルの関係性をグラフエッジで自然に表現。
+  - **ACID保証**: 記憶の追加・更新、引用実績、処理済みカーソルを同一トランザクションで確定。
 
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
@@ -46,71 +46,78 @@
   let db = Surreal::new::<SurrealKv>("./data/ene.db").await?;
   db.use_ns("ene").use_db("main").await?;
 
-  // HNSW ベクトルインデックスの定義
+  // HNSW ベクトルインデックス・全文検索インデックスの定義
   db.query(r#"
-      DEFINE TABLE memory SCHEMALESS;
-      DEFINE INDEX memory_vector ON TABLE memory FIELDS embedding HNSW DIMENSION 1536 DIST COSINE;
+      DEFINE TABLE memory SCHEMAFULL;
+      DEFINE FIELD embedding ON TABLE memory TYPE option<array<float>>;
+      DEFINE INDEX idx_memory_embedding ON TABLE memory FIELDS embedding 
+          HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+      
+      DEFINE ANALYZER japanese_analyzer TOKENIZERS blank,punct FILTERS lowercase;
+      DEFINE INDEX idx_memory_fulltext ON TABLE memory FIELDS content 
+          FULLTEXT ANALYZER japanese_analyzer;
   "#).await?;
   ```
 - **一次ドキュメント**:
-  - [SurrealDB Embedded Rust Guide](https://surrealdb.com/docs/surrealdb/integration/sdks/rust)
+  - [SurrealDB Embedded Rust SDK Guide](https://surrealdb.com/docs/surrealdb/integration/sdks/rust)
   - [SurrealDB Vector Search Documentation](https://surrealdb.com/docs/surrealql/functions/database/vector)
+  - [SurrealDB Index Statements](https://surrealdb.com/docs/reference/query-language/statements/define/indexes)
 
 ---
 
 ### B. エージェントループ：ハイブリッド・ステートマシン
 
-「完全自作による実装量の爆発」を避けつつ、「フレームワークの制約で分岐や全二重が書けない問題」を解消するハイブリッド設計。
+「完全自作による実装量の爆発」を避けつつ、「フレームワークの制約で柔軟な割り込みや非同期制御が書けない問題」を解消するハイブリッド設計。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
-  │ 【LLM通信・ツール定義レイヤー】（ライブラリ活用）         │
-  │  ・rig-core / genai                                    │
-  │  ・OpenAI, Anthropic, Gemini, Groq, OpenRouter, Ollama │
-  │  ・ツール定義マクロ、JSON Schema生成、SSEストリームパース │
+  │ 【LLM通信・ツール定義レイヤー】（rig-core 活用）         │
+  │  ・OpenAI, Anthropic, Gemini, Groq, OpenRouter 等の通信│
+  │  ・型安全なツール定義（#[derive(Tool)]）               │
+  │  ・JSON Schema生成、SSEストリームパース                │
   └───────────────────────────┬────────────────────────────┘
                               │ 抽象プロバイダー / ツール呼び出し
                               ▼
   ┌────────────────────────────────────────────────────────┐
   │ 【エージェントループ・状態機械】（Tokio非同期ステートマシン） │
-  │  ・会話木構造（DAG）とPre-compaction分岐管理           │
+  │  ・追記型線形ログ ＋ スナップショットによる分岐管理    │
   │  ・厳密なアイドル検知（ユーザー操作不在計測・独り言除外） │
-  │  ・Shizuku-Duplex全二重（ひとりごと判定、文節TTS送出）    │
+  │  ・音声パイプライン（文単位先行合成 / ストリーミング） │
   │  ・マルチモーダル先着優先承認（音声/画面ロック）         │
   └────────────────────────────────────────────────────────┘
 ```
 
 #### 実装のポイント
-- **実装量の抑制**: 各社LLMのHTTPヘッダー、ストリーミングパース、ツール呼び出し引数のJSONパース、リトライは `rig-core` または `genai` が担うため、ゼロからAPIクライアントを書く必要はない。
-- **完全な制御権**: 会話ターンやCompactionの管理をBevy ECSのtickからTokio非同期ループへ移行。これにより、バックグラウンド要約中の割り込みや、0.5秒でのAdaptive Barge-inバッファ破棄を直感的な非同期タスクとして書くことができる。
+- **実装量の抑制**: 各社LLMのHTTPヘッダー、ストリーミングパース、ツール呼び出し引数のJSONパース、リトライは `rig-core` が担うため、ゼロから低レベルなAPIクライアントを書く必要はない。
+- **完全な制御権**: 会話ターンやCompaction、先行TTS合成の管理をTokio非同期タスクとして実装。バックグラウンド要約中の割り込みや、ユーザー発話検知時の即時バッファ破棄（Flush）を直感的に書くことができる。
 
 #### 実装例・一次情報
-- [`genai` GitHub (jeremychone/rust-genai)](https://github.com/jeremychone/rust-genai)（マルチプロバイダーの最小・統一LLMクライアント）
-- [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)（型安全なTool deriveマクロとプロバイダー連携）
+- [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)（Rust製LLMアプリケーションフレームワーク・ツールマクロ）
 
 ---
 
-### C. OSサンドボックス：ネイティブ抽象化（方式1）
+### C. OSサンドボックス：ネイティブ抽象化
 
 主要3OS（Linux / Windows / macOS）に対して、共通の抽象インターフェースを提供し、各OSの最適なセキュリティ機構を駆動する。
 
 | OS | 適用する隔離機構 | 制御内容 |
 | :--- | :--- | :--- |
-| **Linux** | **`Landlock`**（カーネル5.13+）/ **`bubblewrap`** | ファイルシステムの指定パス外アクセス遮断、ネットワーク名前空間制限 |
-| **Windows** | **`Job Objects`** ＋ **`Restricted Tokens`** | CPU・メモリ・プロセス生成制限、セキュリティトークンによるアクセス権剥奪 |
-| **macOS** | **`Apple Sandbox (Seatbelt / SBPL)`** | macOSネイティブのサンドボックスプロファイルによるFS・ネットワーク制限 |
-| **全OS共通** | **`cap-std`** (`=4.0.3`) | Capability-basedファイルシステム。親ディレクトリへのパストラバーサル（`../`）をOSレベルで遮断 |
+| **Linux** | **`Landlock`** ＋ **`bubblewrap`** | ファイルシステムパス制限、TCPポート制限、ネットワーク名前空間による完全遮断 |
+| **Windows** | **`AppContainer`** ＋ **`Job Objects`** | 専用SIDによるACLファイル隔離、ネットワークCapability制限、CPU/メモリ/プロセス生成制限 |
+| **macOS** | **`Apple Sandbox (Seatbelt)`** | `sandbox-exec` / SBPLプロファイルによるファイルパス・ネットワーク・バイナリ実行制限 |
+| **全OS共通** | **`cap-std`** | ホスト（Rust）コード自身のファイル操作におけるパストラバーサル（`../`）防止 |
 
 #### 実装例・一次情報
 - [`cap-std` Docs.rs](https://docs.rs/cap-std/latest/cap_std/)（オープンディレクトリをルートとする安全なファイル操作）
 - [`process-wrap` Docs.rs](https://docs.rs/process-wrap/latest/process_wrap/)（Unix process-group、Windows Job Object、kill-on-dropのマルチプラットフォーム対応）
 - [`sandbox_run` Docs.rs](https://docs.rs/sandbox_run)（Linux LandlockとmacOS SandboxのCommandラッパー）
+- [Microsoft Learn: AppContainer for Windows Developers](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation)
 
 ---
 
 ### D. 音声パイプライン（STT / TTS）：プラガブル設計
 
-インターフェース（Trait）を定義し、初期は代表的な最小構成（例: ローカルVOICEVOX + 高速API/ローカルWhisper）から開始して、後から自由に拡張できる設計とする。
+エンジンの通信仕様（文単位REST API / ストリーミング / 双方向Live API）に合わせて柔軟に動作する抽象インターフェース。
 
 ```rust
 #[async_trait::async_trait]
@@ -121,31 +128,34 @@ pub trait SttEngine: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait TtsEngine: Send + Sync {
-    /// 文節テキストを受け取り、オーディオストリームを順次送出する
-    async fn synthesize_stream(&self, text: &str, voice_params: &VoiceParams) 
-        -> Result<Pin<Box<dyn Stream<Item = AudioChunk> + Send>>, TtsError>;
+    /// エンジンの能力を取得
+    fn capabilities(&self) -> TtsCapabilities;
+    
+    /// テキストを音声に合成
+    async fn synthesize(&self, text: &str, params: &VoiceParams) -> Result<AudioData, TtsError>;
 }
 ```
 
-#### サポート候補（段階的に追加）
-- **STT候補**:
+#### サポート対象エンジン
+- **TTSエンジン**:
+  - `VOICEVOX` / `Style-Bert-VITS2`（日本語キャラクター対話の標準文単位HTTP API）
+  - `sherpa-onnx` / `Piper`（ローカルニューラルストリーミング音声合成）
+  - `ElevenLabs`（高品質WebSocketストリーミング）
+  - `OpenAI Realtime` / `Gemini Live`（双方向Live API）
+- **STTエンジン**:
   - `sherpa-onnx`（C++/Rustネイティブ・ONNXストリーミング、Python不要、Windows/Mac/Linux全対応）
   - `whisper-rs`（whisper.cppバインディング）
-  - クラウド高速API（Groq Whisper, Deepgram, OpenAI Whisper）
-- **TTS候補**:
-  - `VOICEVOX` / `Style-Bert-VITS2`（日本語キャラクター対話の標準HTTP API）
-  - `Piper` / `sherpa-onnx` TTS（超軽量ローカルニューラル音声合成）
-  - `ElevenLabs`（高品質WebSocketストリーミング音声）
+  - 高速クラウドAPI（Groq Whisper, Deepgram）
 
 ---
 
 ### E. アバター描画：`apps/ene-avatar`（Bevy + `ene-vrm`）の活用
 
-- **既存資産の最大活用**:
-  - `apps/ene-avatar` は既に Bevy 0.20 + `ene-vrm` によるVRMロード、モーフターゲット（表情・口パク）、および透過ウィンドウ（Wayland/Windows）の基盤を持つ。
+- **既存資産の活用**:
+  - `apps/ene-avatar` は既に Bevy + `ene-vrm` によるVRM 1.0モデルロード、モーフターゲット（表情・口パク）、および透過ウィンドウ（Wayland/Windows）の基盤を持つ。
 - **クロスプラットフォーム対応**:
-  - Windows: Win32 APIによるレイヤード透過ウィンドウ（実装済み）。
-  - Linux: Wayland layer-shell（実装済み）。
-  - macOS: `bevy_winit` の `Window` 設定（`transparent: true`, `decorations: false`）による透過対応。
-- **RMS音量解析によるゼロ遅延口パク**:
-  - 音声再生のPCM振幅（RMS）をBevyのFrame Updateで直接計測し、VRMブレンドシェイプ（`aa` 等）を変位。
+  - Windows: Win32 APIによるレイヤード透過ウィンドウ。
+  - Linux: Wayland layer-shell。
+  - macOS: `bevy_winit` の `Window` 設定（`transparent: true`, `decorations: false`）。
+- **ローカルRMS音量解析による即時口パク**:
+  - 音声再生のPCM振幅（RMS）をBevyのFrame Updateで直接計測し、VRMブレンドシェイプ（`aa` 等）を変位。サーバー往復遅延ゼロで口パクが連動。

@@ -1,6 +1,6 @@
 # ene システムアーキテクチャ
 
-状態：Alpha採用設計（2026-11-03初版、2026-11-09改定、2026-11-11新機能・技術スタック全面反映）。[構想](vision.md)、[機能一覧](features/README.md)、[技術スタック](design/tech-stack.md)、[心と自動記憶](design/mind.md)、[作業相手API](design/work.md)、[知覚・自律ループ・音声](design/loop-perception-voice.md)、[権限](design/permissions.md)を統合する全体構造を定義する。
+状態：Alpha採用設計（2026-11-11策定）。[構想](vision.md)、[機能一覧](features/README.md)、[技術スタック](design/tech-stack.md)、[心と自動記憶](design/mind.md)、[作業相手API](design/work.md)、[コンテキスト圧縮](design/compaction.md)、[知覚・音声](design/voice-avatar.md)、[権限・Sandbox](design/permissions.md)、[プラグイン](design/plugins.md)を統合する全体構造を定義する。
 
 ---
 
@@ -13,24 +13,24 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
                      ┌───────────────────────────────────┐
                      │         ユーザー / デスクトップ      │
                      └───────┬───────────────────▲───────┘
-          OSイベント / 画面知覚 │                   │ 音声合成 / 透過アバター表示
+          OSイベント / 画面知覚 │                   │ 音声出力 / 透過アバター表示
                              ▼                   │
   ┌──────────────────────────────────────────────┴─────────────────────────────┐
   │ 【クライアント層】                                                          │
   │   ・アバター描画（Body）: ene-avatar（Bevy + ene-vrm、透過ウィンドウ）       │
-  │   ・リップシンク: クライアント側RMS音量リアルタイム解析（ゼロ遅延口パク）       │
+  │   ・リップシンク: クライアント側RMS音量解析（フレーム連動口パク）           │
   │   ・知覚センサー（Eyes）: OSイベントフック ＋ アイドルサンプリング（15〜30秒） │
-  │   ・音声入出力: ストリーミングSTT同報配信 / 文節単位TTSストリーミング再生     │
+  │   ・音声入出力: ストリーミングSTT同報配信 / 音声Server Streaming受信       │
   └──────────────────────────────┬─────────────────────────────────────────────┘
-                                 │ Connect-RPC（双方向ストリーミング）
+                                 │ Connect-RPC
   ┌──────────────────────────────▼─────────────────────────────────────────────┐
   │ 【ホスト層（ene-host）】                                                    │
   │                                                                            │
   │   ┌────────────────────────────────────────────────────────────────────┐   │
   │   │ 「頭」（Brain / 親エージェント）：Tokio非同期ステートマシン         │   │
-  │   │   ・マルチプロバイダーLLM通信基盤（rig-core / genai）              │   │
-  │   │   ・会話DAG・Pre-compaction分岐継続（割り込み即時応答）             │   │
-  │   │   ・Shizuku-Duplex全二重（ひとりごと判定、即時相槌、適応型バージイン）│   │
+  │   │   ・マルチプロバイダーLLM通信基盤（rig-core）                      │   │
+  │   │   ・追記型線形ログ ＋ スナップショットによる分岐管理               │   │
+  │   │   ・音声対話パイプライン（文単位先行合成 / ストリーミング）        │   │
   │   │   ・リアルタイムモーション指示（発話時以外の独立 body_motion 呼出）  │   │
   │   │   ・ツール群: talk, body_motion, instruct_hand, set_eye_watch, noop│   │
   │   └───────────────┬────────────────────────────────────┬───────────────┘   │
@@ -38,19 +38,20 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │                   ▼ instruct_hand                      ▼ 記憶・設定アクセス │
   │   ┌──────────────────────────────┐     ┌───────────────────────────────┐   │
   │   │ 「手」（Hands / 作業相手）    │     │ データベース（SurrealDB）      │   │
-  │   │   ・軽量〜重タスクの柔軟委託 │     │   ・Embedded SurrealKV        │   │
-  │   │   ・同一キャラクター一人称   │     │   ・HNSWベクトル検索（記憶）  │   │
-  │   │   ・定期進捗報告と途絶検知   │     │   ・グラフエッジ（関係性）    │   │
-  │   │   ・安全な中断（後片付け）   │     │   ・ACIDドキュメント永続化    │   │
+  │   │   ・WorkSession と Run の分離│     │   ・Embedded SurrealKV        │   │
+  │   │   ・同一キャラクター一人称対話│    │   ・HNSWベクトル検索（記憶）  │   │
+  │   │   ・定期進捗報告と途絶検知   │     │   ・認知グラフ（remembers等） │   │
+  │   │   ・30秒タイムアウト強制終了 │     │   ・ACIDドキュメント永続化    │   │
   │   └───────────────┬──────────────┘     └───────────────────────────────┘   │
   │                   │                                                        │
   │                   ▼ サンドボックス実行                                      │
   │   ┌────────────────────────────────────────────────────────────┐           │
   │   │ セキュリティ・実行境界                                      │           │
-  │   │   ・OSネイティブ隔離（Linux Landlock/bwrap, Windows Job,   │           │
-  │   │                    macOS Seatbelt, cap-std）               │           │
-  │   │   ・入力遮断型 Decision Engine（プロンプトインジェクション防御）│      │
-  │   │   ・マルチモーダル先着優先承認（音声「いいよ」 / 画面カード） │           │
+  │   │   ・OSネイティブ隔離（Linux Landlock/bwrap, Windows App-   │           │
+  │   │     Container/Job, macOS Seatbelt, cap-std）               │           │
+  │   │   ・非対応環境での明示的警告・承認による縮退実行           │           │
+  │   │   ・多層判定パイプライン（機械的ルール照合 ➔ AI補助判定）   │           │
+  │   │   ・マルチモーダル承認（音声承認は同時1件限定 / 画面カード） │           │
   │   └────────────────────────────────────────────────────────────┘           │
   └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -61,10 +62,10 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 | 境界 | 主な構成要素 | 責務と役割 |
 | :--- | :--- | :--- |
-| **「頭」<br>(Brain / 親)** | Tokio非同期ループ<br>LLM抽象クライアント | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・Shizuku-Duplex方式による全二重対話（ひとりごと判定、即時相槌）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`instruct_hand`）<br>・「目」への動的Watcher登録（`set_eye_watch`） |
-| **「手」<br>(Hands / 子)** | WorkSession<br>MCP / ACP / Wasm | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けた安全なクリーンアップ |
+| **「頭」<br>(Brain / 親)** | Tokio非同期ループ<br>LLMクライアント（`rig-core`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`instruct_hand`）<br>・「目」への動的Watcher登録（`set_eye_watch`） |
+| **「手」<br>(Hands / 子)** | WorkSession / Run<br>MCP / ACP / Wasm | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けたクリーンアップと30秒タイムアウト強制終了 |
 | **「目」<br>(Eyes / 知覚)** | クライアントセンサー<br>知覚要約生成器 | ・OSイベント（フォーカス切替、ファイル保存等）の即時フック<br>・無操作時のアイドルサンプリング（15〜30秒間隔）<br>・高解像度な作業状況を簡潔なPerception Summaryへ要約<br>・動的Watcher条件合致時の優先割り込み通知（Priority Interrupt） |
-| **「体」<br>(Body / 表現)** | `ene-avatar`<br>音声ストリーミング | ・透過デスクトップウィンドウ上でのVRM 1.0 3D描画（Bevy）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文節単位のストリーミングTTS再生と、0.5秒割り込み時の即時バッファ破棄 |
+| **「体」<br>(Body / 表現)** | `ene-avatar`<br>音声ストリーミング | ・透過デスクトップウィンドウ上でのVRM 1.0 3D描画（Bevy）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
 
 ---
 
@@ -72,68 +73,41 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 ### 1. エージェントループとセッション管理
 - **Tokio非同期ステートマシン**:
-  - LLMプロバイダー（OpenAI, Anthropic, Gemini, Groq, OpenRouter, Ollama）との通信やツールスキーマ生成は、多言語対応のマルチプロバイダー基盤（`rig-core` / `genai`）を活用。
-  - 会話のターン進行、ツール実行、割り込み調停は、独立したTokioタスク上で動作する非同期状態機械として管理。
-- **Compactionと分岐継続（Branching）**:
-  - アイドル検知（ユーザー操作不在 30〜60秒、独り言は除外）でバックグラウンドCompactionを実行。
-  - Compaction中にユーザーが発話した場合、Compactionの終了を待たず直前のコンテキスト（pre-compaction state）から**即座に応答を生成**。バックグラウンドCompaction結果は破棄/次回延期（Rig Option B）とし、強制Compaction閾値（85〜90%）でオーバーフローを確実に防止。
-- **コンテキスト構築順序（Static First, Dynamic Last）**:
-  - Prefix Cachingを最大化するため、プロンプトを `Tools` ➔ `System Prompt` ➔ `Pinned Core Memory` ➔ `Compaction Summary` ➔ `Retrieved Memory` ➔ `Dynamic Context` ➔ `Recent History` の順で配置。「手」のスキル一覧（`Available Skills`）は「頭」から除外。
+  - LLMプロバイダー（OpenAI, Anthropic, Gemini, Groq, OpenRouter）との通信やツールスキーマ生成は `rig-core` を活用。
+  - 会話ターン、アイドル管理、割り込み調停は、独立したTokioタスク上で動作する非同期状態機械として管理。
+- **追記型線形ログ ＋ スナップショットによるCompaction**:
+  - 会話の生ログは追記型の線形ログとしてディスクに完全保存。
+  - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
+  - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中結果は破棄/次回延期。
+- **機械的コンテキスト上限検証と縮退**:
+  - 送信直前に `Total Input + Max Output <= Context Window` を機械的に保証。
+  - 要約失敗時は古いログをアクティブプロンプト窓から一時的に切り詰めて対話を継続。
+- **Prefix Caching最適化順序**:
+  - プロンプトを `Tools` ➔ `System Persona` ➔ `Pinned Core Memory` ➔ `Compaction Summary` ➔ `Recent Dialogue History` ➔ `Dynamic Context` ➔ `Latest User Turn` の順で配置。動的情報を末尾に置くことで、過去ログ全体のキャッシュヒット率を最大化。
 
 ### 2. 心と自動記憶（SurrealDB）
 - **組み込みSurrealKV**:
   - C++依存を排除した完全Rust製の組み込みストレージ（`kv-surrealkv`）。単一フォルダにデータを永続化。
 - **エピソード記憶（`MemoryRecord`）**:
-  - `importance`（1〜10、非線形格差）、`occurred_at`、`last_accessed_at`、`emotion`、`source_context`、`embedding` を格納。
+  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（1〜10）、`occurred_at`、`last_accessed_at`、`memory_revision`、`is_forgotten`、`embedding` を格納。
   - HNSWインデックスによるコサイン類似度ベクトル検索。
   - 想起スコア計算式：$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$
   - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、`talk` 引数の `cited_memories` で実際に引用された場合のみ更新。
-- **グラフ関係性の活用**:
-  - 人格、記憶、感情、タスクの連関をSurrealQLのグラフエッジ（`companion->remembers->memory` 等）で柔軟に表現。
+  - **Pinned Memory制約**: 重要度10であっても、忘却・訂正状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 
-### 3. 音声対話（Shizuku-Duplex全二重）
-- **ストリーミング全二重処理**:
-  - 発話中も常時リスニングを継続。中間STT結果から相手の話の間合いや句切りを先行予測。
-- **「ひとりごと（Inner Monologue）」判定**:
-  - 音声出力の直前に、相槌（Backchannel）か、本格発話開始（Start Speaking）か、沈黙維持（Keep Listening）かを自律判断。
-- **文節単位ストリーミングTTS**:
-  - 1文または文節単位で先行合成・再生を開始し、初声レイテンシ（TTFA）を数百ミリ秒に極小化。
-- **適応型バージイン（Adaptive Barge-in）**:
-  - 0.3秒未満の微小な相槌・環境音では発話を継続。0.5秒以上の実質的なユーザー発話で即座に発話停止＆クライアント音声バッファを即時破棄。
+### 3. 音声対話パイプライン
+- **プラガブルエンジン適応**:
+  - VOICEVOX等の文単位HTTP API（文ごとに非同期合成し再生キューへ投入）、ストリーミングエンジン、双方向Live APIの各特性に合わせたアダプター構成。
+- **世代管理と順序保証**:
+  - `generation_id` による割り込み時の旧世代チャンク破棄（FlushBuffer）。
+  - 文単位TTSの並行合成時における `sequence_no` 整列再生。
+- **複数コンパニオン調停**:
+  - 全員同報配信 ＋ 自律該当性判断。
+  - 音声フロアを獲得した主担当のみが `instruct_hand` を実行できる作業二重実行防止ロック。
+  - 会話リレー（`speech_completed`）は最大5往復で自動打ち切り。
 
-### 4. セキュリティ・サンドボックス境界
-- **3層セキュリティ**:
-  1. **実効的なOS分離（Deterministic Sandbox）**: Linux Landlock/bwrap、Windows Job Objects/Restricted Tokens、macOS Seatbelt、およびクロスプラットフォームFSケーパビリティ `cap-std`。
-  2. **自動判定エンジン（Decision Engine）**: Sandbox外操作について、操作内容・ユーザー本来の依頼・ポリシー・常に承認ルールのみを渡して判定。思考プロセスや外部Webテキストを遮断し、間接的プロンプトインジェクションを完全防止。
-  3. **マルチモーダルユーザー承認**: 判定拒否または不可逆操作時、音声相談（「〜してもいい？」）と画面カード（承認/常に承認/拒否）を同時提示。**先着優先（First-come-first-served）**で確定し、事後取り消しは `CancellationRequested` として安全にロールバック。
-- **「常に承認」の二元管理**:
-  - Sandbox管理可能（パス・ポート）はホストのSandbox構成に直接反映（決定論的強制）。
-  - セマンティック操作はテキスト判定ルールとして保存。
-
----
-
-## 4. プロセス構成と配置
-
-| パッケージ | 実行形態 | 主な技術 | 役割 |
-| :--- | :--- | :--- | :--- |
-| **`apps/ene-host`** | ヘッドレスバックエンド（常駐） | Tokio, Axum, Connect-RPC, SurrealDB | AI接続、対話ステートマシン、記憶、タスク委託、権限管理 |
-| **`apps/ene-avatar`** | デスクトップGUI（透過ウィンドウ） | Bevy 0.20, `ene-vrm`, Win32/Wayland/Cocoa | 3Dアバター描画、RMSリップシンク、表情・モーション再生 |
-| **`crates/ene-rpc`** | 内部ライブラリ | `buffa`, `connectrpc` | Connect-RPCプロトコル定義および自動生成コード |
-| **`crates/ene-plugin`** | 内部ライブラリ | Rust型定義 | プラグイン作者向けSDKおよび共通型定義 |
-| **`crates/ene-plugin-runtime`** | 内部ライブラリ | Extism | Wasmプラグインの安全なロードと実行制限 |
-| **`crates/ene-vrm`** | 内部ライブラリ | Bevy拡張 | VRM 1.0モデルローダー、モーフターゲット制御 |
-
----
-
-## 5. 過去の実装経緯と互換性
-
-### 2026-11-09 ホスト書き直しの記録
-ホストをRig中心の構成へ整理し、1つのヘッドレスAppスレッド、Connect-RPC、SQLite（旧構成）で初期Alphaの対話・記憶・作業の最小サイクルを確認した。
-
-### 2026-11-10 監査修正
-再入防止（Mutex try_lock）、コンテキスト窓の `fit` 刈り込み、連番マイグレーション（`user_version`）、有界チャネルによる停止処理の分離などを実施。
-
-### 2026-11-11 新アーキテクチャへの発展（本設計）
-- 記憶DBを SQLite から **SurrealDB (SurrealKV)** へ進化させ、グラフ関係性とネイティブHNSWベクトル検索を統合。
-- エージェントループをECS tickから **Tokio非同期ステートマシン** へ整理し、会話ツリー（DAG）の分岐継続と全二重（Shizuku-Duplex）を直接制御。
-- サンドボックスをLinux特化から **Windows / macOS を含むクロスプラットフォームOSネイティブ抽象化** へ拡張。
+### 4. セキュリティとSandbox
+- **OSネイティブ隔離**: Linux（Landlock/bwrap）、Windows（AppContainer/Job Objects）、macOS（Seatbelt）によるプロセス隔離。
+- **非対応環境の縮退**: Sandboxが使えない環境では、非隔離実行である旨を警告・ユーザー承認を得てから実行。
+- **判定パイプライン**: ハード禁止/毎回確認 ➔ 機械的ルール照合 ➔ LLM補助判定 ➔ ユーザー承認 ➔ 実行直前検証の多層防御。
+- **承認要求の不変束縛**: 引数ハッシュを束縛し、引数改変時は承認失効。音声承認は同時に1件のみ有効。

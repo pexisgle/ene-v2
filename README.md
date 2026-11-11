@@ -4,7 +4,7 @@
 
 ## 設計文書
 
-現在の採用設計は[アーキテクチャ](docs/architecture.md)、[心と自動記憶](docs/design/mind.md)、[記憶データモデルとDB設計](docs/design/memory-database-schema.md)、[作業相手API](docs/design/work.md)、[ステップ4詳細技術設計](docs/design/step4-work-protocol.md)、[ステップ5詳細技術設計](docs/design/step5-compaction-session.md)、[コンテキスト圧縮](docs/design/compaction.md)、[セキュリティ・権限設計](docs/design/security-sandbox-permissions.md)、[権限](docs/design/permissions.md)、[知覚・自律ループ・音声](docs/design/loop-perception-voice.md)、[知覚・音声・アバター詳細設計](docs/design/perception-voice-avatar.md)、[プラグイン拡張](docs/design/plugins.md)、[技術スタック・実装リファレンス](docs/design/tech-stack.md)、[ホストAPI](docs/api.md)です。[調査・選定根拠](docs/references.md#alpha-design-sources)と[実装順序・検証条件](docs/alpha.md)を分けて記録しています。設計の追加だけで実装済みにはなりません。現行の動作・起動方法は各パッケージのREADMEを参照してください。
+現在の採用設計は[アーキテクチャ](docs/architecture.md)、[技術スタック・実装リファレンス](docs/design/tech-stack.md)、[心と自動記憶](docs/design/mind.md)、[作業相手「手」API](docs/design/work.md)、[コンテキスト圧縮・セッション管理](docs/design/compaction.md)、[権限・Sandbox・セキュリティ](docs/design/permissions.md)、[知覚・音声・アバター](docs/design/voice-avatar.md)、[プラグイン拡張](docs/design/plugins.md)、[ホストAPI](docs/api.md)です。[調査・選定根拠](docs/references.md#alpha-design-sources)と[実装順序・検証条件](docs/alpha.md)を分けて記録しています。設計の追加だけで実装済みにはなりません。現行の動作・起動方法は各パッケージのREADMEを参照してください。
 
 ## ワークスペース
 
