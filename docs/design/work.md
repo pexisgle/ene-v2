@@ -77,6 +77,21 @@ pub enum RunStatus {
     Failed { error_code: String, message: String },
 }
 
+### 3.2 状態遷移契約（State Machine Transitions）
+
+| 現在の状態 | イベント / トリガー | 次の状態 | 確定点とホストの動作 |
+| :--- | :--- | :--- | :--- |
+| `Created` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
+| `Running` | 子からの質問（`WorkRequest::Input`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち |
+| `Running` | 子からの承認要求（`WorkRequest::Approval`） | `WaitingApproval` | 権限確認待ち（親が自然に対話仲介） |
+| `WaitingInput` | `RespondWork` 受信 | `Running` | 回答を子へ渡し処理再開 |
+| `WaitingApproval` | 承認 / 拒否 受信 | `Running` | 承認時は操作実行、拒否時は代替処理へ |
+| `Running` / `Waiting*` | `CancelWork` 受信 | `Cancelling` | **即座に新規ツール実行受付を遮断**し、最大30秒クリーンアップ待機 |
+| `Cancelling` | 子プロセス終了・後片付け完了確認 | `Cancelled` | 正常中断確定 |
+| `Cancelling` | 30秒超過 ➔ 強制終了後、プロセス終了未確認 | `CancellationUnconfirmed` | 停止未確認として記録 |
+| `Running` | タスク正常完了 | `Completed` | 成果物を親へ返却 |
+| `Running` / `Cancelling` | 回復不能エラー発生 | `Failed` | エラー報告 |
+
 /// 子（手）からの問い合わせ種別
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkRequest {
@@ -203,15 +218,20 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
                                                                  └─ 未確認・不明 ➔ CancellationUnconfirmed
 ```
 
-1. **協調的中断要求**: ホストは子へ `CancellationRequested` を通知し、`RunStatus` を `Cancelling` へ更新する。
-2. **寛大な猶予期間（30秒タイムアウト）**:
+1. **協調的中断要求と新規副作用の即時遮断**:
+   - ホストは子へ `CancellationRequested` を通知し、`RunStatus` を `Cancelling` へ更新する。
+   - **`Cancelling` 移行と同時に、ホストはそのRunからの新規ツール実行要求（ファイル書き込み、外部通信等）を即座に遮断（Reject）**し、クリーンアップ以外の新たな副作用の発生を防止する。
+2. **Run専用プロセスの局所隔離**:
+   - 各Runは必ず**専用の独立プロセスグループ（Linux: `setpgid`、Windows: 専用Job Object）**内でサブプロセスを起動する。
+   - これにより、あるRunが30秒タイムアウトで強制終了（`kill(-pgid, SIGKILL)` や `TerminateJobObject`）された場合でも、他のRunや他のSessionのプロセスを巻き添えにして終了させる事故を構造的に防ぐ。
+3. **寛大な猶予期間（30秒タイムアウト）**:
    - 外部プロセスやビルド処理が正常に一時ファイルを片付ける猶予として、最大 **30秒** 待機する。
-3. **プロセス群の強制終了と停止確認**:
-   - 30秒経過しても応答しない場合、ホストはプロセス単体ではなく**プロセス群全体を強制終了**する（Linux: プロセスグループへの `kill(-pgid, SIGKILL)`、Windows: Job Objectへの `TerminateJobObject`）。
+4. **プロセス群の強制終了と停止確認**:
+   - 30秒経過しても応答しない場合、ホストはプロセス単体ではなく**プロセス群全体を強制終了**する。
    - **状態の厳格な区分**:
      - プロセス群の完全終了とローカル後片付けが確認された場合: `RunStatus::Cancelled`
      - プロセスの残存が疑われる場合や外部クラウド処理の停止が確認できない場合: **`RunStatus::CancellationUnconfirmed`（停止未確認 / 結果不明）** として記録し、ユーザーにも「処理を完全に停止できたか確認できませんでした」と誠実に通知する。
-4. **過去Runの遅延イベントの扱い**:
+5. **過去Runの遅延イベントの扱い**:
    - Run Aの中断後に開始されたRun Bの実行中に、遅れてRun Aのイベントが到着した場合、**Run Bのアクティブ状態を破壊・上書きしない**。ただし、Run A自身の過去の監査記録としては正確に追記保存する。
 
 ### 5.2 外部副作用の現実的な扱い（Undoの限界の明示）

@@ -21,11 +21,12 @@
 
 ---
 
-## 2. 人格と情報の分類
+## 2. 人格と情報の分類と「心」のライフサイクル
 
 | 情報の種類 | 性質 | 心での扱い |
 | :--- | :--- | :--- |
-| **作者設定（CharacterProfile）** | 静的設定 | ロールプレイの核。会話で直接書き換えない。配布・エクスポートの対象 |
+| **作者設定（CharacterProfile）** | 静的設定 | ロールプレイの核。会話で直接書き換えない不変の境界。配布・エクスポートの対象 |
+| **現在の心（current_mind）** | 動的状態 | 気分・感情タグ・最近の関心事。ターンごとに更新され、長時間のアイドルで基本気質へ自然減衰 |
 | **説明用の会話例** | 参考材料 | 話し方・判断傾向の材料。実体験の記憶テーブルへは混入させない |
 | **ユーザーの発言・出来事** | 観測事実 | 誰が何を言ったかの記録。内容自体の客観的真偽とは区別して保存 |
 | **作業・操作結果** | 実績事実 | ホストや対象ツールが返した実行結果。成否不明・失敗も正確に保持 |
@@ -87,9 +88,9 @@ DEFINE TABLE cited_in SCHEMAFULL TYPE RELATION FROM memory TO turn;
 DEFINE TABLE supersedes SCHEMAFULL TYPE RELATION FROM memory TO memory;
 
 -- 5. インデックス定義
--- HNSW ベクトルインデックス（Alpha標準 1536次元コサイン距離。モデル変更時は再構築）
+-- HNSW ベクトルインデックス（セットアップ時に選択されたモデルの次元数で動的定義）
 DEFINE INDEX idx_memory_embedding ON TABLE memory FIELDS embedding 
-    HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+    HNSW DIMENSION <configured_dimensions> DIST COSINE TYPE F32;
 
 -- 日本語2-gram全文検索インデックス
 DEFINE ANALYZER japanese_analyzer TOKENIZERS blank,punct FILTERS lowercase,ngram(2,2);
@@ -118,6 +119,10 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 - **Relevance（関連度: $0.0 \sim 1.0$）**:
   - クエリと記憶のベクトルコサイン類似度と、BM25全文検索ランクを正規化合成したスコア。
   - 埋め込みモデル・次元数・前処理版が一致するレコードのみを対象とする。
+- **マルチプロバイダー埋め込み（ローカル / クラウド選択性）**:
+  - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
+  - SurrealDBのHNSWインデックスは、選択されたモデルの出力次元数（`configured_dimensions`）に合わせて初期化される。
+  - 設定でモデルを変更した場合は再インデックスマイグレーションが走り、切り替え完了まで検索は安全にBM25全文検索へ縮退する。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
   - $1 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化（忘却時も元の重要度値は保持される）。
     - $1 \sim 3$: 日常の雑談、一時的な状況
@@ -161,15 +166,18 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 - **内容ごとの独立レコード分割保存**:
   - 1つの会話発言から複数の異なる事実（例: 「好きな飲み物はコーヒー」と「勤務先はTech社」）が読み取れる場合、**単一のレコードにまとめず、独立した個別の `MemoryRecord` として保存する**。
   - 各レコードは固有のIDを持ち、出所（`source_context.turn_id`）を共有しながらも、重要度や忘却状態を完全に独立して管理できる。
+- **未処理カーソル（`processed_turns_cursor`）による増分抽出**:
+  - 自動整理ジョブは、最後に抽出を完了した `processed_turns_cursor` より後の新規ターンのみを増分走査する。
+  - 過去に処理済みのターンを何度も再走査しないため、以前に抽出・忘却（`is_forgotten = true`）された事実が、過去ログから新しいレコードとして重複再生成されることは構造的に防止される。
 
 ```text
 未処理の対話ログ・子の作業報告
-  → 未処理範囲を取得（既に抽出済みのturn_idは再走査をスキップ）
-  → 既存記憶と現在の版（memory_revision）・忘却状態（is_forgotten / importance）を参照
+  → processed_turns_cursor より後の未読ターンを取得（処理済みターンは再走査をスキップ）
+  → 既存記憶と現在の版（memory_revision）・忘却状態（is_forgotten）を参照
   → 経験の抽出（異なる内容は個別の独立したMemoryRecordとして分割）
   → 既存記憶の統合・訂正、引用実績に基づく重要度再評価
   → トランザクション内で競合検証（版不一致・忘却済み記憶の再生成を拒否）
-  → 記憶・処理済みカーソルを原子的コミット
+  → 記憶・processed_turns_cursor を原子的コミット
 ```
 
 ### 5.3 「忘却」のセマンティクス（想起優先度の引き下げ）と境界

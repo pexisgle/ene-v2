@@ -47,6 +47,7 @@
   db.use_ns("ene").use_db("main").await?;
 
   // HNSW ベクトルインデックス・日本語2-gram全文検索インデックスの定義
+  // ※インデックス次元数は選択されたモデル（ローカル/クラウド）に合わせて動的に設定
   db.query(r#"
       DEFINE TABLE memory SCHEMAFULL;
       DEFINE FIELD content ON TABLE memory TYPE string;
@@ -74,7 +75,7 @@
   ┌────────────────────────────────────────────────────────┐
   │ 【LLM通信・ツール定義レイヤー】（rig-core 活用）         │
   │  ・OpenAI, Anthropic, Gemini, Groq, OpenRouter 等の通信│
-  │  ・型安全なツール定義（#[derive(Tool)]）               │
+  │  ・型安全なツール定義（#[tool] / Tool トレイト）       │
   │  ・JSON Schema生成、SSEストリームパース                │
   └───────────────────────────┬────────────────────────────┘
                               │ 抽象プロバイダー / ツール呼び出し
@@ -132,17 +133,16 @@ pub trait TtsEngine: Send + Sync {
     /// エンジンの能力を取得
     fn capabilities(&self) -> TtsCapabilities;
     
-    /// テキストを音声に合成
+    /// 文単位テキストを音声に合成（Alpha標準）
     async fn synthesize(&self, text: &str, params: &VoiceParams) -> Result<AudioData, TtsError>;
 }
 ```
 
 #### サポート対象エンジン
 - **TTSエンジン**:
-  - `VOICEVOX` / `Style-Bert-VITS2`（日本語キャラクター対話の標準文単位HTTP API）
-  - `sherpa-onnx` / `Piper`（ローカルニューラルストリーミング音声合成）
-  - `ElevenLabs`（高品質WebSocketストリーミング）
-  - `OpenAI Realtime` / `Gemini Live`（双方向Live API）
+  - `VOICEVOX` / `Style-Bert-VITS2`（Alpha標準: 日本語キャラクター対話の標準文単位HTTP API）
+  - `sherpa-onnx` / `Piper`（ローカルニューラルストリーミング音声合成。後続フェーズでStream契約拡張）
+  - `ElevenLabs` / `Gemini Live` / `OpenAI Realtime`（双方向会話バックエンドとして段階的拡張）
 - **STTエンジン**:
   - `sherpa-onnx`（C++/Rustネイティブ・ONNXストリーミング、Python不要、Windows/Mac/Linux全対応）
   - `whisper-rs`（whisper.cppバインディング）

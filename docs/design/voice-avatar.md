@@ -183,11 +183,14 @@ pub struct AudioChunkEnvelope {
 - **発話権（Floor）の先着基準**:
   - 作業担当の譲り合いとは独立して、**ホスト上で最初に `talk` ツールの呼び出しを確定（ディスパッチ）させたコンパニオンが発話権（Floor）を獲得**し、クライアントへの音声配信を行う。音声フロアの解放はクライアントの再生完了報告（`ReportPlaybackStatus`）またはタイムアウトにより行われる。
 
-### 5.3 会話リレー（`speech_completed`）と再生制御
+### 5.3 会話リレー（`speech_completed`）と再生制御・伝達進捗
 - **クライアント側での単一再生物理保証と旧発話の完全失効**:
   - クライアント（`ene-avatar`）は「同時に再生できる音声ストリームは常に1件のみ」という不変条件を保持する。
   - 新しい発話（新しい `utterance_id`）の音声チャンク、または割り込み（`FlushControl`）を受信した場合、クライアントは現在再生中の旧音声を即座に停止・フェードアウトし、音声の重複再生を物理的に防ぐ。
   - **旧発話の失効（逆戻り防止）**: 新しい発話へ切り替えた時点で以前の `utterance_id` はすべてクライアント側で失効扱いとなる。遅れて届いた旧発話のチャンクや旧発話宛てのFlushControlはすべて破棄され、再生中の新発話を停止させたり旧発話へ巻き戻したりしない。
+- **再生進捗の報告と未再生部分の伝達整合性**:
+  - クライアントは再生完了時、またはユーザー割り込み（Barge-in）による再生中断時、`ReportPlaybackStatus` にて**「実際に再生された文番号（`completed_sequence_no`）およびPCMバイト数（`completed_pcm_bytes`）」**をホストへ正確に報告する。
+  - ホストは中断された発話について、未再生部分を「ユーザーに伝達済み」と誤認せず、会話履歴や要約文で事実と異なる認識が生じるのを防ぐ。
 - **再生完了連携と会話リレー**:
   - クライアントでの発話再生完了（`ReportPlaybackStatus`）時、ホストは発話権を解放し、他の全コンパニオンへ `speech_completed` イベントを同報して自然な掛け合いを誘発する。
 - **掛け合い上限（最大5往復）**:
@@ -211,7 +214,7 @@ service VoiceService {
   // 音声ストリーム購読（ホスト -> クライアント Server Streaming）
   rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
 
-  // クライアントからの再生状態報告（再生完了・中断・失敗）
+  // クライアントからの再生状態報告（再生完了・中断・失敗、実再生進捗）
   rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
 }
 
@@ -251,6 +254,9 @@ message PlaybackStatusReport {
     PLAYBACK_FAILED = 3;
   }
   Status status = 3;
+  uint32 completed_sequence_no = 4; // 中断までに実際に再生完了した最終文番号
+  uint64 completed_pcm_bytes = 5;   // 実際に再生されたPCMデータ長
+  string client_id = 6;             // 報告元クライアント識別
 }
 
 message ReportPlaybackStatusResponse {
