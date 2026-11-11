@@ -118,7 +118,21 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 
 - **Relevance（関連度: $0.0 \sim 1.0$）**:
   - クエリと記憶のベクトルコサイン類似度と、BM25全文検索ランクを正規化合成したスコア。
-  - 埋め込みモデル・次元数・前処理版が一致するレコードのみを対象とする。
+  - SurrealDB 3.0ネイティブのHNSW演算子（`<|k, ef|>`）と全文検索スコア（`search::score`）を活用してSurrealQL内で高速に算出する。
+
+```sql
+-- SurrealQL ハイブリッド検索クエリ例（HNSWベクトル検索 + BM25全文検索）
+SELECT 
+    id, content, importance, occurred_at, last_accessed_at,
+    (search::score(1) * 0.5 + vector::similarity::cosine(embedding, $query_vec) * 0.5) AS relevance
+FROM memory
+WHERE 
+    embedding <|10, 40|> $query_vec
+    AND content @1@ $query_text
+    AND is_forgotten = false
+ORDER BY relevance DESC
+LIMIT 5;
+```
 - **マルチプロバイダー埋め込み（ローカル / クラウド選択性）**:
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
   - SurrealDBのHNSWインデックスは、選択されたモデルの出力次元数（`configured_dimensions`）に合わせて初期化される。

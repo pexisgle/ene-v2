@@ -59,6 +59,20 @@
       DEFINE INDEX idx_memory_fulltext ON TABLE memory FIELDS content 
           FULLTEXT ANALYZER japanese_analyzer;
   "#).await?.check()?;
+
+  // 代表的なSurrealQLハイブリッド検索クエリ（HNSW演算子 <|k, ef|> ＋ 全文検索スコア）
+  let _results = db.query(r#"
+      SELECT 
+          id, content, importance, occurred_at, last_accessed_at,
+          (search::score(1) * 0.5 + vector::similarity::cosine(embedding, $query_vec) * 0.5) AS relevance
+      FROM memory
+      WHERE 
+          embedding <|10, 40|> $query_vec
+          AND content @1@ $query_text
+          AND is_forgotten = false
+      ORDER BY relevance DESC
+      LIMIT 5;
+  "#).bind(("query_vec", vec![0.0f32; 1536])).bind(("query_text", "好きなこと")).await?.check()?;
   ```
 - **一次ドキュメント**:
   - [SurrealDB Embedded Rust SDK Guide](https://surrealdb.com/docs/surrealdb/integration/sdks/rust)
@@ -69,32 +83,41 @@
 
 ### B. エージェントループ：ハイブリッド・ステートマシン
 
-「完全自作による実装量の爆発」を避けつつ、「フレームワークの制約で柔軟な割り込みや非同期制御が書けない問題」を解消するハイブリッド設計。
+エージェントループをゼロから自作せず、Rig公式の実行基盤（`rig-ecs` / `rig-agent`、`rig-memory`、`rig-rmcp`）を活用し、ene固有のライフサイクル制御（音声・知覚・アイドル）と自然に連携させるハイブリッド設計。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
-  │ 【LLM通信・ツール定義レイヤー】（rig-core 活用）         │
-  │  ・OpenAI, Anthropic, Gemini, Groq, OpenRouter 等の通信│
-  │  ・型安全なツール定義（#[tool] / Tool トレイト）       │
-  │  ・JSON Schema生成、SSEストリームパース                │
+  │ 【外側：ene-host 統括制御】（Tokio非同期ステートマシン） │
+  │  ・マイク音声入力・ストリーミングSTT監視               │
+  │  ・厳密なアイドル検知（ユーザー無操作時間計測・独り言除外）│
+  │  ・複数コンパニオン調停（発話フロア・作業自律協調）    │
+  │  ・LLM出力テキストストリームの文単位切り出しと先行TTS  │
   └───────────────────────────┬────────────────────────────┘
-                              │ 抽象プロバイダー / ツール呼び出し
+                              │ ユーザー入力・拡張フック
                               ▼
   ┌────────────────────────────────────────────────────────┐
-  │ 【エージェントループ・状態機械】（Tokio非同期ステートマシン） │
-  │  ・追記型線形ログ ＋ スナップショットによる分岐管理    │
-  │  ・厳密なアイドル検知（ユーザー操作不在計測・独り言除外） │
-  │  ・音声パイプライン（文単位先行合成 / ストリーミング） │
-  │  ・マルチモーダル先着優先承認（音声/画面ロック）         │
+  │ 【内側：エージェント実行・会話管理】（Rig 基盤）         │
+  │  ・エージェントループ（rig-ecs / rig-agent）           │
+  │    モデル通信、ツール反復（ReAct）、構造化出力         │
+  │  ・会話ログと短期文脈（rig-memory / Conversation）    │
+  │    AsyncStore によるSurrealDB永続化、Compaction        │
+  │  ・MCPツール統合（rig-rmcp）                           │
+  │    McpConnection ➔ McpTool ➔ DynamicTool 直接登録     │
   └────────────────────────────────────────────────────────┘
 ```
 
 #### 実装のポイント
-- **実装量の抑制**: 各社LLMのHTTPヘッダー、ストリーミングパース、ツール呼び出し引数のJSONパース、リトライは `rig-core` が担うため、ゼロから低レベルなAPIクライアントを書く必要はない。
-- **完全な制御権**: 会話ターンやCompaction、先行TTS合成の管理をTokio非同期タスクとして実装。バックグラウンド要約中の割り込みや、ユーザー発話検知時の即時バッファ破棄（Flush）を直感的に書くことができる。
+- **実装量の劇的削減**:
+  - モデル呼び出しとツール実行の反復（ReActループ）、引数パース、ツール結果のモデル返却は Rig（`rig-ecs` または `rig-agent`）が担うため、エージェントループを自前で再実装する必要はない。
+  - 会話履歴は Rig の標準型（`Conversation` / `Message`）を正本とし、`rig-memory` の `AsyncStore` トレイトをSurrealDB向けに実装して永続化する。
+  - MCPツール連携は `rig-rmcp` を活用し、`McpConnection` から取得したツールを Rig の `DynamicTool` として直接登録する（独自のアダプター層を作らない）。
+- **完全な外側制御権**:
+  - アイドル時間計測、複数コンパニオン間の譲り合い、音声再生と割り込みバッファ破棄（Flush）は、外側のTokioタスクが非同期に制御する。
 
 #### 実装例・一次情報
-- [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)（Rust製LLMアプリケーションフレームワーク・ツールマクロ）
+- [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
+- [`rig-agent` Examples](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-agent/examples)（フックによる実行制御）
+- [`rig-rmcp` Documentation](https://docs.rs/rig-rmcp)（MCPサーバー接続とツール変換）
 
 ---
 
@@ -102,12 +125,12 @@
 
 主要3OS（Linux / Windows / macOS）に対して、共通の抽象インターフェースを提供し、各OSの最適なセキュリティ機構を駆動する。
 
-| OS | 適用する隔離機構 | 制御内容 |
+| クレート / 機構 | 担当責務 | 適用対象 |
 | :--- | :--- | :--- |
-| **Linux** | **`Landlock`** ＋ **`bubblewrap`** | ファイルシステムパス制限、TCPポート制限、ネットワーク名前空間による完全遮断 |
-| **Windows** | **`AppContainer`** ＋ **`Job Objects`** | 専用SIDによるACLファイル隔離、ネットワークCapability制限、CPU/メモリ/プロセス生成制限 |
-| **macOS** | **`Apple Sandbox (Seatbelt)`** | `sandbox-exec` / SBPLプロファイルによるファイルパス・ネットワーク・バイナリ実行制限 |
-| **全OS共通** | **`cap-std`** | ホスト（Rust）コード自身のファイル操作におけるパストラバーサル（`../`）防止 |
+| **`process-wrap`** | 子プロセスの生成、プロセスツリー/Job Object管理、kill-on-drop | 全OS共通（プロセスライフサイクルとタイムアウト強制終了） |
+| **`sandbox-run`** | 子プロセスに対するOSネイティブ隔離ポリシーの適用 | Linux（Landlock/bwrap）、macOS（Seatbelt） |
+| **`AppContainer`** | 専用SIDによるACLファイル隔離、ネットワークCapability制限 | Windows（Alpha初期はJob Objectによる資源制限から段階的拡張） |
+| **`cap-std`** | ホスト（Rust）コード自身のファイル操作におけるパストラバーサル（`../`）防止 | 全OS共通（ホスト自身の安全なファイルI/O） |
 
 #### 実装例・一次情報
 - [`cap-std` Docs.rs](https://docs.rs/cap-std/latest/cap_std/)（オープンディレクトリをルートとする安全なファイル操作）

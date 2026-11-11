@@ -41,19 +41,24 @@
 
 | OS | 検出技術 | 取得できる客観的事実 |
 | :--- | :--- | :--- |
-| **Linux** | X11: `_NET_ACTIVE_WINDOW`<br>Wayland: `wlr-foreign-toplevel-management`<br>`inotify`（ファイル変更） | ウィンドウタイトル、プロセス名、PID、アクティブファイルパス |
-| **Windows** | `SetWinEventHook` (`EVENT_SYSTEM_FOREGROUND`)<br>`GetForegroundWindow`, `GetWindowTextW` | ウィンドウハンドル、プロセス名、実行ファイルパス、ウィンドウタイトル |
-| **macOS** | `NSWorkspace.shared.frontmostApplication`<br>Accessibility API (`AXUIElementCopyAttributeValue`) | アプリケーション名、ドキュメントURL/パス、ウィンドウタイトル |
+| **Linux** | X11: `_NET_ACTIVE_WINDOW`<br>Wayland: `wlr-foreign-toplevel-management` | ウィンドウタイトル、`app_id`、アクティブ状態 |
+| **Windows** | `SetWinEventHook` (`EVENT_SYSTEM_FOREGROUND`)<br>`GetForegroundWindow`, `GetWindowTextW` | ウィンドウハンドル、プロセス名、ウィンドウタイトル |
+| **macOS** | `NSWorkspace.shared.frontmostApplication`<br>Accessibility API (`AXUIElementCopyAttributeValue`) | アプリケーション名、ウィンドウタイトル |
+
+> [!NOTE]
+> **知覚情報の責務分担**:
+> OSウィンドウ監視で取得できるのは「どのアプリが最前面で、どんなタイトルか」という表層情報に限られる。
+> エディタで開いている具体的なファイルパスやプロジェクト情報、ブラウザのURL等は、VS Codeやブラウザの専用連携プラグインから直接取得し、作業エージェントの活動状態はWorkSessionから直接受け取る。これにより、ウィンドウタイトルの不確実な解析に過度に依存しない。
 
 ### 2.2 セマンティック知覚要約と推測の分離
 - **客観的事実と解釈の区分**:
   - ウィンドウタイトルやプロセス名は「観測された事実」として扱う。
-  - 「VS Codeで mind.md を編集中」などの文脈推測は、ホスト側で簡潔な要約（Perception Summary）として整形し、取得できなかった項目は不明とする。
+  - 「VS Codeでコーディング中」などの文脈推測は、ホスト側で簡潔な要約（Perception Summary）として整形し、取得できなかった項目は不明とする。
 - **配置位置**: プロンプトのPrefix Cacheを保護するため、最新ターンの直前（動的文脈枠）へ注入する。
 
 ### 2.3 動的Watcher（`set_eye_watch`）と優先割り込み
 親（頭）は対話やタスクの文脈に応じて、特定の監視条件を「目」に登録できる。
-- 条件合致時（例: 特定PIDのビルド終了）、定期サンプリングを待たずに**即時優先割り込みイベント（Priority Interrupt）**が親へ届き、リアクション推論を起床させる。
+- 条件合致時（例: 特定アプリの前面化やプロセス終了）、定期サンプリングを待たずに**即時優先割り込みイベント（Priority Interrupt）**が親へ届き、リアクション推論を起床させる。
 
 ---
 
@@ -65,8 +70,10 @@
 親（頭）は発話（`talk`）の有無にかかわらず、**`body_motion` ツールをいつでも単独で呼び出すことができる**。
 - 傾聴中の頷き（`nod`）、作業画面注視時の首傾げ（`tilt_head`）、アイドル時の伸び（`stretch`）などを自律実行。
 
-### 3.2 Bevy ECS上でのアニメーション・表情合成
-- **アニメーションレイヤー**: 常にループ再生される `BaseIdleLayer` に対し、指示されたVRMAアクションを300msクロスフェードで加算ブレンド。
+### 3.2 Bevy ECS標準機能によるアニメーション制御
+独自のアニメーション再生レイヤーを新設せず、Bevy標準のコンポーネントを活用する。
+- **`AnimationGraph` ＋ `AnimationTransitions`**: 待機アニメーション（Idle）と各種アクションモーションをBevy標準の `AnimationTransitions` でスムーズにクロスフェード（約300ms）遷移させる。
+- **`ene-vrm` の責務**: VRM/VRMAの読み込みとボーン・モーフターゲットへの対応付けに専念し、再生時間やループ、ブレンディングはBevy標準の `AnimationPlayer` に委ねる。
 - **表情ブレンドシェイプ**: 急激なステップ変化を避け、`smooth_damp` による線形補間（約150〜250ms）で滑らかに遷移。
 - **視線追従（LookAt）**: マウスポインタやフォーカスウィンドウへ自然に頭部・視線を追従。
 
@@ -78,11 +85,12 @@
 
 ## 4. 音声対話パイプライン設計（プラガブルエンジン適応）
 
-> [!NOTE]
-> Shizuku-Duplex（常時傾聴、ひとりごとステートマシン、文節ストリーミング、適応型バージイン等）は**低遅延対話の参考モデル（リファレンス）**である。
-> 実際のパイプラインは、採用するTTSエンジンの通信仕様（文単位REST API / ストリーミング / 双方向Live API）に合わせて柔軟に実装する。
+### 4.1 LLMテキストストリーム直接接続による先行合成
+- 発話全文の生成完了を待つのではなく、**LLMの出力トークンストリームから文末記号（`。`, `！`, `？`, 改行）を検出した順に即座にTTSエンジンへ投入**する。
+- 第1文の音声合成と再生が開始されている間に第2文以降を並行合成することで、初声レイテンシ（Time to First Audio）を劇的に短縮する。
+- 身振り・表情は `body_motion` ツールを通じて独立して非同期に送出される。
 
-### 4.1 TTSエンジンの特性に応じた実装パターン
+### 4.2 TTSエンジンの特性に応じた実装パターン
 
 ```rust
 pub struct TtsCapabilities {
@@ -92,15 +100,15 @@ pub struct TtsCapabilities {
 }
 ```
 
-1. **パターンA: 文単位 HTTP API エンジン（VOICEVOX / Style-Bert-VITS2 等）**
-   - LLM出力を文区切り（`。`, `！`, `？`, 改行）で分割し、文ごとに非同期でHTTPリクエスト。
-   - 完成したWAV/PCMをクライアント再生キューへ順次投入。第1文の再生中に第2文を並行合成することで体感待ち時間を極小化。
-2. **パターンB: ネイティブ・ストリーミングエンジン（sherpa-onnx / ElevenLabs 等）**
+1. **パターンA: 文単位 HTTP API エンジン（VOICEVOX / Style-Bert-VITS2 等、Alpha標準）**
+   - ストリームから切り出した文ごとに非同期でHTTPリクエスト。
+   - 完成したWAV/PCMをクライアント再生キューへ順次投入。
+2. **パターンB: ネイティブ・ストリーミングエンジン（sherpa-onnx / ElevenLabs 等、拡張）**
    - 読点や文節ごとに逐次ストリーム投入し、合成完了したPCMチャンクを順次配信。
-3. **パターンC: 双方向リアルタイム Live API（OpenAI Realtime / Gemini Live）**
-   - WebSocketでモデルとクライアント音声を直結し、モデル側のネイティブVAD・割り込み機構に任せる。
+3. **パターンC: 双方向リアルタイム Live API（OpenAI Realtime / Gemini Live、拡張）**
+   - 単なるTTSエンジンではなく双方向会話バックエンドとしてアダプターを設計。
 
-### 4.2 世代管理（Generation ID）と再生順序制御
+### 4.3 世代管理（Generation ID）と再生順序制御
 
 レビューで指摘された「Flush後の遅延到着再生」および「文完成順の逆転」を防ぐため、以下の順序・世代管理を厳格に実装する。
 

@@ -21,42 +21,38 @@
 
 ---
 
-## 2. 会話ログの構造（線形ログ ＋ スナップショット）
+## 2. 会話ログの構造（Rig Conversation と rig-memory の活用）
 
-レビューの指摘に基づき、複雑なDAG（有向非巡回グラフ）ではなく、**追記型線形ログ（Linear Append-Only Log）＋ スナップショットチェックポイント**のシンプルな構造を採用する。
+独自の会話ログ型を新設してプロバイダー固有データやツール往復の変換オーバーヘッドを作るのではなく、**Rig標準の `Message` / `Conversation` 型を正本とし、`rig-memory` の管理機構を基礎**に採用する。
 
 ```rust
-use chrono::{DateTime, Utc};
+use rig::completion::Message;
 
-/// 追記型会話エントリ
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConversationEntry {
-    pub sequence_no: u64,
-    pub timestamp: DateTime<Utc>,
-    pub role: ConversationRole,
-    pub content: String,
-    pub tool_calls: Vec<ToolCallRecord>,
-    pub tool_results: Vec<ToolResultRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ConversationRole {
-    User,
-    Assistant,
-    Context, // ホスト注入コンテキスト
-}
-
-/// セッションのチェックポイント
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionSnapshot {
+/// 会話履歴のセッション状態（Rig Conversation 型に準拠）
+pub struct ConversationSession {
+    pub session_id: String,
+    pub companion_id: String,
+    /// 直近のアクティブ会話メッセージ列（User, Assistant, ToolCall, ToolResult）
+    pub messages: Vec<Message>,
     /// 直前のCompaction完了時点の要約テキスト
     pub compaction_summary: Option<String>,
-    /// 要約に含まれた最終シーケンス番号（これ以前はプロンプトの生ログから除外）
-    pub compacted_through_sequence: u64,
+    /// 要約に含まれた最終メッセージインデックス（これ以前は生ログから除外）
+    pub compacted_through_index: usize,
     /// 最後に保存された版番号
     pub revision: u64,
 }
 ```
+
+### 2.1 責務の明確な分離
+- **Rig（`rig-core` / `rig-memory`）が担当するもの**:
+  - 会話メッセージ列（マルチパート、ツール呼び出し、プロバイダー固有メタデータ）の完全保持。
+  - `rig-memory` の `AsyncStore` トレイトによるストレージ抽象化。
+  - 最近の会話切り出し（`recent`）および要約適用（`apply_summary`）。
+- **ene-host が担当するもの**:
+  - 「いつ要約を実行するか」の厳密なアイドル判定（ユーザー無操作60秒以上の検知）。
+  - 送信前のトークン上限検証と安全余裕の確保。
+  - SurrealDB をバックエンドとする `AsyncStore` の実装。
+  - 長期的な「思い出・エピソード記憶」の抽出と重要度評価（[心と自動記憶](mind.md)）。
 
 ---
 
