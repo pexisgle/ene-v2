@@ -89,8 +89,8 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **組み込みSurrealKV**:
   - C++依存を排除した完全Rust製の組み込みストレージ（`kv-surrealkv`）。単一フォルダにデータを永続化。
 - **エピソード記憶（`MemoryRecord`）**:
-  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（0〜10、0は忘却・非優先）、`occurred_at`、`last_accessed_at`、`memory_revision`、`is_forgotten`、`embedding` を格納。
-  - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除せず優先度引き下げ（`importance = 0`）で非活性化。
+  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（1〜10）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`is_forgotten`、`embedding` を格納。
+  - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除せず想起優先度の引き下げ（`is_forgotten = true`）で自動想起から除外（過去ログの客観記録は保持）。
   - HNSWインデックスによるコサイン類似度ベクトル検索。
   - 想起スコア計算式：$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$
   - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、`talk` 引数の `cited_memories` で実際に引用された場合のみ更新。
@@ -101,11 +101,11 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - VOICEVOX等の文単位HTTP API（文ごとに非同期合成し再生キューへ投入）、ストリーミングエンジン、双方向Live APIの各特性に合わせたアダプター構成。
 - **世代管理と順序保証**:
   - `generation_id` による割り込み時の旧世代チャンク破棄（FlushBuffer）。
-  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止）。
+  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止）。
   - 文単位TTSの並行合成時における `sequence_no` 整列再生。
 - **複数コンパニオン調停**:
   - 全員同報配信 ＋ 自律該当性判断。
-  - 同一クライアント内の他コンパニオンへの `work_started` 同報通知と、同時着手時の後発側自律キャンセルによる作業二重実行防止。
+  - 同一クライアント内の他コンパニオンへの `work_started` 即時同報通知と、同時着手時の後発側自律キャンセルによる作業二重実行防止（ホスト受付排他は行わずLLM自律協調）。
   - 会話リレー（`speech_completed`）は最大5往復で自動打ち切り。クライアント再生完了（`ReportPlaybackStatus`）またはタイムアウトによる安全なフロア解放（遅延完了報告は破棄）。
 
 ### 4. セキュリティとSandbox

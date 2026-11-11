@@ -61,12 +61,12 @@ DEFINE TABLE memory SCHEMAFULL;
 DEFINE FIELD owner ON TABLE memory TYPE record<companion>;   -- 不変の原所有者（"shared"で上書きしない）
 DEFINE FIELD audiences ON TABLE memory TYPE array<string> DEFAULT []; -- 共有先コンパニオンID一覧
 DEFINE FIELD content ON TABLE memory TYPE string;            -- 記憶の要約・事実・手順本文
-DEFINE FIELD importance ON TABLE memory TYPE int ASSERT $value >= 0 AND $value <= 10; -- 0: 忘却・非優先, 1〜10: 重要度
+DEFINE FIELD importance ON TABLE memory TYPE int ASSERT $value >= 1 AND $value <= 10; -- 1〜10: 重要度
 DEFINE FIELD occurred_at ON TABLE memory TYPE option<datetime>; -- 出来事の発生日時（不明時はnull）
 DEFINE FIELD recorded_at ON TABLE memory TYPE datetime DEFAULT time::now() READONLY; -- 初回記録日時（更新不可）
-DEFINE FIELD last_accessed_at ON TABLE memory TYPE datetime; -- 明示的引用による最終利用日時
+DEFINE FIELD last_accessed_at ON TABLE memory TYPE option<datetime>; -- 明示的引用による最終利用日時（未引用時はnull）
 DEFINE FIELD memory_revision ON TABLE memory TYPE int DEFAULT 1; -- 競合検知用の版
-DEFINE FIELD is_forgotten ON TABLE memory TYPE bool DEFAULT false; -- 忘却フラグ（通常想起から除外）
+DEFINE FIELD is_forgotten ON TABLE memory TYPE bool DEFAULT false; -- 忘却フラグ（通常想起・Pinned枠から除外）
 DEFINE FIELD emotion ON TABLE memory TYPE option<string>;     -- 当時の感情タグ
 DEFINE FIELD source_context ON TABLE memory FLEXIBLE TYPE object; -- 由来（turn_id, run_id, 話者等）
 DEFINE FIELD embedding ON TABLE memory TYPE option<array<float>>; -- 埋め込みベクトル（Alpha標準: 1536次元）
@@ -119,8 +119,7 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
   - クエリと記憶のベクトルコサイン類似度と、BM25全文検索ランクを正規化合成したスコア。
   - 埋め込みモデル・次元数・前処理版が一致するレコードのみを対象とする。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
-  - $0 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化。
-    - $0$: 忘却・優先度最低（通常想起およびPinned枠から完全に除外）
+  - $1 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化（忘却時も元の重要度値は保持される）。
     - $1 \sim 3$: 日常の雑談、一時的な状況
     - $4 \sim 6$: 趣味嗜好、仕事上の習慣
     - $7 \sim 9$: 約束、大きな決定、重要な出来事
@@ -141,10 +140,10 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 
 `importance == 10` のレコード、および `user_profile` は、ベクトル類似度検索をバイパスしてシステムプロンプトの中核枠へ常時注入される。ただし、以下の不変条件を厳格に適用する：
 
-1. **忘却・訂正の適用**: `is_forgotten == true`（または `importance == 0`）の記憶、または訂正されて `superseded_by` を持つ古い記憶は、中核事実であっても**Pinned枠へ注入してはならない**。
+1. **忘却・訂正の適用**: `is_forgotten == true` の記憶、または訂正されて `superseded_by` を持つ古い記憶は、重要度が10であっても**Pinned枠へ注入してはならない**。
 2. **トークン予算上限（Token Budget）**:
    - Pinned Memory枠には最大トークン予算（例: 最大 1,000 トークン）を設定する。
-   - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at` 順で収容する。
+   - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at`（未引用時は `recorded_at`）順で収容する。
 
 ---
 
@@ -173,15 +172,17 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
   → 記憶・処理済みカーソルを原子的コミット
 ```
 
-### 5.3 「忘却」のセマンティクス（優先度引き下げ）と遅延整理ジョブの競合解決
-- **忘却の本質は「優先度最低化（想起除外）」**:
-  - 忘却はデータベースからの物理削除や発話ターン全体の除外ではなく、**対象記憶レコードの優先度を引き下げる（`importance = 0` かつ `is_forgotten = true`）** 運用とする。
-  - 内容ごとに独立レコードとして分割保存されているため、一方の記憶（勤務先）を忘却しても、同一ターンに由来する別の記憶（好きな飲み物）の想起には一切影響を与えない。
-  - 自然な人間の記憶と同様、過去ログ上の認知事実としては残存しつつ、想起スコア計算（$Importance = 0$）および通常想起・Pinned枠からの除外フィルタにより、以後のプロンプトには一切出現しなくなる。
+### 5.3 「忘却」のセマンティクス（想起優先度の引き下げ）と境界
+- **人間の自然な記憶に即した忘却設計**:
+  - 忘却はデータベースからの物理削除ではなく、**「想起優先度を下げ、日常の対話で思い出しにくくする（`is_forgotten = true`）」** 運用とする。人間が過去の日記や発言した客観的事実そのものを物理抹消しないのと同様に、DBからの物理削除は行わない。
+  - **保証の明確な境界**:
+    - **保証すること**: 忘却フラグ（`is_forgotten == true`）が設定された記憶は、ベクトル類似度検索・BM25全文検索・Pinned枠の「自動想起候補」から完全に除外される。
+    - **保証しないこと（意図的仕様）**: 直前の会話生ログ（Recent Dialogue History）や既存の要約文（Compaction Summary）からの物理的・遡及的な削除は保証しない。対話の客観的な事実記録としては残り、対話の進展に伴って直前ログが窓から自然に押し出されるか、次回のCompaction要約で抽象化されるのを待つ。
+  - **分割保存との連携**: 内容ごとに独立した `MemoryRecord` として分割保存されているため、一方の記憶（例: 勤務先）を忘却しても、同一ターンに由来する別の記憶（例: 好きな飲み物）の想起には一切影響を与えない。
 - **遅延整理ジョブの競合解決**:
-  - ユーザーが「今の話は忘れて」と指示して `is_forgotten = true`（`importance = 0`）となった後、バックグラウンドで走っていた古い整理ジョブが同じ記憶を書き戻そうとした場合：
+  - ユーザーが「今の話は忘れて」と指示して `is_forgotten = true` となった後、バックグラウンドで走っていた古い整理ジョブが同じ記憶を書き戻そうとした場合：
     - トランザクション内で `memory_revision` および `is_forgotten` を照合し、**古い整理結果を拒否（Conflict）**して破棄する。
-    - 忘却済みの記憶と同じ意味内容・事実の再抽出を防止し、忘却したはずの記憶が形を変えて復活する不整合を遮断する。
+    - 同一の出所ターンにおいて既に抽出・忘却フラグが立っているレコードが存在する場合、そのレコードの忘却状態を上書き再有効化しない。
 
 ---
 
@@ -202,7 +203,7 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 
 | 不変条件 | 検証方法 | 合格基準 |
 | :--- | :--- | :--- |
-| **忘却の厳密性** | 記憶を忘却（`is_forgotten = true`）させた後、通常想起およびPinned枠を検証 | 通常想起・Pinned枠のいずれからも完全に除外され、再整理ジョブによって復活しないこと |
+| **忘却のセマンティクス** | 記憶を忘却（`is_forgotten = true`）させた後、自動想起およびPinned枠を検証 | 自動想起・Pinned枠のいずれからも完全に除外され、再整理ジョブによって復活しないこと（過去ログの客観記録は保持されること） |
 | **遅延整理の競合排除** | 記憶変更後に、変更前の古い文脈から生成した整理結果をコミット試行 | 版不一致（Conflict）として安全に拒否され、最新状態が上書きされないこと |
 | **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、`talk` で引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、`cited_memories` に含まれた場合のみ更新されること |
 | **Pinned予算制限** | 重要度10の記憶を多数作成し、プロンプト生成を実行 | 予算上限（例: 1,000トークン）を超過せず、文脈窓を圧迫しないこと |
