@@ -51,7 +51,7 @@
           owner TEXT NOT NULL,
           audiences TEXT NOT NULL, -- JSON array
           content TEXT NOT NULL,
-          importance INTEGER NOT NULL CHECK (importance >= 1 AND importance <= 10),
+          importance INTEGER NOT NULL CHECK (importance >= 0 AND importance <= 10),
           occurred_at TEXT,
           recorded_at TEXT NOT NULL,
           last_accessed_at TEXT,
@@ -63,10 +63,25 @@
           embedding_dimensions INTEGER
       );
 
+      -- 外部コンテンツテーブル方式で memories と整数 rowid で結合
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
           content,
+          content='memories',
+          content_rowid='rowid',
           tokenize='trigram'
       );
+
+      -- FTS5 同期トリガー
+      CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+          INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+          INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF content ON memories BEGIN
+          INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+          INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
 
       CREATE TABLE IF NOT EXISTS memory_edges (
           from_id TEXT NOT NULL,

@@ -25,14 +25,14 @@ IDはホスト内で安定した不透明な値とする。親、バックエン
 | 会話 | 発言の受付、追加入力、履歴・メッセージ取得、実行イベントと文字片の購読、生成の停止 |
 | キャラクター | 初期プロファイルの取得・編集と現在の心の取得（`GetMind` / `UpdateMindProfile`）。作者設定と交流で育った状態を分ける |
 | 記憶 | 親の`mind_recall` / `mind_read` / `mind_update`、ホストの自動整理・自動想起、`ControlMemory`（forget/remember/share/unshare）。クライアント向けの記憶一覧UIは未実装 |
-| 作業 | session一覧・状態・結果、追加指示、相談への回答、個別runの停止 |
+| 作業 | WorkSession一覧・状態取得（`ListWork`）、進捗イベント購読（`SubscribeWorkEvents`）、UIからの緊急直接停止（`StopWork`）。通常の作業指示は親の会話を通じて行われる |
 | 接続・ツール | プロバイダー・バックエンド・ツール一覧、能力、設定、認証の開始・状態・解除 |
-| 許可 | 利用範囲の表示、ユーザーによる付与・変更・解除、承認要求の取得と回答 |
+| 権限・承認 | ツール利用許可ルール（パス・コマンド等）やセキュリティ設定の取得・更新、未決の承認要求（`ApprovalRequest`）の取得とユーザー回答（承認/拒否） |
 | 通知 | 会話・心・作業・許可・ホスト状態の変更と再同期 |
 
 日常の記憶訂正・忘却は対話で行える。調査用の一覧を編集しなければ記憶が育たない構成にしない。開発者向けの読取操作と、他のコンパニオンや外部プラグインに許す能力は別にする。
 
-クライアントに親のオーケストレーションを実装しない。通常の作業依頼・追加指示・相談回答は親へ出所付き入力として届く。特定の作業へ向けたユーザーの入力も、親が文脈と対象を理解できる形にする。作業バックエンドの検証用直接呼び出しは別能力として扱い、通常の会話と混ぜない。
+クライアントに親のオーケストレーションを実装しない。通常の作業依頼・追加指示・相談回答は親へ出所付き入力として届く。特定の作業へ向けたユーザーの入力も、親が文脈と対象を理解できる形にする。作業バックエンドの検証用直接呼び出し（`WorkService.StartWork` / `SendWork` 等）は別能力（開発・自動化用）として扱い、通常の会話と混ぜない。
 
 ## 3. 公開状態
 
@@ -78,7 +78,7 @@ RequestViewは質問と権限要求を区別し、対象session/run、request id
 
 ステップ2の実装では、`GetMind` / `UpdateMindProfile`と通知`MindUpdated`を追加し、`mind_companions`の著者プロファイル追加材料と現在の心、`mind_memories`の記憶、`mind_operations`の適用結果をSQLiteへ追加した。記憶と心の正本はSQLite、会話はRigセッションログのままであり、会話全文を複製しない。ステップ1の旧データは削除せず、心の初期状態は既存の`Companion.mind`から読む。
 
-ステップ3の実装では、整理・埋め込みを`purpose=memory, data=["memory"]`のGrantとコンパニオン接続へ分離し、タスク割当・タスクGrantとは共有しない。自動想起はローカルSQLiteの語句検索で配送前に外部埋め込みを待たず、意味検索は`mind_recall`で行う。確定はRigの会話entryの`status=completed`で判定し、処理済み`(last_sequence,last_offset)`の直後から前向きに取得する。長い発言はnext-offsetで分割し、末尾まで処理するまで処理済みにしない。既適用範囲の再送はadvanced=false。失敗/停止ページは終端skipし、未確定応答では待つ。埋め込みはRigのOpenAI wireに認可付きトランスポートを渡し、検索時にmodel・前処理・次元を照合する。共有の公開範囲は本文・説明・appraisal・訂正関係idで、私的な出所は渡さない。`mind_index_pending`・`mind_memories_fts`（FTS5 trigram）・`mind_vectors`（model/dimension/前処理/vector）・`mind_index_status`・`mind_consolidation`を追加し、`ControlMemory`、MindViewの索引/整理状態を追加した。自動整理は確定した会話範囲と処理済み位置を同じSQLiteトランザクションで進め、生成失敗・保存失敗・競合では進めない。FTSとベクトルはRRFで統合し、canonicalの所有者・共有範囲・忘却・時刻で再検証する。埋め込みはタスクGrantで送り、OpenRouter接続の埋め込みは未対応としてsemantic unavailableを返す。
+ステップ3の実装では、整理・埋め込みの処理をコンパニオン接続へ分離した（※初期試作にあった `purpose=memory, data=["memory"]` などの旧 Grant マトリクスは廃止され、[権限・セキュリティ設計](design/permissions.md) および [設定仕様](features/settings/permissions.md) のとおり OSネイティブSandbox ＋ 機械的ルール照合 ＋ 承認要求 `ApprovalRequest` に一本化されている。RPCは `SettingsService` に統合され、独立した旧 Grant RPC は存在しない）。自動想起はローカルSQLiteの語句検索で配送前に外部埋め込みを待たず、意味検索は`mind_recall`で行う。確定はRigの会話entryの`status=completed`で判定し、処理済み`(last_sequence,last_offset)`の直後から前向きに取得する。長い発言はnext-offsetで分割し、末尾まで処理するまで処理済みにしない。既適用範囲の再送はadvanced=false。失敗/停止ページは終端skipし、未確定応答では待つ。埋め込みはRigのOpenAI wireに認可付きトランスポートを渡し、検索時にmodel・前処理・次元を照合する。共有の公開範囲は本文・説明・appraisal・訂正関係idで、私的な出所は渡さない。`mind_index_pending`・`memories_fts`（FTS5 trigram 外部コンテンツ）・`mind_vectors`（model/dimension/前処理/vector）・`mind_index_status`・`mind_consolidation`を追加し、`ControlMemory`、MindViewの索引/整理状態を追加した。自動整理は確定した会話範囲と処理済み位置を同じSQLiteトランザクションで進め、生成失敗・保存失敗・競合では進めない。FTSとベクトルはRRFで統合し、canonicalの所有者・共有範囲・忘却・時刻で再検証する。OpenRouter接続の埋め込みは未対応としてsemantic unavailableを返す。
 
 本書は意味の契約と責務を定める。最終的なフィールド名・タグ・エラーコードは実装時のprotobuf/SDKを正本とし、同じwire仕様を手書き文書へ重複列挙しない。実装した能力だけを広告する。[実装順序](alpha.md)
 

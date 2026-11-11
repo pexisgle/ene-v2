@@ -99,7 +99,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除や除外フラグではなく想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（過去ログの客観記録は保持）。
   - ハイブリッド検索: FTS5 BM25 と ベクトル検索をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。
   - **増分自動整理**: `processed_turns_cursor` より後の新規ターンのみを増分走査し、過去ログからの重複再生成を防止。
-  - 想起スコア計算式：$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$
+  - 想起スコア計算式：$\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t})$（忘却直後のスコアインフレ防止と自動想起 `importance >= 2` フィルタ連動）
   - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、ターン完了後の固定・統合処理（Consolidation）時に `cited_memory_ids` を抽出して実際に引用された場合のみ更新（ストリーミング出力へのタグ混入なし）。
   - **Pinned Memory制約**: 重要度10であっても、訂正状態や優先度引き下げ状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 

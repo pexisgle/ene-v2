@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS memories (
     owner TEXT NOT NULL,              -- 不変の原所有者コンパニオンID
     audiences TEXT NOT NULL,          -- JSON array: 共有先コンパニオンID一覧
     content TEXT NOT NULL,            -- 記憶の要約・事実・手順本文
-    importance INTEGER NOT NULL CHECK (importance >= 1 AND importance <= 10), -- 想起優先度
+    importance INTEGER NOT NULL CHECK (importance >= 0 AND importance <= 10), -- 想起優先度（0〜10: 忘却時は0または1へ引き下げ）
     occurred_at TEXT,                 -- 出来事の発生日時（ISO 8601、不明時はnull）
     recorded_at TEXT NOT NULL,        -- 初回記録日時
     last_accessed_at TEXT,            -- 明示的引用による最終利用日時
@@ -81,11 +81,26 @@ CREATE TABLE IF NOT EXISTS memories (
     embedding_dimensions INTEGER      -- 例: 1536
 );
 
--- 4. 日本語 trigram 全文検索仮想テーブル
+-- 4. 日本語 trigram 全文検索外部コンテンツ仮想テーブル
+-- SQLiteの暗黙の整数 rowid を使って memories と同期する外部コンテンツ方式
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
+    content='memories',
+    content_rowid='rowid',
     tokenize='trigram'
 );
+
+-- FTS5 同期トリガー
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF content ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
 
 -- 5. 認知的関係性グラフ（1ホップ エッジテーブル）
 CREATE TABLE IF NOT EXISTS memory_edges (
@@ -111,9 +126,17 @@ CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, impo
 
 ### 4.1 想起スコアリング計算式
 
-Generative Agents と Mem0 の知見を統合し、想起候補の最終スコアは関連度・重要度・直近性の加重和として算出する。
+Generative Agents と Mem0 の知見を統合し、想起候補の最終スコアは関連度・重要度・直近性の加重和に、重要度による減衰係数を乗じて算出する。
 
-$$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency}$$
+$$\text{Score} = \min\left(1.0, \frac{\text{Importance}}{0.3}\right) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency})$$
+
+- **減衰係数（直後の再想起防止）**:
+  - $\text{Importance} = \text{importance} / 10.0$（$0.0 \sim 1.0$）。
+  - ユーザーが「今の話は忘れて！」と指示した直後は、出来事が起きた直後であるため $\text{Recency} \approx 1.0$、直後の話題が類似していれば $\text{Relevance} \approx 1.0$ となり、単純加算ではスコアが不当に高くなってしまう。
+  - $\min(1.0, \text{Importance} / 0.3)$ を乗じることで、$\text{importance} = 0$ のときはスコアが $0.0$ となり、$\text{importance} = 1$ のときもスコア全体が $1/3$ に減衰し、忘却直後のスコアインフレを数学的に防止する（$\text{importance} \ge 3$ では係数は $1.0$ で減衰なし）。
+- **自動想起と明示想起の境界**:
+  - **自動想起（毎ターンのプロンプト注入枠）**: `WHERE m.importance >= 2` を対象とする。忘却指示（`importance = 0` または `1`）を受けた記憶は、自動で取り出す記憶の候補から即座に外れる。
+  - **明示想起（`mind_recall` ツール枠）**: ユーザーが「さっき忘れてって言ったあの話だけど…」等と明示的に過去を尋ねた場合は、`importance >= 0` の全件が対象となり、過去の客観的事実として再確認できる。
 
 - **Relevance（関連度: $0.0 \sim 1.0$）**:
   - FTS5 trigram 語句検索とベクトル意味検索を独立して取得し、Rust側で **RRF（Reciprocal Rank Fusion）** により順位融合したスコア。
@@ -122,19 +145,39 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 ```rust
 // Rust側でのハイブリッド検索とRRF統合のフロー
 // 1. 全文検索候補の取得（FTS5 BM25スコア順・最大20件）
-let lexical_matches = conn.prepare(r#"
-    SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, bm25(memories_fts) AS rank
-    FROM memories m
-    JOIN memories_fts f ON m.id = f.rowid
-    WHERE (m.owner = ?1 OR m.audiences LIKE ?2)
-      AND memories_fts MATCH ?3
-    ORDER BY rank ASC
-    LIMIT 20
-"#)?;
+// ※FTS5 trigram は3文字未満（例:「犬」「AI」）のクエリでMATCHが0件になるため、2文字以下はLIKEへフォールバック
+let lexical_matches = if query_text.chars().count() >= 3 {
+    // 記号による構文エラーを防ぐためダブルクォートをエスケープしてフレーズ検索化
+    let escaped_query = format!("\"{}\"", query_text.replace('"', "\"\""));
+    let mut stmt = conn.prepare(r#"
+        SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, bm25(memories_fts) AS rank
+        FROM memories m
+        JOIN memories_fts f ON m.rowid = f.rowid
+        WHERE (m.owner = ?1 OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = ?2))
+          AND (?4 = false OR m.importance >= 2) -- 自動想起時は >= 2、明示的想起は全件
+          AND memories_fts MATCH ?3
+        ORDER BY rank ASC
+        LIMIT 20
+    "#)?;
+    stmt.query_map(params![companion_id, companion_id, escaped_query, is_auto_recall], |row| ...)?
+} else {
+    // 2文字以下のフォールバック検索（LIKE）
+    let like_pattern = format!("%{}%", query_text.replace('%', "\\%").replace('_', "\\_"));
+    let mut stmt = conn.prepare(r#"
+        SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, 0.0 AS rank
+        FROM memories m
+        WHERE (m.owner = ?1 OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = ?2))
+          AND (?4 = false OR m.importance >= 2)
+          AND m.content LIKE ?3 ESCAPE '\'
+        ORDER BY m.importance DESC
+        LIMIT 20
+    "#)?;
+    stmt.query_map(params![companion_id, companion_id, like_pattern, is_auto_recall], |row| ...)?
+};
 
 // 2. ベクトル意味検索候補の取得（コサイン類似度順・最大20件）
 // ※選択された埋め込みモデル・次元数が一致するレコードのみを走査
-let semantic_matches = query_vector_similarity(&conn, companion_id, &query_vec, 20)?;
+let semantic_matches = query_vector_similarity(&conn, companion_id, &query_vec, is_auto_recall, 20)?;
 
 // 3. RRF (Reciprocal Rank Fusion) による順位融合
 // rrf_score = sum(1.0 / (60.0 + rank_i))
@@ -150,7 +193,8 @@ for candidate in &mut fused_candidates {
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
   - 各記憶レコードは使用したモデル名と次元数を保持し、検索時は現在のモデルと一致するベクトルのみを照合する。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
-  - $1 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化（忘却時はこの優先度を引き下げる）。
+  - $0 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化（忘却時は $0$ または $1$ へ引き下げる）。
+    - $0$: 忘却指示を受けた記憶（明示的検索でのみ参照可能）
     - $1 \sim 3$: 日常の雑談、一時的な状況
     - $4 \sim 6$: 趣味嗜好、仕事上の習慣
     - $7 \sim 9$: 約束、大きな決定、重要な出来事
@@ -213,12 +257,13 @@ for candidate in &mut fused_candidates {
 - **人間の自然な記憶に即した忘却設計（明確な削除フラグの排除）**:
   - **記憶に明確な削除（物理削除や除外フラグ）は存在しない**。
   - 忘却とは、記憶レコードの**想起優先度（`importance`）を引き下げ、日常会話で自然に想起されにくくすること**である。人間が過去の経験そのものを脳内から完全に抹消できないのと同様に、DBからの物理削除や除外フラグは設けない。
-  - **想起スコア計算との連動**:
-    - 想起スコア計算式（$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency}$）において、優先度（`Importance`）が引き下げられることで総スコアが低下する。
-    - 他の条件（Relevance, Recency）が同じであれば想起スコアは低減し、重要度10のPinned枠からも外れる。ただし、質問との関連度（`Relevance`）が極めて高い場合などは、人間が過去の記憶を詳細に問われて思い出すのと同様に再び想起されることがある。
+  - **想起スコア計算との連動と自動想起除外**:
+    - 想起スコア計算式（$\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency})$）において、優先度（`Importance`）が引き下げられることで総スコアが低下し、減衰係数により直後（高Recency）の再想起スコアインフレも防止される。
+    - **自動想起（毎ターン注入枠）からの即時除外**: 自動想起クエリは `importance >= 2` を条件とするため、忘却指示により重要度が 0 または 1 に引き下げられた記憶は、**「自動で取り出す記憶の候補」から即座に外れる**。
+    - 他の条件（Relevance, Recency）が同じであれば想起スコアは低減し、重要度10のPinned枠からも外れる。ただし、ユーザーが過去について明示的に尋ねた場合（`mind_recall` ツール実行時）は `importance >= 0` 全件が検索対象となり、人間が過去の記憶を詳細に問われて思い出すのと同様に再び確認できる。
   - **保証の明確な境界**:
-    - **保証すること**: 忘却は想起優先度を引き下げる操作であり、他の条件が同じなら想起スコアは低下し、重要度10のPinned枠から外れる。遅延した整理ジョブが古い優先度で上書きすることは防止される。
-    - **保証しないこと（意図的仕様）**: 関連度が極めて高いクエリにおける完全な不可視化や、直前の会話生ログ（Recent Dialogue History）・既存の要約文（Compaction Summary）からの物理的・遡及的な削除は保証しない。対話の客観的な事実記録としては残り、対話の進展に伴って直前ログが窓から自然に押し出されるか、次回のCompaction要約で抽象化されるのを待つ。
+    - **保証すること**: 忘却は想起優先度を引き下げる操作であり、自動想起候補から外れ、他の条件が同じなら想起スコアは低下し、重要度10のPinned枠から外れる。遅延した整理ジョブが古い優先度で上書きすることは防止される。
+    - **保証しないこと（意図的仕様）**: ユーザーからの明示的な過去検索（`mind_recall`）における完全な不可視化や、直前の会話生ログ（Recent Dialogue History）・既存の要約文（Compaction Summary）からの物理的・遡及的な削除は保証しない。対話の客観的な事実記録としては残り、対話の進展に伴って直前ログが窓から自然に押し出されるか、次回のCompaction要約で抽象化されるのを待つ。
   - **分割保存との連携**:
     - 内容ごとに独立した `MemoryRecord` として分割保存されているため、一方の記憶（例: 勤務先）の優先度を引き下げても、同一ターンに由来する別の記憶（例: 好きな飲み物）の想起には一切影響を与えない。
   - **遅延整理ジョブの競合解決**:

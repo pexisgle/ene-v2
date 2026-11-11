@@ -233,7 +233,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 
 - **組み込みSQLite**: C++依存のない完全Rust組み込みストレージ（`rusqlite` bundled）により、Windows/macOS/Linuxで単一ファイル永続化と低メモリ消費を実現。
 - **MemoryRecordスキーマ不変条件**: `owner`（作成者コンパニオン不変保持）、`audiences`（共有先リスト）、`importance`（1〜10: 想起優先度）、`memory_revision`、`embedding_model`、`embedding_dimensions` を保存。
-- **想起スコアリング**: $\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t}$ によるベクトルコサイン・FTS5のRRF統合と重要度・時間減衰の統合。
+- **想起スコアリング**: $\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t})$ によるベクトルコサイン・FTS5のRRF統合と重要度・時間減衰の統合（自動想起は `importance >= 2` を対象とし、明示検索は全件対象）。
 - **引用ガード（汚染ループ防止）**: ターン完了後の固定・統合処理（Consolidation）時に `cited_memory_ids` から明示引用が確認された場合のみ `last_accessed_at` を更新し、アイドル時整理で重要度再評価に活用。ストリーミングテキストへのタグ混入なし。
 - **Pinned Memory保護**: 重要度10であっても、優先度引き下げや訂正状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 - **関係性テーブル（`memory_edges`）**: `companion_id` と `memory_id` の関係や記憶同士の関連をリレーショナルに管理。遅延した自動整理ジョブが優先度引き下げ済みの記憶を古い優先度で上書きする競合をトランザクション内で拒否。
