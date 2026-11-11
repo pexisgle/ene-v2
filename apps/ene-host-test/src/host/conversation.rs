@@ -2,7 +2,7 @@
 use super::{
     Binding, Host, Owner, PREAMBLE, Receipt, ReceiptStatus, model,
     store::{Result, storage},
-    tick,
+    tick, tools,
 };
 use crate::proto::{chat::v1 as w, settings::v1::Settings};
 use connectrpc::ConnectError;
@@ -135,7 +135,7 @@ pub(super) fn spawn_agent(world: &mut World, target: &w::Target) -> Entity {
 pub(super) fn attach_agent(world: &mut World, entity: Entity, target: &w::Target) {
     if world.get::<Owner>(entity).is_none() {
         let owner = Owner(target.clone());
-        let access = owner.tool_access();
+        let access = tools::access_for(world.resource::<tools::ToolCatalog>(), &owner);
         world.entity_mut(entity).insert((owner, access));
     }
 }
@@ -184,7 +184,7 @@ pub(super) fn has_request(world: &mut World, entity: Entity, id: &str) -> bool {
                     .is_some_and(|request| request.0 == id)
             }) || conversation
                 .asides()
-                .any(|(_, aside)| aside.kind == "ene.accepted" && aside.value.as_str() == Some(id))
+                .any(|(_, aside)| aside.kind == "host.accepted" && aside.value.as_str() == Some(id))
         })
         || world
             .query_filtered::<(&Incoming, &ForAgent), (With<Started>, Without<Outcome>)>()
@@ -280,6 +280,23 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     })
 }
 
+/// Injects host context into a conversation without starting a turn.
+///
+/// A subsystem such as the mind adds here what the next model call should
+/// know; `GetHistory` records the message with the source and role `context`.
+#[allow(dead_code)] // The extension point: the mind is the first caller.
+pub(crate) fn interject(
+    world: &mut World,
+    target: &w::Target,
+    source: &str,
+    text: String,
+) -> Result<()> {
+    let entity = target_entity(world, target)?;
+    let author = Author::plugin(source);
+    world.trigger(Deliver::new(entity, text, DeliveryMode::Inform).with_author(author));
+    Ok(())
+}
+
 pub(crate) fn stop(app: &mut App, target: w::Target) -> Result<w::Empty> {
     let entity = target_entity(app.world_mut(), &target)?;
     app.world_mut().trigger(StopTurn {
@@ -312,13 +329,10 @@ pub(crate) fn history(world: &World, entity: Entity) -> w::History {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let role = if entry
-                        .author
-                        .is_some_and(|author| matches!(author.kind, AuthorKind::Agent))
-                    {
-                        "agent"
-                    } else {
-                        "user"
+                    let role = match entry.author.map(|author| &author.kind) {
+                        Some(AuthorKind::Agent) => "agent",
+                        Some(AuthorKind::Plugin(_)) => "context",
+                        _ => "user",
                     };
                     (role, text)
                 }
@@ -380,7 +394,7 @@ pub(super) fn turn_input(conversation: &Conversation, start: MessageId) -> Strin
         .map(|request| request.0.clone())
         .or_else(|| {
             conversation.asides().find_map(|(_, aside)| {
-                (aside.kind == "ene.turn_input"
+                (aside.kind == "host.turn_input"
                     && aside.value["start"].as_u64() == Some(start.get()))
                 .then(|| aside.value["input_id"].as_str().map(str::to_owned))
                 .flatten()

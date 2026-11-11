@@ -5,8 +5,9 @@ use std::{
 };
 
 use connectrpc::ConnectError;
-use rig_core::completion::Section;
+use rig_core::completion::{Message, Section};
 use rig_ecs::{WriteLogs, prelude::*, session_log::SessionLog};
+use rig_memory::{HeuristicTokenCounter, TokenCounter, recent::TokenBudget};
 use uuid::Uuid;
 
 use super::{
@@ -34,6 +35,7 @@ impl Plugin for KernelPlugin {
             .add_observer(turn_input)
             .add_observer(release_approval)
             .add_systems(AgentPass, prepare.in_set(PrepareSystems::Edit))
+            .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit))
             .add_systems(AgentPass, gate.in_set(Stage::Gate))
             // Read before Commit removes the completed turn and its calls.
             .add_systems(AgentPass, streams.in_set(Stage::Review))
@@ -83,7 +85,7 @@ fn turn_input(
     let input = conversation::turn_input(&conversation, turn.start);
     if !input.is_empty() {
         conversation.add_aside(Aside::new(
-            "ene.turn_input",
+            "host.turn_input",
             Author::rig(),
             serde_json::json!({"start":turn.start.get(),"input_id":input}),
         ));
@@ -104,7 +106,7 @@ fn accepted(
     if let Ok(mut conversation) = conversations.get_mut(agent.0) {
         // Keep acceptance evidence even when a failed turn recalls its user entry.
         conversation.add_aside(Aside::new(
-            "ene.accepted",
+            "host.accepted",
             Author::rig(),
             serde_json::json!(request.0),
         ));
@@ -139,9 +141,51 @@ fn prepare(
     }
 }
 
+/// Fits each model call to the window of the model it goes to.
+///
+/// `ModelRequest::history` is the request's own view of the conversation, so
+/// cutting it changes neither the session log nor `GetHistory`. A model whose
+/// window is unknown is sent the whole conversation, never a guess.
+fn fit(mut calls: Query<(&mut ModelRequest, &Adapted), Added<Admitted>>) {
+    for (mut call, adapted) in &mut calls {
+        let spec = &adapted.0.spec;
+        if let Some(max) = spec.max_output_tokens {
+            call.request_mut().max_tokens = Some(u64::from(max));
+        }
+        let Some(window) = spec.context_window else {
+            continue;
+        };
+        let counter = HeuristicTokenCounter::default();
+        let reserve = spec.max_output_tokens.map_or(0, |tokens| tokens as usize)
+            + call
+                .prompt
+                .as_ref()
+                .map_or(0, |prompt| counter.count(&Message::system(prompt.text())))
+            + call
+                .request
+                .tools
+                .iter()
+                .map(|tool| counter.count_tool(tool))
+                .sum::<usize>();
+        // A byte-ratio estimate, not the provider's tokenizer: it errs towards
+        // a larger window, never a shorter one.
+        let budget = (window as usize).saturating_sub(reserve);
+        let Some(history) = call.history.as_mut() else {
+            continue;
+        };
+        let kept = rig_memory::recent::view(history.messages(), &TokenBudget::new(budget));
+        let len = history.messages().len();
+        // The newest message is the question being asked: it always stays.
+        let start = len.saturating_sub(kept.len()).min(len.saturating_sub(1));
+        if start > 0 {
+            history.splice(0..start, [], Author::plugin("host.window"));
+        }
+    }
+}
+
 fn decide(world: &mut World, entity: Entity, why: impl Into<String>) {
     if let Some(mut decision) = world.get_mut::<Decision>(entity) {
-        decision.decide(Decider::plugin("ene-permission"), Outcome::refused(why));
+        decision.decide(Decider::plugin("host-permission"), Outcome::refused(why));
     }
 }
 

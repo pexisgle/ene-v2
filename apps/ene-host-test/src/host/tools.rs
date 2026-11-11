@@ -1,8 +1,12 @@
 //! Host-bound open tools: the agent cannot choose its owner, permission or operation id.
+use std::collections::HashSet;
+
+use bevy_ecs::system::IntoObserverSystem;
 use connectrpc::ConnectError;
+use rig_core::{completion::ToolDefinition, serve::ErasedHandler};
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use super::{
@@ -16,8 +20,47 @@ pub(super) const START_WORK: &str = "start_work";
 pub(super) const UPDATE_STATE: &str = "update_state";
 pub(super) const GUARDED_UPDATE: &str = "guarded_update";
 
-pub(super) const PARENT_TOOLS: &[&str] = &[CURRENT_TIME, START_WORK, UPDATE_STATE];
-pub(super) const WORKER_TOOLS: &[&str] = &[CURRENT_TIME, UPDATE_STATE, GUARDED_UPDATE];
+/// Which agents a tool is offered to. The tool is registered once; its
+/// access is derived, so adding a tool never edits a second list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    Parent,
+    Worker,
+}
+
+/// The tools registered for each role, and the access agents get from it.
+#[derive(Resource, Default)]
+pub(crate) struct ToolCatalog {
+    parent: HashSet<String>,
+    worker: HashSet<String>,
+}
+
+impl ToolCatalog {
+    fn insert(&mut self, name: &str, roles: &[Role]) {
+        for role in roles {
+            match role {
+                Role::Parent => self.parent.insert(name.to_owned()),
+                Role::Worker => self.worker.insert(name.to_owned()),
+            };
+        }
+    }
+
+    fn names(&self, role: Role) -> Vec<String> {
+        match role {
+            Role::Parent => self.parent.iter().cloned().collect(),
+            Role::Worker => self.worker.iter().cloned().collect(),
+        }
+    }
+}
+
+pub(super) fn access_for(catalog: &ToolCatalog, owner: &Owner) -> ToolAccess {
+    let role = if owner.is_work() {
+        Role::Worker
+    } else {
+        Role::Parent
+    };
+    ToolAccess::Only(catalog.names(role))
+}
 
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -44,34 +87,83 @@ pub(super) struct ToolsPlugin;
 
 impl Plugin for ToolsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_open_tool::<NoArgs, _>(
+        app.init_resource::<ToolCatalog>()
+            .add_systems(Update, sync_access.before(AgentLoop));
+        open_tool(
+            app,
+            &[Role::Parent, Role::Worker],
             CURRENT_TIME,
             "Get the current Unix time in milliseconds.",
-            ToolOptions::default(),
             run_tool(|_, _, _, _: NoArgs| Ok(now_ms().to_string())),
-        )
-        .add_open_tool::<StartWork, _>(
+        );
+        open_tool(
+            app,
+            &[Role::Parent],
             START_WORK,
             "Start independent work using only the supplied instructions; returns a work id immediately.",
-            ToolOptions::default(),
             run_tool(|world, agent, call, args: StartWork| start(world, agent, call, args.prompt)),
-        )
-        .add_open_tool::<UpdateState, _>(
+        );
+        open_tool(
+            app,
+            &[Role::Parent, Role::Worker],
             UPDATE_STATE,
             "Replace host-owned state using its expected revision; committed updates survive cancellation.",
-            ToolOptions::default(),
-            run_tool(|world, agent, call, args: UpdateState| {
-                update(world, agent, call, args.value, args.expected_revision)
-            }),
-        )
-        .add_open_tool::<UpdateState, _>(
-            GUARDED_UPDATE,
-            "Propose a state replacement requiring owner approval before execution.",
-            ToolOptions::default(),
             run_tool(|world, agent, call, args: UpdateState| {
                 update(world, agent, call, args.value, args.expected_revision)
             }),
         );
+        open_tool(
+            app,
+            &[Role::Worker],
+            GUARDED_UPDATE,
+            "Propose a state replacement requiring owner approval before execution.",
+            run_tool(|world, agent, call, args: UpdateState| {
+                update(world, agent, call, args.value, args.expected_revision)
+            }),
+        );
+    }
+}
+
+/// Registers a host-bound open tool and records the roles it is offered to.
+fn open_tool<A, M>(
+    app: &mut App,
+    roles: &[Role],
+    name: &str,
+    description: &str,
+    observer: impl IntoObserverSystem<ToolCalled<A>, M>,
+) where
+    A: DeserializeOwned + JsonSchema + Send + Sync + 'static,
+    M: 'static,
+{
+    app.world_mut()
+        .resource_mut::<ToolCatalog>()
+        .insert(name, roles);
+    app.add_open_tool(name, description, ToolOptions::default(), observer);
+}
+
+/// Registers a tool found at runtime, such as an MCP server's, for the given
+/// roles. Calls run through `handler` like any other tool's.
+#[allow(dead_code)] // The extension point: no built-in source exists yet.
+pub(crate) fn spawn_tool(
+    world: &mut World,
+    roles: &[Role],
+    definition: ToolDefinition,
+    handler: ErasedHandler,
+) -> Option<Entity> {
+    let name = definition.name.as_str().to_owned();
+    let entity = world.spawn_tool(definition, handler, ToolOptions::default())?;
+    world.resource_mut::<ToolCatalog>().insert(&name, roles);
+    Some(entity)
+}
+
+/// Gives agents the tools the catalog now holds; a runtime tool is offered
+/// from the next frame on.
+fn sync_access(catalog: Res<ToolCatalog>, mut agents: Query<(&Owner, &mut ToolAccess)>) {
+    if !catalog.is_changed() {
+        return;
+    }
+    for (owner, mut access) in &mut agents {
+        *access = access_for(&catalog, owner);
     }
 }
 
