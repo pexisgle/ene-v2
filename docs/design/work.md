@@ -33,7 +33,7 @@
   - `Run ≒ ACP prompt turn`: 1回の指示実行は `session/prompt` に対応する。
   - **中断の扱い**: 通常のRun中断は ACP 標準の `session/cancel` を送信して安全に行う。外部プロセス自体の終了は、WorkSession自体の破棄時、またはセッション全体がハングして応答しない場合のみ実行する。
 - **内蔵Rigエージェント**:
-  - ホスト同一プロセス内の非同期Tokioタスクとして実行される。外部エージェントプロセスは存在せず、シェルコマンドやビルドツールを実行する子プロセスのみを `process-wrap` で安全に管理する。
+  - 同一 `rig-ecs` World 内で、親エンティティに属する子エージェントエンティティ（`SpawnedBy(parent_entity)`）として並行稼働する。ツール権限を `ToolAccess::Only(...)` で制限し、Run開始は `world.trigger(Deliver::new(child, instruction, DeliveryMode::Queue))`、中断は `world.trigger(StopTurn::new(child))`、完了報告は `TurnFinished` Observer から親へ Deliver することで、同一World内で最小限のオーバーヘッドで実行する。コマンド実行子プロセスのみを `process-wrap` で安全に管理する。
 
 > [!IMPORTANT]
 > **WorkSession と Run の厳格な分離**:
@@ -279,71 +279,70 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 - **通常のユーザー対話（親エージェント経由）**:
   ユーザーはチャット（`ChatService.SendMessage`）や音声入力（`VoiceService`）を通じて親コンパニオンへ実務や調査を依頼する。親エージェント（頭）が文脈を解釈し、内部ツール（`start_work`, `send_work`, `stop_work`, `list_work`）を実行して自律的に進行する。クライアント自身が親のオーケストレーションを肩代わりすることはない。
 - **Connect-RPC `WorkService` の用途区分**:
-  1. **UI一覧表示・進捗購読（通常利用）**:
-     - `ListWork`: 実行中および直近の WorkSession / Run の一覧取得（UIサイドバーやタスクパネル表示用）。
-     - `SubscribeWorkEvents`: 作業エージェントの活動・進捗ログのリアルタイム購読。
+  1. **UI一覧表示・状態取得（通常利用）**:
+     - `ListWorks`: 実行中および直近の WorkSession 一覧取得（UIサイドバーやタスクパネル表示用）。
+     - `GetWork`: 特定 WorkSession の詳細状態・未決要求・成果物の取得。
+     - **単一イベントストリームへの統合**: 個別のストリーム（`SubscribeWorkEvents`）は設けず、リアルタイムの作業進捗ログ・質問・完了イベントはすべて `HostService.Subscribe`（単一の `HostEvent` ストリーム）内の `HostEvent::WorkEvent`（`WorkEventEnvelope`）として集約配信される。
   2. **ユーザー主導の緊急直接停止（即時制御）**:
      - `StopWork`: ユーザーがクライアントUI上の「作業中断」ボタンを押下した際、親LLMの思考待ちを介さず即座に停止要求を発行する。
+     - `CloseWork`: 完了・中断済みセッションの明示的クローズ。
   3. **開発・検証・自動化直接呼び出し（特権・開発用）**:
-     - `StartWork`, `SendWork`: 親コンパニオンの会話文脈を介さず、開発者コンソールやスクリプト連携等で直接タスクを起動・追加入力して検証するためのルート。
+     - `SendWork`: 親コンパニオンの会話文脈を介さず、開発者コンソールやスクリプト連携等で直接指示を投入して検証するためのルート。
 
 ```protobuf
 syntax = "proto3";
 package ene.host.v1;
 
 service WorkService {
-  rpc StartWork(StartWorkRequest) returns (StartWorkResponse);
-  rpc SendWork(SendWorkRequest) returns (SendWorkResponse);
-  rpc StopWork(StopWorkRequest) returns (StopWorkResponse);
-  rpc ListWork(ListWorkRequest) returns (ListWorkResponse);
-  rpc SubscribeWorkEvents(SubscribeWorkEventsRequest) returns (stream WorkEventEnvelope);
+  rpc ListWorks(ListWorksRequest) returns (WorkSessionList);
+  rpc GetWork(WorkRequest) returns (WorkView);
+  rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
+  rpc StopWork(StopWorkRequest) returns (Empty);
+  rpc CloseWork(CloseWorkRequest) returns (Empty);
 }
 
-message StartWorkRequest {
-  optional string session_id = 1;
-  string instruction = 2;
+message ListWorksRequest {
+  optional string companion_id = 1;
 }
 
-message StartWorkResponse {
-  string session_id = 1;
-  string run_id = 2;
+message WorkSessionList {
+  repeated WorkView sessions = 1;
 }
 
-message SendWorkRequest {
-  string session_id = 1;
-  string run_id = 2;
-  string message = 3;
-  optional string request_id = 4;
+message WorkRequest {
+  string work_id = 1;
 }
 
-message SendWorkResponse {
-  bool accepted = 1;
-}
-
-message StopWorkRequest {
-  string session_id = 1;
-  string run_id = 2;
-  optional string reason = 3;
-}
-
-message StopWorkResponse {
-  string session_id = 1;
-  string run_id = 2;
-  bool accepted = 3;
-}
-
-message ListWorkRequest {}
-
-message WorkSessionSummary {
-  string session_id = 1;
+message WorkView {
+  string work_id = 1;
   string companion_id = 2;
   string status = 3;
   optional string active_run_id = 4;
   string last_activity_at = 5;
+  repeated string artifacts = 6;
 }
 
-message ListWorkResponse {
-  repeated WorkSessionSummary sessions = 1;
+message SendWorkRequest {
+  string work_id = 1;
+  optional string run_id = 2;
+  string message = 3;
+  optional string request_id = 4;
+}
+
+message WorkAcceptance {
+  string work_id = 1;
+  string run_id = 2;
+  bool accepted = 3;
+}
+
+message StopWorkRequest {
+  string work_id = 1;
+  optional string run_id = 2;
+  optional string reason = 3;
+}
+
+message CloseWorkRequest {
+  string work_id = 1;
 }
 ```
 

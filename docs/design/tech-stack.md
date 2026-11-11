@@ -8,9 +8,9 @@
 
 | 領域 | 採用技術 / ライブラリ | 選定理由 |
 | :--- | :--- | :--- |
-| **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ `sqlite-vec`（またはコサイン類似度）** | 100% Rust/Cネイティブ、省メモリ・超軽量。FTS5 trigram全文検索とベクトル検索を単一SQLiteで完結。`rig-ecs` の同期システムから `.await` なしで直接ACIDトランザクションを実行可能 |
+| **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | 100% Rustネイティブ、省メモリ・超軽量。FTS5 trigram全文検索とBLOBベクトルコサイン類似度検索を単一SQLiteで完結。`rig-ecs` の同期システムから `.await` なしで直接ACIDトランザクションを実行可能 |
 | **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復・会話ログ正本（`SessionLogPlugin` + `DirStore`）を `rig-ecs` のECSステージ・Observerに一本化。TokioはConnect-RPCサーバーや外部非同期I/Oに徹し、二重ループを完全排除 |
-| **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `sandbox_run`)** | Windows（Job Objects / AppContainer）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
+| **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `landlock`)** | Windows（Job Objects / AppContainer）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産を活用。透過デスクトップウィンドウ（Wayland / Windows）、VRM 1.0モデルロード、RMS音量によるローカル即時口パク。クライアントからの標準入出力JSON Lines制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
 | **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、Server Streaming対応 |
@@ -19,7 +19,7 @@
 
 ## 2. 各コンポーネントの詳細と実装例・リファレンス
 
-### A. データベース：SQLite（Embedded `rusqlite` ＋ FTS5 ＋ `sqlite-vec`）
+### A. データベース：SQLite（Embedded `rusqlite` ＋ FTS5 ＋ Rustコサイン類似度）
 
 #### 特徴と利点
 - **超軽量・ゼロ依存肥大化**:
@@ -27,9 +27,9 @@
   - WAL（Write-Ahead Logging）モードにより、高い並行読み取り性能と耐障害性を両立。
 - **同期ACIDトランザクションと `rig-ecs` の直結**:
   - `rig-ecs` のECSシステム内から、非同期の複雑な `.await` や型変換（SurrealValue等）を挟むことなく、同期トランザクションで記憶の作成・更新・カーソル進行を原子的（Atomic）にコミット可能。
-- **FTS5 trigram ＋ ベクトル検索（`sqlite-vec` / BLOBコサイン類似度）**:
+- **FTS5 trigram ＋ ベクトル検索（BLOBコサイン類似度）**:
   - 日本語の分かち書きエンジン不要の **FTS5 trigram（3-gram）** インデックスにより、助詞や固有名詞を含む高精度な語句検索を実現。
-  - 選択された埋め込みモデル（ローカル `fastembed` / クラウド `text-embedding-3-small` 等）のベクトルを保存し、Rust側でのRRF（Reciprocal Rank Fusion）により語句検索結果と順位融合。
+  - 選択された埋め込みモデル（ローカル `fastembed` / クラウド `text-embedding-3-small` 等）のベクトルを BLOB として保存し、Rust内のスライスコサイン類似度計算と FTS5 の順位を Rust 側で RRF（Reciprocal Rank Fusion）統合（外部C拡張に依存せず安定・最小化）。
 - **1ホップ認知関係性（エッジテーブル）**:
   - 認知的関係性（`companion->remembers->memory`, `memory->cited_in->turn`, `memory->supersedes->memory`）は高々1ホップの参照であるため、外部キー制約およびシンプルな `edges(from_id, rel, to_id)` テーブルで高速・堅牢に表現可能。
 
@@ -47,7 +47,8 @@
       PRAGMA journal_mode = WAL;
       
       CREATE TABLE IF NOT EXISTS memories (
-          id TEXT PRIMARY KEY,
+          rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
           owner TEXT NOT NULL,
           audiences TEXT NOT NULL, -- JSON array
           content TEXT NOT NULL,
@@ -133,9 +134,10 @@
   - 文単位先行TTSは、`Stage::Review` で `StreamDelta` の文字片を購読するシステムが句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
 - **会話ログと要約の責務分担**:
   - **会話セッションログと要約（短期正本）**: `rig-ecs` の `SessionLogPlugin` が要求する `SessionStore(Arc<dyn Store>)` に合わせ、追記型線形ログである `DirStore` を正本とする。Compaction要約も `apply_summary` により `Compacted` として `SessionLog` 内に直接記録される。
+  - **動的文脈の非永続注入**: Pinned Memory、想起記憶、現在の心、知覚要約などの変動情報は `SessionLog` には書き込まず、`PrepareSystems::Fit` 内で `recent::view` 直後のインメモリ `ModelRequest.history` の末尾（最新ユーザー発話直前、Dynamic Tail）へ一時的に挿入する。これにより `SessionLog` の純粋性を維持し、履歴漏洩や自動整理の自己汚染を防止する。
   - **長期エピソード記憶・心**: SQLite（`host.sqlite3`）に同期永続化し、長期的なエピソード記憶、心（感情・関係性）、および長期記憶の抽出進捗カーソル（`processed_turns_cursor`）を管理する。
 - **MCPツールの直接登録**:
-  - `rig-mcp-client` / `WorldToolsExt::spawn_tool` を活用し、MCPツールを独自変換層なしに直接ECS Worldに登録する。
+  - `rig-mcp-client`（`rig_mcp_client::McpPlugin`）を活用し、MCPツールを独自変換層なしに直接ECS Worldに登録する。
 
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
@@ -145,19 +147,20 @@
 
 ### C. OSサンドボックス：ネイティブ抽象化
 
-主要3OS（Linux / Windows / macOS）に対して、共通の抽象インターフェースを提供し、各OSの最適なセキュリティ機構を駆動する。
+主要3OS（Linux / Windows / macOS）に対して、共通の抽象インターフェースを提供し、各OSの最適なセキュリティ機構を駆動する（ライセンスの制約がある外部ラッパーは排し、公式・パーミッシブなクレートに一本化）。
 
 | クレート / 機構 | 担当責務 | 適用対象 |
 | :--- | :--- | :--- |
 | **`process-wrap`** | 子プロセスの生成、プロセスツリー/Job Object管理、kill-on-drop | 全OS共通（プロセスライフサイクルとタイムアウト強制終了） |
-| **`sandbox-run`** | 子プロセスに対するOSネイティブ隔離ポリシーの適用 | Linux（Landlock/bwrap）、macOS（Seatbelt） |
-| **`AppContainer`** | 専用SIDによるACLファイル隔離、ネットワークCapability制限 | Windows（Alpha初期はJob Objectによる資源制限から段階的拡張） |
+| **`landlock` ＋ `bwrap`** | ファイルシステムパス制限、UNIXソケットプロキシ経由の通信制御 | Linux（公式landlockクレート MIT/Apache-2.0 ＋ bwrap コマンドラッパー） |
+| **`AppContainer`** | 専用SIDによるACLファイル隔離、ネットワークCapability制限 | Windows（Job Object / AppContainer による資源制限と隔離） |
+| **`Seatbelt` (`sandbox-exec`)** | SBPLプロファイルによるファイル・プロセス制限 | macOS（システム標準のサンドボックス機構） |
 | **`cap-std`** | ホスト（Rust）コード自身のファイル操作におけるパストラバーサル（`../`）防止 | 全OS共通（ホスト自身の安全なファイルI/O） |
 
 #### 実装例・一次情報
 - [`cap-std` Docs.rs](https://docs.rs/cap-std/latest/cap_std/)（オープンディレクトリをルートとする安全なファイル操作）
 - [`process-wrap` Docs.rs](https://docs.rs/process-wrap/latest/process_wrap/)（Unix process-group、Windows Job Object、kill-on-dropのマルチプラットフォーム対応）
-- [`sandbox_run` Docs.rs](https://docs.rs/sandbox_run)（Linux LandlockとmacOS SandboxのCommandラッパー）
+- [`landlock` Docs.rs](https://docs.rs/landlock)（Linux公式LandlockセキュリティモジュールのRustバインディング）
 - [Microsoft Learn: AppContainer for Windows Developers](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation)
 
 ---

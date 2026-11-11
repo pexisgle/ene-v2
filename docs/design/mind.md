@@ -64,8 +64,10 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 );
 
 -- 3. エピソード記憶（MemoryRecord）
+-- rowid を明示的 INTEGER PRIMARY KEY AUTOINCREMENT とすることで、VACUUM時もFTS5外部コンテンツとの対応関係が不変であることを保証
 CREATE TABLE IF NOT EXISTS memories (
-    id TEXT PRIMARY KEY,
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
     owner TEXT NOT NULL,              -- 不変の原所有者コンパニオンID
     audiences TEXT NOT NULL,          -- JSON array: 共有先コンパニオンID一覧
     content TEXT NOT NULL,            -- 記憶の要約・事実・手順本文
@@ -76,13 +78,13 @@ CREATE TABLE IF NOT EXISTS memories (
     memory_revision INTEGER NOT NULL DEFAULT 1,
     emotion TEXT,                     -- 当時の感情タグ
     source_context TEXT NOT NULL,     -- JSON: 由来（turn_id, run_id, 話者等）
-    embedding BLOB,                   -- ベクトルバイト列 (f32 LE)
+    embedding BLOB,                   -- ベクトルバイト列 (f32 LE: Rust内スライスコサイン類似度計算用)
     embedding_model TEXT,             -- 例: "text-embedding-3-small"
     embedding_dimensions INTEGER      -- 例: 1536
 );
 
 -- 4. 日本語 trigram 全文検索外部コンテンツ仮想テーブル
--- SQLiteの暗黙の整数 rowid を使って memories と同期する外部コンテンツ方式
+-- 明示的 INTEGER PRIMARY KEY である rowid を使って memories と同期する外部コンテンツ方式
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
     content='memories',
@@ -145,10 +147,17 @@ $$\text{Score} = \min\left(1.0, \frac{\text{Importance}}{0.3}\right) \times (0.5
 ```rust
 // Rust側でのハイブリッド検索とRRF統合のフロー
 // 1. 全文検索候補の取得（FTS5 BM25スコア順・最大20件）
-// ※FTS5 trigram は3文字未満（例:「犬」「AI」）のクエリでMATCHが0件になるため、2文字以下はLIKEへフォールバック
-let lexical_matches = if query_text.chars().count() >= 3 {
-    // 記号による構文エラーを防ぐためダブルクォートをエスケープしてフレーズ検索化
-    let escaped_query = format!("\"{}\"", query_text.replace('"', "\"\""));
+// ※FTS5 trigram は文字列全体をクォートすると完全一致部分文字列しかマッチしないため、
+// 3文字以上の部分トークン（空白・記号・助詞等で分割）をクォートし OR で連結する。
+// 3文字以上のトークンが存在しない場合（例:「犬」「AI」）は LIKE へフォールバック。
+let tokens: Vec<String> = split_search_tokens(&query_text)
+    .into_iter()
+    .filter(|t| t.chars().count() >= 3)
+    .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+    .collect();
+
+let lexical_matches = if !tokens.is_empty() {
+    let fts_expr = tokens.join(" OR ");
     let mut stmt = conn.prepare(r#"
         SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, bm25(memories_fts) AS rank
         FROM memories m
@@ -159,7 +168,7 @@ let lexical_matches = if query_text.chars().count() >= 3 {
         ORDER BY rank ASC
         LIMIT 20
     "#)?;
-    stmt.query_map(params![companion_id, companion_id, escaped_query, is_auto_recall], |row| ...)?
+    stmt.query_map(params![companion_id, companion_id, fts_expr, is_auto_recall], |row| ...)?
 } else {
     // 2文字以下のフォールバック検索（LIKE）
     let like_pattern = format!("%{}%", query_text.replace('%', "\\%").replace('_', "\\_"));
@@ -175,11 +184,12 @@ let lexical_matches = if query_text.chars().count() >= 3 {
     stmt.query_map(params![companion_id, companion_id, like_pattern, is_auto_recall], |row| ...)?
 };
 
-// 2. ベクトル意味検索候補の取得（コサイン類似度順・最大20件）
-// ※選択された埋め込みモデル・次元数が一致するレコードのみを走査
+// 2. ベクトル意味検索候補の取得（Rust内スライスコサイン類似度順・最大20件）
+// ※選択された埋め込みモデル・次元数が一致するBLOBレコードのみを走査し、Rust内でコサイン類似度を算出
 let semantic_matches = query_vector_similarity(&conn, companion_id, &query_vec, is_auto_recall, 20)?;
 
 // 3. RRF (Reciprocal Rank Fusion) による順位融合
+// ※SQLite の bm25() は負の浮動小数点数を返すため、ソート後の1始まり整数順位（rank_i = index + 1）を使用する
 // rrf_score = sum(1.0 / (60.0 + rank_i))
 let fused_candidates = reciprocal_rank_fusion(&lexical_matches, &semantic_matches, 60.0);
 
@@ -193,7 +203,7 @@ for candidate in &mut fused_candidates {
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
   - 各記憶レコードは使用したモデル名と次元数を保持し、検索時は現在のモデルと一致するベクトルのみを照合する。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
-  - $0 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化（忘却時は $0$ または $1$ へ引き下げる）。
+  - $0 \sim 10$ の順序尺度。$\text{Importance} = \text{importance} / 10.0$ として正規化（忘却時は $0$ または $1$ へ引き下げる）。
     - $0$: 忘却指示を受けた記憶（明示的検索でのみ参照可能）
     - $1 \sim 3$: 日常の雑談、一時的な状況
     - $4 \sim 6$: 趣味嗜好、仕事上の習慣
@@ -202,7 +212,7 @@ for candidate in &mut fused_candidates {
 - **Recency（直近性 / 時間減衰: $0.0 \sim 1.0$）**:
   $$\text{Recency} = e^{-\lambda \Delta t}$$
   - $\lambda \approx 0.05$（半減期約14日）。
-  - $\Delta t$: 出来事の発生日時（`occurred_at`、不明な場合は `recorded_at`）からの経過日数。些細な日常会話は自然に減衰し、高重要度の事象は長期間にわたり高い基礎スコアを維持する。
+  - $\Delta t$: 最終アクセス日時または発生日時（`COALESCE(last_accessed_at, occurred_at, recorded_at)`）からの経過日数。引用ガードにより実際に会話で参照された記憶は `last_accessed_at` が更新されて直近性がリセットされ、未参照の記憶は時間とともに自然減衰する。
 
 ### 4.2 引用ガード（想起自己汚染ループの防止）
 
@@ -214,13 +224,22 @@ for candidate in &mut fused_candidates {
     - または親が `mind_read` / `mind_update` ツールを明示的に呼び出した場合のみ、ホストが `last_accessed_at = now()` へ更新し、エッジテーブルに `(memory_id, 'cited_in', turn_id)` を追加する。
   - これにより、無関係な記憶が一度検索に引っかかっただけで直近性スコアを引き上げ続け、次回以降も過剰に想起され続ける「想起の自己汚染ループ」を遮断する。
 
-### 4.3 常時注入記憶（Pinned / Core Memory）の制約と保護
+### 4.3 常時注入記憶（Pinned / Core Memory）と動的コンテキストの非永続注入
 
-`importance == 10` のレコード、および `user_profile` は、ベクトル類似度検索をバイパスしてシステムプロンプトの中核枠へ常時注入される。ただし、以下の不変条件を厳格に適用する：
+`importance == 10` のレコード、および `user_profile` は、ベクトル類似度検索をバイパスして注入される。
+
+> [!IMPORTANT]
+> **動的文脈の非永続注入原則（SessionLog の汚染防止）**:
+> Pinned Memory、想起された記憶、現在の心、知覚要約、現在日時は、**会話ログ正本（`SessionLog`）へ `DeliveryMode::Inform` 等で書き込んではならない**。
+> `SessionLog` に一度書き込まれた内容は永続化され、履歴取得API（`GetHistory`）への内部JSON漏洩や、増分自動整理（Consolidation）が想起記憶を自ら再学習する自己汚染ループを引き起こす。
+> 動的コンテキストはすべて、モデル呼び出し直前の `PrepareSystems::Fit` において、`rig_memory::recent::view` で窓を切り詰めた直後の **インメモリ `ModelRequest.history` の末尾（最新ユーザー入力の直前、Dynamic Tail）へ一時的に挿入** する。
+
+ただし、以下の不変条件を厳格に適用する：
 
 1. **優先度低下・訂正の適用**: 訂正されて `superseded_by` を持つ古い記憶や、忘却（想起優先度引き下げ）された記憶は、重要度10を満たさないためPinned枠へ注入されない。
 2. **トークン予算上限（Token Budget）**:
    - Pinned Memory枠には最大トークン予算（例: 最大 1,000 トークン）を設定する。
+   - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at`（未引用時は `recorded_at`）順で収容する。
    - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at`（未引用時は `recorded_at`）順で収容する。
 
 ---

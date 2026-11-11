@@ -28,11 +28,11 @@
 ### 2.1 正本と責務の明確な分離
 - **Rig（`rig-ecs` / `rig-memory`）が所有する正本**:
   - **会話履歴の正本**: `rig-ecs` の `SessionLog` / `SessionStore`（`DirStore` による追記型線形ログ）がメッセージ列（マルチパート、ツール呼び出し、プロバイダーメタデータ）をディスク上に完全保持。
-  - **要約状態と圧縮範囲**: `rig-memory` の既存型（`SummaryPlan.keep_from`、適用後の置換情報を記録する `Compacted`、および `summary_state`）が要約テキストと置換範囲を管理し、`apply_summary` によって会話ログ（`SessionLog`）内に直接反映。SurrealDBへ別途二重保存する必要はない。
+  - **要約状態と圧縮範囲**: `rig-memory` の既存型（`SummaryPlan.keep_from`、適用後の置換情報を記録する `Compacted`、および `summary_state`）が要約テキストと置換範囲を管理し、`apply_summary` によって会話ログ（`SessionLog`）内に直接反映。SQLiteへ別途二重保存する必要はない。
 - **ene-host が管理する追加状態**:
   - `companion_id`（コンパニオンとセッションの対応付け）
   - `InactivityTracker`（厳密なユーザー無操作アイドル時間の計測）
-  - `processed_turns_cursor`（SurrealDBへの長期エピソード記憶抽出の進捗位置）
+  - `processed_turns_cursor`（SQLiteへの長期エピソード記憶抽出の進捗位置）
 - **表示用プロジェクション（View）**:
   - クライアントAPI等で会話履歴を外部へ提供する構造体（`ConversationView` / `MessageView`）は、正本ではなく `SessionLog` からオンデマンドで生成される**読み取り専用ビュー（Projection View）**として位置付け、ene側で可変状態として二重管理しない。
 
@@ -139,16 +139,22 @@ Anthropic Claude、OpenAI、Geminiの **KVキャッシュ（Prefix Caching）** 
  │  4. Compaction Summary (過去の要約テキスト)            │ ── 過去ログ全体が
  │  5. Recent Dialogue History (直近の会話生ログメッセージ)│    キャッシュヒット！
  ├────────────────────────────────────────────────────────┤
- │ 【Dynamic Context & Injection】 (動的末尾)             │
+ │ 【Dynamic Context & Injection】 (非永続・動的末尾)      │
  │  6. Pinned Core Memory (重要度10の中核事実)            │
  │  7. Recalled Memories (今回想起された関連エピソード記憶)│ ── 毎ターン変動する情報は
- │  8. Current Mind State (現在の感情・関心事)            │    履歴の後ろへ配置
- │  9. Perception Summary (目の知覚要約・開いている画面等) │
+ │  8. Current Mind State (現在の感情・関心事)            │    SessionLog には書き込まず
+ │  9. Perception Summary (目の知覚要約・開いている画面等) │    Fit時にインメモリ注入！
  │  10. Current Timestamp (現在日時)                      │
  ├────────────────────────────────────────────────────────┤
  │  11. Latest User Turn (今回のユーザー入力発話)          │
  └────────────────────────────────────────────────────────┘
 ```
+
+> [!IMPORTANT]
+> **動的文脈の非永続インメモリ注入（SessionLog の汚染防止）**:
+> 6〜10の動的コンテキスト（Pinned Memory、想起記憶、現在の心、知覚要約、現在日時）は、**`SessionLog` へは一切書き込まない**（`DeliveryMode::Inform` 等で永続ログに混ぜてはならない）。
+> モデル推論直前の `PrepareSystems::Fit` において、`recent::view` で窓を切り詰めた直後の **インメモリ `ModelRequest.history` の末尾（最新ユーザー発話の直前）へ一時的に挿入** される。
+> これにより、`SessionLog` には純粋な会話ログのみが記録され、`GetHistory` APIに内部コンテキストJSONが漏洩したり、増分記憶整理（Consolidation）が自らの想起記憶を再学習する自己汚染ループを根本から防止する。
 
 ---
 

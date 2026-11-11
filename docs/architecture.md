@@ -30,7 +30,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   │ 「頭」（Brain / 親エージェント）：rig-ecs Bevy ECS 単一ループ       │   │
   │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs）              │   │
   │   │   ・会話ログ正本（rig-ecs SessionLogPlugin + DirStore）            │   │
-  │   │   ・MCPツール直接統合（rig-rmcp ➔ DynamicTool）                    │   │
+  │   │   ・MCPツール直接統合（rig-mcp-client McpPlugin）                  │   │
   │   │   ・ECSステージ制御: 先行TTS（Stage::Review）、承認（Stage::Gate） │   │
   │   │   ・ツール群: start_work, send_work, stop_work, body_motion, noop   │   │
   │   └───────────────┬────────────────────────────────────┬───────────────┘   │
@@ -39,7 +39,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   ┌──────────────────────────────┐     ┌───────────────────────────────┐   │
   │   │ 「手」（Hands / 作業相手）    │     │ データベース（SQLite）         │   │
   │   │   ・WorkSession と Run の分離│     │   ・rusqlite WALモード        │   │
-  │   │   ・同一キャラクター一人称対話│    │   ・FTS5 + sqlite-vec (RRF)   │   │
+  │   │   ・同一キャラクター一人称対話│    │   ・FTS5 + BLOBコサイン (RRF) │   │
   │   │   ・定期進捗報告と途絶検知   │     │   ・記憶関係（memory_edges）  │   │
   │   │   ・30秒タイムアウト強制終了 │     │   ・ACIDリレーショナル永続化  │   │
   │   └───────────────┬──────────────┘     └───────────────────────────────┘   │
@@ -88,18 +88,20 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **機械的コンテキスト上限検証と縮退**:
   - 送信直前に `Total Input + Max Output <= Context Window` を機械的に保証。
   - 要約失敗時は古いログをアクティブプロンプト窓から一時的に切り詰めて対話を継続。
-- **Prefix Caching最適化順序**:
-  - プロンプトを `System Prompt`（静的ツール定義 + キャラクター設定・ペルソナ + ユーザープロファイル） ➔ `Conversation History`（`Summary` + 過去ターン生ログ） ➔ `Dynamic Tail Context`（Pinned Memory + 検索想起記憶 + 現在の心境 + Perception Summary + 現在時刻 + 最新ユーザー入力）の順で配置。動的情報を末尾に置くことで、過去ログ全体のキャッシュヒット率を最大化。
+- **Prefix Caching最適化順序と非永続注入**:
+  - プロンプトを `System Prompt`（静的ツール定義 + キャラクター設定・ペルソナ + ユーザープロファイル） ➔ `Conversation History`（`Summary` + 過去ターン生ログ） ➔ `Dynamic Tail Context`（Pinned Memory + 検索想起記憶 + 現在の心境 + Perception Summary + 現在時刻 + 最新ユーザー入力）の順で配置。
+  - 動的コンテキストは `SessionLog`（永続ログ）へは書き込まず、`PrepareSystems::Fit` 時にインメモリで末尾へ一時注入することで、Prefix Cacheの最大化とログの純粋性（履歴漏洩・自己汚染防止）を両立。
 
 ### 2. 心と自動記憶（SQLite）
-- **組み込みSQLite（`rusqlite` WALモード ＋ FTS5 trigram ＋ `sqlite-vec` / BLOBコサイン）**:
-  - 外部DBデーモン不要、メモリ消費数十MB。同期トランザクションをECS内で高速実行。
+- **組み込みSQLite（`rusqlite` WALモード ＋ FTS5 trigram ＋ Rustコサイン類似度）**:
+  - 外部DBデーモンや外部C拡張（`sqlite-vec` 等）に依存せず、数十MBのメモリで高速・堅牢に動作。
 - **エピソード記憶（`MemoryRecord`）**:
-  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（1〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`embedding` を格納。
+  - `rowid` を明示的 INTEGER PRIMARY KEY AUTOINCREMENT とし、FTS5外部コンテンツテーブルとの対応関係を不変に保証。
+  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（0〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`embedding` を格納。
   - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除や除外フラグではなく想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（過去ログの客観記録は保持）。
-  - ハイブリッド検索: FTS5 BM25 と ベクトル検索をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。
+  - ハイブリッド検索: FTS5 BM25（部分トークンOR結合）と ベクトル検索（Rust内スライスコサイン類似度）をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。
   - **増分自動整理**: `processed_turns_cursor` より後の新規ターンのみを増分走査し、過去ログからの重複再生成を防止。
-  - 想起スコア計算式：$\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t})$（忘却直後のスコアインフレ防止と自動想起 `importance >= 2` フィルタ連動）
+  - 想起スコア計算式：$\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t})$（$\text{Importance} = \text{importance}/10.0$、$\Delta t$ は `COALESCE(last_accessed_at, occurred_at, recorded_at)` からの経過日数。自動想起は `importance >= 2` フィルタと連動）
   - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、ターン完了後の固定・統合処理（Consolidation）時に `cited_memory_ids` を抽出して実際に引用された場合のみ更新（ストリーミング出力へのタグ混入なし）。
   - **Pinned Memory制約**: 重要度10であっても、訂正状態や優先度引き下げ状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 

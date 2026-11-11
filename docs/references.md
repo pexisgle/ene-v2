@@ -30,7 +30,7 @@
 
 [RisuAI](research/mind-sources.md#p17)の由来と複数の想起手掛かりを参考に、全文・意味・時間・関連を利用する。[Graphiti](research/mind-sources.md#m08)や[A-Mem](research/mind-sources.md#m10)は比較対象だが、初版で全記憶をグラフDBへ入れない。[MemoryBank](research/mind-sources.md#m12)等の時間・忘却の考え方を、固定の消去式へ変換しない。
 
-検索接続は[Rig LanceDB v0.46.0](https://github.com/0xPlaygrounds/rig/blob/v0.46.0/crates/rig-lancedb/src/lib.rs)を優先し、[SQLite FTS5](https://www.sqlite.org/fts5.html)と[LanceDBの複合検索](https://lancedb.com/docs/search/hybrid-search/)を利用する。Rigの共通契約で不足する機能は薄い接続で補う。日本語分割、索引更新、資源使用量を実測し、製品名だけで優位性を断定しない。
+検索接続は[SQLite FTS5](https://www.sqlite.org/fts5.html)のtrigram全文検索と、SQLite BLOBに保存した埋め込みベクトルのRust内コサイン類似度計算によるハイブリッド検索を採用し、Rust側でRRF（Reciprocal Rank Fusion）統合する。日本語分割、索引更新、資源使用量を実測し、外部C拡張や重厚なベクトルDBを抱え込まず、最小・堅牢な構成とする。
 
 <a id="alpha-permissions"></a>
 ### 権限・隔離
