@@ -57,16 +57,39 @@ pub enum WorkSessionStatus {
 pub enum RunStatus {
     Starting,
     Running,
-    /// ユーザーへの確認・権限承認待ち
-    WaitingApproval { request_id: String },
+    /// ユーザーへの確認・質問待ち（権限承認または通常質問）
+    WaitingInput {
+        request_id: String,
+        request: WorkRequest,
+    },
     /// 中断要求を受け、後片付け・停止処理中
     Cancelling { requested_at: chrono::DateTime<chrono::Utc> },
     /// 正常完了
     Completed,
-    /// 中断完了
+    /// 停止が完全に確認された中断
     Cancelled,
+    /// 強制終了要求後に停止がOSレベルで完全に確認できなかった場合、または外部処理の停止状態が不明な場合
+    CancellationUnconfirmed {
+        reason: String,
+        unverified_pids: Vec<u32>,
+    },
     /// 失敗
     Failed { error_code: String, message: String },
+}
+
+/// 子（手）からの問い合わせ種別
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkRequest {
+    /// 権限・Sandbox外操作の承認要求
+    Approval {
+        action_summary: String,
+        candidate_action: CandidateAction,
+    },
+    /// 通常の質問・選択肢の確認（例: 「PDFとMarkdownのどちらで出力しますか？」）
+    Input {
+        prompt: String,
+        choices: Option<Vec<String>>,
+    },
 }
 
 /// セッションの管理構造体
@@ -108,11 +131,10 @@ pub enum WorkEventPayload {
     Activity { message: String },
     /// 親へ伝えるべき意味のある進捗メッセージ
     Message { content: String },
-    /// ユーザーへの確認・承認要求
-    ApprovalRequest {
+    /// ユーザーへの確認・質問要求（権限承認または通常質問）
+    Request {
         request_id: String,
-        action_summary: String,
-        candidate_action: CandidateAction,
+        request: WorkRequest,
     },
     /// Runの正常完了報告
     Completed {
@@ -147,14 +169,17 @@ pub enum WorkEventPayload {
   ```
 - 親（頭）はこの通知を受けて、ユーザーに「ちょっと様子を見てみるね」と声をかけたり、子に進捗確認メッセージを送出できる。
 
-### 4.2 ターミナル待ちの割り込み
-- 子がターミナルコマンドや長時間プロセスの出力を待機している間に、親やユーザーから追加指示や確認が届いた場合、ホストはその待機を安全に中断（Interrupt）し、新しい指示をプロンプト注入して処理を再開させる。
+### 4.2 実行中の追加入力の配送（Steer / Queue / Reject）
+Runが実行中にユーザーや親から追加指示が届いた場合、バックエンドの能力に応じてホストが以下のように制御する：
+1. **Steer（実行中注入）**: 外部ハーネスやローカルRigが実行中入力の割り込み注入をサポートしている場合、待機中のターミナル等を安全に中断して現在のRunへ新指示を注入。
+2. **Queue（キューイング）**: 実行中割り込みが非対応の場合、現在のRunが完了した直後に開始される次期Runとしてキューへ保持。
+3. **Reject（非対応通知）**: キューイングも不可な場合、待機するか現在のRunを中断するかを親（頭）が選択。
 
 ---
 
 ## 5. 安全な中断プロトコル（Cancellation Protocol）
 
-### 5.1 中断シーケンスとタイムアウト強制終了
+### 5.1 中断シーケンスと停止確認（Cancelled vs CancellationUnconfirmed）
 
 ```text
 [ユーザー / 親] ──→ cancel_work(session_id, run_id)
@@ -168,20 +193,26 @@ pub enum WorkEventPayload {
                     [子が協調的に後片付け]                      [外部プロセス応答なし]
                     ・一時ファイル削除                                │
                     ・ローカルロック解放                              ▼
-                           │                                   ホストが外部プロセスを
-                           ▼                                   強制終了 (SIGKILL)
-                    CancellationReport 送信                           │
-                           │                                          ▼
-                           └─────────────────────────────────→  RunStatus: Cancelled
-                                                                親へ顛末を一人称で報告
+                           │                                   ホストがプロセス群を強制終了
+                           ▼                                   (Linux: kill(-pgid, SIGKILL)
+                    CancellationReport 送信                    Windows: TerminateJobObject)
+                           │                                          │
+                           ▼                                          ▼
+                    【停止の完全確認】                          【停止が確認できたか？】
+                    RunStatus: Cancelled                         ├─ 完了確認 ➔ Cancelled
+                                                                 └─ 未確認・不明 ➔ CancellationUnconfirmed
 ```
 
 1. **協調的中断要求**: ホストは子へ `CancellationRequested` を通知し、`RunStatus` を `Cancelling` へ更新する。
 2. **寛大な猶予期間（30秒タイムアウト）**:
    - 外部プロセスやビルド処理が正常に一時ファイルを片付ける猶予として、最大 **30秒** 待機する。
-3. **強制終了（Forced Kill）**:
-   - 外部ACPハーネスやサブプロセスが30秒経過しても応答しない場合、ホストはOSレベルでプロセスを強制終了（Linux: `SIGKILL`、Windows: `TerminateProcess`）する。
-   - `CancellationReport { forced_killed: true, ... }` を生成し、セッションを安全に `Cancelled` 状態へ収束させる。
+3. **プロセス群の強制終了と停止確認**:
+   - 30秒経過しても応答しない場合、ホストはプロセス単体ではなく**プロセス群全体を強制終了**する（Linux: プロセスグループへの `kill(-pgid, SIGKILL)`、Windows: Job Objectへの `TerminateJobObject`）。
+   - **状態の厳格な区分**:
+     - プロセス群の完全終了とローカル後片付けが確認された場合: `RunStatus::Cancelled`
+     - プロセスの残存が疑われる場合や外部クラウド処理の停止が確認できない場合: **`RunStatus::CancellationUnconfirmed`（停止未確認 / 結果不明）** として記録し、ユーザーにも「処理を完全に停止できたか確認できませんでした」と誠実に通知する。
+4. **過去Runの遅延イベントの扱い**:
+   - Run Aの中断後に開始されたRun Bの実行中に、遅れてRun Aのイベントが到着した場合、**Run Bのアクティブ状態を破壊・上書きしない**。ただし、Run A自身の過去の監査記録としては正確に追記保存する。
 
 ### 5.2 外部副作用の現実的な扱い（Undoの限界の明示）
 - 一時ファイルの削除などのローカルな後片付けは `local_cleanup_done: true` として処理する。

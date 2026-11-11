@@ -33,7 +33,7 @@
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
   ```toml
-  surrealdb = { version = "2.2", features = ["kv-surrealkv"] }
+  surrealdb = { version = "3.0", features = ["kv-surrealkv"] }
   tokio = { version = "1", features = ["full"] }
   serde = { version = "1", features = ["derive"] }
   ```
@@ -46,14 +46,14 @@
   let db = Surreal::new::<SurrealKv>("./data/ene.db").await?;
   db.use_ns("ene").use_db("main").await?;
 
-  // HNSW ベクトルインデックス・全文検索インデックスの定義
+  // HNSW ベクトルインデックス・日本語2-gram全文検索インデックスの定義
   db.query(r#"
       DEFINE TABLE memory SCHEMAFULL;
       DEFINE FIELD embedding ON TABLE memory TYPE option<array<float>>;
       DEFINE INDEX idx_memory_embedding ON TABLE memory FIELDS embedding 
           HNSW DIMENSION 1536 DIST COSINE TYPE F32;
       
-      DEFINE ANALYZER japanese_analyzer TOKENIZERS blank,punct FILTERS lowercase;
+      DEFINE ANALYZER japanese_analyzer TOKENIZERS ngram 2 3 FILTERS lowercase;
       DEFINE INDEX idx_memory_fulltext ON TABLE memory FIELDS content 
           FULLTEXT ANALYZER japanese_analyzer;
   "#).await?;

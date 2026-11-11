@@ -103,8 +103,8 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 文単位TTSの並行合成時における `sequence_no` 整列再生。
 - **複数コンパニオン調停**:
   - 全員同報配信 ＋ 自律該当性判断。
-  - 音声フロアを獲得した主担当のみが `instruct_hand` を実行できる作業二重実行防止ロック。
-  - 会話リレー（`speech_completed`）は最大5往復で自動打ち切り。
+  - 同一クライアント内の他コンパニオンへの `work_started` 同報通知による作業二重実行の自律的防止。
+  - 会話リレー（`speech_completed`）は最大5往復で自動打ち切り。クライアント再生完了（`ReportPlaybackStatus`）またはタイムアウトによる安全なフロア解放。
 
 ### 4. セキュリティとSandbox
 - **OSネイティブ隔離**: Linux（Landlock/bwrap）、Windows（AppContainer/Job Objects）、macOS（Seatbelt）によるプロセス隔離。

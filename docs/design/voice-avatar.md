@@ -144,11 +144,15 @@ pub struct AudioChunkEnvelope {
                 ▼                               ▼
        talk("了解だよ！")                     noop()
                 │
-                ▼ 最初にtalk確定した方がフロア獲得
-         [ 音声再生開始 ]
-         【作業排他ロック】Aのみが instruct_hand 実行可能
+                ├───────────────────────────────┐
+                ▼ work_started 通知             ▼ (受信)
+         [ 同一クライアントの             「Aが作業を開始した。
+           他コンパニオンへ同報 ]          重複作業は控えて待機」
                 │
-                ▼ 発話再生終了
+                ▼ instruct_hand 実行開始
+         [ 音声再生開始 ]
+                │
+                ▼ クライアントから ReportPlaybackStatus(COMPLETED)
          [ speech_completed イベント同報 ]
                 │
                 └───────────────────────────────┐
@@ -164,16 +168,18 @@ pub struct AudioChunkEnvelope {
 - 音声認識テキストは、アクティブな全コンパニオンへ等しく同報配信される。
 - 各コンパニオンは自身のシステムプロンプトと文脈から「自分宛てか」を自律判断し、無関係なら `noop()` を返して静観する。
 
-### 5.2 発話フロア制御と「作業二重実行」の排他ロック
-- 最初に `talk` ツールを確定させたコンパニオンが発話権（Floor）を獲得する。
-- **実務タスク（`instruct_hand`）の排他制御**:
-  - 同一のユーザー指示に対し、**フロアを獲得した主担当の1体のみが実務タスク（`instruct_hand`）を開始できる排他ロック**をかける。
-  - これにより、2体が同時に重い作業を開始してしまう二重実行事故を防止する。
+### 5.2 自律的作業通知（`work_started`）による二重実行防止
+- ホスト側での中央集権的な排他ロックに過度に依存せず、エージェント間の自律的協調を採用する。
+- 複数コンパニオンが同一クライアントに接続している場合、作業エージェントへの実務指示（`instruct_hand`）を開始する前に、**同一クライアントに属する他のコンパニオンへ「作業を開始した（`work_started`）」通知を同報**する。
+- 通知を受け取った他のコンパニオンは「ピアが着手済み」と文脈を更新し、同一作業への重複介入を自律的に控える。
+- 最初に `talk` を確定させたコンパニオンが発話権（Floor）を獲得し、音声の衝突を防ぐ。
 
 ### 5.3 会話リレー（`speech_completed`）と上限管理
-- 主担当コンパニオンの発話完了時、他の全コンパニオンへ `speech_completed` イベントが配信され、自然な掛け合いや相槌を誘発する。
+- クライアントでの発話再生完了（`ReportPlaybackStatus`）時、他の全コンパニオンへ `speech_completed` イベントが配信され、自然な掛け合いや相槌を誘発する。
 - **掛け合い上限（最大5往復）**:
   - コンパニオン同士の掛け合いが無限ループするのを防ぐため、ユーザー入力なしでの自律掛け合いリレーは**最大5ターン（往復）**で自動打ち切りとする。
+- **再生途絶時の自動フロア解放**:
+  - クライアントのクラッシュや通信切断で完了報告が届かない場合に備え、ホストは「合成音声のPCM再生時間 ＋ 3.0秒」の安全マージンが経過した時点でフロアを強制解放する。
 
 ---
 
@@ -184,12 +190,25 @@ syntax = "proto3";
 package ene.host.v1;
 
 service VoiceService {
-  // マイク音声ストリーム入力
+  // マイク音声ストリーム入力（クライアント -> ホスト）
   rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent);
-  // 音声ストリーム購読（ホストからクライアントへのServer Streaming）
-  rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioChunkEnvelope);
-  // バージイン等による音声破棄要求
-  rpc FlushAudio(FlushAudioRequest) returns (FlushAudioResponse);
+
+  // 音声ストリーム購読（ホスト -> クライアント Server Streaming）
+  rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
+
+  // クライアントからの再生状態報告（再生完了・中断・失敗）
+  rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
+}
+
+message SubscribeAudioRequest {
+  string client_id = 1;
+}
+
+message AudioOutputEvent {
+  oneof event {
+    AudioChunkEnvelope chunk = 1;
+    FlushControl flush = 2;
+  }
 }
 
 message AudioChunkEnvelope {
@@ -201,13 +220,26 @@ message AudioChunkEnvelope {
   bool is_final_chunk = 6;
 }
 
-message FlushAudioRequest {
+message FlushControl {
   string utterance_id = 1;
   uint64 flush_generation_id = 2;
+  string reason = 3; // "barge_in", "cancelled", etc.
 }
 
-message FlushAudioResponse {
-  bool success = 1;
+message PlaybackStatusReport {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    PLAYBACK_COMPLETED = 1;
+    PLAYBACK_INTERRUPTED = 2;
+    PLAYBACK_FAILED = 3;
+  }
+  Status status = 3;
+}
+
+message ReportPlaybackStatusResponse {
+  bool acknowledged = 1;
 }
 ```
 
@@ -218,8 +250,9 @@ message FlushAudioResponse {
 | 不変条件 | 検証方法 | 合格基準 |
 | :--- | :--- | :--- |
 | **世代別Flush破棄** | 発話Aの再生中に割り込み（Flush）を送り、遅れて発話Aの音声チャンクを送信 | 遅れて届いた旧世代チャンクが再生されず、即座に破棄されること |
-| **TTS文順序保証** | 第2文が第1文より先に合成完了するモックTTSを接続 | クライアント側で `sequence_no` 順に再生され、文章の順序逆転が起きないこと |
-| **作業二重実行防止** | 2体のコンパニオンが同時に同一指示を自分宛てと判断する入力を投入 | 音声フロアを獲得した主担当のみが `instruct_hand` を実行し、二重タスクが防止されること |
+| **TTS文順序保証** | 第2文が第1文より先に合成完了するモックTTSを接続 | クライアント側で `sequence_no` 順に整列して待機し、文章の順序逆転が起きないこと |
+| **作業二重実行防止** | 2体のコンパニオンが同時に同一指示を自分宛てと判断する入力を投入 | 先に着手したコンパニオンが同一クライアントの他コンパニオンへ `work_started` を同報し、他方が重複実行を自律的に控えること |
 | **掛け合い上限制限** | 2体のコンパニオンが互いに `talk` を返し続ける設定で起動 | ユーザー入力なしでの掛け合いが5往復以内に自動停止し、無限ループしないこと |
+| **再生完了連携とタイムアウト** | 再生完了イベント送信時、および完了イベントを意図的に落とした時を検証 | 通常時は完了通知でフロアが解放され、障害時もPCM長+3秒で安全に自動解放されること |
 | **単独モーション直接指示** | 会話静止状態で親から `body_motion` のみを呼び出し | アバターが指定されたVRMAモーション・表情へスムーズにクロスフェードすること |
 | **フレーム連動リップシンク** | 再生PCMバッファの振幅とVRMブレンドシェイプ変位をフレーム単位で測定 | ネットワーク往復なしにローカル再生音量に連動して口パクが変位すること |
