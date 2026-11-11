@@ -1,6 +1,6 @@
 # 心：人格・経験・自動記憶・感情の統合設計
 
-状態：Alphaの採用設計（2026-11-11策定）。[全体アーキテクチャ](../architecture.md)、[技術スタック](tech-stack.md)、[作業相手API](work.md)、[Alpha実装計画](../alpha.md)、[記憶機能仕様](../features/memory/README.md)を参照する。
+状態：採用設計。[全体アーキテクチャ](../architecture.md)、[技術スタック](tech-stack.md)、[作業相手API](work.md)、[記憶機能仕様](../features/memory/README.md)を参照する。
 
 ---
 

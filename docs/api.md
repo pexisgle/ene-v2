@@ -1,10 +1,6 @@
-# AlphaホストAPIの意味と移行方針
+# ホストAPI設計
 
-> 2026-11-09: wire契約は全面更新されました。現行のサービス・型・意味は[host.proto](../crates/ene-rpc/proto/host.proto)と[ホストREADME](../apps/ene-host/README.md)、および本稿末尾の「現行wire契約」が正本です。以下の旧節は設計経緯として残しています。
-
-状態：採用する設計方針（2026-11-03）。**この文書の操作名は論理APIの仮称であり、すべてが追加済みのRPCではない。** 現在利用できるwire契約は[host.proto](../crates/ene-rpc/proto/host.proto)と[ホストREADME](../apps/ene-host/README.md)が正本。2026-11-03のステップ1実装で会話の受理・履歴・停止・実行イベントを、ステップ2実装で心の取得・著者プロファイル編集・心の変更通知を、ステップ3実装で自動整理・自動想起・語句/意味検索・記憶の忘却/共有を実装した。
-
-旧[MVP API案](history/mvp-api.md)は履歴へ移した。旧RESTパス、単一Task、長期記憶を除外する前提を現在のAPIへ重ねない。現在のAlpha実装ではBearer認証付きConnect RPCと購読・状態再取得を基本とする。将来の接続アクセス制御の委譲については[ホスト接続の設計](design/host-access.md)を参照し、移行まで現行認証を外さない。既存音声経路の設計は別で、今回本番音声実装まで追加しない。
+状態：採用設計。現行のサービス・型・意味は [host.proto](../crates/ene-rpc/proto/host.proto) と [全体アーキテクチャ](architecture.md) が正本です。Bearer認証付きConnect RPCと購読（`Subscribe`）・状態再取得を基本とします。将来の接続アクセス制御の委譲については [ホスト接続の設計](design/host-access.md) を参照します。
 
 ## 1. 共通の意味
 
@@ -72,29 +68,13 @@ RequestViewは質問と権限要求を区別し、対象session/run、request id
 
 権限解除は許可のrevisionと実行側の適用状態を返す。ホスト管理下の新しい操作を禁止し、外部ハーネスの取消不能な処理や送信済みデータの扱いを隠さない。クライアント切断は停止要求ではない。
 
-## 6. 移行
+## 6. wire契約とサービス構成
 
-後方互換性のために旧REST案や単発ハーネス契約を温存しない。実装変更時にhost.protoとSDKを同時に更新し、必要なクライアント変更、DB・プラグインの移行や再設定を明示する。ステップ1の実装では、`SendMessage`の応答から応答メッセージIDを外し、`MessageStarted`/`MessageUpdated`を`TurnEvent`へ置き換え、`MessageDelta`を`stream_id`で相関させ、失敗時の入力返却を`RecalledInput`として追加した。旧メッセージ表の行は削除しないが、親の会話はRigのセッションログへ移り、旧行は読み込まない。既存データの破棄や旧許可の無条件継承を、互換性不要の意味にはしない。
+現行の契約は `crates/ene-rpc/proto/host.proto` を正本とし、以下の5サービスで構成される：
+- **`HostService`**: システム状態スナップショット、単一イベントストリーム（`Subscribe`）、コンパニオン・心・記憶の取得と操作。
+- **`ChatService`**: 会話メッセージの送信（`SendMessage`）、停止（`Stop`）、会話履歴取得（`GetHistory`, `GetMessage`）。
+- **`SettingsService`**: 設定、プロバイダー/モデル一覧、ツール利用許可ルール、未決承認要求の確認と回答。
+- **`WorkService`**: 作業セッションの一覧（`ListWorks`）、詳細取得（`GetWork`）、直接指示（`SendWork`）、緊急停止（`StopWork`）、クローズ（`CloseWork`）。
+- **`ClientService`**: クライアント端末の登録、有効化、端末操作ストリーム。
 
-ステップ2の実装では、`GetMind` / `UpdateMindProfile`と通知`MindUpdated`を追加し、`mind_companions`の著者プロファイル追加材料と現在の心、`mind_memories`の記憶、`mind_operations`の適用結果をSQLiteへ追加した。記憶と心の正本はSQLite、会話はRigセッションログのままであり、会話全文を複製しない。ステップ1の旧データは削除せず、心の初期状態は既存の`Companion.mind`から読む。
-
-ステップ3の実装では、整理・埋め込みの処理をコンパニオン接続へ分離した（※初期試作にあった `purpose=memory, data=["memory"]` などの旧 Grant マトリクスは廃止され、[権限・セキュリティ設計](design/permissions.md) および [設定仕様](features/settings/permissions.md) のとおり OSネイティブSandbox ＋ 機械的ルール照合 ＋ 承認要求 `ApprovalRequest` に一本化されている。RPCは `SettingsService` に統合され、独立した旧 Grant RPC は存在しない）。自動想起はローカルSQLiteの語句検索で配送前に外部埋め込みを待たず、意味検索は`mind_recall`で行う。確定はRigの会話entryの`status=completed`で判定し、処理済み`(last_sequence,last_offset)`の直後から前向きに取得する。長い発言はnext-offsetで分割し、末尾まで処理するまで処理済みにしない。既適用範囲の再送はadvanced=false。失敗/停止ページは終端skipし、未確定応答では待つ。埋め込みはRigのOpenAI wireに認可付きトランスポートを渡し、検索時にmodel・前処理・次元を照合する。共有の公開範囲は本文・説明・appraisal・訂正関係idで、私的な出所は渡さない。`mind_index_pending`・`memories_fts`（FTS5 trigram 外部コンテンツ）・`mind_vectors`（model/dimension/前処理/vector）・`mind_index_status`・`mind_consolidation`を追加し、`ControlMemory`、MindViewの索引/整理状態を追加した。自動整理は確定した会話範囲と処理済み位置を同じSQLiteトランザクションで進め、生成失敗・保存失敗・競合では進めない。FTSとベクトルはRRFで統合し、canonicalの所有者・共有範囲・忘却・時刻で再検証する。OpenRouter接続の埋め込みは未対応としてsemantic unavailableを返す。
-
-本書は意味の契約と責務を定める。最終的なフィールド名・タグ・エラーコードは実装時のprotobuf/SDKを正本とし、同じwire仕様を手書き文書へ重複列挙しない。実装した能力だけを広告する。[実装順序](alpha.md)
-
-## 2026-11-09 現行wire契約
-
-契約は `crates/ene-rpc/proto/host.proto` を正本とし、`HostService`・`ChatService`・`SettingsService`・`WorkService`・`ClientService` の5サービスを持つ。旧PluginService・旧DeviceServiceの端末トークン前提・旧RESTパスは持たない。
-
-- 認証は `connection.json` のOwner Bearerのみ。`client_id` は接続端末の区別であり、認証情報ではない。
-- 会話の受理は `request_id` だけを返し、実行の開始・終了は `TurnEvent`、文字片は `MessageDelta`、確定内容は `GetHistory`/`GetMessage` で確認する。会話の保存変更は `ConversationChanged` で通知する。
-- `Snapshot` に会話履歴は含めない。履歴は `GetHistory` のカーソルで取得する。
-- 端末操作は `ClientService.DeviceStream` と `CompleteOperation`。ホストは成否不明の操作を再送しない。
-- 意味検索、スケジュール、外部ハーネスはこの契約にまだRPCを持たない。追加時は既存フィールドを再利用せず、新しいフィールド／サービスとして足す。
-
-## 2026-11-10 追加
-
-- `Message.role` は `user | assistant | agent | context`。`context` はホストが注入した文脈（関連する記憶、現在の心）で、利用者の発言ではない。`agent` は作業エージェントの報告。実装は `apps/ene-host/src/host/chat.rs` の `role_of` を正本とする。
-- `HistoryRequest.include_context`（既定`false`）で `context` を含めるか選ぶ。`GetMessage` は常に `context` を返さない（`not_found`）。
-- 通知に `Notice { code, message }` を追加した。`context_window_unknown`、`window_truncated_unconsolidated`、`consolidation_failed`、`summary_failed` を送る。表示するかはクライアントが決める。
-- `SubscribeRequest.client_id` を付けた購読には、`client_id` が一致する通知だけを送る。`client_id` のない通知は全購読へ送る。
+本書は意味の契約と責務を定める。最終的なフィールド名・タグ・エラーコードは protobuf および SDK を正本とし、重複する手書き仕様を保守しない。[全体アーキテクチャ](architecture.md) を参照する。

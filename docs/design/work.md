@@ -1,6 +1,6 @@
 # 作業相手APIと「手」（WorkSession）協調プロトコル
 
-状態：Alphaの採用設計（2026-11-11策定）。[全体アーキテクチャ](../architecture.md)、[技術スタック](tech-stack.md)、[権限・Sandbox](permissions.md)、[Alpha実装計画](../alpha.md)、[タスク機能仕様](../features/task/README.md)を参照する。
+状態：採用設計。[全体アーキテクチャ](../architecture.md)、[技術スタック](tech-stack.md)、[権限・Sandbox](permissions.md)、[タスク機能仕様](../features/task/README.md)を参照する。
 
 ---
 
