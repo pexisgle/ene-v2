@@ -61,7 +61,7 @@ DEFINE TABLE memory SCHEMAFULL;
 DEFINE FIELD owner ON TABLE memory TYPE record<companion>;   -- 不変の原所有者（"shared"で上書きしない）
 DEFINE FIELD audiences ON TABLE memory TYPE array<string> DEFAULT []; -- 共有先コンパニオンID一覧
 DEFINE FIELD content ON TABLE memory TYPE string;            -- 記憶の要約・事実・手順本文
-DEFINE FIELD importance ON TABLE memory TYPE int ASSERT $value >= 1 AND $value <= 10;
+DEFINE FIELD importance ON TABLE memory TYPE int ASSERT $value >= 0 AND $value <= 10; -- 0: 忘却・非優先, 1〜10: 重要度
 DEFINE FIELD occurred_at ON TABLE memory TYPE option<datetime>; -- 出来事の発生日時（不明時はnull）
 DEFINE FIELD recorded_at ON TABLE memory TYPE datetime DEFAULT time::now() READONLY; -- 初回記録日時（更新不可）
 DEFINE FIELD last_accessed_at ON TABLE memory TYPE datetime; -- 明示的引用による最終利用日時
@@ -74,9 +74,16 @@ DEFINE FIELD embedding_model ON TABLE memory TYPE option<string>; -- 例: "text-
 DEFINE FIELD embedding_dimensions ON TABLE memory TYPE option<int>; -- 例: 1536
 DEFINE FIELD embedding_version ON TABLE memory TYPE option<string>; -- 例: "v1"
 
+-- 会話ターン（会話ログへの参照点・引用先テーブル）
+DEFINE TABLE turn SCHEMAFULL;
+DEFINE FIELD session_id ON TABLE turn TYPE string;
+DEFINE FIELD turn_number ON TABLE turn TYPE int;
+DEFINE FIELD speaker ON TABLE turn TYPE string;
+DEFINE FIELD timestamp ON TABLE turn TYPE datetime DEFAULT time::now() READONLY;
+
 -- 4. グラフエッジ（認知的関係性）
 DEFINE TABLE remembers SCHEMAFULL TYPE RELATION FROM companion TO memory;
-DEFINE TABLE cited_in SCHEMAFULL TYPE RELATION FROM memory TO record;
+DEFINE TABLE cited_in SCHEMAFULL TYPE RELATION FROM memory TO turn;
 DEFINE TABLE supersedes SCHEMAFULL TYPE RELATION FROM memory TO memory;
 
 -- 5. インデックス定義
@@ -85,7 +92,7 @@ DEFINE INDEX idx_memory_embedding ON TABLE memory FIELDS embedding
     HNSW DIMENSION 1536 DIST COSINE TYPE F32;
 
 -- 日本語2-gram全文検索インデックス
-DEFINE ANALYZER japanese_analyzer TOKENIZERS ngram 2 3 FILTERS lowercase;
+DEFINE ANALYZER japanese_analyzer TOKENIZERS blank,punct FILTERS lowercase,ngram(2,2);
 DEFINE INDEX idx_memory_content_fulltext ON TABLE memory FIELDS content 
     FULLTEXT ANALYZER japanese_analyzer;
 
@@ -112,7 +119,8 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
   - クエリと記憶のベクトルコサイン類似度と、BM25全文検索ランクを正規化合成したスコア。
   - 埋め込みモデル・次元数・前処理版が一致するレコードのみを対象とする。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
-  - $1 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化。
+  - $0 \sim 10$ の順序尺度。上位の重要事象に強い格差を与える非線形スケールとして正規化。
+    - $0$: 忘却・優先度最低（通常想起およびPinned枠から完全に除外）
     - $1 \sim 3$: 日常の雑談、一時的な状況
     - $4 \sim 6$: 趣味嗜好、仕事上の習慣
     - $7 \sim 9$: 約束、大きな決定、重要な出来事
@@ -133,7 +141,7 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 
 `importance == 10` のレコード、および `user_profile` は、ベクトル類似度検索をバイパスしてシステムプロンプトの中核枠へ常時注入される。ただし、以下の不変条件を厳格に適用する：
 
-1. **忘却・訂正の適用**: `is_forgotten == true` の記憶、または訂正されて `superseded_by` を持つ古い記憶は、重要度が10であっても**Pinned枠へ注入してはならない**。
+1. **忘却・訂正の適用**: `is_forgotten == true`（または `importance == 0`）の記憶、または訂正されて `superseded_by` を持つ古い記憶は、中核事実であっても**Pinned枠へ注入してはならない**。
 2. **トークン予算上限（Token Budget）**:
    - Pinned Memory枠には最大トークン予算（例: 最大 1,000 トークン）を設定する。
    - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at` 順で収容する。
@@ -146,26 +154,34 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 親エージェントには以下のツールが提供される（主体・権限・操作IDはホストが自動束縛）：
 - `mind_recall(query: String, limit: Option<u32>) -> Vec<MemoryItem>`: 記憶の検索
 - `mind_read(memory_id: String) -> MemoryDetail`: 記憶の詳細および由来の閲覧
-- `mind_update(action: MindUpdateAction) -> MindUpdateResult`: 明示的な記憶の追加・訂正・忘却
+- `mind_update(action: MindUpdateAction) -> MindUpdateResult`: 明示的な記憶の追加・訂正・忘却（優先度引き下げ）
 
-### 5.2 自動整理（Consolidation）の起動条件と整合性
+### 5.2 自動整理（Consolidation）における内容の分割保存
 対話ログからの長期記憶形成は、**Compaction（要約）の発生を必須条件とせず、独立してバックグラウンド実行**される。
 - **起動契機**: ユーザー対話が途切れたアイドル時（60秒以上）、または未整理の確定ターン数が閾値（例: 5ターン）に達した時点。
+- **内容ごとの独立レコード分割保存**:
+  - 1つの会話発言から複数の異なる事実（例: 「好きな飲み物はコーヒー」と「勤務先はTech社」）が読み取れる場合、**単一のレコードにまとめず、独立した個別の `MemoryRecord` として保存する**。
+  - 各レコードは固有のIDを持ち、出所（`source_context.turn_id`）を共有しながらも、重要度や忘却状態を完全に独立して管理できる。
 
 ```text
 未処理の対話ログ・子の作業報告
-  → 未処理範囲と出所を取得（忘却指定されたturn_idは再抽出対象から除外）
-  → 既存記憶と現在の版（memory_revision）・忘却状態（is_forgotten）を参照
-  → 経験の抽出（importance, occurred_at, emotion）
+  → 未処理範囲を取得（既に抽出済みのturn_idは再走査をスキップ）
+  → 既存記憶と現在の版（memory_revision）・忘却状態（is_forgotten / importance）を参照
+  → 経験の抽出（異なる内容は個別の独立したMemoryRecordとして分割）
   → 既存記憶の統合・訂正、引用実績に基づく重要度再評価
   → トランザクション内で競合検証（版不一致・忘却済み記憶の再生成を拒否）
   → 記憶・処理済みカーソルを原子的コミット
 ```
 
-### 5.3 遅延整理ジョブの競合解決
-- ユーザーが「今の話は忘れて」と指示して `is_forgotten = true` または版が進んだ後、バックグラウンドで走っていた古い整理ジョブが同じ記憶を書き戻そうとした場合：
-  - トランザクション内で `memory_revision` および `is_forgotten` を照合し、**古い整理結果を拒否（Conflict）**して破棄する。
-  - 同一の出所（`turn_id`）に紐づく忘却記録が存在する場合、別IDでの新規再抽出も遮断し、忘却したはずの記憶が形を変えて遅れて復活する不整合を防止する。
+### 5.3 「忘却」のセマンティクス（優先度引き下げ）と遅延整理ジョブの競合解決
+- **忘却の本質は「優先度最低化（想起除外）」**:
+  - 忘却はデータベースからの物理削除や発話ターン全体の除外ではなく、**対象記憶レコードの優先度を引き下げる（`importance = 0` かつ `is_forgotten = true`）** 運用とする。
+  - 内容ごとに独立レコードとして分割保存されているため、一方の記憶（勤務先）を忘却しても、同一ターンに由来する別の記憶（好きな飲み物）の想起には一切影響を与えない。
+  - 自然な人間の記憶と同様、過去ログ上の認知事実としては残存しつつ、想起スコア計算（$Importance = 0$）および通常想起・Pinned枠からの除外フィルタにより、以後のプロンプトには一切出現しなくなる。
+- **遅延整理ジョブの競合解決**:
+  - ユーザーが「今の話は忘れて」と指示して `is_forgotten = true`（`importance = 0`）となった後、バックグラウンドで走っていた古い整理ジョブが同じ記憶を書き戻そうとした場合：
+    - トランザクション内で `memory_revision` および `is_forgotten` を照合し、**古い整理結果を拒否（Conflict）**して破棄する。
+    - 忘却済みの記憶と同じ意味内容・事実の再抽出を防止し、忘却したはずの記憶が形を変えて復活する不整合を遮断する。
 
 ---
 

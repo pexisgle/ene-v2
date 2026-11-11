@@ -49,14 +49,15 @@
   // HNSW ベクトルインデックス・日本語2-gram全文検索インデックスの定義
   db.query(r#"
       DEFINE TABLE memory SCHEMAFULL;
+      DEFINE FIELD content ON TABLE memory TYPE string;
       DEFINE FIELD embedding ON TABLE memory TYPE option<array<float>>;
       DEFINE INDEX idx_memory_embedding ON TABLE memory FIELDS embedding 
           HNSW DIMENSION 1536 DIST COSINE TYPE F32;
       
-      DEFINE ANALYZER japanese_analyzer TOKENIZERS ngram 2 3 FILTERS lowercase;
+      DEFINE ANALYZER japanese_analyzer TOKENIZERS blank,punct FILTERS lowercase,ngram(2,2);
       DEFINE INDEX idx_memory_fulltext ON TABLE memory FIELDS content 
           FULLTEXT ANALYZER japanese_analyzer;
-  "#).await?;
+  "#).await?.check()?;
   ```
 - **一次ドキュメント**:
   - [SurrealDB Embedded Rust SDK Guide](https://surrealdb.com/docs/surrealdb/integration/sdks/rust)
