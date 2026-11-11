@@ -28,7 +28,7 @@
 ### 2.1 正本と責務の明確な分離
 - **Rig（`rig-ecs` / `rig-memory`）が所有する正本**:
   - **会話履歴の正本**: `rig-ecs` の `SessionLog` / `SessionStore`（`DirStore` による追記型線形ログ）がメッセージ列（マルチパート、ツール呼び出し、プロバイダーメタデータ）をディスク上に完全保持。
-  - **要約状態**: `rig-memory` の `SummaryState` が要約テキストおよび要約対象のメッセージ範囲を管理し、`apply_summary` によって会話文脈へ反映。
+  - **要約状態と圧縮範囲**: `rig-memory` の既存型（`SummaryPlan.keep_from`、適用後の置換情報を記録する `Compacted`、および `summary_state`）が要約テキストと置換範囲を管理し、`apply_summary` によって会話ログ（`SessionLog`）内に直接反映。SurrealDBへ別途二重保存する必要はない。
 - **ene-host が管理する追加状態**:
   - `companion_id`（コンパニオンとセッションの対応付け）
   - `InactivityTracker`（厳密なユーザー無操作アイドル時間の計測）

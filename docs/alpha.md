@@ -219,7 +219,7 @@ OpenAI `gpt-6-luna`の親、コンパニオンと同じ接続の**memory purpose
 
 長時間の対話を破綻なく継続するためのコンテキスト圧縮と、Prefix Cachingヒット率を最大化するプロンプト構築順序を実装する。
 
-- **追記型線形ログ ＋ `rig-memory` によるCompaction**: 会話履歴は `rig-ecs` の `SessionLogPlugin` ＋ `SessionStore`（`DirStore`）を正本としてディスクに保存し、要約スナップショット（`SummaryState`）はSurrealDBに永続化。ディスクへの完全な線形追記ログと、Compaction用の版スナップショットで管理。
+- **追記型線形ログ ＋ `rig-memory` によるCompaction**: 会話履歴および要約（`Compacted`）は `rig-ecs` の `SessionLogPlugin` ＋ `SessionStore`（`DirStore`）を正本としてディスクに保存。ディスクへの完全な線形追記ログと版スナップショットで管理し、SurrealDBへの要約二重保存は行わない。
 - **厳密なアイドル検知**: ユーザーの操作・発話不在時間のみをカウントし、コンパニオン自身の自発的独り言・見守り発話はタイマーをリセットしない。
 - **割り込み耐性とPre-compaction継続**: バックグラウンドCompaction中にユーザー発話があった場合、Compaction完了を待たずに直前履歴（pre-compaction state）から即座に応答を返し、実行中Compaction結果は破棄/次回延期する。
 - **機械的コンテキスト上限検証と縮退動作**: 送信直前に `Total Input + Max Output <= Context Window` を機械的に検証。要約失敗・トークン超過時はアクティブプロンプト窓から最も古い未要約メッセージを一時的に切り詰めて対話を継続。

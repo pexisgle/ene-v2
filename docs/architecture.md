@@ -77,7 +77,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
   - 外側のTokioタスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
-  - 会話の生ログは `DirStore` に完全保存。要約スナップショット（`SummaryState`）および長期記憶はSurrealDBに永続化。
+  - 会話の生ログおよびCompaction要約（`Compacted`）は `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心はSurrealDBに永続化（要約のSurrealDB二重保存は行わない）。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
   - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中結果は破棄/次回延期。
 - **作業エージェント（ACP）のセッション接続維持**:

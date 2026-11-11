@@ -16,7 +16,7 @@
 2. **SurrealDB（SurrealKV組み込み）を唯一の正本とする**:
    - 記憶の正本、ベクトルインデックス、全文検索、および認知的関係性グラフを、C++依存のないPure Rust組み込みストレージ（SurrealKV）で単一トランザクション管理する。
 3. **境界不変条件の厳密な保証**:
-   - 忘却された記憶は通常想起・Pinned枠から確実に排除され、遅れて完了した自動整理ジョブが古い記憶を復活させる競合を防止する。
+   - 忘却（想起優先度の引き下げ）された記憶はPinned枠から外れて想起スコアが低下し、遅れて完了した自動整理ジョブが古い優先度で上書きする競合を防止する。
    - ベクトル検索空間はモデル名・次元数・前処理版で厳密に識別し、異種ベクトルの混線・汚染を防止する。
 
 ---
@@ -121,27 +121,33 @@ $$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 
 
 ```sql
 -- SurrealQL ハイブリッド検索クエリ例（ベクトル検索と全文検索の独立取得とRRF順位統合）
--- 1. ベクトル意味検索候補（語句不一致でも意味が近い候補を漏らさず取得）
+-- 1. ベクトル意味検索候補（語句不一致でも意味が近い候補を漏らさず取得し、スコア降順で整列）
 LET $semantic = (
     SELECT id, content, importance, occurred_at, last_accessed_at,
            vector::similarity::cosine(embedding, $query_vec) AS score
     FROM memory
-    WHERE embedding <|10, 40|> $query_vec
+    WHERE embedding <|20, 40|> $query_vec
+    ORDER BY score DESC
     LIMIT 20
 );
 
--- 2. 全文検索候補（語句・キーワード完全一致候補を取得）
+-- 2. 全文検索候補（語句・キーワード完全一致候補を取得し、スコア降順で整列）
 LET $lexical = (
     SELECT id, content, importance, occurred_at, last_accessed_at,
            search::score(1) AS score
     FROM memory
     WHERE content @1@ $query_text
+    ORDER BY score DESC
     LIMIT 20
 );
 
--- 3. search::rrf による順位融合（候補IDの和集合から統合ランクを算出し、正規化Relevanceを取得）
-RETURN search::rrf([$semantic, $lexical]);
+-- 3. search::rrf による順位融合（必須引数: 候補リスト配列、結果件数 limit=20、定数 k=60）
+RETURN search::rrf([$semantic, $lexical], 20, 60);
 ```
+- **`search::rrf` の引数とスコア尺度合わせ（正規化）**:
+  - `search::rrf($lists, $limit, $k)` は必須引数として結果件数の `$limit` を要求し、各入力リストが `score` の降順に整列（`ORDER BY score DESC`）されていることを前提とする。
+  - RRFが返す `rrf_score` は各リストにおける順位の逆数和（2リスト・$k=60$ の理論上限は $2 / 61 \approx 0.0328$）であり、そのままでは $0.0 \sim 1.0$ の尺度にはならない。
+  - したがって、**「RRFによる順位融合」と「スコアの尺度合わせ（正規化）」は別の処理**として扱い、RRFスコアを理論上限値（$\frac{2}{1+k}$）で除算するかMin-Max正規化を行って $0.0 \sim 1.0$ の `Relevance` へ尺度合わせを行ってから、重要度（`Importance`）・直近性（`Recency`）との加重和に組み込む。
 - **マルチプロバイダー埋め込み（ローカル / クラウド選択性）**:
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
   - SurrealDBのHNSWインデックスは、選択されたモデルの出力次元数（`configured_dimensions`）に合わせて初期化される。
@@ -208,11 +214,11 @@ RETURN search::rrf([$semantic, $lexical]);
   - **記憶に明確な削除（物理削除や除外フラグ）は存在しない**。
   - 忘却とは、記憶レコードの**想起優先度（`importance`）を引き下げ、日常会話で自然に想起されにくくすること**である。人間が過去の経験そのものを脳内から完全に抹消できないのと同様に、DBからの物理削除や除外フラグは設けない。
   - **想起スコア計算との連動**:
-    - 想起スコア計算式（$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency}$）において、優先度（`Importance`）が引き下げられることで総スコアが自然に低下し、日常会話の自動想起で上位に浮上しなくなる。
-    - Pinned Memory枠（重要度10）からも優先度引き下げに伴って自然に外れる。
+    - 想起スコア計算式（$\text{Score} = 0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot \text{Recency}$）において、優先度（`Importance`）が引き下げられることで総スコアが低下する。
+    - 他の条件（Relevance, Recency）が同じであれば想起スコアは低減し、重要度10のPinned枠からも外れる。ただし、質問との関連度（`Relevance`）が極めて高い場合などは、人間が過去の記憶を詳細に問われて思い出すのと同様に再び想起されることがある。
   - **保証の明確な境界**:
-    - **保証すること**: 想起優先度が引き下げられた記憶は、総合スコアが低減するため日常の自動想起で上位候補にならず、Pinned枠からも外れる。
-    - **保証しないこと（意図的仕様）**: 直前の会話生ログ（Recent Dialogue History）や既存の要約文（Compaction Summary）からの物理的・遡及的な削除は保証しない。対話の客観的な事実記録としては残り、対話の進展に伴って直前ログが窓から自然に押し出されるか、次回のCompaction要約で抽象化されるのを待つ。
+    - **保証すること**: 忘却は想起優先度を引き下げる操作であり、他の条件が同じなら想起スコアは低下し、重要度10のPinned枠から外れる。遅延した整理ジョブが古い優先度で上書きすることは防止される。
+    - **保証しないこと（意図的仕様）**: 関連度が極めて高いクエリにおける完全な不可視化や、直前の会話生ログ（Recent Dialogue History）・既存の要約文（Compaction Summary）からの物理的・遡及的な削除は保証しない。対話の客観的な事実記録としては残り、対話の進展に伴って直前ログが窓から自然に押し出されるか、次回のCompaction要約で抽象化されるのを待つ。
   - **分割保存との連携**:
     - 内容ごとに独立した `MemoryRecord` として分割保存されているため、一方の記憶（例: 勤務先）の優先度を引き下げても、同一ターンに由来する別の記憶（例: 好きな飲み物）の想起には一切影響を与えない。
   - **遅延整理ジョブの競合解決**:

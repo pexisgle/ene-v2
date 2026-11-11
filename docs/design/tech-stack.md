@@ -9,7 +9,7 @@
 | 領域 | 採用技術 / ライブラリ | 選定理由 |
 | :--- | :--- | :--- |
 | **データベース** | **`SurrealDB` (Embedded SurrealKV)** | 100% Rustネイティブ、C++ビルド不要。心・記憶・関係性をグラフで表現し、HNSWベクトル検索、BM25全文検索、ACIDトランザクションを単一エンジンで完結 |
-| **エージェント通信・推論** | **`rig-core` ＋ Tokio非同期ステートマシン** | OpenAI / Anthropic / Gemini / OpenRouter 等の通信・ツール定義（`#[derive(Tool)]`）・ストリーミングパースを `rig-core` に委ね、会話ターンやアイドル管理・割り込みをTokio非同期ステートマシンで直感的に制御 |
+| **エージェント実行・推論** | **`rig-ecs` ＋ Tokio非同期ステートマシン** | 親・内蔵の子の推論・ツール反復・会話ログ正本（`SessionLogPlugin` + `DirStore`）を `rig-ecs` に委ね、外側のTokio非同期ステートマシンで音声入出力、アイドル管理、複数コンパニオン調停、ACP WorkSession接続維持を制御 |
 | **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `sandbox_run`)** | Windows（AppContainer / Job Objects）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産を活用。透過デスクトップウィンドウ（Wayland / Windows）、VRM 1.0モデルロード、RMS音量によるローカル即時口パク |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
@@ -60,13 +60,14 @@
           FULLTEXT ANALYZER japanese_analyzer;
   "#).await?.check()?;
 
-  // 代表的なSurrealQLハイブリッド検索クエリ（ベクトル検索と全文検索の独立取得とRRF統合）
+  // 代表的なSurrealQLハイブリッド検索クエリ（ベクトル検索と全文検索の独立取得とRRF順位統合）
   let _results = db.query(r#"
       LET $semantic = (
           SELECT id, content, importance, occurred_at, last_accessed_at,
                  vector::similarity::cosine(embedding, $query_vec) AS score
           FROM memory
-          WHERE embedding <|10, 40|> $query_vec
+          WHERE embedding <|20, 40|> $query_vec
+          ORDER BY score DESC
           LIMIT 20
       );
       LET $lexical = (
@@ -74,9 +75,10 @@
                  search::score(1) AS score
           FROM memory
           WHERE content @1@ $query_text
+          ORDER BY score DESC
           LIMIT 20
       );
-      RETURN search::rrf([$semantic, $lexical]);
+      RETURN search::rrf([$semantic, $lexical], 20, 60);
   "#).bind(("query_vec", vec![0.0f32; 1536])).bind(("query_text", "好きなこと")).await?.check()?;
   ```
 - **一次ドキュメント**:
@@ -116,8 +118,8 @@
 - **実装量の劇的削減と型契約の整合**:
   - 親エージェントおよび内蔵の子エージェントの推論・ツール反復（ReActループ）、引数パース、ツール結果のモデル返却は `rig-ecs` の `AgentPlugin` が担うため、独自エージェントループを自作する必要はない。
   - **保存の責務分担**:
-    - **会話セッションログ（短期正本）**: `rig-ecs` の `SessionLogPlugin` が要求する `SessionStore(Arc<dyn Store>)`（同期 `Store`）に合わせ、高速・堅牢な追記型線形ログである `DirStore` をそのまま正本として採用する（`AsyncStore` との型不一致を起こさない）。
-    - **長期記憶・心・Compaction要約**: SurrealDB（SurrealKV）に非同期永続化し、グラフ関係性・HNSWベクトル検索・要約状態を管理する。
+    - **会話セッションログと要約（短期正本）**: `rig-ecs` の `SessionLogPlugin` が要求する `SessionStore(Arc<dyn Store>)`（同期 `Store`）に合わせ、高速・堅牢な追記型線形ログである `DirStore` をそのまま正本として採用する。Compaction要約も `apply_summary` により `Compacted` として `SessionLog` 内に直接記録されるため、SurrealDBへ別途二重保存する必要はない。
+    - **長期記憶・心**: SurrealDB（SurrealKV）に非同期永続化し、長期的なエピソード記憶、心（感情・関係性）、HNSWベクトル検索、および長期記憶の抽出進捗（`processed_turns_cursor`）を管理する。
   - MCPツール連携は `rig-rmcp` を活用し、`McpConnection` から取得したツールを Rig の `DynamicTool` として直接登録する（独自のアダプター層を作らない）。
 - **完全な外側制御権**:
   - アイドル時間計測、複数コンパニオン間の譲り合い、音声再生と割り込みバッファ破棄（Flush）、ACP WorkSession接続維持は、外側のTokioタスクが非同期に制御する。
