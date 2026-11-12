@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS memories (
     emotion TEXT,                     -- 当時の感情タグ
     source_context TEXT NOT NULL,     -- JSON: 由来（turn_id, run_id, 話者等）
     embedding BLOB,                   -- ベクトルバイト列 (f32 LE: Rust内スライスコサイン類似度計算用)
-    embedding_model TEXT,             -- 例: "text-embedding-3-small"
+    embedding_model TEXT,             -- 埋め込み空間複合識別子: "<model_name>:<dimensions>:<prep_version>"（例: "text-embedding-3-small:1536:v1"）
     embedding_dimensions INTEGER,     -- 例: 1536
     embedding_content_revision INTEGER -- 生成時の content_revision (不一致時は無効・再計算対象)
 );
@@ -109,7 +109,7 @@ END;
 -- 5. 認知的関係性グラフ（1ホップ エッジテーブル）
 CREATE TABLE IF NOT EXISTS memory_edges (
     from_id TEXT NOT NULL,
-    relation TEXT NOT NULL, -- 'remembers', 'cited_in', 'supersedes'
+    relation TEXT NOT NULL, -- 'remembers', 'cited_in', 'estimated_cited_in', 'supersedes'
     to_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (from_id, relation, to_id)
@@ -213,9 +213,9 @@ for candidate in &mut fused_candidates {
     candidate.relevance = (candidate.rrf_score / (2.0 / 61.0)).clamp(0.0, 1.0);
 }
 ```
-- **マルチプロバイダー埋め込み（ローカル / クラウド選択性）**:
+- **マルチプロバイダー埋め込み（ローカル / クラウド選択性と空間分離）**:
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
-  - 各記憶レコードは使用したモデル名と次元数を保持し、検索時は現在のモデルと一致するベクトルのみを照合する。
+  - 各記憶レコードは、モデル名・次元数・前処理バージョンを複合化した `embedding_model` 識別子（例: `"text-embedding-3-small:1536:v1"`）を保持し、検索時は現在の空間識別子と完全一致するベクトルのみを走査・類似度計算の対象とする（次元不一致や前処理変更による破綻を決定論的に防止）。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
   - $0 \sim 10$ の順序尺度。$\text{Importance} = \text{importance} / 10.0$ として正規化（忘却時は $0$ または $1$ へ引き下げる）。
     - $0$: 忘却指示を受けた記憶（明示的検索でのみ参照可能）
@@ -228,7 +228,7 @@ for candidate in &mut fused_candidates {
   - $\lambda \approx 0.05$（半減期約14日）。
   - $\Delta t$: 最終アクセス日時または発生日時（`COALESCE(last_accessed_at, occurred_at, recorded_at)`）からの経過日数。引用ガードにより実際に会話で参照された記憶は `last_accessed_at` が更新されて直近性がリセットされ、未参照の記憶は時間とともに自然減衰する。
 
-### 4.2 引用ガード（想起自己汚染ループの防止）
+### 4.2 引用ガード（想起自己汚染の低減）
 
 - **更新条件の厳格性とホスト側引用検証**:
   - ベクトル検索により想起候補としてプロンプトへ注入されただけでは、`last_accessed_at` は**更新されない**。
@@ -237,9 +237,10 @@ for candidate in &mut fused_candidates {
     - ターン完了後のバックグラウンド増分整理（Consolidation）において、整理モデルがターンの会話内容を分析し、実際に参照・活用された記憶ID（`cited_memory_ids`）を構造化出力として抽出する。
     - **ホストによる引用IDの照合検証と利用実績の区分**:
       - ホストは抽出された `cited_memory_ids` が**「そのターンで実際にプロンプトへ注入された記憶IDリスト」に含まれているかを機械的に検証**する。注入されていない記憶IDや幻覚されたIDの引用は棄却し、不当なアクセス実績の更新を遮断する。
-      - 整理モデルによる判定は「推定利用実績」として位置づけ、親エージェントによる明示的な `mind_read` / `mind_update` ツール呼び出し（「直接・確実な利用実績」）と明確に区別してエッジテーブル等に記録する。
-      - 検証を通過した記憶、または明示的ツール呼び出しがあった場合のみ、ホストが `last_accessed_at = now()` へ更新し、エッジテーブルに `(memory_id, 'cited_in', turn_id)` を追加する。
-  - これにより、無関係な記憶が一度検索に引っかかっただけで直近性スコアを引き上げ続け、次回以降も過剰に想起され続ける「想起の自己汚染ループ」を遮断する。
+      - 親エージェントによる明示的な `mind_read` / `mind_update` ツール呼び出し（「直接・確実な利用実績」）は関係エッジ `(memory_id, 'cited_in', turn_id)` として記録する。
+      - 一方、整理モデルによる抽出判定は「推定利用実績」として位置づけ、ホストの注入照合検証を通過したもののみ関係エッジ `(memory_id, 'estimated_cited_in', turn_id)` として区別して記録する。
+      - いずれの確実な利用実績または検証済み推定利用実績が成立した場合に限り、ホストが `last_accessed_at = now()` へ更新する。
+  - これにより、無関係な記憶が一度検索に引っかかっただけで直近性スコアを引き上げ続け、次回以降も過剰に想起され続ける誤った再強化を低減する。
 
 ### 4.3 常時注入記憶（Pinned / Core Memory）と動的コンテキストの非永続注入
 
@@ -271,23 +272,36 @@ for candidate in &mut fused_candidates {
 ### 5.2 自動整理（Consolidation）の単一方向パイプラインと重複防止
 対話ログからの長期記憶形成は、**Compaction（要約）の発生を必須条件とせず、独立してバックグラウンド実行**される。
 - **起動契機**: ユーザー対話が途切れたアイドル時（60秒以上）、または未整理の確定ターン数が閾値（例: 5ターン）に達した時点。
+- **単一フライト実行ガード（Single-Flight Consolidation Guard）**:
+  - コンパニオンごとに同時に稼働する自動整理ジョブは**常に高々1件**に制限する（ホスト側インメモリの `is_consolidating` フラグまたは排他ガード）。
+  - 先行ジョブの処理中に新たなアイドルやターン蓄積が発生しても、多重に並行ジョブを走らせず、スキップまたは次回アイドル時へ安全に遅延させる。
 - **物理的再実行の確実な重複排除と意味的統合の境界**:
-  - **物理的な重複排除**: 確定ログのターンIDおよび `consolidation_state.last_processed_turn_id` のカーソル管理により、同一会話ターンを二重に走査・再処理する事故は決定論的に防止される。
+  - **同一会話ターン範囲の二重コミットの排除（No Duplicate Commit of the Same Turn Range）**: 確定ログのターンIDおよび `consolidation_state.last_processed_turn_id` のカーソル管理により、同一会話ターン範囲を二重にコミットする事故を決定論的に防止する。
   - **意味的な統合提案（Heuristic Consolidation）**: 会話から抽出された知識候補が既存記憶と同一・類似であるかの判定は、FTS5およびベクトル類似検索を参考にした整理モデルの意味的推論（統合提案）として扱う。
     - 既存記憶の更新と判断された場合：`memory_revision` と `content_revision` をインクリメントして内容・重要度を更新し、古い埋め込みを無効化（再計算対象にマーキング）。
     - 忘却済み記憶（`importance <= 1`）の復活防止：出所ターンや既存エッジ（`supersedes` 等）を照合し、同一主題の過去記憶が忘却されている場合は、安易に高優先度の新規レコードとして再生成しないよう整理プロンプトの制約を課す。
 - **単一方向パイプライン（Single-Direction Consolidation Pipeline）**:
-  1. **確定済みログの読み込み**: `SessionLog`（追記型ディスク正本）から、`consolidation_state.last_processed_turn_id` より後の確定ターン（最新の未完了ターンを除く安定範囲）を読み込む。Compaction後のプロンプト用Viewではなく、客観的な会話生ログを正本入力とする。
+  1. **確定済みログの読み込みと開始カーソルの束縛**:
+     - ジョブ開始時に `consolidation_state` から現在の `job_start_turn_id` を読み込み束縛する。
+     - `SessionLog`（追記型ディスク正本）から、`job_start_turn_id` より後の確定ターン（最新の未完了ターンを除く安定範囲）を読み込む。Compaction後のプロンプト用Viewではなく、客観的な会話生ログを正本入力とする。
   2. **事実抽出と既存記憶の照合**: 整理モデルが会話から抽出した知識候補について、ホストがFTS5およびベクトル検索を用いて既存記憶との類似候補を取得・照合する。
   3. **更新（Merge）と新規作成（Insert）の適用**:
      - 既存の記憶と同一事実または更新である場合：`memory_revision` と `content_revision` をインクリメントして内容・重要度を更新。
      - 新規の独立した事実である場合：新しい `MemoryRecord` を採番して作成。1つの発話から複数事実が抽出された場合は、内容ごとに独立したレコードとして分割保存する。
-  4. **原子的コミット**: 記憶の変更・エッジの追加・および `consolidation_state.last_processed_turn_id` の前進を、同一のSQLiteトランザクション内で原子的（Atomic）にコミットする。
+  4. **原子的コミットとカーソル整合性の検証（Atomic Commit with Cursor Match）**:
+     - 記憶の変更・エッジ（`estimated_cited_in` 等）の追加・およびカーソル更新を、同一のSQLiteトランザクション内で実行する。
+     - トランザクション内で以下の更新条件を検証する：
+       ```sql
+       UPDATE consolidation_state
+       SET last_processed_turn_id = :new_cursor, updated_at = :now
+       WHERE companion_id = :companion_id AND last_processed_turn_id = :job_start_turn_id;
+       ```
+     - もし更新行数が 0 行（コミット直前に他処理によるカーソル前進や不整合が生じた場合）であった場合は、**トランザクション全体を直ちにロールバック（アボート）**し、重複挿入・誤コミットを完全に防止する。
 
 ```text
 SessionLog（追記型確定生ログ）
   │
-  ├─ last_processed_turn_id より後の安定ターンを読み出し
+  ├─ job_start_turn_id より後の安定ターンを読み出し (Single-Flight)
   ▼
 整理モデルによる経験・事実の抽出
   │
@@ -297,9 +311,10 @@ SessionLog（追記型確定生ログ）
   │
   ├─ 引用実績のホスト側検証（プロンプト注入IDとの照合）
   ▼
-SQLite トランザクション
+SQLite トランザクション (Atomic Commit)
   ├─ memories / memory_edges のコミット
-  └─ consolidation_state.last_processed_turn_id の同時コミット
+  └─ consolidation_state 更新 (WHERE last_processed_turn_id = job_start_turn_id)
+     └─ 一致時: コミット完了 / 不一致時: ロールバック破棄
 ```
 
 ### 5.3 「忘却」のセマンティクス（想起優先度の引き下げ）と境界
@@ -340,7 +355,7 @@ SQLite トランザクション
 | 不変条件 | 検証方法 | 合格基準 |
 | :--- | :--- | :--- |
 | **忘却のセマンティクス** | 記憶の想起優先度（`importance`）を引き下げた後、想起スコアおよびPinned枠を検証 | 他の条件が同じなら想起スコアが低下し、重要度10のPinned枠から外れること。再整理ジョブによって古い優先度へ巻き戻らないこと（過去ログの客観記録は保持されること） |
-| **遅延整理の競合排除** | 記憶変更後に、変更前の古い文脈から生成した整理結果をコミット試行 | 版不一致（Conflict）として安全に拒否され、最新状態が上書きされないこと |
-| **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、応答内で明示引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、応答メタデータや明示操作で引用された場合のみ更新されること |
+| **遅延整理・並行コミットの競合排除** | 記憶変更後またはカーソル前進後に、変更前の古い文脈から生成した整理結果をコミット試行 | `last_processed_turn_id` 不一致または版不一致（Conflict）としてトランザクションがロールバックされ、同一ターン範囲の二重コミットや古い状態の上書きが完全に排除されること |
+| **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、応答内で明示操作または推定引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、明示操作（`cited_in`）またはホスト照合を通過した推定引用（`estimated_cited_in`）の場合のみ更新されること |
 | **Pinned予算制限** | 重要度10の記憶を多数作成し、プロンプト生成を実行 | 予算上限（例: 1,000トークン）を超過せず、文脈窓を圧迫しないこと |
-| **埋め込み空間の隔離** | 異なる埋め込みモデル名・次元数のベクトルを登録して検索 | 次元不一致・モデル違いのベクトルが混入せず、一致する空間のみで類似度計算が行われること |
+| **埋め込み空間の隔離** | 異なる埋め込みモデル名・次元数・前処理バージョンの複合キー（`embedding_model`）を持つベクトルを登録して検索 | 次元不一致や前処理違いのベクトルが混入せず、一致する空間複合キーのみで類似度計算が行われること |

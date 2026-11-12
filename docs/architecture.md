@@ -77,13 +77,13 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
     - 先行TTS: `PostUpdate` の `MessageReader<StreamDelta>` で親のユーザー向け発話のみをフィルタし文単位で合成キューへ送出
-    - 承認待機: `Stage::Gate` で公式契約に準拠した保留エンティティ `(Ask, ForAgent, HoldOf)` を生成（承認時は `HoldOf` 解除でツール起動、拒否時は `Decision` 確定後に `HoldOf` 解除）
+    - 承認待機: `Stage::Gate` で公式契約に準拠した保留エンティティ `(Ask, ForAgent, HoldOf)` を生成（承認時は対象エンティティへ `Approved` 付与後に `HoldOf` 解除、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` 確定後に `HoldOf` 解除）
   - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
   - 会話の生ログおよびCompaction要約（`Compacted`）は `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心はSQLiteに永続化（要約のSQLite二重保存は行わない）。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
-  - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中だった要約タスクは安全にキャンセル・破棄して次回アイドル時へ延期。
+  - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中だった要約タスクは安全にキャンセル・破棄して次回アイドル時へ延期。ハード強制閾値到達時も同期要約による会話停止は避け、緊急窓切り詰めを優先適用して応答テンポを維持。
 - **作業エージェントのセッション接続維持とライフサイクル分離**:
   - `WorkSession ≒ ACP Session` としてプロセス接続を維持。Run（指示ごとの実行）の中断はACP標準の `session/cancel` で行い、プロセス強制終了はセッション終了時や暴走時のみ実施。
   - **停止伝播の非結合**: 継続稼働する `WorkSession` は親の `SpawnedBy` ではなく独立エンティティとしてWorld内に生成し、ユーザーの音声割り込み（Barge-in）による会話ターンの停止が作業セッションへ伝播して道連れ終了する事故を防止。
@@ -95,16 +95,16 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 動的コンテキストは `SessionLog`（永続ログ）へは書き込まず、`PrepareSystems::Fit` 時にインメモリで末尾へ一時注入し、動的文脈を含む要求全体に対してFitを実行。
 
 ### 2. 心と自動記憶（SQLite）
-- **組み込みSQLite（`rusqlite` bundled, WALモード ＋ FTS5 trigram ＋ Rustコサイン類似度）**:
+- **組み込みSQLite（`tokio-rusqlite` bundled, WALモード ＋ FTS5 trigram ＋ Rustコサイン類似度）**:
   - C言語SQLiteを静的リンクして単一ファイル完結。`tokio-rusqlite` によるスレッド分離でECSメインループをブロックせず非同期ACIDトランザクションを実行。
 - **エピソード記憶（`MemoryRecord`）**:
   - `rowid` を明示的 INTEGER PRIMARY KEY とし、FTS5外部コンテンツテーブルとの整数参照関係を不変に保証。
   - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（0〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`content_revision`、`embedding` を格納。
   - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除や除外フラグではなく想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（過去ログの客観記録は保持）。
-  - ハイブリッド検索: FTS5 BM25（部分トークンOR結合）と ベクトル検索（Rust内スライスコサイン類似度）をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。
-  - **増分自動整理**: `consolidation_state.last_processed_turn_id` より後の新規ターンのみを単一方向パイプラインで増分走査し、既存記憶の照合（更新 vs 新規分割作成）とカーソル前進を原子的コミット。
+  - ハイブリッド検索: FTS5 BM25（部分トークンOR結合）と ベクトル検索（Rust内スライスコサイン類似度）をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。`embedding_model` 複合識別子により適合する埋め込み空間のみを照合。
+  - **増分自動整理**: 単一フライトガード（高々1件）のもと、`consolidation_state.last_processed_turn_id` より後の新規ターンのみを単一方向パイプラインで増分走査し、既存記憶の照合（更新 vs 新規分割作成）と開始カーソル一致検証（`WHERE last_processed_turn_id = :job_start_turn_id`）を伴う原子的コミットにより、同一ターン範囲の二重コミットを完全に排除。
   - 想起スコア計算式：$\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t})$（$\text{Importance} = \text{importance}/10.0$、$\Delta t$ は `COALESCE(last_accessed_at, occurred_at, recorded_at)` からの経過日数。自動想起は `importance >= 2` フィルタと連動）
-  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、ターン完了後の固定・統合処理（Consolidation）時に抽出された `cited_memory_ids` をホストがプロンプト注入実績と照合検証した上で更新。
+  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、明示操作（`cited_in`）または整理モデル抽出後にホストがプロンプト注入実績と照合検証した推定利用（`estimated_cited_in`）の場合に限り `last_accessed_at` を更新し、想起自己汚染を低減。
   - **Pinned Memory制約**: 重要度10であっても、訂正状態や優先度引き下げ状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 
 ### 3. 音声対話パイプライン
@@ -113,7 +113,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **世代管理と順序保証**:
   - `generation_id` による割り込み時の旧世代チャンク破棄（FlushBuffer）。
   - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止、実再生進捗報告による未伝達部分の記録整合、再生中の自己音声エコー抑制）。
-  - 文単位TTSの並行合成時における `sequence_no` 整列再生と、合成失敗時の明示的 `SentenceSkipped` 通知による待機解除。
+  - 文単位TTSの並行合成時における `sequence_no` 整列再生、合成失敗時の明示的 `SentenceSkipped` 通知による待機解除、および発話全体の確定完了を告げる `UtteranceFinished` による非ハング保証。
 - **複数コンパニオン調停**:
   - 全員同報配信 ＋ 自律該当性判断。日常対話の譲り合いはLLM自律協調。
   - 不可逆操作を伴う同一タスクの作業委託（`start_work`）は、ホストの原子的受付登録（`try_claim_delegation`）により先着1件のみが実行権を獲得し、多重実行を決定論的に防止。

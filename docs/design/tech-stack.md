@@ -38,11 +38,11 @@
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
   ```toml
-  rusqlite = { version = "0.40", features = ["bundled"] }
-  tokio-rusqlite = "0.8"
+  tokio-rusqlite = { version = "0.8", features = ["bundled"] }
   serde = { version = "1", features = ["derive"] }
   serde_json = "1"
   ```
+  ※ `tokio-rusqlite = { version = "0.8", features = ["bundled"] }` は内部で SQLite C ソースを同梱して静的リンクし、かつ `rusqlite` の型（`tokio_rusqlite::Connection` および re-export された `rusqlite` 型群）を直接公開するため、最上位で個別に `rusqlite` を重ねて宣言することによる版の不一致や C ライブラリの二重リンクを防止する。
 - **スキーマ定義とハイブリッド検索（Rust）**:
   ```rust
   // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ + 整理カーソル）
@@ -65,7 +65,7 @@
           emotion TEXT,
           source_context TEXT,     -- JSON object
           embedding BLOB,          -- f32 array bytes
-          embedding_model TEXT,
+          embedding_model TEXT,    -- 埋め込み空間複合識別子: "<model_name>:<dimensions>:<prep_version>"
           embedding_dimensions INTEGER,
           embedding_content_revision INTEGER -- 生成時の content_revision (不一致時は無効・再計算対象)
       );
@@ -92,7 +92,7 @@
 
       CREATE TABLE IF NOT EXISTS memory_edges (
           from_id TEXT NOT NULL,
-          relation TEXT NOT NULL, -- 'remembers', 'cited_in', 'supersedes'
+          relation TEXT NOT NULL, -- 'remembers', 'cited_in', 'estimated_cited_in', 'supersedes'
           to_id TEXT NOT NULL,
           created_at TEXT NOT NULL,
           PRIMARY KEY (from_id, relation, to_id)
@@ -148,8 +148,8 @@
   - **公式契約に準拠した承認待機（Ask / HoldOf / Decision）**:
     - `Stage::Gate` で承認保留を行う際、ツール呼び出し対象エンティティへ勝手な単一フラグを付与するのではなく、Rig公式契約通り保留エンティティ `(Ask, ForAgent(agent), HoldOf(call_entity))` をWorld内に生成する。
     - **承認質問の回答確定とツールの保留解除**:
-      - ユーザーが承認した場合：その承認質問エンティティ（およびそれが持つ `HoldOf`）を `despawn` する。ツール本体の `Decision` は未決定（undecided）のまま維持されるため、カーネルがそのままツールの実行を開始する（ツールを実行せずに勝手に成功結果を与えてしまう事故を防止）。
-      - ユーザーが拒否した場合：対象ツールエンティティの `Decision` に対して `decision.decide(Decider::user(), Outcome::refused("User denied"))` を確定させた上で、承認質問エンティティの `HoldOf` を解除（despawn）する。カーネルはツールを実行せず拒否結果（Denied）として安全に確定・決済する。
+      - ユーザーが承認した場合：対象ツールエンティティ（`call_entity`）へ **`Approved` コンポーネントを付与**（`commands.entity(call_entity).insert(Approved)`）した上で、承認質問エンティティ（およびそれが持つ `HoldOf`）を `despawn` する。これにより、後続のゲートシステム（`Without<Approved>` クエリ）が同一ツール呼び出しを再保留するのを防ぎつつ、ツール本体の `Decision` は未決定（undecided）のまま維持されるため、実行ステージで安全にツール実行が開始される（ツールを実行せずに勝手に成功結果を与えてしまう事故を防止）。
+      - ユーザーが拒否した場合：対象ツールエンティティの `Decision` に対して **`decision.decide(Decider::Person, Outcome::refused("User denied"))`** を確定させた上で、承認質問エンティティの `HoldOf` を解除（`despawn`）する。カーネルはツールを実行せず拒否結果（Denied）として安全に確定・決済する。
       - これにより、他の無関係な保留理由を巻き込んで解除することなく、単一の契約に従って承認・拒否・タイムアウトが整合して終端する。
   - **ストリーム文字片の厳格なフィルタリング**:
     - `PostUpdate` で `MessageReader<StreamDelta>` を購読するシステムは、**親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。

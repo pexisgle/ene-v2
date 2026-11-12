@@ -92,7 +92,7 @@ pub enum RunStatus {
 | :--- | :--- | :--- | :--- |
 | `Starting` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
 | `Running` | 子からの質問または承認要求（`WorkRequest`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち（Rig承認保留は `(Ask, ForAgent, HoldOf)` エンティティを生成） |
-| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時は質問の `HoldOf` エンティティを解除（ツール実行開始）。拒否時は `decision.decide(..., Outcome::refused(...))` を確定した上で `HoldOf` を解除 |
+| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時は対象ツールエンティティに `Approved` コンポーネントを付与して質問の `HoldOf` エンティティを解除（ゲート再評価を抑止しツール実行開始）。拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を確定した上で `HoldOf` を解除 |
 | `WaitingInput` | 質問回答受信（`SendWork` with `request_id`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
 | `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信（未決permissionはcancel応答）、最大30秒クリーンアップ待機 |
 | `Cancelling` | ACP `cancelled` 応答 または Rigターン停止確認 | `Cancelled` | 正常中断確定（ACPプロセスはセッション維持のため生存） |
