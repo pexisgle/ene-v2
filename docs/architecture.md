@@ -77,7 +77,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
     - 先行TTS: `PostUpdate` の `MessageReader<StreamDelta>` で親のユーザー向け発話のみをフィルタし文単位で合成キューへ送出
-    - 承認待機: `Stage::Gate` で公式契約に準拠した保留エンティティ `(Ask, ForAgent, HoldOf)` を生成（承認時は対象エンティティへ `Approved` 付与後に `HoldOf` 解除、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` 確定後に `HoldOf` 解除）
+    - 承認待機: `Stage::Gate` で公式契約に準拠した質問エンティティ `(Ask, ForAgent, HoldOf)` を生成。承認・拒否回答は対象 `Ask` の `Decision` へ `Answer(Outcome)` として確定し、公式 `ApprovalPlugin` が承認時は対象ツールに `Approved` 付与、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を反映後に `HoldOf` を解除（回答確定前に `Ask` を despawn しない）
   - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
@@ -112,8 +112,8 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - VOICEVOX等の文単位HTTP API（文ごとに非同期合成し再生キューへ投入）、ストリーミングエンジン、双方向Live APIの各特性に合わせたアダプター構成。標準音声形式は 24kHz 16-bit mono PCM。
 - **世代管理と順序保証**:
   - `generation_id` による割り込み時の旧世代チャンク破棄（FlushBuffer）。
-  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止、実再生進捗報告による未伝達部分の記録整合、再生中の自己音声エコー抑制）。
-  - 文単位TTSの並行合成時における `sequence_no` 整列再生、合成失敗時の明示的 `SentenceSkipped` 通知による待機解除、および発話全体の確定完了を告げる `UtteranceFinished` による非ハング保証。
+  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止、実再生進捗報告による未伝達部分の記録整合、再生中音声フレーム除外と再生停止後新規発話束縛によるエコー誤承認防止）。
+  - 文単位TTSの並行合成時における `sequence_no` 整列再生、合成失敗時の明示的 `SentenceSkipped` 通知による待機解除、および発話送信完了（`UtteranceFinished`）とクライアント再生完了（`ReportPlaybackStatus(COMPLETED)`）の二段階完了契約による再生途中打ち切り・ハング防止。
 - **複数コンパニオン調停**:
   - 全員同報配信 ＋ 自律該当性判断。日常対話の譲り合いはLLM自律協調。
   - 不可逆操作を伴う同一タスクの作業委託（`start_work`）は、ホストの原子的受付登録（`try_claim_delegation`）により先着1件のみが実行権を獲得し、多重実行を決定論的に防止。

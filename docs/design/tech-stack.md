@@ -145,12 +145,16 @@
 #### 実装のポイント
 - **状態所有権の完全一本化（二重ループの排除）**:
   - ユーザー発話、知覚センサー（目）の要約、タイマースケジュール、作業エージェント（手）からの報告は、すべて `world.trigger(Deliver::new(agent, text, DeliveryMode))` を通じてECS Worldへ直接投入される。
-  - **公式契約に準拠した承認待機（Ask / HoldOf / Decision）**:
-    - `Stage::Gate` で承認保留を行う際、ツール呼び出し対象エンティティへ勝手な単一フラグを付与するのではなく、Rig公式契約通り保留エンティティ `(Ask, ForAgent(agent), HoldOf(call_entity))` をWorld内に生成する。
-    - **承認質問の回答確定とツールの保留解除**:
-      - ユーザーが承認した場合：対象ツールエンティティ（`call_entity`）へ **`Approved` コンポーネントを付与**（`commands.entity(call_entity).insert(Approved)`）した上で、承認質問エンティティ（およびそれが持つ `HoldOf`）を `despawn` する。これにより、後続のゲートシステム（`Without<Approved>` クエリ）が同一ツール呼び出しを再保留するのを防ぎつつ、ツール本体の `Decision` は未決定（undecided）のまま維持されるため、実行ステージで安全にツール実行が開始される（ツールを実行せずに勝手に成功結果を与えてしまう事故を防止）。
-      - ユーザーが拒否した場合：対象ツールエンティティの `Decision` に対して **`decision.decide(Decider::Person, Outcome::refused("User denied"))`** を確定させた上で、承認質問エンティティの `HoldOf` を解除（`despawn`）する。カーネルはツールを実行せず拒否結果（Denied）として安全に確定・決済する。
-      - これにより、他の無関係な保留理由を巻き込んで解除することなく、単一の契約に従って承認・拒否・タイムアウトが整合して終端する。
+  - **公式契約に準拠した承認待機（Ask / HoldOf / Decision / ApprovalPlugin）**:
+    - `Stage::Gate` で承認保留を行う際、ツール呼び出し対象エンティティへ勝手な単一フラグを付与するのではなく、Rig公式契約通り質問エンティティ `(Ask, ForAgent(agent), HoldOf(call_entity))` をWorld内に生成する。
+    - **質問への回答確定とツールの保留解除（公式回答経路への準拠）**:
+      - `Ask` は回答を持つ effect であり、ユーザーの承認・拒否回答は**対象 `Ask` エンティティ自身の `Decision` に対して `Answer` の `Outcome` として確定**する（`ask_decision.decide(Decider::Person, outcome)`）。回答確定前に対象 `Ask` エンティティを勝手に `despawn` してはならない。
+      - 承認・拒否の適用は公式 `ApprovalPlugin`（承認ハンドラ）の契約に委譲する：
+        - ユーザーが承認した場合：プラグインが `Ask` の回答結果を読み取り、対象ツール呼び出しへ `Approved` コンポーネントを付与する（これにより後続の `Without<Approved>` ゲートによる再保留を抑止しつつ、ツール本体の `Decision` は未決定のまま実行ステージへ進める）。
+        - ユーザーが拒否した場合：プラグインが対象ツールの `Decision` を拒否（`decision.decide(Decider::Person, Outcome::refused("User denied"))`）として確定する。
+        - その後、プラグインが質問エンティティの `HoldOf(call_entity)` を解除（`remove::<HoldOf>()` または保留解除）する。質問自身は回答確定済み effect としてセッションログに安全に記録される。
+      - GUI / RPC（`SettingsService.SubmitApproval`）側は、公式の質問回答先である `Answerer`（質問応答機構）の登録を含めて接続する。要求IDと `Ask` エンティティの対応、および承認対象の引数ハッシュ束縛は ene 側の責務として管理する。
+      - これにより、ene 側で独自の回答履歴や状態管理を二重に作り込むことなく、Rigの標準経路で質問と回答が確定・記録され、承認・拒否・タイムアウトが整合して終端する。
   - **ストリーム文字片の厳格なフィルタリング**:
     - `PostUpdate` で `MessageReader<StreamDelta>` を購読するシステムは、**親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
     - プラグイン自身の内部モデル呼び出し、Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等は一切TTSへ流さない。
