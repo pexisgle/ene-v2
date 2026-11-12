@@ -32,6 +32,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: "1.73.0"
+          github_token: ${{ github.token }}
 
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
