@@ -253,7 +253,7 @@ for candidate in &mut fused_candidates {
 > **動的文脈の非永続注入原則（SessionLog の汚染防止）**:
 > Pinned Memory、想起された記憶、現在の心、知覚要約、現在日時は、**会話ログ正本（`SessionLog`）へ `DeliveryMode::Inform` 等で書き込んではならない**。
 > `SessionLog` に一度書き込まれた内容は永続化され、履歴取得API（`GetHistory`）への内部JSON漏洩や、増分自動整理（Consolidation）が想起記憶を自ら再学習する自己汚染ループを引き起こす。
-> 動的コンテキストはすべて、インメモリ要求（`ModelRequest.history`）の末尾（最新ユーザー入力の直前、Dynamic Tail）へ一時挿入した上で、**`PrepareSystems::Fit` を動的文脈を含む要求全体に対して実行**し、合計トークン数に基づいて履歴ウィンドウ（`recent::view`）を切り詰める。
+> 動的コンテキストはすべて `PrepareSystems::Edit` で `ModelRequest.history` 末尾の最新ユーザー発話メッセージ（`User_N`）内にブロックとしてインメモリ結合し、その上で **`PrepareSystems::Fit` を動的文脈を含む要求全体に対して実行**し、合計トークン数に基づいて履歴ウィンドウ（`recent::view`）を切り詰める。
 
 ただし、以下の不変条件を厳格に適用する：
 

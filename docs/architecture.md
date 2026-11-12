@@ -31,7 +31,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs）              │   │
   │   │   ・会話ログ正本（rig-sqlite: SqliteSessionStore）                 │   │
   │   │   ・MCPツール動的登録（world.spawn_tool: ene設定所有）             │   │
-  │   │   ・ECS制御: 先行TTS（PostUpdate StreamDelta）、承認保留（HoldOf） │   │
+  │   │   ・ECS制御: 先行TTS（Stage::Review StreamDelta）、承認保留（HoldOf） │   │
   │   │   ・ツール群: start_work, send_work, stop_work, body_motion, noop   │   │
   │   └───────────────┬────────────────────────────────────┬───────────────┘   │
   │                   │                                    │                   │
@@ -76,7 +76,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **`rig-ecs` による単一イベント駆動エージェントループ**:
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
-    - 先行TTS: `PostUpdate` の `MessageReader<StreamDelta>` で親のユーザー向け発話のみをフィルタし文単位で合成キューへ送出
+    - 先行TTS: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`delta.agent` が親コンパニオンの Entity と一致するテキスト文字片のみをフィルタして文単位（`。`、`！`、`？`、改行）で合成キューへ送出
     - 承認待機: `Stage::Gate` でポリシー判定し、要確認操作には `commands.spawn(HoldOf(call_entity))` を投入してReActループを保留。RPC（`SettingsService.SubmitApproval`）でユーザー回答を受け取り、承認時は `Approved` コンポーネントを付与、拒否時は `Outcome::refused` を確定し、`HoldOf` を解除して処理再開。承認結果は `host.sqlite3` の `approval_requests` テーブルへ保存
   - 会話ログの正本は `SessionLogPlugin` ＋ `SqliteSessionStore`（`rig-sqlite`）により単一の `host.sqlite3` に保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。

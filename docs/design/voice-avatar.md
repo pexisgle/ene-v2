@@ -104,18 +104,19 @@
 
 - **リクエスト形式（Client ➔ Avatar stdin）**:
   ```json
-  {"id": 1, "op": "add", "character": "ene", "config": {"model": "models/ene.vrm", "motion": "motions/idle.vrma", "playing": true, "looping": true, "size_percent": 100.0}}
-  {"id": 2, "op": "set", "character": "ene", "config": {"model": "models/ene.vrm", "motion": "motions/nod.vrma", "playing": true, "looping": false, "size_percent": 100.0}}
-  {"id": 3, "op": "center", "character": "ene", "monitor": "eDP-1"}
-  {"id": 4, "op": "fps", "value": 60}
-  {"id": 5, "op": "remove", "character": "ene"}
-  {"id": 6, "op": "quit"}
+  {"id": 1, "op": "add", "character": "ene", "config": {"model": "/abs/path/ene.vrm", "motion": "/abs/path/idle.vrma", "expression": "neutral", "playing": true, "looping": true, "size_percent": 100.0}}
+  {"id": 2, "op": "set", "character": "ene", "config": {"model": "/abs/path/ene.vrm", "motion": "/abs/path/nod.vrma", "expression": "happy", "playing": true, "looping": false, "size_percent": 100.0}}
+  {"id": 3, "op": "lip_sync", "character": "ene", "rms": 0.42}
+  {"id": 4, "op": "center", "character": "ene", "monitor": "eDP-1"}
+  {"id": 5, "op": "fps", "value": 60}
+  {"id": 6, "op": "remove", "character": "ene"}
+  {"id": 7, "op": "quit"}
   ```
 - **レスポンス・通知形式（Avatar stdout ➔ Client）**:
   ```json
-  {"id": 1, "ok": true}
-  {"id": 2, "ok": true}
-  {"id": 0, "event": "motion_finished", "character": "ene", "motion": "motions/nod.vrma"}
+  {"id": 1, "ok": null}
+  {"id": 2, "ok": null}
+  {"event": "finished", "character": "ene"}
   ```
 
 ---
@@ -124,7 +125,7 @@
 
 ### 4.1 LLMテキストストリーム直接接続による先行合成
 - 発話全文の生成完了を待つのではなく、**LLMの出力トークンストリームから文末記号（`。`, `！`, `？`, 改行）を検出した順に即座にTTSエンジンへ投入**する。
-- **フィルタリング原則**: `StreamDelta` は親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象とし、Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等はTTSへ流さない。
+- **フィルタリング原則**: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`delta.agent` が親コンパニオンの Entity と一致するテキスト文字片のみを対象とし、Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等はTTSへ流さない。
 - **未完了文の終端フラッシュ**: LLMの生成が文末記号なしで完了（`end_turn`）した場合、文蓄積バッファに残っているテキストを即座に最終文としてフラッシュし、TTSへ投入する。
 - **並行合成バッファ上限**: 先行合成キューの滞留を防ぐため、再生待機バッファの最大文数は **3文** までとし、再生速度に応じたバックプレッシャーをかける。
 - **合成失敗時の明示的スキップ通知（SentenceSkipped）**:

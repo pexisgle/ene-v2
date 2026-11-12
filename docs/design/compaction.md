@@ -115,7 +115,7 @@ Compaction（要約生成）は、会話の進行を妨げない非同期バッ�
 
 $$\text{next\_request\_tokens} + \text{OUTPUT\_MARGIN} \le \text{Model Context Limit}$$
 
-- **`Anchor` / `RequestStart`**: 各ターンの開始位置（User発話等）を不変アンカー（`Anchor`）として保持し、モデル要求の開始オフセット（`RequestStart`）から過去ログを走査する。
+- **`Anchor` / `RequestStart`**: 前回応答でプロバイダーが報告した実トークン使用量（Usage）と対象メッセージ位置を `Anchor` として保持し、`RequestStart` からの差分計算の起点として `next_request_tokens` を正確に評価する。
 - **`OUTPUT_MARGIN`**: モデルの最大出力長（例: 4,096トークン）に安全マージン（10%）を加算した予約枠。
 - **`ClearToolOutputs`**: コンテキスト圧迫時、過去ターンの肥大化した巨大ツール出力（長大なファイル全文等）を安全に省略プレースホルダーへ置換し、会話の骨格を破壊せずにトークンを削減。
 - **`recent::view`**: それでも上限を超える場合、最古の完全ターン単位（User ＋ Assistant または ToolCall ＋ ToolResult の完全な往復）でアクティブプロンプト窓から一時除外（ToolCallとToolResultを分断する切り詰めは禁止）。プロンプトのContext枠に `[System Notice: 過去の一部ログを一時的に省略して対話を継続しています]` を付与する。
@@ -133,7 +133,7 @@ Anthropic Claude、OpenAI、Geminiの **KVキャッシュ（Prefix Caching）** 
 > **動的情報の配置とキャッシュ保護**:
 > OpenAI Responses API や Anthropic Messages API では、`SystemPrompt` はメッセージ列の最先頭に集約される。
 > もし `SystemPrompt` 内に毎ターン変化する動的要素（Pinned Memory、想起記憶、現在の心、現在日時）を含めてしまうと、**その後ろに続く会話履歴全体のPrefix Cacheが無効化**されてしまう。
-> したがって、システムプロンプトには完全な静的情報のみを配置し、変動情報はすべて**会話履歴の末尾（最新ユーザー発話ブロック `User_N` の直前/末尾枠、Dynamic Tail）**へ集約する。
+> したがって、システムプロンプトには完全な静的情報のみを配置し、変動情報はすべて `PrepareSystems::Edit` で `ModelRequest.history` 末尾の最新ユーザー発話メッセージ（`User_N`）内にブロックとして結合する（Dynamic Tail）。
 
 ```text
  ┌────────────────────────────────────────────────────────┐
@@ -160,7 +160,7 @@ Anthropic Claude、OpenAI、Geminiの **KVキャッシュ（Prefix Caching）** 
 > [!IMPORTANT]
 > **動的文脈の非永続インメモリ注入（SessionLog の汚染防止）**:
 > 6〜10の動的コンテキスト（Pinned Memory、想起記憶、現在の心、知覚要約、現在日時）は、**`SessionLog` へは一切書き込まない**（`DeliveryMode::Inform` 等で永続ログに混ぜてはならない）。
-> `PrepareSystems::Edit` で最新ユーザー発話ブロック（`User_N`）の末尾枠へインメモリ一時注入した上で、**`PrepareSystems::Fit` を動的文脈を含む要求全体に対して実行**し、合計トークン数を評価した上で履歴ウィンドウ（`recent::view`）を切り詰める。
+> `PrepareSystems::Edit` で `ModelRequest.history` 末尾の最新ユーザー発話メッセージ（`User_N`）内にインメモリで結合（先頭または末尾ブロック）した上で、**`PrepareSystems::Fit` を動的文脈を含む要求全体に対して実行**し、合計トークン数を評価した上で履歴ウィンドウ（`recent::view`）を切り詰める。
 > これにより、動的文脈を含めた完全な要求がモデル上限に収まることを保証しつつ、`SessionLog` には純粋な会話ログのみが記録され、`GetHistory` APIに内部コンテキストJSONが漏洩したり、増分記憶整理（Consolidation）が自らの想起記憶を再学習する自己汚染ループを根本から防止する。
 
 ---

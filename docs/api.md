@@ -182,6 +182,30 @@ message Companion {
   optional string voice_identifier = 11;
 }
 message Companions { repeated Companion items = 1; }
+message AssignmentPatch {
+  oneof change {
+    ModelAssignment set = 1;
+    Empty clear = 2;
+  }
+}
+message CreateCompanionRequest {
+  string name = 1;
+  string mind = 2;
+  string body = 3;  // JSON object text
+  string voice = 4; // JSON object text
+  ModelAssignments assignments = 5;
+  MindProfile profile = 6;
+}
+message UpdateCompanionRequest {
+  string id = 1;
+  uint64 revision = 2;
+  optional string name = 3;
+  optional string mind = 4;
+  optional string body = 5;
+  optional string voice = 6;
+  AssignmentPatch companion_assignment = 7;
+  AssignmentPatch task_assignment = 8;
+}
 
 // Mind and Memories --------------------------------------------------------
 
@@ -413,6 +437,72 @@ message UpdateSettingsRequest {
 }
 message SettingsUpdated { Settings settings = 1; }
 
+message CredentialRequest {
+  string id = 1;
+  optional string secret = 2;
+  optional string source = 3;
+}
+message CredentialResult { string credential_state = 1; }
+message CheckRequest {
+  string id = 1;
+  string request_key = 2;
+  string companion_id = 3;
+  optional string model_id = 4;
+}
+message CheckResult {
+  string request_id = 1;
+  string capabilities = 2; // JSON object text
+  bool success = 3;
+  string model_id = 4;
+}
+message FieldSource {
+  string key = 1;
+  string value = 2;
+}
+message ModelMetadata {
+  string source = 1;
+  string scope = 2;
+  optional uint64 context_window = 3;
+  optional uint64 max_input_tokens = 4;
+  optional uint64 max_output_tokens = 5;
+  StringList input_modalities = 6;
+  StringList output_modalities = 7;
+  StringList supported_parameters = 8;
+  repeated FieldSource field_sources = 9;
+}
+message Model {
+  string id = 1;
+  string name = 2;
+  ModelMetadata metadata = 3;
+}
+message Models { repeated Model items = 1; }
+message ModelsRequest {
+  string id = 1;
+  optional string companion_id = 2;
+}
+message SettingField {
+  string key = 1;
+  string label = 2;
+  string kind = 3;
+  bool required = 4;
+  repeated string choices = 5;
+}
+message ProviderCapabilities {
+  bool streaming_text = 1;
+  bool model_list = 2;
+}
+message Provider {
+  string id = 1;
+  string name = 2;
+  string kind = 3;
+  string endpoint = 4;
+  string options = 5; // JSON object text
+  repeated SettingField settings = 6;
+  bool requires_credentials = 7;
+  optional string environment_variable = 8;
+}
+message Providers { repeated Provider items = 1; }
+
 // Voice Service ------------------------------------------------------------
 
 message AudioInputChunk {
@@ -484,8 +574,37 @@ message Client {
   string id = 1;
   string name = 2;
   string platform = 3;
-  bool active = 4;
-  string last_seen_at = 5;
+  repeated string capabilities = 4;
+  repeated string granted_capabilities = 5;
+  uint64 revision = 6;
+  string last_seen = 7;
+  bool connected = 8;
+  repeated string active_companions = 9;
+}
+message Clients { repeated Client items = 1; }
+message RegisterClientRequest {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;
+  uint64 expected_revision = 5;
+}
+message SetCapabilitiesRequest {
+  string client_id = 1;
+  repeated string capabilities = 2;
+  repeated string granted_capabilities = 3;
+  uint64 revision = 4;
+}
+message ActivationRequest {
+  string companion_id = 1;
+  string client_id = 2;
+  uint64 expected_revision = 3;
+  bool release = 4;
+}
+message Activation {
+  string companion_id = 1;
+  optional string client_id = 2;
+  uint64 revision = 3;
 }
 message ClientUpdated { Client client = 1; }
 message DeviceOperation {
@@ -494,12 +613,25 @@ message DeviceOperation {
   string input = 3; // JSON object text
   string subscription_id = 4;
 }
+message DeviceReady { string subscription_id = 1; }
+message DeviceEvent {
+  oneof event {
+    DeviceReady ready = 1;
+    DeviceOperation operation = 2;
+  }
+}
 message DeviceOperationResult {
   string client_id = 1;
   string operation_id = 2;
   bool success = 3;
   string output = 4; // JSON object text
   optional Failure failure = 5;
+}
+message DeviceOperationState {
+  string operation_id = 1;
+  string client_id = 2;
+  string status = 3;
+  optional DeviceOperationResult result = 4;
 }
 message HostEvent {
   string kind = 1;
@@ -512,6 +644,10 @@ service HostService {
   rpc GetSnapshot(Empty) returns (Snapshot);
   rpc Subscribe(SubscribeRequest) returns (stream Notification);
   rpc ListCompanions(Empty) returns (Companions);
+  rpc GetCompanion(Id) returns (Companion);
+  rpc CreateCompanion(CreateCompanionRequest) returns (Companion);
+  rpc UpdateCompanion(UpdateCompanionRequest) returns (Companion);
+  rpc DeleteCompanion(Id) returns (Empty);
   rpc GetMind(Id) returns (MindView);
   rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
   rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
@@ -532,6 +668,11 @@ service SettingsService {
   rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
   rpc ListPolicyRules(Empty) returns (PolicyRules);
   rpc UpdatePolicyRules(UpdatePolicyRulesRequest) returns (PolicyRules);
+  rpc ListProviders(Empty) returns (Providers);
+  rpc ListModels(ModelsRequest) returns (Models);
+  rpc RegisterCredentials(CredentialRequest) returns (CredentialResult);
+  rpc RevokeCredentials(Id) returns (Empty);
+  rpc CheckConnection(CheckRequest) returns (CheckResult);
 }
 
 service WorkService {
@@ -547,5 +688,15 @@ service VoiceService {
   rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent); // HTTP/2
   rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
   rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
+}
+
+service ClientService {
+  rpc RegisterClient(RegisterClientRequest) returns (Client);
+  rpc List(Empty) returns (Clients);
+  rpc Activate(ActivationRequest) returns (Activation);
+  rpc SetCapabilities(SetCapabilitiesRequest) returns (Client);
+  rpc DeviceStream(Id) returns (stream DeviceEvent);
+  rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
+  rpc GetOperation(Id) returns (DeviceOperationState);
 }
 ```

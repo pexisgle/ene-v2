@@ -44,7 +44,7 @@
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
   ```toml
-  rusqlite = { version = "0.34", features = ["bundled"] }
+  rusqlite = { version = "0.40", features = ["bundled"] }
   rig-core = "0.46"
   rig-ecs = "0.46"
   rig-memory = "0.46"
@@ -157,7 +157,7 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
   │  ・全体調整: PrepareSystems::Fit (recent::view 窓管理)  │
   │  ・権限ゲート: Stage::Gate (HoldOf 生成 ➔ Approved 付与) │
   │  ・推論・ツール反復: AgentPlugin (ReActループ)          │
-  │  ・文単位先行TTS: PostUpdate (MessageReader<StreamDelta>)│
+  │  ・文単位先行TTS: Stage::Review (MessageReader<StreamDelta>)│
   │    (親のユーザー向け発話のみフィルタし、句点 。！？ 送出)│
   │  ・会話ログ正本: SessionLogPlugin ＋ SqliteSessionStore │
   │  ・MCPツール統合: world.spawn_tool(def, handler, opts)  │
@@ -181,7 +181,7 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
   - これにより、`[System Prompt, ..., Assistant_{N-1}]` までの過去ログ全体が完全に不変のプレフィックスとして保持され、>90% のキャッシュヒット率を達成する。
   - `PrepareSystems::Edit` で動的文脈を注入し、`PrepareSystems::Fit` で動的文脈を含む要求全体に対してトークン数計測と `recent::view` 窓切り詰めを実行する。
 - **ストリーム文字片の厳格なフィルタリング**:
-  - `PostUpdate` で `MessageReader<StreamDelta>` を購読するシステムは、**親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
+  - `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読するシステムは、**`delta.agent` が親コンパニオンの Entity と一致するテキスト文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
   - Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等は一切TTSへ流さない。
 - **MCPツールの動的ECS登録**:
   - 外部ファイル自動探索（`rig-mcp-client`）を排し、eneの設定DBで認可されたMCPサーバーのツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。設定の正本はeneが単一所有する。

@@ -66,10 +66,9 @@ pub enum WorkSessionStatus {
 pub enum RunStatus {
     Starting,
     Running,
-    /// ユーザーへの確認・質問待ち（権限承認 WorkRequest::Approval または通常質問 WorkRequest::Input）
+    /// 子からの質問待ち（WorkInquiry）または権限承認待ち（ApprovalRequest）
     WaitingInput {
         request_id: String,
-        request: WorkRequest,
     },
     /// 中断要求を受け、後片付け・停止処理中
     Cancelling { requested_at: chrono::DateTime<chrono::Utc> },
@@ -85,6 +84,7 @@ pub enum RunStatus {
     /// 失敗
     Failed { error_code: String, message: String },
 }
+```
 
 ### 3.2 状態遷移契約（State Machine Transitions）
 
@@ -101,6 +101,7 @@ pub enum RunStatus {
 | `Running` | タスク正常完了 | `Completed` | 成果物を親へ返却 |
 | `Running` / `Cancelling` | 回復不能エラー発生 | `Failed` | エラー報告 |
 
+```rust
 /// 子（手）からのユーザー確認・質問（WorkInquiry: protobuf WorkInquiry と 1:1 対応）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkInquiry {
@@ -162,10 +163,10 @@ pub enum WorkEventPayload {
     Activity { message: String },
     /// 親へ伝えるべき意味のある進捗メッセージ
     Message { content: String },
-    /// ユーザーへの確認・質問要求（権限承認または通常質問）
-    Request {
+    /// ユーザーへの確認・質問要求（WorkInquiry）
+    Inquiry {
         request_id: String,
-        request: WorkRequest,
+        inquiry: WorkInquiry,
     },
     /// Runの正常完了報告
     Completed {
@@ -299,83 +300,9 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
   3. **開発・検証・自動化直接呼び出し（特権・開発用）**:
      - `SendWork`: 親コンパニオンの会話文脈を介さず、開発者コンソールやスクリプト連携等で直接指示を投入して検証するためのルート。冪等性キー（`request_key`）による重複実行防止を備える。
 
-```protobuf
-syntax = "proto3";
-package ene.host.v1;
-
-service WorkService {
-  rpc ListWorks(ListWorksRequest) returns (WorkSessionList);
-  rpc GetWork(WorkRequest) returns (WorkView);
-  rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
-  rpc StopWork(StopWorkRequest) returns (Empty);
-  rpc CloseWork(CloseWorkRequest) returns (Empty);
-}
-
-message ListWorksRequest {
-  string companion_id = 1;
-}
-
-message WorkSession {
-  string id = 1;
-  string companion_id = 2;
-  string backend = 3;
-  string status = 4;
-  optional string last_run_id = 5;
-  optional string last_report = 6;
-  string created_at = 7;
-  string updated_at = 8;
-  bool closed = 9;
-}
-
-message WorkSessionList {
-  repeated WorkSession items = 1;
-}
-
-message RunInfo {
-  string run_id = 1;
-  string input_id = 2;
-  string state = 3;
-  optional string failure_message = 4;
-}
-
-message WorkRequestView {
-  string request_id = 1;
-  string kind = 2; // "approval" | "input"
-  string prompt = 3;
-  repeated string choices = 4;
-}
-
-message WorkView {
-  WorkSession session = 1;
-  repeated RunInfo runs = 2;
-  repeated WorkRequestView pending_requests = 3; // 再接続時に未決の質問・承認を取得可能
-}
-
-message WorkRequest {
-  string work_id = 1;
-}
-
-message SendWorkRequest {
-  string work_id = 1;
-  string request_key = 2; // 冪等性重複排除キー
-  string text = 3;
-  optional string request_id = 4; // 未決質問(WorkRequest::Input)への回答時にそのIDを明示束縛
-  string client_id = 5;
-}
-
-message WorkAcceptance {
-  string request_id = 1;
-}
-
-message StopWorkRequest {
-  string work_id = 1;
-  optional string run_id = 2;
-}
-
-message CloseWorkRequest {
-  string work_id = 1;
-}
-```
+> [!NOTE]
+> **カノニカル RPC 定義**:
+> `WorkService` の完全な Protobuf サービス定義およびメッセージ（`WorkSession`, `WorkInquiry`, `WorkView`, `SendWorkRequest` 等）は、[ホストAPI設計 カノニカル Protobuf 定義](../api.md#7-カノニカル-protobuf-定義-hostproto) を正本とする。重複する定義は保守しない。
 
 ---
 
