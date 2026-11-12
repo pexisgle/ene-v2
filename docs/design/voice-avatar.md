@@ -108,7 +108,10 @@
 - **フィルタリング原則**: `StreamDelta` は親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象とし、Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等はTTSへ流さない。
 - **未完了文の終端フラッシュ**: LLMの生成が文末記号なしで完了（`end_turn`）した場合、文蓄積バッファに残っているテキストを即座に最終文としてフラッシュし、TTSへ投入する。
 - **並行合成バッファ上限**: 先行合成キューの滞留を防ぐため、再生待機バッファの最大文数は **3文** までとし、再生速度に応じたバックプレッシャーをかける。
-- **合成失敗時の非ブロッキングフォールバック**: 特定の文（第 $N$ 文）の合成が失敗・タイムアウトした場合、後続文の再生待ちデッドロックを防止するため、該当文をスキップ（またはエラーログ記録）して第 $N+1$ 文の再生へ即座に進める。
+- **合成失敗時の明示的スキップ通知（SentenceSkipped）**:
+  - 特定の文（第 $N$ 文）の合成が失敗・タイムアウトした場合、ホストはクライアントへ即座に `SentenceSkipped { utterance_id, generation_id, sequence_no, reason }` を送信する。
+  - クライアントは文番号順の待機キューにおいて第 $N$ 文の欠番確定を認識し、待機を即座に解除して第 $N+1$ 文の再生へ安全に進める（クライアント側のデッドロック防止）。
+  - クライアントは再生完了報告（`ReportPlaybackStatus`）において、実際に再生された文番号一覧（`played_sequence_nos`）とスキップされた文番号一覧（`skipped_sequence_nos`）を明示報告し、ホスト側でどの文が伝達されたかを完全に復元可能とする。
 - 第1文の音声合成と再生が開始されている間に第2文以降を並行合成することで、初声レイテンシ（Time to First Audio）を劇的に短縮する。
 - 身振り・表情は `body_motion` ツールを通じて独立して非同期に送出される。
 
@@ -156,8 +159,14 @@ pub struct AudioChunkEnvelope {
 - **文単位並行合成の順序保証**:
   - 各文には文頭からの連番（`sequence_no: 0, 1, 2...`）が付与される。
   - 短い第2文が長い第1文より先に合成完了した場合でも、クライアントは `sequence_no` 順に整列して待機させ、順序逆転再生を防止する。
-- **自己音声エコー抑制（Echo Suppression）**:
-  - コンパニオンの音声再生中（再生完了報告 `ReportPlaybackStatus` が届くまで）は、クライアントのマイクSTT入力に `is_companion_speaking = true` のフラグを付与し、自身の発話読み上げがマイクに拾われて意図しない発話・承認として誤爆することを防止する。
+- **自己音声エコー防止と音声承認の運用契約**:
+  - コンパニオンの音声再生中（`ReportPlaybackStatus` 受信まで）は、クライアントのマイク入力ストリームに `is_companion_speaking = true` を付与する。
+  - **高権限な音声承認（「いいよ」「実行して」）の受付制限**:
+    - 再生中（`is_companion_speaking == true`）にマイクが拾った音声は、スピーカーからの回り込みによる自己承認事故を防ぐため、**権限承認の判定対象から除外（ゲート）**する。
+    - 音声承認は、コンパニオンの発話再生が終了した静寂時、または明示的な割り込み停止後にのみ有効とする。
+  - **発話割り込み（Barge-in）の扱い**:
+    - ユーザーが再生中に声を出した場合は「発話中断（Barge-in）」として検出し、ホストおよびクライアントへ `FlushControl` を発行して再生を即座に停止・フェードアウトする。
+    - 発話が停止して静寂（`is_companion_speaking == false`）に戻った後、改めてユーザーが「いいよ」と発話することで、安全・確実に承認を確定できる。
 
 ---
 
@@ -271,7 +280,15 @@ message AudioOutputEvent {
   oneof event {
     AudioChunkEnvelope chunk = 1;
     FlushControl flush = 2;
+    SentenceSkipped skipped = 3;
   }
+}
+
+message SentenceSkipped {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 sequence_no = 3;
+  string reason = 4;
 }
 
 message AudioChunkEnvelope {
@@ -299,9 +316,11 @@ message PlaybackStatusReport {
     PLAYBACK_FAILED = 3;
   }
   Status status = 3;
-  uint32 completed_sentence_count = 4; // 中断までに実際に再生完了した文の総数（0は未完了）
-  uint64 completed_pcm_bytes = 5;      // 実際に再生されたPCMデータ長
-  string client_id = 6;                // 報告元クライアント識別
+  uint32 completed_sentence_count = 4;   // 中断までに実際に再生完了した文の総数（0は未完了）
+  repeated uint32 played_sequence_nos = 5;  // 実際に再生された文番号一覧
+  repeated uint32 skipped_sequence_nos = 6; // スキップ・失敗した文番号一覧
+  uint64 completed_pcm_bytes = 7;        // 実際に再生されたPCMデータ長
+  string client_id = 8;                  // 報告元クライアント識別
 }
 
 message ReportPlaybackStatusResponse {
@@ -319,7 +338,9 @@ message ReportPlaybackStatusResponse {
 | **TTS文順序保証** | 第2文が第1文より先に合成完了するモックTTSを接続 | クライアント側で `sequence_no` 順に整列して待機し、文章の順序逆転が起きないこと |
 | **クライアント単一再生保証** | 発話Aの再生中に発話Bの音声チャンクを受信 | クライアント側で発話Aの再生が即座に停止・フェードアウトされ、音声の重複が物理的に防止されること |
 | **発話切替後の旧発話無害化** | 発話Aから発話Bへ切替後、発話AのチャンクやFlushが遅延到着 | 旧発話Aのデータが安全に破棄され、発話Bの再生が妨害されたり発話Aへ巻き戻ったりしないこと |
-| **作業委託の原子的リース取得** | 2体のコンパニオンが同一指示に対して同時に `start_work`（委託）を試行 | ホスト側で `try_claim_delegation` により先着1件のみがリースを獲得し、他方は安全に作業を控え、外部副作用の多重実行が遮断されること |
+| **文合成失敗時の非ブロッキング** | 第1文の合成が失敗するモックTTSを接続 | ホストから `SentenceSkipped` が送信され、クライアントが待機を解除して第2文の再生へ進めること |
+| **自己音声エコー誤承認防止** | コンパニオン発話再生中に「いいよ」とマイクから音声入力 | 再生中（`is_companion_speaking`）は高権限音声承認がゲートされ、発話停止・静寂後にのみ承認が成立すること |
+| **作業委託の原子的受付登録** | 2体のコンパニオンが同一指示に対して同時に `start_work`（委託）を試行 | ホスト側で `try_claim_delegation` により先着1件のみが受付登録され、他方は安全に作業を控え、外部副作用の多重実行が遮断されること |
 | **掛け合い上限制限** | 2体のコンパニオンが互いに発話（テキスト生成）を返し続ける設定で起動 | ユーザー入力なしでの掛け合いが5往復以内に自動停止し、無限ループしないこと |
 | **再生完了連携とタイムアウト** | 再生完了イベント送信時、および完了イベントを意図的に落とした時を検証 | 通常時は完了通知でフロアが解放され、障害時もPCM長+3秒で安全に自動解放されること |
 | **遅延完了報告の無害化** | タイムアウト後に旧発話の `PLAYBACK_COMPLETED` を意図的に遅延送信 | 新発話の発話権や会話リレーに影響を与えず、旧報告が安全に破棄されること |

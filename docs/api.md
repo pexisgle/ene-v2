@@ -71,10 +71,10 @@ RequestViewは質問と権限要求を区別し、対象session/run、request id
 
 ## 6. wire契約とサービス構成
 
-現行の契約は `crates/ene-rpc/proto/host.proto` を正本とし、以下の5サービスで構成される：
+現行のwire契約は `crates/ene-rpc/proto/host.proto` を正本とし、以下の5サービスで構成される（音声ストリーミング `VoiceService` は移行設計として [知覚・音声](design/voice-avatar.md) に定義）：
 - **`HostService`**: システム状態スナップショット、単一イベントストリーム（`Subscribe`）、コンパニオン・心・記憶の取得と操作。
 - **`ChatService`**: 会話メッセージの送信（`SendMessage`）、停止（`Stop`）、会話履歴取得（`GetHistory`, `GetMessage`）。
-- **`SettingsService`**: 設定、プロバイダー/モデル一覧、ツール利用許可ルール、未決承認要求の確認と回答。
+- **`SettingsService`**: 設定、プロバイダー/モデル一覧、ツール利用許可ルール、未決承認要求の確認と回答（`SubmitApproval`）。
 - **`WorkService`**: 作業セッションの一覧（`ListWorks`）、詳細取得（`GetWork`）、直接指示（`SendWork`）、緊急停止（`StopWork`）、クローズ（`CloseWork`）。
 - **`ClientService`**: クライアント端末の登録、有効化、端末操作ストリーム。
 

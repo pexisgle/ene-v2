@@ -11,7 +11,7 @@
 | **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイルで完結。FTS5 trigram全文検索とBLOBベクトルコサイン類似度検索を単一SQLiteで完結。`tokio-rusqlite`（または専用DBワーカー）を介して非同期ECSループをブロックせずACIDトランザクションを実行 |
 | **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復・会話ログ正本（`SessionLogPlugin` + `DirStore`）を `rig-ecs` のECSステージ・Observerに一本化。TokioはConnect-RPCサーバーや外部非同期I/Oに徹し、二重ループを完全排除 |
 | **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `landlock`)** | Windows（Job Objects / AppContainer）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
-| **アバター描画** | **`apps/ene-avatar` (`bevy` + `bevy_vrm1`)** | `bevy_vrm1` 公式機構（VRM 1.0モデルロード、VRMA、Spring Bone、表情モーフターゲット）を直接活用。透過デスクトップウィンドウ（Wayland / Windows）、RMS音量によるローカル即時口パク、標準入出力JSON Lines制御 |
+| **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産をそのまま活用。透過デスクトップウィンドウ（Wayland layer-shell / Windows Win32 layered）、VRM 1.0モデルロード・アニメーション（`ene-vrm`）、RMS音量によるローカル即時口パク、標準入出力JSON Lines IPC制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
 | **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、Server Streaming対応 |
 
@@ -39,7 +39,7 @@
 - **依存定義 (`Cargo.toml`)**:
   ```toml
   rusqlite = { version = "0.40", features = ["bundled"] }
-  tokio-rusqlite = "0.6"
+  tokio-rusqlite = "0.8"
   serde = { version = "1", features = ["derive"] }
   serde_json = "1"
   ```
@@ -66,7 +66,8 @@
           source_context TEXT,     -- JSON object
           embedding BLOB,          -- f32 array bytes
           embedding_model TEXT,
-          embedding_dimensions INTEGER
+          embedding_dimensions INTEGER,
+          embedding_content_revision INTEGER -- 生成時の content_revision (不一致時は無効・再計算対象)
       );
 
       -- 外部コンテンツテーブル方式で memories と整数 rowid で結合
@@ -146,7 +147,10 @@
   - ユーザー発話、知覚センサー（目）の要約、タイマースケジュール、作業エージェント（手）からの報告は、すべて `world.trigger(Deliver::new(agent, text, DeliveryMode))` を通じてECS Worldへ直接投入される。
   - **公式契約に準拠した承認待機（Ask / HoldOf / Decision）**:
     - `Stage::Gate` で承認保留を行う際、ツール呼び出し対象エンティティへ勝手な単一フラグを付与するのではなく、Rig公式契約通り保留エンティティ `(Ask, ForAgent(agent), HoldOf(call_entity))` をWorld内に生成する。
-    - クライアントからの回答（承認/拒否）やタイムアウト・Run取消時は、`Decision::Approved` または `Decision::Rejected(reason)` を投入することで保留エンティティを終端し、実行を再開または中止させる。複数保留のスタックや二重回答の防止もこの単一契約に従う。
+    - **承認質問の回答確定とツールの保留解除**:
+      - ユーザーが承認した場合：その承認質問エンティティ（およびそれが持つ `HoldOf`）を `despawn` する。ツール本体の `Decision` は未決定（undecided）のまま維持されるため、カーネルがそのままツールの実行を開始する（ツールを実行せずに勝手に成功結果を与えてしまう事故を防止）。
+      - ユーザーが拒否した場合：対象ツールエンティティの `Decision` に対して `decision.decide(Decider::user(), Outcome::refused("User denied"))` を確定させた上で、承認質問エンティティの `HoldOf` を解除（despawn）する。カーネルはツールを実行せず拒否結果（Denied）として安全に確定・決済する。
+      - これにより、他の無関係な保留理由を巻き込んで解除することなく、単一の契約に従って承認・拒否・タイムアウトが整合して終端する。
   - **ストリーム文字片の厳格なフィルタリング**:
     - `PostUpdate` で `MessageReader<StreamDelta>` を購読するシステムは、**親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
     - プラグイン自身の内部モデル呼び出し、Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等は一切TTSへ流さない。
@@ -217,17 +221,16 @@ pub trait TtsEngine: Send + Sync {
 
 ---
 
-### E. アバター描画：`apps/ene-avatar`（Bevy + `bevy_vrm1`）の活用
+### E. アバター描画：`apps/ene-avatar`（Bevy + `ene-vrm`）をそのまま採用
 
-- **公式プラグイン（`bevy_vrm1`）の直接活用**:
-  - VRM 1.0モデルのロード、VRMAアニメーション再生、Spring Bone、モーフターゲット（表情・ブレンドシェイプ）、およびLookAtの計算は、公式コミュニティクレート `bevy_vrm1` および Bevy 標準のアニメーション機構をそのまま活用する。独自VRMローダーの再発明は行わない。
-- **ene固有の接続・差分実装**:
-  - `apps/ene-avatar` が提供する責務は以下の3点に絞る：
-    1. **透過デスクトップウィンドウ構成**:
-       - Windows: Win32 APIによるレイヤード透過ウィンドウ。
-       - Linux: Wayland layer-shell（透過・背後クリック透過）。
-       - macOS: `bevy_winit` の `Window` 設定（`transparent: true`, `decorations: false`）。
-    2. **ローカルRMS音量解析による即時口パク（リップシンク）**:
-       - クライアントが受信・再生するPCM音声データの振幅（RMS）を Bevy の Frame Update で直接計測し、VRMブレンドシェイプ（`aa` 等）を即座に変位。サーバー往復遅延ゼロで口パクが連動。
-    3. **親エージェントからのIPC演出指示受信**:
-       - 標準入出力 JSON Lines 経由で親エージェントの `body_motion` ツール指示を受信し、モーション名や表情へのクロスフェードを実行。
+- **既存実装（`apps/ene-avatar`）の直接利用**:
+  - アバター描画プロセスには、リポジトリ内に既に実装済みの `apps/ene-avatar` をそのまま採用する。
+  - `apps/ene-avatar` は `bevy = "=0.20.0"` および専用の `ene-vrm`（`crates/ene-vrm`）により、VRM 1.0モデルロード、VRMA/モーフアニメーション再生、および表情ブレンドシェイプを完結して実装している。
+- **実証済みの機能構成**:
+  1. **クロスプラットフォーム透過デスクトップウィンドウ**:
+     - Linux: Wayland layer-shell（`exwlshellev = "=0.20.1"` による透過・背後クリック透過）。
+     - Windows: Win32 API（`windows = "0.62"`）によるレイヤード透過ウィンドウ（Layered Window）。
+  2. **ローカルRMS音量解析による即時口パク（リップシンク）**:
+     - 再生中PCM音声のRMS振幅をフレーム単位で解析し、VRMブレンドシェイプ（`aa` 等）を即時変位。
+  3. **標準入出力 JSON Lines IPC制御**:
+     - 親エージェントからの `body_motion` 指示（モーション名・表情）を標準入力で受信し、滑らかにクロスフェード再生。

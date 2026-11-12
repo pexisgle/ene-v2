@@ -57,8 +57,6 @@ pub enum WorkSessionStatus {
     Idle,
     /// Runが実行中
     Active { current_run_id: String },
-    /// 一時停止中
-    Suspended { reason: String },
     /// セッション終了・破棄済み
     Closed,
 }
@@ -94,9 +92,10 @@ pub enum RunStatus {
 | :--- | :--- | :--- | :--- |
 | `Starting` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
 | `Running` | 子からの質問または承認要求（`WorkRequest`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち（Rig承認保留は `(Ask, ForAgent, HoldOf)` エンティティを生成） |
-| `WaitingInput` | `SendWork` 受信（回答または追加入力） | `Running` | 回答を子へ渡し処理再開（承認時は `Decision::Approved`、拒否時は `Decision::Rejected`） |
-| `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信、最大30秒クリーンアップ待機 |
-| `Cancelling` | 子プロセス終了・後片付け完了確認 | `Cancelled` | 正常中断確定 |
+| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時は質問の `HoldOf` エンティティを解除（ツール実行開始）。拒否時は `decision.decide(..., Outcome::refused(...))` を確定した上で `HoldOf` を解除 |
+| `WaitingInput` | 質問回答受信（`SendWork` with `request_id`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
+| `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信（未決permissionはcancel応答）、最大30秒クリーンアップ待機 |
+| `Cancelling` | ACP `cancelled` 応答 または Rigターン停止確認 | `Cancelled` | 正常中断確定（ACPプロセスはセッション維持のため生存） |
 | `Cancelling` | 30秒超過 ➔ 強制終了後、プロセス終了未確認 | `CancellationUnconfirmed` | 停止未確認として記録 |
 | `Running` | タスク正常完了 | `Completed` | 成果物を親へ返却 |
 | `Running` / `Cancelling` | 回復不能エラー発生 | `Failed` | エラー報告 |
@@ -248,15 +247,16 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 1. **協調的中断要求と新規副作用の即時遮断**:
    - ホストは子へ中断を通知（ACPエージェントへは `session/cancel`、内蔵Rigへはタスク中断シグナル）し、`RunStatus` を `Cancelling` へ更新する。
    - **`Cancelling` 移行と同時に、ホストはそのRunからの新規ツール実行要求（ファイル書き込み、外部通信等）を即座に遮断（Reject）**し、クリーンアップ以外の新たな副作用の発生を防止する。
-2. **プロセス終了と中断の責務分離**:
-   - 通常のRun中断では、セッション文脈を保持するためACPエージェントプロセスを安易にkillしない。
-   - 強制終了（`kill(-pgid, SIGKILL)` や `TerminateJobObject`）の対象は、**そのRunが直接起動して応答しないシェルコマンド子プロセス**、または**WorkSession破棄時に30秒経過しても終了しないエージェントプロセス**に限定する。
+2. **プロセス終了と中断の責務分離（停止確認の3分類）**:
+   - **内蔵RigのRun停止**: 対象ターンの `StopTurn` とホスト管理下の関連タスク停止を確認（`RunStatus::Cancelled`）。
+   - **ACPのRun停止**: `session/cancel` を送信し、対応する `session/prompt` の `cancelled` 終了応答（および未決のpermission requestへのcancel回答）を受信した時点で中断を確定（`RunStatus::Cancelled`）。ACPエージェントのOSプロセスは会話文脈を維持するため生存させる。
+   - **OSプロセスの強制終了**: 強制終了（`kill(-pgid, SIGKILL)` や `TerminateJobObject`）の対象は、**そのRunが直接起動して応答しないシェルコマンド子プロセス**、または**WorkSession破棄時（`CloseWork`）に30秒経過しても終了しないエージェントプロセス**に限定する。
 3. **寛大な猶予期間（30秒タイムアウト）**:
    - サブプロセスやビルド処理が正常に一時ファイルを片付ける猶予として、最大 **30秒** 待機する。
 4. **プロセス群の強制終了と停止確認**:
    - 30秒経過しても応答しない場合、ホストは対象プロセス群を強制終了する。
    - **状態の厳格な区分**:
-     - プロセス群の完全終了とローカル後片付けが確認された場合: `RunStatus::Cancelled`
+     - プロセス群の完全終了またはACPのキャンセル応答が正常に確認された場合: `RunStatus::Cancelled`
      - プロセスの残存が疑われる場合や外部クラウド処理の停止が確認できない場合: **`RunStatus::CancellationUnconfirmed`（停止未確認 / 結果不明）** として記録し、ユーザーにも「処理を完全に停止できたか確認できませんでした」と誠実に通知する。
 5. **過去Runの遅延イベントの扱い**:
    - Run Aの中断後に開始されたRun Bの実行中に、遅れてRun Aのイベントが到着した場合、**Run Bのアクティブ状態を破壊・上書きしない**。ただし、Run A自身の過去の監査記録としては正確に追記保存する。
@@ -365,7 +365,8 @@ message SendWorkRequest {
   string work_id = 1;
   string request_key = 2; // 冪等性重複排除キー
   string text = 3;
-  string client_id = 4;
+  optional string request_id = 4; // 未決質問(WorkRequest::Input)への回答時にそのIDを明示束縛
+  string client_id = 5;
 }
 
 message WorkAcceptance {
@@ -390,6 +391,7 @@ message CloseWorkRequest {
 | :--- | :--- | :--- |
 | **同一ペルソナ一人称対話** | 「手」の作業報告を受けた親の会話出力を検査 | 「裏で作業者が〜」等の第三者表現が排除され、一人称（「私が今〜したよ」）で報告されること |
 | **Run完了の独立性** | Run A中断後にRun Bを開始し、遅れてRun Aの完了イベントをシミュレート到着 | Run Bのアクティブ状態が破壊・上書きされず、遅延到着したRun AのイベントはRun A自身の過去監査記録へ安全に反映されること |
+| **ACPプロンプト中断とプロセス生存** | 実行中Runに対して中断要求を発行 | ACPの `session/cancel` が送信され、promptの `cancelled` 応答でRunが `Cancelled` になり、エージェントプロセス自体はセッション維持のため生存すること |
 | **強制終了タイムアウトと停止確認** | 中断要求に応答しないモック外部プロセスを起動 | 30秒後にホストがプロセス群を強制終了し、停止を確認できた場合は `Cancelled`、停止が確認できない場合は `CancellationUnconfirmed`（停止未確認）として記録・報告されること |
 | **非可逆操作の誠実な報告** | 外部送信済み操作を含むRunを中断 | 「Undo完了」と偽らず、`irreversible_effects` に記録されてユーザーへ報告されること |
 | **途絶検知プロンプト注入** | 子の活動報告を90秒間意図的に停止 | 親エージェントへ進捗確認プロンプトが自律注入され、親が状況確認を試みること |
