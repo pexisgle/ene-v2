@@ -439,6 +439,12 @@ fn fit(
             .saturating_sub(kept_len)
             .max(protected)
             .min(len.saturating_sub(1));
+        // Queue the summary when the view is near the threshold, whether or
+        // not it had to drop messages: `compaction::start` re-checks idle
+        // time and real usage before it runs.
+        if due && let Some(key) = key {
+            compaction.0.insert(key.companion().into());
+        }
         if start <= protected {
             continue;
         }
@@ -473,9 +479,6 @@ fn fit(
                     "the window dropped messages that are not consolidated into memory yet",
                 );
             }
-        }
-        if due {
-            compaction.0.insert(key.companion().into());
         }
     }
 }

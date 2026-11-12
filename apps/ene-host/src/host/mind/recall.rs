@@ -144,12 +144,7 @@ pub(crate) fn inject_context(
                 }
             }
         };
-        let Some(index) = history
-            .entries()
-            .find_map(|entry| (entry.id == before).then_some(entry.index))
-        else {
-            continue;
-        };
+        let index = context_index(history, before);
         history.splice(
             index..index,
             [Entry::new(Message::user(text))],
@@ -157,6 +152,27 @@ pub(crate) fn inject_context(
         );
         commands.entity(call).insert(ContextInjected);
     }
+}
+
+/// Where the tail goes: before the turn input, or after a summary when a
+/// mid-turn compaction already covered that input.
+///
+/// The fallback position stays the same for every later step of the turn, so
+/// the injected tail does not move and the prefix cache keeps working.
+fn context_index(history: &rig_core::conversation::Conversation, before: MessageId) -> usize {
+    if let Some(index) = history
+        .entries()
+        .find_map(|entry| (entry.id == before).then_some(entry.index))
+    {
+        return index;
+    }
+    usize::from(
+        history
+            .entries()
+            .next()
+            .and_then(|entry| chat::entry_text(entry.message))
+            .is_some_and(|text| text.starts_with("<summary>")),
+    )
 }
 
 /// The entry that asked this turn: the user's own text or an agent's
@@ -171,4 +187,37 @@ fn latest_input(history: &rig_core::conversation::Conversation) -> Option<(Messa
         let text = chat::entry_text(entry.message)?;
         (!text.is_empty()).then_some((entry.id, text))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig_core::conversation::Conversation;
+
+    #[test]
+    fn the_tail_stays_before_the_input_or_falls_back_after_a_summary() {
+        let mut history = Conversation::from_messages([Message::user("話しかけた")]);
+        let before = history.entries().next().unwrap().id;
+        assert_eq!(context_index(&history, before), 0);
+
+        history.splice(
+            0..1,
+            [Entry::new(Message::user(
+                "<summary>\n古い会話の要約\n</summary>",
+            ))],
+            Author::plugin("ene.compaction"),
+        );
+        assert_eq!(
+            context_index(&history, before),
+            1,
+            "a summary-covered input falls back to just after the summary"
+        );
+    }
+
+    #[test]
+    fn the_tail_starts_at_the_head_without_a_summary() {
+        let history = Conversation::from_messages([Message::assistant("応答")]);
+        let missing = MessageId::default();
+        assert_eq!(context_index(&history, missing), 0);
+    }
 }
