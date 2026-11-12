@@ -31,11 +31,11 @@ cargo run --locked -p ene-host
 - **1つのヘッドレスRig App** を専用スレッドで動かします。APIからの読み書きは `Runtime::call` / `Runtime::read` でこのスレッドへ直列化します。`read` はスナップショットや履歴の取得だけで、AgentLoopと仮想時間を進めません。
 - **SQLiteは同じRig Appスレッドの単一接続** で同期実行します。PK参照・FTS5・ルール照合はマイクロ秒規模なので、ECSのシステムから直接読み書きし、非同期ワーカーへの往復を作りません。
 - 会話・受信箱・ターン・モデル／ツール呼び出しはRigが所有し、`<state>/rig/` のセッションログが会話の正本です。`GetHistory` / `GetMessage` はこのログからの読み取り専用投影です。
-- 人格の核と作者プロファイルは安定したsystem promptに置きます。現在の心・Pinned Memory・想起記憶・現在時刻は `DeliveryMode::Inform` でログへ書かず、`ModelRequest.history` の末尾へリクエストごとに一時注入します。
+- 人格の核と作者プロファイルは安定したsystem promptに置きます。現在の心・Pinned Memory・想起記憶・現在時刻は `SessionLog` へ書かず、`ModelRequest.history` の末尾へリクエストごとに一時注入します。作業エージェントにも現在時刻だけを同じ仕組みで注入します。
 - 自動記憶（Consolidation）は確定ターンだけを前向きに読み、`importance` と `audiences` を決めて、記憶と処理済みカーソルを同じSQLiteトランザクションで確定します。
-- Compactionは `rig-memory` の `CompactionPolicy` / `Summarizer` を使った **View専用のローリング要約** です。`SessionLog` は不変の追記型のままにし、要約は `ModelRequest.history` の先頭へだけインメモリ注入します。スナップショットは `ene.summary` Aside としてログへ追記し、起動時に復元します。`GetHistory` には現れません。
+- Compactionは `rig-memory` の `CompactionPolicy` / `Summarizer` を使った **View専用のローリング要約** です。`SessionLog` は不変の追記型のままにし、要約は `ModelRequest.history` の先頭へだけインメモリ注入します。スナップショットは `ene.summary` Aside としてログへ追記し、起動時に復元します。`GetHistory` には現れません。ユーザーの発話が届いた時点で実行中の要約は破棄し、次回のアイドル時へ延期します。
 - モデルは `ModelAssignments` の7役割（companion/task/perception/compaction/consolidation/decision/embedding）から選び、未指定時はdocsのフォールバック順で解決します。
-- 親は `mind_*`、`start_work` / `send_work` / `list_works` / `stop_work`、`body_motion` / `set_eye_watch` / `noop` を保持します。スケジュールツールは発火機構が完成するまで公開しません。
+- 親は `mind_*`、`start_work` / `send_work` / `list_works` / `stop_work`、`body_motion` / `set_eye_watch` / `noop`、`device_request` を保持します。スケジュールツールは発火機構が完成するまで公開しません。
 - 端末操作はアクティブ端末1台へ配送します。オフラインなら `pending`、配送後に切断したら `uncertain` とし、自動再送しません。成否不明を成功として扱いません。
 - 同じ `request_key` の再送は元の受理結果を返し、内容が違えば競合です。対応する入力やターン記録を確認できない `ene.accepted` は未確定として無視し、新しい受理を作ります。
 - ストレージまたはセッションログの書込みに失敗した場合、ホストは新規受理を止め、未保存の状態を通知しません。
@@ -73,7 +73,7 @@ cargo run --locked -p ene-host
 - `importance` は 0〜10 の想起優先度です。自動想起は `>= 2`、明示的な `mind_recall` は全件を対象にします。`forget` は 0、`remember` は最低3へ戻します。
 - `audiences` は共有先companion IDのJSON配列です。共有プールは `["*"]`、private は `[]` です。
 - `activations` がコンパニオンごとのアクティブ端末と版を持ちます。`Snapshot.active_companion_id` はその先頭です。
-- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。単発承認はセッションとrunに束縛して一度だけ消費し、停止時には保留を失効させます。明示的な `confirm` は保存済み許可より優先し、`always_approve` は `confirm` がない場合だけ完全一致の保存ルールにします。起動時に実行対象のない pending 承認は失効させます。ポリシー読取失敗は fail-closed です。`HoldOf` で保留したツール呼び出しは、承認・拒否の送信時に解放して再評価します。
+- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。承認は対象の呼び出しに `Approved` マーカーを付けてから保留を解放し、次の `Stage::Gate` が要求を一度だけ消費します。拒否は `Decider::Person` で確定します。停止などで保留が消えた場合は、対応する pending 承認を失効させます。明示的な `confirm` は保存済み許可より優先し、現行の承認はすべて `confirm` 由来のため `always_approve` も単発承認として扱います。起動時に実行対象のない pending 承認は失効させます。ポリシー読取失敗は fail-closed です。ルールの `pattern` は正規化引数 JSON 全体またはその文字列値との完全一致で、部分文字列では一致しません。
 - 過去のJSONドキュメント方式（`documents` テーブル）や旧baselineは移行しません。未知のDB・新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
 
 ## API契約

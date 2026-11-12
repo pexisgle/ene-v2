@@ -48,7 +48,6 @@ use tokio::sync::{broadcast, oneshot};
 
 const QUEUE: usize = 256;
 const MAX_COMPANIONS: usize = 16;
-const MAX_INPUT: usize = 65_536;
 
 type StartError = Box<dyn Error + Send + Sync>;
 type Job = Box<dyn FnOnce(&mut App) + Send>;
@@ -149,7 +148,6 @@ impl Runtime {
                 .insert_resource(CompactionQueue::default())
                 .insert_resource(Inactivity::default())
                 .insert_resource(resources::Perception::default())
-                .insert_resource(resources::ApprovalHolds::default())
                 .insert_resource(host_options)
                 .add_plugins((AgentPlugin, SessionLogPlugin, agent::KernelPlugin));
                 app.finish();
@@ -395,7 +393,8 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
         health: health.into(),
         capabilities: w::HostCapabilities {
             limits: wire::json(&serde_json::json!({
-                "max_input_bytes": MAX_INPUT,
+                "max_input_tokens": chat::MAX_INPUT_TOKENS,
+                "max_input_chars": chat::MAX_INPUT_CHARS,
                 "max_companions": MAX_COMPANIONS,
             })),
             features: [

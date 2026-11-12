@@ -6,15 +6,18 @@ use super::{
     mind,
     model::{self, Binding, Refusal},
     notify::Notifier,
-    resources::{ApprovalHolds, CompactionQueue, ConsolidationQueue, HostOptions, HostState},
-    settings, tools, wire, work,
+    resources::{CompactionQueue, ConsolidationQueue, HostOptions, HostState},
+    wire, work,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use rig_core::{completion::Message, conversation::Author};
+use rig_core::{
+    completion::Message,
+    conversation::{Author, Entry},
+};
 use rig_ecs::{WriteLogs, prelude::*};
 use rig_memory::recent::TokenBudget;
-use rig_memory::{HeuristicTokenCounter, TokenCounter, recent};
+use rig_memory::{ClearToolOutputs, HeuristicTokenCounter, TokenCounter, recent};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
@@ -73,13 +76,13 @@ pub(crate) struct KernelPlugin;
 impl Plugin for KernelPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<AgentKey>()
-            .add_tool(tools::current_time_tool())
             .add_observer(turn_input)
             .add_observer(turn_started)
             .add_observer(turn_settled)
             .add_observer(follow_successor::<Binding>)
             .add_observer(follow_successor::<mind::Batch>)
             .add_observer(follow_successor::<compaction::SummaryJob>)
+            .add_observer(hold_released)
             .add_systems(
                 Update,
                 (client::sweep, mind::start_consolidation, compaction::start).before(AgentLoop),
@@ -107,9 +110,7 @@ impl Plugin for KernelPlugin {
                     .in_set(ReviewSystems::Edit),
             )
             .add_systems(PostUpdate, recalled)
-            .add_systems(Last, changes.after(WriteLogs))
-            .add_systems(Last, work::finalize_reports.after(changes))
-            .add_systems(Last, settings::expire_orphan_holds);
+            .add_systems(Last, changes.after(WriteLogs));
         mind::register_tools(app);
         work::register_tools(app);
         client::register_tools(app);
@@ -233,6 +234,11 @@ fn turn_settled(
                 .resource_mut::<CompactionQueue>()
                 .0
                 .insert(key.companion().into());
+            if let Err(error) = work::finalize_reports(world, key.companion())
+                && error.is_storage()
+            {
+                super::fail(world, error.to_string());
+            }
         } else if let Err(error) = work::report_work(world, agent)
             && error.is_storage()
         {
@@ -365,19 +371,24 @@ fn fit(
             continue;
         };
         let counter = HeuristicTokenCounter::default();
-        let reserve = spec
+        let output = spec
             .max_output_tokens
-            .map_or(0usize, |tokens| tokens as usize)
-            + call
-                .prompt
-                .as_ref()
-                .map_or(0, |prompt| counter.count(&Message::system(prompt.text())))
-            + call
-                .request
-                .tools
-                .iter()
-                .map(|tool| counter.count_tool(tool))
-                .sum::<usize>();
+            .map_or(0usize, |tokens| tokens as usize);
+        // The docs reserve the output budget plus a 10% margin for its estimate.
+        let reserve = output
+            .saturating_add(output.div_ceil(10))
+            .saturating_add(
+                call.prompt
+                    .as_ref()
+                    .map_or(0, |prompt| counter.count(&Message::system(prompt.text()))),
+            )
+            .saturating_add(
+                call.request
+                    .tools
+                    .iter()
+                    .map(|tool| counter.count_tool(tool))
+                    .sum::<usize>(),
+            );
         let budget = (window as usize).saturating_sub(reserve);
         let Some(history) = call.history.as_mut() else {
             continue;
@@ -411,8 +422,18 @@ fn fit(
                 .insert(Refusal("context_exceeded".into()));
             continue;
         }
+        let used: usize = history
+            .messages()
+            .iter()
+            .map(|message| counter.count(message))
+            .sum();
+        if used > budget {
+            ClearToolOutputs::new(budget.min(20_000))
+                .clear_conversation(history, Author::plugin("ene.window"));
+        }
         let kept = recent::view(&history.messages()[protected..], &TokenBudget::new(budget));
         let kept_len = kept.len();
+        let due = compaction_due(kept, u64::from(window), options.compaction.threshold);
         let len = history.messages().len();
         let start = len
             .saturating_sub(kept_len)
@@ -438,7 +459,11 @@ fn fit(
         let unconsolidated = dropped
             .iter()
             .any(|(id, own)| *own && *id > cursor.last_sequence);
-        history.splice(protected..start, [], Author::plugin("ene.window"));
+        history.splice(
+            protected..start,
+            [Entry::new(Message::user(WINDOW_NOTICE))],
+            Author::plugin("ene.window"),
+        );
         if unconsolidated {
             queues.0.insert(key.companion().into());
             if reported.insert((agent.0, "truncated")) {
@@ -449,10 +474,21 @@ fn fit(
                 );
             }
         }
-        if (kept_len as f64) / (window as f64) > options.compaction.threshold {
+        if due {
             compaction.0.insert(key.companion().into());
         }
     }
+}
+
+const WINDOW_NOTICE: &str = "[System Notice: 過去の一部ログを一時的に省略して対話を継続しています]";
+
+fn compaction_due(kept: &[std::sync::Arc<Message>], window: u64, threshold: f64) -> bool {
+    if window == 0 {
+        return false;
+    }
+    let counter = HeuristicTokenCounter::default();
+    let tokens: usize = kept.iter().map(|message| counter.count(message)).sum();
+    (tokens as f64) / (window as f64) > threshold
 }
 
 fn gate(world: &mut World) {
@@ -461,6 +497,12 @@ fn gate(world: &mut World) {
         .iter(world)
         .collect();
     for entity in calls {
+        if world
+            .get::<Decision>(entity)
+            .is_some_and(Decision::is_decided)
+        {
+            continue;
+        }
         let ready = world.resource::<HostState>().ready().err();
         let needs_binding = world.get::<ModelRequest>(entity).is_some()
             || world.get::<ToolRequest>(entity).is_some();
@@ -482,17 +524,32 @@ fn gate(world: &mut World) {
                 serde_json::to_string(&request.call.function.arguments).unwrap_or_default(),
             )
         });
-        let policy = match tool_request.as_ref() {
-            Some((name, args)) => match policy_refusal(world, entity, name, args) {
+        let policy = match (
+            tool_request.as_ref(),
+            world.get::<Approved>(entity).cloned(),
+        ) {
+            (_, Some(mut approved)) if !approved.consumed => {
+                let store = world.resource::<Store>().clone();
+                match store.consume_approval(&approved.request_id) {
+                    Ok(true) => {
+                        approved.consumed = true;
+                        world.entity_mut(entity).insert(approved);
+                        Policy::Allow
+                    }
+                    Ok(false) => Policy::Refuse("approval was already consumed".into()),
+                    Err(error) => Policy::Refuse(format!("policy unavailable: {error}")),
+                }
+            }
+            (_, Some(_)) => Policy::Allow,
+            (Some((name, args)), None) => match policy_refusal(world, entity, name, args) {
                 Ok(Policy::Allow) => Policy::Allow,
                 Ok(Policy::Hold { reason }) => Policy::Hold { reason },
                 Ok(Policy::Refuse(reason)) => Policy::Refuse(reason),
                 Err(error) => Policy::Refuse(format!("policy unavailable: {error}")),
             },
-            None => Policy::Allow,
+            (None, None) => Policy::Allow,
         };
-        let hold = matches!(&policy, Policy::Hold { .. });
-        if hold {
+        if matches!(&policy, Policy::Hold { .. }) {
             continue;
         }
         let policy = match policy {
@@ -532,31 +589,105 @@ enum Policy {
     Hold { reason: String },
 }
 
-fn ensure_hold(world: &mut World, request_id: &str, call: Entity) {
-    let existing = world.resource::<ApprovalHolds>().0.get(request_id).copied();
-    if let Some(hold) = existing {
-        let live = world
-            .get::<HoldOf>(hold)
-            .is_some_and(|HoldOf(held)| *held == call);
-        if live {
+/// A live tool call waits for this approval request. The component sits on the
+/// [`HoldOf`] entity, so stopping the turn releases the call and expires the
+/// request with it.
+#[derive(Component, Clone)]
+pub(crate) struct ApprovalHold {
+    pub(crate) request_id: String,
+}
+
+/// The user approved this exact call. Gate consumes the request and lets the
+/// call run; the request's hash already binds it to the call's arguments.
+#[derive(Component, Clone)]
+pub(crate) struct Approved {
+    pub(crate) request_id: String,
+    consumed: bool,
+}
+
+impl Approved {
+    pub(crate) fn new(request_id: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+            consumed: false,
+        }
+    }
+}
+
+fn hold_released(
+    released: On<Despawn<ApprovalHold>>,
+    holds: Query<&ApprovalHold>,
+    mut commands: Commands,
+) {
+    let Ok(hold) = holds.get(released.entity) else {
+        return;
+    };
+    let request_id = hold.request_id.clone();
+    commands.queue(move |world: &mut World| {
+        // A successor takes over the hold before the old entity goes. Expiring
+        // the request then would invalidate the approval the successor waits on.
+        if world
+            .query::<&ApprovalHold>()
+            .iter(world)
+            .any(|hold| hold.request_id == request_id)
+        {
             return;
         }
-        world.resource_mut::<ApprovalHolds>().0.remove(request_id);
+        let store = world.resource::<Store>().clone();
+        match store.approval(&request_id) {
+            Ok(Some(approval)) if approval.status == "pending" => {
+                if let Err(error) = store.set_approval_status(&request_id, "expired")
+                    && error.is_storage()
+                {
+                    super::fail(world, error.to_string());
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.is_storage() => super::fail(world, error.to_string()),
+            Err(_) => {}
+        }
+    });
+}
+
+fn ensure_hold(world: &mut World, request_id: &str, call: Entity) {
+    let (existing, stale): (bool, Vec<Entity>) = {
+        let mut existing = false;
+        let mut stale = Vec::new();
+        for (hold, ApprovalHold { request_id: found }, HoldOf(held)) in world
+            .query::<(Entity, &ApprovalHold, &HoldOf)>()
+            .iter(world)
+        {
+            if found != request_id {
+                continue;
+            }
+            if *held == call {
+                existing = true;
+            } else {
+                stale.push(hold);
+            }
+        }
+        (existing, stale)
+    };
+    if existing {
+        return;
     }
-    let hold = world.spawn(HoldOf(call)).id();
-    world
-        .resource_mut::<ApprovalHolds>()
-        .0
-        .insert(request_id.to_owned(), hold);
+    // Spawn the replacement before despawning stale holds: the despawn
+    // observer only expires a request with no live hold left.
+    world.spawn((
+        HoldOf(call),
+        ApprovalHold {
+            request_id: request_id.to_owned(),
+        },
+    ));
+    for hold in stale {
+        world.despawn(hold);
+    }
 }
 
 fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> Result<Policy> {
     let store = world.resource::<Store>().clone();
     let rules = store.policy_rules()?;
-    let matches = |rule: &w::PolicyRule| {
-        (rule.tool_name.is_empty() || rule.tool_name == "*" || rule.tool_name == name)
-            && (rule.pattern.is_empty() || args.contains(&rule.pattern))
-    };
+    let matches = |rule: &w::PolicyRule| super::settings::rule_matches(rule, name, args);
     if rules
         .iter()
         .any(|rule| rule.effect == "deny" && matches(rule))
@@ -627,7 +758,6 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
         reason: "approval required".into(),
     })
 }
-
 fn streams(
     mut deltas: MessageReader<StreamDelta>,
     calls: Query<(&Effect, &CallOf), With<TurnCall>>,
@@ -725,5 +855,21 @@ fn changes(
                 ..Default::default()
             })),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn compaction_is_due_by_tokens_not_by_message_count() {
+        // One long message used to divide its count (1) by the window and
+        // never trigger compaction.
+        let kept = [Arc::new(Message::user("x".repeat(4_000)))];
+        assert!(compaction_due(&kept, 1_000, 0.70));
+        let short = [Arc::new(Message::user("ok"))];
+        assert!(!compaction_due(&short, 1_000, 0.70));
     }
 }

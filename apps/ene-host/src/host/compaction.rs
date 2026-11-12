@@ -50,6 +50,37 @@ pub(crate) struct SummaryJob {
 #[derive(Component)]
 pub(crate) struct Applied;
 
+/// Drops a running summary for `companion` because the user spoke, and
+/// schedules a fresh attempt for the next idle period.
+///
+/// The task runs on the pool, so despawning its call is what cancels it: the
+/// in-memory request view is discarded and no stale summary can be applied
+/// after the live log has moved on.
+pub(crate) fn interrupt(world: &mut World, companion: &str) {
+    let jobs: Vec<Entity> = {
+        let mut jobs =
+            world.query_filtered::<(Entity, &ForAgent), (With<SummaryJob>, Without<Applied>)>();
+        jobs.iter(world)
+            .filter_map(|(call, agent)| {
+                world
+                    .get::<AgentKey>(agent.0)
+                    .is_some_and(|key| !key.is_work() && key.companion() == companion)
+                    .then_some(call)
+            })
+            .collect()
+    };
+    if jobs.is_empty() {
+        return;
+    }
+    for call in jobs {
+        world.despawn(call);
+    }
+    world
+        .resource_mut::<CompactionQueue>()
+        .0
+        .insert(companion.to_owned());
+}
+
 /// The latest view-only summary for an agent.
 #[derive(Component, Clone)]
 pub(crate) struct Summary {

@@ -26,7 +26,6 @@ keyring = { version = "4", default-features = false, features = ["v1"] }
 private-fs = "0.2.1"
 reqwest.workspace = true
 rig-core = { version = "=0.46.0", default-features = false }
-rig-derive = "=0.46.0"
 rig-ecs = "=0.46.0"
 rig-http = "=0.46.0"
 rig-memory = { version = "=0.46.0", features = ["fs"] }

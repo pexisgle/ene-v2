@@ -1,7 +1,7 @@
 //! Conversation binding, input acceptance, idempotent delivery and history.
 use super::{
     agent::AgentKey,
-    client,
+    client, compaction,
     db::{Result, Store, digest, validate_id, validate_key},
     error::HostError,
     failure::Failure,
@@ -11,12 +11,18 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use rig_core::completion::Message;
 use rig_core::conversation::{Aside, Author, AuthorKind, MessageId, RequestId, TurnEnd};
 use rig_ecs::prelude::*;
+use rig_memory::{HeuristicTokenCounter, TokenCounter};
 use serde_json::json;
 use uuid::Uuid;
 
-pub(crate) const MAX_INPUT: usize = 65_536;
+/// The ingress limit for one user message: 8,000 tokens, about 32,000
+/// characters. A message that alone could fill the window is refused before
+/// it reaches the conversation loop; it is never truncated.
+pub(crate) const MAX_INPUT_TOKENS: usize = 8_000;
+pub(crate) const MAX_INPUT_CHARS: usize = 32_000;
 const MAX_PENDING_INPUTS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +45,6 @@ impl TurnState {
 }
 
 pub(crate) const PARENT_TOOLS: &[&str] = &[
-    "current_time",
     "mind_recall",
     "mind_read",
     "mind_update",
@@ -52,7 +57,7 @@ pub(crate) const PARENT_TOOLS: &[&str] = &[
     "noop",
     "device_request",
 ];
-pub(crate) const WORK_TOOLS: &[&str] = &["current_time", "report", "device_request"];
+pub(crate) const WORK_TOOLS: &[&str] = &["report", "device_request"];
 
 pub(crate) fn tool_access(key: &AgentKey) -> ToolAccess {
     let names = if key.is_work() {
@@ -302,8 +307,10 @@ pub(crate) fn input_of(conversation: &Conversation, start: MessageId) -> Option<
 pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w::Acceptance> {
     validate_id(&request.companion_id)?;
     validate_key(&request.request_key)?;
-    if request.text.trim().is_empty() || request.text.len() > MAX_INPUT {
-        return Err(HostError::invalid("message must contain 1..65536 bytes"));
+    if request.text.trim().is_empty() || input_too_large(&request.text) {
+        return Err(HostError::invalid(
+            "message exceeds the 8,000-token ingress limit",
+        ));
     }
     if !request.client_id.is_empty() {
         validate_id(&request.client_id)?;
@@ -325,6 +332,10 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     if !request.client_id.is_empty() {
         client::activate_on_send(app.world_mut(), key.companion(), &request.client_id)?;
     }
+    // A user who speaks while a background summary runs wants the reply, not
+    // the summary: drop the in-flight job and schedule it for the next idle
+    // period. The summary view is never written over the live log.
+    compaction::interrupt(app.world_mut(), key.companion());
     let now = app.world().resource::<Time<Virtual>>().elapsed();
     app.world_mut()
         .resource_mut::<Inactivity>()
@@ -335,6 +346,11 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
         request_id,
         ..Default::default()
     })
+}
+
+fn input_too_large(text: &str) -> bool {
+    text.chars().count() > MAX_INPUT_CHARS
+        || HeuristicTokenCounter::default().count(&Message::user(text)) > MAX_INPUT_TOKENS
 }
 
 pub(crate) fn deliver_accepted(

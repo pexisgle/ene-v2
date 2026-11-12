@@ -1,22 +1,8 @@
-//! Shared open-tool dispatch and the one built-in tool.
+//! Shared open-tool dispatch.
 use super::{error::HostError, fail};
 use bevy_ecs::prelude::*;
 use rig_core::tool::ToolResult;
-use rig_derive::rig_tool;
 use rig_ecs::prelude::*;
-
-/// Get the current Unix time in milliseconds.
-#[rig_tool]
-fn current_time() -> std::result::Result<String, std::convert::Infallible> {
-    Ok(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis())
-        .to_string())
-}
-
-pub(crate) fn current_time_tool() -> impl rig_core::tool::Tool {
-    CurrentTime
-}
 
 pub(crate) fn run_tool<A: Clone + Send + Sync + 'static>(
     handler: fn(&mut World, Entity, &str, A) -> std::result::Result<String, HostError>,
@@ -55,6 +41,3 @@ pub(crate) fn answer(
         decision.decide(Decider::plugin("ene-host"), outcome);
     }
 }
-
-#[allow(dead_code)]
-fn _uses(_: &HostError) {}

@@ -1,5 +1,6 @@
 //! Provider connections, settings revision and the policy/approval surface.
 use super::{
+    agent::{ApprovalHold, Approved},
     db::{Result, Store, new_id, next_revision, now, validate_id},
     error::HostError,
     model,
@@ -8,6 +9,7 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use rig_ecs::prelude::{Decider, HoldOf, Outcome};
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,45 +176,46 @@ pub(crate) fn submit_approval(
     if approval.status != "pending" {
         return Err(HostError::conflict("approval is already resolved"));
     }
-    let hold = world
-        .resource::<super::resources::ApprovalHolds>()
-        .0
-        .get(&request.request_id)
-        .copied();
-    if !hold.is_some_and(|hold| {
-        world
-            .get::<rig_ecs::stage::HoldOf>(hold)
-            .is_some_and(|rig_ecs::stage::HoldOf(call)| world.get_entity(*call).is_ok())
-    }) {
+    let live = {
+        let mut holds = world.query::<(Entity, &ApprovalHold, &HoldOf)>();
+        holds.iter(world).find_map(|(entity, hold, HoldOf(call))| {
+            (hold.request_id == request.request_id).then_some((entity, *call))
+        })
+    };
+    let Some((hold, call)) = live else {
+        return Err(HostError::conflict(
+            "approval is not attached to a live tool call",
+        ));
+    };
+    if world.get_entity(call).is_err() {
         return Err(HostError::conflict(
             "approval is not attached to a live tool call",
         ));
     }
     let status = match request.decision.as_str() {
-        "approve" => "approved",
-        "always_approve" => "approved",
+        "approve" | "always_approve" => "approved",
         "deny" => "denied",
         _ => return Err(HostError::invalid("invalid approval decision")),
     };
-    if request.decision == "always_approve" && !confirm_matches(&store, &approval)? {
-        let rule = w::PolicyRule {
-            id: format!("approval-{}", approval.request_id),
-            tool_name: approval.tool_name.clone(),
-            pattern: approval.normalized_arguments.clone(),
-            effect: "always_approve".into(),
-            created_at: now(),
-            ..Default::default()
-        };
-        store.update_policy_rules(&[rule], &[])?;
-        notify_policy_rules(world, &store)?;
-    }
+    // Every approval today comes from an explicit `confirm` rule, which stays
+    // authoritative (design/permissions.md §5.B). "always_approve" therefore
+    // resolves like "approve" and stores no rule; the automatic decision
+    // pipeline that could produce other approvals is not implemented.
     store.set_approval_status(&request.request_id, status)?;
-    if let Some(hold) = world
-        .resource_mut::<super::resources::ApprovalHolds>()
-        .0
-        .remove(&request.request_id)
-        && world.get_entity(hold).is_ok()
-    {
+    match status {
+        "approved" => {
+            world
+                .entity_mut(call)
+                .insert(Approved::new(request.request_id.clone()));
+        }
+        "denied" => {
+            if let Some(mut decision) = world.get_mut::<rig_ecs::stage::Decision>(call) {
+                decision.decide(Decider::Person, Outcome::refused("user denied"));
+            }
+        }
+        _ => {}
+    }
+    if world.get_entity(hold).is_ok() {
         world.despawn(hold);
     }
     world.resource_mut::<Notifier>().push(
@@ -236,27 +239,33 @@ pub(crate) fn submit_approval(
     })
 }
 
-fn confirm_matches(store: &Store, approval: &w::ApprovalRequest) -> Result<bool> {
-    Ok(store.policy_rules()?.into_iter().any(|rule| {
-        rule.effect == "confirm"
-            && (rule.tool_name.is_empty()
-                || rule.tool_name == "*"
-                || rule.tool_name == approval.tool_name)
-            && (rule.pattern.is_empty() || approval.normalized_arguments.contains(&rule.pattern))
-    }))
+/// Whether `rule` applies to a call of `tool` with `args`, the normalized
+/// argument JSON.
+///
+/// A non-empty `pattern` is matched exactly, never as a substring: the whole
+/// normalized arguments or one of their string values (a path, URL, command,
+/// and so on). A saved `(tool, target)` rule therefore cannot apply to a
+/// different target that merely contains the same text.
+pub(crate) fn rule_matches(rule: &w::PolicyRule, tool: &str, args: &str) -> bool {
+    if !(rule.tool_name.is_empty() || rule.tool_name == "*" || rule.tool_name == tool) {
+        return false;
+    }
+    if rule.pattern.is_empty() {
+        return true;
+    }
+    if rule.pattern == args {
+        return true;
+    }
+    serde_json::from_str::<Value>(args).is_ok_and(|value| contains_string(&value, &rule.pattern))
 }
 
-fn notify_policy_rules(world: &mut World, store: &Store) -> Result<()> {
-    let rules = policy_rules(store)?;
-    world.resource_mut::<Notifier>().push(
-        None,
-        None,
-        w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
-            rules: rules.items.clone(),
-            ..Default::default()
-        })),
-    );
-    Ok(())
+fn contains_string(value: &Value, pattern: &str) -> bool {
+    match value {
+        Value::String(text) => text == pattern,
+        Value::Array(items) => items.iter().any(|item| contains_string(item, pattern)),
+        Value::Object(object) => object.values().any(|value| contains_string(value, pattern)),
+        _ => false,
+    }
 }
 
 fn notify_settings(world: &mut World, view: &w::Settings) {
@@ -279,28 +288,32 @@ pub(crate) fn credential_changed(world: &mut World, connection_id: &str) -> Resu
     Ok(())
 }
 
-pub(crate) fn expire_orphan_holds(world: &mut World) {
-    let stale: Vec<(String, bevy_ecs::prelude::Entity)> = world
-        .resource::<super::resources::ApprovalHolds>()
-        .0
-        .iter()
-        .filter(|(_, hold)| world.get_entity(**hold).is_err())
-        .map(|(request, hold)| (request.clone(), *hold))
-        .collect();
-    if stale.is_empty() {
-        return;
-    }
-    let store = world.resource::<Store>().clone();
-    for (request, _) in stale {
-        if let Err(error) = store.set_approval_status(&request, "expired") {
-            if error.is_storage() {
-                crate::host::fail(world, error.to_string());
-            }
-            return;
-        }
-        world
-            .resource_mut::<super::resources::ApprovalHolds>()
-            .0
-            .remove(&request);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rule_patterns_match_exactly_not_as_substrings() {
+        let rule = w::PolicyRule {
+            tool_name: "device_request".into(),
+            pattern: "x".into(),
+            effect: "confirm".into(),
+            ..Default::default()
+        };
+        assert!(rule_matches(
+            &rule,
+            "device_request",
+            r#"{"capability":"files","input":{"path":"x"}}"#
+        ));
+        assert!(!rule_matches(
+            &rule,
+            "device_request",
+            r#"{"capability":"files","input":{"path":"x-long"}}"#
+        ));
+        assert!(!rule_matches(
+            &rule,
+            "other_tool",
+            r#"{"capability":"files","input":{"path":"x"}}"#
+        ));
     }
 }

@@ -106,10 +106,7 @@ impl Store {
                 transaction.execute("DELETE FROM policy_rules WHERE id=?1", [id])?;
             }
             for rule in &add_or_update {
-                if !matches!(
-                    rule.effect.as_str(),
-                    "allow" | "deny" | "confirm" | "always_approve"
-                ) {
+                if !matches!(rule.effect.as_str(), "allow" | "deny" | "confirm") {
                     return Err(HostError::invalid("invalid policy effect"));
                 }
                 let created_at = if rule.created_at.is_empty() {

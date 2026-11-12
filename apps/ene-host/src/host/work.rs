@@ -1,8 +1,7 @@
 //! Independent work sessions, their runs and the parent report.
 use super::{
     agent::AgentKey,
-    chat::{self, TurnState},
-    client,
+    chat, client,
     db::{Result, Store, digest, new_id, now, validate_key},
     error::HostError,
     notify::Notifier,
@@ -180,7 +179,7 @@ fn start_in_world(
         "{WORK_PROMPT}\n\n作業: {instruction}"
     )));
     world.trigger(
-        Deliver::new(child, instruction, DeliveryMode::Steer).with_author(Author::agent(
+        Deliver::new(child, instruction, DeliveryMode::Queue).with_author(Author::agent(
             AgentKey::parent(companion_id).agent_id(),
             Some(RequestId(id.clone())),
         )),
@@ -584,6 +583,15 @@ fn report_tool(world: &mut World, agent: Entity, args: ReportArgs) -> Result<Str
             &format!("作業からの質問 (request_id: {request_id}):\n{text}"),
             Some(&format!("inquiry:{request_id}")),
         );
+        let run = current_run(world, agent, work);
+        notify_run(
+            world,
+            key.companion(),
+            work,
+            &run,
+            "inquiry_created",
+            json!({"request_id": request_id, "text": text}),
+        );
         return Ok(request_id);
     }
     deliver_to_parent(world, key.companion(), work, &text, None);
@@ -612,17 +620,37 @@ pub(crate) fn deliver_to_parent(
 }
 
 pub(crate) fn notify(world: &mut World, session: &WorkSession, kind: &str, detail: Value) {
+    notify_run(world, &session.companion_id, &session.id, "", kind, detail);
+}
+
+pub(crate) fn notify_run(
+    world: &mut World,
+    companion: &str,
+    work: &str,
+    run: &str,
+    kind: &str,
+    detail: Value,
+) {
     world.resource_mut::<Notifier>().push(
-        Some(session.companion_id.clone()),
+        Some(companion.into()),
         None,
         w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
-            work_id: session.id.clone(),
-            run_id: String::new(),
+            work_id: work.into(),
+            run_id: run.into(),
             kind: kind.into(),
             detail: detail.to_string(),
             ..Default::default()
         })),
     );
+}
+
+fn current_run(world: &World, agent: Entity, work: &str) -> String {
+    world
+        .get::<Conversation>(agent)
+        .and_then(|conversation| conversation.turns().next_back())
+        .map_or_else(String::new, |(_, turn)| {
+            format!("{work}:{}", turn.start.get())
+        })
 }
 
 fn parent_key(world: &mut World, agent: Entity) -> Result<AgentKey> {
@@ -636,62 +664,45 @@ fn parent_key(world: &mut World, agent: Entity) -> Result<AgentKey> {
     Ok(key)
 }
 
-#[allow(dead_code)]
-fn _uses(_: Uuid, _: TurnState) {}
-
-/// Marks a report as persisted only after the parent's accepted Aside is visible.
-pub(crate) fn finalize_reports(world: &mut World) {
+/// Marks reports as persisted when the parent turn that consumed them has
+/// settled. Running this from `turn_settled` keeps it event-driven instead of
+/// rescanning every work session (and querying SQLite) on every frame.
+pub(crate) fn finalize_reports(world: &mut World, companion: &str) -> Result<()> {
     if world
         .resource::<rig_ecs::session_log::SessionLog>()
         .failure()
         .is_some()
     {
-        return;
+        return Ok(());
     }
-    let agents: Vec<AgentKey> = world
-        .query::<(&AgentKey, &Conversation)>()
-        .iter(world)
-        .filter(|(key, _)| key.is_work())
-        .map(|(key, _)| key.clone())
-        .collect();
-    for key in agents {
-        let Some(work_id) = key.work_id() else {
-            continue;
-        };
-        let Some(conversation) = world
-            .query::<(&AgentKey, &Conversation)>()
-            .iter(world)
-            .find_map(|(candidate, conversation)| (candidate == &key).then_some(conversation))
-        else {
-            continue;
-        };
-        let Some((_, turn)) = conversation.turns().next_back() else {
-            continue;
-        };
-        if turn.end.is_none() {
+    let Some(parent) = chat::find_agent(world, &AgentKey::parent(companion)) else {
+        return Ok(());
+    };
+    let store = world.resource::<Store>().clone();
+    for mut session in store.works_for(companion)? {
+        if session.closed {
             continue;
         }
-        let run = format!("{work_id}:{}", turn.start.get());
-        let Some(parent) = chat::find_agent(world, &AgentKey::parent(key.companion())) else {
+        let Some(child) = chat::find_agent(world, &AgentKey::work(companion, &session.id)) else {
             continue;
         };
-        if !chat::has_request(world, parent, &format!("report:{run}")) {
-            continue;
-        }
-        let store = world.resource::<Store>().clone();
-        let Ok(Some(mut session)) = store.work(work_id) else {
+        let Some(run) = world.get::<Conversation>(child).and_then(|conversation| {
+            let (_, turn) = conversation.turns().next_back()?;
+            turn.end.as_ref()?;
+            Some(format!("{}:{}", session.id, turn.start.get()))
+        }) else {
             continue;
         };
         if session.reported_run.as_deref() == Some(&run) {
             continue;
         }
+        if !chat::has_request(world, parent, &format!("report:{run}")) {
+            continue;
+        }
         session.reported_run = Some(run);
         session.status = WorkStatus::Idle;
         session.updated_at = now();
-        if let Err(error) = store.save_work(&session)
-            && error.is_storage()
-        {
-            crate::host::fail(world, error.to_string());
-        }
+        store.save_work(&session)?;
     }
+    Ok(())
 }

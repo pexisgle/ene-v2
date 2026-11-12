@@ -1463,6 +1463,89 @@ async fn send_work_replays_the_same_request_key_without_delivering_twice() {
 }
 
 #[tokio::test]
+async fn a_denied_approval_refuses_the_tool_without_running_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let parent = parent_model(vec![
+        vec![
+            E::tool_call(
+                "dev",
+                "device_request",
+                json!({"capability": "files", "input": {"path": "x"}}),
+            ),
+            E::final_response_with_default_usage(),
+        ],
+        vec![E::text("denied"), E::final_response_with_default_usage()],
+    ]);
+    let runtime = Runtime::start_with(temp.path(), scripted(parent, text_model("unused"), false))
+        .await
+        .unwrap();
+    let companion = default_companion(&runtime).await;
+    runtime
+        .call(|app| {
+            settings::update_policy_rules(
+                app.world_mut(),
+                w::UpdatePolicyRulesRequest {
+                    add_or_update: vec![w::PolicyRule {
+                        id: "confirm-device".into(),
+                        tool_name: "device_request".into(),
+                        effect: "confirm".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    send(&runtime, &companion, "deny", "端末を使って").await;
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let _ = runtime.call(|_| Ok(())).await;
+            let pending = runtime
+                .call(|app| settings::pending_approvals(app.world().resource::<Store>()))
+                .await
+                .unwrap();
+            if let Some(request) = pending.items.first() {
+                return request.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no approval request");
+    let request_id = approval.request_id.clone();
+    runtime
+        .call(move |app| {
+            settings::submit_approval(
+                app.world_mut(),
+                w::SubmitApprovalRequest {
+                    request_id,
+                    decision: "deny".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    until(&runtime, &companion, "denied").await;
+    let devices = runtime
+        .call(|app| app.world().resource::<Store>().devices())
+        .await
+        .unwrap();
+    assert!(devices.is_empty(), "a denied tool must not run");
+    let stored = runtime
+        .call({
+            let id = approval.request_id.clone();
+            move |app| app.world().resource::<Store>().approval(&id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, "denied");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn stopping_an_approval_does_not_reuse_its_hold_for_the_next_call() {
     let temp = tempfile::tempdir().unwrap();
     let parent = parent_model(vec![
@@ -1677,5 +1760,99 @@ async fn stopping_a_closed_work_from_the_tool_keeps_it_closed() {
         .await
         .unwrap();
     assert_eq!(status, WorkStatus::Closed);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_oversized_input_is_refused_before_it_enters_the_log() {
+    let temp = tempfile::tempdir().unwrap();
+    let model = text_model("unused");
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(model.clone(), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
+    let companion = default_companion(&runtime).await;
+    let text = "あ".repeat(32_001);
+    let error = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                chat::accept(
+                    app,
+                    w::SendMessageRequest {
+                        companion_id: companion,
+                        request_key: "too-large".into(),
+                        text,
+                        ..Default::default()
+                    },
+                )
+            }
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HostError::Invalid(_)));
+    assert_eq!(model.request_count(), 0);
+    let seen = history(&runtime, &companion, true).await;
+    assert!(seen.items.is_empty());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_user_message_drops_a_running_compaction_and_requeues_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
+    let companion = default_companion(&runtime).await;
+    let job = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                let agent = chat::find_agent(app.world_mut(), &AgentKey::parent(&companion))
+                    .ok_or_else(|| HostError::not_found("agent not found"))?;
+                let job = app
+                    .world_mut()
+                    .spawn((
+                        super::compaction::SummaryJob { keep_from: None },
+                        rig_ecs::prelude::ForAgent(agent),
+                    ))
+                    .id();
+                app.world_mut()
+                    .resource_mut::<super::resources::CompactionQueue>()
+                    .0
+                    .insert(companion.clone());
+                Ok(job)
+            }
+        })
+        .await
+        .unwrap();
+    send(&runtime, &companion, "interrupt", "話しかけた").await;
+    let cancelled = runtime
+        .call(move |app| Ok(app.world().get_entity(job).is_err()))
+        .await
+        .unwrap();
+    assert!(cancelled, "the running summary job must be dropped");
+    let queued = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                Ok(app
+                    .world()
+                    .resource::<super::resources::CompactionQueue>()
+                    .0
+                    .contains(&companion))
+            }
+        })
+        .await
+        .unwrap();
+    assert!(
+        queued,
+        "the summary must be deferred to the next idle period"
+    );
     runtime.shutdown().await.unwrap();
 }
