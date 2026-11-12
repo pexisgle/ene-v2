@@ -94,7 +94,7 @@ pub enum RunStatus {
 | `Running` | 子からの質問（`WorkInquiry`） | `WaitingInput` | ユーザーまたは親の回答待ち。`WorkView.pending_inquiries` へ登録 |
 | `Running` | 権限・Sandbox外操作の保留 | `WaitingInput` | `Stage::Gate` で `commands.spawn(HoldOf(call_entity))` を投入し、`approval_requests` テーブルへ登録。未決承認リスト（`pending_approvals`）へ追加 |
 | `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時は `commands.entity(call_entity).insert(Approved)` を付与、拒否時は `Outcome::refused(...)` を確定し、`HoldOf` を解除して処理再開 |
-| `WaitingInput` | 質問回答受信（`SendWork` with `request_id`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
+| `WaitingInput` | 質問回答受信（`SendWork` with `request_id` または `AnswerInquiry`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
 | `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信（未決permissionはcancel応答）、最大30秒クリーンアップ待機 |
 | `Cancelling` | ACP `cancelled` 応答 または Rigターン停止確認 | `Cancelled` | 正常中断確定（ACPプロセスはセッション維持のため生存） |
 | `Cancelling` | 30秒超過 ➔ 強制終了後、プロセス終了未確認 | `CancellationUnconfirmed` | 停止未確認として記録 |

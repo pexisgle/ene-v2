@@ -21,7 +21,7 @@ IDはホスト内で安定した不透明な値とする。親、バックエン
 | 会話 | 発言の受付、追加入力、履歴・メッセージ取得、実行イベントと文字片の購読、生成の停止 |
 | キャラクター | 初期プロファイルの取得・編集と現在の心の取得（`GetMind` / `UpdateMindProfile`）。作者設定と交流で育った状態を分ける |
 | 記憶 | 親の`mind_recall` / `mind_read` / `mind_update`、ホストの自動整理・自動想起、`ControlMemory`（forget/remember/share/unshare）。クライアント向けの記憶一覧UIは未実装 |
-| 作業 | WorkSession一覧・状態取得（`ListWorks`）、進捗イベント購読（`HostService.Subscribe` の `WorkEvent`）、UIからの緊急直接停止（`StopWork`）。通常の作業指示は親の会話を通じて行われる |
+| 作業 | WorkSession一覧・状態取得（`ListWorks`）、未決質問への回答（`AnswerInquiry`）、進捗イベント購読（`HostService.Subscribe` の `WorkEvent`）、UIからの緊急直接停止（`StopWork`）。通常の作業指示は親の会話を通じて行われる |
 | 音声・身体 | マイク入力ストリーム（`StreamAudioInput`）、合成音声出力ストリーム（`SubscribeAudioOutput`）、クライアント再生進捗報告（`ReportPlaybackStatus`）。音声再生デバイスはデスクトップクライアントが単一所有する |
 | 接続・ツール | プロバイダー・バックエンド・ツール一覧、能力、設定、認証の開始・状態・解除 |
 | 権限・承認 | ツール利用許可ルール（パス・コマンド等）やセキュリティ設定の取得・更新、未決の承認要求（`ApprovalRequest`）の取得とユーザー回答（承認/拒否） |
@@ -47,9 +47,12 @@ MemoryViewは本文、短い説明、出所・取得方法、時刻、共有範�
 
 ### 作業
 
-WorkSessionViewは親、BackendProfile、利用可能性、進行中run、最後の説明、未決Request、成果物参照、再開可能性を持つ。runには入力との関係、配送状態、実行状態、終了理由と失敗・不明の情報がある。backendの設定をキーに一件の履歴しか読めないAPIにしない。
+WorkViewは親、WorkSession、進行中RunInfo、未決質問（`pending_inquiries`）を持つ。runには配送状態、実行状態、終了理由と失敗・不明の情報がある。
+未決質問（`WorkInquiry`）への回答経路は2通り存在する：
+1. **対話仲介経路（通常）**: 子エージェントからの質問を親エージェントがユーザーに相談し、ユーザーの返答を受けた親が `send_work` ツール（`request_id` に質問IDを束縛）で回答する。
+2. **UI直接回答経路（クライアントUI）**: クライアントが `WorkView.pending_inquiries` から質問カードを表示し、ユーザーの選択・入力を `WorkService.AnswerInquiry(work_id, request_id, answer)` RPCで直接回答する。
 
-RequestViewは質問と権限要求を区別し、対象session/run、request id、回答形式、影響、関連する許可、状態と版を持つ。許可の範囲は親が書いた説明文だけで決めず、ホストが対象操作に束縛する。
+権限承認要求（`ApprovalRequest`）は `SettingsService.SubmitApproval` で回答し、通常の質問（`WorkInquiry`）と明確に区別する。
 
 ### 能力
 
@@ -137,6 +140,8 @@ message SubscribeRequest {
 message Notification {
   Cursor cursor = 1;
   string kind = 2;
+  optional string client_id = 17;     // 特定クライアント宛て通知の場合（省略時は全端末同報）
+  optional string companion_id = 18;  // コンパニオン関連通知の場合
   oneof event {
     HostHealth health = 3;
     Companion companion = 4;
@@ -195,6 +200,8 @@ message CreateCompanionRequest {
   string voice = 4; // JSON object text
   ModelAssignments assignments = 5;
   MindProfile profile = 6;
+  optional string persona = 7;
+  optional string voice_identifier = 8;
 }
 message UpdateCompanionRequest {
   string id = 1;
@@ -205,6 +212,13 @@ message UpdateCompanionRequest {
   optional string voice = 6;
   AssignmentPatch companion_assignment = 7;
   AssignmentPatch task_assignment = 8;
+  AssignmentPatch perception_assignment = 9;
+  AssignmentPatch compaction_assignment = 10;
+  AssignmentPatch consolidation_assignment = 11;
+  AssignmentPatch decision_assignment = 12;
+  AssignmentPatch embedding_assignment = 13;
+  optional string persona = 14;
+  optional string voice_identifier = 15;
 }
 
 // Mind and Memories --------------------------------------------------------
@@ -357,7 +371,13 @@ message SendWorkRequest {
   string request_key = 2;
   string text = 3;
   string client_id = 4;
-  optional string request_id = 5; // 質問への回答束縛用
+  optional string request_id = 5; // 質問への回答束縛用 (会話ツール経由等)
+}
+message AnswerInquiryRequest {
+  string work_id = 1;
+  string request_id = 2; // WorkInquiry.request_id
+  string answer = 3;     // ユーザーの回答テキスト
+  string client_id = 4;
 }
 message WorkAcceptance { string request_id = 1; }
 message StopWorkRequest { string work_id = 1; }
@@ -680,6 +700,7 @@ service WorkService {
   rpc GetWork(WorkRequest) returns (WorkView);
   rpc StartWork(StartWorkRequest) returns (WorkSession);
   rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
+  rpc AnswerInquiry(AnswerInquiryRequest) returns (WorkAcceptance);
   rpc StopWork(StopWorkRequest) returns (Empty);
   rpc CloseWork(WorkRequest) returns (Empty);
 }
