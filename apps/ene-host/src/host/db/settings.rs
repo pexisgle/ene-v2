@@ -106,7 +106,10 @@ impl Store {
                 transaction.execute("DELETE FROM policy_rules WHERE id=?1", [id])?;
             }
             for rule in &add_or_update {
-                if !matches!(rule.effect.as_str(), "allow" | "deny" | "confirm") {
+                if !matches!(
+                    rule.effect.as_str(),
+                    "allow" | "deny" | "confirm" | "always_approve"
+                ) {
                     return Err(HostError::invalid("invalid policy effect"));
                 }
                 let created_at = if rule.created_at.is_empty() {
@@ -252,18 +255,21 @@ impl Store {
         tool_name: &str,
         hash: &[u8],
         session_id: &str,
+        run_id: &str,
     ) -> Result<Option<w::ApprovalRequest>> {
         let tool_name = tool_name.to_owned();
         let hash = hash.to_vec();
         let session_id = session_id.to_owned();
+        let run_id = run_id.to_owned();
         self.call(move |connection| {
             connection
                 .query_row(
                     "SELECT request_id, session_id, run_id, action_payload_hash, tool_name, \
                      normalized_arguments, status, created_at FROM approval_requests \
                      WHERE tool_name=?1 AND action_payload_hash=?2 AND session_id=?3 \
+                       AND run_id=?4 \
                      ORDER BY created_at DESC LIMIT 1",
-                    params![tool_name, hash, session_id],
+                    params![tool_name, hash, session_id, run_id],
                     row_to_approval,
                 )
                 .optional()

@@ -515,7 +515,6 @@ impl w::SettingsService for Services {
             })
             .await
             .map_err(ConnectError::from)?;
-        cleanup.map_err(ConnectError::from)?;
         self.runtime
             .call({
                 let id = id.clone();
@@ -523,6 +522,7 @@ impl w::SettingsService for Services {
             })
             .await
             .map_err(ConnectError::from)?;
+        cleanup.map_err(ConnectError::from)?;
         Response::ok(w::Empty::default())
     }
 

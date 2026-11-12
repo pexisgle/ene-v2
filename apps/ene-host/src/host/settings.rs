@@ -185,7 +185,7 @@ pub(crate) fn submit_approval(
             id: format!("approval-{}", approval.request_id),
             tool_name: approval.tool_name.clone(),
             pattern: approval.normalized_arguments.clone(),
-            effect: "allow".into(),
+            effect: "always_approve".into(),
             created_at: now(),
             ..Default::default()
         };
@@ -197,6 +197,7 @@ pub(crate) fn submit_approval(
         .resource_mut::<super::resources::ApprovalHolds>()
         .0
         .remove(&request.request_id)
+        && world.get_entity(hold).is_ok()
     {
         world.despawn(hold);
     }
@@ -252,4 +253,25 @@ pub(crate) fn credential_changed(world: &mut World, connection_id: &str) -> Resu
     let view = settings(&store)?;
     notify_settings(world, &view);
     Ok(())
+}
+
+pub(crate) fn expire_orphan_holds(world: &mut World) {
+    let stale: Vec<(String, bevy_ecs::prelude::Entity)> = world
+        .resource::<super::resources::ApprovalHolds>()
+        .0
+        .iter()
+        .filter(|(_, hold)| world.get_entity(**hold).is_err())
+        .map(|(request, hold)| (request.clone(), *hold))
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    let store = world.resource::<Store>().clone();
+    for (request, _) in stale {
+        let _ = store.set_approval_status(&request, "expired");
+        world
+            .resource_mut::<super::resources::ApprovalHolds>()
+            .0
+            .remove(&request);
+    }
 }

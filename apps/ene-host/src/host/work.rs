@@ -267,7 +267,15 @@ pub(crate) fn send(app: &mut App, request: w::SendWorkRequest) -> Result<w::Work
         return Err(HostError::conflict("work is closed"));
     }
     let key = AgentKey::work(&session.companion_id, &request.work_id);
-    let hash = digest(format!("{}:{}", request.work_id, request.text).as_bytes());
+    let hash = digest(
+        format!(
+            "{}:{}:{}",
+            request.work_id,
+            request.text,
+            request.request_id.as_deref().unwrap_or_default()
+        )
+        .as_bytes(),
+    );
     let child = chat::find_agent(app.world_mut(), &key)
         .ok_or_else(|| HostError::not_found("work not found"))?;
     if let Some(accepted) = chat::accepted(app.world(), child, &request.request_key) {
@@ -620,6 +628,13 @@ fn _uses(_: Uuid, _: TurnState) {}
 
 /// Marks a report as persisted only after the parent's accepted Aside is visible.
 pub(crate) fn finalize_reports(world: &mut World) {
+    if world
+        .resource::<rig_ecs::session_log::SessionLog>()
+        .failure()
+        .is_some()
+    {
+        return;
+    }
     let agents: Vec<AgentKey> = world
         .query::<(&AgentKey, &Conversation)>()
         .iter(world)
@@ -660,6 +675,10 @@ pub(crate) fn finalize_reports(world: &mut World) {
         session.reported_run = Some(run);
         session.status = WorkStatus::Idle;
         session.updated_at = now();
-        let _ = store.save_work(&session);
+        if let Err(error) = store.save_work(&session)
+            && error.is_storage()
+        {
+            crate::host::fail(world, error.to_string());
+        }
     }
 }

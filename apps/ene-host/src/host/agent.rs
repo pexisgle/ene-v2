@@ -7,7 +7,7 @@ use super::{
     model::{self, Binding, Refusal},
     notify::Notifier,
     resources::{ApprovalHolds, CompactionQueue, ConsolidationQueue, HostOptions, HostState},
-    tools, wire, work,
+    settings, tools, wire, work,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -62,8 +62,8 @@ impl AgentKey {
 
     pub(crate) fn agent_id(&self) -> String {
         match self {
-            Self::Parent { companion } => format!("parent:{companion}"),
-            Self::Work { work, .. } => format!("work:{work}"),
+            Self::Parent { companion } => format!("parent-{companion}"),
+            Self::Work { work, .. } => format!("work-{work}"),
         }
     }
 }
@@ -108,7 +108,8 @@ impl Plugin for KernelPlugin {
             )
             .add_systems(PostUpdate, recalled)
             .add_systems(Last, changes.after(WriteLogs))
-            .add_systems(Last, work::finalize_reports.after(changes));
+            .add_systems(Last, work::finalize_reports.after(changes))
+            .add_systems(Last, settings::expire_orphan_holds);
         mind::register_tools(app);
         work::register_tools(app);
         client::register_tools(app);
@@ -531,15 +532,23 @@ enum Policy {
     Hold { reason: String },
 }
 
-fn hold_approval(world: &mut World, request_id: &str, call: Entity) {
-    if world.resource::<ApprovalHolds>().0.contains_key(request_id) {
-        return;
+fn hold_approval(world: &mut World, request_id: &str, call: Entity) -> bool {
+    let existing = world.resource::<ApprovalHolds>().0.get(request_id).copied();
+    if let Some(hold) = existing {
+        let live = world
+            .get::<HoldOf>(hold)
+            .is_some_and(|HoldOf(held)| *held == call);
+        if live {
+            return true;
+        }
+        world.resource_mut::<ApprovalHolds>().0.remove(request_id);
     }
     let hold = world.spawn(HoldOf(call)).id();
     world
         .resource_mut::<ApprovalHolds>()
         .0
         .insert(request_id.to_owned(), hold);
+    true
 }
 
 fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> Result<Policy> {
@@ -556,14 +565,19 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
         return Ok(Policy::Refuse("policy denied".into()));
     }
     if rules.iter().any(|rule| {
-        rule.effect == "allow" && !rule.pattern.is_empty() && rule.pattern == args && matches(rule)
+        rule.effect == "always_approve"
+            && !rule.pattern.is_empty()
+            && rule.pattern == args
+            && matches(rule)
     }) {
         return Ok(Policy::Allow);
     }
-    if !rules
+    if rules
         .iter()
         .any(|rule| rule.effect == "confirm" && matches(rule))
     {
+        // fall through to the bound call approval
+    } else {
         return Ok(Policy::Allow);
     }
     let hash = crate::host::db::digest(format!("{name}:{args}").as_bytes());
@@ -581,7 +595,7 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
         .and_then(|CallOf(turn)| world.get::<Turn>(*turn))
         .map(|turn| format!("{}:{}", session_id, turn.start.get()))
         .unwrap_or_default();
-    if let Some(existing) = store.approval_for(name, hash.as_bytes(), &session_id)? {
+    if let Some(existing) = store.approval_for(name, hash.as_bytes(), &session_id, &run_id)? {
         match existing.status.as_str() {
             "approved" => {
                 if store.consume_approval(&existing.request_id)? {
@@ -590,10 +604,12 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
                 return Ok(Policy::Refuse("approval was already consumed".into()));
             }
             "pending" => {
-                hold_approval(world, &existing.request_id, entity);
-                return Ok(Policy::Hold {
-                    reason: "approval pending".into(),
-                });
+                if hold_approval(world, &existing.request_id, entity) {
+                    return Ok(Policy::Hold {
+                        reason: "approval pending".into(),
+                    });
+                }
+                store.set_approval_status(&existing.request_id, "expired")?;
             }
             "denied" => return Ok(Policy::Refuse("approval denied".into())),
             _ => {}

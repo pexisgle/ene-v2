@@ -18,7 +18,8 @@ use rig_core::{
 };
 use rig_ecs::prelude::*;
 use rig_memory::{
-    CompactReason, CompactionPolicy, HeuristicTokenCounter, Summarizer, TokenCounter, summary_state,
+    CompactReason, CompactionPolicy, HeuristicTokenCounter, Summarizer, SummaryState, TokenCounter,
+    summary_author,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -66,6 +67,7 @@ pub(crate) fn start(
     time: Res<Time<Virtual>>,
     mut queue: ResMut<CompactionQueue>,
     agents: Query<(Entity, &AgentKey, &Conversation)>,
+    summaries: Query<&Summary>,
     pending: Query<&ForAgent, (With<SummaryJob>, Without<Applied>)>,
 ) {
     if queue.0.is_empty() {
@@ -115,13 +117,31 @@ pub(crate) fn start(
         if (used as f64) / (limit as f64) < options.compaction.threshold {
             continue;
         }
-        let state = summary_state(conversation);
-        let Ok(plan) = options.compaction.policy.plan_summary(
-            conversation,
-            &state,
-            &CompactReason::Threshold,
-            &spec,
-        ) else {
+        let mut view = conversation.clone();
+        let mut state = SummaryState::default();
+        if let Ok(summary) = summaries.get(agent) {
+            state.summary = summary.text.clone();
+            let covered = view
+                .entries()
+                .take_while(|entry| entry.id.get() <= summary.through)
+                .count();
+            if covered > 0 {
+                view.splice(
+                    0..covered,
+                    [Entry::new(Message::user(format!(
+                        "<summary>\n{}\n</summary>",
+                        summary.text
+                    )))],
+                    summary_author(),
+                );
+            }
+        }
+        let Ok(plan) =
+            options
+                .compaction
+                .policy
+                .plan_summary(&view, &state, &CompactReason::Threshold, &spec)
+        else {
             continue;
         };
         let Some(plan) = plan else {

@@ -204,7 +204,7 @@ pub(crate) fn ensure_model(
     Ok(())
 }
 
-pub(crate) fn has_request(world: &mut World, entity: Entity, id: &str) -> bool {
+pub(crate) fn has_input(world: &mut World, entity: Entity, id: &str) -> bool {
     world
         .get::<Conversation>(entity)
         .is_some_and(|conversation| {
@@ -213,14 +213,6 @@ pub(crate) fn has_request(world: &mut World, entity: Entity, id: &str) -> bool {
                     .author
                     .and_then(|author| author.request.as_ref())
                     .is_some_and(|request| request.0 == id)
-            }) || conversation.asides().any(|(_, aside)| {
-                aside.kind == "ene.accepted"
-                    && (aside.value.as_str() == Some(id)
-                        || aside
-                            .value
-                            .get("request_id")
-                            .and_then(|value| value.as_str())
-                            == Some(id))
             })
         })
         || world
@@ -233,6 +225,23 @@ pub(crate) fn has_request(world: &mut World, entity: Entity, id: &str) -> bool {
                         .request
                         .as_ref()
                         .is_some_and(|request| request.0 == id)
+            })
+}
+
+pub(crate) fn has_request(world: &mut World, entity: Entity, id: &str) -> bool {
+    has_input(world, entity, id)
+        || world
+            .get::<Conversation>(entity)
+            .is_some_and(|conversation| {
+                conversation.asides().any(|(_, aside)| {
+                    aside.kind == "ene.accepted"
+                        && (aside.value.as_str() == Some(id)
+                            || aside
+                                .value
+                                .get("request_id")
+                                .and_then(|value| value.as_str())
+                                == Some(id))
+                })
             })
 }
 
@@ -343,12 +352,17 @@ pub(crate) fn deliver_accepted(
     };
     app.world_mut()
         .trigger(Deliver::new(entity, text, DeliveryMode::Steer).with_author(author));
+    let aside = record_accepted(app.world_mut(), entity, request_key, &hash, &request_id);
     tick(app);
     let failed = app.world().resource::<HostState>().failed.is_some();
-    if failed || !has_request(app.world_mut(), entity, &request_id) {
+    if failed || !has_input(app.world_mut(), entity, &request_id) {
+        if let (Some(aside), Some(mut conversation)) =
+            (aside, app.world_mut().get_mut::<Conversation>(entity))
+        {
+            conversation.remove_aside(aside);
+        }
         return Err(HostError::unavailable("input was not saved"));
     }
-    record_accepted(app.world_mut(), entity, request_key, &hash, &request_id);
     Ok(request_id)
 }
 
@@ -383,11 +397,9 @@ pub(crate) fn record_accepted(
     request_key: &str,
     hash: &str,
     request_id: &str,
-) {
-    let Some(mut conversation) = world.get_mut::<Conversation>(entity) else {
-        return;
-    };
-    conversation.add_aside(Aside::new(
+) -> Option<rig_core::conversation::AsideId> {
+    let mut conversation = world.get_mut::<Conversation>(entity)?;
+    Some(conversation.add_aside(Aside::new(
         "ene.accepted",
         Author::rig(),
         json!({
@@ -395,7 +407,7 @@ pub(crate) fn record_accepted(
             "hash": hash,
             "request_id": request_id,
         }),
-    ));
+    )))
 }
 
 pub(crate) fn stop(app: &mut App, companion_id: &str) -> Result<()> {
