@@ -2,7 +2,6 @@
 mod clients;
 mod companions;
 mod memories;
-mod receipts;
 mod settings;
 mod work;
 
@@ -113,7 +112,6 @@ fn has_schema(connection: &Connection) -> Result<bool> {
         "work_sessions",
         "work_inquiries",
         "device_operations",
-        "receipts",
         "mind_operations",
         "memories",
         "memories_fts",

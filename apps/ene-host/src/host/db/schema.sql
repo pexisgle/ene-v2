@@ -110,17 +110,6 @@ CREATE TABLE device_operations (
 );
 CREATE INDEX device_operations_client_status ON device_operations(client_id, status);
 
-CREATE TABLE receipts (
-    kind TEXT NOT NULL,
-    scope_id TEXT NOT NULL,
-    request_key TEXT NOT NULL,
-    hash TEXT NOT NULL,
-    status TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (kind, scope_id, request_key)
-);
-
 CREATE TABLE mind_operations (
     companion_id TEXT NOT NULL,
     operation_id TEXT NOT NULL,

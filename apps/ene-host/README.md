@@ -66,13 +66,13 @@ cargo run --locked -p ene-host
 
 ## データベース
 
-`host.sqlite3` は `PRAGMA user_version = 1` の単一baselineで、WAL・`busy_timeout = 5000`・`synchronous = NORMAL` を使います。主なテーブルは `companions` / `activations` / `connections` / `policy_rules` / `approval_requests` / `clients` / `work_sessions` / `work_inquiries` / `schedules` / `device_operations` / `receipts` / `mind_operations` / `memories` / `memories_fts` / `memory_edges` / `consolidation_state` です。
+`host.sqlite3` は `PRAGMA user_version = 1` の単一baselineで、WAL・`busy_timeout = 5000`・`synchronous = NORMAL` を使います。主なテーブルは `companions` / `activations` / `connections` / `policy_rules` / `approval_requests` / `clients` / `work_sessions` / `work_inquiries` / `schedules` / `device_operations` / `mind_operations` / `memories` / `memories_fts` / `memory_edges` / `consolidation_state` です。
 
 - 記憶の本文は `memories`、全文検索は `memories_fts`（FTS5 trigram、外部コンテンツ方式）、認知的関係は `memory_edges`、自動整理のカーソルは `consolidation_state` に置きます。
 - `importance` は 0〜10 の想起優先度です。自動想起は `>= 2`、明示的な `mind_recall` は全件を対象にします。`forget` は 0、`remember` は最低3へ戻します。
 - `audiences` は共有先companion IDのJSON配列です。共有プールは `["*"]`、private は `[]` です。
 - `activations` がコンパニオンごとのアクティブ端末と版を持ちます。`Snapshot.active_companion_id` はその先頭です。
-- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。単発承認はセッション束縛で一度だけ消費し、`always_approve` は完全一致の許可ルールとして保存します。ポリシー読取失敗は fail-closed です。`HoldOf` によるターン再開は未実装です。
+- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。単発承認はセッション束縛で一度だけ消費し、`always_approve` は完全一致の許可ルールとして保存します。ポリシー読取失敗は fail-closed です。`HoldOf` で保留したツール呼び出しは、承認・拒否の送信時に解放して再評価します。
 - 過去のJSONドキュメント方式（`documents` テーブル）や旧baselineは移行しません。未知のDB・新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
 
 ## API契約
@@ -82,7 +82,7 @@ cargo run --locked -p ene-host
 ## 現時点で実装していないもの
 
 - `VoiceService`（STT/TTS/再生進捗）は未実装で、全RPCが `unimplemented` を返します。
-- `HoldOf` による承認待ちターンの再開、知覚Watcherのクライアント側評価、スケジュールの発火、埋め込み検索、MCPツール、ACPバックエンド、sandbox実行、自発実行、外部アクセス制御は未実装です。
+- 知覚Watcherのクライアント側評価、スケジュールの発火、埋め込み検索、MCPツール、ACPバックエンド、sandbox実行、自発実行、外部アクセス制御は未実装です。
 - `WorkService.ListWorks` / `GetWork` は会話から `runs` を投影します。作業エージェントの `report(kind="question")` は `work_inquiries` に記録され、`AnswerInquiry` で解決します。
 
 ## 検証

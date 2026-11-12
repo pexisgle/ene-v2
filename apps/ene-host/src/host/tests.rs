@@ -1362,25 +1362,30 @@ async fn a_confirm_policy_emits_an_approval_request_before_the_tool_runs() {
         .await
         .unwrap();
     let request_id = approval.request_id.clone();
-    let consumed = runtime
-        .call(move |app| {
-            app.world()
-                .resource::<Store>()
-                .consume_approval(&request_id)
-        })
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let _ = runtime.call(|_| Ok(())).await;
+            let current = runtime
+                .call({
+                    let id = request_id.clone();
+                    move |app| app.world().resource::<Store>().approval(&id)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            if current.status == "consumed" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("approved tool call did not resume and consume the approval");
+    let pending = runtime
+        .call(|app| settings::pending_approvals(app.world().resource::<Store>()))
         .await
         .unwrap();
-    assert!(consumed);
-    let request_id = approval.request_id;
-    let consumed = runtime
-        .call(move |app| {
-            app.world()
-                .resource::<Store>()
-                .consume_approval(&request_id)
-        })
-        .await
-        .unwrap();
-    assert!(!consumed, "a single approval can only be consumed once");
+    assert!(pending.items.is_empty());
     runtime.shutdown().await.unwrap();
 }
 

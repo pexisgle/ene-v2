@@ -6,7 +6,7 @@ use super::{
     mind,
     model::{self, Binding, Refusal},
     notify::Notifier,
-    resources::{CompactionQueue, ConsolidationQueue, HostOptions, HostState},
+    resources::{ApprovalHolds, CompactionQueue, ConsolidationQueue, HostOptions, HostState},
     tools, wire, work,
 };
 use bevy_ecs::prelude::*;
@@ -74,7 +74,6 @@ impl Plugin for KernelPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<AgentKey>()
             .add_tool(tools::current_time_tool())
-            .add_observer(accepted)
             .add_observer(turn_input)
             .add_observer(turn_started)
             .add_observer(turn_settled)
@@ -158,22 +157,6 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn accepted(
-    started: On<Add<Started>>,
-    inputs: Query<(&Incoming, &ForAgent)>,
-    mut conversations: Query<&mut Conversation>,
-) {
-    let Ok((input, agent)) = inputs.get(started.entity) else {
-        return;
-    };
-    let Some(request) = &input.author.request else {
-        return;
-    };
-    if let Ok(mut conversation) = conversations.get_mut(agent.0) {
-        conversation.add_aside(Aside::new("ene.accepted", Author::rig(), json!(request.0)));
-    }
 }
 
 fn turn_input(
@@ -500,10 +483,20 @@ fn gate(world: &mut World) {
         });
         let policy = match tool_request.as_ref() {
             Some((name, args)) => match policy_refusal(world, entity, name, args) {
-                Ok(reason) => reason,
-                Err(error) => Some(format!("policy unavailable: {error}")),
+                Ok(Policy::Allow) => Policy::Allow,
+                Ok(Policy::Hold { reason }) => Policy::Hold { reason },
+                Ok(Policy::Refuse(reason)) => Policy::Refuse(reason),
+                Err(error) => Policy::Refuse(format!("policy unavailable: {error}")),
             },
-            None => None,
+            None => Policy::Allow,
+        };
+        let hold = matches!(&policy, Policy::Hold { .. });
+        if hold {
+            continue;
+        }
+        let policy = match policy {
+            Policy::Refuse(reason) => Some(reason),
+            _ => None,
         };
         let refusal = if let Some(policy) = policy {
             Some(policy)
@@ -532,12 +525,24 @@ fn gate(world: &mut World) {
     }
 }
 
-fn policy_refusal(
-    world: &mut World,
-    entity: Entity,
-    name: &str,
-    args: &str,
-) -> Result<Option<String>> {
+enum Policy {
+    Allow,
+    Refuse(String),
+    Hold { reason: String },
+}
+
+fn hold_approval(world: &mut World, request_id: &str, call: Entity) {
+    if world.resource::<ApprovalHolds>().0.contains_key(request_id) {
+        return;
+    }
+    let hold = world.spawn(HoldOf(call)).id();
+    world
+        .resource_mut::<ApprovalHolds>()
+        .0
+        .insert(request_id.to_owned(), hold);
+}
+
+fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> Result<Policy> {
     let store = world.resource::<Store>().clone();
     let rules = store.policy_rules()?;
     let matches = |rule: &w::PolicyRule| {
@@ -548,18 +553,18 @@ fn policy_refusal(
         .iter()
         .any(|rule| rule.effect == "deny" && matches(rule))
     {
-        return Ok(Some("policy denied".into()));
+        return Ok(Policy::Refuse("policy denied".into()));
     }
     if rules.iter().any(|rule| {
         rule.effect == "allow" && !rule.pattern.is_empty() && rule.pattern == args && matches(rule)
     }) {
-        return Ok(None);
+        return Ok(Policy::Allow);
     }
     if !rules
         .iter()
         .any(|rule| rule.effect == "confirm" && matches(rule))
     {
-        return Ok(None);
+        return Ok(Policy::Allow);
     }
     let hash = crate::host::db::digest(format!("{name}:{args}").as_bytes());
     let agent = world
@@ -571,23 +576,33 @@ fn policy_refusal(
         .cloned()
         .ok_or_else(|| HostError::permission("unbound agent"))?;
     let session_id = key.agent_id();
+    let run_id = world
+        .get::<CallOf>(entity)
+        .and_then(|CallOf(turn)| world.get::<Turn>(*turn))
+        .map(|turn| format!("{}:{}", session_id, turn.start.get()))
+        .unwrap_or_default();
     if let Some(existing) = store.approval_for(name, hash.as_bytes(), &session_id)? {
         match existing.status.as_str() {
             "approved" => {
                 if store.consume_approval(&existing.request_id)? {
-                    return Ok(None);
+                    return Ok(Policy::Allow);
                 }
-                return Ok(Some("approval was already consumed".into()));
+                return Ok(Policy::Refuse("approval was already consumed".into()));
             }
-            "pending" => return Ok(Some("approval pending".into())),
-            "denied" => return Ok(Some("approval denied".into())),
+            "pending" => {
+                hold_approval(world, &existing.request_id, entity);
+                return Ok(Policy::Hold {
+                    reason: "approval pending".into(),
+                });
+            }
+            "denied" => return Ok(Policy::Refuse("approval denied".into())),
             _ => {}
         }
     }
     let request = w::ApprovalRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         session_id,
-        run_id: String::new(),
+        run_id,
         action_payload_hash: hash.as_bytes().to_vec(),
         tool_name: name.into(),
         normalized_arguments: args.into(),
@@ -596,15 +611,18 @@ fn policy_refusal(
         ..Default::default()
     };
     store.save_approval(&request)?;
+    hold_approval(world, &request.request_id, entity);
     world.resource_mut::<Notifier>().push(
         Some(key.companion().into()),
         None,
         w::notification::Event::ApprovalRequested(Box::new(w::ApprovalRequested {
-            request: request.into(),
+            request: request.clone().into(),
             ..Default::default()
         })),
     );
-    Ok(Some("approval required".into()))
+    Ok(Policy::Hold {
+        reason: "approval required".into(),
+    })
 }
 
 fn streams(

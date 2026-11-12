@@ -267,35 +267,24 @@ pub(crate) fn send(app: &mut App, request: w::SendWorkRequest) -> Result<w::Work
         return Err(HostError::conflict("work is closed"));
     }
     let key = AgentKey::work(&session.companion_id, &request.work_id);
-    let scope = key.agent_id();
     let hash = digest(format!("{}:{}", request.work_id, request.text).as_bytes());
-    if let Some(receipt) = store.receipt(
-        super::receipt::ReceiptKind::Chat,
-        &scope,
-        &request.request_key,
-    )? {
-        if receipt.hash != hash {
+    let child = chat::find_agent(app.world_mut(), &key)
+        .ok_or_else(|| HostError::not_found("work not found"))?;
+    if let Some(accepted) = chat::accepted(app.world(), child, &request.request_key) {
+        if accepted.hash != hash {
             return Err(HostError::already_exists(
                 "request key was used with different content",
             ));
         }
-        if receipt.status == super::receipt::ReceiptStatus::Accepted {
-            if let Some(inquiry) = request.request_id {
-                store.answer_inquiry(&request.work_id, &inquiry)?;
-            }
-            return Ok(w::WorkAcceptance {
-                request_id: receipt.request_id,
-                ..Default::default()
-            });
+        if let Some(inquiry) = request.request_id {
+            store.answer_inquiry(&request.work_id, &inquiry)?;
         }
-        return Err(HostError::unavailable(
-            "previous acceptance was not confirmed; inspect state before sending a new key",
-        ));
+        return Ok(w::WorkAcceptance {
+            request_id: accepted.request_id,
+            ..Default::default()
+        });
     }
-    let child = chat::find_agent(app.world_mut(), &key)
-        .ok_or_else(|| HostError::not_found("work not found"))?;
-    let request_id =
-        chat::deliver_with_receipt(app, child, &scope, &request.request_key, hash, request.text)?;
+    let request_id = chat::deliver_accepted(app, child, &request.request_key, hash, request.text)?;
     if let Some(request_id) = request.request_id {
         store.answer_inquiry(&request.work_id, &request_id)?;
     }

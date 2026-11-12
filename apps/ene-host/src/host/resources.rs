@@ -55,3 +55,8 @@ pub(crate) struct HostOptions {
 
 #[derive(Resource, Default)]
 pub(crate) struct Perception(pub(crate) std::collections::HashMap<String, String>);
+
+#[derive(Resource, Default)]
+pub(crate) struct ApprovalHolds(
+    pub(crate) std::collections::HashMap<String, bevy_ecs::prelude::Entity>,
+);

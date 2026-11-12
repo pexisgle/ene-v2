@@ -2,7 +2,7 @@
 use super::{
     agent::AgentKey,
     client,
-    db::{Result, Store, digest, now, validate_id, validate_key},
+    db::{Result, Store, digest, validate_id, validate_key},
     error::HostError,
     failure::Failure,
     model::{self, Binding},
@@ -11,8 +11,9 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use rig_core::conversation::{Author, AuthorKind, MessageId, RequestId, TurnEnd};
+use rig_core::conversation::{Aside, Author, AuthorKind, MessageId, RequestId, TurnEnd};
 use rig_ecs::prelude::*;
+use serde_json::json;
 use uuid::Uuid;
 
 pub(crate) const MAX_INPUT: usize = 65_536;
@@ -212,9 +213,15 @@ pub(crate) fn has_request(world: &mut World, entity: Entity, id: &str) -> bool {
                     .author
                     .and_then(|author| author.request.as_ref())
                     .is_some_and(|request| request.0 == id)
-            }) || conversation
-                .asides()
-                .any(|(_, aside)| aside.kind == "ene.accepted" && aside.value.as_str() == Some(id))
+            }) || conversation.asides().any(|(_, aside)| {
+                aside.kind == "ene.accepted"
+                    && (aside.value.as_str() == Some(id)
+                        || aside
+                            .value
+                            .get("request_id")
+                            .and_then(|value| value.as_str())
+                            == Some(id))
+            })
         })
         || world
             .query_filtered::<(&Incoming, &ForAgent), (With<Started>, Without<Outcome>)>()
@@ -286,28 +293,17 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     }
     let key = AgentKey::parent(request.companion_id);
     let entity = ensure_target(app.world_mut(), &key)?;
-    let scope = key.agent_id();
     let hash = digest(format!("{}:{}", key.companion(), request.text).as_bytes());
-    if let Some(receipt) = app.world().resource::<Store>().receipt(
-        super::receipt::ReceiptKind::Chat,
-        &scope,
-        &request.request_key,
-    )? {
-        if receipt.hash != hash {
+    if let Some(accepted) = accepted(app.world(), entity, &request.request_key) {
+        if accepted.hash != hash {
             return Err(HostError::already_exists(
                 "request key was used with different content",
             ));
         }
-        return match receipt.status {
-            super::receipt::ReceiptStatus::Accepted => Ok(w::Acceptance {
-                request_id: receipt.request_id,
-                ..Default::default()
-            }),
-            super::receipt::ReceiptStatus::Pending
-            | super::receipt::ReceiptStatus::NotDelivered => Err(HostError::unavailable(
-                "previous acceptance was not confirmed; inspect state before sending a new key",
-            )),
-        };
+        return Ok(w::Acceptance {
+            request_id: accepted.request_id,
+            ..Default::default()
+        });
     }
     if !request.client_id.is_empty() {
         client::activate_on_send(app.world_mut(), key.companion(), &request.client_id)?;
@@ -317,24 +313,16 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
         .resource_mut::<Inactivity>()
         .0
         .insert(key.companion().into(), now);
-    let request_id = deliver_with_receipt(
-        app,
-        entity,
-        &scope,
-        &request.request_key,
-        hash,
-        request.text,
-    )?;
+    let request_id = deliver_accepted(app, entity, &request.request_key, hash, request.text)?;
     Ok(w::Acceptance {
         request_id,
         ..Default::default()
     })
 }
 
-pub(crate) fn deliver_with_receipt(
+pub(crate) fn deliver_accepted(
     app: &mut App,
     entity: Entity,
-    scope: &str,
     request_key: &str,
     hash: String,
     text: String,
@@ -349,19 +337,6 @@ pub(crate) fn deliver_with_receipt(
         return Err(HostError::exhausted("inbox is full"));
     }
     let request_id = Uuid::new_v4().to_string();
-    let mut receipt = super::receipt::Receipt {
-        hash,
-        status: super::receipt::ReceiptStatus::Pending,
-        request_id: request_id.clone(),
-        updated_at: now(),
-    };
-    let store = app.world().resource::<Store>().clone();
-    store.save_receipt(
-        super::receipt::ReceiptKind::Chat,
-        scope,
-        request_key,
-        &receipt,
-    )?;
     let author = Author {
         request: Some(RequestId(request_id.clone())),
         ..Author::user()
@@ -371,23 +346,56 @@ pub(crate) fn deliver_with_receipt(
     tick(app);
     let failed = app.world().resource::<HostState>().failed.is_some();
     if failed || !has_request(app.world_mut(), entity, &request_id) {
-        receipt.status = super::receipt::ReceiptStatus::NotDelivered;
-        store.save_receipt(
-            super::receipt::ReceiptKind::Chat,
-            scope,
-            request_key,
-            &receipt,
-        )?;
         return Err(HostError::unavailable("input was not saved"));
     }
-    receipt.status = super::receipt::ReceiptStatus::Accepted;
-    store.save_receipt(
-        super::receipt::ReceiptKind::Chat,
-        scope,
-        request_key,
-        &receipt,
-    )?;
+    record_accepted(app.world_mut(), entity, request_key, &hash, &request_id);
     Ok(request_id)
+}
+
+pub(crate) fn accepted(world: &World, entity: Entity, request_key: &str) -> Option<Accepted> {
+    world.get::<Conversation>(entity).and_then(|conversation| {
+        conversation.asides().find_map(|(_, aside)| {
+            if aside.kind != "ene.accepted"
+                || aside
+                    .value
+                    .get("request_key")
+                    .and_then(|value| value.as_str())
+                    != Some(request_key)
+            {
+                return None;
+            }
+            Some(Accepted {
+                hash: aside.value.get("hash")?.as_str()?.to_owned(),
+                request_id: aside.value.get("request_id")?.as_str()?.to_owned(),
+            })
+        })
+    })
+}
+
+pub(crate) struct Accepted {
+    pub(crate) hash: String,
+    pub(crate) request_id: String,
+}
+
+pub(crate) fn record_accepted(
+    world: &mut World,
+    entity: Entity,
+    request_key: &str,
+    hash: &str,
+    request_id: &str,
+) {
+    let Some(mut conversation) = world.get_mut::<Conversation>(entity) else {
+        return;
+    };
+    conversation.add_aside(Aside::new(
+        "ene.accepted",
+        Author::rig(),
+        json!({
+            "request_key": request_key,
+            "hash": hash,
+            "request_id": request_id,
+        }),
+    ));
 }
 
 pub(crate) fn stop(app: &mut App, companion_id: &str) -> Result<()> {
@@ -525,32 +533,6 @@ fn to_message(
             .map_or_else(String::new, |author| author.label()),
         ..Default::default()
     })
-}
-
-pub(crate) fn restore(world: &mut World) -> Result<()> {
-    let pending = world
-        .resource::<Store>()
-        .pending_receipts(super::receipt::ReceiptKind::Chat)?;
-    for (scope, key, mut receipt) in pending {
-        let entity = world
-            .query::<(Entity, &AgentKey)>()
-            .iter(world)
-            .find_map(|(entity, agent)| (agent.agent_id() == scope).then_some(entity));
-        receipt.status =
-            if entity.is_some_and(|entity| has_request(world, entity, &receipt.request_id)) {
-                super::receipt::ReceiptStatus::Accepted
-            } else {
-                super::receipt::ReceiptStatus::NotDelivered
-            };
-        receipt.updated_at = now();
-        world.resource::<Store>().save_receipt(
-            super::receipt::ReceiptKind::Chat,
-            &scope,
-            &key,
-            &receipt,
-        )?;
-    }
-    Ok(())
 }
 
 pub(crate) fn ensure_parent(world: &mut World, companion: &str) -> Entity {

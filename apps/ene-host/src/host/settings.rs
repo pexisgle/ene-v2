@@ -193,6 +193,13 @@ pub(crate) fn submit_approval(
         notify_policy_rules(world, &store)?;
     }
     store.set_approval_status(&request.request_id, status)?;
+    if let Some(hold) = world
+        .resource_mut::<super::resources::ApprovalHolds>()
+        .0
+        .remove(&request.request_id)
+    {
+        world.despawn(hold);
+    }
     world.resource_mut::<Notifier>().push(
         None,
         None,

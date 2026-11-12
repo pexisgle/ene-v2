@@ -13,7 +13,6 @@ pub(crate) mod memory;
 pub(crate) mod mind;
 pub(crate) mod model;
 pub(crate) mod notify;
-pub(crate) mod receipt;
 pub(crate) mod resources;
 pub(crate) mod settings;
 pub(crate) mod tools;
@@ -150,6 +149,7 @@ impl Runtime {
                 .insert_resource(CompactionQueue::default())
                 .insert_resource(Inactivity::default())
                 .insert_resource(resources::Perception::default())
+                .insert_resource(resources::ApprovalHolds::default())
                 .insert_resource(host_options)
                 .add_plugins((AgentPlugin, SessionLogPlugin, agent::KernelPlugin));
                 app.finish();
@@ -363,7 +363,6 @@ fn restore(app: &mut App) -> Result<()> {
     agent::restore(app.world_mut())?;
     compaction::restore(app.world_mut());
     work::restore(app.world_mut())?;
-    chat::restore(app.world_mut())?;
     client::restore(app.world_mut())?;
     mind::restore(app.world_mut())?;
     tick(app);
