@@ -81,6 +81,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 | | `stop_work(work_id: String, reason: Option<String>)` | 進行中タスクの中断を要求 |
 | **身体・知覚 (Body & Eye)** | `body_motion(motion: String, expression: Option<String>)` | アバターのモーション・表情を自律指示 |
 | | `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)` | クライアント知覚センサーに動的監視ルールを設定 |
+| | `device_request(capability: String, input: Object)` | アクティブ端末の機能（ファイル・画面など）を実行し、結果を後続のモデル呼び出しで受け取る |
 | | `noop()` | 何も行動しない（沈黙・見守り。自律tickの空ターンはログから自動巻き戻し） |
 | **自律スケジュール** | `schedule_create(title: String, instruction: String, run_at: Option<String>, cron_expr: Option<String>)` | タイマーや定期リマインドを登録 |
 | | `schedule_list()` | 登録済みスケジュール一覧を取得 |
@@ -98,7 +99,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
     - 先行TTS: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`Query<(&Effect, &CallOf), With<TurnCall>>` により通常ターン呼び出しをフィルタし、`matches!(delta.event, StreamEvent::Text { .. })` で思考トークン（Reasoning）を除外した上で、親コンパニオンの発話テキストのみを文単位（`。`、`！`、`？`、改行）で合成キューへ送出
-    - 承認待機: `Stage::Gate` でポリシー判定し、要確認操作には `commands.spawn(HoldOf(call_entity))` を投入してReActループを保留。RPC（`SettingsService.SubmitApproval`）でユーザー回答を受け取り、承認時は `Approved` コンポーネントを付与、拒否時は `Outcome::refused` を確定し、`HoldOf` を解除して処理再開。承認結果は `host.sqlite3` の `approval_requests` テーブルへ保存
+    - 承認待機: `Stage::Gate` でポリシー判定し、要確認操作には `commands.spawn(HoldOf(call_entity))` を投入してReActループを保留。RPC（`SettingsService.SubmitApproval`）でユーザー回答を受け取り、承認時はホスト定義の `Approved` マーカーを付与し、拒否時は `Decider::Person` で `Outcome::refused` を確定し、`HoldOf` を解除して処理再開。承認結果は `host.sqlite3` の `approval_requests` テーブルへ保存
   - 会話ログの正本は `SessionLogPlugin` ＋ `DirStore`（`<state_dir>/rig/`）によりディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:

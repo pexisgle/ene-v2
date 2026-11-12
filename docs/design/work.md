@@ -36,6 +36,7 @@
 - **内蔵Rigエージェント**:
   - **ライフサイクルと停止伝播の分離**: Rig v0.46.0 において `StopTurn` は `SpawnedBy` 配下の子エージェントへ停止を自動伝播させる。ユーザーが音声対話を「ちょっと話止めて。作業は続けて！」と割り込み（Barge-in）した際に作業まで道連れで強制終了されるのを防ぐため、**継続稼働する `WorkSession` は `SpawnedBy(parent_entity)` ではなく、独立したエージェントエンティティ（`WorkSessionOf(companion_id)`）としてWorld内に生成する**（`SpawnedBy` はそのターンと運命を共にする一時的なサブタスクにのみ限定）。
   - ツール権限を `ToolAccess::Only(...)` で制限し、Run開始は `world.trigger(Deliver::new(work_entity, instruction, DeliveryMode::Queue))`、作業の中断は明示的な `world.trigger(StopTurn::new(work_entity))`、完了報告は `ConversationChanged`（または `ActiveTurn` コンポーネント除去）の検知Observerから親へ通知することで、同一World内で最小限のオーバーヘッドで実行する。コマンド実行子プロセスのみを `process-wrap` で安全に管理する。
+  - 新規Runの開始は `Queue` とし、実行中セッションへの追加指示（`send_work`）や未決質問への回答（`AnswerInquiry`）は §4.2 の `Steer` を使い分ける。
 
 > [!IMPORTANT]
 > **WorkSession と Run の厳格な分離**:
@@ -94,7 +95,7 @@ pub enum RunStatus {
 | `Starting` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
 | `Running` | 子からの質問（`WorkInquiry`） | `WaitingInput` | ユーザーまたは親の回答待ち。`WorkView.pending_inquiries` へ登録 |
 | `Running` | 権限・Sandbox外操作の保留 | `WaitingInput` | `Stage::Gate` で `commands.spawn(HoldOf(call_entity))` を投入し、`approval_requests` テーブルへ登録。未決承認リスト（`pending_approvals`）へ追加 |
-| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時は `commands.entity(call_entity).insert(Approved)` を付与、拒否時は `Outcome::refused(...)` を確定し、`HoldOf` を解除して処理再開 |
+| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時はホスト定義の `Approved` マーカーを付与し、拒否時は `Decider::Person` で `Outcome::refused(...)` を確定し、`HoldOf` を解除して処理再開 |
 | `WaitingInput` | 質問回答受信（`SendWork` with `request_id` または `AnswerInquiry`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
 | `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信（未決permissionはcancel応答）、最大30秒クリーンアップ待機 |
 | `Cancelling` | ACP `cancelled` 応答 または Rigターン停止確認 | `Cancelled` | 正常中断確定（ACPプロセスはセッション維持のため生存） |
@@ -282,6 +283,7 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
 | **`report`** | `kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。**`session_id` と `run_id` はホスト実行環境がコンテキストから自動束縛**し、LLMに引数として書かせない。ACP外部プロセスの場合は `agent_client_protocol::v1::schema` の通知へ相互変換される |
+| **`device_request`** | `capability: String`<br>`input: Object` | アクティブ端末の機能を実行する。ホストが端末の許可済みcapabilityと照合し、結果は後続のモデル呼び出しで返る |
 
 ---
 

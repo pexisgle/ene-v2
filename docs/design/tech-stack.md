@@ -10,7 +10,7 @@
 | :--- | :--- | :--- |
 | **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイル（`host.sqlite3`）で完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。記憶整理や埋め込み生成等の重い非同期処理のみバックグラウンドタスクへ分離 |
 | **会話ログ・要約正本** | **`rig_memory::DirStore` (`rig-memory` feature `fs`)** | 公式の `rig-ecs` がネイティブに要求する同期ファイルストア。プロセス間ファイルロック、破損末尾行の自動退避、画像Blob管理を公式実装に委譲し、アダプタ実装ゼロ行で完結。受理レシート（`request_key`）も `Conversation::add_aside` でセッションログ内に記録するため、SQLiteとの2相不整合は原理的に発生しない |
-| **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ `rig-rmcp` ＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と `rig-rmcp` による公式MCPブリッジ動的登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
+| **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ `rig-rmcp` ＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と `rig-rmcp` による公式MCPブリッジ動的登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
 | **OSサンドボックス** | **OSネイティブ隔離 (`cap-std`, `process-wrap`, `landlock`, `bwrap`)** | Linux（Landlock ＋ bwrap netns分離 ＋ UNIXソケットプロキシ）、Windows（AppContainer / Job Objects）、macOS（Seatbelt）を統一制御。非対応環境では明示的警告・承認で縮退 |
 | **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` + `rubato` (音声I/O・リサンプリング) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlint（Royalty-free規約遵守）による軽快な設定・承認UI、cpal＋rubatoによる低遅延・高精度リサンプリング音声キャプチャ・再生、OSフックによる知覚センシング（目） |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産をそのまま活用。透過デスクトップウィンドウ（Wayland layer-shell / Windows Win32 layered）、VRM 1.0モデルロード・アニメーション（`ene-vrm`）、RMS音量によるローカル即時口パク、標準入出力JSON Lines IPC制御 |
@@ -163,7 +163,7 @@
 
 エージェント状態や実行ループをTokio側で自作せず、公式の `rig-ecs` にエージェント実行・状態管理・会話ログ正本（`DirStore`）を一本化する。TokioはConnect-RPCサーバーと外部非同期I/O（ストリーミング通信・子プロセス監視）の非同期ランタイムに専念する。
 
-CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` 等）や `rig-mcp-client` は採用せず、純粋な `rig-ecs` プリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と動的ツール登録で最小構成を実現する。
+CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` 等）や `rig-mcp-client` は採用せず、純粋な `rig-ecs` プリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と動的ツール登録で最小構成を実現する。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
@@ -180,7 +180,7 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
   │  ・入力投入: Deliver(agent, text, DeliveryMode)         │
   │  ・動的注入: PrepareSystems::Edit (Dynamic Tail)        │
   │  ・全体調整: PrepareSystems::Fit (recent::view 窓管理)  │
-  │  ・権限ゲート: Stage::Gate (HoldOf 生成 ➔ Approved 付与) │
+  │  ・権限ゲート: Stage::Gate (HoldOf 生成 ➔ ホスト定義 Approved 付与) │
   │  ・推論・ツール反復: AgentPlugin (ReActループ)          │
   │  ・文単位先行TTS: Stage::Review (MessageReader<StreamDelta>)│
   │    (親のユーザー向け発話のみフィルタし、句点 。！？ 送出)│
@@ -192,11 +192,11 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
 #### 実装のポイント
 - **状態所有権の完全一本化（二重ループの排除）**:
   - ユーザー発話、知覚センサー（目）の要約、タイマースケジュール、作業エージェント（手）からの報告は、すべて `world.trigger(Deliver::new(agent, text, DeliveryMode))` を通じてECS Worldへ直接投入される。
-- **純粋なECSプリミティブによる承認待機（`HoldOf` / `Approved`）**:
-  - CLIハーネス用の `ApprovalPlugin`（内部非公開マーカー `Approving` を前提とする機構）を排除し、`rig-ecs` のコアコンポーネントのみで完結させる：
+- **純粋なECSプリミティブによる承認待機（`HoldOf` / ホスト定義の `Approved`）**:
+  - CLIハーネス用の `ApprovalPlugin`（内部非公開マーカー `Approving` を前提とする機構）を排除し、`rig-ecs` のコアコンポーネントとホスト定義のマーカーだけで完結させる：
     1. **保留**: `Stage::Gate` システムにおいて、未承認のツール呼び出しエンティティ（`call_entity`）を検知した場合、`commands.spawn(HoldOf(call_entity))` を投入してReActループを安全に待機させる。
     2. **登録**: 保留した操作の引数ハッシュを計算し、`approval_requests` テーブルおよび未決リストへ登録。クライアントへ `ApprovalRequested` 通知を発行。
-    3. **承認確定（RPC ➔ ECS）**: ユーザーが承認した場合、Connect-RPC（`SettingsService.SubmitApproval`）ハンドラからECS Worldへコマンドをディスパッチし、`commands.entity(call_entity).insert(Approved)` を付与した上で `HoldOf` エンティティを `despawn` する。後続の `Stage::Gate` は `Approved` コンポーネントを検知して通過させる。
+    3. **承認確定（RPC ➔ ECS）**: ユーザーが承認した場合、Connect-RPC（`SettingsService.SubmitApproval`）ハンドラからECS Worldへコマンドをディスパッチし、`commands.entity(call_entity).insert(Approved)`（ホスト定義のマーカー）を付与した上で `HoldOf` エンティティを `despawn` する。後続の `Stage::Gate` は `Approved` コンポーネントを検知して通過させる。
     4. **拒否確定**: ユーザーが拒否した場合、対象ツールの `Decision` を拒否（`decision.decide(Decider::Person, Outcome::refused("User denied"))`）として確定し、`HoldOf` エンティティを `despawn` する。
     5. **記録**: 承認結果は `host.sqlite3` の `approval_requests` テーブルへ永続化する。会話ログ（`SessionLog`）を汚染しない。
 - **動的文脈の非永続注入（Dynamic Tail）と KV Prefix Cache 最大化**:
