@@ -47,6 +47,10 @@ pub(crate) enum Purpose {
 }
 
 impl Purpose {
+    pub(crate) fn requires_tools(self) -> bool {
+        matches!(self, Self::Conversation | Self::Task | Self::Decision)
+    }
+
     pub(crate) fn assignment(self, companion: &Companion) -> Option<&ModelAssignment> {
         match self {
             Self::Conversation => companion.assignments.companion.as_ref(),
@@ -239,7 +243,12 @@ fn explicit_tool_calling(options: &Value) -> Result<Option<bool>> {
     Ok(tool_calling)
 }
 
-fn spec(connection: &Connection, adapter: &str, model: &str) -> Result<Arc<ModelSpec>> {
+fn spec(
+    connection: &Connection,
+    adapter: &str,
+    model: &str,
+    require_tools: bool,
+) -> Result<Arc<ModelSpec>> {
     if model.trim().is_empty() || model.len() > MAX_MODEL_ID {
         return Err(HostError::invalid("model is required"));
     }
@@ -252,11 +261,16 @@ fn spec(connection: &Connection, adapter: &str, model: &str) -> Result<Arc<Model
                     .ok_or_else(|| HostError::invalid("provider is not in the Rig catalog"))?;
                 Arc::new(ModelSpec::new(provider, model).with_tools(true))
             }
+            Some(false) | None if !require_tools => {
+                let provider = ProviderId::catalog(adapter)
+                    .ok_or_else(|| HostError::invalid("provider is not in the Rig catalog"))?;
+                Arc::new(ModelSpec::new(provider, model).with_tools(false))
+            }
             Some(false) => return Err(HostError::conflict("model_cannot_call_tools")),
             None => return Err(HostError::unavailable("model_capability_unknown")),
         },
     };
-    if !spec.tools {
+    if require_tools && !spec.tools {
         return Err(HostError::conflict("model_cannot_call_tools"));
     }
     Ok(spec)
@@ -314,7 +328,12 @@ pub(crate) fn connect(
     let revision = store.settings_revision()?;
     let secret =
         secret(credentials, &record).ok_or_else(|| HostError::permission("credential_missing"))?;
-    let spec = spec(&record, &record.adapter, &assignment.model)?;
+    let spec = spec(
+        &record,
+        &record.adapter,
+        &assignment.model,
+        purpose.requires_tools(),
+    )?;
     let permit = Arc::new(AtomicBool::new(true));
     let transport = Authorized::new(permit.clone(), destination)?;
     let handler = match provider.wire {
@@ -414,4 +433,21 @@ pub(crate) async fn probe(record: &Connection, secret: &str) -> Result<(Vec<w::M
         "model_count": models.len(),
     });
     Ok((models, capabilities))
+}
+
+pub(crate) fn invalidate_connection(world: &mut bevy_ecs::prelude::World, id: &str) {
+    let entities: Vec<bevy_ecs::prelude::Entity> = world
+        .query::<(bevy_ecs::prelude::Entity, &Binding)>()
+        .iter(world)
+        .filter(|(_, binding)| binding.connection == id)
+        .map(|(entity, _)| entity)
+        .collect();
+    for entity in entities {
+        if let Some(binding) = world.get::<Binding>(entity) {
+            revoke(binding);
+        }
+        world
+            .entity_mut(entity)
+            .remove::<(Binding, rig_ecs::model::Connection)>();
+    }
 }

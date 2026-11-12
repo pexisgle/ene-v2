@@ -481,6 +481,13 @@ impl w::SettingsService for Services {
                 .await;
         }
         saved.map_err(ConnectError::from)?;
+        self.runtime
+            .call({
+                let id = id.clone();
+                move |app| host::settings::credential_changed(app.world_mut(), &id)
+            })
+            .await
+            .map_err(ConnectError::from)?;
         Response::ok(w::CredentialResult {
             credential_state: "registered".into(),
             ..Default::default()
@@ -495,11 +502,12 @@ impl w::SettingsService for Services {
         let id = request.id.to_owned();
         let reference = format!("connection:{id}");
         let cleanup = self.runtime.credentials().forget(&reference).await;
+        let save_id = id.clone();
         self.runtime
             .call(move |app| {
                 let store = app.world().resource::<host::db::Store>();
                 let mut connection = store
-                    .connection(&id)?
+                    .connection(&save_id)?
                     .ok_or_else(|| HostError::not_found("connection not found"))?;
                 connection.credential_ref = None;
                 connection.credential_state = host::settings::CredentialState::Missing;
@@ -508,6 +516,13 @@ impl w::SettingsService for Services {
             .await
             .map_err(ConnectError::from)?;
         cleanup.map_err(ConnectError::from)?;
+        self.runtime
+            .call({
+                let id = id.clone();
+                move |app| host::settings::credential_changed(app.world_mut(), &id)
+            })
+            .await
+            .map_err(ConnectError::from)?;
         Response::ok(w::Empty::default())
     }
 

@@ -906,13 +906,16 @@ async fn an_idle_turn_is_compacted_without_rewriting_the_log() {
     send(&runtime, &companion, "after", "続き").await;
     until(&runtime, &companion, "了解").await;
     let seen = requests.requests();
-    assert!(
-        seen.iter().any(|request| {
+    let summarized = seen
+        .iter()
+        .find(|request| {
             let history = format!("{:?}", request.chat_history);
             history.contains("<summary>") && history.contains("古い会話の要約")
-        }),
-        "no request received the view-only summary"
-    );
+        })
+        .expect("no request received the view-only summary");
+    let history = format!("{:?}", summarized.chat_history);
+    assert!(!history.contains("長い話"), "{history}");
+    assert!(history.contains("続き"), "{history}");
     runtime.shutdown().await.unwrap();
     drop(runtime);
 
@@ -1344,12 +1347,13 @@ async fn a_confirm_policy_emits_an_approval_request_before_the_tool_runs() {
     .expect("no approval request");
     assert_eq!(approval.tool_name, "device_request");
     assert_eq!(approval.status, "pending");
+    let approval_id = approval.request_id.clone();
     runtime
         .call(move |app| {
             settings::submit_approval(
                 app.world_mut(),
                 w::SubmitApprovalRequest {
-                    request_id: approval.request_id,
+                    request_id: approval_id.clone(),
                     decision: "approve".into(),
                     ..Default::default()
                 },
@@ -1357,5 +1361,87 @@ async fn a_confirm_policy_emits_an_approval_request_before_the_tool_runs() {
         })
         .await
         .unwrap();
+    let request_id = approval.request_id.clone();
+    let consumed = runtime
+        .call(move |app| {
+            app.world()
+                .resource::<Store>()
+                .consume_approval(&request_id)
+        })
+        .await
+        .unwrap();
+    assert!(consumed);
+    let request_id = approval.request_id;
+    let consumed = runtime
+        .call(move |app| {
+            app.world()
+                .resource::<Store>()
+                .consume_approval(&request_id)
+        })
+        .await
+        .unwrap();
+    assert!(!consumed, "a single approval can only be consumed once");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn send_work_replays_the_same_request_key_without_delivering_twice() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("unused"), text_model("done"), false),
+    )
+    .await
+    .unwrap();
+    let companion = default_companion(&runtime).await;
+    let work = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                work::start(
+                    app,
+                    companion,
+                    "replay".into(),
+                    "始めて".into(),
+                    String::new(),
+                )
+            }
+        })
+        .await
+        .unwrap();
+    let send = |key: &'static str| {
+        let id = work.id.clone();
+        move |app: &mut rig_ecs::prelude::App| {
+            work::send(
+                app,
+                w::SendWorkRequest {
+                    work_id: id,
+                    request_key: key.into(),
+                    text: "追加".into(),
+                    ..Default::default()
+                },
+            )
+        }
+    };
+    let first = runtime.call(send("work-key")).await.unwrap();
+    let second = runtime.call(send("work-key")).await.unwrap();
+    assert_eq!(first.request_id, second.request_id);
+    let conflicting = runtime
+        .call({
+            let id = work.id.clone();
+            move |app: &mut rig_ecs::prelude::App| {
+                work::send(
+                    app,
+                    w::SendWorkRequest {
+                        work_id: id,
+                        request_key: "work-key".into(),
+                        text: "違う内容".into(),
+                        ..Default::default()
+                    },
+                )
+            }
+        })
+        .await;
+    assert!(conflicting.is_err());
     runtime.shutdown().await.unwrap();
 }

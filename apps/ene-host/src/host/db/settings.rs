@@ -247,24 +247,39 @@ fn json_error(error: impl std::fmt::Display) -> rusqlite::Error {
 }
 
 impl Store {
-    pub(crate) fn approval_status_for(
+    pub(crate) fn approval_for(
         &self,
         tool_name: &str,
         hash: &[u8],
-    ) -> Result<Option<String>> {
+        session_id: &str,
+    ) -> Result<Option<w::ApprovalRequest>> {
         let tool_name = tool_name.to_owned();
         let hash = hash.to_vec();
+        let session_id = session_id.to_owned();
         self.call(move |connection| {
             connection
                 .query_row(
-                    "SELECT status FROM approval_requests \
-                     WHERE tool_name=?1 AND action_payload_hash=?2 \
+                    "SELECT request_id, session_id, run_id, action_payload_hash, tool_name, \
+                     normalized_arguments, status, created_at FROM approval_requests \
+                     WHERE tool_name=?1 AND action_payload_hash=?2 AND session_id=?3 \
                      ORDER BY created_at DESC LIMIT 1",
-                    params![tool_name, hash],
-                    |row| row.get(0),
+                    params![tool_name, hash, session_id],
+                    row_to_approval,
                 )
                 .optional()
                 .map_err(Into::into)
+        })
+    }
+
+    pub(crate) fn consume_approval(&self, request_id: &str) -> Result<bool> {
+        let request_id = request_id.to_owned();
+        self.call(move |connection| {
+            let changed = connection.execute(
+                "UPDATE approval_requests SET status='consumed' \
+                 WHERE request_id=?1 AND status='approved'",
+                [request_id],
+            )?;
+            Ok(changed > 0)
         })
     }
 
@@ -287,6 +302,40 @@ impl Store {
                 ],
             )?;
             Ok(())
+        })
+    }
+}
+
+impl Store {
+    pub(crate) fn approval(&self, request_id: &str) -> Result<Option<w::ApprovalRequest>> {
+        let request_id = request_id.to_owned();
+        self.call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT request_id, session_id, run_id, action_payload_hash, tool_name, \
+                     normalized_arguments, status, created_at FROM approval_requests \
+                     WHERE request_id=?1",
+                    [&request_id],
+                    row_to_approval,
+                )
+                .optional()
+                .map_err(Into::into)
+        })
+    }
+}
+
+impl Store {
+    pub(crate) fn bump_settings(&self) -> Result<u64> {
+        self.call(|connection| {
+            connection.execute(
+                "UPDATE settings SET revision=revision+1, updated_at=?1 WHERE id=1",
+                [crate::host::db::now()],
+            )?;
+            connection
+                .query_row("SELECT revision FROM settings WHERE id=1", [], |row| {
+                    row.get(0)
+                })
+                .map_err(Into::into)
         })
     }
 }

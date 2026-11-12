@@ -2,11 +2,12 @@
 use super::{
     body, chat, client, compaction,
     db::{Result, Store},
+    error::HostError,
     mind,
     model::{self, Binding, Refusal},
     notify::Notifier,
     resources::{CompactionQueue, ConsolidationQueue, HostOptions, HostState},
-    schedule, tools, wire, work,
+    tools, wire, work,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -79,6 +80,7 @@ impl Plugin for KernelPlugin {
             .add_observer(turn_settled)
             .add_observer(follow_successor::<Binding>)
             .add_observer(follow_successor::<mind::Batch>)
+            .add_observer(follow_successor::<compaction::SummaryJob>)
             .add_systems(
                 Update,
                 (client::sweep, mind::start_consolidation, compaction::start).before(AgentLoop),
@@ -106,11 +108,11 @@ impl Plugin for KernelPlugin {
                     .in_set(ReviewSystems::Edit),
             )
             .add_systems(PostUpdate, recalled)
-            .add_systems(Last, changes.after(WriteLogs));
+            .add_systems(Last, changes.after(WriteLogs))
+            .add_systems(Last, work::finalize_reports.after(changes));
         mind::register_tools(app);
         work::register_tools(app);
         client::register_tools(app);
-        schedule::register_tools(app);
         body::register_tools(app);
     }
 }
@@ -396,6 +398,19 @@ fn fit(
         let Some(history) = call.history.as_mut() else {
             continue;
         };
+        let protected = usize::from(
+            history
+                .entries()
+                .next()
+                .and_then(|entry| chat::entry_text(entry.message))
+                .is_some_and(|text| text.starts_with("<summary>")),
+        );
+        let protected_tokens = history
+            .messages()
+            .first()
+            .filter(|_| protected == 1)
+            .map_or(0, |message| counter.count(message));
+        let budget = budget.saturating_sub(protected_tokens);
         let Some(last) = history.messages().last() else {
             continue;
         };
@@ -412,11 +427,14 @@ fn fit(
                 .insert(Refusal("context_exceeded".into()));
             continue;
         }
-        let kept = recent::view(history.messages(), &TokenBudget::new(budget));
+        let kept = recent::view(&history.messages()[protected..], &TokenBudget::new(budget));
         let kept_len = kept.len();
         let len = history.messages().len();
-        let start = len.saturating_sub(kept_len).min(len.saturating_sub(1));
-        if start == 0 {
+        let start = len
+            .saturating_sub(kept_len)
+            .max(protected)
+            .min(len.saturating_sub(1));
+        if start <= protected {
             continue;
         }
         let Some(key) = key else {
@@ -429,13 +447,14 @@ fn fit(
             .unwrap_or_default();
         let dropped: Vec<(u64, bool)> = history
             .entries()
-            .take(start)
+            .skip(protected)
+            .take(start - protected)
             .map(|entry| (entry.id.get(), entry.author.is_none()))
             .collect();
         let unconsolidated = dropped
             .iter()
             .any(|(id, own)| *own && *id > cursor.last_sequence);
-        history.splice(0..start, [], Author::plugin("ene.window"));
+        history.splice(protected..start, [], Author::plugin("ene.window"));
         if unconsolidated {
             queues.0.insert(key.companion().into());
             if reported.insert((agent.0, "truncated")) {
@@ -479,9 +498,13 @@ fn gate(world: &mut World) {
                 serde_json::to_string(&request.call.function.arguments).unwrap_or_default(),
             )
         });
-        let policy = tool_request
-            .as_ref()
-            .and_then(|(name, args)| policy_refusal(world, entity, name, args));
+        let policy = match tool_request.as_ref() {
+            Some((name, args)) => match policy_refusal(world, entity, name, args) {
+                Ok(reason) => reason,
+                Err(error) => Some(format!("policy unavailable: {error}")),
+            },
+            None => None,
+        };
         let refusal = if let Some(policy) = policy {
             Some(policy)
         } else if let Some(refusal) = world.get::<Refusal>(entity) {
@@ -509,43 +532,61 @@ fn gate(world: &mut World) {
     }
 }
 
-fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> Option<String> {
+fn policy_refusal(
+    world: &mut World,
+    entity: Entity,
+    name: &str,
+    args: &str,
+) -> Result<Option<String>> {
     let store = world.resource::<Store>().clone();
-    let rules = store.policy_rules().ok()?;
-    let mut confirm = false;
-    for rule in &rules {
-        let tool_matches =
-            rule.tool_name.is_empty() || rule.tool_name == "*" || rule.tool_name == name;
-        let pattern_matches = rule.pattern.is_empty() || args.contains(&rule.pattern);
-        if !tool_matches || !pattern_matches {
-            continue;
-        }
-        match rule.effect.as_str() {
-            "deny" => return Some("policy denied".into()),
-            "confirm" => confirm = true,
+    let rules = store.policy_rules()?;
+    let matches = |rule: &w::PolicyRule| {
+        (rule.tool_name.is_empty() || rule.tool_name == "*" || rule.tool_name == name)
+            && (rule.pattern.is_empty() || args.contains(&rule.pattern))
+    };
+    if rules
+        .iter()
+        .any(|rule| rule.effect == "deny" && matches(rule))
+    {
+        return Ok(Some("policy denied".into()));
+    }
+    if rules.iter().any(|rule| {
+        rule.effect == "allow" && !rule.pattern.is_empty() && rule.pattern == args && matches(rule)
+    }) {
+        return Ok(None);
+    }
+    if !rules
+        .iter()
+        .any(|rule| rule.effect == "confirm" && matches(rule))
+    {
+        return Ok(None);
+    }
+    let hash = crate::host::db::digest(format!("{name}:{args}").as_bytes());
+    let agent = world
+        .get::<ForAgent>(entity)
+        .map(|agent| agent.0)
+        .ok_or_else(|| HostError::permission("unbound tool call"))?;
+    let key = world
+        .get::<AgentKey>(agent)
+        .cloned()
+        .ok_or_else(|| HostError::permission("unbound agent"))?;
+    let session_id = key.agent_id();
+    if let Some(existing) = store.approval_for(name, hash.as_bytes(), &session_id)? {
+        match existing.status.as_str() {
+            "approved" => {
+                if store.consume_approval(&existing.request_id)? {
+                    return Ok(None);
+                }
+                return Ok(Some("approval was already consumed".into()));
+            }
+            "pending" => return Ok(Some("approval pending".into())),
+            "denied" => return Ok(Some("approval denied".into())),
             _ => {}
         }
     }
-    if !confirm {
-        return None;
-    }
-    let hash = crate::host::db::digest(format!("{name}:{args}").as_bytes());
-    match store
-        .approval_status_for(name, hash.as_bytes())
-        .ok()
-        .flatten()
-        .as_deref()
-    {
-        Some("approved") => return None,
-        Some("pending") => return Some("approval pending".into()),
-        Some("denied") => return Some("approval denied".into()),
-        _ => {}
-    }
-    let agent = world.get::<ForAgent>(entity)?.0;
-    let key = world.get::<AgentKey>(agent)?.clone();
     let request = w::ApprovalRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: key.agent_id(),
+        session_id,
         run_id: String::new(),
         action_payload_hash: hash.as_bytes().to_vec(),
         tool_name: name.into(),
@@ -554,9 +595,7 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
         created_at: crate::host::db::now(),
         ..Default::default()
     };
-    if store.save_approval(&request).is_err() {
-        return Some("approval unavailable".into());
-    }
+    store.save_approval(&request)?;
     world.resource_mut::<Notifier>().push(
         Some(key.companion().into()),
         None,
@@ -565,7 +604,7 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
             ..Default::default()
         })),
     );
-    Some("approval required".into())
+    Ok(Some("approval required".into()))
 }
 
 fn streams(

@@ -269,6 +269,29 @@ pub(crate) fn send(app: &mut App, request: w::SendWorkRequest) -> Result<w::Work
     let key = AgentKey::work(&session.companion_id, &request.work_id);
     let scope = key.agent_id();
     let hash = digest(format!("{}:{}", request.work_id, request.text).as_bytes());
+    if let Some(receipt) = store.receipt(
+        super::receipt::ReceiptKind::Chat,
+        &scope,
+        &request.request_key,
+    )? {
+        if receipt.hash != hash {
+            return Err(HostError::already_exists(
+                "request key was used with different content",
+            ));
+        }
+        if receipt.status == super::receipt::ReceiptStatus::Accepted {
+            if let Some(inquiry) = request.request_id {
+                store.answer_inquiry(&request.work_id, &inquiry)?;
+            }
+            return Ok(w::WorkAcceptance {
+                request_id: receipt.request_id,
+                ..Default::default()
+            });
+        }
+        return Err(HostError::unavailable(
+            "previous acceptance was not confirmed; inspect state before sending a new key",
+        ));
+    }
     let child = chat::find_agent(app.world_mut(), &key)
         .ok_or_else(|| HostError::not_found("work not found"))?;
     let request_id =
@@ -420,9 +443,6 @@ pub(crate) fn report_work(world: &mut World, worker: Entity) -> Result<()> {
     }
     if !delivered {
         deliver_to_parent(world, &session.companion_id, work_id, &message, Some(&run));
-        session.reported_run = Some(run.clone());
-        session.updated_at = now();
-        changed = true;
     } else if session.reported_run.as_deref() != Some(&run) {
         session.reported_run = Some(run.clone());
         session.updated_at = now();
@@ -445,51 +465,49 @@ pub(crate) fn report_work(world: &mut World, worker: Entity) -> Result<()> {
 fn start_tool(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     let key = parent_key(world, agent)?;
     if let Some(work_id) = args.work_id {
-        let store = world.resource::<Store>().clone();
-        let session = store
-            .work(&work_id)?
-            .ok_or_else(|| HostError::not_found("work not found"))?;
-        if session.companion_id != key.companion() || session.closed {
-            return Err(HostError::not_found("work not found"));
-        }
-        let child = chat::find_agent(world, &AgentKey::work(&session.companion_id, &work_id))
-            .ok_or_else(|| HostError::not_found("work not found"))?;
-        world.trigger(
-            Deliver::new(child, args.instruction, DeliveryMode::Steer).with_author(Author::agent(
-                key.agent_id(),
-                Some(RequestId(work_id.clone())),
-            )),
-        );
-        return Ok(work_id);
+        return continue_work(world, &key, &work_id, args.instruction, None);
     }
     Ok(start_in_world(world, key.companion(), "", &args.instruction)?.id)
 }
 
 fn send_tool(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
     let key = parent_key(world, agent)?;
-    if args.text.trim().is_empty() || args.text.len() > MAX_INSTRUCTION {
+    continue_work(world, &key, &args.work_id, args.text, args.request_id)
+}
+
+fn continue_work(
+    world: &mut World,
+    key: &AgentKey,
+    work_id: &str,
+    text: String,
+    request_id: Option<String>,
+) -> Result<String> {
+    if text.trim().is_empty() || text.len() > MAX_INSTRUCTION {
         return Err(HostError::invalid("invalid work instruction"));
     }
     let store = world.resource::<Store>().clone();
     let mut session = store
-        .work(&args.work_id)?
+        .work(work_id)?
         .ok_or_else(|| HostError::not_found("work not found"))?;
     if session.companion_id != key.companion() || session.closed {
         return Err(HostError::not_found("work not found"));
     }
-    let child = chat::find_agent(world, &AgentKey::work(&session.companion_id, &args.work_id))
+    let child = chat::find_agent(world, &AgentKey::work(&session.companion_id, work_id))
         .ok_or_else(|| HostError::not_found("work not found"))?;
+    if let Some(inquiry) = request_id.as_deref() {
+        store.answer_inquiry(work_id, inquiry)?;
+    }
     world.trigger(
-        Deliver::new(child, args.text, DeliveryMode::Steer).with_author(Author::agent(
+        Deliver::new(child, text, DeliveryMode::Steer).with_author(Author::agent(
             key.agent_id(),
-            args.request_id.map(RequestId),
+            Some(RequestId(request_id.unwrap_or_else(|| work_id.to_owned()))),
         )),
     );
     session.status = WorkStatus::Active;
     session.updated_at = now();
     store.save_work(&session)?;
     notify(world, &session, "run_started", json!({}));
-    Ok(args.work_id)
+    Ok(work_id.to_owned())
 }
 
 fn stop_tool(world: &mut World, agent: Entity, id: &str, reason: Option<&str>) -> Result<String> {
@@ -610,3 +628,49 @@ fn parent_key(world: &mut World, agent: Entity) -> Result<AgentKey> {
 
 #[allow(dead_code)]
 fn _uses(_: Uuid, _: TurnState) {}
+
+/// Marks a report as persisted only after the parent's accepted Aside is visible.
+pub(crate) fn finalize_reports(world: &mut World) {
+    let agents: Vec<AgentKey> = world
+        .query::<(&AgentKey, &Conversation)>()
+        .iter(world)
+        .filter(|(key, _)| key.is_work())
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in agents {
+        let Some(work_id) = key.work_id() else {
+            continue;
+        };
+        let Some(conversation) = world
+            .query::<(&AgentKey, &Conversation)>()
+            .iter(world)
+            .find_map(|(candidate, conversation)| (candidate == &key).then_some(conversation))
+        else {
+            continue;
+        };
+        let Some((_, turn)) = conversation.turns().next_back() else {
+            continue;
+        };
+        if turn.end.is_none() {
+            continue;
+        }
+        let run = format!("{work_id}:{}", turn.start.get());
+        let Some(parent) = chat::find_agent(world, &AgentKey::parent(key.companion())) else {
+            continue;
+        };
+        if !chat::has_request(world, parent, &format!("report:{run}")) {
+            continue;
+        }
+        let store = world.resource::<Store>().clone();
+        let Ok(Some(mut session)) = store.work(work_id) else {
+            continue;
+        };
+        if session.reported_run.as_deref() == Some(&run) {
+            continue;
+        }
+        session.reported_run = Some(run);
+        session.status = WorkStatus::Idle;
+        session.updated_at = now();
+        let _ = store.save_work(&session);
+    }
+}

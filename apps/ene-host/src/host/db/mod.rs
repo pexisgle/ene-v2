@@ -3,7 +3,6 @@ mod clients;
 mod companions;
 mod memories;
 mod receipts;
-mod schedules;
 mod settings;
 mod work;
 

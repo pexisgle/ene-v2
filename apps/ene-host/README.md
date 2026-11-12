@@ -35,7 +35,7 @@ cargo run --locked -p ene-host
 - 自動記憶（Consolidation）は確定ターンだけを前向きに読み、`importance` と `audiences` を決めて、記憶と処理済みカーソルを同じSQLiteトランザクションで確定します。
 - Compactionは `rig-memory` の `CompactionPolicy` / `Summarizer` を使った **View専用のローリング要約** です。`SessionLog` は不変の追記型のままにし、要約は `ModelRequest.history` の先頭へだけインメモリ注入します。スナップショットは `ene.summary` Aside としてログへ追記し、起動時に復元します。`GetHistory` には現れません。
 - モデルは `ModelAssignments` の7役割（companion/task/perception/compaction/consolidation/decision/embedding）から選び、未指定時はdocsのフォールバック順で解決します。
-- 親は `mind_*`、`start_work` / `send_work` / `list_works` / `stop_work`、`body_motion` / `set_eye_watch` / `noop`、`schedule_create` / `schedule_list` / `schedule_cancel` を保持します。
+- 親は `mind_*`、`start_work` / `send_work` / `list_works` / `stop_work`、`body_motion` / `set_eye_watch` / `noop` を保持します。スケジュールツールは発火機構が完成するまで公開しません。
 - 端末操作はアクティブ端末1台へ配送します。オフラインなら `pending`、配送後に切断したら `uncertain` とし、自動再送しません。成否不明を成功として扱いません。
 - ストレージまたはセッションログの書込みに失敗した場合、ホストは新規受理を止め、未保存の状態を通知しません。
 
@@ -58,7 +58,6 @@ cargo run --locked -p ene-host
 | `src/host/compaction.rs` | View専用ローリング要約（SessionLog不変） |
 | `src/host/work.rs` | 作業セッション、Run、StartWork/SendWork/AnswerInquiry、親への報告 |
 | `src/host/body.rs` | `body_motion` / `set_eye_watch` / `noop` |
-| `src/host/schedule.rs` | `schedule_create` / `schedule_list` / `schedule_cancel` |
 | `src/host/settings.rs` | 接続、資格情報、ポリシー、承認 |
 | `src/host/client/` | 端末登録、排他アクティブ化、デバイス操作 |
 | `src/host/model/` | 組み込みプロバイダー、Keyring資格情報、認可トランスポート |
@@ -73,7 +72,7 @@ cargo run --locked -p ene-host
 - `importance` は 0〜10 の想起優先度です。自動想起は `>= 2`、明示的な `mind_recall` は全件を対象にします。`forget` は 0、`remember` は最低3へ戻します。
 - `audiences` は共有先companion IDのJSON配列です。共有プールは `["*"]`、private は `[]` です。
 - `activations` がコンパニオンごとのアクティブ端末と版を持ちます。`Snapshot.active_companion_id` はその先頭です。
-- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。承認後の同一引数再試行は通し、`HoldOf` によるターン再開は未実装です。
+- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。単発承認はセッション束縛で一度だけ消費し、`always_approve` は完全一致の許可ルールとして保存します。ポリシー読取失敗は fail-closed です。`HoldOf` によるターン再開は未実装です。
 - 過去のJSONドキュメント方式（`documents` テーブル）や旧baselineは移行しません。未知のDB・新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
 
 ## API契約

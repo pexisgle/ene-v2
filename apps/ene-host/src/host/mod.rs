@@ -15,7 +15,6 @@ pub(crate) mod model;
 pub(crate) mod notify;
 pub(crate) mod receipt;
 pub(crate) mod resources;
-pub(crate) mod schedule;
 pub(crate) mod settings;
 pub(crate) mod tools;
 pub(crate) mod wire;

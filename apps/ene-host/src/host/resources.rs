@@ -54,4 +54,4 @@ pub(crate) struct HostOptions {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct Perception(pub(crate) Option<String>);
+pub(crate) struct Perception(pub(crate) std::collections::HashMap<String, String>);

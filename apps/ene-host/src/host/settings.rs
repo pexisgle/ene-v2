@@ -2,6 +2,7 @@
 use super::{
     db::{Result, Store, new_id, next_revision, now, validate_id},
     error::HostError,
+    model,
     notify::Notifier,
     wire,
 };
@@ -167,11 +168,30 @@ pub(crate) fn submit_approval(
     request: w::SubmitApprovalRequest,
 ) -> Result<w::SubmitApprovalResponse> {
     let store = world.resource::<Store>().clone();
+    let approval = store
+        .approval(&request.request_id)?
+        .ok_or_else(|| HostError::not_found("approval request not found"))?;
+    if approval.status != "pending" {
+        return Err(HostError::conflict("approval is already resolved"));
+    }
     let status = match request.decision.as_str() {
-        "approve" | "always_approve" => "approved",
+        "approve" => "approved",
+        "always_approve" => "approved",
         "deny" => "denied",
         _ => return Err(HostError::invalid("invalid approval decision")),
     };
+    if request.decision == "always_approve" {
+        let rule = w::PolicyRule {
+            id: format!("approval-{}", approval.request_id),
+            tool_name: approval.tool_name.clone(),
+            pattern: approval.normalized_arguments.clone(),
+            effect: "allow".into(),
+            created_at: now(),
+            ..Default::default()
+        };
+        store.update_policy_rules(&[rule], &[])?;
+        notify_policy_rules(world, &store)?;
+    }
     store.set_approval_status(&request.request_id, status)?;
     world.resource_mut::<Notifier>().push(
         None,
@@ -194,6 +214,19 @@ pub(crate) fn submit_approval(
     })
 }
 
+fn notify_policy_rules(world: &mut World, store: &Store) -> Result<()> {
+    let rules = policy_rules(store)?;
+    world.resource_mut::<Notifier>().push(
+        None,
+        None,
+        w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
+            rules: rules.items.clone(),
+            ..Default::default()
+        })),
+    );
+    Ok(())
+}
+
 fn notify_settings(world: &mut World, view: &w::Settings) {
     world.resource_mut::<Notifier>().push(
         None,
@@ -203,4 +236,13 @@ fn notify_settings(world: &mut World, view: &w::Settings) {
             ..Default::default()
         })),
     );
+}
+
+pub(crate) fn credential_changed(world: &mut World, connection_id: &str) -> Result<()> {
+    let store = world.resource::<Store>().clone();
+    store.bump_settings()?;
+    model::invalidate_connection(world, connection_id);
+    let view = settings(&store)?;
+    notify_settings(world, &view);
+    Ok(())
 }

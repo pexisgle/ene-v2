@@ -49,9 +49,6 @@ pub(crate) const PARENT_TOOLS: &[&str] = &[
     "set_eye_watch",
     "body_motion",
     "noop",
-    "schedule_create",
-    "schedule_list",
-    "schedule_cancel",
     "device_request",
 ];
 pub(crate) const WORK_TOOLS: &[&str] = &["current_time", "report", "device_request"];
@@ -412,7 +409,11 @@ pub(crate) fn stop(app: &mut App, companion_id: &str) -> Result<()> {
 pub(crate) fn history(world: &mut World, request: w::HistoryRequest) -> Result<w::History> {
     validate_id(&request.companion_id)?;
     let key = AgentKey::parent(request.companion_id.clone());
-    let Some(entity) = find_target(world, &key)? else {
+    world
+        .resource::<Store>()
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let Some(entity) = find_agent(world, &key) else {
         return Ok(w::History::default());
     };
     let cursor = request
@@ -449,8 +450,12 @@ pub(crate) fn message(world: &mut World, request: w::MessageRequest) -> Result<w
         .message_id
         .parse::<u64>()
         .map_err(|_| HostError::invalid("invalid message id"))?;
+    world
+        .resource::<Store>()
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
     let entity =
-        find_target(world, &key)?.ok_or_else(|| HostError::not_found("message not found"))?;
+        find_agent(world, &key).ok_or_else(|| HostError::not_found("message not found"))?;
     world
         .get::<Conversation>(entity)
         .ok_or_else(|| HostError::not_found("message not found"))?

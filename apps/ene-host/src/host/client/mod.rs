@@ -145,6 +145,10 @@ pub(crate) fn activate(app: &mut App, request: w::ActivationRequest) -> Result<w
     }
     if request.release {
         store.remove_activation(&request.companion_id)?;
+        app.world_mut()
+            .resource_mut::<super::resources::Perception>()
+            .0
+            .remove(&request.companion_id);
         notify_activation(app.world_mut(), &request.client_id);
         return Ok(w::Activation {
             companion_id: request.companion_id,
@@ -158,6 +162,10 @@ pub(crate) fn activate(app: &mut App, request: w::ActivationRequest) -> Result<w
         .ok_or_else(|| HostError::not_found("client not found"))?;
     let revision = next_revision(current_revision)?;
     store.save_activation(&request.companion_id, &request.client_id, revision)?;
+    app.world_mut()
+        .resource_mut::<super::resources::Perception>()
+        .0
+        .remove(&request.companion_id);
     let _ = current_client;
     notify_activation(app.world_mut(), &request.client_id);
     Ok(w::Activation {
@@ -176,6 +184,10 @@ pub(crate) fn activate_on_send(world: &mut World, companion_id: &str, client: &s
     }
     let revision = next_revision(current.map_or(1, |(_, revision)| revision))?;
     store.save_activation(companion_id, client, revision)?;
+    world
+        .resource_mut::<super::resources::Perception>()
+        .0
+        .remove(companion_id);
     notify_activation(world, client);
     Ok(())
 }
@@ -231,8 +243,21 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
         None => None,
     };
     if let Some(text) = text {
-        world.resource_mut::<super::resources::Perception>().0 =
-            Some(crate::truncate_chars(&text, 1000));
+        let client_id = event.client_id.as_str();
+        if !client_id.is_empty() {
+            let text = crate::truncate_chars(&text, 1000);
+            let companions: Vec<String> = world
+                .resource::<Store>()
+                .activations()?
+                .into_iter()
+                .filter(|(_, client, _)| client == client_id)
+                .map(|(companion, _, _)| companion)
+                .collect();
+            let mut perception = world.resource_mut::<super::resources::Perception>();
+            for companion in companions {
+                perception.0.insert(companion, text.clone());
+            }
+        }
     }
     Ok(())
 }

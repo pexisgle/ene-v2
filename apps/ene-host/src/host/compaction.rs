@@ -53,6 +53,7 @@ pub(crate) struct Applied;
 #[derive(Component, Clone)]
 pub(crate) struct Summary {
     pub(crate) text: String,
+    pub(crate) through: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -185,10 +186,11 @@ pub(crate) fn apply(
             }
         };
         if let Some(text) = text {
-            let through = job.keep_from.map_or(0, |id| id.get());
-            commands
-                .entity(agent.0)
-                .insert(Summary { text: text.clone() });
+            let through = job.keep_from.map_or(0, |id| id.get().saturating_sub(1));
+            commands.entity(agent.0).insert(Summary {
+                text: text.clone(),
+                through,
+            });
             if let Ok(mut conversation) = conversations.get_mut(agent.0) {
                 conversation.add_aside(Aside::new(
                     "ene.summary",
@@ -221,7 +223,8 @@ pub(crate) fn restore(world: &mut World) {
             .rfind(|(_, aside)| aside.kind == "ene.summary")
             .and_then(|(_, aside)| {
                 let text = aside.value.get("text")?.as_str()?.to_owned();
-                (!text.is_empty()).then_some(Summary { text })
+                let through = aside.value.get("through_message_id")?.as_u64()?;
+                (!text.is_empty()).then_some(Summary { text, through })
             });
         if let Some(snapshot) = snapshot {
             world.entity_mut(entity).insert(snapshot);
@@ -245,8 +248,12 @@ pub(crate) fn inject(
         let Some(history) = call.history.as_mut() else {
             continue;
         };
+        let covered = history
+            .entries()
+            .take_while(|entry| entry.id.get() <= summary.through)
+            .count();
         history.splice(
-            0..0,
+            0..covered,
             [Entry::new(Message::user(format!(
                 "<summary>\n{}\n</summary>",
                 summary.text

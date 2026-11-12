@@ -120,7 +120,12 @@ pub(crate) fn inject_context(
             .map(|snapshot| snapshot.text.clone());
         let context = match snapshot {
             Some(text) => Ok(Some(text)),
-            None => build_context(&store, key.companion(), &input, perception.0.as_deref()),
+            None => build_context(
+                &store,
+                key.companion(),
+                &input,
+                perception.0.get(key.companion()).map(String::as_str),
+            ),
         };
         match context {
             Ok(Some(text)) => {
