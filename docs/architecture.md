@@ -29,7 +29,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   ┌────────────────────────────────────────────────────────────────────┐   │
   │   │ 「頭」（Brain / 親エージェント）：rig-ecs Bevy ECS 単一ループ       │   │
   │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs）              │   │
-  │   │   ・会話ログ正本（rig-sqlite: SqliteSessionStore）                 │   │
+  │   │   ・会話ログ正本（rig-memory: DirStore 公式標準）                 │   │
   │   │   ・MCPツール動的登録（world.spawn_tool: ene設定所有）             │   │
   │   │   ・ECS制御: 先行TTS（Stage::Review StreamDelta）、承認保留（HoldOf） │   │
   │   │   ・ツール群: start_work, send_work, stop_work, body_motion, noop   │   │
@@ -78,10 +78,10 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
     - 入力受付: `world.trigger(Deliver::new(...))`
     - 先行TTS: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`delta.agent` が親コンパニオンの Entity と一致するテキスト文字片のみをフィルタして文単位（`。`、`！`、`？`、改行）で合成キューへ送出
     - 承認待機: `Stage::Gate` でポリシー判定し、要確認操作には `commands.spawn(HoldOf(call_entity))` を投入してReActループを保留。RPC（`SettingsService.SubmitApproval`）でユーザー回答を受け取り、承認時は `Approved` コンポーネントを付与、拒否時は `Outcome::refused` を確定し、`HoldOf` を解除して処理再開。承認結果は `host.sqlite3` の `approval_requests` テーブルへ保存
-  - 会話ログの正本は `SessionLogPlugin` ＋ `SqliteSessionStore`（`rig-sqlite`）により単一の `host.sqlite3` に保存。
+  - 会話ログの正本は `SessionLogPlugin` ＋ `DirStore`（`<state_dir>/rig/`）によりディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
-- **SQLite単一保存 ＋ `rig-memory` によるCompaction**:
-  - 会話の生ログおよびCompaction要約（`Compacted`）は `SqliteSessionStore`（`rig-sqlite`）に完全保存。長期エピソード記憶および心も同一のSQLiteファイル（`host.sqlite3`）で完結し、ファイルシステム二重管理を排除。
+- **追記型線形ログ ＋ `rig-memory` によるCompaction**:
+  - 会話の生ログおよびCompaction要約（`Compacted`）、受理レシート（`Conversation::add_aside`）は公式の `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心は SQLite（`host.sqlite3`）に永続化し、2相復旧を原理的に排除。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
   - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中だった要約タスクは安全にキャンセル・破棄して次回アイドル時へ延期。ハード強制閾値到達時も同期要約による会話停止は避け、緊急窓切り詰めを優先適用して応答テンポを維持。
 - **作業エージェントのセッション接続維持とライフサイクル分離**:

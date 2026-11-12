@@ -9,7 +9,7 @@
 | 領域 | 採用技術 / ライブラリ | 選定理由 |
 | :--- | :--- | :--- |
 | **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイル（`host.sqlite3`）で完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。記憶整理や埋め込み生成等の重い非同期処理のみバックグラウンドタスクへ分離 |
-| **会話ログ・要約正本** | **`rig::sqlite::SqliteSessionStore` (`rig-sqlite`)** | 会話履歴（`SessionLog`）および要約状態を `host.sqlite3` に一元化。ファイルシステム追記ログ（`DirStore`）との二重管理や2相リカバリを完全排除し、SQLiteのACIDトランザクションへ統合 |
+| **会話ログ・要約正本** | **`rig_memory::DirStore` (`rig-memory` feature `fs`)** | 公式の `rig-ecs` が推奨する同期ファイルストア。プロセス間ファイルロック、破損末尾行の自動退避、画像Blob管理を公式実装に委譲し、アダプタ実装ゼロ行で完結。受理レシート（`request_key`）も `Conversation::add_aside` でセッションログ内に記録するため、SQLiteとの2相不整合は原理的に発生しない |
 | **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics` / `rig-mcp-client`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と `world.spawn_tool` による動的MCP登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
 | **OSサンドボックス** | **OSネイティブ隔離 (`cap-std`, `process-wrap`, `landlock`, `bwrap`)** | Linux（Landlock ＋ bwrap netns分離 ＋ UNIXソケットプロキシ）、Windows（AppContainer / Job Objects）、macOS（Seatbelt）を統一制御。非対応環境では明示的警告・承認で縮退 |
 | **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` (音声I/O) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlintによる軽快な設定・承認UI、cpalによる低遅延音声キャプチャ・再生、OSフックによる知覚センシング（目） |
@@ -32,9 +32,11 @@
   - 記憶件数が数千件規模のデスクトップ利用において、プライマリキー参照、ルール照合、FTS5 trigram検索、およびインメモリBLOBコサイン類似度計算は **1ms未満（数百マイクロ秒）** で完了する。
   - したがって、ECSメインスレッドに同期の `rusqlite::Connection` を直接保持して同期実行し、非同期エグゼキュータへのタスクスイッチやチャネル往復オーバーヘッドを完全に排除する。
   - 記憶整理（Consolidation）のLLM呼び出しや埋め込みベクトル生成（Embedding API）などの長時間非同期処理のみ、専用のTokioバックグラウンドタスクおよび別コネクションへ分離する。
-- **会話ログ・要約正本の一元化（`SqliteSessionStore`）**:
-  - `rig::sqlite::SqliteSessionStore`（`rig-sqlite`）を採用し、`rig-ecs` の会話セッションログ（`SessionLog`）および要約状態を `host.sqlite3` に一元化。
-  - ファイルシステム追記ログ（`DirStore`）との二重管理や、クラッシュ時の2相復旧（ファイルシステムとDBの不整合調停）を完全排除し、SQLiteのACIDトランザクションへ統合する。
+- **会話ログ・要約正本（`rig_memory::DirStore`）と SQLite のクリーンな責務分離**:
+  - 会話履歴（`SessionLog`）および要約状態（`Compacted`）は、公式 `rig-ecs` がネイティブに要求する同期ストア `rig_memory::DirStore`（`<state_dir>/rig/`）をそのまま採用。
+  - プロセス間ファイルロック、破損末尾行の自動退避、画像等のバイナリBlob管理は公式実装に完全に委譲され、アダプタの自作はゼロ行（0行）。
+  - クライアントからの会話受理レシート（`request_key` 重複排除）は SQLite ではなく `Conversation::add_aside`（SessionLog 内）に直接記録するため、ファイルシステムと SQLite 間の 2相コミットやクラッシュ時の不整合復旧問題が原理的に発生しない。
+  - SQLite（`host.sqlite3`）は、心・長期エピソード記憶・認知的関係性・設定・作業・承認要求のACID管理に専念する。
 - **FTS5 trigram ＋ ベクトル検索（BLOBコサイン類似度）**:
   - 日本語の分かち書きエンジン不要の **FTS5 trigram（3-gram）** インデックスにより、助詞や固有名詞を含む高精度な語句検索を実現。
   - 選択された埋め込みモデル（ローカル `fastembed` / クラウド `text-embedding-3-small` 等）のベクトルを BLOB として保存し、Rust内のスライスコサイン類似度計算と FTS5 の順位を Rust 側で RRF（Reciprocal Rank Fusion）統合（外部C拡張に依存せず安定・最小化）。
@@ -47,8 +49,7 @@
   rusqlite = { version = "0.40", features = ["bundled"] }
   rig-core = "0.46"
   rig-ecs = "0.46"
-  rig-memory = "0.46"
-  rig-sqlite = "0.46"
+  rig-memory = { version = "0.46", features = ["fs"] }
   serde = { version = "1", features = ["derive"] }
   serde_json = "1"
   ```
@@ -136,7 +137,7 @@
 
 ### B. エージェントループ：純粋な `rig-ecs` イベント駆動アーキテクチャ
 
-エージェント状態や実行ループをTokio側で自作せず、公式の `rig-ecs` にエージェント実行・状態管理・会話ログ正本（`SqliteSessionStore`）を一本化する。TokioはConnect-RPCサーバーと外部非同期I/O（ストリーミング通信・子プロセス監視）の非同期ランタイムに専念する。
+エージェント状態や実行ループをTokio側で自作せず、公式の `rig-ecs` にエージェント実行・状態管理・会話ログ正本（`DirStore`）を一本化する。TokioはConnect-RPCサーバーと外部非同期I/O（ストリーミング通信・子プロセス監視）の非同期ランタイムに専念する。
 
 CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` 等）や `rig-mcp-client` は採用せず、純粋な `rig-ecs` プリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と動的ツール登録で最小構成を実現する。
 
@@ -159,7 +160,7 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
   │  ・推論・ツール反復: AgentPlugin (ReActループ)          │
   │  ・文単位先行TTS: Stage::Review (MessageReader<StreamDelta>)│
   │    (親のユーザー向け発話のみフィルタし、句点 。！？ 送出)│
-  │  ・会話ログ正本: SessionLogPlugin ＋ SqliteSessionStore │
+  │  ・会話ログ正本: SessionLogPlugin ＋ DirStore (公式標準) │
   │  ・MCPツール統合: world.spawn_tool(def, handler, opts)  │
   └────────────────────────────────────────────────────────┘
 ```
@@ -189,7 +190,7 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
 - [`rig-ecs` Documentation](https://docs.rs/rig-ecs)（Bevy ECSベースのエージェント実行）
-- [`rig-sqlite` Documentation](https://docs.rs/rig-sqlite)（SQLiteセッションストア）
+- [`rig-memory` Documentation](https://docs.rs/rig-memory)（DirStore・Compaction要約・Anchor）
 
 ---
 

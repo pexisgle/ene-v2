@@ -131,7 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, impo
   - Bevy ECS のシステム（`PrepareSystems::Edit`, `Stage::Gate` 等）は同期関数として動作する。
   - デスクトップ利用におけるプライマリキー参照、ルール照合、FTS5 trigram検索、およびインメモリBLOBコサイン類似度計算（通常1,000件未満）は **1ms未満（数百マイクロ秒）** で完了する。
   - したがって、ECSメインスレッドに同期の `rusqlite::Connection` を直接保持して同期実行し、非同期タスクスイッチやチャネル往復オーバーヘッドを完全に排除する。
-  - 会話セッションログ正本は `rig::sqlite::SqliteSessionStore`（`rig-sqlite`）により単一の `host.sqlite3` に一元化される。
+  - 会話セッションログ正本は公式標準の `rig_memory::DirStore`（`<state_dir>/rig/`）により保存され、受理レシートも `Conversation::add_aside` でセッションログ内に記録されるため、SQLiteとの2相不整合は原理的に発生しない。
   - 記憶整理（Consolidation）のLLM呼び出しや埋め込みベクトル生成（Embedding API）などの長時間非同期処理のみ、専用のTokioバックグラウンドタスクおよび別コネクションへ分離する。
 
 ### 3.3 所有権と共有（Privacy & Sharing）
