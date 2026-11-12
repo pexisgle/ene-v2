@@ -522,6 +522,11 @@ fn stop_tool(world: &mut World, agent: Entity, id: &str, reason: Option<&str>) -
             reason: Some(reason.unwrap_or("parent stopped work").into()),
         });
     }
+    let mut session = session;
+    session.status = WorkStatus::Idle;
+    session.updated_at = now();
+    world.resource::<Store>().save_work(&session)?;
+    notify(world, &session, "status_changed", json!({"status": "idle"}));
     Ok(id.into())
 }
 
