@@ -507,7 +507,12 @@ fn continue_work(
     Ok(work_id.to_owned())
 }
 
-fn stop_tool(world: &mut World, agent: Entity, id: &str, reason: Option<&str>) -> Result<String> {
+pub(crate) fn stop_tool(
+    world: &mut World,
+    agent: Entity,
+    id: &str,
+    reason: Option<&str>,
+) -> Result<String> {
     let key = parent_key(world, agent)?;
     let store = world.resource::<Store>().clone();
     let session = store
@@ -515,6 +520,9 @@ fn stop_tool(world: &mut World, agent: Entity, id: &str, reason: Option<&str>) -
         .ok_or_else(|| HostError::not_found("work not found"))?;
     if session.companion_id != key.companion() {
         return Err(HostError::not_found("work not found"));
+    }
+    if session.closed {
+        return Ok(id.into());
     }
     if let Some(child) = chat::find_agent(world, &AgentKey::work(&session.companion_id, id)) {
         world.trigger(StopTurn {

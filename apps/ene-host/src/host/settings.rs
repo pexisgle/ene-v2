@@ -174,11 +174,16 @@ pub(crate) fn submit_approval(
     if approval.status != "pending" {
         return Err(HostError::conflict("approval is already resolved"));
     }
-    if !world
+    let hold = world
         .resource::<super::resources::ApprovalHolds>()
         .0
-        .contains_key(&request.request_id)
-    {
+        .get(&request.request_id)
+        .copied();
+    if !hold.is_some_and(|hold| {
+        world
+            .get::<rig_ecs::stage::HoldOf>(hold)
+            .is_some_and(|rig_ecs::stage::HoldOf(call)| world.get_entity(*call).is_ok())
+    }) {
         return Err(HostError::conflict(
             "approval is not attached to a live tool call",
         ));

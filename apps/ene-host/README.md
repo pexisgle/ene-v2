@@ -37,6 +37,7 @@ cargo run --locked -p ene-host
 - モデルは `ModelAssignments` の7役割（companion/task/perception/compaction/consolidation/decision/embedding）から選び、未指定時はdocsのフォールバック順で解決します。
 - 親は `mind_*`、`start_work` / `send_work` / `list_works` / `stop_work`、`body_motion` / `set_eye_watch` / `noop` を保持します。スケジュールツールは発火機構が完成するまで公開しません。
 - 端末操作はアクティブ端末1台へ配送します。オフラインなら `pending`、配送後に切断したら `uncertain` とし、自動再送しません。成否不明を成功として扱いません。
+- 同じ `request_key` の再送は元の受理結果を返し、内容が違えば競合です。対応する入力やターン記録を確認できない `ene.accepted` は未確定として無視し、新しい受理を作ります。
 - ストレージまたはセッションログの書込みに失敗した場合、ホストは新規受理を止め、未保存の状態を通知しません。
 
 ## 内部構成

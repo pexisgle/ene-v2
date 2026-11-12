@@ -375,27 +375,33 @@ pub(crate) fn deliver_accepted(
 }
 
 pub(crate) fn accepted(world: &mut World, entity: Entity, request_key: &str) -> Option<Accepted> {
-    let found = world.get::<Conversation>(entity).and_then(|conversation| {
-        conversation.asides().find_map(|(_, aside)| {
-            if aside.kind != "ene.accepted"
-                || aside
-                    .value
-                    .get("request_key")
-                    .and_then(|value| value.as_str())
-                    != Some(request_key)
-            {
-                return None;
-            }
-            Some((
-                aside.value.get("hash")?.as_str()?.to_owned(),
-                aside.value.get("request_id")?.as_str()?.to_owned(),
-            ))
+    let candidates: Vec<(String, String)> = world
+        .get::<Conversation>(entity)
+        .map(|conversation| {
+            conversation
+                .asides()
+                .filter_map(|(_, aside)| {
+                    (aside.kind == "ene.accepted"
+                        && aside
+                            .value
+                            .get("request_key")
+                            .and_then(|value| value.as_str())
+                            == Some(request_key))
+                    .then(|| {
+                        Some((
+                            aside.value.get("hash")?.as_str()?.to_owned(),
+                            aside.value.get("request_id")?.as_str()?.to_owned(),
+                        ))
+                    })
+                    .flatten()
+                })
+                .collect()
         })
-    })?;
-    has_input(world, entity, &found.1).then_some(Accepted {
-        hash: found.0,
-        request_id: found.1,
-    })
+        .unwrap_or_default();
+    candidates
+        .into_iter()
+        .find(|(_, request_id)| has_input(world, entity, request_id))
+        .map(|(hash, request_id)| Accepted { hash, request_id })
 }
 
 pub(crate) struct Accepted {

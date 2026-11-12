@@ -1354,7 +1354,7 @@ async fn a_confirm_policy_emits_an_approval_request_before_the_tool_runs() {
                 app.world_mut(),
                 w::SubmitApprovalRequest {
                     request_id: approval_id.clone(),
-                    decision: "approve".into(),
+                    decision: "always_approve".into(),
                     ..Default::default()
                 },
             )
@@ -1559,16 +1559,16 @@ async fn stopping_an_approval_does_not_reuse_its_hold_for_the_next_call() {
 }
 
 #[tokio::test]
-async fn an_accepted_aside_without_the_input_is_not_a_receipt() {
+async fn an_orphan_receipt_does_not_hide_a_later_valid_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = Runtime::start_with(
         temp.path(),
-        scripted(text_model("unused"), text_model("unused"), false),
+        scripted(text_model("ok"), text_model("unused"), false),
     )
     .await
     .unwrap();
     let companion = default_companion(&runtime).await;
-    let found = runtime
+    runtime
         .call({
             let companion = companion.clone();
             move |app| {
@@ -1581,11 +1581,79 @@ async fn an_accepted_aside_without_the_input_is_not_a_receipt() {
                     "orphan-hash",
                     "missing-input",
                 );
-                Ok(chat::accepted(app.world_mut(), entity, "orphan-key").is_none())
+                Ok(())
             }
         })
         .await
         .unwrap();
-    assert!(found, "an aside without its input must not be accepted");
+    let first = send(&runtime, &companion, "orphan-key", "hello").await;
+    let second = send(&runtime, &companion, "orphan-key", "hello").await;
+    assert_eq!(first.request_id, second.request_id);
+    let conflict = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                chat::accept(
+                    app,
+                    w::SendMessageRequest {
+                        companion_id: companion,
+                        request_key: "orphan-key".into(),
+                        text: "different".into(),
+                        ..Default::default()
+                    },
+                )
+            }
+        })
+        .await;
+    assert!(conflict.is_err());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopping_a_closed_work_from_the_tool_keeps_it_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("unused"), text_model("done"), false),
+    )
+    .await
+    .unwrap();
+    let companion = default_companion(&runtime).await;
+    let work = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                work::start(
+                    app,
+                    companion,
+                    "closed".into(),
+                    "止める".into(),
+                    String::new(),
+                )
+            }
+        })
+        .await
+        .unwrap();
+    runtime
+        .call({
+            let id = work.id.clone();
+            move |app| work::close(app, &id)
+        })
+        .await
+        .unwrap();
+    let status = runtime
+        .call({
+            let companion = companion.clone();
+            let id = work.id.clone();
+            move |app| {
+                let agent = chat::find_agent(app.world_mut(), &AgentKey::parent(&companion))
+                    .ok_or_else(|| HostError::not_found("agent not found"))?;
+                work::stop_tool(app.world_mut(), agent, &id, None)?;
+                Ok(app.world().resource::<Store>().work(&id)?.unwrap().status)
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(status, WorkStatus::Closed);
     runtime.shutdown().await.unwrap();
 }
