@@ -3,8 +3,7 @@ use super::{
     agent::AgentKey,
     client, compaction,
     db::{Result, Store, digest, validate_id, validate_key},
-    error::HostError,
-    failure::Failure,
+    error::{Failure, HostError},
     model::{self, Binding},
     resources::{HostState, Inactivity, Models},
     tick,
@@ -135,7 +134,7 @@ pub(crate) fn attach_agent(world: &mut World, entity: Entity, key: &AgentKey) {
     set_sections(world, entity, &companion);
 }
 
-fn set_sections(world: &mut World, agent: Entity, companion: &super::companion::Companion) {
+fn set_sections(world: &mut World, agent: Entity, companion: &super::mind::Companion) {
     let existing: Vec<Entity> = world
         .query::<(Entity, &SectionOf)>()
         .iter(world)
@@ -150,7 +149,7 @@ fn set_sections(world: &mut World, agent: Entity, companion: &super::companion::
     }
 }
 
-fn prompt_sections(companion: &super::companion::Companion) -> Vec<(i32, String, String)> {
+fn prompt_sections(companion: &super::mind::Companion) -> Vec<(i32, String, String)> {
     let mut sections = Vec::new();
     for (index, (tag, items)) in companion.profile.sections().into_iter().enumerate() {
         if items.is_empty() {

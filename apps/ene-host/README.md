@@ -46,24 +46,32 @@ cargo run --locked -p ene-host
 | --- | --- |
 | `src/server/mod.rs` | 起動、シグナル、終了 |
 | `src/server/access.rs` | プライベートディレクトリ、ロック、`connection.json` |
-| `src/server/rpc.rs` | 生成されたConnectサービス、Owner Bearer、Host/Origin検証 |
+| `src/server/rpc/` | 生成されたConnectサービス（auth / host / chat / settings / work / client / voice） |
 | `src/host/mod.rs` | Appスレッド、`Runtime`、リソース、通知、スナップショット、失敗・復元・停止 |
-| `src/host/agent.rs` | `AgentKey`、system prompt、Open tool、Prepare/Fit/Gate/Review、ストリーム、ターンイベント |
+| `src/host/agent.rs` | `AgentKey`、プラグイン配線、ターンライフサイクル、ストリーム、通知 |
 | `src/host/chat.rs` | 入力受理（冪等レシート）、停止、履歴、メッセージ |
-| `src/host/companion.rs` | コンパニオンのドメイン型 |
+| `src/host/permission/` | 承認保留、`Stage::Gate`、ポリシールール、承認・拒否 |
 | `src/host/mind/mod.rs` | コンパニオンCRUD、作者プロファイル、現在の心、削除 |
-| `src/host/mind/memory.rs` | 記憶制御（forget/remember/share/unshare） |
+| `src/host/mind/companion.rs` | コンパニオンのドメイン型 |
+| `src/host/mind/memory.rs` | 記憶の型と制御（forget/remember/share/unshare） |
 | `src/host/mind/recall.rs` | 動的コンテキストの構築と `ModelRequest.history` への注入 |
-| `src/host/mind/consolidate.rs` | 増分自動整理、`importance`、カーソル |
+| `src/host/mind/consolidate.rs` | 増分自動整理、`importance`、`Consolidation` カーソル型 |
 | `src/host/mind/tools.rs` | `mind_recall` / `mind_read` / `mind_update` |
-| `src/host/compaction.rs` | View専用ローリング要約（SessionLog不変） |
-| `src/host/work.rs` | 作業セッション、Run、StartWork/SendWork/AnswerInquiry、親への報告 |
+| `src/host/compaction.rs` | View専用ローリング要約（SessionLog不変）と `Fit`（コンテキスト窓） |
+| `src/host/work/mod.rs` | 作業セッション、Run、StartWork/SendWork/AnswerInquiry、報告の確定 |
+| `src/host/work/tools.rs` | `start_work` / `send_work` / `stop_work` / `list_works` / `report` |
+| `src/host/work/rig.rs` | 内蔵RigのRun開始、親への配送、作業イベント通知 |
 | `src/host/body.rs` | `body_motion` / `set_eye_watch` / `noop` |
-| `src/host/settings.rs` | 接続、資格情報、ポリシー、承認 |
+| `src/host/settings.rs` | 接続、資格情報、設定revision |
 | `src/host/client/` | 端末登録、排他アクティブ化、デバイス操作 |
 | `src/host/model/` | 組み込みプロバイダー、Keyring資格情報、認可トランスポート |
 | `src/host/db/` | typed SQLite store、baseline schema（schedule・work inquiry を含む） |
+| `src/host/error.rs` | `HostError` とユーザー向け `Failure` |
+| `src/host/tools.rs` | ホスト管理ツール共通のディスパッチ |
+| `src/host/tests/` | 機能別の挙動テスト（chat / mind / compaction / approval / work / client / store） |
 | `src/host/wire.rs` | ドメイン型からproto viewへの変換、JSON text、agent key |
+
+`host/` の公開関数は、現時点では `ene_rpc` の生成型をコマンド／ビューのDTOとして直接受け取ります。RPC境界とhost内部で同じ型を二重定義しないための意図的な選択です。RPCを通らない内部経路（スケジュール発火や音声操作）から同じ操作を呼ぶ段階で、host内部のドメイン型へ分離します。
 
 ## データベース
 

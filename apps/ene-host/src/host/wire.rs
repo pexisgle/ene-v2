@@ -1,10 +1,9 @@
 //! The one boundary between stored domain values and the proto contract.
 use super::{
     client::{Client, DeviceOperation},
-    companion::{Assignments, Companion, ModelAssignment},
     db::parse_json,
-    error::Result,
-    failure::Failure,
+    error::{Failure, Result},
+    mind::{Assignments, Companion, ModelAssignment},
     settings::Connection,
     work::WorkSession,
 };
@@ -161,7 +160,7 @@ pub(crate) fn device_state(value: &DeviceOperation) -> w::DeviceOperationState {
     }
 }
 
-pub(crate) fn memory_item(value: &super::memory::Memory) -> w::MemoryItem {
+pub(crate) fn memory_item(value: &super::mind::Memory) -> w::MemoryItem {
     w::MemoryItem {
         id: value.id.clone(),
         owner: value.owner.clone(),

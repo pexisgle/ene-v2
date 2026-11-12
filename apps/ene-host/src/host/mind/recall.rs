@@ -2,10 +2,10 @@
 use crate::host::{
     agent::AgentKey,
     chat,
-    companion::Companion,
     db::{Result, Store, now},
     error::HostError,
-    memory::RecallMode,
+    mind::Companion,
+    mind::RecallMode,
 };
 use bevy_ecs::prelude::*;
 use rig_core::{

@@ -2,8 +2,7 @@
 use crate::host::{
     agent::AgentKey,
     db::{Result, Store, now, validate_id},
-    error::HostError,
-    failure::Failure,
+    error::{Failure, HostError},
     resources::{DeviceStreams, DeviceTimeout},
     tools, wire,
 };

@@ -1,11 +1,18 @@
 //! Companions, authored profiles and the current mind.
+pub(crate) mod companion;
 mod consolidate;
-mod memory;
+pub(crate) mod memory;
 mod recall;
 mod tools;
 
+pub(crate) use self::companion::{Assignments, Companion, ModelAssignment, Profile};
+pub(crate) use self::memory::{
+    Acquisition, Memory, MemoryAction, MindOperation, RecallMode, SHARED_AUDIENCE,
+};
 pub(crate) use self::{
-    consolidate::{Batch, apply as apply_consolidation, start as start_consolidation},
+    consolidate::{
+        Batch, Consolidation, apply as apply_consolidation, start as start_consolidation,
+    },
     memory::control_memory,
     recall::inject_context,
     tools::register_tools,
@@ -14,7 +21,6 @@ pub(crate) use self::{
 use super::{
     agent::AgentKey,
     chat,
-    companion::{Companion, Profile},
     db::{Result, Store, new_id, next_revision, now, validate_id},
     error::HostError,
     notify::Notifier,
@@ -162,17 +168,18 @@ pub(crate) fn update_companion(
     Ok(wire::companion(&record))
 }
 
-fn assignments_from(value: Option<&w::ModelAssignments>) -> super::companion::Assignments {
+fn assignments_from(value: Option<&w::ModelAssignments>) -> self::companion::Assignments {
     let Some(value) = value else {
         return Default::default();
     };
-    super::companion::Assignments {
-        companion: value.companion.as_option().map(|assignment| {
-            super::companion::ModelAssignment {
+    self::companion::Assignments {
+        companion: value
+            .companion
+            .as_option()
+            .map(|assignment| self::companion::ModelAssignment {
                 connection: assignment.connection_id.clone(),
                 model: assignment.model_id.clone(),
-            }
-        }),
+            }),
         task: value.task.as_option().map(assignment),
         perception: value.perception.as_option().map(assignment),
         compaction: value.compaction.as_option().map(assignment),
@@ -184,10 +191,10 @@ fn assignments_from(value: Option<&w::ModelAssignments>) -> super::companion::As
 
 fn assignment_patch(
     patch: &w::AssignmentPatch,
-) -> Result<Option<super::companion::ModelAssignment>> {
+) -> Result<Option<self::companion::ModelAssignment>> {
     match patch.change.as_ref() {
         Some(w::assignment_patch::Change::Set(assignment)) => {
-            Ok(Some(super::companion::ModelAssignment {
+            Ok(Some(self::companion::ModelAssignment {
                 connection: assignment.connection_id.clone(),
                 model: assignment.model_id.clone(),
             }))
@@ -308,8 +315,8 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
     Ok(())
 }
 
-fn assignment(value: &w::ModelAssignment) -> super::companion::ModelAssignment {
-    super::companion::ModelAssignment {
+fn assignment(value: &w::ModelAssignment) -> self::companion::ModelAssignment {
+    self::companion::ModelAssignment {
         connection: value.connection_id.clone(),
         model: value.model_id.clone(),
     }

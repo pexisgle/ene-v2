@@ -6,7 +6,7 @@ mod settings;
 mod work;
 
 pub(crate) use super::error::Result;
-use super::{companion::Companion, error::HostError};
+use super::{error::HostError, mind::Companion};
 use bevy_ecs::prelude::Resource;
 use rusqlite::{Connection, OptionalExtension};
 use std::{

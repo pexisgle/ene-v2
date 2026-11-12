@@ -1,4 +1,5 @@
-//! Shared open-tool dispatch.
+//! The one dispatch path shared by every host-bound open tool: run a handler
+//! against the World and answer the effect with a tool result or refusal.
 use super::{error::HostError, fail};
 use bevy_ecs::prelude::*;
 use rig_core::tool::ToolResult;

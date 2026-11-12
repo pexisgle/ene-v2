@@ -5,11 +5,11 @@ use super::{
     next_revision, now, parse_json,
 };
 use crate::host::{
-    companion::Companion,
-    consolidation::Consolidation,
     db::Result,
     error::HostError,
-    memory::{Acquisition, Memory, MemoryAction, MindOperation, RecallMode, SHARED_AUDIENCE},
+    mind::Companion,
+    mind::Consolidation,
+    mind::{Acquisition, Memory, MemoryAction, MindOperation, RecallMode, SHARED_AUDIENCE},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 

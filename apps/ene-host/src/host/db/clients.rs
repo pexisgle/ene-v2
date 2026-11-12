@@ -3,8 +3,7 @@ use super::{Store, parse_json};
 use crate::host::{
     client::{Client, DeviceOperation, DeviceResult, DeviceStatus},
     db::Result,
-    error::HostError,
-    failure::Failure,
+    error::{Failure, HostError},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};

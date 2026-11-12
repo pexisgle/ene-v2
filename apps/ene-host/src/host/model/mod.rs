@@ -6,9 +6,9 @@ pub(crate) use self::credentials::{Credentials, secret};
 
 use self::transport::Authorized;
 use super::{
-    companion::{Companion, ModelAssignment},
     db::{Result, Store},
     error::HostError,
+    mind::{Companion, ModelAssignment},
     settings::Connection,
 };
 use ene_rpc as w;

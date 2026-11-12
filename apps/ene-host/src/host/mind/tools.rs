@@ -5,7 +5,7 @@ use crate::host::{
     chat,
     db::{Result, Store, digest, next_revision, now, validate_id},
     error::HostError,
-    memory::{Acquisition, Memory, MindOperation, RecallMode, SHARED_AUDIENCE},
+    mind::memory::{Acquisition, Memory, MindOperation, RecallMode, SHARED_AUDIENCE},
     tools,
 };
 use bevy_ecs::prelude::*;

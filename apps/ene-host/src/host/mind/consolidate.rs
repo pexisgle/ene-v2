@@ -3,10 +3,9 @@ use super::{MAX_CONTENT, MAX_ITEMS, MAX_TEXT, mind_view};
 use crate::host::{
     agent::AgentKey,
     chat,
-    consolidation::Consolidation,
     db::{Result, Store, next_revision, now},
     error::HostError,
-    memory::{Acquisition, Memory},
+    mind::memory::{Acquisition, Memory},
     model::{self},
     resources::Models,
     resources::{CompactionQueue, ConsolidationQueue, HostOptions},
@@ -24,6 +23,40 @@ use uuid::Uuid;
 const METHOD: &str = "consolidation-v1";
 const BATCH_ENTRIES: usize = 12;
 const BATCH_CHARS: usize = 8_000;
+
+#[derive(Clone, Debug)]
+pub(crate) struct Consolidation {
+    pub(crate) last_sequence: u64,
+    pub(crate) last_offset: u64,
+    pub(crate) method_revision: String,
+    pub(crate) state: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) jobs: u64,
+    pub(crate) model_calls: u64,
+    pub(crate) input_chars: u64,
+    pub(crate) skipped: u64,
+    pub(crate) attempts: u64,
+    pub(crate) updated_at: String,
+}
+
+impl Default for Consolidation {
+    fn default() -> Self {
+        Self {
+            last_sequence: 0,
+            last_offset: 0,
+            method_revision: String::new(),
+            state: "unconfigured".into(),
+            reason: None,
+            jobs: 0,
+            model_calls: 0,
+            input_chars: 0,
+            skipped: 0,
+            attempts: 0,
+            updated_at: now(),
+        }
+    }
+}
+
 const MAX_ATTEMPTS: u64 = 3;
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -5,11 +5,12 @@
 //! `PrepareSystems::Edit`.
 use super::{
     agent::AgentKey,
+    chat,
     db::Store,
-    model,
+    model::{self, Refusal},
     notify::Notifier,
     resources::Models,
-    resources::{CompactionQueue, HostOptions, Inactivity},
+    resources::{CompactionQueue, ConsolidationQueue, HostOptions, Inactivity},
 };
 use bevy_ecs::prelude::*;
 use rig_core::{
@@ -18,10 +19,11 @@ use rig_core::{
 };
 use rig_ecs::prelude::*;
 use rig_memory::{
-    CompactReason, CompactionPolicy, HeuristicTokenCounter, Summarizer, SummaryState, TokenCounter,
-    summary_author,
+    ClearToolOutputs, CompactReason, CompactionPolicy, HeuristicTokenCounter, Summarizer,
+    SummaryState, TokenCounter, recent, recent::TokenBudget, summary_author,
 };
 use serde_json::json;
+use std::collections::HashSet;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -311,5 +313,175 @@ pub(crate) fn inject(
             )))],
             Author::plugin("ene.compaction"),
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fit(
+    mut calls: Query<(Entity, &mut ModelRequest, &ForAgent, &Adapted), Added<Admitted>>,
+    keys: Query<&AgentKey>,
+    store: Res<Store>,
+    options: Res<HostOptions>,
+    mut queues: ResMut<ConsolidationQueue>,
+    mut compaction: ResMut<CompactionQueue>,
+    mut notifier: ResMut<Notifier>,
+    mut reported: Local<HashSet<(Entity, &'static str)>>,
+    mut commands: Commands,
+) {
+    for (call_entity, mut call, agent, adapted) in &mut calls {
+        let key = keys.get(agent.0).ok();
+        let spec = &adapted.0.spec;
+        if let Some(max) = spec.max_output_tokens {
+            call.request_mut().max_tokens = Some(u64::from(max));
+        }
+        let Some(window) = spec.context_window else {
+            if reported.insert((agent.0, "window"))
+                && let Some(key) = key
+            {
+                notifier.notice(
+                    key.companion(),
+                    "context_window_unknown",
+                    "the model's context length is unknown; the whole conversation is sent",
+                );
+            }
+            continue;
+        };
+        let counter = HeuristicTokenCounter::default();
+        let output = spec
+            .max_output_tokens
+            .map_or(0usize, |tokens| tokens as usize);
+        // The docs reserve the output budget plus a 10% margin for its estimate.
+        let reserve = output
+            .saturating_add(output.div_ceil(10))
+            .saturating_add(
+                call.prompt
+                    .as_ref()
+                    .map_or(0, |prompt| counter.count(&Message::system(prompt.text()))),
+            )
+            .saturating_add(
+                call.request
+                    .tools
+                    .iter()
+                    .map(|tool| counter.count_tool(tool))
+                    .sum::<usize>(),
+            );
+        let budget = (window as usize).saturating_sub(reserve);
+        let Some(history) = call.history.as_mut() else {
+            continue;
+        };
+        let protected = usize::from(
+            history
+                .entries()
+                .next()
+                .and_then(|entry| chat::entry_text(entry.message))
+                .is_some_and(|text| text.starts_with("<summary>")),
+        );
+        let protected_tokens = history
+            .messages()
+            .first()
+            .filter(|_| protected == 1)
+            .map_or(0, |message| counter.count(message));
+        let budget = budget.saturating_sub(protected_tokens);
+        let Some(last) = history.messages().last() else {
+            continue;
+        };
+        if counter.count(last) > budget {
+            if let Some(key) = key {
+                notifier.notice(
+                    key.companion(),
+                    "context_exceeded",
+                    "the latest message does not fit the model's context window",
+                );
+            }
+            commands
+                .entity(call_entity)
+                .insert(Refusal("context_exceeded".into()));
+            continue;
+        }
+        let used: usize = history
+            .messages()
+            .iter()
+            .map(|message| counter.count(message))
+            .sum();
+        if used > budget {
+            ClearToolOutputs::new(budget.min(20_000))
+                .clear_conversation(history, Author::plugin("ene.window"));
+        }
+        let kept = recent::view(&history.messages()[protected..], &TokenBudget::new(budget));
+        let kept_len = kept.len();
+        let due = compaction_due(kept, u64::from(window), options.compaction.threshold);
+        let len = history.messages().len();
+        let start = len
+            .saturating_sub(kept_len)
+            .max(protected)
+            .min(len.saturating_sub(1));
+        // Queue the summary when the view is near the threshold, whether or
+        // not it had to drop messages: `compaction::start` re-checks idle
+        // time and real usage before it runs.
+        if due && let Some(key) = key {
+            compaction.0.insert(key.companion().into());
+        }
+        if start <= protected {
+            continue;
+        }
+        let Some(key) = key else {
+            continue;
+        };
+        let cursor = store
+            .consolidation(key.companion())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let dropped: Vec<(u64, bool)> = history
+            .entries()
+            .skip(protected)
+            .take(start - protected)
+            .map(|entry| (entry.id.get(), entry.author.is_none()))
+            .collect();
+        let unconsolidated = dropped
+            .iter()
+            .any(|(id, own)| *own && *id > cursor.last_sequence);
+        history.splice(
+            protected..start,
+            [Entry::new(Message::user(WINDOW_NOTICE))],
+            Author::plugin("ene.window"),
+        );
+        if unconsolidated {
+            queues.0.insert(key.companion().into());
+            if reported.insert((agent.0, "truncated")) {
+                notifier.notice(
+                    key.companion(),
+                    "window_truncated_unconsolidated",
+                    "the window dropped messages that are not consolidated into memory yet",
+                );
+            }
+        }
+    }
+}
+
+const WINDOW_NOTICE: &str = "[System Notice: 過去の一部ログを一時的に省略して対話を継続しています]";
+
+fn compaction_due(kept: &[std::sync::Arc<Message>], window: u64, threshold: f64) -> bool {
+    if window == 0 {
+        return false;
+    }
+    let counter = HeuristicTokenCounter::default();
+    let tokens: usize = kept.iter().map(|message| counter.count(message)).sum();
+    (tokens as f64) / (window as f64) > threshold
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn compaction_is_due_by_tokens_not_by_message_count() {
+        // One long message used to divide its count (1) by the window and
+        // never trigger compaction.
+        let kept = [Arc::new(Message::user("x".repeat(4_000)))];
+        assert!(compaction_due(&kept, 1_000, 0.70));
+        let short = [Arc::new(Message::user("ok"))];
+        assert!(!compaction_due(&short, 1_000, 0.70));
     }
 }

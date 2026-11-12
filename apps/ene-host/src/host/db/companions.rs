@@ -1,9 +1,9 @@
 //! Companion rows.
 use super::{Store, parse_json};
 use crate::host::{
-    companion::{Assignments, Companion, ModelAssignment},
     db::Result,
     error::HostError,
+    mind::{Assignments, Companion, ModelAssignment},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
