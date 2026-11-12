@@ -77,7 +77,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
     - 先行TTS: `PostUpdate` の `MessageReader<StreamDelta>` で親のユーザー向け発話のみをフィルタし文単位で合成キューへ送出
-    - 承認待機: `Stage::Gate` で公式契約に準拠した質問エンティティ `(Ask, ForAgent, HoldOf)` を生成。承認・拒否回答は対象 `Ask` の `Decision` へ `Answer(Outcome)` として確定し、公式 `ApprovalPlugin` が承認時は対象ツールに `Approved` 付与、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を反映後に `HoldOf` を解除（回答確定前に `Ask` を despawn しない）
+    - 承認待機: `Stage::Gate` でeneのポリシー判定が `NeedsApproval::add` で理由を追加し、公式 `ApprovalPlugin` が承認用 `Ask` を生成。承認・拒否回答はプラグインが生成した `Ask` の `Decision` へ `Answer(Outcome)` として確定し、プラグインが承認時は対象ツールに `Approved` 付与、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を反映後に `HoldOf` を解除（回答確定前に `Ask` を despawn しない。履歴永続化は effect log 保存経路で実施）
   - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:

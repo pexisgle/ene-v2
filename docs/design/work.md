@@ -91,8 +91,8 @@ pub enum RunStatus {
 | 現在の状態 | イベント / トリガー | 次の状態 | 確定点とホストの動作 |
 | :--- | :--- | :--- | :--- |
 | `Starting` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
-| `Running` | 子からの質問または承認要求（`WorkRequest`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち（Rig承認保留は `(Ask, ForAgent, HoldOf)` エンティティを生成） |
-| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 対象AskのDecisionへAnswer(Outcome)を確定。公式ApprovalPluginが承認時は対象ツールに `Approved` 付与、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を反映した上で質問の `HoldOf` を解除（Askは回答確定前にdespawnしない） |
+| `Running` | 子からの質問または承認要求（`WorkRequest`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち（ポリシー判定が `NeedsApproval::add` を付与し、公式ApprovalPluginが承認用Askを生成） |
+| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | プラグイン生成の対象AskのDecisionへAnswer(Outcome)を確定。公式ApprovalPluginが承認時は対象ツールに `Approved` 付与、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を反映後に質問の `HoldOf` を解除（Askは回答確定前にdespawnしない） |
 | `WaitingInput` | 質問回答受信（`SendWork` with `request_id`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
 | `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信（未決permissionはcancel応答）、最大30秒クリーンアップ待機 |
 | `Cancelling` | ACP `cancelled` 応答 または Rigターン停止確認 | `Cancelled` | 正常中断確定（ACPプロセスはセッション維持のため生存） |
