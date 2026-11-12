@@ -72,7 +72,7 @@ cargo run --locked -p ene-host
 - `importance` は 0〜10 の想起優先度です。自動想起は `>= 2`、明示的な `mind_recall` は全件を対象にします。`forget` は 0、`remember` は最低3へ戻します。
 - `audiences` は共有先companion IDのJSON配列です。共有プールは `["*"]`、private は `[]` です。
 - `activations` がコンパニオンごとのアクティブ端末と版を持ちます。`Snapshot.active_companion_id` はその先頭です。
-- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。単発承認はセッションとrunに束縛して一度だけ消費し、停止時には保留を失効させます。`always_approve` は完全一致の専用ルールとして保存し、明示的な `confirm` は通常の保存済み `allow` より優先します。ポリシー読取失敗は fail-closed です。`HoldOf` で保留したツール呼び出しは、承認・拒否の送信時に解放して再評価します。
+- 承認・ポリシーは `approval_requests` / `policy_rules` に保存します。`Stage::Gate` でルールを評価し、`confirm` は承認要求を発行してツール呼び出しを止めます。単発承認はセッションとrunに束縛して一度だけ消費し、停止時には保留を失効させます。明示的な `confirm` は保存済み許可より優先し、`always_approve` は `confirm` がない場合だけ完全一致の保存ルールにします。起動時に実行対象のない pending 承認は失効させます。ポリシー読取失敗は fail-closed です。`HoldOf` で保留したツール呼び出しは、承認・拒否の送信時に解放して再評価します。
 - 過去のJSONドキュメント方式（`documents` テーブル）や旧baselineは移行しません。未知のDB・新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
 
 ## API契約

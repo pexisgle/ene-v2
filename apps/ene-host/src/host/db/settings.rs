@@ -345,3 +345,15 @@ impl Store {
         })
     }
 }
+
+impl Store {
+    pub(crate) fn expire_pending_approvals(&self) -> Result<()> {
+        self.call(|connection| {
+            connection.execute(
+                "UPDATE approval_requests SET status='expired' WHERE status='pending'",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+}

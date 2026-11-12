@@ -667,7 +667,7 @@ async fn settings_policies_and_approvals_are_revisioned() {
                     app.world_mut(),
                     w::SubmitApprovalRequest {
                         request_id: "missing".into(),
-                        decision: "approve".into(),
+                        decision: "always_approve".into(),
                         ..Default::default()
                     },
                 )
@@ -1361,6 +1361,17 @@ async fn a_confirm_policy_emits_an_approval_request_before_the_tool_runs() {
         })
         .await
         .unwrap();
+    let rules = runtime
+        .call(|app| settings::policy_rules(app.world().resource::<Store>()))
+        .await
+        .unwrap();
+    assert!(
+        !rules
+            .items
+            .iter()
+            .any(|rule| rule.effect == "always_approve"),
+        "always_approve must not bypass an explicit confirm rule"
+    );
     let request_id = approval.request_id.clone();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1544,5 +1555,37 @@ async fn stopping_an_approval_does_not_reuse_its_hold_for_the_next_call() {
     .expect("the stopped approval was reused instead of creating a new one");
     assert_eq!(pending.items.len(), 1);
     assert_eq!(pending.items[0].status, "pending");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_accepted_aside_without_the_input_is_not_a_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("unused"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
+    let companion = default_companion(&runtime).await;
+    let found = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                let entity = chat::find_agent(app.world_mut(), &AgentKey::parent(&companion))
+                    .ok_or_else(|| HostError::not_found("agent not found"))?;
+                chat::record_accepted(
+                    app.world_mut(),
+                    entity,
+                    "orphan-key",
+                    "orphan-hash",
+                    "missing-input",
+                );
+                Ok(chat::accepted(app.world_mut(), entity, "orphan-key").is_none())
+            }
+        })
+        .await
+        .unwrap();
+    assert!(found, "an aside without its input must not be accepted");
     runtime.shutdown().await.unwrap();
 }

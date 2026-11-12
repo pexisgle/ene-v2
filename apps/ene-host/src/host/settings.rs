@@ -174,13 +174,22 @@ pub(crate) fn submit_approval(
     if approval.status != "pending" {
         return Err(HostError::conflict("approval is already resolved"));
     }
+    if !world
+        .resource::<super::resources::ApprovalHolds>()
+        .0
+        .contains_key(&request.request_id)
+    {
+        return Err(HostError::conflict(
+            "approval is not attached to a live tool call",
+        ));
+    }
     let status = match request.decision.as_str() {
         "approve" => "approved",
         "always_approve" => "approved",
         "deny" => "denied",
         _ => return Err(HostError::invalid("invalid approval decision")),
     };
-    if request.decision == "always_approve" {
+    if request.decision == "always_approve" && !confirm_matches(&store, &approval)? {
         let rule = w::PolicyRule {
             id: format!("approval-{}", approval.request_id),
             tool_name: approval.tool_name.clone(),
@@ -220,6 +229,16 @@ pub(crate) fn submit_approval(
         status: status.into(),
         ..Default::default()
     })
+}
+
+fn confirm_matches(store: &Store, approval: &w::ApprovalRequest) -> Result<bool> {
+    Ok(store.policy_rules()?.into_iter().any(|rule| {
+        rule.effect == "confirm"
+            && (rule.tool_name.is_empty()
+                || rule.tool_name == "*"
+                || rule.tool_name == approval.tool_name)
+            && (rule.pattern.is_empty() || approval.normalized_arguments.contains(&rule.pattern))
+    }))
 }
 
 fn notify_policy_rules(world: &mut World, store: &Store) -> Result<()> {
@@ -268,7 +287,12 @@ pub(crate) fn expire_orphan_holds(world: &mut World) {
     }
     let store = world.resource::<Store>().clone();
     for (request, _) in stale {
-        let _ = store.set_approval_status(&request, "expired");
+        if let Err(error) = store.set_approval_status(&request, "expired") {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            }
+            return;
+        }
         world
             .resource_mut::<super::resources::ApprovalHolds>()
             .0

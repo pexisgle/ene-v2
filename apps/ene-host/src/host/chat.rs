@@ -216,6 +216,14 @@ pub(crate) fn has_input(world: &mut World, entity: Entity, id: &str) -> bool {
             })
         })
         || world
+            .get::<Conversation>(entity)
+            .is_some_and(|conversation| {
+                conversation.asides().any(|(_, aside)| {
+                    aside.kind == "ene.turn_input"
+                        && aside.value.get("input_id").and_then(|value| value.as_str()) == Some(id)
+                })
+            })
+        || world
             .query_filtered::<(&Incoming, &ForAgent), (With<Started>, Without<Outcome>)>()
             .iter(world)
             .any(|(input, agent)| {
@@ -303,7 +311,7 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     let key = AgentKey::parent(request.companion_id);
     let entity = ensure_target(app.world_mut(), &key)?;
     let hash = digest(format!("{}:{}", key.companion(), request.text).as_bytes());
-    if let Some(accepted) = accepted(app.world(), entity, &request.request_key) {
+    if let Some(accepted) = accepted(app.world_mut(), entity, &request.request_key) {
         if accepted.hash != hash {
             return Err(HostError::already_exists(
                 "request key was used with different content",
@@ -366,8 +374,8 @@ pub(crate) fn deliver_accepted(
     Ok(request_id)
 }
 
-pub(crate) fn accepted(world: &World, entity: Entity, request_key: &str) -> Option<Accepted> {
-    world.get::<Conversation>(entity).and_then(|conversation| {
+pub(crate) fn accepted(world: &mut World, entity: Entity, request_key: &str) -> Option<Accepted> {
+    let found = world.get::<Conversation>(entity).and_then(|conversation| {
         conversation.asides().find_map(|(_, aside)| {
             if aside.kind != "ene.accepted"
                 || aside
@@ -378,11 +386,15 @@ pub(crate) fn accepted(world: &World, entity: Entity, request_key: &str) -> Opti
             {
                 return None;
             }
-            Some(Accepted {
-                hash: aside.value.get("hash")?.as_str()?.to_owned(),
-                request_id: aside.value.get("request_id")?.as_str()?.to_owned(),
-            })
+            Some((
+                aside.value.get("hash")?.as_str()?.to_owned(),
+                aside.value.get("request_id")?.as_str()?.to_owned(),
+            ))
         })
+    })?;
+    has_input(world, entity, &found.1).then_some(Accepted {
+        hash: found.0,
+        request_id: found.1,
     })
 }
 

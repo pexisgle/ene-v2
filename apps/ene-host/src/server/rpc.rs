@@ -501,7 +501,10 @@ impl w::SettingsService for Services {
     ) -> ServiceResult<w::Empty> {
         let id = request.id.to_owned();
         let reference = format!("connection:{id}");
-        let cleanup = self.runtime.credentials().forget(&reference).await;
+        self.runtime
+            .credentials()
+            .invalidate(&reference)
+            .map_err(ConnectError::from)?;
         let save_id = id.clone();
         self.runtime
             .call(move |app| {
@@ -522,7 +525,11 @@ impl w::SettingsService for Services {
             })
             .await
             .map_err(ConnectError::from)?;
-        cleanup.map_err(ConnectError::from)?;
+        self.runtime
+            .credentials()
+            .cleanup(&reference)
+            .await
+            .map_err(ConnectError::from)?;
         Response::ok(w::Empty::default())
     }
 

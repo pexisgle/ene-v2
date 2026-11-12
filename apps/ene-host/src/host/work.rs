@@ -278,7 +278,7 @@ pub(crate) fn send(app: &mut App, request: w::SendWorkRequest) -> Result<w::Work
     );
     let child = chat::find_agent(app.world_mut(), &key)
         .ok_or_else(|| HostError::not_found("work not found"))?;
-    if let Some(accepted) = chat::accepted(app.world(), child, &request.request_key) {
+    if let Some(accepted) = chat::accepted(app.world_mut(), child, &request.request_key) {
         if accepted.hash != hash {
             return Err(HostError::already_exists(
                 "request key was used with different content",

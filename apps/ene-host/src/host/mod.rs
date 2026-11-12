@@ -360,6 +360,7 @@ pub(crate) fn revoke_and_stop(world: &mut World, companion: Option<&str>) {
 }
 
 fn restore(app: &mut App) -> Result<()> {
+    app.world().resource::<Store>().expire_pending_approvals()?;
     agent::restore(app.world_mut())?;
     compaction::restore(app.world_mut());
     work::restore(app.world_mut())?;

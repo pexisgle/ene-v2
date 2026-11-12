@@ -532,14 +532,14 @@ enum Policy {
     Hold { reason: String },
 }
 
-fn hold_approval(world: &mut World, request_id: &str, call: Entity) -> bool {
+fn ensure_hold(world: &mut World, request_id: &str, call: Entity) {
     let existing = world.resource::<ApprovalHolds>().0.get(request_id).copied();
     if let Some(hold) = existing {
         let live = world
             .get::<HoldOf>(hold)
             .is_some_and(|HoldOf(held)| *held == call);
         if live {
-            return true;
+            return;
         }
         world.resource_mut::<ApprovalHolds>().0.remove(request_id);
     }
@@ -548,7 +548,6 @@ fn hold_approval(world: &mut World, request_id: &str, call: Entity) -> bool {
         .resource_mut::<ApprovalHolds>()
         .0
         .insert(request_id.to_owned(), hold);
-    true
 }
 
 fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> Result<Policy> {
@@ -564,20 +563,10 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
     {
         return Ok(Policy::Refuse("policy denied".into()));
     }
-    if rules.iter().any(|rule| {
-        rule.effect == "always_approve"
-            && !rule.pattern.is_empty()
-            && rule.pattern == args
-            && matches(rule)
-    }) {
-        return Ok(Policy::Allow);
-    }
-    if rules
+    if !rules
         .iter()
         .any(|rule| rule.effect == "confirm" && matches(rule))
     {
-        // fall through to the bound call approval
-    } else {
         return Ok(Policy::Allow);
     }
     let hash = crate::host::db::digest(format!("{name}:{args}").as_bytes());
@@ -604,12 +593,10 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
                 return Ok(Policy::Refuse("approval was already consumed".into()));
             }
             "pending" => {
-                if hold_approval(world, &existing.request_id, entity) {
-                    return Ok(Policy::Hold {
-                        reason: "approval pending".into(),
-                    });
-                }
-                store.set_approval_status(&existing.request_id, "expired")?;
+                ensure_hold(world, &existing.request_id, entity);
+                return Ok(Policy::Hold {
+                    reason: "approval pending".into(),
+                });
             }
             "denied" => return Ok(Policy::Refuse("approval denied".into())),
             _ => {}
@@ -627,7 +614,7 @@ fn policy_refusal(world: &mut World, entity: Entity, name: &str, args: &str) -> 
         ..Default::default()
     };
     store.save_approval(&request)?;
-    hold_approval(world, &request.request_id, entity);
+    ensure_hold(world, &request.request_id, entity);
     world.resource_mut::<Notifier>().push(
         Some(key.companion().into()),
         None,

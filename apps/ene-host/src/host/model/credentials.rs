@@ -81,11 +81,15 @@ impl Credentials {
         Ok(())
     }
 
-    pub(crate) async fn forget(&self, reference: &str) -> Result<()> {
+    pub(crate) fn invalidate(&self, reference: &str) -> Result<()> {
         self.cache
             .lock()
             .map_err(|_| HostError::internal("credential cache is poisoned"))?
             .remove(reference);
+        Ok(())
+    }
+
+    pub(crate) async fn cleanup(&self, reference: &str) -> Result<()> {
         if self.session_only {
             return Ok(());
         }
@@ -98,6 +102,11 @@ impl Credentials {
             "credential store cleanup failed",
         )
         .await
+    }
+
+    pub(crate) async fn forget(&self, reference: &str) -> Result<()> {
+        self.invalidate(reference)?;
+        self.cleanup(reference).await
     }
 
     async fn read(&self, reference: &str) -> Result<String> {
