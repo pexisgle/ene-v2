@@ -31,9 +31,10 @@
 - **外部ACPエージェント（Agent Client Protocol）**:
   - `WorkSession ≒ ACP Session`: 外部ACPプロセスとの接続はWorkSession単位で維持され、複数Runにわたってエージェントの会話文脈が継続する。
   - `Run ≒ ACP prompt turn`: 1回の指示実行は `session/prompt` に対応する。
-  - **中断の扱い**: 通常のRun中断は ACP 標準の `session/cancel` を送信して安全に行う。外部プロセス自体の終了は、WorkSession自体の破棄時、またはセッション全体がハングして応答しない場合のみ実行する。
+  - **中断の扱い**: 通常のRun中断は ACP 標準の `session/cancel` を送信して安全に行う。外部プロセス自体の終了は、WorkSession自体の破棄時、またはセッション全体がハングして応答しない場合のみ実行する。文脈を保持するACPセッションでは、Run終了後もOSプロセスは生存する。
 - **内蔵Rigエージェント**:
-  - 同一 `rig-ecs` World 内で、親エンティティに属する子エージェントエンティティ（`SpawnedBy(parent_entity)`）として並行稼働する。ツール権限を `ToolAccess::Only(...)` で制限し、Run開始は `world.trigger(Deliver::new(child, instruction, DeliveryMode::Queue))`、中断は `world.trigger(StopTurn::new(child))`、完了報告は `TurnFinished` Observer から親へ Deliver することで、同一World内で最小限のオーバーヘッドで実行する。コマンド実行子プロセスのみを `process-wrap` で安全に管理する。
+  - **ライフサイクルと停止伝播の分離**: Rig v0.46.0 において `StopTurn` は `SpawnedBy` 配下の子エージェントへ停止を自動伝播させる。ユーザーが音声対話を「ちょっと話止めて。作業は続けて！」と割り込み（Barge-in）した際に作業まで道連れで強制終了されるのを防ぐため、**継続稼働する `WorkSession` は `SpawnedBy(parent_entity)` ではなく、独立したエージェントエンティティ（`WorkSessionOf(companion_id)`）としてWorld内に生成する**（`SpawnedBy` はそのターンと運命を共にする一時的なサブタスクにのみ限定）。
+  - ツール権限を `ToolAccess::Only(...)` で制限し、Run開始は `world.trigger(Deliver::new(work_entity, instruction, DeliveryMode::Queue))`、作業の中断は明示的な `world.trigger(StopTurn::new(work_entity))`、完了報告は `TurnFinished` Observer から親へ通知することで、同一World内で最小限のオーバーヘッドで実行する。コマンド実行子プロセスのみを `process-wrap` で安全に管理する。
 
 > [!IMPORTANT]
 > **WorkSession と Run の厳格な分離**:
@@ -49,15 +50,17 @@
 use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
-/// WorkSession（文脈の器）の状態
+/// WorkSession（文脈の器）の公開状態（実体から導出され、二重管理による不整合を防ぐ）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkSessionStatus {
     /// 待機中（実行中のRunなし）
     Idle,
     /// Runが実行中
     Active { current_run_id: String },
+    /// 一時停止中
+    Suspended { reason: String },
     /// セッション終了・破棄済み
-    Terminated,
+    Closed,
 }
 
 /// 単一Run（実行ターン）の状態
@@ -65,7 +68,7 @@ pub enum WorkSessionStatus {
 pub enum RunStatus {
     Starting,
     Running,
-    /// ユーザーへの確認・質問待ち（権限承認または通常質問）
+    /// ユーザーへの確認・質問待ち（権限承認 WorkRequest::Approval または通常質問 WorkRequest::Input）
     WaitingInput {
         request_id: String,
         request: WorkRequest,
@@ -89,12 +92,10 @@ pub enum RunStatus {
 
 | 現在の状態 | イベント / トリガー | 次の状態 | 確定点とホストの動作 |
 | :--- | :--- | :--- | :--- |
-| `Created` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
-| `Running` | 子からの質問（`WorkRequest::Input`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち |
-| `Running` | 子からの承認要求（`WorkRequest::Approval`） | `WaitingApproval` | 権限確認待ち（親が自然に対話仲介） |
-| `WaitingInput` | `SendWork` 受信（回答または追加入力） | `Running` | 回答を子へ渡し処理再開 |
-| `WaitingApproval` | 承認 / 拒否 受信 | `Running` | 承認時は操作実行、拒否時は代替処理へ |
-| `Running` / `Waiting*` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、最大30秒クリーンアップ待機 |
+| `Starting` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
+| `Running` | 子からの質問または承認要求（`WorkRequest`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち（Rig承認保留は `(Ask, ForAgent, HoldOf)` エンティティを生成） |
+| `WaitingInput` | `SendWork` 受信（回答または追加入力） | `Running` | 回答を子へ渡し処理再開（承認時は `Decision::Approved`、拒否時は `Decision::Rejected`） |
+| `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信、最大30秒クリーンアップ待機 |
 | `Cancelling` | 子プロセス終了・後片付け完了確認 | `Cancelled` | 正常中断確定 |
 | `Cancelling` | 30秒超過 ➔ 強制終了後、プロセス終了未確認 | `CancellationUnconfirmed` | 停止未確認として記録 |
 | `Running` | タスク正常完了 | `Completed` | 成果物を親へ返却 |
@@ -115,12 +116,26 @@ pub enum WorkRequest {
     },
 }
 
-/// セッションの管理構造体
+/// セッションの管理構造体（状態の正本は active_run と closed のみとし、公開statusは導出）
 pub struct ActiveWorkSession {
     pub session_id: String,
     pub companion_id: String,
-    pub status: WorkSessionStatus,
     pub active_run: Option<ActiveRunTracker>,
+    pub closed: bool,
+}
+
+impl ActiveWorkSession {
+    pub fn status(&self) -> WorkSessionStatus {
+        if self.closed {
+            WorkSessionStatus::Closed
+        } else if let Some(run) = &self.active_run {
+            WorkSessionStatus::Active {
+                current_run_id: run.run_id.clone(),
+            }
+        } else {
+            WorkSessionStatus::Idle
+        }
+    }
 }
 
 /// 実行中Runのトラッキング
@@ -187,6 +202,7 @@ pub enum WorkEventPayload {
 
 ### 4.1 途絶検知と親へのプロンプト注入
 - 子からの活動報告が閾値（デフォルト: **90秒**）を超えて途絶した場合、ホストは親（頭）へ**コンテキスト注入イベント（Prompt Injection / `DeliveryMode::Inform`）**を行う。
+- **通知と返答要求の区別**: `DeliveryMode::Inform` は返答を強制しない非ブロッキング通知である。途絶通知は親のコンテキストに事実情報として追加され、親が対話中であれば次ターンの思考材料となる。即時に親からユーザーへ声かけを行わせる必要がある緊急ケースでは、ホストが `DeliveryMode::Queue` で能動的な確認ターンをディスパッチする。
 - **1回のみの警告（`stall_warned`）**:
   - `now - last_activity_at > 90s` かつ `stall_warned == false` のときに限り、ホストは通知を1回だけ送出し、`stall_warned = true` に設定する。これにより、親エージェントへの通知スパムを防止する。
   - 子から新たな活動報告（`Activity` や `Message`）が到着した時点で `last_activity_at` は更新され、`stall_warned = false` にリセットされる。
@@ -269,7 +285,7 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
-| **`report`** | `session_id: String`<br>`run_id: String`<br>`kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。ACP外部プロセスの場合は `agent-client-protocol-schema` の通知へ相互変換される |
+| **`report`** | `kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。**`session_id` と `run_id` はホスト実行環境がコンテキストから自動束縛**し、LLMに引数として書かせない。ACP外部プロセスの場合は `agent-client-protocol-schema` の通知へ相互変換される |
 
 ---
 
@@ -281,13 +297,13 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 - **Connect-RPC `WorkService` の用途区分**:
   1. **UI一覧表示・状態取得（通常利用）**:
      - `ListWorks`: 実行中および直近の WorkSession 一覧取得（UIサイドバーやタスクパネル表示用）。
-     - `GetWork`: 特定 WorkSession の詳細状態・未決要求・成果物の取得。
+     - `GetWork`: 特定 WorkSession の詳細状態（`WorkSession`）、実行履歴（`runs`）、未決要求（`pending_requests`）、および成果物の取得。再接続時に未決の承認要求や質問を再取得できる。
      - **単一イベントストリームへの統合**: 個別のストリーム（`SubscribeWorkEvents`）は設けず、リアルタイムの作業進捗ログ・質問・完了イベントはすべて `HostService.Subscribe`（単一の `HostEvent` ストリーム）内の `HostEvent::WorkEvent`（`WorkEventEnvelope`）として集約配信される。
   2. **ユーザー主導の緊急直接停止（即時制御）**:
      - `StopWork`: ユーザーがクライアントUI上の「作業中断」ボタンを押下した際、親LLMの思考待ちを介さず即座に停止要求を発行する。
      - `CloseWork`: 完了・中断済みセッションの明示的クローズ。
   3. **開発・検証・自動化直接呼び出し（特権・開発用）**:
-     - `SendWork`: 親コンパニオンの会話文脈を介さず、開発者コンソールやスクリプト連携等で直接指示を投入して検証するためのルート。
+     - `SendWork`: 親コンパニオンの会話文脈を介さず、開発者コンソールやスクリプト連携等で直接指示を投入して検証するためのルート。冪等性キー（`request_key`）による重複実行防止を備える。
 
 ```protobuf
 syntax = "proto3";
@@ -302,43 +318,63 @@ service WorkService {
 }
 
 message ListWorksRequest {
-  optional string companion_id = 1;
+  string companion_id = 1;
+}
+
+message WorkSession {
+  string id = 1;
+  string companion_id = 2;
+  string backend = 3;
+  string status = 4;
+  optional string last_run_id = 5;
+  optional string last_report = 6;
+  string created_at = 7;
+  string updated_at = 8;
+  bool closed = 9;
 }
 
 message WorkSessionList {
-  repeated WorkView sessions = 1;
+  repeated WorkSession items = 1;
+}
+
+message RunInfo {
+  string run_id = 1;
+  string input_id = 2;
+  string state = 3;
+  optional string failure_message = 4;
+}
+
+message WorkRequestView {
+  string request_id = 1;
+  string kind = 2; // "approval" | "input"
+  string prompt = 3;
+  repeated string choices = 4;
+}
+
+message WorkView {
+  WorkSession session = 1;
+  repeated RunInfo runs = 2;
+  repeated WorkRequestView pending_requests = 3; // 再接続時に未決の質問・承認を取得可能
 }
 
 message WorkRequest {
   string work_id = 1;
 }
 
-message WorkView {
-  string work_id = 1;
-  string companion_id = 2;
-  string status = 3;
-  optional string active_run_id = 4;
-  string last_activity_at = 5;
-  repeated string artifacts = 6;
-}
-
 message SendWorkRequest {
   string work_id = 1;
-  optional string run_id = 2;
-  string message = 3;
-  optional string request_id = 4;
+  string request_key = 2; // 冪等性重複排除キー
+  string text = 3;
+  string client_id = 4;
 }
 
 message WorkAcceptance {
-  string work_id = 1;
-  string run_id = 2;
-  bool accepted = 3;
+  string request_id = 1;
 }
 
 message StopWorkRequest {
   string work_id = 1;
   optional string run_id = 2;
-  optional string reason = 3;
 }
 
 message CloseWorkRequest {

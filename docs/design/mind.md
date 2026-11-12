@@ -64,9 +64,9 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 );
 
 -- 3. エピソード記憶（MemoryRecord）
--- rowid を明示的 INTEGER PRIMARY KEY AUTOINCREMENT とすることで、VACUUM時もFTS5外部コンテンツとの対応関係が不変であることを保証
+-- rowid を明示的 INTEGER PRIMARY KEY とすることで、SQLite の 64-bit rowid の直接エイリアスとなり VACUUM 時も安定して FTS5 外部コンテンツテーブルとの整数参照関係を保持
 CREATE TABLE IF NOT EXISTS memories (
-    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    rowid INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
     owner TEXT NOT NULL,              -- 不変の原所有者コンパニオンID
     audiences TEXT NOT NULL,          -- JSON array: 共有先コンパニオンID一覧
@@ -76,11 +76,13 @@ CREATE TABLE IF NOT EXISTS memories (
     recorded_at TEXT NOT NULL,        -- 初回記録日時
     last_accessed_at TEXT,            -- 明示的引用による最終利用日時
     memory_revision INTEGER NOT NULL DEFAULT 1,
+    content_revision INTEGER NOT NULL DEFAULT 1, -- 本文更新時にインクリメントされ、埋め込みの鮮度検証に使用
     emotion TEXT,                     -- 当時の感情タグ
     source_context TEXT NOT NULL,     -- JSON: 由来（turn_id, run_id, 話者等）
     embedding BLOB,                   -- ベクトルバイト列 (f32 LE: Rust内スライスコサイン類似度計算用)
     embedding_model TEXT,             -- 例: "text-embedding-3-small"
-    embedding_dimensions INTEGER      -- 例: 1536
+    embedding_dimensions INTEGER,     -- 例: 1536
+    embedding_content_revision INTEGER -- 生成時の content_revision (不一致時は無効・再計算対象)
 );
 
 -- 4. 日本語 trigram 全文検索外部コンテンツ仮想テーブル
@@ -113,9 +115,21 @@ CREATE TABLE IF NOT EXISTS memory_edges (
     PRIMARY KEY (from_id, relation, to_id)
 );
 
+-- 6. 増分自動整理の進行状態永続化テーブル
+CREATE TABLE IF NOT EXISTS consolidation_state (
+    companion_id TEXT PRIMARY KEY,
+    last_processed_turn_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- 検索インデックス
 CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
 ```
+
+### 3.2 データベーススレッドモデルと非同期実行境界
+- **ECSループの非ブロッキング保証**:
+  - `rusqlite::Connection` は `Send` だが `Sync` ではないため、Bevy ECSのメインスレッドに直接保持して同期待ちさせるのではなく、**`tokio-rusqlite`（バックグラウンドスレッドで実行する `Connection::call` パターン）**または専用のDB非同期タスクワーカーへDB処理を委託する。
+  - これにより、数千件のベクトル類似度走査やトランザクション書き込み中であっても、Bevy ECSのメインフレーム更新や音声ストリーミング処理がブロックされることを防止する。
 
 ### 3.2 所有権と共有（Privacy & Sharing）
 - **原所有者（`owner`）の不変性**: 記憶の `owner` は作成したコンパニオンのIDを常に保持する。他コンパニオンへ共有する場合も `owner = "shared"` で上書きせず、`audiences` JSON配列に対象コンパニオンIDを追加する。
@@ -216,12 +230,13 @@ for candidate in &mut fused_candidates {
 
 ### 4.2 引用ガード（想起自己汚染ループの防止）
 
-- **更新条件の厳格性**:
+- **更新条件の厳格性とホスト側引用検証**:
   - ベクトル検索により想起候補としてプロンプトへ注入されただけでは、`last_accessed_at` は**更新されない**。
   - **発話本文を汚染しない増分整理判定**:
     - 音声ストリーミング（TTS）を阻害しないよう、発話本文に `<cite id="..."/>` 等のタグを出力させることは行わない。
-    - ターン完了後のバックグラウンド増分整理（Consolidation）において、整理モデルがターンの会話内容を分析し、実際に参照・活用された記憶ID（`cited_memory_ids`）を構造化出力として確定する。
-    - または親が `mind_read` / `mind_update` ツールを明示的に呼び出した場合のみ、ホストが `last_accessed_at = now()` へ更新し、エッジテーブルに `(memory_id, 'cited_in', turn_id)` を追加する。
+    - ターン完了後のバックグラウンド増分整理（Consolidation）において、整理モデルがターンの会話内容を分析し、実際に参照・活用された記憶ID（`cited_memory_ids`）を構造化出力として抽出する。
+    - **ホストによる引用IDの照合検証**: ホストは抽出された `cited_memory_ids` が**「そのターンで実際にプロンプトへ注入された記憶IDリスト」に含まれているかを機械的に検証**する。注入されていない記憶IDや幻覚されたIDの引用は棄却し、不当なアクセス実績の更新を遮断する。
+    - 検証を通過した記憶、または親が `mind_read` / `mind_update` ツールを明示的に呼び出した場合のみ、ホストが `last_accessed_at = now()` へ更新し、エッジテーブルに `(memory_id, 'cited_in', turn_id)` を追加する。
   - これにより、無関係な記憶が一度検索に引っかかっただけで直近性スコアを引き上げ続け、次回以降も過剰に想起され続ける「想起の自己汚染ループ」を遮断する。
 
 ### 4.3 常時注入記憶（Pinned / Core Memory）と動的コンテキストの非永続注入
@@ -240,7 +255,6 @@ for candidate in &mut fused_candidates {
 2. **トークン予算上限（Token Budget）**:
    - Pinned Memory枠には最大トークン予算（例: 最大 1,000 トークン）を設定する。
    - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at`（未引用時は `recorded_at`）順で収容する。
-   - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at`（未引用時は `recorded_at`）順で収容する。
 
 ---
 
@@ -252,24 +266,33 @@ for candidate in &mut fused_candidates {
 - `mind_read(memory_id: String) -> MemoryDetail`: 記憶の詳細および由来の閲覧
 - `mind_update(action: MindUpdateAction) -> MindUpdateResult`: 明示的な記憶の追加・訂正・想起優先度引き下げ
 
-### 5.2 自動整理（Consolidation）における内容の分割保存
+### 5.2 自動整理（Consolidation）の単一方向パイプラインと重複防止
 対話ログからの長期記憶形成は、**Compaction（要約）の発生を必須条件とせず、独立してバックグラウンド実行**される。
 - **起動契機**: ユーザー対話が途切れたアイドル時（60秒以上）、または未整理の確定ターン数が閾値（例: 5ターン）に達した時点。
-- **内容ごとの独立レコード分割保存**:
-  - 1つの会話発言から複数の異なる事実（例: 「好きな飲み物はコーヒー」と「勤務先はTech社」）が読み取れる場合、**単一のレコードにまとめず、独立した個別の `MemoryRecord` として保存する**。
-  - 各レコードは固有のIDを持ち、出所（`source_context.turn_id`）を共有しながらも、重要度（想起優先度）を完全に独立して管理できる。
-- **未処理カーソル（`processed_turns_cursor`）による増分抽出**:
-  - 自動整理ジョブは、最後に抽出を完了した `processed_turns_cursor` より後の新規ターンのみを増分走査する。
-  - 過去に処理済みのターンを何度も再走査しないため、以前に抽出・優先度変更された事実が、過去ログから新しいレコードとして重複再生成されることは構造的に防止される。
+- **単一方向パイプライン（Single-Direction Consolidation Pipeline）**:
+  1. **確定済みログの読み込み**: `SessionLog`（追記型ディスク正本）から、`consolidation_state.last_processed_turn_id` より後の確定ターン（最新の未完了ターンを除く安定範囲）を読み込む。Compaction後のプロンプト用Viewではなく、客観的な会話生ログを正本入力とする。
+  2. **事実抽出と既存記憶の照合**: 整理モデルが会話から抽出した知識候補について、ホストがFTS5およびベクトル検索を用いて既存記憶との類似度を照合する。
+  3. **更新（Merge）と新規作成（Insert）の決定論的分岐**:
+     - 既存の記憶と同一事実または更新である場合：`memory_revision` と `content_revision` をインクリメントして内容・重要度を更新し、古い埋め込みを無効化（再計算対象にマーキング）。
+     - 新規の独立した事実である場合：新しい `MemoryRecord` を採番して作成。1つの発話から複数事実が抽出された場合は、内容ごとに独立したレコードとして分割保存する。
+  4. **原子的コミット**: 記憶の変更・エッジの追加・および `consolidation_state.last_processed_turn_id` の前進を、同一のSQLiteトランザクション内で原子的（Atomic）にコミットする。
 
 ```text
-未処理の対話ログ・子の作業報告
-  → processed_turns_cursor より後の未読ターンを取得（処理済みターンは再走査をスキップ）
-  → 既存記憶と現在の版（memory_revision）・想起優先度（importance）を参照
-  → 経験の抽出（異なる内容は個別の独立したMemoryRecordとして分割）
-  → 既存記憶の統合・訂正、引用実績に基づく重要度再評価
-  → トランザクション内で競合検証（版不一致・古い優先度への不当な巻き戻しを拒否）
-  → 記憶・processed_turns_cursor を原子的コミット
+SessionLog（追記型確定生ログ）
+  │
+  ├─ last_processed_turn_id より後の安定ターンを読み出し
+  ▼
+整理モデルによる経験・事実の抽出
+  │
+  ├─ 既存記憶のFTS5/ベクトル照合（重複検出）
+  ▼
+分岐：既存更新（UPDATE + revision進捗） or 新規分割作成（INSERT）
+  │
+  ├─ 引用実績のホスト側検証（プロンプト注入IDとの照合）
+  ▼
+SQLite トランザクション
+  ├─ memories / memory_edges のコミット
+  └─ consolidation_state.last_processed_turn_id の同時コミット
 ```
 
 ### 5.3 「忘却」のセマンティクス（想起優先度の引き下げ）と境界

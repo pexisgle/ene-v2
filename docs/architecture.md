@@ -17,7 +17,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
                              ▼                   │
   ┌──────────────────────────────────────────────┴─────────────────────────────┐
   │ 【クライアント層】                                                          │
-  │   ・アバター描画（Body）: ene-avatar（Bevy + ene-vrm、透過ウィンドウ）       │
+  │   ・アバター描画（Body）: ene-avatar（Bevy + bevy_vrm1、透過ウィンドウ）     │
   │   ・リップシンク: クライアント側RMS音量解析（フレーム連動口パク）           │
   │   ・知覚センサー（Eyes）: OSイベントフック ＋ アイドルサンプリング（15〜30秒） │
   │   ・音声入出力: ストリーミングSTT同報配信 / 音声Server Streaming受信       │
@@ -30,15 +30,16 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   │ 「頭」（Brain / 親エージェント）：rig-ecs Bevy ECS 単一ループ       │   │
   │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs）              │   │
   │   │   ・会話ログ正本（rig-ecs SessionLogPlugin + DirStore）            │   │
-  │   │   ・MCPツール直接統合（rig-mcp-client McpPlugin）                  │   │
-  │   │   ・ECSステージ制御: 先行TTS（Stage::Review）、承認（Stage::Gate） │   │
+  │   │   ・MCPツール登録（McpCorePlugin + AddMcpServer: ene設定所有）     │   │
+  │   │   ・ECS制御: 先行TTS（PostUpdate StreamDelta）、承認保留（HoldOf） │   │
   │   │   ・ツール群: start_work, send_work, stop_work, body_motion, noop   │   │
   │   └───────────────┬────────────────────────────────────┬───────────────┘   │
   │                   │                                    │                   │
   │                   ▼ start_work / send_work             ▼ 記憶・設定アクセス │
   │   ┌──────────────────────────────┐     ┌───────────────────────────────┐   │
   │   │ 「手」（Hands / 作業相手）    │     │ データベース（SQLite）         │   │
-  │   │   ・WorkSession と Run の分離│     │   ・rusqlite WALモード        │   │
+  │   │   ・WorkSession と Run の分離│     │   ・rusqlite bundled (WAL)    │   │
+  │   │   ・親子停止伝播の非結合     │     │   ・tokio-rusqlite スレッド分離│   │
   │   │   ・同一キャラクター一人称対話│    │   ・FTS5 + BLOBコサイン (RRF) │   │
   │   │   ・定期進捗報告と途絶検知   │     │   ・記憶関係（memory_edges）  │   │
   │   │   ・30秒タイムアウト強制終了 │     │   ・ACIDリレーショナル永続化  │   │
@@ -75,46 +76,47 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **`rig-ecs` による単一イベント駆動エージェントループ**:
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
-    - 先行TTS: `Stage::Review` で `StreamDelta` を検出し文単位で合成キューへ送出
-    - 承認待機: `Stage::Gate` で `HoldOf` による一時停止
+    - 先行TTS: `PostUpdate` の `MessageReader<StreamDelta>` で親のユーザー向け発話のみをフィルタし文単位で合成キューへ送出
+    - 承認待機: `Stage::Gate` で公式契約に準拠した保留エンティティ `(Ask, ForAgent, HoldOf)` を生成し、`Decision` で終端
   - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
   - 会話の生ログおよびCompaction要約（`Compacted`）は `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心はSQLiteに永続化（要約のSQLite二重保存は行わない）。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
-  - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中結果は破棄/次回延期。
-- **作業エージェント（ACP）のセッション接続維持**:
-  - `WorkSession ≒ ACP Session` としてプロセス接続を維持。Run（指示ごとの実行）の中断はACP標準の `session/cancel` で行い、プロセス強制終了はセッション終了時や暴走時のみ実施。内蔵Rigはホスト内タスクとして実行。
-- **機械的コンテキスト上限検証と縮退**:
-  - 送信直前に `Total Input + Max Output <= Context Window` を機械的に保証。
+  - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中だった要約タスクは安全にキャンセル・破棄して次回アイドル時へ延期。
+- **作業エージェントのセッション接続維持とライフサイクル分離**:
+  - `WorkSession ≒ ACP Session` としてプロセス接続を維持。Run（指示ごとの実行）の中断はACP標準の `session/cancel` で行い、プロセス強制終了はセッション終了時や暴走時のみ実施。
+  - **停止伝播の非結合**: 継続稼働する `WorkSession` は親の `SpawnedBy` ではなく独立エンティティとしてWorld内に生成し、ユーザーの音声割り込み（Barge-in）による会話ターンの停止が作業セッションへ伝播して道連れ終了する事故を防止。
+- **安全マージンを設けたコンテキスト上限検証と縮退**:
+  - 送信直前に `Total Input + Max Output <= Context Window` を安全マージン（10%）を考慮して機械的に検証。
   - 要約失敗時は古いログをアクティブプロンプト窓から一時的に切り詰めて対話を継続。
 - **Prefix Caching最適化順序と非永続注入**:
-  - プロンプトを `System Prompt`（静的ツール定義 + キャラクター設定・ペルソナ + ユーザープロファイル） ➔ `Conversation History`（`Summary` + 過去ターン生ログ） ➔ `Dynamic Tail Context`（Pinned Memory + 検索想起記憶 + 現在の心境 + Perception Summary + 現在時刻 + 最新ユーザー入力）の順で配置。
-  - 動的コンテキストは `SessionLog`（永続ログ）へは書き込まず、`PrepareSystems::Fit` 時にインメモリで末尾へ一時注入することで、Prefix Cacheの最大化とログの純粋性（履歴漏洩・自己汚染防止）を両立。
+  - プロンプトを `System Prompt`（静的ツール定義 + キャラクター設定・ペルソナ + ユーザープロファイル） ➔ `Conversation History`（`Summary` + 過去ターン生ログ） ➔ `Dynamic Tail Context`（Pinned Memory + 検索想起記憶 + 現在の心境 + Perception Summary + 現在時刻 + 最新ユーザー入力）の順で配置し、高いキャッシュヒット率（ターゲット: >90%）を目指す。
+  - 動的コンテキストは `SessionLog`（永続ログ）へは書き込まず、`PrepareSystems::Fit` 時にインメモリで末尾へ一時注入し、動的文脈を含む要求全体に対してFitを実行。
 
 ### 2. 心と自動記憶（SQLite）
-- **組み込みSQLite（`rusqlite` WALモード ＋ FTS5 trigram ＋ Rustコサイン類似度）**:
-  - 外部DBデーモンや外部C拡張（`sqlite-vec` 等）に依存せず、数十MBのメモリで高速・堅牢に動作。
+- **組み込みSQLite（`rusqlite` bundled, WALモード ＋ FTS5 trigram ＋ Rustコサイン類似度）**:
+  - C言語SQLiteを静的リンクして単一ファイル完結。`tokio-rusqlite` によるスレッド分離でECSメインループをブロックせず非同期ACIDトランザクションを実行。
 - **エピソード記憶（`MemoryRecord`）**:
-  - `rowid` を明示的 INTEGER PRIMARY KEY AUTOINCREMENT とし、FTS5外部コンテンツテーブルとの対応関係を不変に保証。
-  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（0〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`embedding` を格納。
+  - `rowid` を明示的 INTEGER PRIMARY KEY とし、FTS5外部コンテンツテーブルとの整数参照関係を不変に保証。
+  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（0〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`content_revision`、`embedding` を格納。
   - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除や除外フラグではなく想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（過去ログの客観記録は保持）。
   - ハイブリッド検索: FTS5 BM25（部分トークンOR結合）と ベクトル検索（Rust内スライスコサイン類似度）をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。
-  - **増分自動整理**: `processed_turns_cursor` より後の新規ターンのみを増分走査し、過去ログからの重複再生成を防止。
+  - **増分自動整理**: `consolidation_state.last_processed_turn_id` より後の新規ターンのみを単一方向パイプラインで増分走査し、既存記憶の照合（更新 vs 新規分割作成）とカーソル前進を原子的コミット。
   - 想起スコア計算式：$\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t})$（$\text{Importance} = \text{importance}/10.0$、$\Delta t$ は `COALESCE(last_accessed_at, occurred_at, recorded_at)` からの経過日数。自動想起は `importance >= 2` フィルタと連動）
-  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、ターン完了後の固定・統合処理（Consolidation）時に `cited_memory_ids` を抽出して実際に引用された場合のみ更新（ストリーミング出力へのタグ混入なし）。
+  - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、ターン完了後の固定・統合処理（Consolidation）時に抽出された `cited_memory_ids` をホストがプロンプト注入実績と照合検証した上で更新。
   - **Pinned Memory制約**: 重要度10であっても、訂正状態や優先度引き下げ状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
 
 ### 3. 音声対話パイプライン
 - **プラガブルエンジン適応**:
-  - VOICEVOX等の文単位HTTP API（文ごとに非同期合成し再生キューへ投入）、ストリーミングエンジン、双方向Live APIの各特性に合わせたアダプター構成。
+  - VOICEVOX等の文単位HTTP API（文ごとに非同期合成し再生キューへ投入）、ストリーミングエンジン、双方向Live APIの各特性に合わせたアダプター構成。標準音声形式は 24kHz 16-bit mono PCM。
 - **世代管理と順序保証**:
   - `generation_id` による割り込み時の旧世代チャンク破棄（FlushBuffer）。
-  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止、実再生進捗報告による未伝達部分の記録整合）。
-  - 文単位TTSの並行合成時における `sequence_no` 整列再生。
+  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止、実再生進捗報告による未伝達部分の記録整合、再生中の自己音声エコー抑制）。
+  - 文単位TTSの並行合成時における `sequence_no` 整列再生と、合成失敗時の非ブロッキングスキップ。
 - **複数コンパニオン調停**:
-  - 全員同報配信 ＋ 自律該当性判断。
-  - 同一クライアント内の他コンパニオンへの `work_started` 即時同報通知と、同時着手時の後発側自律キャンセルによる作業重複の自律解消（ホスト受付排他は行わずLLM自律協調）。
+  - 全員同報配信 ＋ 自律該当性判断。日常対話の譲り合いはLLM自律協調。
+  - 不可逆操作を伴う同一タスクの作業委託（`start_work`）は、ホストの原子的リース取得（`try_claim_delegation`）により先着1件のみが実行権を獲得し、多重実行を決定論的に防止。
   - 音声フロアはホスト上での発話テキスト生成（文ストリーム）先着順。会話リレー（`speech_completed`）は最大5往復で自動打ち切り。クライアント再生完了（`ReportPlaybackStatus`）またはタイムアウトによる安全なフロア解放（遅延完了報告は破棄）。
 
 ### 4. セキュリティとSandbox
