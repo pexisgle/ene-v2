@@ -66,6 +66,8 @@ WorkViewは親、WorkSession、進行中RunInfo、未決質問（`pending_inquir
   - `notify_on`: 発火契機（`"focus"`: アクティブ化時、`"blur"`: 非アクティブ化時、`"title_change"`: タイトル変更時）
   - `enabled`: ルールの有効化（`true`）または解除（`false`）
   合致時は定期サンプリングを待たずに即時優先割り込み（Priority Interrupt）が親エージェントへ通知される。
+- **ホスト ➔ クライアントへの監視ルール伝達経路**:
+  親エージェントが `set_eye_watch` を実行した際、ホストは接続中のデスクトップクライアントに対し、`ClientService.DeviceStream` 上の `DeviceOperation { capability: "eye.watch", input: <ルールJSON> }` を送出して監視条件を設定・解除する。クライアントはこれを受けてOSネイティブウィンドウフックのフィルタ条件を動的更新する。
 
 ### 能力
 

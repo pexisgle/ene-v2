@@ -13,10 +13,10 @@ AIが外部から最新情報を収集したり、実行環境や各種サービ
 | **記憶 (Mind)** | `mind_recall(query, limit)` | 過去の関連エピソード記憶を検索（明示的想起） |
 | | `mind_read(memory_id)` | 特定記憶の詳細と由来コンテキストを閲覧 |
 | | `mind_update(action)` | 記憶の追加・訂正・忘却（想起優先度の引き下げ） |
-| **作業委譲 (Hands)** | `start_work(backend, instruction, client_id, files)` | 「手」（WorkSession）へ実務タスクを発注 |
+| **作業委譲 (Hands)** | `start_work(instruction, work_id)` | 「手」（WorkSession）へ実務タスクを発注（新規または既存継続） |
 | | `send_work(work_id, text, request_id)` | 進行中タスクへの追加入力や未決質問（`WorkInquiry`）への回答 |
 | | `list_works()` | 担当するWorkSessionの一覧・進捗状況を取得 |
-| | `stop_work(work_id)` | 進行中タスクの中断を要求 |
+| | `stop_work(work_id, reason)` | 進行中タスクの中断を要求 |
 | **身体・知覚 (Body & Eye)** | `body_motion(motion, expression)` | アバターのモーション・表情を自律指示 |
 | | `set_eye_watch(target_pattern, match_kind, notify_on, enabled)` | クライアント知覚センサーに動的監視ルールを設定 |
 | | `noop()` | 何も行動しない（沈黙・見守り。自律tickの空ターンはログから自動巻き戻し） |

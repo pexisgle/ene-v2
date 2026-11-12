@@ -75,10 +75,10 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 | **記憶 (Mind)** | `mind_recall(query: String, limit: Option<u32>)` | 過去の関連エピソード記憶を検索（明示的想起） |
 | | `mind_read(memory_id: String)` | 特定記憶の詳細と由来コンテキストを閲覧 |
 | | `mind_update(action: MindUpdateAction)` | 記憶の追加・訂正・忘却（想起優先度の引き下げ） |
-| **作業委譲 (Hands)** | `start_work(backend: String, instruction: String, client_id: Option<String>, files: Vec<String>)` | 「手」（WorkSession）へ実務タスクを発注 |
+| **作業委譲 (Hands)** | `start_work(instruction: String, work_id: Option<String>)` | 「手」（WorkSession）へ実務タスクを発注（新規または既存継続） |
 | | `send_work(work_id: String, text: String, request_id: Option<String>)` | 進行中タスクへの追加入力や未決質問（`WorkInquiry`）への回答 |
 | | `list_works()` | 担当するWorkSessionの一覧・進捗状況を取得 |
-| | `stop_work(work_id: String)` | 進行中タスクの中断を要求 |
+| | `stop_work(work_id: String, reason: Option<String>)` | 進行中タスクの中断を要求 |
 | **身体・知覚 (Body & Eye)** | `body_motion(motion: String, expression: Option<String>)` | アバターのモーション・表情を自律指示 |
 | | `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)` | クライアント知覚センサーに動的監視ルールを設定 |
 | | `noop()` | 何も行動しない（沈黙・見守り。自律tickの空ターンはログから自動巻き戻し） |
@@ -102,7 +102,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 会話ログの正本は `SessionLogPlugin` ＋ `DirStore`（`<state_dir>/rig/`）によりディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
-  - 会話の生ログおよびCompaction要約（`Compacted`）、受理レシート（`Conversation::add_aside`）は公式の `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心は SQLite（`host.sqlite3`）に永続化し、2相復旧を原理的に排除。
+  - 会話の生ログおよび要約スナップショット（Aside `ene.summary`）、受理レシート（`Conversation::add_aside`）は公式の `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心は SQLite（`host.sqlite3`）に永続化し、2相復旧を原理的に排除。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
   - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中だった要約タスクは安全にキャンセル・破棄して次回アイドル時へ延期。ハード強制閾値到達時も同期要約による会話停止は避け、緊急窓切り詰めを優先適用して応答テンポを維持。
 - **作業エージェントのセッション接続維持とライフサイクル分離**:

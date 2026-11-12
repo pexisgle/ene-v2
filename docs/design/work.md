@@ -272,9 +272,9 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
-| **`start_work`** | `instruction: String`<br>`session_id: Option<String>` | 「手」に実務を委託。`session_id` 未指定時は新規WorkSessionを作成し、Runを開始して `(session_id, run_id)` を返す |
-| **`send_work`** | `session_id: String`<br>`run_id: String`<br>`message: String`<br>`request_id: Option<String>` | 「手」に対する追加指示（Steering）や質問（Request）への回答を送信 |
-| **`stop_work`** | `session_id: String`<br>`run_id: String`<br>`reason: Option<String>` | 実行中のRunに対する中断要求を発行 |
+| **`start_work`** | `instruction: String`<br>`work_id: Option<String>` | 「手」に実務を委託。`work_id` 未指定時は新規WorkSessionを作成し、指定時は既存セッションを継続してRunを開始 |
+| **`send_work`** | `work_id: String`<br>`text: String`<br>`request_id: Option<String>` | 「手」に対する追加指示や未決質問（`WorkInquiry`）への回答を送信（アクティブRunをホストが自動特定） |
+| **`stop_work`** | `work_id: String`<br>`reason: Option<String>` | 実行中のタスクに対する中断要求を発行（アクティブRunをホストが自動特定） |
 | **`list_works`** | なし | 実行中および直近のWorkSession・Runの状態一覧を取得 |
 
 ### 6.2 子（手）向け報告ツール（内蔵Rig / カスタムエージェント用）
@@ -289,7 +289,7 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 
 ### 7.1 クライアント向けRPCと親（頭）内部ツールの責務分離
 - **通常のユーザー対話（親エージェント経由）**:
-  ユーザーはチャット（`ChatService.SendMessage`）や音声入力（`VoiceService`）を通じて親コンパニオンへ実務や調査を依頼する。親エージェント（頭）が文脈を解釈し、内部ツール（`start_work`, `send_work`, `stop_work`, `list_work`）を実行して自律的に進行する。クライアント自身が親のオーケストレーションを肩代わりすることはない。
+  ユーザーはチャット（`ChatService.SendMessage`）や音声入力（`VoiceService`）を通じて親コンパニオンへ実務や調査を依頼する。親エージェント（頭）が文脈を解釈し、内部ツール（`start_work`, `send_work`, `stop_work`, `list_works`）を実行して自律的に進行する。クライアント自身が親のオーケストレーションを肩代わりすることはない。
 - **Connect-RPC `WorkService` の用途区分**:
   1. **UI一覧表示・状態取得（通常利用）**:
      - `ListWorks`: 実行中および直近の WorkSession 一覧取得（UIサイドバーやタスクパネル表示用）。

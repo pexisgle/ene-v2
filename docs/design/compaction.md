@@ -28,9 +28,10 @@
 ### 2.1 正本と責務の明確な分離（View専用ローリング要約方式への一本化）
 - **Rig（`rig-ecs` / `rig-memory`）が所有する正本**:
   - **会話履歴の追記型正本（完全無圧縮）**: `rig_memory::DirStore`（`rig-memory` feature `fs`）により、会話ログ（`SessionLog`）のメッセージ列をディスク（`<state_dir>/rig/`）上に**完全無圧縮・不変の追記型（Append-only）生ログとして保持**する。
-  - **View専用ローリング要約（View-Only Rolling Summary）の採用**:
+  - **View専用ローリング要約（View-Only Rolling Summary）の採用とAside永続化**:
     - 会話ログ正本をインプレースに書き換える方式（`apply_summary` による splice 置換や undo 復元）は採用せず、**ディスク上の生ログは一切改変しない**。
-    - コンテキスト圧縮は、LLMへ送信するアクティブプロンプト窓（View）の構築時（`PrepareSystems::Fit`）に、`recent::view` で溢れた古いメッセージ群に対して `rig_memory::Summarizer` が生成した要約テキストスナップショットを、`ModelRequest.history` の先頭に `<summary>` としてインメモリ注入する方式に一本化する。
+    - コンテキスト圧縮は、LLMへ送信するアクティブプロンプト窓（View）の構築時（`PrepareSystems::Fit`）に、`recent::view` で溢れた古いメッセージ群に対して `rig_memory::Summarizer` が生成した要約テキストスナップショット（要約本文 `text: String` と要約対象終端 `through_message_id: u64`）を、`ModelRequest.history` の先頭に `<summary>` としてインメモリ注入する方式に一本化する。
+    - **再起動耐性の担保（Aside永続化）**: 要約スナップショットは、受理レシートと同じく `Conversation::add_aside(Aside::new("ene.summary", snapshot_json))` として `SessionLog` 内に Aside レコードとして追記永続化する。ホスト起動時は最後の `"ene.summary"` Aside を読み込んで `current_summary_snapshot` を復元する。これにより、生ログ不変・SQLiteとの2相コミット不要・再起動耐性のすべてを完全同期で達成する。
     - これにより、ディスク上のログ破損や要約差分の不整合、ログ巻き戻し処理の複雑さを根本から排除し、最小で堅牢な実装を実現する。
   - **受理レシート（冪等性）の記録**: クライアントからのメッセージ受付キー（`request_key`）のレシートは、`Conversation::add_aside` を用いて `SessionLog` 内の Aside レコードとして記録する。これにより、SQLite とファイルシステム間の 2相コミットやクラッシュ時の不整合復旧問題が原理的に発生しない。
 - **ene-host が管理する追加状態**:

@@ -33,9 +33,9 @@
   - したがって、ECSメインスレッドに同期の `rusqlite::Connection` を直接保持して同期実行し、非同期エグゼキュータへのタスクスイッチやチャネル往復オーバーヘッドを完全に排除する。
   - 記憶整理（Consolidation）のLLM呼び出しや埋め込みベクトル生成（Embedding API）などの長時間非同期処理のみ、専用のTokioバックグラウンドタスクおよび別コネクションへ分離する。
 - **会話ログ・要約正本（`rig_memory::DirStore`）と SQLite のクリーンな責務分離**:
-  - 会話履歴（`SessionLog`）および要約状態（`Compacted`）は、公式 `rig-ecs` がネイティブに要求する同期ストア `rig_memory::DirStore`（`<state_dir>/rig/`）をそのまま採用。
+  - 会話履歴（`SessionLog`）および要約スナップショット（Aside `ene.summary`）は、公式 `rig-ecs` がネイティブに要求する同期ストア `rig_memory::DirStore`（`<state_dir>/rig/`）をそのまま採用。
   - プロセス間ファイルロック、破損末尾行の自動退避、画像等のバイナリBlob管理は公式実装に完全に委譲され、アダプタの自作はゼロ行（0行）。
-  - クライアントからの会話受理レシート（`request_key` 重複排除）は SQLite ではなく `Conversation::add_aside`（SessionLog 内）に直接記録するため、ファイルシステムと SQLite 間の 2相コミットやクラッシュ時の不整合復旧問題が原理的に発生しない。
+  - クライアントからの会話受理レシート（`request_key` 重複排除）および要約スナップショットは、SQLite ではなく `Conversation::add_aside`（SessionLog 内）に直接記録するため、ファイルシステムと SQLite 間の 2相コミットやクラッシュ時の不整合復旧問題が原理的に発生しない。
   - SQLite（`host.sqlite3`）は、心・長期エピソード記憶・認知的関係性・設定・作業・承認要求・スケジュールのACID管理に専念する。
 
 > [!NOTE]
@@ -216,18 +216,24 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
   - 外部ファイル自動探索（`rig-mcp-client` の暗黙読み込み）を排し、公式の **`rig-rmcp`**（`McpConnection` / `ManagedToolSink`）または `rig_mcp_client::McpCorePlugin` を採用。
   - eneの設定DBで認可されたMCPサーバーのみを明示的に接続・再接続管理し、取得されたツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。設定の正本はeneが単一所有する。
 - **7つの `ModelAssignments` と `rig-core` カタログの最小マッピング**:
-  - `rig_core::catalog::Catalog` と `rig_ecs::model::Connection` を直接用いて、7役割（`companion`, `task`, `perception`, `compaction`, `consolidation`, `decision`, `embedding`）を解決する：
+  - `rig_core::catalog::Catalog` はモデルメタデータ（`ModelSpec`：コンテキスト長・入出力上限等）を引くための純粋なデータ辞書として利用し、モデル接続はプロバイダークライアントから `rig_ecs::model::Connection` へ直接マッピングする：
     ```rust
-    // rig-core 公式 Catalog による接続解決の最小構成
-    let mut catalog = Catalog::default();
-    // プロバイダー認証情報を登録
-    catalog.register_credentials(&provider_id, &api_key);
-    // 各役割のモデル接続を取得
-    let companion_model = catalog.connect(&assignments.companion.model_id)?;
-    let task_model = catalog.connect(&assignments.task.model_id)?;
+    // rig-core 0.46 公式 ModelAdapter + Connection の最小構成
+    // Catalog からモデル仕様 (ModelSpec) を取得
+    let spec = catalog.get(&assignments.companion.model_id)?;
+    // プロバイダークライアント経由で生成したモデルを ErasedHandler で包む
+    let adapter = ModelAdapter::<Completion>::new(client.completion_model(&assignments.companion.model_id));
+    let handler = ErasedHandler::new(adapter);
     // rig-ecs Connection コンポーネントとして World へ注入
-    commands.entity(companion_entity).insert(Connection::new(companion_model));
+    commands.entity(companion_entity).insert(rig_ecs::model::Connection {
+        spec,
+        handler: Handler(handler),
+    });
     ```
+- **自律tickターンの段階的昇格方式（Staged PromotionによるSessionLog保護）**:
+  - `rig-ecs` の `SessionLogPlugin` は `Deliver` が呼ばれたフレーム末尾で即座にディスク上のファイル（`DirStore`）へ Incoming メッセージを追記する。`DirStore` は追記専用であるため、後から `Conversation` の末尾エントリを消してもディスク上のログを巻き戻すことはできない。
+  - したがって、自律tickや見守り判定の推論は、最初からメインの `Conversation` に `Deliver` せず、現在の `Conversation` の一時ビュー（またはクローン）を用いて推論を実行する。
+  - モデルが `noop()` 以外（ユーザーへの発話テキスト、または `start_work` 等の実アクション）を返した場合にのみ、そのターン（入力＋発話／アクション）をメインの `Conversation` 正本へ `Deliver` / 記録する。これにより、ディスクI/Oとセッションログの不要な肥大化を根本から防ぐ。
 
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
@@ -326,17 +332,33 @@ pub trait TtsEngine: Send + Sync {
   - `agent-client-protocol = "5.0.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
   - `process-wrap` の `TokioCommandWrap` で起動した子プロセスの標準入出力を `Client::v1()` トランスポートへ接続する最小構成：
     ```rust
-    use agent_client_protocol::v1::Client;
-    use process_wrap::tokio::TokioCommandWrap;
+    use agent_client_protocol::{ByteStreams, Client, schema::ProtocolVersion, v1::schema::InitializeRequest};
+    use process_wrap::tokio::*;
     use tokio::process::Command;
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-    let mut wrap = TokioCommandWrap::from(Command::new("opencode"));
+    let mut wrap = CommandWrap::with_new("opencode", |cmd| {
+        cmd.stdin(std::process::Stdio::piped())
+           .stdout(std::process::Stdio::piped());
+    });
+    #[cfg(unix)]
+    wrap.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    wrap.wrap(JobObject);
+    wrap.wrap(KillOnDrop);
+
     let mut child = wrap.spawn()?;
-    let stdin = child.take_stdin().expect("stdin pipe");
-    let stdout = child.take_stdout().expect("stdout pipe");
+    let stdin = child.stdin().take().expect("stdin").compat_write();
+    let stdout = child.stdout().take().expect("stdout").compat();
 
-    // agent-client-protocol の Client トランスポートへ接続
-    let client = Client::v1(stdin, stdout);
+    Client.v1()
+        .name("ene-host")
+        .connect_with(ByteStreams::new(stdin, stdout), async |cx| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+            // WorkSession (cx.build_session_cwd() 等) を維持して prompt / cancel を実行
+            Ok(())
+        })
+        .await?;
     ```
 
 - **Connect-RPC サーバーの HTTP/2（h2c）設定**:
