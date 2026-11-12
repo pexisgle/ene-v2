@@ -102,15 +102,22 @@
 ### 3.4 `apps/ene-avatar` 標準入出力 JSON Lines IPC スキーマ
 デスクトップクライアントと `apps/ene-avatar` 子プロセス間の標準入出力通信仕様。各行は最大 64 KiB の改行区切り JSON テキスト。
 
+- **実装済み機能と将来拡張の境界**:
+  - **実装済み機能**: `src/control.rs` の `add`, `set`, `get`, `remove`, `center`, `fps`, `quit` コマンド。VRM 1.0モデルロード、単一VRMA再生、SpringBone物理演算。
+  - **段階的拡張**: 表情ブレンドシェイプ（`expression`）、アニメーション遷移クロスフェード、および高頻度ワンウェイ口パク通知（`lip_sync`）。
 - **リクエスト形式（Client ➔ Avatar stdin）**:
   ```json
-  {"id": 1, "op": "add", "character": "ene", "config": {"model": "/abs/path/ene.vrm", "motion": "/abs/path/idle.vrma", "expression": "neutral", "playing": true, "looping": true, "size_percent": 100.0}}
-  {"id": 2, "op": "set", "character": "ene", "config": {"model": "/abs/path/ene.vrm", "motion": "/abs/path/nod.vrma", "expression": "happy", "playing": true, "looping": false, "size_percent": 100.0}}
-  {"id": 3, "op": "lip_sync", "character": "ene", "rms": 0.42}
-  {"id": 4, "op": "center", "character": "ene", "monitor": "eDP-1"}
-  {"id": 5, "op": "fps", "value": 60}
-  {"id": 6, "op": "remove", "character": "ene"}
-  {"id": 7, "op": "quit"}
+  {"id": 1, "op": "add", "character": "ene", "config": {"model": "/abs/path/ene.vrm", "motion": "/abs/path/idle.vrma", "playing": true, "looping": true, "size_percent": 100.0}}
+  {"id": 2, "op": "set", "character": "ene", "config": {"model": "/abs/path/ene.vrm", "motion": "/abs/path/nod.vrma", "playing": true, "looping": false, "size_percent": 100.0}}
+  {"id": 3, "op": "center", "character": "ene", "monitor": "eDP-1"}
+  {"id": 4, "op": "fps", "value": 60}
+  {"id": 5, "op": "remove", "character": "ene"}
+  {"id": 6, "op": "quit"}
+  ```
+- **高頻度ストリーム（ワンウェイ通知型: 応答待機なし）**:
+  リップシンクは毎秒60回発生する高頻度ストリームであるため、ID付きリクエスト・レスポンスではなく、**標準出力の詰まりを防止するワンウェイ通知（Fire-and-forget）**として送信する：
+  ```json
+  {"op": "lip_sync", "character": "ene", "rms": 0.42}
   ```
 - **レスポンス・通知形式（Avatar stdout ➔ Client）**:
   ```json
@@ -125,7 +132,7 @@
 
 ### 4.1 LLMテキストストリーム直接接続による先行合成
 - 発話全文の生成完了を待つのではなく、**LLMの出力トークンストリームから文末記号（`。`, `！`, `？`, 改行）を検出した順に即座にTTSエンジンへ投入**する。
-- **フィルタリング原則**: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`delta.agent` が親コンパニオンの Entity と一致するテキスト文字片のみを対象とし、Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等はTTSへ流さない。
+- **フィルタリング原則**: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`Query<(&Effect, &CallOf), With<TurnCall>>` により通常の会話ターン呼び出し（`TurnCall` マーカー付き）であることをフィルタし、かつ `matches!(delta.event, StreamEvent::Text { .. })` で思考トークン（Reasoning）を除外した上で、親コンパニオンの発話テキストのみをTTSへ流す（Compaction要約、記憶整理、子エージェントログ等は完全に遮断）。
 - **未完了文の終端フラッシュ**: LLMの生成が文末記号なしで完了（`end_turn`）した場合、文蓄積バッファに残っているテキストを即座に最終文としてフラッシュし、TTSへ投入する。
 - **並行合成バッファ上限**: 先行合成キューの滞留を防ぐため、再生待機バッファの最大文数は **3文** までとし、再生速度に応じたバックプレッシャーをかける。
 - **合成失敗時の明示的スキップ通知（SentenceSkipped）**:
@@ -170,8 +177,9 @@ pub struct TtsCapabilities {
 
 レビューで指摘された「Flush後の遅延到着再生」「文完成順の逆転」「音声フォーマット不整合」を防ぐため、以下の順序・世代管理を厳格に実装する。
 
-- **標準音声フォーマット（Wire Standard）**:
+- **標準音声フォーマット（Wire Standard）とデバイスリサンプリング（`rubato`）**:
   - 全エンジンからの音声ストリームは **24,000 Hz / 16-bit signed Little-Endian PCM（`pcm_s16le`）/ 1 チャンネル（モノラル）** に統一して配信する。
+  - **クライアント側リサンプラー（`rubato`）**: cpal はハードウェアネイティブのサンプリングレート（多くのデバイスで 48kHz または 44.1kHz、2ch ステレオ）しか受け付けない場合が多いため、クライアント側で公式の高品質リサンプラー `rubato` を用いて、マイク入力（48kHz stereo ➔ 24kHz mono）およびスピーカー再生（24kHz mono ➔ 48kHz stereo）の双方向リサンプリング・チャンネル変換を行う。
 
 ```rust
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -258,11 +266,13 @@ pub struct AudioChunkEnvelope {
 ### 5.2 会話上の自律性と不可逆操作権限の分離（原子的な受付登録の獲得）
 - **会話上の自律性と副作用実行権の明確な分離**:
   - コンパニオン同士の日常雑談、相談、譲り合いはLLMが自律的に行う。
-  - しかし、**メール送信・ファイル確定・外部API呼び出し等の取り消せない外部副作用を伴う同一タスクの着手**については、「後発側が気づいて自律キャンセルする」という緩い前提に依存せず、ホストが入力要求由来のID（`request_id` / `delegation_key`）に基づく**原子的受付登録（Atomic Claim）**により一意に担当を確定する。
-- **タスク着手時の原子的受付登録（`try_claim_delegation`）**:
-  - 実務指示（`start_work`）を開始する際、コンパニオンはホストに対して委託受付を登録する：
+  - しかし、**メール送信・ファイル確定・外部API呼び出し等の取り消せない外部副作用を伴う同一タスクの着手**については、「後発側が気づいて自律キャンセルする」という緩い前提に依存せず、ホストが入力要求由来のID（`transcription_id`）に基づく**原子的受付登録（Atomic Claim）**により一意に担当を確定する。
+- **タスク着手時の原子的受付登録（`try_claim_delegation`）とキー自動束縛**:
+  - `start_work` 呼び出しにおける `delegation_key` は、LLMに引数として生成させない（異なる文字列が生成されて排他が効かなくなるのを防ぐ）。
+  - **ホスト側で「同一の音声認識イベント（`transcription_id`）に紐づくターンでの `start_work` 呼び出しは、ホストが `transcription_id` を自動で `delegation_key` に束縛」**する。
+  - 実務指示を開始する際、コンパニオンはホストに対して委託受付を登録する：
     ```rust
-    // ホスト内の同期・原子的判定
+    // ホスト内の同期・原子的判定 (transcription_id を delegation_key として自動利用)
     if host.try_claim_delegation(&delegation_key, companion_id) {
         // 先着で権利を獲得：作業エージェントの起動と不可逆操作へ進む
         notify_others_work_started(companion_id, delegation_key);
@@ -274,8 +284,10 @@ pub struct AudioChunkEnvelope {
     ```
   - これにより、複数コンパニオンが同時に同一指示を受け取った場合でも、外部副作用（メール2重送信など）が先行して実行される競合リスクを決定論的に排除する。
   - ユーザーが明示的に「2人とも調べて」と複数並行委託を指示した場合は、指示ごとに個別の `delegation_key` が発行され、安全に並行実行される。
-- **発話権（Floor）の先着基準**:
-  - 作業担当の受付登録とは独立して、**ホスト上で最初にユーザー向け応答テキストの生成（最初の文ストリーム）を開始・受付させたコンパニオンが発話権（Floor）を獲得**し、クライアントへの音声配信ストリーミングを行う。音声フロアの解放はクライアントの再生完了報告（`ReportPlaybackStatus`）またはタイムアウトにより行われる。
+- **発話権（Floor）の先着基準と負けた側のターン出力破棄**:
+  - 作業担当の受付登録とは独立して、**ホスト上で最初にユーザー向け応答テキストの生成（最初の文ストリーム）を開始・受付させたコンパニオンが発話権（Floor）を獲得**し、クライアントへの音声配信ストリーミングを行う。
+  - **負けた側のターン出力破棄規約**: 先着でフロアを獲得できなかった側のコンパニオンについては、ホストが `world.trigger(StopTurn::new(peer_entity))` により推論を即座に中断・破棄する。これにより、「言いかけて言わなかった応答」が未発話のまま `SessionLog` に残って会話記憶が汚染される事故を防止する。
+  - 音声フロアの解放はクライアントの再生完了報告（`ReportPlaybackStatus`）またはタイムアウトにより行われる。
 
 ### 5.3 会話リレー（`speech_completed`）と再生制御・伝達進捗
 - **クライアント側での単一再生物理保証と旧発話の完全失効**:

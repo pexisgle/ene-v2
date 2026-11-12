@@ -63,10 +63,31 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 | 境界 | 主な構成要素 | 責務と役割 |
 | :--- | :--- | :--- |
-| **「頭」<br>(Brain / 親)** | `rig-ecs` Bevy ECS 単一ループ<br>（`SessionLogPlugin`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`start_work`, `send_work`, `stop_work`）<br>・「目」への動的Watcher登録（`set_eye_watch`） |
-| **「手」<br>(Hands / 子)** | WorkSession / Run<br>MCP / ACP / Wasm | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けたクリーンアップと30秒タイムアウト強制終了 |
+| **「頭」<br>(Brain / 親)** | `rig-ecs` Bevy ECS 単一ループ<br>（`SessionLogPlugin` ＋ `DirStore`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`start_work`, `send_work`, `list_works`, `stop_work`）<br>・「目」への動的Watcher登録（`set_eye_watch`）<br>・自律スケジュール管理（`schedule_create`, `schedule_list`, `schedule_cancel`） |
+| **「手」<br>(Hands / 子)** | WorkSession / Run<br>MCP（`rig-rmcp`） / ACP<br>（WasmはPhase 2） | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けたクリーンアップと30秒タイムアウト強制終了 |
 | **「目」<br>(Eyes / 知覚)** | クライアントセンサー<br>知覚要約生成器 | ・OSイベント（フォーカス切替、ファイル保存等）の即時フック<br>・無操作時のアイドルサンプリング（15〜30秒間隔）<br>・高解像度な作業状況を簡潔なPerception Summaryへ要約<br>・動的Watcher条件合致時の優先割り込み通知（Priority Interrupt） |
-| **「体」<br>(Body / 表現)** | `ene-avatar`<br>音声ストリーミング | ・透過デスクトップウィンドウ上でのVRM 1.0 3D描画（Bevy）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
+| **「体」<br>(Body / 表現)** | `apps/ene-avatar`<br>音声ストリーミング | ・透過デスクトップウィンドウ上でのVRM 1.0 3D描画（Bevy）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
+
+### 親エージェント（頭）の正規ツールセット一覧
+
+| カテゴリ | ツール名とシグネチャ | 役割と責務 |
+| :--- | :--- | :--- |
+| **記憶 (Mind)** | `mind_recall(query: String, limit: Option<u32>)` | 過去の関連エピソード記憶を検索（明示的想起） |
+| | `mind_read(memory_id: String)` | 特定記憶の詳細と由来コンテキストを閲覧 |
+| | `mind_update(action: MindUpdateAction)` | 記憶の追加・訂正・忘却（想起優先度の引き下げ） |
+| **作業委譲 (Hands)** | `start_work(backend: String, instruction: String, client_id: Option<String>, files: Vec<String>)` | 「手」（WorkSession）へ実務タスクを発注 |
+| | `send_work(work_id: String, text: String, request_id: Option<String>)` | 進行中タスクへの追加入力や未決質問（`WorkInquiry`）への回答 |
+| | `list_works()` | 担当するWorkSessionの一覧・進捗状況を取得 |
+| | `stop_work(work_id: String)` | 進行中タスクの中断を要求 |
+| **身体・知覚 (Body & Eye)** | `body_motion(motion: String, expression: Option<String>)` | アバターのモーション・表情を自律指示 |
+| | `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)` | クライアント知覚センサーに動的監視ルールを設定 |
+| | `noop()` | 何も行動しない（沈黙・見守り。自律tickの空ターンはログから自動巻き戻し） |
+| **自律スケジュール** | `schedule_create(title: String, instruction: String, run_at: Option<String>, cron_expr: Option<String>)` | タイマーや定期リマインドを登録 |
+| | `schedule_list()` | 登録済みスケジュール一覧を取得 |
+| | `schedule_cancel(schedule_id: String)` | スケジュールを解除 |
+
+> [!NOTE]
+> 現在日時は `PrepareSystems::Edit` により毎ターン最新が Dynamic Tail としてインメモリ注入されるためツール呼び出しは不要。また、外部Web検索は「手」（WorkSession）のツールまたは外部MCPサーバーへ委譲する。
 
 ---
 
@@ -76,7 +97,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 - **`rig-ecs` による単一イベント駆動エージェントループ**:
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
-    - 先行TTS: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`delta.agent` が親コンパニオンの Entity と一致するテキスト文字片のみをフィルタして文単位（`。`、`！`、`？`、改行）で合成キューへ送出
+    - 先行TTS: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`Query<(&Effect, &CallOf), With<TurnCall>>` により通常ターン呼び出しをフィルタし、`matches!(delta.event, StreamEvent::Text { .. })` で思考トークン（Reasoning）を除外した上で、親コンパニオンの発話テキストのみを文単位（`。`、`！`、`？`、改行）で合成キューへ送出
     - 承認待機: `Stage::Gate` でポリシー判定し、要確認操作には `commands.spawn(HoldOf(call_entity))` を投入してReActループを保留。RPC（`SettingsService.SubmitApproval`）でユーザー回答を受け取り、承認時は `Approved` コンポーネントを付与、拒否時は `Outcome::refused` を確定し、`HoldOf` を解除して処理再開。承認結果は `host.sqlite3` の `approval_requests` テーブルへ保存
   - 会話ログの正本は `SessionLogPlugin` ＋ `DirStore`（`<state_dir>/rig/`）によりディスクに保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。

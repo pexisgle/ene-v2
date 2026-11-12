@@ -9,10 +9,10 @@
 | 領域 | 採用技術 / ライブラリ | 選定理由 |
 | :--- | :--- | :--- |
 | **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイル（`host.sqlite3`）で完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。記憶整理や埋め込み生成等の重い非同期処理のみバックグラウンドタスクへ分離 |
-| **会話ログ・要約正本** | **`rig_memory::DirStore` (`rig-memory` feature `fs`)** | 公式の `rig-ecs` が推奨する同期ファイルストア。プロセス間ファイルロック、破損末尾行の自動退避、画像Blob管理を公式実装に委譲し、アダプタ実装ゼロ行で完結。受理レシート（`request_key`）も `Conversation::add_aside` でセッションログ内に記録するため、SQLiteとの2相不整合は原理的に発生しない |
-| **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics` / `rig-mcp-client`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と `world.spawn_tool` による動的MCP登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
+| **会話ログ・要約正本** | **`rig_memory::DirStore` (`rig-memory` feature `fs`)** | 公式の `rig-ecs` がネイティブに要求する同期ファイルストア。プロセス間ファイルロック、破損末尾行の自動退避、画像Blob管理を公式実装に委譲し、アダプタ実装ゼロ行で完結。受理レシート（`request_key`）も `Conversation::add_aside` でセッションログ内に記録するため、SQLiteとの2相不整合は原理的に発生しない |
+| **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ `rig-rmcp` ＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と `rig-rmcp` による公式MCPブリッジ動的登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
 | **OSサンドボックス** | **OSネイティブ隔離 (`cap-std`, `process-wrap`, `landlock`, `bwrap`)** | Linux（Landlock ＋ bwrap netns分離 ＋ UNIXソケットプロキシ）、Windows（AppContainer / Job Objects）、macOS（Seatbelt）を統一制御。非対応環境では明示的警告・承認で縮退 |
-| **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` (音声I/O) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlintによる軽快な設定・承認UI、cpalによる低遅延音声キャプチャ・再生、OSフックによる知覚センシング（目） |
+| **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` + `rubato` (音声I/O・リサンプリング) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlint（Royalty-free規約遵守）による軽快な設定・承認UI、cpal＋rubatoによる低遅延・高精度リサンプリング音声キャプチャ・再生、OSフックによる知覚センシング（目） |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産をそのまま活用。透過デスクトップウィンドウ（Wayland layer-shell / Windows Win32 layered）、VRM 1.0モデルロード・アニメーション（`ene-vrm`）、RMS音量によるローカル即時口パク、標準入出力JSON Lines IPC制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
 | **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、双方向ストリーミング（HTTP/2）対応 |
@@ -36,10 +36,17 @@
   - 会話履歴（`SessionLog`）および要約状態（`Compacted`）は、公式 `rig-ecs` がネイティブに要求する同期ストア `rig_memory::DirStore`（`<state_dir>/rig/`）をそのまま採用。
   - プロセス間ファイルロック、破損末尾行の自動退避、画像等のバイナリBlob管理は公式実装に完全に委譲され、アダプタの自作はゼロ行（0行）。
   - クライアントからの会話受理レシート（`request_key` 重複排除）は SQLite ではなく `Conversation::add_aside`（SessionLog 内）に直接記録するため、ファイルシステムと SQLite 間の 2相コミットやクラッシュ時の不整合復旧問題が原理的に発生しない。
-  - SQLite（`host.sqlite3`）は、心・長期エピソード記憶・認知的関係性・設定・作業・承認要求のACID管理に専念する。
-- **FTS5 trigram ＋ ベクトル検索（BLOBコサイン類似度）**:
-  - 日本語の分かち書きエンジン不要の **FTS5 trigram（3-gram）** インデックスにより、助詞や固有名詞を含む高精度な語句検索を実現。
-  - 選択された埋め込みモデル（ローカル `fastembed` / クラウド `text-embedding-3-small` 等）のベクトルを BLOB として保存し、Rust内のスライスコサイン類似度計算と FTS5 の順位を Rust 側で RRF（Reciprocal Rank Fusion）統合（外部C拡張に依存せず安定・最小化）。
+  - SQLite（`host.sqlite3`）は、心・長期エピソード記憶・認知的関係性・設定・作業・承認要求・スケジュールのACID管理に専念する。
+
+> [!NOTE]
+> **SqliteSessionStore を採用しない技術的理由（公式API仕様）**:
+> `rig-memory 0.46.0` では、同期の `rig_memory::Store`（スーパートレイトとして `Files` を持つ）を実装した型はブランケット実装により自動的に `AsyncStore` になるが、逆（`AsyncStore` ➔ `Store`）は成り立たない。
+> `rig-sqlite 0.46.0` の `SqliteSessionStore` は `load_async` / `save_async` が用いる `AsyncStore` のみを実装しており、`rig-ecs` の `SessionLogPlugin`（`SessionStore(Arc<dyn Store>)` / `open_session`）が要求する同期 `Store` および `Files`（`logs`, `files`, `append_file`, `remove_file` 等）を実装していない。
+> さらに `rig-sqlite` は内部依存として `tokio-rusqlite` や `sqlite-vec` を引き込むため、同期 `rusqlite` に統一したECSアーキテクチャに不要な非同期ラッパーが再混入する。したがって、公式が `rig-ecs` 向けに提供する標準同期ファイルストア `rig_memory::DirStore`（アダプタ自作ゼロ行）を採用するのが最も堅牢で最小構成となる。
+
+- **FTS5 trigram ＋ ベクトル検索（インメモリ CompactVectorIndex によるゼロアロケーション）**:
+  - 日本語の分かち書きエンジン不要の **FTS5 trigram（3-gram）** インデックスにより、助詞や固有名詞を含む高精度な語句検索を実現。空白・句読点でのみ分割し、助詞正規表現分割による誤切断を防止。
+  - **`CompactVectorIndex`（ECS Resource キャッシュ）**: 毎ターンの類似度検索で SQLite から全 BLOB を `Vec<u8>` としてデシリアライズするオーバーヘッドを排除するため、SQLite を正本としつつ ECS Resource 上にフラットな `Vec<f32>` 連続配列キャッシュ（`CompactVectorIndex`）を保持。`memory_revision` 更新時のみ差分同期し、数十マイクロ秒・ゼロアロケーションでスライスコサイン類似度を高速計算。FTS5 の順位と Rust 側で RRF（Reciprocal Rank Fusion）統合する。
 - **1ホップ認知関係性（エッジテーブル）**:
   - 認知的関係性（`companion->remembers->memory`, `memory->cited_in->turn`, `memory->supersedes->memory`）は高々1ホップの参照であるため、シンプルな `memory_edges(from_id, rel, to_id)` テーブルで高速・堅牢に表現可能。
 
@@ -50,14 +57,18 @@
   rig-core = "0.46"
   rig-ecs = "0.46"
   rig-memory = { version = "0.46", features = ["fs"] }
+  rig-rmcp = "0.46"
   serde = { version = "1", features = ["derive"] }
   serde_json = "1"
   ```
 - **スキーマ定義とハイブリッド検索（Rust）**:
   ```rust
-  // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ + 整理カーソル + 承認状態）
+  // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ + 整理カーソル + 承認状態 + スケジュール）
+  // 全コネクションでビジータイムアウトと同期モードを必須設定
   conn.execute_batch(r#"
       PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
+      PRAGMA synchronous = NORMAL;
       
       -- 明示的 INTEGER PRIMARY KEY は SQLite の rowid のエイリアスとなり VACUUM 後も安定
       CREATE TABLE IF NOT EXISTS memories (
@@ -127,6 +138,19 @@
           created_at TEXT NOT NULL,
           resolved_at TEXT
       );
+
+      -- スケジュール・自律リマインド永続化テーブル
+      CREATE TABLE IF NOT EXISTS schedules (
+          id TEXT PRIMARY KEY,
+          companion_id TEXT NOT NULL,
+          cron_expr TEXT,            -- 繰り返しスケジュール (5-field cron)
+          run_at TEXT,               -- 一度限りの実行日時 (ISO 8601)
+          title TEXT NOT NULL,       -- 予定・リマインドのタイトル
+          instruction TEXT NOT NULL, -- 発火時に親エージェントへ投入するプロンプト
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          last_triggered_at TEXT
+      );
   "#)?;
   ```
 - **一次ドキュメント**:
@@ -180,17 +204,36 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
     $$\text{[System Prompt]} \longrightarrow \text{[Past Dialogue History]} \longrightarrow \text{[Dynamic Tail in User\_N]} \longrightarrow \text{[User Speech]}$$
   - Pinned Memory、想起エピソード記憶、現在の心（`MindState`）、知覚要約（Perception Summary）、現在日時は、永続会話ログ（`SessionLog`）には一切書き込まず、最新のユーザー発話ブロック（`User_N`）の末尾コンテキスト枠に一時注入する。
   - これにより、`[System Prompt, ..., Assistant_{N-1}]` までの過去ログ全体が完全に不変のプレフィックスとして保持され、>90% のキャッシュヒット率を達成する。
+  - **1ターン内のReActツール反復におけるキャッシュ固定規約**:
+    - 1ターン内でモデルがツール（例: `mind_recall`）を呼び出し、その `ToolResult` を持って2回目のモデル推論（Step 2）が走る際、ターン開始時に生成した Dynamic Tail のスナップショット（時刻・心境・想起記憶）を固定し、ターン内の複数ステップ間で全く同一のコンテキスト文字列を維持する。
+    - これにより、1ターン内のReActツール反復において Prefix Cache が 100% 効くことを保証する。
   - `PrepareSystems::Edit` で動的文脈を注入し、`PrepareSystems::Fit` で動的文脈を含む要求全体に対してトークン数計測と `recent::view` 窓切り詰めを実行する。
-- **ストリーム文字片の厳格なフィルタリング**:
-  - `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読するシステムは、**`delta.agent` が親コンパニオンの Entity と一致するテキスト文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
-  - Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等は一切TTSへ流さない。
-- **MCPツールの動的ECS登録**:
-  - 外部ファイル自動探索（`rig-mcp-client`）を排し、eneの設定DBで認可されたMCPサーバーのツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。設定の正本はeneが単一所有する。
+- **先行TTSストリーム文字片の厳格なフィルタリング**:
+  - `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読するシステムは、**`Query<(&Effect, &CallOf), With<TurnCall>>` により `delta.effect` が通常の会話ターン呼び出し（`TurnCall` マーカー付き）であることを機械的にフィルタ**する。
+  - これにより、親エージェントがトリガーしたサイドLLM呼び出し（Compaction要約や記憶整理）の出力がTTSに混入する事故を完全に防ぐ。
+  - さらに **`matches!(delta.event, StreamEvent::Text { .. })` で思考トークン（Reasoning / Thinking）を確実に除外**し、親コンパニオンのユーザー向け発話テキストのみを句点（`。`、`！`、`？`、改行）ごとに切り出してTTSタスクへ送出する。
+- **MCPツールの動的ECS登録（`rig-rmcp`）**:
+  - 外部ファイル自動探索（`rig-mcp-client` の暗黙読み込み）を排し、公式の **`rig-rmcp`**（`McpConnection` / `ManagedToolSink`）または `rig_mcp_client::McpCorePlugin` を採用。
+  - eneの設定DBで認可されたMCPサーバーのみを明示的に接続・再接続管理し、取得されたツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。設定の正本はeneが単一所有する。
+- **7つの `ModelAssignments` と `rig-core` カタログの最小マッピング**:
+  - `rig_core::catalog::Catalog` と `rig_ecs::model::Connection` を直接用いて、7役割（`companion`, `task`, `perception`, `compaction`, `consolidation`, `decision`, `embedding`）を解決する：
+    ```rust
+    // rig-core 公式 Catalog による接続解決の最小構成
+    let mut catalog = Catalog::default();
+    // プロバイダー認証情報を登録
+    catalog.register_credentials(&provider_id, &api_key);
+    // 各役割のモデル接続を取得
+    let companion_model = catalog.connect(&assignments.companion.model_id)?;
+    let task_model = catalog.connect(&assignments.task.model_id)?;
+    // rig-ecs Connection コンポーネントとして World へ注入
+    commands.entity(companion_entity).insert(Connection::new(companion_model));
+    ```
 
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
 - [`rig-ecs` Documentation](https://docs.rs/rig-ecs)（Bevy ECSベースのエージェント実行）
 - [`rig-memory` Documentation](https://docs.rs/rig-memory)（DirStore・Compaction要約・Anchor）
+- [`rig-rmcp` Documentation (docs.rs)](https://docs.rs/rig-rmcp)（公式RMCP SDKブリッジ）
 
 ---
 
@@ -245,19 +288,22 @@ pub trait TtsEngine: Send + Sync {
 
 ---
 
-### E. アバター描画：`apps/ene-avatar`（Bevy + `ene-vrm`）をそのまま採用
+### E. アバター描画：`apps/ene-avatar`（Bevy + `ene-vrm`）の資産活用と段階的拡張
 
-- **既存実装（`apps/ene-avatar`）の直接利用**:
-  - アバター描画プロセスには、リポジトリ内に既に実装済みの `apps/ene-avatar` をそのまま採用する。
-  - `apps/ene-avatar` は `bevy = "=0.20.0"` および専用の `ene-vrm`（`crates/ene-vrm`）により、VRM 1.0モデルロード、VRMA/モーフアニメーション再生、および表情ブレンドシェイプを完結して実装している。
-- **実証済みの機能構成**:
-  1. **クロスプラットフォーム透過デスクトップウィンドウ**:
-     - Linux: Wayland layer-shell（`exwlshellev = "=0.20.1"` による透過・背後クリック透過）。
-     - Windows: Win32 API（`windows = "0.62"`）によるレイヤード透過ウィンドウ（Layered Window）。
-  2. **ローカルRMS音量解析による即時口パク（リップシンク）**:
-     - 再生中PCM音声のRMS振幅をフレーム単位で解析し、VRMブレンドシェイプ（`aa` 等）を即時変位。
-  3. **標準入出力 JSON Lines IPC制御**:
-     - 親エージェントからの `body_motion` 指示（モーション名・表情）を標準入力で受信し、滑らかにクロスフェード再生。
+- **既存実装（`apps/ene-avatar`）で実装済みの機能**:
+  - `apps/ene-avatar` は `bevy = "=0.20.0"` および `crates/ene-vrm` により、以下のコア基盤を完結して実装している：
+    1. **クロスプラットフォーム透過デスクトップウィンドウ**:
+       - Linux: Wayland layer-shell（`exwlshellev = "=0.20.1"` による透過・背後クリック透過）。
+       - Windows: Win32 API（`windows = "0.62"`）によるレイヤード透過ウィンドウ（Layered Window）。
+    2. **VRM 1.0モデルロードと単一VRMAアニメーション再生**:
+       - `ene-vrm` によるモデル読み込み、SpringBone（髪・服の揺れもの物理）、VRMAクリップ再生。
+    3. **標準入出力 JSON Lines IPC基盤（`src/control.rs`）**:
+       - `add`, `set`, `get`, `remove`, `center`, `fps`, `quit` の7種コマンドによるプロセス制御。
+- **今後追加する最小拡張（Future Extensions）**:
+  - **ワンウェイ通知型リップシンク（`lip_sync`）**:
+    - リップシンク（口パク）は毎秒60回発生する高頻度ストリームであるため、通常のリクエスト-レスポンス（`{"id": N, "ok": null}`）ではなく、**応答不要のワンウェイ通知（Fire-and-forget Event）** として `{"op": "lip_sync", "character": "ene", "rms": 0.42}` を受け付けるよう拡張する。これにより、標準出力のバッファ溢れ・IPC詰まりを根本から防止する。
+  - **表情ブレンドシェイプとクロスフェード遷移**:
+    - `config.expression`（表情名指定）および Bevy標準 `AnimationTransitions` によるモーション切り替え時のスムーズなクロスフェード補間（約300ms）を段階的に導入する。
 
 ---
 
@@ -267,11 +313,35 @@ pub trait TtsEngine: Send + Sync {
 
 | コンポーネント | 採用技術 | 選定理由と責務 |
 | :--- | :--- | :--- |
-| **ネイティブGUI** | **`Slint`** | ElectronやQtのような巨大なランタイム・Webブラウザエンジンを排し、Pure Rustで軽量・高速に描画されるネイティブGUIツールキットを採用。承認カード、設定画面、コンパニオン切替UIを数MBのフットプリントで瞬時に表示 |
-| **オーディオ入出力** | **`cpal`** | クロスプラットフォーム（ALSA/PulseAudio/WASAPI/CoreAudio）対応の低レイテンシオーディオI/O。24kHz 16-bit mono PCMでのマイク録音・スピーカー再生を担い、再生中PCMからRMS振幅を算出して口パクIPCを駆動 |
+| **ネイティブGUI** | **`Slint`** | ElectronやQtのような巨大なランタイム・Webブラウザエンジンを排し、Pure Rustで軽量・高速に描画されるネイティブGUIツールキットを採用。承認カード、設定画面、コンパニオン切替UIを数MBのフットプリントで瞬時に表示。<br>※ライセンスは `GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0`。OSS公開時はGPLv3、プロプライエタリ配布時はSlint Royalty-free Desktop License（帰属表示義務を満たす）を採用 |
+| **オーディオ入出力・リサンプリング** | **`cpal` ＋ `rubato`** | クロスプラットフォーム（ALSA/PulseAudio/WASAPI/CoreAudio）対応の低レイテンシオーディオI/O。オーディオハードウェアネイティブのサンプリングレート（48kHz/44.1kHz stereo等）と内部ワイヤー標準（24kHz mono PCM）間の相互変換を公式高品質リサンプラー `rubato` で行い、デバイス互換性と正確なRMS振幅計測を両立 |
 | **知覚センサー（目）** | **OSネイティブウィンドウフック** | Linux（X11/Wayland）、Windows（`SetWinEventHook`）、macOS（Accessibility API）を通じてアクティブウィンドウのタイトルやフォーカス変化をリアルタイム検知 |
 | **アバター子プロセス管理** | **標準入出力 JSON Lines IPC** | `apps/ene-avatar` を子プロセスとして起動・監視し、標準入出力経由でモーション指定、表情、リップシンク振幅をミリ秒単位で制御 |
 
+---
+
+### G. 外部ACPエージェント接続と Connect-RPC サーバー設定
+
+- **ACP外部ハーネス接続の最小イディオム**:
+  - `agent-client-protocol = "5.0.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
+  - `process-wrap` の `TokioCommandWrap` で起動した子プロセスの標準入出力を `Client::v1()` トランスポートへ接続する最小構成：
+    ```rust
+    use agent_client_protocol::v1::Client;
+    use process_wrap::tokio::TokioCommandWrap;
+    use tokio::process::Command;
+
+    let mut wrap = TokioCommandWrap::from(Command::new("opencode"));
+    let mut child = wrap.spawn()?;
+    let stdin = child.take_stdin().expect("stdin pipe");
+    let stdout = child.take_stdout().expect("stdout pipe");
+
+    // agent-client-protocol の Client トランスポートへ接続
+    let client = Client::v1(stdin, stdout);
+    ```
+
+- **Connect-RPC サーバーの HTTP/2（h2c）設定**:
+  - `VoiceService.StreamAudioInput` 等の双方向ストリーミングを平文ローカル通信（h2c）で安定動作させるため、`connectrpc::Server` または axum / hyper において明示的に HTTP/2 prior knowledge（h2c）を有効化して起動する（デフォルトの HTTP/1.1 単一受付によるストリーミング遮断を防止）。
+
 > [!NOTE]
 > **Extism (Wasm) プラグインのフェーズ位置づけ**:
-> Extism (Wasm) によるサードパーティプラグイン実行環境は、後続の拡張フェーズへ延期する。Alpha/Minimal構成では、内蔵Rigツール、外部MCPサーバー（JSON-RPC）、および外部ACPコーディングエージェント（stdio）の3系統に集中し、過剰な抽象化層を排して堅牢な動作を担保する。
+> Extism (Wasm) によるサードパーティプラグイン実行環境は、後続の拡張フェーズ（Phase 2）へ延期する。Alpha/Minimal構成では、内蔵Rigツール、外部MCPサーバー（JSON-RPC）、および外部ACPコーディングエージェント（stdio）の3系統に集中し、過剰な抽象化層を排して堅牢な動作を担保する。

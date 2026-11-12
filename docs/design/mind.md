@@ -122,15 +122,34 @@ CREATE TABLE IF NOT EXISTS consolidation_state (
     updated_at TEXT NOT NULL
 );
 
+-- 7. スケジュール・自律リマインド永続化テーブル
+CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    companion_id TEXT NOT NULL,
+    cron_expr TEXT,            -- 繰り返しスケジュール (5-field cron)
+    run_at TEXT,               -- 一度限りの実行日時 (ISO 8601)
+    title TEXT NOT NULL,       -- 予定・リマインドのタイトル
+    instruction TEXT NOT NULL, -- 発火時に親エージェントへ投入するプロンプト
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_triggered_at TEXT
+);
+
 -- 検索インデックス
 CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
+CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companion_id, enabled);
 ```
 
 ### 3.2 データベーススレッドモデルと実行境界
+- **接続設定とロック競合対策**:
+  - 全ての SQLite コネクションにおいて、WAL モードに加えて `PRAGMA busy_timeout = 5000;`（ビジータイムアウト5秒）および `PRAGMA synchronous = NORMAL;` を必須設定とする。
+  - バックグラウンドの記憶整理タスクがコミットしている瞬間に ECS メインスレッドが即座に `SQLITE_BUSY` で異常終了する事態を確実に防止する。
 - **ECSループスレッドでの直接同期アクセス（決定論的・ゼロオーバーヘッド）**:
   - Bevy ECS のシステム（`PrepareSystems::Edit`, `Stage::Gate` 等）は同期関数として動作する。
-  - デスクトップ利用におけるプライマリキー参照、ルール照合、FTS5 trigram検索、およびインメモリBLOBコサイン類似度計算（通常1,000件未満）は **1ms未満（数百マイクロ秒）** で完了する。
-  - したがって、ECSメインスレッドに同期の `rusqlite::Connection` を直接保持して同期実行し、非同期タスクスイッチやチャネル往復オーバーヘッドを完全に排除する。
+  - デスクトップ利用におけるプライマリキー参照、ルール照合、FTS5 trigram検索は **1ms未満（数百マイクロ秒）** で完了する。
+  - **インメモリ `CompactVectorIndex` によるゼロアロケーション走査**:
+    - 類似度検索で毎ターン SQLite から全 BLOB を `Vec<u8>` としてデシリアライズするメモリ割り当てを排除するため、SQLite を正本としつつ ECS Resource 上にフラットな `Vec<f32>` 連続配列キャッシュ（`CompactVectorIndex`）を保持する。
+    - `memory_revision` 更新時のみ差分同期することで、毎ターンのコサイン類似度走査は数十マイクロ秒・ゼロアロケーションで実行される。
   - 会話セッションログ正本は公式標準の `rig_memory::DirStore`（`<state_dir>/rig/`）により保存され、受理レシートも `Conversation::add_aside` でセッションログ内に記録されるため、SQLiteとの2相不整合は原理的に発生しない。
   - 記憶整理（Consolidation）のLLM呼び出しや埋め込みベクトル生成（Embedding API）などの長時間非同期処理のみ、専用のTokioバックグラウンドタスクおよび別コネクションへ分離する。
 
@@ -164,10 +183,11 @@ $$\text{Score} = \min\left(1.0, \frac{\text{Importance}}{0.3}\right) \times (0.5
 ```rust
 // Rust側でのハイブリッド検索とRRF統合のフロー
 // 1. 全文検索候補の取得（FTS5 BM25スコア順・最大20件）
-// ※FTS5 trigram は文字列全体をクォートすると完全一致部分文字列しかマッチしないため、
-// 3文字以上の部分トークン（空白・記号・助詞等で分割）をクォートし OR で連結する。
+// ※SQLite FTS5 trigram は空白・句読点（記号）のみで分割するか、クエリ文字列から連続する3文字を抽出する。
+// 助詞等によるヒューリスティックな正規表現分割は「東京都」「外国人」等の固有名詞が誤分割されて
+// 3文字未満になるアンチパターンを引き起こすため行わない。
 // 3文字以上のトークンが存在しない場合（例:「犬」「AI」）は LIKE へフォールバック。
-let tokens: Vec<String> = split_search_tokens(&query_text)
+let tokens: Vec<String> = split_punctuation_and_whitespace(&query_text)
     .into_iter()
     .filter(|t| t.chars().count() >= 3)
     .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
@@ -254,6 +274,9 @@ for candidate in &mut fused_candidates {
 > Pinned Memory、想起された記憶、現在の心、知覚要約、現在日時は、**会話ログ正本（`SessionLog`）へ `DeliveryMode::Inform` 等で書き込んではならない**。
 > `SessionLog` に一度書き込まれた内容は永続化され、履歴取得API（`GetHistory`）への内部JSON漏洩や、増分自動整理（Consolidation）が想起記憶を自ら再学習する自己汚染ループを引き起こす。
 > 動的コンテキストはすべて `PrepareSystems::Edit` で `ModelRequest.history` 末尾の最新ユーザー発話メッセージ（`User_N`）内にブロックとしてインメモリ結合し、その上で **`PrepareSystems::Fit` を動的文脈を含む要求全体に対して実行**し、合計トークン数に基づいて履歴ウィンドウ（`recent::view`）を切り詰める。
+> 
+> **1ターン内のReActツール反復におけるキャッシュ固定規約**:
+> 1ターン内でモデルがツール（例: `mind_recall`）を呼び出し、その `ToolResult` を持って2回目のモデル推論（Step 2）が走る際、ターン開始時に生成した Dynamic Tail のスナップショット（時刻・心境・想起記憶）を固定し、ターン内の複数ステップ間で全く同一のコンテキスト文字列を維持する。これにより、ターン内のReAct反復で Prefix Cache を 100% 効かせる。
 
 ただし、以下の不変条件を厳格に適用する：
 
@@ -271,6 +294,9 @@ for candidate in &mut fused_candidates {
 - `mind_recall(query: String, limit: Option<u32>) -> Vec<MemoryItem>`: 記憶の検索
 - `mind_read(memory_id: String) -> MemoryDetail`: 記憶の詳細および由来の閲覧
 - `mind_update(action: MindUpdateAction) -> MindUpdateResult`: 明示的な記憶の追加・訂正・想起優先度引き下げ
+- `schedule_create(title: String, instruction: String, run_at: Option<String>, cron_expr: Option<String>) -> ScheduleItem`: スケジュールの登録
+- `schedule_list() -> Vec<ScheduleItem>`: 登録中スケジュールの一覧
+- `schedule_cancel(schedule_id: String) -> bool`: スケジュールの解除
 
 ### 5.2 自動整理（Consolidation）の単一方向パイプラインと重複防止
 対話ログからの長期記憶形成は、**Compaction（要約）の発生を必須条件とせず、独立してバックグラウンド実行**される。
@@ -289,7 +315,16 @@ for candidate in &mut fused_candidates {
      - `SessionLog`（追記型ディスク正本）から、`job_start_turn_id` より後の確定ターン（最新の未完了ターンを除く安定範囲）を読み込む。Compaction後のプロンプト用Viewではなく、客観的な会話生ログを正本入力とする。
   2. **事実抽出と既存記憶の照合**: 整理モデルが会話から抽出した知識候補について、ホストがFTS5およびベクトル検索を用いて既存記憶との類似候補を取得・照合する。
   3. **更新（Merge）と新規作成（Insert）の適用**:
-     - 既存の記憶と同一事実または更新である場合：`memory_revision` と `content_revision` をインクリメントして内容・重要度を更新。
+     - **既存記憶のCAS原子的更新（CAS Update by memory_revision）**:
+       既存の記憶と同一事実または更新である場合、必ず直前の `memory_revision` を条件としたCAS（Compare-And-Swap）更新を実行する：
+       ```sql
+       UPDATE memories
+       SET content = :content, importance = :importance,
+           content_revision = content_revision + 1, memory_revision = memory_revision + 1,
+           last_accessed_at = :now
+       WHERE id = :id AND memory_revision = :expected_memory_revision;
+       ```
+       もし更新行数が 0 行（整理ジョブ実行中にユーザーが対話で `mind_update` により優先度変更・訂正を行っていた場合）なら、古い整理ジョブによる上書きを直ちに検知してスキップ・破棄する。
      - 新規の独立した事実である場合：新しい `MemoryRecord` を採番して作成。1つの発話から複数事実が抽出された場合は、内容ごとに独立したレコードとして分割保存する。
   4. **原子的コミットとカーソル整合性の検証（Atomic Commit with Cursor Match）**:
      - 記憶の変更・エッジ（`estimated_cited_in` 等）の追加・およびカーソル更新を、同一のSQLiteトランザクション内で実行する。

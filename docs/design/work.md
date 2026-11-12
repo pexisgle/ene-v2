@@ -23,12 +23,13 @@
 
 | 概念 | 責務 | ライフサイクル |
 | :--- | :--- | :--- |
-| **BackendProfile** | モデル割当、認証情報、実行環境（ローカルRig / 外部ACP / Wasm）、Sandbox設定 | 静的設定 |
+| **BackendProfile** | モデル割当、認証情報、実行環境（ローカルRig / 外部ACP、WasmはPhase 2）、Sandbox設定 | 静的設定 |
 | **WorkSession** | 親コンパニオンに属する、特定のタスク文脈・作業ディレクトリ・状態を保持する枠組み（ACP Sessionに1:1対応） | 複数Runにわたり継続 |
 | **Run** | ユーザーや親からの1回の指示・追加入力によって開始される単一の実行ターン（ACPの `session/prompt` に対応） | 指示受付から完了/失敗まで |
 
 ### 2.1 バックエンド別の実行モデル（ACPと内蔵Rigの適正化）
 - **外部ACPエージェント（Agent Client Protocol）**:
+  - `agent-client-protocol = "5.0.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
   - `WorkSession ≒ ACP Session`: 外部ACPプロセスとの接続はWorkSession単位で維持され、複数Runにわたってエージェントの会話文脈が継続する。
   - `Run ≒ ACP prompt turn`: 1回の指示実行は `session/prompt` に対応する。
   - **中断の扱い**: 通常のRun中断は ACP 標準の `session/cancel` を送信して安全に行う。外部プロセス自体の終了は、WorkSession自体の破棄時、またはセッション全体がハングして応答しない場合のみ実行する。文脈を保持するACPセッションでは、Run終了後もOSプロセスは生存する。
@@ -274,13 +275,13 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 | **`start_work`** | `instruction: String`<br>`session_id: Option<String>` | 「手」に実務を委託。`session_id` 未指定時は新規WorkSessionを作成し、Runを開始して `(session_id, run_id)` を返す |
 | **`send_work`** | `session_id: String`<br>`run_id: String`<br>`message: String`<br>`request_id: Option<String>` | 「手」に対する追加指示（Steering）や質問（Request）への回答を送信 |
 | **`stop_work`** | `session_id: String`<br>`run_id: String`<br>`reason: Option<String>` | 実行中のRunに対する中断要求を発行 |
-| **`list_work`** | なし | 実行中および直近のWorkSession・Runの状態一覧を取得 |
+| **`list_works`** | なし | 実行中および直近のWorkSession・Runの状態一覧を取得 |
 
 ### 6.2 子（手）向け報告ツール（内蔵Rig / カスタムエージェント用）
 
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
-| **`report`** | `kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。**`session_id` と `run_id` はホスト実行環境がコンテキストから自動束縛**し、LLMに引数として書かせない。ACP外部プロセスの場合は `agent-client-protocol-schema` の通知へ相互変換される |
+| **`report`** | `kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。**`session_id` と `run_id` はホスト実行環境がコンテキストから自動束縛**し、LLMに引数として書かせない。ACP外部プロセスの場合は `agent_client_protocol::v1::schema` の通知へ相互変換される |
 
 ---
 

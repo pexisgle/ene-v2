@@ -1,6 +1,6 @@
 # ホストAPI設計
 
-状態：採用設計。現行のサービス・型・意味は [host.proto](../crates/ene-rpc/proto/host.proto) と [全体アーキテクチャ](architecture.md) が正本です。Bearer認証付きConnect RPCと購読（`Subscribe`）・状態再取得を基本とします。将来の接続アクセス制御の委譲については [ホスト接続の設計](design/host-access.md) を参照します。
+状態：採用設計。本仕様書（§7 カノニカル Protobuf 定義）および [全体アーキテクチャ](architecture.md) を正本（Canonical Source of Truth）とします。既存クレート（`crates/ene-rpc/proto/host.proto`）は本設計に基づくクリーンルーム実装によって更新されます。Bearer認証付きConnect RPCと購読（`Subscribe`）・状態再取得を基本とします。将来の接続アクセス制御の委譲については [ホスト接続の設計](design/host-access.md) を参照します。
 
 ## 1. 共通の意味
 
@@ -53,6 +53,19 @@ WorkViewは親、WorkSession、進行中RunInfo、未決質問（`pending_inquir
 2. **UI直接回答経路（クライアントUI）**: クライアントが `WorkView.pending_inquiries` から質問カードを表示し、ユーザーの選択・入力を `WorkService.AnswerInquiry(work_id, request_id, answer)` RPCで直接回答する。
 
 権限承認要求（`ApprovalRequest`）は `SettingsService.SubmitApproval` で回答し、通常の質問（`WorkInquiry`）と明確に区別する。
+
+### 知覚（目）と動的Watcher
+
+クライアント側知覚センサー（OSウィンドウフック・サンプリング）は `ClientService.ReportPerception` RPCを通じてホストへ知覚イベント（`PerceptionEvent`）を送信する。
+ホストはこれを受信して簡潔な要約（`PerceptionSummary`）を生成し、親エージェントの動的文脈（Dynamic Tail）へインメモリ注入する。
+親エージェントは以下の正規ツールを通じて知覚センサーに動的監視ルールを設定できる：
+
+- `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)`:
+  - `target_pattern`: 監視対象のウィンドウタイトルまたはアプリ識別子の部分一致・正規表現パターン（例: `"GitHub"`, `".*\\.rs"`）
+  - `match_kind`: `"title"`（ウィンドウタイトル）または `"app_id"`（プロセス/アプリケーション名）
+  - `notify_on`: 発火契機（`"focus"`: アクティブ化時、`"blur"`: 非アクティブ化時、`"title_change"`: タイトル変更時）
+  - `enabled`: ルールの有効化（`true`）または解除（`false`）
+  合致時は定期サンプリングを待たずに即時優先割り込み（Priority Interrupt）が親エージェントへ通知される。
 
 ### 能力
 
@@ -157,7 +170,14 @@ message Notification {
     DeviceOperation device_operation = 14;
     DeviceOperationResult device_operation_result = 15;
     HostEvent generic = 16;
+    Snapshot initial_state = 19;
+    ResyncRequired resync_required = 20;
   }
+}
+
+message ResyncRequired {
+  string reason = 1;
+  Cursor target_cursor = 2;
 }
 
 // Model Assignments --------------------------------------------------------
@@ -239,10 +259,28 @@ message MindState {
   string concerns = 5;      // JSON array text
   string updated_at = 6;
 }
+message MindIndexStatus {
+  uint32 pending_fts_count = 1;
+  uint32 pending_vector_count = 2;
+  string embedding_model = 3;
+  uint64 model_calls = 4;
+  uint64 total_tokens = 5;
+}
+
+message MindConsolidationStatus {
+  string last_processed_turn_id = 1;
+  uint64 jobs_completed = 2;
+  uint64 model_calls = 3;
+  uint64 input_chars = 4;
+  optional string last_error = 5;
+}
+
 message MindView {
   string companion_id = 1;
   MindProfile profile = 2;
   MindState state = 3;
+  optional MindIndexStatus index = 4;
+  optional MindConsolidationStatus consolidation = 5;
 }
 message MindUpdated {
   string companion_id = 1;
@@ -658,6 +696,34 @@ message HostEvent {
   string payload = 2;
 }
 
+// Perception (Eyes) --------------------------------------------------------
+
+message PerceptionEvent {
+  string client_id = 1;
+  string timestamp = 2;
+  oneof event {
+    ActiveWindowChanged active_window = 3;
+    UserActivityState user_activity = 4;
+    PerceptionSummary perception_summary = 5;
+  }
+}
+
+message ActiveWindowChanged {
+  string title = 1;
+  string app_id = 2;
+  optional string url = 3;
+}
+
+message UserActivityState {
+  bool is_active = 1;
+  uint64 idle_seconds = 2;
+}
+
+message PerceptionSummary {
+  string summary = 1;
+  repeated string tags = 2;
+}
+
 // Service RPCs -------------------------------------------------------------
 
 service HostService {
@@ -717,6 +783,7 @@ service ClientService {
   rpc Activate(ActivationRequest) returns (Activation);
   rpc SetCapabilities(SetCapabilitiesRequest) returns (Client);
   rpc DeviceStream(Id) returns (stream DeviceEvent);
+  rpc ReportPerception(PerceptionEvent) returns (Empty);
   rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
   rpc GetOperation(Id) returns (DeviceOperationState);
 }

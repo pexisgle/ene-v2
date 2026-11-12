@@ -10,7 +10,35 @@
    - 明示的な特定予定がない場合でも、**「前回『頭』が動いてから一定時間が経過したとき」**に定期的なハートビート（Tick）として「頭」が呼び出されます（AITuberの独り言ループと同様）。
 3. **「頭」による自律判断（行動選択）**:
    - スケジュールや定期Tickが発火した際、具体的に何を行うか（ユーザーにボイスで話しかけるのか、「手」に作業を発注するのか、今は何もしない/NOOPか）は、**「頭」に完全に一任**されます。
-4. **クライアント切断時の継続**:
+4. **`noop()` による空ターンの自動巻き戻し不変条件**:
+   - 自律tickや見守り判定で親が `noop()` のみを呼び出して沈黙した場合、その空ターン（`[Inform: tick] -> [ToolCall: noop] -> [ToolResult: ok]`）をそのまま `SessionLog` に残すと、長時間の放置で何百ターンもの空履歴が蓄積し、コンテキスト窓と Prefix Cache を破壊します。
+   - したがって、**「`noop()` で終了した自律tickターンは `SessionLog` から自動的に巻き戻し（直前の確定ターンへロールバック）を行い、永続ログに記録しない」** 不変条件を厳格に適用します。
+5. **クライアント切断時の継続**:
    - クライアントが切断中であってもホスト上で自立して進められる作業は継続され、再接続時にまとめて「頭」から報告・通知されます。未決事項を重複して何度も通知することはありません。
+
+## データモデルと管理ツール
+
+### スケジュールデータモデル (`host.sqlite3`)
+
+```sql
+CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    companion_id TEXT NOT NULL,
+    cron_expr TEXT,            -- 繰り返しスケジュール (5-field cron, 例: "0 9 * * 1-5")
+    run_at TEXT,               -- 一度限りの実行日時 (ISO 8601, 例: "2026-11-13T10:00:00Z")
+    title TEXT NOT NULL,       -- 予定・リマインドのタイトル
+    instruction TEXT NOT NULL, -- 発火時に親エージェントへ投入するプロンプト
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_triggered_at TEXT
+);
+```
+
+### 親エージェント向け Rig ツール
+
+親エージェント（頭）は日常会話の中でスケジュールを自律的に登録・確認・解除できる：
+- `schedule_create(title: String, instruction: String, run_at: Option<String>, cron_expr: Option<String>)`: 予定やリマインドを登録
+- `schedule_list()`: 登録中スケジュール一覧を取得
+- `schedule_cancel(schedule_id: String)`: スケジュールを解除
 
 参考：[Hermes Agent](../../references.md#hermes-agent) のスケジュール実行、および [Grok Bot](../../references.md#grok-bot) の継続タスク・通知機能。

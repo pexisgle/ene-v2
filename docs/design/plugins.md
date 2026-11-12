@@ -12,7 +12,7 @@ eneにおける拡張性は、単なる「外部APIツールの追加」にと�
 
 | 拡張ポイント | 役割 | プラグインの形態 |
 | :--- | :--- | :--- |
-| **「手」の拡張（Actions & Tools）** | 実務タスク遂行、外部操作 | MCP（Model Context Protocol）サーバー、Wasmプラグイン（Extism）、ACP外部タスクハーネス |
+| **「手」の拡張（Actions & Tools）** | 実務タスク遂行、外部操作 | MCP（`rig-rmcp`）、ACP外部タスクハーネス（WasmはPhase 2） |
 | **「目」の拡張（Perception Sensors）** | 環境知覚、状況認識 | IDE連携センサー、ブラウザ監視拡張、OSイベントフック、アクティブウィンドウWatcher |
 | **「体」の拡張（Body & Expressions）** | 身体表現、デスクトップ演出 | VRMAアニメーション、ブレンドシェイプ表情プリセット、デスクトップギミック（座る、窓押し等） |
 
@@ -22,13 +22,13 @@ eneにおける拡張性は、単なる「外部APIツールの追加」にと�
 
 ### 1. 「手」の拡張（Actions & Tools）
 作業エージェント（Hands / WorkSession）が実務タスクで使用するツールや実行基盤の拡張。
-- **MCP（Model Context Protocol）接続**:
-  - 業界標準のMCPプロトコルに基づき、ローカルまたはリモートのMCPサーバーを登録。
-  - ホストがMCPクライアントとして接続し、利用可能なツール一覧を「手」へ提供する。
-- **Wasmプラグイン（Extism組み込み）**:
-  - 安全にサンドボックス化されたWebAssemblyプラグイン。ファイル操作やネットワーク通信はホストが認可したCapabilityの範囲に厳格に制限される。
+- **MCP（Model Context Protocol）接続（`rig-rmcp`）**:
+  - 業界標準のMCPプロトコルに基づき、公式の **`rig-rmcp`**（`McpConnection` / `ManagedToolSink`）または `rig_mcp_client::McpCorePlugin` を採用。
+  - 設定DBで認可されたMCPサーバーのみをコード側から明示的に接続・再接続管理し、取得されたツール定義を `world.spawn_tool` で「手」へ提供する（自前のJSON-RPCハンドラ自作を排除）。
 - **ACP（Agent Client Protocol）外部ハーネス**:
   - 特化型のエージェント実行環境（例: 高機能コーディングハーネス）をACP経由で接続し、一連のタスク実行をまるごと委託可能。
+- **Wasmプラグイン（Extism組み込み: Phase 2 拡張フェーズ）**:
+  - 安全にサンドボックス化されたWebAssemblyプラグイン。Alpha/Minimal構成ではノイズを排すため対象外とし、後続フェーズでCapability制限付きランタイムとして段階的に導入する。
 
 ### 2. 「目」の拡張（Perception Sensors）
 デスクトップの状況やユーザーの作業状態をセンシングする知覚の拡張。
