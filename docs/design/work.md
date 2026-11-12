@@ -34,7 +34,7 @@
   - **中断の扱い**: 通常のRun中断は ACP 標準の `session/cancel` を送信して安全に行う。外部プロセス自体の終了は、WorkSession自体の破棄時、またはセッション全体がハングして応答しない場合のみ実行する。文脈を保持するACPセッションでは、Run終了後もOSプロセスは生存する。
 - **内蔵Rigエージェント**:
   - **ライフサイクルと停止伝播の分離**: Rig v0.46.0 において `StopTurn` は `SpawnedBy` 配下の子エージェントへ停止を自動伝播させる。ユーザーが音声対話を「ちょっと話止めて。作業は続けて！」と割り込み（Barge-in）した際に作業まで道連れで強制終了されるのを防ぐため、**継続稼働する `WorkSession` は `SpawnedBy(parent_entity)` ではなく、独立したエージェントエンティティ（`WorkSessionOf(companion_id)`）としてWorld内に生成する**（`SpawnedBy` はそのターンと運命を共にする一時的なサブタスクにのみ限定）。
-  - ツール権限を `ToolAccess::Only(...)` で制限し、Run開始は `world.trigger(Deliver::new(work_entity, instruction, DeliveryMode::Queue))`、作業の中断は明示的な `world.trigger(StopTurn::new(work_entity))`、完了報告は `TurnFinished` Observer から親へ通知することで、同一World内で最小限のオーバーヘッドで実行する。コマンド実行子プロセスのみを `process-wrap` で安全に管理する。
+  - ツール権限を `ToolAccess::Only(...)` で制限し、Run開始は `world.trigger(Deliver::new(work_entity, instruction, DeliveryMode::Queue))`、作業の中断は明示的な `world.trigger(StopTurn::new(work_entity))`、完了報告は `ConversationChanged`（または `ActiveTurn` コンポーネント除去）の検知Observerから親へ通知することで、同一World内で最小限のオーバーヘッドで実行する。コマンド実行子プロセスのみを `process-wrap` で安全に管理する。
 
 > [!IMPORTANT]
 > **WorkSession と Run の厳格な分離**:
@@ -91,8 +91,9 @@ pub enum RunStatus {
 | 現在の状態 | イベント / トリガー | 次の状態 | 確定点とホストの動作 |
 | :--- | :--- | :--- | :--- |
 | `Starting` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
-| `Running` | 子からの質問または承認要求（`WorkRequest`） | `WaitingInput` | 親エージェントまたはユーザーの回答待ち（ポリシー判定が `NeedsApproval::add` を付与し、公式ApprovalPluginが承認用Askを生成） |
-| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | プラグイン生成の対象AskのDecisionへAnswer(Outcome)を確定。公式ApprovalPluginが承認時は対象ツールに `Approved` 付与、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を反映後に質問の `HoldOf` を解除（Askは回答確定前にdespawnしない） |
+| `Running` | 子からの質問（`WorkInquiry`） | `WaitingInput` | ユーザーまたは親の回答待ち。`WorkView.pending_inquiries` へ登録 |
+| `Running` | 権限・Sandbox外操作の保留 | `WaitingInput` | `Stage::Gate` で `commands.spawn(HoldOf(call_entity))` を投入し、`approval_requests` テーブルへ登録。未決承認リスト（`pending_approvals`）へ追加 |
+| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時は `commands.entity(call_entity).insert(Approved)` を付与、拒否時は `Outcome::refused(...)` を確定し、`HoldOf` を解除して処理再開 |
 | `WaitingInput` | 質問回答受信（`SendWork` with `request_id`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
 | `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信（未決permissionはcancel応答）、最大30秒クリーンアップ待機 |
 | `Cancelling` | ACP `cancelled` 応答 または Rigターン停止確認 | `Cancelled` | 正常中断確定（ACPプロセスはセッション維持のため生存） |
@@ -100,19 +101,12 @@ pub enum RunStatus {
 | `Running` | タスク正常完了 | `Completed` | 成果物を親へ返却 |
 | `Running` / `Cancelling` | 回復不能エラー発生 | `Failed` | エラー報告 |
 
-/// 子（手）からの問い合わせ種別
+/// 子（手）からのユーザー確認・質問（WorkInquiry: protobuf WorkInquiry と 1:1 対応）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkRequest {
-    /// 権限・Sandbox外操作の承認要求
-    Approval {
-        action_summary: String,
-        candidate_action: CandidateAction,
-    },
-    /// 通常の質問・選択肢の確認（例: 「PDFとMarkdownのどちらで出力しますか？」）
-    Input {
-        prompt: String,
-        choices: Option<Vec<String>>,
-    },
+pub struct WorkInquiry {
+    pub request_id: String,
+    pub prompt: String,
+    pub choices: Vec<String>,
 }
 
 /// セッションの管理構造体（状態の正本は active_run と closed のみとし、公開statusは導出）

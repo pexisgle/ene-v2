@@ -71,11 +71,481 @@ RequestViewは質問と権限要求を区別し、対象session/run、request id
 
 ## 6. wire契約とサービス構成
 
-現行のwire契約は `crates/ene-rpc/proto/host.proto` を正本とし、以下の5サービスで構成される（音声ストリーミング `VoiceService` は移行設計として [知覚・音声](design/voice-avatar.md) に定義）：
-- **`HostService`**: システム状態スナップショット、単一イベントストリーム（`Subscribe`）、コンパニオン・心・記憶の取得と操作。
+wire契約は以下の6つのConnect-RPCサービスで構成される：
+- **`HostService`**: システム状態スナップショット、単一イベントストリーム（`Subscribe`）、コンパニオン・心・記憶の取得・操作（`ListMemories` 含む）。
 - **`ChatService`**: 会話メッセージの送信（`SendMessage`）、停止（`Stop`）、会話履歴取得（`GetHistory`, `GetMessage`）。
-- **`SettingsService`**: 設定、プロバイダー/モデル一覧、ツール利用許可ルール、未決承認要求の確認と回答（`SubmitApproval`）。
+- **`SettingsService`**: 設定、プロバイダー/モデル一覧、ポリシー・承認ルール（`PolicyRule`）、未決承認要求の確認と回答（`SubmitApproval`）。
 - **`WorkService`**: 作業セッションの一覧（`ListWorks`）、詳細取得（`GetWork`）、直接指示（`SendWork`）、緊急停止（`StopWork`）、クローズ（`CloseWork`）。
+- **`VoiceService`**: 双方向マイク音声入力ストリーム（`StreamAudioInput` / 要HTTP/2）、音声ストリーム購読（`SubscribeAudioOutput`）、再生完了・進捗報告（`ReportPlaybackStatus`）。
 - **`ClientService`**: クライアント端末の登録、有効化、端末操作ストリーム。
 
-本書は意味の契約と責務を定める。最終的なフィールド名・タグ・エラーコードは protobuf および SDK を正本とし、重複する手書き仕様を保守しない。[全体アーキテクチャ](architecture.md) を参照する。
+---
+
+## 7. カノニカル Protobuf 定義 (`host.proto`)
+
+過剰なマトリクス型 Grant（purpose/destination/data_kind/Consent/Availability）を全廃し、純粋な `ApprovalRequest` / `PolicyRule`、7つの役割モデル割当、および音声サービスを統合した正本スキーマ。
+
+```protobuf
+syntax = "proto3";
+package ene.host.v1;
+
+message Empty {}
+message Id { string id = 1; }
+message StringList { repeated string values = 1; }
+message Cursor { string epoch = 1; uint64 seq = 2; }
+message Failure {
+  string code = 1;
+  string message = 2;
+  reserved 3;
+  reserved "details";
+}
+
+message HostHealth {
+  bool ready = 1;
+  bool recovery_required = 2;
+  bool stopping = 3;
+  reserved 4;
+  reserved "credential_cleanup_pending";
+}
+
+message HostCapabilities {
+  string limits = 1; // JSON object text
+  repeated string features = 2;
+  repeated string adapters = 3;
+  string transport = 4;
+}
+
+message Snapshot {
+  string server_version = 1;
+  HostHealth health = 2;
+  HostCapabilities capabilities = 3;
+  Settings settings = 4;
+  repeated Companion companions = 5;
+  repeated WorkSession work_sessions = 6;
+  optional string active_companion_id = 7;
+  repeated ApprovalRequest pending_approvals = 8;
+  repeated Client clients = 9;
+  Cursor cursor = 10;
+  repeated PolicyRule policy_rules = 11;
+}
+
+message SubscribeRequest {
+  string client_id = 1;
+  optional Cursor cursor = 2;
+}
+
+message Notification {
+  Cursor cursor = 1;
+  string kind = 2;
+  oneof event {
+    HostHealth health = 3;
+    Companion companion = 4;
+    MindUpdated mind_updated = 5;
+    MessageCreated message_created = 6;
+    MessageDelta message_delta = 7;
+    TurnEvent turn_event = 8;
+    WorkEvent work_event = 9;
+    ApprovalRequested approval_requested = 10;
+    PolicyRulesUpdated policy_rules_updated = 11;
+    SettingsUpdated settings_updated = 12;
+    ClientUpdated client_updated = 13;
+    DeviceOperation device_operation = 14;
+    DeviceOperationResult device_operation_result = 15;
+    HostEvent generic = 16;
+  }
+}
+
+// Model Assignments --------------------------------------------------------
+
+message ModelAssignment { string connection_id = 1; string model_id = 2; }
+message ModelAssignments {
+  ModelAssignment companion = 1;              // 頭（対話・ロールプレイ）: 必須
+  ModelAssignment task = 2;                   // 手（実務タスク）: 必須
+  optional ModelAssignment perception = 3;     // 目（知覚要約、未指定時は companion フォールバック）
+  optional ModelAssignment compaction = 4;     // Compaction要約（未指定時は companion フォールバック）
+  optional ModelAssignment consolidation = 5;  // 記憶整理（未指定時は companion フォールバック）
+  optional ModelAssignment decision = 6;       // 権限判定（未指定時は task フォールバック）
+  optional ModelAssignment embedding = 7;      // 埋め込みモデル
+}
+
+message Companion {
+  string id = 1;
+  string name = 2;
+  string mind = 3;
+  string body = 4;  // JSON object text
+  string voice = 5; // JSON object text
+  ModelAssignments assignments = 6;
+  uint64 revision = 7;
+  string created_at = 8;
+  string updated_at = 9;
+  optional string persona = 10;
+  optional string voice_identifier = 11;
+}
+message Companions { repeated Companion items = 1; }
+
+// Mind and Memories --------------------------------------------------------
+
+message MindProfile {
+  string core = 1;
+  uint64 revision = 2;
+  repeated string facets = 3;
+  repeated string examples = 4;
+  repeated string background = 5;
+  repeated string expression = 6;
+}
+message MindState {
+  uint64 revision = 1;
+  string emotion = 2;       // JSON text
+  string relationships = 3; // JSON array text
+  string tendencies = 4;    // JSON array text
+  string concerns = 5;      // JSON array text
+  string updated_at = 6;
+}
+message MindView {
+  string companion_id = 1;
+  MindProfile profile = 2;
+  MindState state = 3;
+}
+message MindUpdated {
+  string companion_id = 1;
+  uint64 profile_revision = 2;
+  uint64 state_revision = 3;
+  string updated_at = 4;
+}
+message UpdateMindProfileRequest {
+  string companion_id = 1;
+  uint64 expected_revision = 2;
+  MindProfile profile = 3;
+}
+message MemoryControlRequest {
+  string companion_id = 1;
+  string memory_id = 2;
+  // "forget" | "remember" | "share" | "unshare"
+  string action = 3;
+}
+message MemoryControlResult {
+  string memory_id = 1;
+  uint32 importance = 2;
+  repeated string audiences = 3;
+  uint64 revision = 4;
+}
+
+message ListMemoriesRequest {
+  string companion_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+}
+message MemoryItem {
+  string id = 1;
+  string owner = 2;
+  repeated string audiences = 3;
+  string content = 4;
+  uint32 importance = 5;
+  optional string occurred_at = 6;
+  string recorded_at = 7;
+  optional string last_accessed_at = 8;
+  uint64 revision = 9;
+}
+message Memories {
+  repeated MemoryItem items = 1;
+  optional string next_cursor = 2;
+}
+
+// Chat ---------------------------------------------------------------------
+
+message SendMessageRequest {
+  string companion_id = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+}
+message Acceptance { string request_id = 1; }
+message StopRequest { string companion_id = 1; }
+message Message {
+  string id = 1;
+  string companion_id = 2;
+  string work_id = 3;
+  string role = 4; // "user" | "assistant" | "agent" | "context"
+  string text = 5;
+  string created_at = 7;
+  uint64 sequence = 8;
+  optional string request_id = 9;
+  string author = 12;
+}
+message MessageCreated { Message message = 1; }
+message MessageDelta {
+  string companion_id = 1;
+  string stream_id = 2;
+  string delta = 3;
+}
+message TurnEvent {
+  string companion_id = 1;
+  string turn_id = 2;
+  string status = 3; // "streaming" | "answered" | "stopped" | "failed"
+  optional Failure failure = 4;
+}
+message HistoryRequest {
+  string companion_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+  optional bool include_context = 4;
+}
+message History { repeated Message items = 1; }
+message MessageRequest { string companion_id = 1; string message_id = 2; }
+
+// Work ---------------------------------------------------------------------
+
+message WorkSession {
+  string id = 1;
+  string companion_id = 2;
+  string title = 3;
+  string status = 4; // "idle" | "active" | "closed"
+  string created_at = 5;
+  string updated_at = 6;
+}
+message RunInfo {
+  string run_id = 1;
+  string work_id = 2;
+  string state = 3;
+  Failure failure = 4;
+}
+message WorkInquiry {
+  string request_id = 1;
+  string prompt = 2;
+  repeated string choices = 3;
+}
+message WorkView {
+  WorkSession session = 1;
+  repeated RunInfo runs = 2;
+  repeated WorkInquiry pending_inquiries = 3;
+}
+message WorkViews { repeated WorkView items = 1; }
+message ListWorksRequest { string companion_id = 1; }
+message WorkRequest { string work_id = 1; }
+message StartWorkRequest {
+  string companion_id = 1;
+  string title = 2;
+  string instruction = 3;
+  string client_id = 4;
+}
+message SendWorkRequest {
+  string work_id = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+  optional string request_id = 5; // 質問への回答束縛用
+}
+message WorkAcceptance { string request_id = 1; }
+message StopWorkRequest { string work_id = 1; }
+message WorkEvent {
+  string work_id = 1;
+  string run_id = 2;
+  string kind = 3; // "status_changed" | "run_started" | "run_finished" | "inquiry_created"
+  string detail = 4; // JSON object text
+}
+
+// Permissions and Approvals ------------------------------------------------
+
+message ApprovalRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string run_id = 3;
+  bytes action_payload_hash = 4;
+  string tool_name = 5;
+  string normalized_arguments = 6;
+  string status = 7; // "pending" | "approved" | "denied" | "expired"
+  string created_at = 8;
+}
+message PendingApprovals { repeated ApprovalRequest items = 1; }
+message SubmitApprovalRequest {
+  string request_id = 1;
+  string decision = 2; // "approve" | "always_approve" | "deny"
+  optional string reason = 3;
+}
+message SubmitApprovalResponse {
+  bool acknowledged = 1;
+  string status = 2;
+}
+message ApprovalRequested { ApprovalRequest request = 1; }
+
+message PolicyRule {
+  string id = 1;
+  string tool_name = 2;
+  string pattern = 3;
+  string effect = 4; // "allow" | "deny" | "confirm"
+  string created_at = 5;
+}
+message PolicyRules { repeated PolicyRule items = 1; }
+message UpdatePolicyRulesRequest {
+  repeated PolicyRule add_or_update = 1;
+  repeated string remove_ids = 2;
+}
+message PolicyRulesUpdated { repeated PolicyRule rules = 1; }
+
+// Settings & Connections ---------------------------------------------------
+
+message Connection {
+  string id = 1;
+  string kind = 2;
+  string adapter = 3;
+  string endpoint = 4;
+  string options = 5; // JSON object text
+  string credential_state = 6;
+  string last_check = 8; // JSON object text
+  bool enabled = 9;
+}
+message Settings {
+  uint64 revision = 1;
+  repeated Connection connections = 2;
+  string updated_at = 3;
+}
+message ConnectionInput {
+  string id = 1;
+  bool enabled = 2;
+  string kind = 3;
+  string adapter = 4;
+  string endpoint = 5;
+  string options = 6; // JSON object text
+}
+message UpdateSettingsRequest {
+  uint64 expected_revision = 1;
+  repeated ConnectionInput connections = 2;
+}
+message SettingsUpdated { Settings settings = 1; }
+
+// Voice Service ------------------------------------------------------------
+
+message AudioInputChunk {
+  string client_id = 1;
+  bytes pcm_data = 2; // 24kHz / 16kHz 16-bit mono PCM
+  uint32 sample_rate = 3;
+  bool is_companion_speaking = 4;
+}
+message TranscriptionEvent {
+  string transcription_id = 1;
+  string text = 2;
+  bool is_final = 3;
+  bool is_speaking = 4;
+}
+message SubscribeAudioRequest { string client_id = 1; }
+message AudioOutputEvent {
+  oneof event {
+    AudioChunkEnvelope chunk = 1;
+    FlushControl flush = 2;
+    SentenceSkipped skipped = 3;
+    UtteranceFinished finished = 4;
+  }
+}
+message AudioChunkEnvelope {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 sequence_no = 3;
+  bytes pcm_data = 4;
+  uint32 sample_rate = 5;
+  bool is_final_chunk = 6;
+}
+message FlushControl {
+  string utterance_id = 1;
+  uint64 flush_generation_id = 2;
+  string reason = 3;
+}
+message SentenceSkipped {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 sequence_no = 3;
+  string reason = 4;
+}
+message UtteranceFinished {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 total_sentences = 3;
+}
+message PlaybackStatusReport {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    PLAYBACK_COMPLETED = 1;
+    PLAYBACK_INTERRUPTED = 2;
+    PLAYBACK_FAILED = 3;
+  }
+  Status status = 3;
+  uint32 completed_sentence_count = 4;
+  repeated uint32 played_sequence_nos = 5;
+  repeated uint32 skipped_sequence_nos = 6;
+  uint64 completed_pcm_bytes = 7;
+  string client_id = 8;
+}
+message ReportPlaybackStatusResponse { bool acknowledged = 1; }
+
+// Client Service -----------------------------------------------------------
+
+message Client {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  bool active = 4;
+  string last_seen_at = 5;
+}
+message ClientUpdated { Client client = 1; }
+message DeviceOperation {
+  string operation_id = 1;
+  string capability = 2;
+  string input = 3; // JSON object text
+  string subscription_id = 4;
+}
+message DeviceOperationResult {
+  string client_id = 1;
+  string operation_id = 2;
+  bool success = 3;
+  string output = 4; // JSON object text
+  optional Failure failure = 5;
+}
+message HostEvent {
+  string kind = 1;
+  string payload = 2;
+}
+
+// Service RPCs -------------------------------------------------------------
+
+service HostService {
+  rpc GetSnapshot(Empty) returns (Snapshot);
+  rpc Subscribe(SubscribeRequest) returns (stream Notification);
+  rpc ListCompanions(Empty) returns (Companions);
+  rpc GetMind(Id) returns (MindView);
+  rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
+  rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
+  rpc ListMemories(ListMemoriesRequest) returns (Memories);
+}
+
+service ChatService {
+  rpc SendMessage(SendMessageRequest) returns (Acceptance);
+  rpc Stop(StopRequest) returns (Empty);
+  rpc GetHistory(HistoryRequest) returns (History);
+  rpc GetMessage(MessageRequest) returns (Message);
+}
+
+service SettingsService {
+  rpc GetSettings(Empty) returns (Settings);
+  rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
+  rpc ListPendingApprovals(Empty) returns (PendingApprovals);
+  rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
+  rpc ListPolicyRules(Empty) returns (PolicyRules);
+  rpc UpdatePolicyRules(UpdatePolicyRulesRequest) returns (PolicyRules);
+}
+
+service WorkService {
+  rpc ListWorks(ListWorksRequest) returns (WorkViews);
+  rpc GetWork(WorkRequest) returns (WorkView);
+  rpc StartWork(StartWorkRequest) returns (WorkSession);
+  rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
+  rpc StopWork(StopWorkRequest) returns (Empty);
+  rpc CloseWork(WorkRequest) returns (Empty);
+}
+
+service VoiceService {
+  rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent); // HTTP/2
+  rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
+  rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
+}
+```

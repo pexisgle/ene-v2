@@ -99,6 +99,25 @@
 - サーバー側での音素（Viseme）解析やネットワーク同期を排し、**クライアントが受信した音声PCMデータのRMS（実効値）振幅をローカルで直接計測**してブレンドシェイプ（`aa` 等）を変位させる。
 - サーバー往復遅延がなく、音声再生と同一フレームで口パクが連動する。
 
+### 3.4 `apps/ene-avatar` 標準入出力 JSON Lines IPC スキーマ
+デスクトップクライアントと `apps/ene-avatar` 子プロセス間の標準入出力通信仕様。各行は最大 64 KiB の改行区切り JSON テキスト。
+
+- **リクエスト形式（Client ➔ Avatar stdin）**:
+  ```json
+  {"id": 1, "op": "add", "character": "ene", "config": {"model": "models/ene.vrm", "motion": "motions/idle.vrma", "playing": true, "looping": true, "size_percent": 100.0}}
+  {"id": 2, "op": "set", "character": "ene", "config": {"model": "models/ene.vrm", "motion": "motions/nod.vrma", "playing": true, "looping": false, "size_percent": 100.0}}
+  {"id": 3, "op": "center", "character": "ene", "monitor": "eDP-1"}
+  {"id": 4, "op": "fps", "value": 60}
+  {"id": 5, "op": "remove", "character": "ene"}
+  {"id": 6, "op": "quit"}
+  ```
+- **レスポンス・通知形式（Avatar stdout ➔ Client）**:
+  ```json
+  {"id": 1, "ok": true}
+  {"id": 2, "ok": true}
+  {"id": 0, "event": "motion_finished", "character": "ene", "motion": "motions/nod.vrma"}
+  ```
+
 ---
 
 ## 4. 音声対話パイプライン設計（プラガブルエンジン適応）
@@ -276,6 +295,10 @@ pub struct AudioChunkEnvelope {
 ---
 
 ## 6. Connect-RPC サービス定義 (`voice.proto`)
+
+> [!NOTE]
+> `VoiceService` は `crates/ene-rpc/proto/host.proto` と共通の `ene.host.v1` パッケージに属する。
+> 双方向ストリーミング RPC（`StreamAudioInput`）は Connect-RPC / gRPC の仕様上、HTTP/2 トランスポート（または h2c）を必須とする（Server Streaming の `SubscribeAudioOutput` は HTTP/1.1 Server-Sent Events / Chunked でも動作可能）。
 
 ```protobuf
 syntax = "proto3";

@@ -29,8 +29,8 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   ┌────────────────────────────────────────────────────────────────────┐   │
   │   │ 「頭」（Brain / 親エージェント）：rig-ecs Bevy ECS 単一ループ       │   │
   │   │   ・エージェント実行・ツール反復（Rig 基盤: rig-ecs）              │   │
-  │   │   ・会話ログ正本（rig-ecs SessionLogPlugin + DirStore）            │   │
-  │   │   ・MCPツール登録（McpCorePlugin + AddMcpServer: ene設定所有）     │   │
+  │   │   ・会話ログ正本（rig-sqlite: SqliteSessionStore）                 │   │
+  │   │   ・MCPツール動的登録（world.spawn_tool: ene設定所有）             │   │
   │   │   ・ECS制御: 先行TTS（PostUpdate StreamDelta）、承認保留（HoldOf） │   │
   │   │   ・ツール群: start_work, send_work, stop_work, body_motion, noop   │   │
   │   └───────────────┬────────────────────────────────────┬───────────────┘   │
@@ -39,7 +39,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   ┌──────────────────────────────┐     ┌───────────────────────────────┐   │
   │   │ 「手」（Hands / 作業相手）    │     │ データベース（SQLite）         │   │
   │   │   ・WorkSession と Run の分離│     │   ・rusqlite bundled (WAL)    │   │
-  │   │   ・親子停止伝播の非結合     │     │   ・tokio-rusqlite スレッド分離│   │
+  │   │   ・親子停止伝播の非結合     │     │   ・ECSスレッド直接同期アクセス│   │
   │   │   ・同一キャラクター一人称対話│    │   ・FTS5 + BLOBコサイン (RRF) │   │
   │   │   ・定期進捗報告と途絶検知   │     │   ・記憶関係（memory_edges）  │   │
   │   │   ・30秒タイムアウト強制終了 │     │   ・ACIDリレーショナル永続化  │   │
@@ -77,26 +77,26 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - 外側の重複Tokioループを排し、`rig-ecs`（Bevy ECS）のステージに統一：
     - 入力受付: `world.trigger(Deliver::new(...))`
     - 先行TTS: `PostUpdate` の `MessageReader<StreamDelta>` で親のユーザー向け発話のみをフィルタし文単位で合成キューへ送出
-    - 承認待機: `Stage::Gate` でeneのポリシー判定が `NeedsApproval::add` で理由を追加し、公式 `ApprovalPlugin` が承認用 `Ask` を生成。承認・拒否回答はプラグインが生成した `Ask` の `Decision` へ `Answer(Outcome)` として確定し、プラグインが承認時は対象ツールに `Approved` 付与、拒否時は `decision.decide(Decider::Person, Outcome::refused(...))` を反映後に `HoldOf` を解除（回答確定前に `Ask` を despawn しない。履歴永続化は effect log 保存経路で実施）
-  - 会話ログの正本は `SessionLogPlugin` ＋ `SessionStore`（`DirStore` による追記型線形ログ）でディスクに保存。
+    - 承認待機: `Stage::Gate` でポリシー判定し、要確認操作には `commands.spawn(HoldOf(call_entity))` を投入してReActループを保留。RPC（`SettingsService.SubmitApproval`）でユーザー回答を受け取り、承認時は `Approved` コンポーネントを付与、拒否時は `Outcome::refused` を確定し、`HoldOf` を解除して処理再開。承認結果は `host.sqlite3` の `approval_requests` テーブルへ保存
+  - 会話ログの正本は `SessionLogPlugin` ＋ `SqliteSessionStore`（`rig-sqlite`）により単一の `host.sqlite3` に保存。
   - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
-- **追記型線形ログ ＋ `rig-memory` によるCompaction**:
-  - 会話の生ログおよびCompaction要約（`Compacted`）は `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心はSQLiteに永続化（要約のSQLite二重保存は行わない）。
+- **SQLite単一保存 ＋ `rig-memory` によるCompaction**:
+  - 会話の生ログおよびCompaction要約（`Compacted`）は `SqliteSessionStore`（`rig-sqlite`）に完全保存。長期エピソード記憶および心も同一のSQLiteファイル（`host.sqlite3`）で完結し、ファイルシステム二重管理を排除。
   - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
   - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中だった要約タスクは安全にキャンセル・破棄して次回アイドル時へ延期。ハード強制閾値到達時も同期要約による会話停止は避け、緊急窓切り詰めを優先適用して応答テンポを維持。
 - **作業エージェントのセッション接続維持とライフサイクル分離**:
   - `WorkSession ≒ ACP Session` としてプロセス接続を維持。Run（指示ごとの実行）の中断はACP標準の `session/cancel` で行い、プロセス強制終了はセッション終了時や暴走時のみ実施。
   - **停止伝播の非結合**: 継続稼働する `WorkSession` は親の `SpawnedBy` ではなく独立エンティティとしてWorld内に生成し、ユーザーの音声割り込み（Barge-in）による会話ターンの停止が作業セッションへ伝播して道連れ終了する事故を防止。
 - **安全マージンを設けたコンテキスト上限検証と縮退**:
-  - 送信直前に `Total Input + Max Output <= Context Window` を安全マージン（10%）を考慮して機械的に検証。
+  - 送信直前に `next_request_tokens + OUTPUT_MARGIN <= Context Window` を安全マージンを考慮して機械的に検証。
   - 要約失敗時は古いログをアクティブプロンプト窓から一時的に切り詰めて対話を継続。
 - **Prefix Caching最適化順序と非永続注入**:
-  - プロンプトを `System Prompt`（静的ツール定義 + キャラクター設定・ペルソナ + ユーザープロファイル） ➔ `Conversation History`（`Summary` + 過去ターン生ログ） ➔ `Dynamic Tail Context`（Pinned Memory + 検索想起記憶 + 現在の心境 + Perception Summary + 現在時刻 + 最新ユーザー入力）の順で配置し、高いキャッシュヒット率（ターゲット: >90%）を目指す。
-  - 動的コンテキストは `SessionLog`（永続ログ）へは書き込まず、`PrepareSystems::Fit` 時にインメモリで末尾へ一時注入し、動的文脈を含む要求全体に対してFitを実行。
+  - プロンプトを `System Prompt`（静的ツール定義 + キャラクター設定・ペルソナ + ユーザープロファイル） ➔ `Conversation History`（`Summary` + 過去ターン生ログ） ➔ `Dynamic Tail Context in User_N`（Pinned Memory + 検索想起記憶 + 現在の心境 + Perception Summary + 現在時刻 + 最新ユーザー入力）の順で配置し、高いキャッシュヒット率（ターゲット: >90%）を達成。
+  - 動的コンテキストは `SessionLog`（永続ログ）へは書き込まず、`PrepareSystems::Edit` で一時注入し、`PrepareSystems::Fit` 時に動的文脈を含む要求全体に対してFitを実行。
 
 ### 2. 心と自動記憶（SQLite）
-- **組み込みSQLite（`tokio-rusqlite` bundled, WALモード ＋ FTS5 trigram ＋ Rustコサイン類似度）**:
-  - C言語SQLiteを静的リンクして単一ファイル完結。`tokio-rusqlite` によるスレッド分離でECSメインループをブロックせず非同期ACIDトランザクションを実行。
+- **組み込みSQLite（`rusqlite` bundled, WALモード ＋ FTS5 trigram ＋ Rustコサイン類似度）**:
+  - C言語SQLiteを静的リンクして単一ファイル完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。重い記憶整理や埋め込み生成のみTokioバックグラウンドタスクへ分離。
 - **エピソード記憶（`MemoryRecord`）**:
   - `rowid` を明示的 INTEGER PRIMARY KEY とし、FTS5外部コンテンツテーブルとの整数参照関係を不変に保証。
   - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（0〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`content_revision`、`embedding` を格納。

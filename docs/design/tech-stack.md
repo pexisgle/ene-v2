@@ -8,12 +8,14 @@
 
 | 領域 | 採用技術 / ライブラリ | 選定理由 |
 | :--- | :--- | :--- |
-| **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイルで完結。FTS5 trigram全文検索とBLOBベクトルコサイン類似度検索を単一SQLiteで完結。`tokio-rusqlite`（または専用DBワーカー）を介して非同期ECSループをブロックせずACIDトランザクションを実行 |
-| **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復・会話ログ正本（`SessionLogPlugin` + `DirStore`）を `rig-ecs` のECSステージ・Observerに一本化。TokioはConnect-RPCサーバーや外部非同期I/Oに徹し、二重ループを完全排除 |
-| **OSサンドボックス** | **OSネイティブ隔離の抽象化 (`cap-std`, `process-wrap`, `landlock`)** | Windows（Job Objects / AppContainer）、Linux（Landlock / bwrap）、macOS（Seatbelt）を統一インターフェースで制御。非対応環境では明示的警告・承認で縮退 |
+| **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイル（`host.sqlite3`）で完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。記憶整理や埋め込み生成等の重い非同期処理のみバックグラウンドタスクへ分離 |
+| **会話ログ・要約正本** | **`rig::sqlite::SqliteSessionStore` (`rig-sqlite`)** | 会話履歴（`SessionLog`）および要約状態を `host.sqlite3` に一元化。ファイルシステム追記ログ（`DirStore`）との二重管理や2相リカバリを完全排除し、SQLiteのACIDトランザクションへ統合 |
+| **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics` / `rig-mcp-client`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と `world.spawn_tool` による動的MCP登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
+| **OSサンドボックス** | **OSネイティブ隔離 (`cap-std`, `process-wrap`, `landlock`, `bwrap`)** | Linux（Landlock ＋ bwrap netns分離 ＋ UNIXソケットプロキシ）、Windows（AppContainer / Job Objects）、macOS（Seatbelt）を統一制御。非対応環境では明示的警告・承認で縮退 |
+| **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` (音声I/O) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlintによる軽快な設定・承認UI、cpalによる低遅延音声キャプチャ・再生、OSフックによる知覚センシング（目） |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産をそのまま活用。透過デスクトップウィンドウ（Wayland layer-shell / Windows Win32 layered）、VRM 1.0モデルロード・アニメーション（`ene-vrm`）、RMS音量によるローカル即時口パク、標準入出力JSON Lines IPC制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
-| **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、Server Streaming対応 |
+| **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、双方向ストリーミング（HTTP/2）対応 |
 
 ---
 
@@ -23,29 +25,36 @@
 
 #### 特徴と利点
 - **超軽量・ゼロ外部デーモン依存**:
-  - `rusqlite`（bundled）により、C言語SQLiteのソースコードをバイナリへ静的コンパイル・リンク。追加の巨大DBデーモンや外部C++依存を持たず、単一のSQLiteファイル（例: `~/.local/share/ene/host.sqlite3`）で完結。
+  - `rusqlite`（bundled）により、C言語SQLiteのソースコードをバイナリへ静的コンパイル・リンク。追加の巨大DBデーモンや外部C++依存を持たず、単一のSQLiteファイル（`host.sqlite3`）で完結。
   - WAL（Write-Ahead Logging）モードにより、高い並行読み取り性能と耐障害性を両立。
-- **スレッド分離と非同期DBワーカー（ECSループの非ブロッキング化）**:
-  - `rusqlite::Connection` は `Send` だが `Sync` ではないため、Bevy ECSのメインスレッドで長大なベクトル走査やDB書き込みロック待ちを実行すると、音声ストリーミングやゲームループがブロックするリスクがある。
-  - したがって、DB操作は `tokio-rusqlite`（専用バックグラウンドスレッドで `Connection::call` を実行する薄い公式推奨パターン）または専用非同期タスク境界に集約し、ECSメインループは非同期チャネルを介して非ブロッキングで結果を受け取る。
+- **ECSループスレッドでの直接同期アクセス（決定論的・ゼロオーバーヘッド）**:
+  - Bevy ECS のシステム（`PrepareSystems::Edit`, `Stage::Gate` 等）は同期関数 `fn system(...)` として動作する。
+  - 記憶件数が数千件規模のデスクトップ利用において、プライマリキー参照、ルール照合、FTS5 trigram検索、およびインメモリBLOBコサイン類似度計算は **1ms未満（数百マイクロ秒）** で完了する。
+  - したがって、ECSメインスレッドに同期の `rusqlite::Connection` を直接保持して同期実行し、非同期エグゼキュータへのタスクスイッチやチャネル往復オーバーヘッドを完全に排除する。
+  - 記憶整理（Consolidation）のLLM呼び出しや埋め込みベクトル生成（Embedding API）などの長時間非同期処理のみ、専用のTokioバックグラウンドタスクおよび別コネクションへ分離する。
+- **会話ログ・要約正本の一元化（`SqliteSessionStore`）**:
+  - `rig::sqlite::SqliteSessionStore`（`rig-sqlite`）を採用し、`rig-ecs` の会話セッションログ（`SessionLog`）および要約状態を `host.sqlite3` に一元化。
+  - ファイルシステム追記ログ（`DirStore`）との二重管理や、クラッシュ時の2相復旧（ファイルシステムとDBの不整合調停）を完全排除し、SQLiteのACIDトランザクションへ統合する。
 - **FTS5 trigram ＋ ベクトル検索（BLOBコサイン類似度）**:
   - 日本語の分かち書きエンジン不要の **FTS5 trigram（3-gram）** インデックスにより、助詞や固有名詞を含む高精度な語句検索を実現。
   - 選択された埋め込みモデル（ローカル `fastembed` / クラウド `text-embedding-3-small` 等）のベクトルを BLOB として保存し、Rust内のスライスコサイン類似度計算と FTS5 の順位を Rust 側で RRF（Reciprocal Rank Fusion）統合（外部C拡張に依存せず安定・最小化）。
-  - ベクトル走査は選択中モデル・次元数に一致するレコードのみを対象とし、必要に応じて小バッチ化して実行する。
 - **1ホップ認知関係性（エッジテーブル）**:
-  - 認知的関係性（`companion->remembers->memory`, `memory->cited_in->turn`, `memory->supersedes->memory`）は高々1ホップの参照であるため、外部キー制約およびシンプルな `memory_edges(from_id, rel, to_id)` テーブルで高速・堅牢に表現可能。
+  - 認知的関係性（`companion->remembers->memory`, `memory->cited_in->turn`, `memory->supersedes->memory`）は高々1ホップの参照であるため、シンプルな `memory_edges(from_id, rel, to_id)` テーブルで高速・堅牢に表現可能。
 
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
   ```toml
-  tokio-rusqlite = { version = "0.8", features = ["bundled"] }
+  rusqlite = { version = "0.34", features = ["bundled"] }
+  rig-core = "0.46"
+  rig-ecs = "0.46"
+  rig-memory = "0.46"
+  rig-sqlite = "0.46"
   serde = { version = "1", features = ["derive"] }
   serde_json = "1"
   ```
-  ※ `tokio-rusqlite = { version = "0.8", features = ["bundled"] }` は内部で SQLite C ソースを同梱して静的リンクし、かつ `rusqlite` の型（`tokio_rusqlite::Connection` および re-export された `rusqlite` 型群）を直接公開するため、最上位で個別に `rusqlite` を重ねて宣言することによる版の不一致や C ライブラリの二重リンクを防止する。
 - **スキーマ定義とハイブリッド検索（Rust）**:
   ```rust
-  // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ + 整理カーソル）
+  // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ + 整理カーソル + 承認状態）
   conn.execute_batch(r#"
       PRAGMA journal_mode = WAL;
       
@@ -104,18 +113,32 @@
           last_processed_turn_id TEXT NOT NULL,
           updated_at TEXT NOT NULL
       );
+
+      -- 権限承認要求永続化テーブル
+      CREATE TABLE IF NOT EXISTS approval_requests (
+          request_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          action_payload_hash BLOB NOT NULL,
+          tool_name TEXT NOT NULL,
+          normalized_arguments TEXT NOT NULL,
+          status TEXT NOT NULL, -- 'pending', 'approved', 'denied', 'expired'
+          created_at TEXT NOT NULL,
+          resolved_at TEXT
+      );
   "#)?;
   ```
 - **一次ドキュメント**:
   - [SQLite FTS5 Extension Documentation](https://www.sqlite.org/fts5.html)
   - [`rusqlite` Documentation (docs.rs)](https://docs.rs/rusqlite/latest/rusqlite/)
-  - [`tokio-rusqlite` Documentation (docs.rs)](https://docs.rs/tokio-rusqlite)
 
 ---
 
-### B. エージェントループ：`rig-ecs` 単一イベント駆動アーキテクチャ
+### B. エージェントループ：純粋な `rig-ecs` イベント駆動アーキテクチャ
 
-エージェント状態や実行ループをTokio側で自作せず、Rig公式の `rig-ecs` にエージェント実行・状態管理・会話ログ正本を一本化する。TokioはRPCサーバー（axum + connectrpc）と外部非同期I/O（ストリーミング通信・子プロセス）の非同期ランタイムとして機能する。
+エージェント状態や実行ループをTokio側で自作せず、公式の `rig-ecs` にエージェント実行・状態管理・会話ログ正本（`SqliteSessionStore`）を一本化する。TokioはConnect-RPCサーバーと外部非同期I/O（ストリーミング通信・子プロセス監視）の非同期ランタイムに専念する。
+
+CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` 等）や `rig-mcp-client` は採用せず、純粋な `rig-ecs` プリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ `Approved`）と動的ツール登録で最小構成を実現する。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
@@ -123,54 +146,50 @@
   │  ・Connect-RPC 受付（ChatService / WorkService / etc.） │
   │  ・外部ACPエージェントプロセスの標準入出力監視          │
   │  ・マイク音声入力 / TTSエンジンへのHTTP・ストリーム送受信│
-  │  ・非同期SQLiteワーカー（tokio-rusqlite）              │
+  │  ・バックグラウンド記憶整理・埋め込み生成タスク        │
   └───────────────────────────┬────────────────────────────┘
                               │ world.trigger(Deliver::new(...))
                               ▼
   ┌────────────────────────────────────────────────────────┐
   │ 【エージェント実行・状態管理】（rig-ecs 単一World基盤）  │
   │  ・入力投入: Deliver(agent, text, DeliveryMode)         │
-  │  ・プロンプト準備: PrepareSystems::Fit                  │
-  │    (動的文脈注入 ➔ 全体トークン計測 ➔ recent::view 調整) │
-  │  ・権限判定ゲート: Stage::Gate                          │
-  │    (NeedsApproval 付与 ➔ ApprovalPlugin が Ask/HoldOf 生成)│
+  │  ・動的注入: PrepareSystems::Edit (Dynamic Tail)        │
+  │  ・全体調整: PrepareSystems::Fit (recent::view 窓管理)  │
+  │  ・権限ゲート: Stage::Gate (HoldOf 生成 ➔ Approved 付与) │
   │  ・推論・ツール反復: AgentPlugin (ReActループ)          │
   │  ・文単位先行TTS: PostUpdate (MessageReader<StreamDelta>)│
   │    (親のユーザー向け発話のみフィルタし、句点 。！？ 送出)│
-  │  ・会話ログ正本: SessionLogPlugin ＋ DirStore (追記ログ)│
-  │  ・MCPツール統合: McpCorePlugin ＋ AddMcpServer (ene管理)│
+  │  ・会話ログ正本: SessionLogPlugin ＋ SqliteSessionStore │
+  │  ・MCPツール統合: world.spawn_tool(def, handler, opts)  │
   └────────────────────────────────────────────────────────┘
 ```
 
 #### 実装のポイント
 - **状態所有権の完全一本化（二重ループの排除）**:
   - ユーザー発話、知覚センサー（目）の要約、タイマースケジュール、作業エージェント（手）からの報告は、すべて `world.trigger(Deliver::new(agent, text, DeliveryMode))` を通じてECS Worldへ直接投入される。
-  - **公式契約に準拠した承認待機（NeedsApproval / ApprovalPlugin / Ask）**:
-    - `Stage::Gate` で承認保留を行う際、ツール呼び出し対象エンティティへ勝手な単一フラグを付与したり、ene側で承認用質問エンティティ `(Ask, ForAgent, HoldOf)` を直接手動生成したりは行わない（公式 `ApprovalPlugin` は内部で非公開マーカー `Approving` を付与したAskの回答のみを処理対象とするため）。
-    - ユーザー承認が必要なツール呼び出しには、eneのポリシー判定systemが **`commands.entity(call_entity).queue(NeedsApproval::add("ene-permissions", reason))`** で理由を追加する。
-    - **質問の生成から回答反映までの公式プラグイン委譲**:
-      - **質問生成（`ApprovalPlugin`）**: プラグインが `NeedsApproval` を検知し、公式契約に準拠した承認質問 `(Ask, ForAgent, HoldOf)` を生成してツール呼び出しを保留する。eneは承認用質問を手動で直接生成しない。
-      - **回答確定（GUI / RPC ➔ Ask）**: `Ask` は回答を持つ effect であり、GUI／RPCは**プラグインが生成した対象 `Ask` エンティティ自身の `Decision` に対して `Answer` の `Outcome` として確定**する（`ask_decision.decide(Decider::Person, outcome)`）。回答確定前に質問エンティティを勝手に `despawn` してはならない。
-      - **結果の反映と保留解除（`ApprovalPlugin`）**: プラグインが `Ask` の回答結果を読み取り、承認時は対象ツール呼び出しへ `Approved` コンポーネントを付与（後続ゲートの再保留抑止）、拒否時は対象ツールの `Decision` を拒否（`decision.decide(Decider::Person, Outcome::refused("User denied"))`）として確定し、最後に `HoldOf` を解除する。
-      - **ログ・履歴の保存責務の分離**: Askへの回答はRigの標準effect経路で確定する。承認履歴のディスク永続化は、採用するeffect logの保存経路（公式の `EffectLogPlugin` など）で行い、会話用の `SessionLog` への自動保存とは同一視しない。
-    - GUI / RPC（`SettingsService.SubmitApproval`）側は、公式の質問回答先である `Answerer`（質問応答機構）の登録を含めて接続する。要求IDと `Ask` エンティティの対応、および承認対象の引数ハッシュ束縛は ene 側の責務として管理する。
-    - これにより、質問の生成・再質問抑止・回答適用・保留解除をene側で再実装することなく、公式プラグインとのクリーンな契約で承認・拒否・タイムアウトが整合して終端する。
-  - **ストリーム文字片の厳格なフィルタリング**:
-    - `PostUpdate` で `MessageReader<StreamDelta>` を購読するシステムは、**親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
-    - プラグイン自身の内部モデル呼び出し、Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等は一切TTSへ流さない。
-- **会話ログと要約の責務分担**:
-  - **会話セッションログと要約（短期正本）**: `rig-ecs` の `SessionLogPlugin` が要求する `SessionStore(Arc<dyn Store>)` に合わせ、追記型線形ログである `DirStore` を正本とする。Compaction要約も `apply_summary` により `Compacted` として `SessionLog` 内に直接記録される。
-  - **動的文脈の非永続注入と Fit による最終全体予算管理**:
-    - Pinned Memory、想起記憶、現在の心、知覚要約などの変動情報は `SessionLog` には書き込まず、インメモリの要求（Request）の末尾（最新ユーザー発話直前、Dynamic Tail）へ一時的に挿入する。
-    - その後、`PrepareSystems::Fit` を**動的文脈を含む要求全体に対して実行**し、合計トークン数を評価した上で履歴ウィンドウ（`recent::view`）を切り詰める。これにより、動的文脈を追加したことでトークン上限を超過する事故を決定論的に防止する。
-  - **長期エピソード記憶・心**: SQLite（`host.sqlite3`）に永続化し、長期的なエピソード記憶、心（感情・関係性）、および長期記憶の抽出進捗カーソル（`consolidation_state`）を管理する。
-- **MCP設定のene単一所有権（McpCorePlugin ＋ AddMcpServer）**:
-  - `rig_mcp_client::McpPlugin` は `RIG_HOME/mcp.json` 探索や独自の承認機構を持つため、ene側の設定管理と二重化する。
-  - したがって、設定ファイルの自動探索を行わない **`McpCorePlugin`** を採用し、eneのDB・UIで認可されたMCPサーバーのみを **`AddMcpServer`** イベントによりプログラム的にECS Worldへ登録する。MCPサーバーの接続・切断・ツール公開は公式MCP統合に委譲しつつ、設定の正本はeneが単一所有する。
+- **純粋なECSプリミティブによる承認待機（`HoldOf` / `Approved`）**:
+  - CLIハーネス用の `ApprovalPlugin`（内部非公開マーカー `Approving` を前提とする機構）を排除し、`rig-ecs` のコアコンポーネントのみで完結させる：
+    1. **保留**: `Stage::Gate` システムにおいて、未承認のツール呼び出しエンティティ（`call_entity`）を検知した場合、`commands.spawn(HoldOf(call_entity))` を投入してReActループを安全に待機させる。
+    2. **登録**: 保留した操作の引数ハッシュを計算し、`approval_requests` テーブルおよび未決リストへ登録。クライアントへ `ApprovalRequested` 通知を発行。
+    3. **承認確定（RPC ➔ ECS）**: ユーザーが承認した場合、Connect-RPC（`SettingsService.SubmitApproval`）ハンドラからECS Worldへコマンドをディスパッチし、`commands.entity(call_entity).insert(Approved)` を付与した上で `HoldOf` エンティティを `despawn` する。後続の `Stage::Gate` は `Approved` コンポーネントを検知して通過させる。
+    4. **拒否確定**: ユーザーが拒否した場合、対象ツールの `Decision` を拒否（`decision.decide(Decider::Person, Outcome::refused("User denied"))`）として確定し、`HoldOf` エンティティを `despawn` する。
+    5. **記録**: 承認結果は `host.sqlite3` の `approval_requests` テーブルへ永続化する。会話ログ（`SessionLog`）を汚染しない。
+- **動的文脈の非永続注入（Dynamic Tail）と KV Prefix Cache 最大化**:
+  - Anthropic/OpenAI/Gemini の KVキャッシュ（Prefix Caching）を最大限に活かすため、プロンプト構造を以下に固定する：
+    $$\text{[System Prompt]} \longrightarrow \text{[Past Dialogue History]} \longrightarrow \text{[Dynamic Tail in User\_N]} \longrightarrow \text{[User Speech]}$$
+  - Pinned Memory、想起エピソード記憶、現在の心（`MindState`）、知覚要約（Perception Summary）、現在日時は、永続会話ログ（`SessionLog`）には一切書き込まず、最新のユーザー発話ブロック（`User_N`）の末尾コンテキスト枠に一時注入する。
+  - これにより、`[System Prompt, ..., Assistant_{N-1}]` までの過去ログ全体が完全に不変のプレフィックスとして保持され、>90% のキャッシュヒット率を達成する。
+  - `PrepareSystems::Edit` で動的文脈を注入し、`PrepareSystems::Fit` で動的文脈を含む要求全体に対してトークン数計測と `recent::view` 窓切り詰めを実行する。
+- **ストリーム文字片の厳格なフィルタリング**:
+  - `PostUpdate` で `MessageReader<StreamDelta>` を購読するシステムは、**親コンパニオンのユーザー向け応答ターン（`turn.is_user_facing && turn.agent_id == companion_id`）の文字片のみを対象**として句点（`。`、`！`、`？`、改行）ごとにテキストを切り出し、TTS非同期タスクへ送信する。
+  - Compaction要約、記憶整理、推論思考（thinking）断片、子エージェントの内部ログ等は一切TTSへ流さない。
+- **MCPツールの動的ECS登録**:
+  - 外部ファイル自動探索（`rig-mcp-client`）を排し、eneの設定DBで認可されたMCPサーバーのツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。設定の正本はeneが単一所有する。
 
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
-- [`rig-ecs` Documentation](https://docs.rs/rig-ecs)（Bevy ECSベースのエージェント実行プラグイン・SessionLog）
+- [`rig-ecs` Documentation](https://docs.rs/rig-ecs)（Bevy ECSベースのエージェント実行）
+- [`rig-sqlite` Documentation](https://docs.rs/rig-sqlite)（SQLiteセッションストア）
 
 ---
 
@@ -238,3 +257,20 @@ pub trait TtsEngine: Send + Sync {
      - 再生中PCM音声のRMS振幅をフレーム単位で解析し、VRMブレンドシェイプ（`aa` 等）を即時変位。
   3. **標準入出力 JSON Lines IPC制御**:
      - 親エージェントからの `body_motion` 指示（モーション名・表情）を標準入力で受信し、滑らかにクロスフェード再生。
+
+---
+
+### F. デスクトップクライアント技術スタック（Desktop Client）
+
+ホストデーモン（`apps/ene-host`）と協調して動作するデスクトップクライアント（UI/知覚/オーディオ）の技術スタック。
+
+| コンポーネント | 採用技術 | 選定理由と責務 |
+| :--- | :--- | :--- |
+| **ネイティブGUI** | **`Slint`** | ElectronやQtのような巨大なランタイム・Webブラウザエンジンを排し、Pure Rustで軽量・高速に描画されるネイティブGUIツールキットを採用。承認カード、設定画面、コンパニオン切替UIを数MBのフットプリントで瞬時に表示 |
+| **オーディオ入出力** | **`cpal`** | クロスプラットフォーム（ALSA/PulseAudio/WASAPI/CoreAudio）対応の低レイテンシオーディオI/O。24kHz 16-bit mono PCMでのマイク録音・スピーカー再生を担い、再生中PCMからRMS振幅を算出して口パクIPCを駆動 |
+| **知覚センサー（目）** | **OSネイティブウィンドウフック** | Linux（X11/Wayland）、Windows（`SetWinEventHook`）、macOS（Accessibility API）を通じてアクティブウィンドウのタイトルやフォーカス変化をリアルタイム検知 |
+| **アバター子プロセス管理** | **標準入出力 JSON Lines IPC** | `apps/ene-avatar` を子プロセスとして起動・監視し、標準入出力経由でモーション指定、表情、リップシンク振幅をミリ秒単位で制御 |
+
+> [!NOTE]
+> **Extism (Wasm) プラグインのフェーズ位置づけ**:
+> Extism (Wasm) によるサードパーティプラグイン実行環境は、後続の拡張フェーズへ延期する。Alpha/Minimal構成では、内蔵Rigツール、外部MCPサーバー（JSON-RPC）、および外部ACPコーディングエージェント（stdio）の3系統に集中し、過剰な抽象化層を排して堅牢な動作を担保する。
