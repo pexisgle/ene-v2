@@ -183,7 +183,8 @@ pub struct AudioChunkEnvelope {
        - ソフトウェア単体で再生参照信号との同期エコー抑制が保証できない環境では、**マイク入力による自動Barge-inを無効化**し、自発話による誤中断を防止する。
        - この場合の割り込みは、GUI上の停止ボタン、キーボードショートカット（Esc等）、プッシュ・トゥ・トーク、またはヘッドフォン／イヤホン利用時（マイクへの音響回り込みがない環境）に限定する。
   - **音声承認の厳格な発話束縛契約**:
-    - `is_companion_speaking = false` はクライアント側の再生停止状態を示すソフトウェアフラグであり、マイク入力の音響的静寂を保証するものではない。
+    - クライアントはマイク音声送信時（`AudioInputChunk`）、再生中であるかを示すフラグ `is_companion_speaking` を付与する。
+    - ただし、`is_companion_speaking = false` はクライアント側の再生停止状態を示すソフトウェアフラグであり、マイク入力の音響的静寂を保証するものではない。
     - したがって、スピーカーからの回り込みによる自己承認事故を防止するため、**「コンパニオン再生中（`is_companion_speaking == true`）に収録・バッファリングされた音声フレームは、権限承認の判定対象から完全に破棄・除外」**する。
     - 高権限な音声承認（「いいよ」「実行して」等）は、**再生が完全に停止した後に新しく開始（発声検知）されたユーザー発話にのみ厳格に束縛**して受け付ける。再生中の残響や遅延フレームから承認を確定することは禁止する。
 
@@ -289,6 +290,20 @@ service VoiceService {
 
   // クライアントからの再生状態報告（再生完了・中断・失敗、実再生進捗）
   rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
+}
+
+message AudioInputChunk {
+  string client_id = 1;
+  bytes pcm_data = 2; // pcm_s16le mono 16kHz / 24kHz
+  uint32 sample_rate = 3;
+  bool is_companion_speaking = 4; // 再生中フラグ
+}
+
+message TranscriptionEvent {
+  string transcription_id = 1;
+  string text = 2;
+  bool is_final = 3;
+  bool is_speaking = 4; // VADによる音声活動検出フラグ
 }
 
 message SubscribeAudioRequest {
