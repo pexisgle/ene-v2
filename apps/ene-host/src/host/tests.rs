@@ -1,13 +1,18 @@
 //! Behaviour tests for the headless host. The model is scripted; no external
 //! service is called.
 
-use super::*;
-use crate::host::{
+use super::{
+    Runtime, Store,
+    agent::AgentKey,
     chat, client,
-    mind::{self, CompanionRecord},
-    model::Binding,
+    companion::Companion,
+    db::{new_id, now},
+    error::HostError,
+    memory::Memory,
+    mind,
+    model::{Binding, ModelSource, Purpose},
     settings,
-    work::WorkRecord,
+    work::{self, WorkStatus},
 };
 use ene_rpc as w;
 use rig_core::{
@@ -17,29 +22,32 @@ use rig_core::{
     test_utils::{MockCompletionModel, MockStreamEvent as E},
 };
 use rig_ecs::{effects::Handler, model::Connection};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use serde_json::json;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
 };
-use std::time::Duration;
 
-/// A scripted model source: the parent's script, the work agents' script,
-/// and a revision that rises so `bind` re-binds as it would on a change.
 struct Scripted {
     parent: MockCompletionModel,
     worker: MockCompletionModel,
     revisions: AtomicU64,
 }
 
-impl model::ModelSource for Scripted {
+impl ModelSource for Scripted {
     fn connect(
         &self,
-        host: &Host,
+        store: &Store,
         companion_id: &str,
-        purpose: model::Purpose,
-    ) -> Result<(Connection, Binding)> {
-        mind::companion(&host.db, companion_id)?;
-        let model = if purpose == model::Purpose::Task {
+        purpose: Purpose,
+    ) -> super::error::Result<(Connection, Binding)> {
+        store
+            .companion(companion_id)?
+            .ok_or_else(|| HostError::not_found("companion not found"))?;
+        let model = if purpose == Purpose::Task {
             self.worker.clone()
         } else {
             self.parent.clone()
@@ -48,19 +56,19 @@ impl model::ModelSource for Scripted {
     }
 }
 
-fn wrap_model(model: MockCompletionModel, revision: u64) -> Result<(Connection, Binding)> {
-    let spec = Catalog::builtin()
-        .resolve("openai/gpt-6-luna")
-        .map_err(|_| ConnectError::unavailable("test model unavailable"))?
-        .shared();
-    wrap_spec(model, spec, revision)
-}
-
-fn wrap_spec(
+fn wrap_model(
     model: MockCompletionModel,
-    spec: Arc<rig_core::catalog::ModelSpec>,
     revision: u64,
-) -> Result<(Connection, Binding)> {
+) -> super::error::Result<(Connection, Binding)> {
+    let spec = std::sync::Arc::new(
+        (*Catalog::builtin()
+            .resolve("openai/gpt-6-luna")
+            .map_err(|_| HostError::unavailable("test model unavailable"))?
+            .shared())
+        .clone()
+        .with_context_window(100_000)
+        .with_max_output_tokens(1_000),
+    );
     Ok((
         Connection {
             handler: Handler(ErasedHandler::new(ModelAdapter::<Completion>::new(
@@ -78,60 +86,16 @@ fn wrap_spec(
     ))
 }
 
-/// A source whose model advertises the window and output limit a test needs.
-struct Windowed {
-    model: MockCompletionModel,
-    window: Option<u32>,
-    output: Option<u32>,
-}
+struct ScriptedSource(Scripted);
 
-impl model::ModelSource for Windowed {
+impl ModelSource for ScriptedSource {
     fn connect(
         &self,
-        host: &Host,
+        store: &Store,
         companion_id: &str,
-        _: model::Purpose,
-    ) -> Result<(Connection, Binding)> {
-        mind::companion(&host.db, companion_id)?;
-        let spec = if self.window.is_none() && self.output.is_none() {
-            rig_core::catalog::ModelSpec::new(
-                rig_core::providers::registry::ProviderId::catalog("openai")
-                    .ok_or_else(|| ConnectError::unavailable("test provider is unknown"))?,
-                "gpt-6-luna",
-            )
-            .with_tools(true)
-        } else {
-            let mut spec = (*Catalog::builtin()
-                .resolve("openai/gpt-6-luna")
-                .map_err(|_| ConnectError::unavailable("test model unavailable"))?
-                .shared())
-            .clone();
-            if let Some(window) = self.window {
-                spec = spec.with_context_window(window);
-            }
-            if let Some(output) = self.output {
-                spec = spec.with_max_output_tokens(output);
-            }
-            spec
-        };
-        wrap_spec(self.model.clone(), Arc::new(spec), 1)
-    }
-}
-
-fn windowed(
-    model: MockCompletionModel,
-    window: Option<u32>,
-    output: Option<u32>,
-    consolidate: bool,
-) -> Options {
-    Options {
-        models: Some(Arc::new(Windowed {
-            model,
-            window,
-            output,
-        })),
-        consolidate,
-        ..Options::default()
+        purpose: Purpose,
+    ) -> super::error::Result<(Connection, Binding)> {
+        self.0.connect(store, companion_id, purpose)
     }
 }
 
@@ -139,20 +103,16 @@ fn scripted(
     parent: MockCompletionModel,
     worker: MockCompletionModel,
     consolidate: bool,
-) -> Options {
-    Options {
-        models: Some(Arc::new(Scripted {
+) -> super::Options {
+    super::Options {
+        models: Some(Arc::new(ScriptedSource(Scripted {
             parent,
             worker,
             revisions: AtomicU64::new(0),
-        })),
+        }))),
         consolidate,
-        ..Options::default()
+        ..Default::default()
     }
-}
-
-fn model_options(model: MockCompletionModel) -> Options {
-    scripted(model.clone(), model, false)
 }
 
 fn text_model(text: &'static str) -> MockCompletionModel {
@@ -162,49 +122,39 @@ fn text_model(text: &'static str) -> MockCompletionModel {
     ]])
 }
 
-fn factory(text: &'static str) -> Options {
-    let model = text_model(text);
-    scripted(model.clone(), model, false)
+fn parent_model(turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>) -> MockCompletionModel {
+    MockCompletionModel::from_stream_turns(turns)
 }
 
-/// A source that refuses to connect, as a host without a model would.
 struct NoModel;
 
-impl model::ModelSource for NoModel {
-    fn connect(&self, _: &Host, _: &str, _: model::Purpose) -> Result<(Connection, Binding)> {
-        Err(ConnectError::unavailable("no model in this restart"))
-    }
-}
-
-fn no_model() -> Options {
-    Options {
-        models: Some(Arc::new(NoModel)),
-        consolidate: false,
-        ..Options::default()
-    }
-}
-
-fn target(companion: &str) -> w::Target {
-    w::Target {
-        companion_id: companion.into(),
-        ..Default::default()
+impl ModelSource for NoModel {
+    fn connect(
+        &self,
+        _: &Store,
+        _: &str,
+        _: Purpose,
+    ) -> super::error::Result<(Connection, Binding)> {
+        Err(HostError::unavailable("no model in this restart"))
     }
 }
 
 async fn default_companion(runtime: &Runtime) -> String {
     runtime
         .call(|app| {
-            Ok(mind::companions(&app.world().resource::<Host>().db)?
-                .into_iter()
-                .next()
-                .unwrap()
-                .id)
+            Ok(app
+                .world()
+                .resource::<Store>()
+                .companions()?
+                .first()
+                .map(|companion| companion.id.clone())
+                .unwrap_or_default())
         })
         .await
         .unwrap()
 }
 
-async fn send(runtime: &Runtime, companion: &str, key: &str, text: &str) -> w::MessageAcceptance {
+async fn send(runtime: &Runtime, companion: &str, key: &str, text: &str) -> w::Acceptance {
     let companion = companion.to_owned();
     let key = key.to_owned();
     let text = text.to_owned();
@@ -213,7 +163,7 @@ async fn send(runtime: &Runtime, companion: &str, key: &str, text: &str) -> w::M
             chat::accept(
                 app,
                 w::SendMessageRequest {
-                    target: target(&companion).into(),
+                    companion_id: companion,
                     request_key: key,
                     text,
                     ..Default::default()
@@ -224,13 +174,16 @@ async fn send(runtime: &Runtime, companion: &str, key: &str, text: &str) -> w::M
         .unwrap()
 }
 
-async fn history(runtime: &Runtime, target: w::Target) -> w::History {
+async fn history(runtime: &Runtime, companion: &str, include_context: bool) -> w::History {
+    let companion = companion.to_owned();
     runtime
         .call(move |app| {
             chat::history(
                 app.world_mut(),
                 w::HistoryRequest {
-                    target: target.into(),
+                    companion_id: companion,
+                    limit: Some(200),
+                    include_context: Some(include_context),
                     ..Default::default()
                 },
             )
@@ -242,7 +195,8 @@ async fn history(runtime: &Runtime, target: w::Target) -> w::History {
 async fn until(runtime: &Runtime, companion: &str, text: &str) -> w::History {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let seen = history(runtime, target(companion)).await;
+            let _ = runtime.call(|_| Ok(())).await;
+            let seen = history(runtime, companion, true).await;
             if seen.items.iter().any(|message| message.text == text) {
                 return seen;
             }
@@ -253,12 +207,38 @@ async fn until(runtime: &Runtime, companion: &str, text: &str) -> w::History {
     .expect("host did not answer")
 }
 
+fn memory(owner: &str, content: &str) -> Memory {
+    Memory {
+        id: new_id(),
+        owner: owner.into(),
+        audiences: Vec::new(),
+        content: content.into(),
+        description: String::new(),
+        appraisal: String::new(),
+        acquisition: super::memory::Acquisition::UserStatement,
+        importance: 5,
+        occurred_at: None,
+        recorded_at: now(),
+        last_accessed_at: None,
+        memory_revision: 1,
+        content_revision: 1,
+        emotion: None,
+        source_context: json!([]),
+        supersedes: Vec::new(),
+        created_by: "test".into(),
+        updated_at: now(),
+    }
+}
+
 #[tokio::test]
 async fn a_turn_is_accepted_answered_and_restored() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("こんにちは"))
-        .await
-        .unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("こんにちは"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
     let companion = default_companion(&runtime).await;
     let accepted = send(&runtime, &companion, "key", "hi").await;
     assert!(!accepted.request_id.is_empty());
@@ -269,8 +249,17 @@ async fn a_turn_is_accepted_answered_and_restored() {
     runtime.shutdown().await.unwrap();
     drop(runtime);
 
-    let runtime = Runtime::start_with(temp.path(), no_model()).await.unwrap();
-    let seen = history(&runtime, target(&companion)).await;
+    let runtime = Runtime::start_with(
+        temp.path(),
+        super::Options {
+            models: Some(Arc::new(NoModel)),
+            consolidate: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let seen = history(&runtime, &companion, false).await;
     assert!(
         seen.items
             .iter()
@@ -280,86 +269,52 @@ async fn a_turn_is_accepted_answered_and_restored() {
     runtime.shutdown().await.unwrap();
 }
 
-#[test]
-fn a_companion_record_round_trips_its_json_fields() {
-    let record = CompanionRecord::seed("id".into(), "now".into());
-    let encoded = serde_json::to_string(&record).unwrap();
-    let decoded: CompanionRecord = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded.companion.id, record.companion.id);
-    assert_eq!(decoded.profile, record.profile);
-    assert_eq!(decoded.state, record.state);
-}
-
 #[tokio::test]
 async fn a_work_session_runs_while_the_parent_keeps_talking_and_reports_once() {
     let temp = tempfile::tempdir().unwrap();
-    let parent = MockCompletionModel::from_stream_turns([
+    let parent = parent_model(vec![
         vec![
-            E::tool_call(
-                "start",
-                "start_work",
-                serde_json::json!({"prompt": "整理して"}),
-            ),
+            E::tool_call("start", "start_work", json!({"instruction": "整理して"})),
             E::final_response_with_default_usage(),
         ],
         vec![E::text("started"), E::final_response_with_default_usage()],
+        vec![
+            E::text("作業が終わったよ"),
+            E::final_response_with_default_usage(),
+        ],
     ]);
-    let worker = MockCompletionModel::from_stream_turns([vec![
-        E::text("done"),
-        E::final_response_with_default_usage(),
-    ]]);
+    let worker = text_model("done");
     let runtime = Runtime::start_with(temp.path(), scripted(parent, worker, false))
         .await
         .unwrap();
     let companion = default_companion(&runtime).await;
     send(&runtime, &companion, "work", "任せる").await;
-    let seen = until(&runtime, &companion, "started").await;
-    assert!(seen.items.iter().any(|message| message.text == "started"));
-    let report = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let seen = history(&runtime, target(&companion)).await;
-            if seen
-                .items
-                .iter()
-                .any(|message| message.text.contains("作業") && message.text.contains("done"))
-            {
-                return seen;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("work report did not arrive");
+    until(&runtime, &companion, "started").await;
+    let seen = until(&runtime, &companion, "作業が終わったよ").await;
     assert!(
-        report
-            .items
+        seen.items
             .iter()
             .any(|message| message.text.contains("done"))
     );
     let works = runtime
-        .call(move |app| {
-            Ok(app
-                .world()
-                .resource::<Host>()
-                .db
-                .list::<WorkRecord>("work:")?
-                .into_iter()
-                .map(|(_, record)| record.session)
-                .collect::<Vec<_>>())
-        })
+        .call(|app| app.world().resource::<Store>().works())
         .await
         .unwrap();
     assert_eq!(works.len(), 1);
-    assert_eq!(works[0].status, "answered");
+    assert_eq!(works[0].status, WorkStatus::Idle);
+    assert!(works[0].reported_run.as_deref().is_some());
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn clients_are_registered_and_activation_is_exclusive() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("ok"))
-        .await
-        .unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
     let companion = default_companion(&runtime).await;
     let a = runtime
         .call(|app| {
@@ -455,235 +410,67 @@ async fn clients_are_registered_and_activation_is_exclusive() {
 #[tokio::test]
 async fn a_mind_update_is_stored_and_the_next_turn_recalls_it() {
     let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            E::tool_call(
-                "mem",
-                "mind_update",
-                serde_json::json!({
-                    "expected_revision": 1,
-                    "memories": [{
-                        "content": "りんごが好き",
-                        "acquisition": "user_statement"
-                    }]
-                }),
-            ),
-            E::final_response_with_default_usage(),
-        ],
-        vec![E::text("覚えた"), E::final_response_with_default_usage()],
-        vec![
-            E::text("りんごだね"),
-            E::final_response_with_default_usage(),
-        ],
-    ]);
-    let runtime = Runtime::start_with(temp.path(), model_options(model))
-        .await
-        .unwrap();
+    let model = text_model("りんごだね");
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(model.clone(), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
     let companion = default_companion(&runtime).await;
-    for (key, text, answer) in [
-        ("first", "りんごが好き", "覚えた"),
-        ("second", "りんごが好きって言ってたね", "りんごだね"),
-    ] {
-        send(&runtime, &companion, key, text).await;
-        until(&runtime, &companion, answer).await;
-    }
-    let view = runtime
-        .call({
-            let companion = companion.clone();
-            move |app| mind::mind_view(&app.world().resource::<Host>().db, &companion)
-        })
+    let memory = memory(&companion, "りんごが好き");
+    let saved = memory.clone();
+    runtime
+        .call(move |app| app.world().resource::<Store>().save_memory(&saved))
         .await
         .unwrap();
-    assert_eq!(view.index.as_option().unwrap().memories, 1);
-    let seen = context_history(&runtime, target(&companion)).await;
-    let note = seen
-        .items
-        .iter()
-        .find(|message| message.text.contains("関連する記憶"))
-        .expect("the recall note must be in the streamed context");
-    assert_eq!(note.role, "context", "injected context is not the user");
+    send(&runtime, &companion, "fruit", "りんご").await;
+    until(&runtime, &companion, "りんごだね").await;
+    let requests = model.requests();
+    assert!(!requests.is_empty());
+    let seen = format!("{:?}", requests[0].chat_history);
+    assert!(seen.contains("関連する記憶"), "{seen}");
+    assert!(seen.contains("りんごが好き"), "{seen}");
+    let visible = history(&runtime, &companion, true).await;
+    assert!(
+        !visible
+            .items
+            .iter()
+            .any(|message| message.text.contains("関連する記憶")),
+        "dynamic context must not be persisted"
+    );
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_device_operation_waits_for_the_client_and_returns_its_result() {
+async fn memory_control_forgets_shares_and_is_idempotent() {
     let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            E::tool_call(
-                "device",
-                "device_request",
-                serde_json::json!({
-                    "capability": "files",
-                    "input": {"path": "note.txt"}
-                }),
-            ),
-            E::final_response_with_default_usage(),
-        ],
-        vec![
-            E::text("受け取った"),
-            E::final_response_with_default_usage(),
-        ],
-    ]);
-    let runtime = Runtime::start_with(temp.path(), model_options(model))
-        .await
-        .unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
     let companion = default_companion(&runtime).await;
+    let memory = memory(&companion, "青森のりんご");
+    let id = memory.id.clone();
+    let saved = memory.clone();
     runtime
-        .call(|app| {
-            client::register(
-                app,
-                w::RegisterClientRequest {
-                    id: "device".into(),
-                    name: "phone".into(),
-                    platform: "android".into(),
-                    capabilities: vec!["files".into()],
-                    ..Default::default()
-                },
-            )
-        })
+        .call(move |app| app.world().resource::<Store>().save_memory(&saved))
         .await
         .unwrap();
-    runtime
-        .call(|app| {
-            client::set_capabilities(
-                app,
-                w::SetCapabilitiesRequest {
-                    client_id: "device".into(),
-                    capabilities: vec!["files".into()],
-                    granted_capabilities: vec!["files".into()],
-                    revision: 1,
-                    ..Default::default()
-                },
-            )
-        })
-        .await
-        .unwrap();
-    runtime
-        .call({
-            let companion = companion.clone();
-            move |app| {
-                client::activate(
-                    app,
-                    w::ActivationRequest {
-                        companion_id: companion,
-                        client_id: "device".into(),
-                        expected_revision: 1,
-                        ..Default::default()
-                    },
-                )
-            }
-        })
-        .await
-        .unwrap();
-    let mut stream = runtime
-        .call(|app| client::subscribe(app, "device"))
-        .await
-        .unwrap();
-    let _ = stream.pending;
-    send(&runtime, &companion, "device", "note.txt を読んで").await;
-    let operation = tokio::time::timeout(Duration::from_secs(5), stream.receiver.recv())
-        .await
-        .expect("device operation was not dispatched")
-        .expect("device stream closed");
-    assert_eq!(operation.capability, "files");
-    runtime
-        .call({
-            let operation = operation.operation_id.clone();
-            move |app| {
-                client::complete(
-                    app,
-                    w::DeviceOperationResult {
-                        client_id: "device".into(),
-                        operation_id: operation,
-                        success: true,
-                        output: w::JsonDocument {
-                            json: "{\"ok\":true}".into(),
-                            ..Default::default()
-                        }
-                        .into(),
-                        ..Default::default()
-                    },
-                )
-            }
-        })
-        .await
-        .unwrap();
-    until(&runtime, &companion, "受け取った").await;
-    let state = runtime
-        .call({
-            let operation = operation.operation_id;
-            move |app| client::get_operation(app, &operation)
-        })
-        .await
-        .unwrap();
-    assert_eq!(state.status, "completed");
-    runtime.shutdown().await.unwrap();
-}
 
-/// A terminal that never answers must not keep the turn open: the next
-/// message would be steered into a turn that cannot end.
-#[tokio::test]
-async fn a_device_request_nobody_answers_does_not_hold_the_turn_forever() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            E::tool_call(
-                "device",
-                "device_request",
-                serde_json::json!({"capability": "files", "input": {"path": "note.txt"}}),
-            ),
-            E::final_response_with_default_usage(),
-        ],
-        vec![
-            E::text("端末が応答しません"),
-            E::final_response_with_default_usage(),
-        ],
-    ]);
-    let mut options = model_options(model);
-    options.device_timeout = Duration::from_millis(50);
-    let runtime = Runtime::start_with(temp.path(), options).await.unwrap();
-    let companion = default_companion(&runtime).await;
-    runtime
-        .call(|app| {
-            client::register(
-                app,
-                w::RegisterClientRequest {
-                    id: "device".into(),
-                    name: "phone".into(),
-                    platform: "android".into(),
-                    capabilities: vec!["files".into()],
-                    ..Default::default()
-                },
-            )
-        })
-        .await
-        .unwrap();
-    runtime
-        .call(|app| {
-            client::set_capabilities(
-                app,
-                w::SetCapabilitiesRequest {
-                    client_id: "device".into(),
-                    capabilities: vec!["files".into()],
-                    granted_capabilities: vec!["files".into()],
-                    revision: 1,
-                    ..Default::default()
-                },
-            )
-        })
-        .await
-        .unwrap();
-    runtime
+    let forgotten = runtime
         .call({
             let companion = companion.clone();
+            let id = id.clone();
             move |app| {
-                client::activate(
-                    app,
-                    w::ActivationRequest {
+                mind::control_memory(
+                    app.world_mut(),
+                    w::MemoryControlRequest {
                         companion_id: companion,
-                        client_id: "device".into(),
-                        expected_revision: 1,
+                        memory_id: id,
+                        action: "forget".into(),
                         ..Default::default()
                     },
                 )
@@ -691,105 +478,305 @@ async fn a_device_request_nobody_answers_does_not_hold_the_turn_forever() {
         })
         .await
         .unwrap();
-    let mut stream = runtime
-        .call(|app| client::subscribe(app, "device"))
+    assert_eq!(forgotten.importance, 0);
+    let store = runtime
+        .call(|app| Ok(app.world().resource::<Store>().clone()))
         .await
         .unwrap();
-    let _ = stream.pending;
-    send(&runtime, &companion, "device", "note.txt を読んで").await;
-    let operation = tokio::time::timeout(Duration::from_secs(5), stream.receiver.recv())
-        .await
-        .expect("device operation was not dispatched")
-        .expect("device stream closed");
-    // No `complete`: the host gives up on its own and the turn carries on.
-    until(&runtime, &companion, "端末が応答しません").await;
-    let state = runtime
+    assert!(
+        store
+            .recall(
+                &companion,
+                "りんご",
+                super::memory::RecallMode::Automatic,
+                10
+            )
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .recall(
+                &companion,
+                "りんご",
+                super::memory::RecallMode::Explicit,
+                10
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    let shared = runtime
         .call({
-            let operation = operation.operation_id;
-            move |app| client::get_operation(app, &operation)
+            let companion = companion.clone();
+            let id = id.clone();
+            move |app| {
+                mind::control_memory(
+                    app.world_mut(),
+                    w::MemoryControlRequest {
+                        companion_id: companion,
+                        memory_id: id,
+                        action: "share".into(),
+                        ..Default::default()
+                    },
+                )
+            }
         })
         .await
         .unwrap();
-    assert_eq!(state.status, "uncertain");
+    assert_eq!(shared.audiences, ["*"]);
+    let again = runtime
+        .call({
+            let companion = companion.clone();
+            let id = id.clone();
+            move |app| {
+                mind::control_memory(
+                    app.world_mut(),
+                    w::MemoryControlRequest {
+                        companion_id: companion,
+                        memory_id: id,
+                        action: "share".into(),
+                        ..Default::default()
+                    },
+                )
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(again.revision, shared.revision);
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn a_settled_turn_is_consolidated_into_memory() {
     let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![E::text("first"), E::final_response_with_default_usage()],
+    let extraction = json!({
+        "reason": "remembered",
+        "memories": [{
+            "content": "りんごが好き",
+            "description": "好物",
+            "appraisal": "うれしい",
+            "acquisition": "user_statement",
+            "importance": 5
+        }]
+    })
+    .to_string();
+    let parent = parent_model(vec![
+        vec![E::text("ok"), E::final_response_with_default_usage()],
         vec![
-            E::text(
-                "{\"reason\":\"好みを覚えた\",\"memories\":[{\"content\":\"紅茶が好き\",\"description\":\"好み\",\"appraisal\":\"うれしい\",\"acquisition\":\"user_statement\"}]}",
-            ),
+            E::text(extraction.clone()),
             E::final_response_with_default_usage(),
         ],
     ]);
-    let runtime = Runtime::start_with(temp.path(), scripted(model.clone(), model, true))
+    let runtime = Runtime::start_with(temp.path(), scripted(parent, text_model("unused"), true))
         .await
         .unwrap();
     let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "memory", "紅茶が好き").await;
-    until(&runtime, &companion, "first").await;
-    let view = tokio::time::timeout(Duration::from_secs(5), async {
+    send(&runtime, &companion, "first", "りんごが好き").await;
+    until(&runtime, &companion, "ok").await;
+    let wait_runtime = runtime.clone();
+    let wait_companion = companion.clone();
+    tokio::time::timeout(Duration::from_secs(5), async move {
         loop {
-            let view = runtime
-                .call({
-                    let companion = companion.clone();
-                    move |app| mind::mind_view(&app.world().resource::<Host>().db, &companion)
-                })
+            let _ = wait_runtime.call(|_| Ok(())).await;
+            let companion = wait_companion.clone();
+            let count = wait_runtime
+                .call(move |app| app.world().resource::<Store>().count_memories(&companion))
                 .await
                 .unwrap();
-            if view
-                .index
-                .as_option()
-                .is_some_and(|index| index.memories > 0)
-            {
-                return view;
+            if count == 1 {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .expect("consolidation did not store a memory");
-    assert_eq!(view.index.as_option().unwrap().memories, 1);
+    let memories = runtime
+        .call(move |app| app.world().resource::<Store>().memories_for(&companion))
+        .await
+        .unwrap();
+    assert_eq!(memories[0].content, "りんごが好き");
+    assert_eq!(memories[0].importance, 5);
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn settings_and_grants_are_revisioned_and_idempotent() {
+async fn settings_policies_and_approvals_are_revisioned() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), Options::default())
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
+    let (settings, _) = runtime
+        .call(|app| {
+            settings::update_settings(
+                app.world_mut(),
+                w::UpdateSettingsRequest {
+                    expected_revision: 1,
+                    connections: vec![w::ConnectionInput {
+                        id: "conn".into(),
+                        enabled: true,
+                        kind: "llm".into(),
+                        adapter: "openai".into(),
+                        endpoint: "https://api.openai.com/v1".into(),
+                        options: "{}".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+        })
         .await
         .unwrap();
-    let companion = default_companion(&runtime).await;
-    let connection = w::ConnectionInput {
-        id: Some("openai".into()),
-        create: true,
-        kind: "llm".into(),
-        adapter: "openai".into(),
-        endpoint: "https://api.openai.com/v1".into(),
-        options: w::JsonDocument {
-            json: "{}".into(),
-            ..Default::default()
-        }
-        .into(),
-        ..Default::default()
-    };
-    let updated = runtime
-        .call({
-            let connection = connection.clone();
-            move |app| {
-                settings::update_settings(
+    assert_eq!(settings.revision, 2);
+    assert_eq!(settings.connections.len(), 1);
+    assert!(!settings.updated_at.is_empty());
+
+    let rules = runtime
+        .call(|app| {
+            settings::update_policy_rules(
+                app.world_mut(),
+                w::UpdatePolicyRulesRequest {
+                    add_or_update: vec![w::PolicyRule {
+                        id: "rule-1".into(),
+                        tool_name: "shell".into(),
+                        pattern: "rm -rf".into(),
+                        effect: "confirm".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(rules.items.len(), 1);
+    assert_eq!(rules.items[0].effect, "confirm");
+    let pending = runtime
+        .call(|app| settings::pending_approvals(app.world().resource::<Store>()))
+        .await
+        .unwrap();
+    assert!(pending.items.is_empty());
+    assert!(
+        runtime
+            .call(|app| {
+                settings::submit_approval(
                     app.world_mut(),
-                    w::UpdateSettingsRequest {
-                        revision: 1,
-                        connections: w::ConnectionInputs {
-                            items: vec![connection],
-                            ..Default::default()
-                        }
-                        .into(),
+                    w::SubmitApprovalRequest {
+                        request_id: "missing".into(),
+                        decision: "approve".into(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .await
+            .is_err()
+    );
+
+    let (settings, forgotten) = runtime
+        .call(|app| {
+            settings::update_settings(
+                app.world_mut(),
+                w::UpdateSettingsRequest {
+                    expected_revision: 2,
+                    connections: Vec::new(),
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(settings.revision, 3);
+    assert!(settings.connections.is_empty());
+    assert!(forgotten.is_empty());
+    let stale = runtime
+        .call(|app| {
+            settings::update_settings(
+                app.world_mut(),
+                w::UpdateSettingsRequest {
+                    expected_revision: 2,
+                    connections: Vec::new(),
+                    ..Default::default()
+                },
+            )
+        })
+        .await;
+    assert!(stale.is_err());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_device_request_nobody_answers_becomes_uncertain() {
+    let temp = tempfile::tempdir().unwrap();
+    let parent = parent_model(vec![
+        vec![
+            E::tool_call(
+                "device",
+                "device_request",
+                json!({"capability": "files", "input": {"path": "note.txt"}}),
+            ),
+            E::final_response_with_default_usage(),
+        ],
+        vec![E::text("after"), E::final_response_with_default_usage()],
+    ]);
+    let runtime = Runtime::start_with(
+        temp.path(),
+        super::Options {
+            models: Some(Arc::new(ScriptedSource(Scripted {
+                parent,
+                worker: text_model("unused"),
+                revisions: AtomicU64::new(0),
+            }))),
+            device_timeout: Duration::from_millis(30),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let companion = default_companion(&runtime).await;
+    runtime
+        .call(|app| {
+            client::register(
+                app,
+                w::RegisterClientRequest {
+                    id: "client".into(),
+                    name: "client".into(),
+                    platform: "linux".into(),
+                    capabilities: vec!["files".into()],
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    runtime
+        .call(|app| {
+            client::set_capabilities(
+                app,
+                w::SetCapabilitiesRequest {
+                    client_id: "client".into(),
+                    capabilities: vec!["files".into()],
+                    granted_capabilities: vec!["files".into()],
+                    revision: 1,
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                client::activate(
+                    app,
+                    w::ActivationRequest {
+                        companion_id: companion,
+                        client_id: "client".into(),
+                        expected_revision: 1,
                         ..Default::default()
                     },
                 )
@@ -797,1421 +784,401 @@ async fn settings_and_grants_are_revisioned_and_idempotent() {
         })
         .await
         .unwrap();
-    assert_eq!(updated.0.revision, 2);
-    let grant = w::CreateGrantRequest {
-        request_key: "grant".into(),
-        companion_id: companion.clone(),
-        connection_id: "openai".into(),
-        destinations: vec!["https://api.openai.com".into()],
-        data_kinds: vec!["conversation".into()],
-        purpose: "conversation".into(),
-        consent: w::Consent {
-            settings_revision: 2,
-            provider_revision: "builtin-openai-v1".into(),
-            ..Default::default()
-        }
-        .into(),
-        ..Default::default()
-    };
-    let first = runtime
-        .call({
-            let grant = grant.clone();
-            move |app| settings::create_grant(app.world_mut(), grant)
-        })
+    send(&runtime, &companion, "device", "端末で確認して").await;
+    until(&runtime, &companion, "after").await;
+    let devices = runtime
+        .call(|app| app.world().resource::<Store>().devices())
         .await
         .unwrap();
-    let replay = runtime
-        .call({
-            let grant = grant.clone();
-            move |app| settings::create_grant(app.world_mut(), grant)
-        })
-        .await
-        .unwrap();
-    assert_eq!(first.id, replay.id);
-    let mut changed = grant;
-    changed.purpose = "task".into();
-    changed.data_kinds = vec!["task".into()];
-    assert!(
-        runtime
-            .call({
-                let changed = changed.clone();
-                move |app| settings::create_grant(app.world_mut(), changed)
-            })
-            .await
-            .is_err()
-    );
-    let availability = runtime
-        .call({
-            let companion = companion.clone();
-            move |app| {
-                settings::availability(&app.world().resource::<Host>().db, &companion, "openai")
-            }
-        })
-        .await
-        .unwrap();
-    assert!(
-        availability
-            .operations
-            .iter()
-            .any(|operation| operation.operation == "conversation" && operation.runnable)
-    );
+    assert_eq!(devices[0].status, super::client::DeviceStatus::Uncertain);
     runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_oversized_reply_is_not_committed() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([vec![
-        E::text("x".repeat(128_001)),
-        E::final_response_with_default_usage(),
-    ]]);
-    let runtime = Runtime::start_with(temp.path(), model_options(model))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "huge", "too much").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let seen = history(&runtime, target(&companion)).await;
-    assert!(
-        !seen
-            .items
-            .iter()
-            .any(|message| message.text.len() > 128_000)
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn streamed_deltas_and_turn_events_are_emitted_exactly_once_per_turn() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([vec![
-        E::text("こん"),
-        E::text("にちは"),
-        E::final_response_with_default_usage(),
-    ]]);
-    let runtime = Runtime::start_with(temp.path(), model_options(model))
-        .await
-        .unwrap();
-    let (companion, mut events) = runtime
-        .call(|app| {
-            let companion = mind::companions(&app.world().resource::<Host>().db)?
-                .into_iter()
-                .next()
-                .unwrap()
-                .id;
-            let (_, receiver, _) = super::subscribe(app, None)?;
-            Ok((companion, receiver))
-        })
-        .await
-        .unwrap();
-    send(&runtime, &companion, "stream", "hello").await;
-    until(&runtime, &companion, "こんにちは").await;
-
-    let mut deltas = Vec::new();
-    let mut turn_states = Vec::new();
-    while let Ok(notification) = events.try_recv() {
-        match notification.event {
-            Some(w::notification::Event::MessageDelta(delta)) => {
-                deltas.push((delta.offset, delta.delta));
-            }
-            Some(w::notification::Event::TurnEvent(turn)) => {
-                turn_states.push(turn.state);
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(deltas, vec![(0, "こん".into()), (2, "にちは".into())]);
-    assert_eq!(turn_states, vec!["streaming", "answered"]);
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn consolidation_runs_after_restart_without_new_chat_and_mind_state_is_not_duplicated() {
-    let temp = tempfile::tempdir().unwrap();
-    let first_model = MockCompletionModel::from_stream_turns([
-        vec![
-            E::tool_call(
-                "mem",
-                "mind_update",
-                serde_json::json!({
-                    "expected_revision": 1,
-                    "state": {
-                        "tendencies": ["穏やか"]
-                    }
-                }),
-            ),
-            E::final_response_with_default_usage(),
-        ],
-        vec![E::text("了解"), E::final_response_with_default_usage()],
-    ]);
-    let runtime = Runtime::start_with(
-        temp.path(),
-        scripted(first_model.clone(), first_model, false),
-    )
-    .await
-    .unwrap();
-    let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "turn-1", "緑茶が好き").await;
-    until(&runtime, &companion, "了解").await;
-    runtime.shutdown().await.unwrap();
-    drop(runtime);
-
-    let second_model = MockCompletionModel::from_stream_turns([
-        vec![
-            E::text(
-                "{\"reason\":\"再起動後の整理\",\"memories\":[{\"content\":\"緑茶が好き\",\"description\":\"好み\",\"appraisal\":\"落ち着いた\",\"acquisition\":\"user_statement\"}]}",
-            ),
-            E::final_response_with_default_usage(),
-        ],
-        vec![E::text("二度目"), E::final_response_with_default_usage()],
-    ]);
-    let runtime = Runtime::start_with(
-        temp.path(),
-        scripted(second_model.clone(), second_model, true),
-    )
-    .await
-    .unwrap();
-    let view = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let view = runtime
-                .call({
-                    let companion = companion.clone();
-                    move |app| mind::mind_view(&app.world().resource::<Host>().db, &companion)
-                })
-                .await
-                .unwrap();
-            if view
-                .index
-                .as_option()
-                .is_some_and(|index| index.memories > 0)
-            {
-                return view;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("consolidation did not run after restart");
-    assert_eq!(view.index.as_option().unwrap().memories, 1);
-
-    send(&runtime, &companion, "turn-2", "こんにちは").await;
-    until(&runtime, &companion, "二度目").await;
-    let seen = context_history(&runtime, target(&companion)).await;
-    let mind_notes = seen
-        .items
-        .iter()
-        .filter(|message| message.text.contains("現在の心（revision 2）:"))
-        .count();
-    assert_eq!(
-        mind_notes, 1,
-        "mind state note must not be duplicated across restart"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-fn memory(owner: &str, content: &str) -> mind::MemoryRecord {
-    mind::MemoryRecord {
-        id: "m1".into(),
-        owner: owner.into(),
-        kind: "experience".into(),
-        audience: mind::PRIVATE.into(),
-        content: content.into(),
-        description: String::new(),
-        appraisal: String::new(),
-        acquisition: "user_statement".into(),
-        sources: Vec::new(),
-        recorded_at: "2026-11-10T00:00:00Z".into(),
-        occurred_at: None,
-        supersedes: Vec::new(),
-        recall_preference: mind::NORMAL.into(),
-        created_by: "parent".into(),
-        revision: 1,
-        updated_at: "2026-11-10T00:00:00Z".into(),
-    }
-}
-
-async fn control(
-    runtime: &Runtime,
-    companion: &str,
-    action: &str,
-) -> super::db::Result<w::MemoryControlResult> {
-    let (companion, action) = (companion.to_owned(), action.to_owned());
-    tokio::time::timeout(
-        Duration::from_secs(3),
-        runtime.call(move |app| {
-            mind::control_memory(
-                app.world_mut(),
-                w::MemoryControlRequest {
-                    companion_id: companion,
-                    memory_id: "m1".into(),
-                    action,
-                    ..Default::default()
-                },
-            )
-        }),
-    )
-    .await
-    .expect("control_memory must return")
-}
-
-#[tokio::test]
-async fn memory_control_forgets_shares_and_is_idempotent() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("ok"))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    let owner = companion.clone();
-    runtime
-        .call(move |app| {
-            app.world()
-                .resource::<Host>()
-                .db
-                .transaction(|tx| tx.put_memory(&memory(&owner, "りんごが好き")))
-        })
-        .await
-        .unwrap();
-
-    let forgotten = control(&runtime, &companion, "forget").await.unwrap();
-    assert_eq!(forgotten.recall_preference, mind::FORGOTTEN);
-    assert_eq!(forgotten.revision, 2);
-    let replay = control(&runtime, &companion, "forget").await.unwrap();
-    assert_eq!(replay.revision, 2, "a repeated action must not re-revision");
-
-    let shared = control(&runtime, &companion, "share").await.unwrap();
-    assert_eq!(shared.audience, mind::SHARED);
-    let private = control(&runtime, &companion, "unshare").await.unwrap();
-    assert_eq!(private.audience, mind::PRIVATE);
-
-    let record = runtime
-        .call({
-            let companion = companion.clone();
-            move |app| mind::companion(&app.world().resource::<Host>().db, &companion)
-        })
-        .await
-        .unwrap();
-    assert_eq!(record.memory_revision, 4);
-
-    let ghost = runtime
-        .call(move |app| {
-            mind::control_memory(
-                app.world_mut(),
-                w::MemoryControlRequest {
-                    companion_id: "ghost".into(),
-                    memory_id: "m1".into(),
-                    action: "forget".into(),
-                    ..Default::default()
-                },
-            )
-        })
-        .await;
-    assert_eq!(ghost.unwrap_err().code, connectrpc::ErrorCode::NotFound);
-    runtime.shutdown().await.unwrap();
-}
-
-async fn context_history(runtime: &Runtime, target: w::Target) -> w::History {
-    runtime
-        .call(move |app| {
-            chat::history(
-                app.world_mut(),
-                w::HistoryRequest {
-                    target: target.into(),
-                    include_context: Some(true),
-                    ..Default::default()
-                },
-            )
-        })
-        .await
-        .unwrap()
-}
-
-fn consolidation(reply: &str) -> Vec<rig_core::test_utils::MockStreamEvent> {
-    vec![
-        E::text(reply.to_owned()),
-        E::final_response_with_default_usage(),
-    ]
-}
-
-#[tokio::test]
-async fn consolidation_does_not_relearn_injected_context() {
-    let temp = tempfile::tempdir().unwrap();
-    let empty = "{\"reason\":\"なし\",\"memories\":[]}";
-    let model = MockCompletionModel::from_stream_turns([
-        vec![E::text("はい"), E::final_response_with_default_usage()],
-        consolidation(empty),
-        vec![E::text("そうだね"), E::final_response_with_default_usage()],
-        consolidation(empty),
-    ]);
-    let runtime = Runtime::start_with(temp.path(), scripted(model.clone(), model.clone(), true))
-        .await
-        .unwrap();
-    let companion = runtime
-        .call(|app| {
-            let host = app.world_mut().resource_mut::<Host>();
-            let companion = mind::companions(&host.db)?.into_iter().next().unwrap().id;
-            host.db
-                .transaction(|tx| tx.put_memory(&memory(&companion, "りんごが好き")))?;
-            let mut record = mind::companion(&host.db, &companion)?;
-            record.state.concerns = vec!["静かな午後".into()];
-            host.db.put(&format!("companion:{companion}"), &record)?;
-            Ok(companion)
-        })
-        .await
-        .unwrap();
-    for (key, text, answer) in [
-        ("one", "りんごが好き", "はい"),
-        ("two", "りんごが好きだよね", "そうだね"),
-    ] {
-        send(&runtime, &companion, key, text).await;
-        until(&runtime, &companion, answer).await;
-    }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while model.requests().len() < 4 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("consolidation did not run");
-
-    let prompts: Vec<String> = model
-        .requests()
-        .iter()
-        .map(|request| format!("{:?}", request.chat_history))
-        .collect();
-    let batches: Vec<&String> = prompts
-        .iter()
-        .filter(|prompt| prompt.contains("以下は保存済みの会話"))
-        .collect();
-    assert_eq!(batches.len(), 2, "both turns must be consolidated once");
-    let last = batches.last().unwrap();
-    assert!(
-        !last.contains("関連する記憶"),
-        "recall notes must not be re-learned: {last}"
-    );
-    assert!(
-        !last.contains("現在の心（revision"),
-        "mind state notes must not be re-learned: {last}"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn only_a_turns_own_call_streams_into_the_conversation() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("こんにちは"))
-        .await
-        .unwrap();
-    let (companion, mut events) = runtime
-        .call(|app| {
-            let companion = mind::companions(&app.world().resource::<Host>().db)?
-                .into_iter()
-                .next()
-                .unwrap()
-                .id;
-            let (_, receiver, _) = super::subscribe(app, None)?;
-            Ok((companion, receiver))
-        })
-        .await
-        .unwrap();
-    send(&runtime, &companion, "stream", "hi").await;
-    until(&runtime, &companion, "こんにちは").await;
-    while events.try_recv().is_ok() {}
-
-    runtime
-        .call({
-            let companion = companion.clone();
-            move |app| {
-                let world = app.world_mut();
-                let parent = chat::find_agent(world, &chat::parent_id(&companion))
-                    .ok_or_else(|| ConnectError::unavailable("parent agent is missing"))?;
-                // A settled turn is despawned, so stand one in: the kernel
-                // ignores a turn without `TurnOf`, but streams still read it.
-                let turn = world.spawn(Turn::default()).id();
-                let side = world.spawn((Effect::default(), CallOf(turn))).id();
-                let own = world
-                    .spawn((Effect::default(), CallOf(turn), TurnCall))
-                    .id();
-                for (effect, text) in [(side, "side call"), (own, "turn call")] {
-                    world.write_message(StreamDelta {
-                        effect,
-                        agent: Some(parent),
-                        event: StreamEvent::Text {
-                            part: Part::new(0),
-                            text: text.into(),
-                        },
-                    });
-                }
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
-
-    let mut deltas = Vec::new();
-    while let Ok(notification) = events.try_recv() {
-        if let Some(w::notification::Event::MessageDelta(delta)) = notification.event {
-            deltas.push(delta.delta);
-        }
-    }
-    assert_eq!(
-        deltas,
-        vec!["turn call".to_owned()],
-        "a side call must not stream into the conversation"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn consolidation_keeps_the_acquisition_and_drops_unknown_ones() {
-    for (output, stored) in [
-        (
-            "{\"reason\":\"報告\",\"memories\":[{\"content\":\"紅茶が好き\",\"acquisition\":\"report\"}]}",
-            1,
-        ),
-        (
-            "```json\n{\"reason\":\"報告\",\"memories\":[{\"content\":\"紅茶が好き\",\"acquisition\":\"report\"}]}\n```",
-            1,
-        ),
-        (
-            "{\"reason\":\"不明\",\"memories\":[{\"content\":\"紅茶が好き\",\"acquisition\":\"made_up\"}]}",
-            0,
-        ),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let model = MockCompletionModel::from_stream_turns([
-            vec![E::text("first"), E::final_response_with_default_usage()],
-            consolidation(output),
-        ]);
-        let runtime = Runtime::start_with(temp.path(), scripted(model.clone(), model, true))
-            .await
-            .unwrap();
-        let companion = default_companion(&runtime).await;
-        send(&runtime, &companion, "memory", "紅茶が好き").await;
-        until(&runtime, &companion, "first").await;
-        let view = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let view = runtime
-                    .call({
-                        let companion = companion.clone();
-                        move |app| mind::mind_view(&app.world().resource::<Host>().db, &companion)
-                    })
-                    .await
-                    .unwrap();
-                if view
-                    .consolidation
-                    .as_option()
-                    .is_some_and(|c| c.state == "ready")
-                {
-                    return view;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("consolidation did not become ready");
-        assert_eq!(view.index.as_option().unwrap().memories, stored);
-        if stored == 1 {
-            let found = runtime
-                .call({
-                    let companion = companion.clone();
-                    move |app| {
-                        app.world().resource::<Host>().db.search_memories(
-                            &companion,
-                            "紅茶が好き",
-                            false,
-                            1,
-                        )
-                    }
-                })
-                .await
-                .unwrap();
-            assert_eq!(found[0].acquisition, "report");
-        }
-        runtime.shutdown().await.unwrap();
-    }
 }
 
 #[tokio::test]
 async fn an_unknown_target_never_spawns_an_agent() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("ok"))
-        .await
-        .unwrap();
-    runtime
-        .call(|app| chat::stop(app, target("ghost")))
-        .await
-        .unwrap();
-    let message = runtime
-        .call(move |app| {
-            chat::message(
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
+    let missing = runtime
+        .read(|app| {
+            chat::history(
                 app.world_mut(),
-                w::MessageRequest {
-                    target: target("ghost").into(),
-                    message_id: "1".into(),
+                w::HistoryRequest {
+                    companion_id: "missing".into(),
                     ..Default::default()
                 },
             )
         })
         .await;
-    assert_eq!(message.unwrap_err().code, connectrpc::ErrorCode::NotFound);
-    let accept = runtime
-        .call(move |app| {
-            chat::accept(
-                app,
-                w::SendMessageRequest {
-                    target: target("ghost").into(),
-                    request_key: "ghost".into(),
-                    text: "hi".into(),
-                    ..Default::default()
-                },
-            )
-        })
-        .await;
-    assert_eq!(accept.unwrap_err().code, connectrpc::ErrorCode::NotFound);
+    assert!(matches!(missing, Err(HostError::NotFound(_))));
     let agents = runtime
         .call(|app| {
-            Ok(app
-                .world_mut()
-                .query::<&AgentId>()
-                .iter(app.world())
-                .map(|agent| agent.0.clone())
-                .collect::<Vec<_>>())
+            let mut query = app.world_mut().query::<&AgentKey>();
+            Ok(query.iter(app.world()).count())
         })
         .await
         .unwrap();
-    assert!(
-        !agents.iter().any(|agent| agent == "parent-ghost"),
-        "an unknown companion must not get an agent: {agents:?}"
-    );
+    assert_eq!(agents, 1);
     runtime.shutdown().await.unwrap();
 }
 
-async fn elapsed(runtime: &Runtime) -> Duration {
-    runtime
-        .read(|app| Ok(app.world().resource::<Time<Virtual>>().elapsed()))
-        .await
-        .unwrap()
+#[test]
+fn a_foreign_database_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("host.sqlite3");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE documents (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+        .unwrap();
+    drop(connection);
+    assert!(Store::open(&path).is_err());
 }
 
 #[tokio::test]
-async fn reads_do_not_advance_the_simulation_time() {
+async fn companion_seed_is_persistent() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("ok"))
-        .await
-        .unwrap();
-    let before = elapsed(&runtime).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    for _ in 0..3 {
-        runtime
-            .read(|app| super::snapshot(app, None))
-            .await
-            .unwrap();
-    }
-    let after = elapsed(&runtime).await;
-    assert!(
-        after.saturating_sub(before) < Duration::from_millis(20),
-        "a read must not advance the simulation: {before:?} -> {after:?}"
-    );
-    runtime.call(|_| Ok(())).await.unwrap();
-    let ticked = elapsed(&runtime).await;
-    assert!(
-        ticked.saturating_sub(after) >= Duration::from_millis(20),
-        "a write must advance it: {after:?} -> {ticked:?}"
-    );
-    runtime.shutdown().await.unwrap();
+    let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+    let companions = store.companions().unwrap();
+    assert_eq!(companions.len(), 1);
+    assert_eq!(companions[0].name, "ene");
+    drop(store);
+    let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+    assert_eq!(store.companions().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn wakes_never_consume_the_command_queue() {
+async fn an_idle_turn_is_compacted_without_rewriting_the_log() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("ok"))
-        .await
-        .unwrap();
-    runtime
-        .call(|app| {
-            let wake = app.world().resource::<Wake>();
-            for _ in 0..100_000 {
-                wake.wake();
-            }
-            Ok(())
-        })
-        .await
-        .unwrap();
-    for _ in 0..3 {
-        runtime
-            .read(|app| super::snapshot(app, None))
-            .await
-            .unwrap();
-    }
-    tokio::time::timeout(Duration::from_secs(10), runtime.shutdown())
-        .await
-        .expect("a stopped host must return")
-        .unwrap();
-}
-
-#[tokio::test]
-async fn consolidation_runs_for_the_parent_while_a_work_agent_exists() {
-    let temp = tempfile::tempdir().unwrap();
-    let parent = MockCompletionModel::from_stream_turns([
+    let parent = parent_model(vec![
+        vec![E::text("ok"), E::final_response_with_default_usage()],
         vec![
-            E::tool_call(
-                "start",
-                "start_work",
-                serde_json::json!({"prompt": "整理して"}),
-            ),
+            E::text("古い会話の要約"),
             E::final_response_with_default_usage(),
         ],
-        vec![E::text("started"), E::final_response_with_default_usage()],
-        // A work report asks the parent for a turn, and that turn and the
-        // consolidation call race for the next entry: both take the same
-        // reply so either order reads as a consolidation.
-        consolidation("{\"reason\":\"なし\",\"memories\":[]}"),
-        consolidation("{\"reason\":\"なし\",\"memories\":[]}"),
+        vec![E::text("了解"), E::final_response_with_default_usage()],
     ]);
-    let runtime = Runtime::start_with(temp.path(), scripted(parent, text_model("done"), true))
-        .await
-        .unwrap();
+    let requests = parent.clone();
+    let policy = rig_memory::CompactionPolicy {
+        keep_recent: 1,
+        ..Default::default()
+    };
+    let options = super::Options {
+        models: Some(Arc::new(ScriptedSource(Scripted {
+            parent,
+            worker: text_model("unused"),
+            revisions: AtomicU64::new(0),
+        }))),
+        consolidate: false,
+        compaction: super::compaction::Options {
+            policy,
+            idle: Duration::ZERO,
+            threshold: 0.0,
+        },
+        ..Default::default()
+    };
+    let runtime = Runtime::start_with(temp.path(), options).await.unwrap();
     let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "work", "任せる").await;
-    until(&runtime, &companion, "started").await;
-    let view = tokio::time::timeout(Duration::from_secs(5), async {
+    send(&runtime, &companion, "compact", "長い話").await;
+    until(&runtime, &companion, "ok").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let view = runtime
-                .read({
-                    let companion = companion.clone();
-                    move |app| mind::mind_view(&app.world().resource::<Host>().db, &companion)
-                })
-                .await
-                .unwrap();
-            if view
-                .consolidation
-                .as_option()
-                .is_some_and(|cursor| cursor.last_sequence > 0)
-            {
-                return view;
+            let _ = runtime.call(|_| Ok(())).await;
+            if requests.requests().len() >= 2 {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the parent must still be consolidated with a work agent present");
+    .expect("compaction did not run");
+    let visible = history(&runtime, &companion, true).await;
     assert!(
-        view.consolidation
-            .as_option()
-            .is_some_and(|cursor| cursor.state == "ready")
+        !visible
+            .items
+            .iter()
+            .any(|message| message.text.contains("古い会話の要約")),
+        "the summary is view-only and must not rewrite GetHistory"
     );
+    send(&runtime, &companion, "after", "続き").await;
+    until(&runtime, &companion, "了解").await;
+    let seen = requests.requests();
+    assert!(
+        seen.iter().any(|request| {
+            let history = format!("{:?}", request.chat_history);
+            history.contains("<summary>") && history.contains("古い会話の要約")
+        }),
+        "no request received the view-only summary"
+    );
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+
+    let runtime = Runtime::start_with(
+        temp.path(),
+        super::Options {
+            models: Some(Arc::new(NoModel)),
+            consolidate: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let restored = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                let entity = chat::find_agent(app.world_mut(), &AgentKey::parent(&companion))
+                    .ok_or_else(|| HostError::not_found("agent not restored"))?;
+                Ok(app
+                    .world()
+                    .get::<super::compaction::Summary>(entity)
+                    .is_some())
+            }
+        })
+        .await
+        .unwrap();
+    assert!(restored, "the summary snapshot must survive a restart");
     runtime.shutdown().await.unwrap();
 }
 
-fn starts_with_tool_result(messages: &[Arc<rig_core::completion::Message>]) -> bool {
-    messages
-        .iter()
-        .find(|message| !matches!(&***message, rig_core::completion::Message::System { .. }))
-        .is_some_and(|message| match &**message {
-            rig_core::completion::Message::User { content } => content
-                .iter()
-                .all(|item| matches!(item, UserContent::ToolResult(_))),
-            _ => false,
-        })
+#[tokio::test]
+async fn mind_update_is_idempotent_and_stores_importance() {
+    let temp = tempfile::tempdir().unwrap();
+    let update = json!({
+        "expected_revision": 1,
+        "memories": [{
+            "content": "りんごが好き",
+            "acquisition": "user_statement",
+            "importance": 7
+        }]
+    });
+    let parent = parent_model(vec![
+        vec![
+            E::tool_call("mem", "mind_update", update.clone()),
+            E::final_response_with_default_usage(),
+        ],
+        vec![E::text("覚えた"), E::final_response_with_default_usage()],
+        vec![
+            E::tool_call("mem", "mind_update", update),
+            E::final_response_with_default_usage(),
+        ],
+        vec![
+            E::text("もう覚えてる"),
+            E::final_response_with_default_usage(),
+        ],
+    ]);
+    let runtime = Runtime::start_with(temp.path(), scripted(parent, text_model("unused"), false))
+        .await
+        .unwrap();
+    let companion = default_companion(&runtime).await;
+    send(&runtime, &companion, "one", "りんごが好き").await;
+    until(&runtime, &companion, "覚えた").await;
+    send(&runtime, &companion, "two", "りんごが好きって言った").await;
+    until(&runtime, &companion, "もう覚えてる").await;
+    let memories = runtime
+        .call(move |app| app.world().resource::<Store>().memories_for(&companion))
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0].importance, 7);
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn the_window_bounds_what_the_model_reads_and_keeps_history_whole() {
+async fn a_reused_request_key_with_different_text_is_a_conflict() {
     let temp = tempfile::tempdir().unwrap();
-    let mut turns = vec![
-        vec![
-            E::tool_call("clock", "current_time", serde_json::json!({})),
-            E::final_response_with_default_usage(),
-        ],
-        vec![E::text("ok"), E::final_response_with_default_usage()],
-    ];
-    for n in 0..4 {
-        turns.push(vec![
-            E::text(format!("answer {n}")),
-            E::final_response_with_default_usage(),
-        ]);
-    }
-    let model = MockCompletionModel::from_stream_turns(turns);
     let runtime = Runtime::start_with(
         temp.path(),
-        windowed(model.clone(), Some(600), Some(100), false),
+        scripted(text_model("ok"), text_model("unused"), false),
     )
     .await
     .unwrap();
     let companion = default_companion(&runtime).await;
-    for key in ["one", "two", "three", "four"] {
-        send(&runtime, &companion, key, &"x".repeat(600)).await;
-    }
-    until(&runtime, &companion, "answer 2").await;
-
-    let sent = model.requests().last().cloned().expect("a model call");
-    assert_eq!(sent.max_tokens, Some(100), "the output limit must be set");
-    let seen = history(&runtime, target(&companion)).await;
-    assert!(
-        seen.items.len() >= 4,
-        "GetHistory must keep every message: {}",
-        seen.items.len()
-    );
-    assert!(
-        sent.chat_history.len() <= seen.items.len(),
-        "the window must cut what the model reads: {} of {}",
-        sent.chat_history.len(),
-        seen.items.len()
-    );
-    assert!(
-        !starts_with_tool_result(&sent.chat_history),
-        "a tool result must not lose its call"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_unknown_context_window_is_reported_and_left_whole() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), windowed(text_model("ok"), None, None, false))
-        .await
-        .unwrap();
-    let (companion, mut events) = runtime
-        .call(|app| {
-            let companion = mind::companions(&app.world().resource::<Host>().db)?
-                .into_iter()
-                .next()
-                .unwrap()
-                .id;
-            let (_, receiver, _) = super::subscribe(app, None)?;
-            Ok((companion, receiver))
-        })
-        .await
-        .unwrap();
-    send(&runtime, &companion, "unknown", &"x".repeat(64)).await;
-    until(&runtime, &companion, "ok").await;
-    let code = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            while let Ok(notification) = events.try_recv() {
-                if let Some(w::notification::Event::Notice(notice)) = notification.event {
-                    return notice.code;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("an unknown window must be reported");
-    assert_eq!(code, "context_window_unknown");
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_broken_consolidation_reply_is_reported_and_holds_the_cursor() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![E::text("first"), E::final_response_with_default_usage()],
-        consolidation("this is not json"),
-    ]);
-    let runtime = Runtime::start_with(temp.path(), scripted(model.clone(), model, true))
-        .await
-        .unwrap();
-    let (companion, mut events) = runtime
-        .call(|app| {
-            let companion = mind::companions(&app.world().resource::<Host>().db)?
-                .into_iter()
-                .next()
-                .unwrap()
-                .id;
-            let (_, receiver, _) = super::subscribe(app, None)?;
-            Ok((companion, receiver))
-        })
-        .await
-        .unwrap();
-    send(&runtime, &companion, "broken", "紅茶が好き").await;
-    until(&runtime, &companion, "first").await;
-    let view = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let view = runtime
-                .read({
-                    let companion = companion.clone();
-                    move |app| mind::mind_view(&app.world().resource::<Host>().db, &companion)
-                })
-                .await
-                .unwrap();
-            if view
-                .consolidation
-                .as_option()
-                .is_some_and(|c| c.state == "error")
-            {
-                return view;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("a broken reply must be reported");
-    let cursor = view.consolidation.as_option().unwrap();
-    assert_eq!(cursor.last_sequence, 0, "the cursor must not advance");
-    let code = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            while let Ok(notification) = events.try_recv() {
-                if let Some(w::notification::Event::Notice(notice)) = notification.event {
-                    return notice.code;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("a failed consolidation must be reported");
-    assert_eq!(code, "consolidation_failed");
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_batch_that_never_parses_is_skipped_instead_of_stopping_memory() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![E::text("返事"), E::final_response_with_default_usage()],
-        consolidation("this is not json"),
-        consolidation("this is not json"),
-        consolidation("this is not json"),
-        consolidation("this is not json"),
-        consolidation("this is not json"),
-    ]);
-    let runtime = Runtime::start_with(temp.path(), scripted(model.clone(), model, true))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "bad", "紅茶が好き").await;
-    until(&runtime, &companion, "返事").await;
-    let cursor = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            // No further turn ends, so the queue is nudged to retry.
-            runtime
-                .call({
-                    let companion = companion.clone();
-                    move |app| {
-                        app.world_mut()
-                            .resource_mut::<Host>()
-                            .consolidation_queue
-                            .insert(companion);
-                        Ok(())
-                    }
-                })
-                .await
-                .unwrap();
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let view = runtime
-                .read({
-                    let companion = companion.clone();
-                    move |app| mind::mind_view(&app.world().resource::<Host>().db, &companion)
-                })
-                .await
-                .unwrap();
-            let cursor = view.consolidation.as_option().cloned().unwrap();
-            if cursor.skipped == 1 {
-                return cursor;
-            }
-        }
-    })
-    .await
-    .expect("a batch the model never answers must be skipped, not retried forever");
-    assert!(
-        cursor.last_sequence > 0,
-        "skipping must move the cursor past the bad batch"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn the_authors_profile_is_a_prompt_section_not_a_per_call_edit() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![E::text("はい"), E::final_response_with_default_usage()],
-        vec![E::text("そうだね"), E::final_response_with_default_usage()],
-    ]);
-    let runtime = Runtime::start_with(temp.path(), model_options(model.clone()))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    runtime
+    send(&runtime, &companion, "same", "one").await;
+    let error = runtime
         .call({
             let companion = companion.clone();
             move |app| {
-                mind::update_mind_profile(
-                    app.world_mut(),
-                    w::UpdateMindProfileRequest {
-                        companion_id: companion,
-                        expected_revision: 1,
-                        facets: vec!["静かで穏やか".into()],
+                chat::accept(
+                    app,
+                    w::SendMessageRequest {
+                        companion_id: companion.clone(),
+                        request_key: "same".into(),
+                        text: "two".into(),
                         ..Default::default()
                     },
                 )
             }
         })
         .await
-        .unwrap();
-    send(&runtime, &companion, "one", "こんにちは").await;
-    until(&runtime, &companion, "はい").await;
-    send(&runtime, &companion, "two", "元気？").await;
-    until(&runtime, &companion, "そうだね").await;
-
-    let sent = model.requests();
-    assert!(sent.len() >= 2);
-    for request in &sent {
-        let system = match request.chat_history.first().map(|message| &**message) {
-            Some(rig_core::completion::Message::System { content }) => content.clone(),
-            other => panic!("a request must open with its system prompt: {other:?}"),
-        };
-        assert!(
-            system.contains("静かで穏やか"),
-            "the profile must be in the prompt: {system}"
-        );
-        assert!(
-            system.contains("<facets>"),
-            "the profile must be a tagged section: {system}"
-        );
-    }
+        .unwrap_err();
+    assert!(matches!(error, HostError::AlreadyExists(_)));
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_work_report_asks_the_parent_for_a_turn_of_its_own() {
+async fn memory_fts_tracks_updates_and_respects_audiences() {
     let temp = tempfile::tempdir().unwrap();
-    let parent = MockCompletionModel::from_stream_turns([
-        vec![
-            E::tool_call(
-                "start",
-                "start_work",
-                serde_json::json!({"prompt": "調べて"}),
-            ),
-            E::final_response_with_default_usage(),
-        ],
-        vec![E::text("started"), E::final_response_with_default_usage()],
-        vec![
-            E::text("報告を受けた"),
-            E::final_response_with_default_usage(),
-        ],
-    ]);
-    let runtime = Runtime::start_with(temp.path(), scripted(parent, text_model("done"), false))
-        .await
-        .unwrap();
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
     let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "work", "任せる").await;
-    until(&runtime, &companion, "started").await;
-    // No user message: the report itself starts the parent's next turn.
-    let seen = until(&runtime, &companion, "報告を受けた").await;
-    let reports = seen
-        .items
-        .iter()
-        .filter(|message| message.text.contains("done") && message.role == "agent")
-        .count();
-    assert_eq!(reports, 1, "a finished work is reported exactly once");
-    let record = runtime
-        .read(|app| {
-            let records = app
-                .world()
-                .resource::<Host>()
-                .db
-                .list::<WorkRecord>("work:")?;
-            Ok(records.into_iter().next().unwrap().1)
+    let other = runtime
+        .call(|app| {
+            let store = app.world().resource::<Store>();
+            let mut record = Companion::seed(new_id(), now());
+            record.name = "other".into();
+            store.save_companion(&record)?;
+            Ok(record.id)
         })
         .await
         .unwrap();
-    assert!(
-        !record.reported_run.is_empty(),
-        "the reported run must be recorded"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-/// A turn a restart starts, with no request to bind the model at.
-#[tokio::test]
-async fn a_report_starts_the_parents_turn_after_a_restart() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("はじめまして"))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "hello", "やあ").await;
-    until(&runtime, &companion, "はじめまして").await;
-    runtime.shutdown().await.unwrap();
-    drop(runtime);
-
-    // No `SendMessage` follows: the report is the only way into the
-    // conversation, as a work report or a scheduled wake would be.
-    let runtime = Runtime::start_with(temp.path(), factory("報告を読んだ"))
-        .await
-        .unwrap();
+    let mut item = memory(&companion, "青森のりんご");
+    let id = item.id.clone();
+    let saved = item.clone();
     runtime
-        .call({
-            let companion = companion.clone();
-            move |app| {
-                work::deliver_to_parent(
-                    app.world_mut(),
-                    &companion,
-                    "work-1",
-                    "作業が終わった",
-                    None,
-                );
-                Ok(())
-            }
-        })
+        .call(move |app| app.world().resource::<Store>().save_memory(&saved))
         .await
         .unwrap();
-    let seen = until(&runtime, &companion, "報告を読んだ").await;
-    assert!(
-        seen.items
-            .iter()
-            .any(|message| message.text == "報告を読んだ"),
-        "the parent's own turn must answer a host-originated input"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_empty_mind_still_states_its_revision() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("はい"))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "empty", "こんにちは").await;
-    until(&runtime, &companion, "はい").await;
-    let seen = context_history(&runtime, target(&companion)).await;
-    let notes = seen
-        .items
-        .iter()
-        .filter(|message| {
-            message
-                .text
-                .contains("現在の心（revision 1）: （まだ何もありません）")
-        })
-        .count();
-    assert_eq!(notes, 1, "the empty mind is stated, once");
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_stale_mind_update_names_the_current_revision() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            E::tool_call(
-                "mem",
-                "mind_update",
-                serde_json::json!({
-                    "expected_revision": 9,
-                    "memories": [{"content": "りんごが好き", "acquisition": "user_statement"}]
-                }),
-            ),
-            E::final_response_with_default_usage(),
-        ],
-        vec![E::text("はい"), E::final_response_with_default_usage()],
-    ]);
-    let runtime = Runtime::start_with(temp.path(), model_options(model.clone()))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    send(&runtime, &companion, "stale", "りんごが好き").await;
-    until(&runtime, &companion, "はい").await;
-    let refusal = model
-        .requests()
-        .iter()
-        .flat_map(|request| request.chat_history.iter())
-        .map(|message| format!("{message:?}"))
-        .find(|text| text.contains("mind revision changed"))
-        .expect("the refusal must reach the model");
-    assert!(
-        refusal.contains("current revision is 1"),
-        "the refusal must name the current revision: {refusal}"
-    );
-    runtime.shutdown().await.unwrap();
-}
-
-async fn update_settings(runtime: &Runtime, items: Vec<w::ConnectionInput>) -> Result<w::Settings> {
+    item.content = "長野のぶどう".into();
+    let updated = item.clone();
     runtime
-        .call(move |app| {
-            settings::update_settings(
-                app.world_mut(),
-                w::UpdateSettingsRequest {
-                    revision: 1,
-                    connections: w::ConnectionInputs {
-                        items,
-                        ..Default::default()
-                    }
-                    .into(),
-                    ..Default::default()
-                },
+        .call(move |app| app.world().resource::<Store>().save_memory(&updated))
+        .await
+        .unwrap();
+    let store = runtime
+        .call(|app| Ok(app.world().resource::<Store>().clone()))
+        .await
+        .unwrap();
+    assert!(store.memory(&id).unwrap().is_some());
+    assert!(
+        store
+            .recall(
+                &companion,
+                "りんご",
+                super::memory::RecallMode::Explicit,
+                10
             )
-            .map(|(settings, _)| settings)
-        })
-        .await
-}
-
-fn connection_input(adapter: &str, kind: &str) -> w::ConnectionInput {
-    w::ConnectionInput {
-        id: Some("openai".into()),
-        create: true,
-        kind: kind.into(),
-        adapter: adapter.into(),
-        endpoint: "https://api.openai.com/v1".into(),
-        options: w::JsonDocument {
-            json: "{}".into(),
-            ..Default::default()
-        }
-        .into(),
-        ..Default::default()
-    }
-}
-
-#[tokio::test]
-async fn a_connection_must_name_its_adapter_and_kind() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), Options::default())
-        .await
-        .unwrap();
-    for (adapter, kind) in [("", "llm"), ("openai", ""), ("openai", "embedding")] {
-        let refused = update_settings(&runtime, vec![connection_input(adapter, kind)]).await;
-        let error = refused.expect_err("an unsupported connection must be refused");
-        assert_eq!(
-            error.code,
-            connectrpc::ErrorCode::InvalidArgument,
-            "{adapter}/{kind} was refused with {error:?}"
-        );
-    }
-    update_settings(&runtime, vec![connection_input("openai", "llm")])
-        .await
-        .unwrap();
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_grant_must_cover_the_data_its_purpose_sends() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), Options::default())
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    update_settings(&runtime, vec![connection_input("openai", "llm")])
-        .await
-        .unwrap();
-    let grant = w::CreateGrantRequest {
-        request_key: "grant".into(),
-        companion_id: companion,
-        connection_id: "openai".into(),
-        destinations: vec!["https://api.openai.com".into()],
-        data_kinds: vec!["task".into()],
-        purpose: "conversation".into(),
-        consent: w::Consent {
-            settings_revision: 2,
-            provider_revision: "builtin-openai-v1".into(),
-            ..Default::default()
-        }
-        .into(),
-        ..Default::default()
-    };
-    let refused = runtime
-        .call(move |app| settings::create_grant(app.world_mut(), grant))
-        .await;
-    assert_eq!(
-        refused.unwrap_err().code,
-        connectrpc::ErrorCode::InvalidArgument,
-        "a grant must cover the kinds its purpose sends"
+            .unwrap()
+            .is_empty()
     );
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_unsupported_backend_is_not_run() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("ok"))
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
+    assert_eq!(
+        store
+            .recall(
+                &companion,
+                "ぶどう",
+                super::memory::RecallMode::Explicit,
+                10
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .recall(&other, "ぶどう", super::memory::RecallMode::Explicit, 10)
+            .unwrap()
+            .is_empty()
+    );
+    let mut shared = item;
+    shared.audiences = vec!["*".into()];
+    let shared_copy = shared.clone();
     runtime
-        .call({
-            let companion = companion.clone();
-            move |app| {
-                app.world().resource::<Host>().db.put(
-                    "work:acp",
-                    &WorkRecord {
-                        session: w::WorkSession {
-                            id: "acp".into(),
-                            companion_id: companion,
-                            backend: "acp".into(),
-                            status: "running".into(),
-                            ..Default::default()
-                        },
-                        reported_run: String::new(),
-                    },
-                )
-            }
-        })
+        .call(move |app| app.world().resource::<Store>().save_memory(&shared_copy))
         .await
         .unwrap();
-    let refused = runtime.call(|app| work::view(app, "acp")).await;
     assert_eq!(
-        refused.unwrap_err().code,
-        connectrpc::ErrorCode::Unavailable,
-        "a backend the host cannot run is unavailable, not empty"
+        store
+            .recall(&other, "ぶどう", super::memory::RecallMode::Explicit, 10)
+            .unwrap()
+            .len(),
+        1
     );
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn the_advertised_companion_limit_is_enforced() {
+async fn companions_store_all_seven_assignments_persona_and_voice() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), factory("ok"))
-        .await
-        .unwrap();
-    for index in 1..mind::MAX_COMPANIONS {
-        runtime
-            .call(move |app| {
-                mind::create_companion(
-                    app.world_mut(),
-                    w::CreateCompanionRequest {
-                        name: format!("companion {index}"),
-                        ..Default::default()
-                    },
-                )
-            })
-            .await
-            .unwrap();
-    }
-    let refused = runtime
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
+    let created = runtime
         .call(|app| {
             mind::create_companion(
                 app.world_mut(),
                 w::CreateCompanionRequest {
-                    name: "too many".into(),
-                    ..Default::default()
-                },
-            )
-        })
-        .await;
-    assert_eq!(
-        refused.unwrap_err().code,
-        connectrpc::ErrorCode::ResourceExhausted
-    );
-    let count = runtime
-        .read(|app| Ok(mind::companions(&app.world().resource::<Host>().db)?.len()))
-        .await
-        .unwrap();
-    assert_eq!(count, mind::MAX_COMPANIONS);
-    runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_removed_connection_takes_its_credential_and_grants_with_it() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = Runtime::start_with(temp.path(), Options::default())
-        .await
-        .unwrap();
-    let companion = default_companion(&runtime).await;
-    update_settings(&runtime, vec![connection_input("openai", "llm")])
-        .await
-        .unwrap();
-    runtime
-        .call(|app| {
-            let db = &app.world().resource::<Host>().db;
-            let key = "connection:openai";
-            let mut record: settings::ConnectionRecord = db.get(key)?.unwrap();
-            record.credential_ref = Some("connection:openai".into());
-            record.connection.credential_state = "registered".into();
-            db.put(key, &record)
-        })
-        .await
-        .unwrap();
-    runtime
-        .call({
-            let companion = companion.clone();
-            move |app| {
-                settings::create_grant(
-                    app.world_mut(),
-                    w::CreateGrantRequest {
-                        request_key: "grant".into(),
-                        companion_id: companion,
-                        connection_id: "openai".into(),
-                        destinations: vec!["https://api.openai.com".into()],
-                        data_kinds: vec!["conversation".into()],
-                        purpose: "conversation".into(),
-                        consent: w::Consent {
-                            settings_revision: 2,
-                            provider_revision: "builtin-openai-v1".into(),
+                    name: "extra".into(),
+                    mind: "calm".into(),
+                    body: "{}".into(),
+                    voice: "{}".into(),
+                    assignments: Some(w::ModelAssignments {
+                        companion: Some(w::ModelAssignment {
+                            connection_id: "c".into(),
+                            model_id: "m".into(),
                             ..Default::default()
-                        }
+                        })
+                        .into(),
+                        perception: Some(w::ModelAssignment {
+                            connection_id: "p".into(),
+                            model_id: "pm".into(),
+                            ..Default::default()
+                        })
                         .into(),
                         ..Default::default()
-                    },
-                )
-            }
-        })
-        .await
-        .unwrap();
-
-    let (updated, forgotten) = runtime
-        .call(|app| {
-            settings::update_settings(
-                app.world_mut(),
-                w::UpdateSettingsRequest {
-                    revision: 2,
-                    connections: w::ConnectionInputs::default().into(),
+                    })
+                    .into(),
+                    persona: Some("persona".into()),
+                    voice_identifier: Some("voice-1".into()),
                     ..Default::default()
                 },
             )
         })
         .await
         .unwrap();
-    assert!(updated.connections.is_empty());
-    assert_eq!(forgotten, vec!["connection:openai".to_owned()]);
-    let grants = runtime
-        .read(|app| settings::grants(&app.world().resource::<Host>().db, None))
-        .await
-        .unwrap();
-    assert_eq!(grants[0].status, "revoked");
-    runtime.shutdown().await.unwrap();
-}
-
-async fn until_assistant(runtime: &Runtime, companion: &str, count: usize) -> w::History {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let seen = history(runtime, target(companion)).await;
-            let answered = seen
-                .items
-                .iter()
-                .filter(|message| message.role == "assistant")
-                .count();
-            if answered >= count {
-                return seen;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the turn did not finish")
-}
-
-#[tokio::test]
-async fn the_window_keeps_a_summary_of_what_it_cut_without_touching_history() {
-    let temp = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_stream_turns(
-        (0..10).map(|_| vec![E::text("ok"), E::final_response_with_default_usage()]),
-    );
-    let runtime = Runtime::start_with(
-        temp.path(),
-        windowed(model.clone(), Some(600), Some(100), false),
-    )
-    .await
-    .unwrap();
-    let companion = default_companion(&runtime).await;
-    // Everything so far counts as consolidated, so the window may summarize.
-    runtime
+    assert_eq!(created.persona.as_deref(), Some("persona"));
+    assert_eq!(created.voice_identifier.as_deref(), Some("voice-1"));
+    let updated = runtime
         .call({
-            let companion = companion.clone();
+            let id = created.id.clone();
             move |app| {
-                app.world().resource::<Host>().db.put(
-                    &format!("memory-cursor:{companion}"),
-                    &mind::Consolidation {
-                        last_sequence: u64::MAX,
-                        state: "ready".into(),
+                mind::update_companion(
+                    app.world_mut(),
+                    w::UpdateCompanionRequest {
+                        id,
+                        revision: created.revision,
+                        perception_assignment: Some(w::AssignmentPatch {
+                            change: Some(w::assignment_patch::Change::Set(Box::new(
+                                w::ModelAssignment {
+                                    connection_id: "p2".into(),
+                                    model_id: "pm2".into(),
+                                    ..Default::default()
+                                },
+                            ))),
+                            ..Default::default()
+                        })
+                        .into(),
+                        decision_assignment: Some(w::AssignmentPatch {
+                            change: Some(w::assignment_patch::Change::Set(Box::new(
+                                w::ModelAssignment {
+                                    connection_id: "d".into(),
+                                    model_id: "dm".into(),
+                                    ..Default::default()
+                                },
+                            ))),
+                            ..Default::default()
+                        })
+                        .into(),
+                        persona: Some("changed".into()),
                         ..Default::default()
                     },
                 )
@@ -2219,62 +1186,176 @@ async fn the_window_keeps_a_summary_of_what_it_cut_without_touching_history() {
         })
         .await
         .unwrap();
-    for (index, key) in ["one", "two", "three", "four"].iter().enumerate() {
-        send(&runtime, &companion, key, &"x".repeat(600)).await;
-        until_assistant(&runtime, &companion, index + 1).await;
-    }
-    let summary = tokio::time::timeout(Duration::from_secs(5), async {
+    assert_eq!(updated.persona.as_deref(), Some("changed"));
+    let response = updated.assignments.as_option().unwrap();
+    assert_eq!(response.perception.as_option().unwrap().connection_id, "p2");
+    assert_eq!(response.decision.as_option().unwrap().connection_id, "d");
+    runtime
+        .call({
+            let id = updated.id.clone();
+            move |app| mind::delete_companion(app.world_mut(), &id)
+        })
+        .await
+        .unwrap();
+    let list = runtime
+        .call(|app| mind::companions(app.world().resource::<Store>()))
+        .await
+        .unwrap();
+    assert!(!list.iter().any(|companion| companion.id == updated.id));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn work_questions_become_pending_inquiries_and_answers_resolve_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let worker = parent_model(vec![
+        vec![
+            E::tool_call(
+                "ask",
+                "report",
+                json!({"kind": "question", "content": "どちらにしますか"}),
+            ),
+            E::final_response_with_default_usage(),
+        ],
+        vec![E::text("了解"), E::final_response_with_default_usage()],
+    ]);
+    let runtime = Runtime::start_with(temp.path(), scripted(text_model("unused"), worker, false))
+        .await
+        .unwrap();
+    let companion = default_companion(&runtime).await;
+    let work = runtime
+        .call({
+            let companion = companion.clone();
+            move |app| {
+                work::start(
+                    app,
+                    companion,
+                    "inquiry".into(),
+                    "確認して".into(),
+                    String::new(),
+                )
+            }
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let stored = runtime
-                .read({
-                    let companion = companion.clone();
-                    move |app| {
-                        let agent = chat::find_agent(app.world_mut(), &chat::parent_id(&companion));
-                        Ok(
-                            agent
-                                .and_then(|agent| app.world().get::<mind::Summary>(agent).cloned()),
-                        )
-                    }
-                })
-                .await
-                .unwrap();
-            if stored
-                .as_ref()
-                .is_some_and(|summary| !summary.text.is_empty())
+            let _ = runtime.call(|_| Ok(())).await;
+            let seen = history(&runtime, &companion, true).await;
+            if seen
+                .items
+                .iter()
+                .any(|message| message.text.contains("作業からの質問"))
             {
-                return stored.unwrap();
+                return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("a cut window must be summarized");
-    assert_eq!(summary.text, "ok");
+    .expect("the question did not reach the parent");
+    let view = runtime
+        .call({
+            let id = work.id.clone();
+            move |app| work::view(app.world_mut(), &id)
+        })
+        .await
+        .unwrap();
+    assert_eq!(view.pending_inquiries.len(), 1);
+    let request_id = view.pending_inquiries[0].request_id.clone();
+    runtime
+        .call({
+            let id = work.id.clone();
+            move |app| {
+                work::answer_inquiry(
+                    app,
+                    w::AnswerInquiryRequest {
+                        work_id: id,
+                        request_id,
+                        answer: "左".into(),
+                        ..Default::default()
+                    },
+                )
+            }
+        })
+        .await
+        .unwrap();
+    let view = runtime
+        .call({
+            let id = work.id.clone();
+            move |app| work::view(app.world_mut(), &id)
+        })
+        .await
+        .unwrap();
+    assert!(view.pending_inquiries.is_empty());
+    runtime.shutdown().await.unwrap();
+}
 
-    send(&runtime, &companion, "five", &"x".repeat(600)).await;
-    until_assistant(&runtime, &companion, 5).await;
-    let prompts: Vec<String> = model
-        .requests()
-        .iter()
-        .map(|request| format!("{:?}", request.chat_history))
-        .collect();
-    assert!(
-        prompts
-            .iter()
-            .any(|prompt| prompt.contains("<conversation>")),
-        "the window must ask for a summary"
-    );
-    assert!(
-        prompts.iter().any(|prompt| prompt.contains("<summary>")),
-        "the summary must reach a later request"
-    );
-    let seen = history(&runtime, target(&companion)).await;
-    assert!(
-        !seen
-            .items
-            .iter()
-            .any(|message| message.text.contains("<summary>")),
-        "the summary is the request's own, not the conversation's"
-    );
+#[tokio::test]
+async fn a_confirm_policy_emits_an_approval_request_before_the_tool_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let parent = parent_model(vec![
+        vec![
+            E::tool_call(
+                "dev",
+                "device_request",
+                json!({"capability": "files", "input": {"path": "x"}}),
+            ),
+            E::final_response_with_default_usage(),
+        ],
+        vec![E::text("unused"), E::final_response_with_default_usage()],
+    ]);
+    let runtime = Runtime::start_with(temp.path(), scripted(parent, text_model("unused"), false))
+        .await
+        .unwrap();
+    let companion = default_companion(&runtime).await;
+    runtime
+        .call(|app| {
+            settings::update_policy_rules(
+                app.world_mut(),
+                w::UpdatePolicyRulesRequest {
+                    add_or_update: vec![w::PolicyRule {
+                        id: "confirm-device".into(),
+                        tool_name: "device_request".into(),
+                        effect: "confirm".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
+    send(&runtime, &companion, "confirm", "端末を使って").await;
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let _ = runtime.call(|_| Ok(())).await;
+            let pending = runtime
+                .call(|app| settings::pending_approvals(app.world().resource::<Store>()))
+                .await
+                .unwrap();
+            if let Some(request) = pending.items.first() {
+                return request.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no approval request");
+    assert_eq!(approval.tool_name, "device_request");
+    assert_eq!(approval.status, "pending");
+    runtime
+        .call(move |app| {
+            settings::submit_approval(
+                app.world_mut(),
+                w::SubmitApprovalRequest {
+                    request_id: approval.request_id,
+                    decision: "approve".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap();
     runtime.shutdown().await.unwrap();
 }

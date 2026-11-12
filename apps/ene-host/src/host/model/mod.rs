@@ -1,4 +1,4 @@
-//! Built-in LLM providers, capability resolution and authorized model connections.
+//! Built-in LLM providers, capability resolution and authorized connections.
 mod credentials;
 mod transport;
 
@@ -6,12 +6,11 @@ pub(crate) use self::credentials::{Credentials, secret};
 
 use self::transport::Authorized;
 use super::{
-    Host,
-    db::{Database, Result, aborted, invalid, permission, unavailable},
-    mind::{CompanionRecord, companion},
-    settings::{ConnectionRecord, GrantRecord, revision as settings_revision},
+    companion::{Companion, ModelAssignment},
+    db::{Result, Store},
+    error::HostError,
+    settings::Connection,
 };
-use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use rig_core::{
     catalog::{Catalog, ModelSpec},
@@ -20,7 +19,7 @@ use rig_core::{
     serve::{ErasedHandler, adapters::ModelAdapter},
 };
 use rig_ecs::{effects::Handler, model::Connection as ModelConnection};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     sync::{
         Arc,
@@ -35,47 +34,49 @@ const MAX_MODELS: usize = 4096;
 const MAX_MODEL_ID: usize = 512;
 const MAX_PROBE_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum Purpose {
     Conversation,
     Task,
-    Memory,
+    Perception,
+    Compaction,
+    Consolidation,
+    Decision,
+    Embedding,
 }
 
 impl Purpose {
-    pub(crate) const ALL: [Self; 3] = [Self::Conversation, Self::Task, Self::Memory];
-
-    pub(crate) fn from_str(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|p| p.name() == value)
-    }
-
-    pub(crate) fn name(self) -> &'static str {
+    pub(crate) fn assignment(self, companion: &Companion) -> Option<&ModelAssignment> {
         match self {
-            Self::Conversation => "conversation",
-            Self::Task => "task",
-            Self::Memory => "memory",
-        }
-    }
-
-    /// The data kinds a grant for this purpose must cover.
-    pub(crate) fn required_data_kinds(self) -> &'static [&'static str] {
-        match self {
-            Self::Conversation => &["conversation"],
-            Self::Task => &["task"],
-            Self::Memory => &["memory"],
-        }
-    }
-
-    fn assignment(self, companion: &CompanionRecord) -> Option<&w::ModelAssignment> {
-        let assignments = companion.companion.assignments.as_option()?;
-        match self {
-            Self::Conversation | Self::Memory => assignments.companion.as_option(),
-            Self::Task => assignments.task.as_option(),
+            Self::Conversation => companion.assignments.companion.as_ref(),
+            Self::Task => companion.assignments.task.as_ref(),
+            Self::Perception => companion
+                .assignments
+                .perception
+                .as_ref()
+                .or(companion.assignments.companion.as_ref()),
+            Self::Compaction => companion
+                .assignments
+                .compaction
+                .as_ref()
+                .or(companion.assignments.companion.as_ref()),
+            Self::Consolidation => companion
+                .assignments
+                .consolidation
+                .as_ref()
+                .or(companion.assignments.companion.as_ref()),
+            Self::Decision => companion
+                .assignments
+                .decision
+                .as_ref()
+                .or(companion.assignments.task.as_ref()),
+            Self::Embedding => companion.assignments.embedding.as_ref(),
         }
     }
 }
 
-#[derive(Clone, Component)]
+#[derive(Clone, Debug, bevy_ecs::prelude::Component)]
 pub(crate) struct Binding {
     pub(crate) connection: String,
     pub(crate) model: String,
@@ -83,33 +84,29 @@ pub(crate) struct Binding {
     pub(crate) permit: Arc<AtomicBool>,
 }
 
-/// What the last bind attempt for a call failed with, so the gate can say
-/// why instead of "model permission changed".
-#[derive(Component, Clone)]
-pub(crate) struct Refused(pub(crate) String);
+/// Why the last bind attempt failed, so Gate can say more than "unavailable".
+#[derive(Clone, Debug, bevy_ecs::prelude::Component)]
+pub(crate) struct Refusal(pub(crate) String);
 
 pub(crate) fn revoke(binding: &Binding) {
     binding.permit.store(false, Ordering::Release);
 }
 
-/// Whether `binding` is still what [`connect`] would give: the same
-/// assignment under the same settings.
-///
-/// Cheaper than connecting, which lists every grant and builds a transport
-/// only to throw it away.
 pub(crate) fn unchanged(
-    host: &Host,
+    store: &Store,
     companion_id: &str,
     purpose: Purpose,
     binding: &Binding,
 ) -> Result<bool> {
-    let record = companion(&host.db, companion_id)?;
-    let Some(assignment) = purpose.assignment(&record) else {
+    let companion = store
+        .companion(companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let Some(assignment) = purpose.assignment(&companion) else {
         return Ok(false);
     };
-    Ok(assignment.connection_id == binding.connection
-        && assignment.model_id == binding.model
-        && settings_revision(&host.db)? == binding.revision)
+    Ok(assignment.connection == binding.connection
+        && assignment.model == binding.model
+        && store.settings_revision()? == binding.revision)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,12 +118,10 @@ enum Wire {
 pub(crate) struct Provider {
     pub(crate) id: &'static str,
     pub(crate) name: &'static str,
-    /// What the connection is for: only `llm` is implemented today.
     pub(crate) kind: &'static str,
     pub(crate) endpoint: &'static str,
     pub(crate) environment: &'static str,
     pub(crate) revision: &'static str,
-    pub(crate) default_model: &'static str,
     wire: Wire,
 }
 
@@ -138,7 +133,6 @@ const PROVIDERS: &[Provider] = &[
         endpoint: "https://api.openai.com/v1",
         environment: "OPENAI_API_KEY",
         revision: "builtin-openai-v1",
-        default_model: "gpt-6-luna",
         wire: Wire::Responses,
     },
     Provider {
@@ -148,7 +142,6 @@ const PROVIDERS: &[Provider] = &[
         endpoint: "https://openrouter.ai/api/v1",
         environment: "OPENROUTER_API_KEY",
         revision: "builtin-openrouter-v1",
-        default_model: "google/gemini-2.5-flash-lite",
         wire: Wire::ChatCompletions,
     },
 ];
@@ -165,22 +158,9 @@ pub(crate) fn descriptors() -> Vec<w::Provider> {
             name: provider.name.into(),
             kind: provider.kind.into(),
             endpoint: provider.endpoint.into(),
+            options: "{}".into(),
             requires_credentials: true,
             environment_variable: Some(provider.environment.into()),
-            destinations: vec![origin(provider.endpoint).unwrap_or_default()],
-            state: "ready".into(),
-            revision: provider.revision.into(),
-            capabilities: w::ProviderCapabilities {
-                streaming_text: true,
-                model_list: true,
-                ..Default::default()
-            }
-            .into(),
-            models: vec![w::Model {
-                id: provider.default_model.into(),
-                name: provider.default_model.into(),
-                ..Default::default()
-            }],
             ..Default::default()
         })
         .collect()
@@ -227,12 +207,13 @@ pub(crate) fn validate_connection(
     endpoint: &str,
     options: &Value,
 ) -> Result<()> {
-    let provider = builtin(adapter).ok_or_else(|| invalid("unsupported provider adapter"))?;
+    let provider =
+        builtin(adapter).ok_or_else(|| HostError::invalid("unsupported provider adapter"))?;
     if kind != provider.kind {
-        return Err(invalid("unsupported connection kind"));
+        return Err(HostError::invalid("unsupported connection kind"));
     }
     if origin(endpoint).is_none() {
-        return Err(invalid(
+        return Err(HostError::invalid(
             "endpoint requires HTTPS or loopback HTTP without credentials, query or fragment",
         ));
     }
@@ -243,156 +224,117 @@ pub(crate) fn validate_connection(
 fn explicit_tool_calling(options: &Value) -> Result<Option<bool>> {
     let object = options
         .as_object()
-        .ok_or_else(|| invalid("connection options must be an object"))?;
+        .ok_or_else(|| HostError::invalid("connection options must be an object"))?;
     let mut tool_calling = None;
     for (key, value) in object {
         if key != "tool_calling" {
-            return Err(invalid("unsupported connection option"));
+            return Err(HostError::invalid("unsupported connection option"));
         }
         tool_calling = Some(
             value
                 .as_bool()
-                .ok_or_else(|| invalid("tool_calling must be boolean"))?,
+                .ok_or_else(|| HostError::invalid("tool_calling must be boolean"))?,
         );
     }
     Ok(tool_calling)
 }
 
-pub(crate) fn fingerprint(provider: &Provider, connection: &w::Connection) -> Value {
-    let options = connection
-        .options
-        .as_option()
-        .and_then(|document| serde_json::from_str::<Value>(&document.json).ok())
-        .unwrap_or(Value::Null);
-    serde_json::json!({
-        "contract": "ene-policy-v1",
-        "adapter": connection.adapter,
-        "endpoint": connection.endpoint,
-        "options": options,
-        "implementation": provider.revision,
-    })
-}
-
-fn spec(connection: &w::Connection, adapter: &str, model: &str) -> Result<Arc<ModelSpec>> {
+fn spec(connection: &Connection, adapter: &str, model: &str) -> Result<Arc<ModelSpec>> {
     if model.trim().is_empty() || model.len() > MAX_MODEL_ID {
-        return Err(invalid("model is required"));
+        return Err(HostError::invalid("model is required"));
     }
-    let options = connection
-        .options
-        .as_option()
-        .and_then(|document| serde_json::from_str::<Value>(&document.json).ok())
-        .unwrap_or(Value::Null);
     let reference = format!("{adapter}/{model}");
     let spec = match Catalog::builtin().resolve(&reference) {
         Ok(found) => found.shared(),
-        Err(_) => match explicit_tool_calling(&options)? {
+        Err(_) => match explicit_tool_calling(&connection.options)? {
             Some(true) => {
                 let provider = ProviderId::catalog(adapter)
-                    .ok_or_else(|| invalid("provider is not in the Rig catalog"))?;
+                    .ok_or_else(|| HostError::invalid("provider is not in the Rig catalog"))?;
                 Arc::new(ModelSpec::new(provider, model).with_tools(true))
             }
-            Some(false) => return Err(aborted("model_cannot_call_tools")),
-            None => return Err(aborted("model_capability_unknown")),
+            Some(false) => return Err(HostError::conflict("model_cannot_call_tools")),
+            None => return Err(HostError::unavailable("model_capability_unknown")),
         },
     };
     if !spec.tools {
-        return Err(aborted("model_cannot_call_tools"));
+        return Err(HostError::conflict("model_cannot_call_tools"));
     }
     Ok(spec)
 }
 
-/// Where an agent's model comes from: the built-in providers, or a script
-/// in a test. Every path that binds an agent goes through it, so a test
-/// exercises the same companion checks as the running host.
 pub(crate) trait ModelSource: Send + Sync {
     fn connect(
         &self,
-        host: &Host,
+        store: &Store,
         companion_id: &str,
         purpose: Purpose,
     ) -> Result<(ModelConnection, Binding)>;
 }
 
-pub(crate) struct Providers;
+pub(crate) struct Providers {
+    pub(crate) credentials: Credentials,
+}
 
 impl ModelSource for Providers {
     fn connect(
         &self,
-        host: &Host,
+        store: &Store,
         companion_id: &str,
         purpose: Purpose,
     ) -> Result<(ModelConnection, Binding)> {
-        let record = companion(&host.db, companion_id)?;
-        connect(&host.db, &host.credentials, &record, purpose)
+        let companion = store
+            .companion(companion_id)?
+            .ok_or_else(|| HostError::not_found("companion not found"))?;
+        connect(store, &self.credentials, &companion, purpose)
     }
 }
 
 pub(crate) fn connect(
-    database: &Database,
+    store: &Store,
     credentials: &Credentials,
-    companion: &CompanionRecord,
+    companion: &Companion,
     purpose: Purpose,
 ) -> Result<(ModelConnection, Binding)> {
     let assignment = purpose
         .assignment(companion)
-        .ok_or_else(|| aborted("model_unset"))?;
-    if assignment.connection_id.is_empty() || assignment.model_id.is_empty() {
-        return Err(aborted("model_unset"));
+        .ok_or_else(|| HostError::conflict("model_unset"))?;
+    if assignment.connection.is_empty() || assignment.model.is_empty() {
+        return Err(HostError::conflict("model_unset"));
     }
-    let record: ConnectionRecord = database
-        .get(&format!("connection:{}", assignment.connection_id))?
-        .ok_or_else(|| aborted("model_unset"))?;
-    if !record.connection.enabled {
-        return Err(permission("connection is disabled"));
+    let record = store
+        .connection(&assignment.connection)?
+        .ok_or_else(|| HostError::conflict("model_unset"))?;
+    if !record.enabled {
+        return Err(HostError::permission("connection is disabled"));
     }
-    let provider = builtin(&record.connection.adapter)
-        .ok_or_else(|| aborted("unsupported provider adapter"))?;
-    let expected = fingerprint(provider, &record.connection);
-    let destination = origin(&record.connection.endpoint)
-        .ok_or_else(|| invalid("connection endpoint is invalid"))?;
-    let revision = settings_revision(database)?;
-    let permitted = database
-        .list::<GrantRecord>("grant:")?
-        .into_iter()
-        .any(|(_, g)| {
-            g.permits(
-                &companion.companion.id,
-                &assignment.connection_id,
-                purpose.name(),
-                &destination,
-                &expected,
-                revision,
-            )
-        });
-    if !permitted {
-        return Err(permission("permission_required"));
-    }
-    let secret = secret(credentials, &record).ok_or_else(|| permission("credential_missing"))?;
-    let spec = spec(
-        &record.connection,
-        &record.connection.adapter,
-        &assignment.model_id,
-    )?;
+    let provider = builtin(&record.adapter)
+        .ok_or_else(|| HostError::conflict("unsupported provider adapter"))?;
+    let destination = origin(&record.endpoint)
+        .ok_or_else(|| HostError::invalid("connection endpoint is invalid"))?;
+    let revision = store.settings_revision()?;
+    let secret =
+        secret(credentials, &record).ok_or_else(|| HostError::permission("credential_missing"))?;
+    let spec = spec(&record, &record.adapter, &assignment.model)?;
     let permit = Arc::new(AtomicBool::new(true));
     let transport = Authorized::new(permit.clone(), destination)?;
     let handler = match provider.wire {
         Wire::ChatCompletions => {
             let client =
                 OpenAIConfig::with_key(&rig_core::providers::openai::wire::OPENROUTER, secret)
-                    .with_base_url(&record.connection.endpoint)
+                    .with_base_url(&record.endpoint)
                     .connect(transport);
             ErasedHandler::new(ModelAdapter::<Completion>::new(
                 spec.reference(),
-                client.chat(assignment.model_id.clone()),
+                client.chat(assignment.model.clone()),
             ))
         }
         Wire::Responses => {
             let client = OpenAIConfig::new(secret)
-                .with_base_url(&record.connection.endpoint)
+                .with_base_url(&record.endpoint)
                 .connect(transport);
             ErasedHandler::new(ModelAdapter::<Completion>::new(
                 spec.reference(),
-                client.responses(assignment.model_id.clone()),
+                client.responses(assignment.model.clone()),
             ))
         }
     };
@@ -402,57 +344,54 @@ pub(crate) fn connect(
             handler: Handler(handler),
         },
         Binding {
-            connection: assignment.connection_id.clone(),
-            model: assignment.model_id.clone(),
+            connection: assignment.connection.clone(),
+            model: assignment.model.clone(),
             revision,
             permit,
         },
     ))
 }
 
-pub(crate) async fn probe(
-    record: &ConnectionRecord,
-    secret: &str,
-) -> Result<(Vec<w::Model>, Value)> {
-    let provider = builtin(&record.connection.adapter)
-        .ok_or_else(|| unavailable("unsupported provider adapter"))?;
-    let endpoint = record.connection.endpoint.trim_end_matches('/');
+pub(crate) async fn probe(record: &Connection, secret: &str) -> Result<(Vec<w::Model>, Value)> {
+    let provider = builtin(&record.adapter)
+        .ok_or_else(|| HostError::unavailable("unsupported provider adapter"))?;
+    let endpoint = record.endpoint.trim_end_matches('/');
     let mut response = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|_| unavailable("provider is unavailable"))?
+        .map_err(|_| HostError::unavailable("provider is unavailable"))?
         .get(format!("{endpoint}/models"))
         .bearer_auth(secret)
         .send()
         .await
-        .map_err(|_| unavailable("provider is unavailable"))?;
+        .map_err(|_| HostError::unavailable("provider is unavailable"))?;
     if !response.status().is_success() {
-        return Err(unavailable("provider is unavailable"));
+        return Err(HostError::unavailable("provider is unavailable"));
     }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_PROBE_BYTES as u64)
     {
-        return Err(unavailable("provider reply is too large"));
+        return Err(HostError::unavailable("provider reply is too large"));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| unavailable("provider is unavailable"))?
+        .map_err(|_| HostError::unavailable("provider is unavailable"))?
     {
         if bytes.len() + chunk.len() > MAX_PROBE_BYTES {
-            return Err(unavailable("provider reply is too large"));
+            return Err(HostError::unavailable("provider reply is too large"));
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| unavailable("provider reply is invalid"))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| HostError::unavailable("provider reply is invalid"))?;
     let items = value
         .get("data")
         .and_then(Value::as_array)
-        .ok_or_else(|| unavailable("provider reply is invalid"))?;
+        .ok_or_else(|| HostError::unavailable("provider reply is invalid"))?;
     let models: Vec<w::Model> = items
         .iter()
         .take(MAX_MODELS)
@@ -469,7 +408,7 @@ pub(crate) async fn probe(
             })
         })
         .collect();
-    let capabilities = serde_json::json!({
+    let capabilities = json!({
         "provider": provider.id,
         "revision": provider.revision,
         "model_count": models.len(),

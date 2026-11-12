@@ -38,18 +38,13 @@ async fn process_publishes_private_discovery_authenticates_and_stops() {
     let (transport, config) = ene_rpc::connect(&discovery.0, &discovery.1).unwrap();
     let client = ene_rpc::HostServiceClient::new(transport, config);
     let snapshot = client
-        .get_snapshot(ene_rpc::SnapshotRequest::default())
+        .get_snapshot(ene_rpc::Empty::default())
         .await
         .unwrap();
-    assert!(!snapshot.view().host_id.is_empty());
+    assert!(!snapshot.view().server_version.is_empty());
     let (transport, config) = ene_rpc::connect(&discovery.0, "wrong-token").unwrap();
     let wrong = ene_rpc::HostServiceClient::new(transport, config);
-    assert!(
-        wrong
-            .get_snapshot(ene_rpc::SnapshotRequest::default())
-            .await
-            .is_err()
-    );
+    assert!(wrong.get_snapshot(ene_rpc::Empty::default()).await.is_err());
     let status = Command::new("kill")
         .arg("-TERM")
         .arg(child.id().to_string())

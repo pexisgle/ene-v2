@@ -1,6 +1,6 @@
-//! Authorized HTTP transport enforcing destination origin, live permit and 8 MiB stream bounds.
+//! Authorized HTTP transport enforcing destination origin, live permit and bounds.
 use super::origin;
-use crate::host::db::{Result, unavailable};
+use crate::host::{db::Result, error::HostError};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use rig_http::{
@@ -17,7 +17,6 @@ use std::{
 };
 
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
-/// How long a stream may go without sending anything before it is abandoned.
 const READ_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone)]
@@ -38,11 +37,9 @@ impl Authorized {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(30))
-            // A generation may stream for minutes: only silence times out.
-            // A whole-request deadline would cut a long answer off.
             .read_timeout(READ_TIMEOUT)
             .build()
-            .map_err(|_| unavailable("cannot build model transport"))?;
+            .map_err(|_| HostError::unavailable("cannot build model transport"))?;
         Ok(Self {
             client: ReqwestClient::from(client),
             allowed,
@@ -72,8 +69,6 @@ impl HttpClientExt for Authorized {
                 return Err(denied());
             }
             this.client.send(request).await.map_err(|error| {
-                // The provider's reason never reaches the client: the failure
-                // is reported as "generation failed", so it is logged here.
                 tracing::warn!(%error, "model request failed");
                 denied()
             })

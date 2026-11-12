@@ -13,20 +13,6 @@ pub mod rpc {
 
 pub use rpc::*;
 
-impl From<serde_json::Value> for JsonDocument {
-    fn from(value: serde_json::Value) -> Self {
-        Self {
-            json: value.to_string(),
-            ..Default::default()
-        }
-    }
-}
-impl From<&serde_json::Value> for JsonDocument {
-    fn from(value: &serde_json::Value) -> Self {
-        Self::from(value.clone())
-    }
-}
-
 #[cfg(all(feature = "client", not(target_family = "wasm")))]
 mod client;
 #[cfg(all(feature = "client", not(target_family = "wasm")))]

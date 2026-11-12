@@ -1,37 +1,59 @@
-//! Client device registration, capability grants and exclusive companion activation.
-mod device;
+//! Connected terminals, exclusive companion activation and device operations.
+pub(crate) mod device;
 
 pub(crate) use self::device::{
-    complete, get_operation, register_tools, restore, subscribe, sweep_closed,
+    DeviceOperation, DeviceResult, DeviceStatus, complete, get_operation, register_tools, restore,
+    subscribe, sweep_closed,
 };
 
 use super::{
-    Host,
-    db::{Result, aborted, invalid, next_revision, not_found, now, validate_id},
-    mind::{CompanionRecord, companion},
+    db::{Result, Store, next_revision, now, validate_id},
+    error::HostError,
+    notify::Notifier,
+    resources::DeviceStreams,
+    wire,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use rig_ecs::prelude::*;
+use rig_ecs::prelude::App;
+
+#[derive(Clone, Debug)]
+pub(crate) struct Client {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) platform: String,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) granted_capabilities: Vec<String>,
+    pub(crate) revision: u64,
+    pub(crate) last_seen: String,
+}
+
+impl Client {
+    pub(crate) fn connected(&self, streams: &DeviceStreams) -> bool {
+        streams
+            .0
+            .get(&self.id)
+            .is_some_and(|sender| !sender.is_closed())
+    }
+}
 
 pub(crate) fn register(app: &mut App, request: w::RegisterClientRequest) -> Result<w::Client> {
     validate_id(&request.id)?;
     if request.name.chars().count() > 200 || request.platform.chars().count() > 100 {
-        return Err(invalid("invalid client name"));
+        return Err(HostError::invalid("invalid client name"));
     }
     if request
         .capabilities
         .iter()
-        .any(|c| c.is_empty() || c.len() > 100)
+        .any(|capability| capability.is_empty() || capability.len() > 100)
     {
-        return Err(invalid("invalid capability"));
+        return Err(HostError::invalid("invalid capability"));
     }
-    let key = format!("client:{}", request.id);
-    let host = app.world().resource::<Host>();
-    let existing = host.db.get::<w::Client>(&key)?;
+    let store = app.world().resource::<Store>().clone();
+    let existing = store.client(&request.id)?;
     let revision = if let Some(existing) = &existing {
         if existing.revision != request.expected_revision && request.expected_revision != 0 {
-            return Err(aborted("client revision changed"));
+            return Err(HostError::conflict("client revision changed"));
         }
         if existing.name == request.name
             && existing.platform == request.platform
@@ -45,14 +67,15 @@ pub(crate) fn register(app: &mut App, request: w::RegisterClientRequest) -> Resu
         1
     };
     let granted = existing
-        .map(|c| {
-            c.granted_capabilities
+        .map(|client| {
+            client
+                .granted_capabilities
                 .into_iter()
-                .filter(|cap| request.capabilities.contains(cap))
+                .filter(|capability| request.capabilities.contains(capability))
                 .collect()
         })
         .unwrap_or_default();
-    let client = w::Client {
+    let client = Client {
         id: request.id,
         name: request.name,
         platform: request.platform,
@@ -60,35 +83,26 @@ pub(crate) fn register(app: &mut App, request: w::RegisterClientRequest) -> Resu
         granted_capabilities: granted,
         revision,
         last_seen: now(),
-        connected: false,
-        active_companions: Vec::new(),
-        ..Default::default()
     };
-    host.db.put(&key, &client)?;
-    notify(app.world_mut(), &client);
-    Ok(client)
+    store.save_client(&client)?;
+    notify(app.world_mut(), &client, false, Vec::new());
+    Ok(wire::client(&client, false, Vec::new()))
 }
 
-pub(crate) fn list(host: &Host) -> Result<Vec<w::Client>> {
-    let companions = host.db.list::<CompanionRecord>("companion:")?;
-    let mut clients: Vec<w::Client> = host
-        .db
-        .list::<w::Client>("client:")?
-        .into_iter()
-        .map(|(_, client)| client)
-        .collect();
-    for client in &mut clients {
-        client.connected = host
-            .device_streams
-            .get(&client.id)
-            .is_some_and(|s| !s.is_closed());
-        client.active_companions = companions
-            .iter()
-            .filter(|(_, record)| record.companion.active_client.as_deref() == Some(&client.id))
-            .map(|(_, record)| record.companion.id.clone())
-            .collect();
-    }
-    Ok(clients)
+pub(crate) fn list(store: &Store, streams: &DeviceStreams) -> Result<Vec<w::Client>> {
+    let activations = store.activations()?;
+    Ok(store
+        .clients()?
+        .iter()
+        .map(|client| {
+            let active = activations
+                .iter()
+                .filter(|(_, client_id, _)| client_id == &client.id)
+                .map(|(companion, _, _)| companion.clone())
+                .collect();
+            wire::client(client, client.connected(streams), active)
+        })
+        .collect())
 }
 
 pub(crate) fn set_capabilities(
@@ -96,107 +110,181 @@ pub(crate) fn set_capabilities(
     request: w::SetCapabilitiesRequest,
 ) -> Result<w::Client> {
     validate_id(&request.client_id)?;
-    let key = format!("client:{}", request.client_id);
-    let host = app.world().resource::<Host>();
-    let mut client = host
-        .db
-        .get::<w::Client>(&key)?
-        .ok_or_else(|| not_found("client not found"))?;
+    let store = app.world().resource::<Store>().clone();
+    let mut client = store
+        .client(&request.client_id)?
+        .ok_or_else(|| HostError::not_found("client not found"))?;
     if client.revision != request.revision {
-        return Err(aborted("client revision changed"));
+        return Err(HostError::conflict("client revision changed"));
     }
     client.capabilities = request.capabilities;
     client.granted_capabilities = request
         .granted_capabilities
         .into_iter()
-        .filter(|cap| client.capabilities.contains(cap))
+        .filter(|capability| client.capabilities.contains(capability))
         .collect();
     client.revision = next_revision(client.revision)?;
     client.last_seen = now();
-    host.db.put(&key, &client)?;
-    notify(app.world_mut(), &client);
-    Ok(client)
+    store.save_client(&client)?;
+    notify(app.world_mut(), &client, false, Vec::new());
+    Ok(wire::client(&client, false, Vec::new()))
 }
 
 pub(crate) fn activate(app: &mut App, request: w::ActivationRequest) -> Result<w::Activation> {
     validate_id(&request.companion_id)?;
     validate_id(&request.client_id)?;
-    let host = app.world().resource::<Host>();
-    let mut record = companion(&host.db, &request.companion_id)?;
-    if record.companion.activation_revision != request.expected_revision {
-        return Err(aborted("activation revision changed"));
+    let store = app.world().resource::<Store>().clone();
+    store
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let (current_client, current_revision) = store
+        .activation(&request.companion_id)?
+        .unwrap_or_else(|| (String::new(), 1));
+    if current_revision != request.expected_revision {
+        return Err(HostError::conflict("activation revision changed"));
     }
-    if !request.release
-        && host
-            .db
-            .get::<w::Client>(&format!("client:{}", request.client_id))?
-            .is_none()
-    {
-        return Err(not_found("client not found"));
-    }
-    let active = (!request.release).then(|| request.client_id.clone());
-    apply_activation(
-        app.world_mut(),
-        &mut record,
-        active,
-        Some(request.client_id),
-    )
-}
-
-pub(crate) fn activate_on_send(world: &mut World, companion_id: &str, client: &str) -> Result<()> {
-    let host = world.resource::<Host>();
-    let mut record = companion(&host.db, companion_id)?;
-    if record.companion.active_client.as_deref() == Some(client)
-        || host
-            .db
-            .get::<w::Client>(&format!("client:{client}"))?
-            .is_none()
-    {
-        return Ok(());
-    }
-    apply_activation(world, &mut record, Some(client.into()), None)?;
-    Ok(())
-}
-
-fn apply_activation(
-    world: &mut World,
-    record: &mut CompanionRecord,
-    active_client: Option<String>,
-    notify_client: Option<String>,
-) -> Result<w::Activation> {
-    let revision = next_revision(record.companion.activation_revision)?;
-    record.companion.activation_revision = revision;
-    record.companion.active_client.clone_from(&active_client);
-    record.companion.updated_at = now();
-    world
-        .resource::<Host>()
-        .db
-        .put(&format!("companion:{}", record.companion.id), record)?;
-    world.resource_mut::<Host>().notify(
-        Some(record.companion.id.clone()),
-        notify_client,
-        w::notification::Event::ActivationChanged(Box::new(w::ActivationChanged {
-            companion_id: record.companion.id.clone(),
-            client_id: active_client.clone(),
-            revision,
+    if request.release {
+        store.remove_activation(&request.companion_id)?;
+        notify_activation(app.world_mut(), &request.client_id);
+        return Ok(w::Activation {
+            companion_id: request.companion_id,
+            client_id: None,
+            revision: current_revision.saturating_add(1),
             ..Default::default()
-        })),
-    );
+        });
+    }
+    store
+        .client(&request.client_id)?
+        .ok_or_else(|| HostError::not_found("client not found"))?;
+    let revision = next_revision(current_revision)?;
+    store.save_activation(&request.companion_id, &request.client_id, revision)?;
+    let _ = current_client;
+    notify_activation(app.world_mut(), &request.client_id);
     Ok(w::Activation {
-        companion_id: record.companion.id.clone(),
-        client_id: active_client,
+        companion_id: request.companion_id,
+        client_id: Some(request.client_id),
         revision,
         ..Default::default()
     })
 }
 
-fn notify(world: &mut World, client: &w::Client) {
-    world.resource_mut::<Host>().notify(
-        None,
+pub(crate) fn activate_on_send(world: &mut World, companion_id: &str, client: &str) -> Result<()> {
+    let store = world.resource::<Store>().clone();
+    let current = store.activation(companion_id)?;
+    if current.as_ref().is_some_and(|(id, _)| id == client) || store.client(client)?.is_none() {
+        return Ok(());
+    }
+    let revision = next_revision(current.map_or(1, |(_, revision)| revision))?;
+    store.save_activation(companion_id, client, revision)?;
+    notify_activation(world, client);
+    Ok(())
+}
+
+fn notify_activation(world: &mut World, client_id: &str) {
+    if let Ok(Some(client)) = world.resource::<Store>().client(client_id) {
+        notify(world, &client, false, Vec::new());
+    }
+}
+
+fn notify(world: &mut World, client: &Client, connected: bool, active: Vec<String>) {
+    let view = wire::client(client, connected, active);
+    world.resource_mut::<Notifier>().push(
         Some(client.id.clone()),
+        None,
         w::notification::Event::ClientUpdated(Box::new(w::ClientUpdated {
-            client: client.clone().into(),
+            client: view.into(),
             ..Default::default()
         })),
     );
+}
+
+pub(crate) fn sweep(store: Res<Store>, mut streams: ResMut<DeviceStreams>, mut commands: Commands) {
+    if let Err(error) = sweep_closed(&store, &mut streams)
+        && error.is_storage()
+    {
+        commands.queue(move |world: &mut World| crate::host::fail(world, error.to_string()));
+    }
+}
+
+pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
+    let text = match event.event.as_ref() {
+        Some(w::perception_event::Event::PerceptionSummary(summary)) => {
+            if summary.summary.trim().is_empty() {
+                None
+            } else {
+                Some(summary.summary.clone())
+            }
+        }
+        Some(w::perception_event::Event::ActiveWindow(window)) => {
+            let title = window.title.trim();
+            if title.is_empty() {
+                None
+            } else {
+                Some(format!("{} ({})", title, window.app_id))
+            }
+        }
+        Some(w::perception_event::Event::UserActivity(activity)) => Some(if activity.is_active {
+            "ユーザーは操作中です".into()
+        } else {
+            format!("ユーザーは{}秒間無操作です", activity.idle_seconds)
+        }),
+        None => None,
+    };
+    if let Some(text) = text {
+        world.resource_mut::<super::resources::Perception>().0 =
+            Some(crate::truncate_chars(&text, 1000));
+    }
+    Ok(())
+}
+
+/// Fire-and-forget host-to-client operation. Used by `eye.watch` and
+/// `body.motion`, which do not wait for a device result.
+pub(crate) fn send_operation(
+    world: &mut World,
+    companion: &str,
+    capability: &str,
+    input: String,
+) -> Result<String> {
+    let store = world.resource::<Store>().clone();
+    let client_id = store
+        .activation(companion)?
+        .map(|(client, _)| client)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| HostError::conflict("no active client"))?;
+    let client = store
+        .client(&client_id)?
+        .ok_or_else(|| HostError::not_found("client not found"))?;
+    if !client
+        .granted_capabilities
+        .iter()
+        .any(|granted| granted == capability)
+    {
+        return Err(HostError::permission("capability_not_granted"));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut record = device::DeviceOperation {
+        id: id.clone(),
+        client_id: client_id.clone(),
+        companion_id: companion.into(),
+        capability: capability.into(),
+        input: super::db::parse_json(&input)?,
+        status: device::DeviceStatus::Pending,
+        result: None,
+        subscription_id: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    store.save_device(&record)?;
+    if let Some(sender) = world.resource::<DeviceStreams>().0.get(&client_id) {
+        let subscription = format!("{client_id}:{id}");
+        if sender
+            .try_send(wire::device_task(&record, &subscription))
+            .is_ok()
+        {
+            record.status = device::DeviceStatus::Dispatched;
+            record.subscription_id = Some(subscription);
+            store.save_device(&record)?;
+        }
+    }
+    Ok(id)
 }

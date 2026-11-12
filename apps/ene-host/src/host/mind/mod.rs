@@ -1,166 +1,43 @@
-//! Companions, author-defined MindProfile and evolving MindState.
+//! Companions, authored profiles and the current mind.
 mod consolidate;
 mod memory;
-mod summary;
+mod recall;
 mod tools;
 
 pub(crate) use self::{
-    consolidate::{Batch, Consolidation, apply_consolidation, restore, start_consolidation},
-    memory::{FORGOTTEN, MemoryRecord, NORMAL, PRIVATE, SHARED, control_memory, inject_recall},
-    summary::{
-        Job as SummaryJob, Summary, apply as apply_summary, inject as inject_summary,
-        start as start_summary,
-    },
+    consolidate::{Batch, apply as apply_consolidation, start as start_consolidation},
+    memory::control_memory,
+    recall::inject_context,
     tools::register_tools,
 };
 
 use super::{
-    Host, chat,
-    db::{
-        Database, Result, aborted, document, invalid, new_id, next_revision, not_found, now,
-        validate_id,
-    },
+    agent::AgentKey,
+    chat,
+    companion::{Companion, Profile},
+    db::{Result, Store, new_id, next_revision, now, validate_id},
+    error::HostError,
+    notify::Notifier,
+    resources::ConsolidationQueue,
+    wire,
 };
 use bevy_ecs::prelude::*;
-use connectrpc::ConnectError;
 use ene_rpc as w;
-use rig_core::conversation::{Author, RequestId};
-use rig_ecs::prelude::*;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
-/// The number of companions a host serves, advertised and enforced.
 pub(crate) const MAX_COMPANIONS: usize = 16;
-pub(super) const MAX_CONTENT: usize = 4000;
-pub(super) const MAX_TEXT: usize = 1000;
-pub(super) const MAX_ITEMS: usize = 16;
+const MAX_CONTENT: usize = 4000;
+const MAX_TEXT: usize = 1000;
+const MAX_ITEMS: usize = 16;
 
-/// How a memory came to the companion: the only values the host stores.
-pub(crate) const ACQUISITIONS: &[&str] = &[
-    "direct_experience",
-    "user_statement",
-    "report",
-    "shared",
-    "inference",
-];
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ProfileData {
-    #[serde(default)]
-    pub(crate) facets: Vec<String>,
-    #[serde(default)]
-    pub(crate) examples: Vec<String>,
-    #[serde(default)]
-    pub(crate) background: Vec<String>,
-    #[serde(default)]
-    pub(crate) expression: Vec<String>,
+pub(crate) fn companions(store: &Store) -> Result<Vec<w::Companion>> {
+    Ok(store.companions()?.iter().map(wire::companion).collect())
 }
 
-impl ProfileData {
-    pub(crate) fn sections(&self) -> [(&'static str, &[String]); 4] {
-        [
-            ("facets", &self.facets),
-            ("examples", &self.examples),
-            ("background", &self.background),
-            ("expression", &self.expression),
-        ]
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct StateData {
-    #[serde(default)]
-    pub(crate) emotion: Value,
-    #[serde(default)]
-    pub(crate) relationships: Vec<Value>,
-    #[serde(default)]
-    pub(crate) tendencies: Vec<String>,
-    #[serde(default)]
-    pub(crate) concerns: Vec<String>,
-}
-
-impl StateData {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.emotion.is_null()
-            && self.relationships.is_empty()
-            && self.tendencies.is_empty()
-            && self.concerns.is_empty()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct CompanionRecord {
-    pub(crate) companion: w::Companion,
-    pub(crate) profile: ProfileData,
-    pub(crate) state: StateData,
-    pub(crate) profile_revision: u64,
-    pub(crate) state_revision: u64,
-    pub(crate) memory_revision: u64,
-}
-
-impl CompanionRecord {
-    pub(crate) fn seed(id: String, created_at: String) -> Self {
-        Self {
-            companion: w::Companion {
-                id,
-                name: "ene".into(),
-                mind: "日本語で、簡潔で親しみやすく応答する。".into(),
-                body: document(json!({})).into(),
-                voice: document(json!({})).into(),
-                assignments: w::ModelAssignments::default().into(),
-                revision: 1,
-                created_at: created_at.clone(),
-                updated_at: created_at,
-                active_client: None,
-                activation_revision: 1,
-                ..Default::default()
-            },
-            profile: ProfileData::default(),
-            state: StateData::default(),
-            profile_revision: 1,
-            state_revision: 1,
-            memory_revision: 1,
-        }
-    }
-
-    pub(crate) fn mind(&self) -> w::MindProfile {
-        w::MindProfile {
-            core: self.companion.mind.clone(),
-            revision: self.profile_revision,
-            facets: self.profile.facets.clone(),
-            examples: self.profile.examples.clone(),
-            background: self.profile.background.clone(),
-            expression: self.profile.expression.clone(),
-            ..Default::default()
-        }
-    }
-
-    pub(crate) fn mind_state(&self) -> w::MindState {
-        w::MindState {
-            revision: self.state_revision,
-            emotion: document(self.state.emotion.clone()).into(),
-            relationships: document(json!(self.state.relationships)).into(),
-            tendencies: document(json!(self.state.tendencies)).into(),
-            concerns: document(json!(self.state.concerns)).into(),
-            updated_at: self.companion.updated_at.clone(),
-            ..Default::default()
-        }
-    }
-}
-
-pub(crate) fn companions(database: &Database) -> Result<Vec<w::Companion>> {
-    Ok(database
-        .list::<CompanionRecord>("companion:")?
-        .into_iter()
-        .map(|(_, record)| record.companion)
-        .collect())
-}
-
-pub(crate) fn companion(database: &Database, id: &str) -> Result<CompanionRecord> {
+pub(crate) fn companion(store: &Store, id: &str) -> Result<Companion> {
     validate_id(id)?;
-    database
-        .get(&format!("companion:{id}"))?
-        .ok_or_else(|| not_found("companion not found"))
+    store
+        .companion(id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))
 }
 
 pub(crate) fn create_companion(
@@ -168,144 +45,182 @@ pub(crate) fn create_companion(
     request: w::CreateCompanionRequest,
 ) -> Result<w::Companion> {
     if request.name.trim().is_empty() || request.name.chars().count() > 200 {
-        return Err(invalid("invalid companion name"));
+        return Err(HostError::invalid("invalid companion name"));
     }
     if request.mind.chars().count() > 16_000 {
-        return Err(invalid("companion mind is too long"));
+        return Err(HostError::invalid("companion mind is too long"));
     }
-    if companions(&world.resource::<Host>().db)?.len() >= MAX_COMPANIONS {
-        return Err(ConnectError::resource_exhausted("too many companions"));
+    let store = world.resource::<Store>().clone();
+    if store.companions()?.len() >= MAX_COMPANIONS {
+        return Err(HostError::exhausted("too many companions"));
     }
-    let mut record = CompanionRecord::seed(new_id(), now());
-    record.companion.name = request.name;
-    record.companion.mind = request.mind;
-    record.companion.body = request.body;
-    record.companion.voice = request.voice;
-    record.companion.assignments = request.assignments;
-    if let Some(profile) = request.profile.into_option() {
-        record.profile = ProfileData {
-            facets: profile.facets,
-            examples: profile.examples,
-            background: profile.background,
-            expression: profile.expression,
+    let mut record = Companion::seed(new_id(), now());
+    record.name = request.name;
+    record.mind = request.mind;
+    record.body = wire::parse(&request.body)?;
+    record.voice = wire::parse(&request.voice)?;
+    record.assignments = assignments_from(request.assignments.as_option());
+    record.persona = request.persona.clone();
+    record.voice_identifier = request.voice_identifier.clone();
+    if let Some(profile) = request.profile.as_option() {
+        record.profile = Profile {
+            facets: profile.facets.clone(),
+            examples: profile.examples.clone(),
+            background: profile.background.clone(),
+            expression: profile.expression.clone(),
         };
     }
-    world
-        .resource::<Host>()
-        .db
-        .put(&format!("companion:{}", record.companion.id), &record)?;
-    notify_companion(world, &record.companion);
-    Ok(record.companion)
+    store.save_companion(&record)?;
+    notify_companion(world, &record);
+    Ok(wire::companion(&record))
 }
 
 pub(crate) fn update_companion(
     world: &mut World,
     request: w::UpdateCompanionRequest,
 ) -> Result<w::Companion> {
-    let db = &world.resource::<Host>().db;
-    let mut record = companion(db, &request.id)?;
-    if record.companion.revision != request.revision {
-        return Err(aborted("companion revision changed"));
+    let store = world.resource::<Store>().clone();
+    let mut record = companion(&store, &request.id)?;
+    if record.revision != request.revision {
+        return Err(HostError::conflict("companion revision changed"));
     }
+    let mut changed = false;
     if let Some(name) = request.name {
         if name.trim().is_empty() || name.chars().count() > 200 {
-            return Err(invalid("invalid companion name"));
+            return Err(HostError::invalid("invalid companion name"));
         }
-        record.companion.name = name;
+        changed |= record.name != name;
+        record.name = name;
     }
     if let Some(mind) = request.mind {
         if mind.chars().count() > 16_000 {
-            return Err(invalid("companion mind is too long"));
+            return Err(HostError::invalid("companion mind is too long"));
         }
-        record.companion.mind = mind;
+        changed |= record.mind != mind;
+        record.mind = mind;
     }
-    if let Some(body) = request.body.into_option() {
-        record.companion.body = document(patch_doc(body)?).into();
+    if let Some(body) = request.body {
+        let value = wire::parse(&body)?;
+        changed |= record.body != value;
+        record.body = value;
     }
-    if let Some(voice) = request.voice.into_option() {
-        record.companion.voice = document(patch_doc(voice)?).into();
+    if let Some(voice) = request.voice {
+        let value = wire::parse(&voice)?;
+        changed |= record.voice != value;
+        record.voice = value;
     }
-    if let Some(patch) = request.companion_assignment.into_option() {
-        apply_assignment(&mut record, true, patch)?;
+    if let Some(patch) = request.companion_assignment.as_option() {
+        let value = assignment_patch(patch)?;
+        changed |= record.assignments.companion != value;
+        record.assignments.companion = value;
     }
-    if let Some(patch) = request.task_assignment.into_option() {
-        apply_assignment(&mut record, false, patch)?;
+    if let Some(patch) = request.task_assignment.as_option() {
+        let value = assignment_patch(patch)?;
+        changed |= record.assignments.task != value;
+        record.assignments.task = value;
     }
-    record.companion.revision = next_revision(record.companion.revision)?;
-    record.companion.updated_at = now();
-    db.put(&format!("companion:{}", record.companion.id), &record)?;
-    chat::refresh_prompt(world, &record.companion.id);
-    notify_companion(world, &record.companion);
-    Ok(record.companion)
+    if let Some(patch) = request.perception_assignment.as_option() {
+        let value = assignment_patch(patch)?;
+        changed |= record.assignments.perception != value;
+        record.assignments.perception = value;
+    }
+    if let Some(patch) = request.compaction_assignment.as_option() {
+        let value = assignment_patch(patch)?;
+        changed |= record.assignments.compaction != value;
+        record.assignments.compaction = value;
+    }
+    if let Some(patch) = request.consolidation_assignment.as_option() {
+        let value = assignment_patch(patch)?;
+        changed |= record.assignments.consolidation != value;
+        record.assignments.consolidation = value;
+    }
+    if let Some(patch) = request.decision_assignment.as_option() {
+        let value = assignment_patch(patch)?;
+        changed |= record.assignments.decision != value;
+        record.assignments.decision = value;
+    }
+    if let Some(patch) = request.embedding_assignment.as_option() {
+        let value = assignment_patch(patch)?;
+        changed |= record.assignments.embedding != value;
+        record.assignments.embedding = value;
+    }
+    if let Some(persona) = request.persona {
+        changed |= record.persona != Some(persona.clone());
+        record.persona = Some(persona);
+    }
+    if let Some(voice) = request.voice_identifier {
+        changed |= record.voice_identifier != Some(voice.clone());
+        record.voice_identifier = Some(voice);
+    }
+    if changed {
+        record.revision = next_revision(record.revision)?;
+        record.updated_at = now();
+        store.save_companion(&record)?;
+        chat::refresh_prompt(world, &record.id);
+        notify_companion(world, &record);
+    }
+    Ok(wire::companion(&record))
 }
 
-fn patch_doc(patch: w::JsonDocumentPatch) -> Result<Value> {
-    match patch.change {
-        Some(w::json_document_patch::Change::Set(doc)) => {
-            serde_json::from_str(&doc.json).map_err(|_| invalid("invalid document"))
-        }
-        Some(w::json_document_patch::Change::Clear(_)) => Ok(json!({})),
-        None => Err(invalid("empty document patch")),
-    }
-}
-
-fn apply_assignment(
-    record: &mut CompanionRecord,
-    companion: bool,
-    patch: w::AssignmentPatch,
-) -> Result<()> {
-    let mut assignments = record
-        .companion
-        .assignments
-        .as_option()
-        .cloned()
-        .unwrap_or_default();
-    let value = match patch.change {
-        Some(w::assignment_patch::Change::Set(assignment)) => (*assignment).into(),
-        Some(w::assignment_patch::Change::Clear(_)) => Default::default(),
-        None => return Err(invalid("empty assignment patch")),
+fn assignments_from(value: Option<&w::ModelAssignments>) -> super::companion::Assignments {
+    let Some(value) = value else {
+        return Default::default();
     };
-    if companion {
-        assignments.companion = value;
-    } else {
-        assignments.task = value;
+    super::companion::Assignments {
+        companion: value.companion.as_option().map(|assignment| {
+            super::companion::ModelAssignment {
+                connection: assignment.connection_id.clone(),
+                model: assignment.model_id.clone(),
+            }
+        }),
+        task: value.task.as_option().map(assignment),
+        perception: value.perception.as_option().map(assignment),
+        compaction: value.compaction.as_option().map(assignment),
+        consolidation: value.consolidation.as_option().map(assignment),
+        decision: value.decision.as_option().map(assignment),
+        embedding: value.embedding.as_option().map(assignment),
     }
-    record.companion.assignments = assignments.into();
-    Ok(())
 }
 
-pub(crate) fn mind_view(database: &Database, id: &str) -> Result<w::MindView> {
-    let record = companion(database, id)?;
-    let cursor = database
-        .get::<Consolidation>(&format!("memory-cursor:{id}"))?
-        .unwrap_or_default();
-    let memories = database.count_memories(id)?;
+fn assignment_patch(
+    patch: &w::AssignmentPatch,
+) -> Result<Option<super::companion::ModelAssignment>> {
+    match patch.change.as_ref() {
+        Some(w::assignment_patch::Change::Set(assignment)) => {
+            Ok(Some(super::companion::ModelAssignment {
+                connection: assignment.connection_id.clone(),
+                model: assignment.model_id.clone(),
+            }))
+        }
+        Some(w::assignment_patch::Change::Clear(_)) => Ok(None),
+        None => Err(HostError::invalid("empty assignment patch")),
+    }
+}
+
+pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
+    let record = companion(store, id)?;
+    let cursor = store.consolidation(id)?.unwrap_or_default();
     Ok(w::MindView {
         companion_id: id.into(),
-        profile: record.mind().into(),
-        state: record.mind_state().into(),
-        memory_revision: record.memory_revision,
-        index: w::MemoryStatus {
-            state: "ready".into(),
-            reason: None,
-            memories,
-            semantic: false,
-            updated_at: cursor.updated_at.clone(),
+        profile: wire::mind_profile(&record).into(),
+        state: wire::mind_state(&record).into(),
+        index: Some(w::MindIndexStatus {
+            pending_fts_count: 0,
+            pending_vector_count: 0,
+            embedding_model: String::new(),
+            model_calls: 0,
+            total_tokens: 0,
             ..Default::default()
-        }
+        })
         .into(),
-        consolidation: w::ConsolidationStatus {
-            last_sequence: cursor.last_sequence,
-            last_offset: cursor.last_offset,
-            state: cursor.state,
-            reason: cursor.reason,
-            jobs: cursor.jobs,
+        consolidation: Some(w::MindConsolidationStatus {
+            last_processed_turn_id: cursor.last_sequence.to_string(),
+            jobs_completed: cursor.jobs,
             model_calls: cursor.model_calls,
             input_chars: cursor.input_chars,
-            skipped: cursor.skipped,
-            updated_at: cursor.updated_at,
+            last_error: cursor.reason,
             ..Default::default()
-        }
+        })
         .into(),
         ..Default::default()
     })
@@ -315,90 +230,100 @@ pub(crate) fn update_mind_profile(
     world: &mut World,
     request: w::UpdateMindProfileRequest,
 ) -> Result<w::MindView> {
-    let view = {
-        let db = &world.resource::<Host>().db;
-        let mut record = companion(db, &request.companion_id)?;
-        if record.profile_revision != request.expected_revision {
-            return Err(aborted("profile revision changed"));
-        }
-        let sections = [
-            &request.facets,
-            &request.examples,
-            &request.background,
-            &request.expression,
-        ];
-        if sections.iter().any(|list| list.len() > MAX_ITEMS) {
-            return Err(invalid("too many profile items"));
-        }
-        if sections
-            .into_iter()
-            .flatten()
-            .any(|item| item.chars().count() > 2000)
-        {
-            return Err(invalid("profile item is too long"));
-        }
-        record.profile = ProfileData {
-            facets: request.facets,
-            examples: request.examples,
-            background: request.background,
-            expression: request.expression,
-        };
-        record.profile_revision = next_revision(record.profile_revision)?;
-        record.companion.updated_at = now();
-        db.put(&format!("companion:{}", record.companion.id), &record)?;
-        mind_view(db, &record.companion.id)?
+    let store = world.resource::<Store>().clone();
+    let mut record = companion(&store, &request.companion_id)?;
+    if record.profile_revision != request.expected_revision {
+        return Err(HostError::conflict("profile revision changed"));
+    }
+    let profile = request
+        .profile
+        .as_option()
+        .ok_or_else(|| HostError::invalid("profile is required"))?;
+    let sections = [
+        &profile.facets,
+        &profile.examples,
+        &profile.background,
+        &profile.expression,
+    ];
+    if sections.iter().any(|list| list.len() > MAX_ITEMS) {
+        return Err(HostError::invalid("too many profile items"));
+    }
+    if sections
+        .into_iter()
+        .flatten()
+        .any(|item| item.chars().count() > 2000)
+    {
+        return Err(HostError::invalid("profile item is too long"));
+    }
+    record.profile = Profile {
+        facets: profile.facets.clone(),
+        examples: profile.examples.clone(),
+        background: profile.background.clone(),
+        expression: profile.expression.clone(),
     };
-    chat::refresh_prompt(world, &view.companion_id);
-    notify_mind(world, &view.companion_id, view.clone());
+    record.profile_revision = next_revision(record.profile_revision)?;
+    record.updated_at = now();
+    store.save_companion(&record)?;
+    chat::refresh_prompt(world, &record.id);
+    let view = mind_view(&store, &record.id)?;
+    notify_mind(world, &record.id, &view);
     Ok(view)
 }
 
-pub(crate) fn deliver_state(world: &mut World, agent: Entity, companion_id: &str) -> Result<()> {
-    let record = companion(&world.resource::<Host>().db, companion_id)?;
-    let request_id = format!("mind:{}", record.state_revision);
-    if chat::has_request(world, agent, &request_id) {
-        return Ok(());
-    }
-    // Even an empty mind is stated, so the model knows the revision it must
-    // name when it updates it.
-    let text = if record.state.is_empty() {
-        format!(
-            "現在の心（revision {}）: （まだ何もありません）",
-            record.state_revision
-        )
-    } else {
-        let state_json = serde_json::to_string(&record.state).unwrap_or_default();
-        format!(
-            "現在の心（revision {}）:\n{state_json}",
-            record.state_revision
-        )
-    };
-    let author = Author {
-        request: Some(RequestId(request_id)),
-        ..Author::plugin("mind")
-    };
-    world.trigger(Deliver::new(agent, text, DeliveryMode::Inform).with_author(author));
-    Ok(())
-}
-
-fn notify_companion(world: &mut World, companion: &w::Companion) {
-    world.resource_mut::<Host>().notify(
+pub(crate) fn notify_companion(world: &mut World, companion: &Companion) {
+    let view = wire::companion(companion);
+    world.resource_mut::<Notifier>().push(
         Some(companion.id.clone()),
         None,
-        w::notification::Event::CompanionUpdated(Box::new(w::CompanionUpdated {
-            companion: companion.clone().into(),
-            ..Default::default()
-        })),
+        w::notification::Event::Companion(Box::new(view)),
     );
 }
 
-pub(crate) fn notify_mind(world: &mut World, companion: &str, view: w::MindView) {
-    world.resource_mut::<Host>().notify(
+pub(crate) fn notify_mind(world: &mut World, companion: &str, view: &w::MindView) {
+    world.resource_mut::<Notifier>().push(
         Some(companion.into()),
         None,
         w::notification::Event::MindUpdated(Box::new(w::MindUpdated {
-            mind: view.into(),
+            companion_id: companion.into(),
+            profile_revision: view
+                .profile
+                .as_option()
+                .map_or(0, |profile| profile.revision),
+            state_revision: view.state.as_option().map_or(0, |state| state.revision),
+            updated_at: view
+                .state
+                .as_option()
+                .map_or_else(String::new, |state| state.updated_at.clone()),
             ..Default::default()
         })),
     );
+}
+
+pub(crate) fn restore(world: &mut World) -> Result<()> {
+    let store = world.resource::<Store>().clone();
+    let mut queue = world.resource_mut::<ConsolidationQueue>();
+    for companion in store.companions()? {
+        queue.0.insert(companion.id);
+    }
+    Ok(())
+}
+
+fn assignment(value: &w::ModelAssignment) -> super::companion::ModelAssignment {
+    super::companion::ModelAssignment {
+        connection: value.connection_id.clone(),
+        model: value.model_id.clone(),
+    }
+}
+
+pub(crate) fn delete_companion(world: &mut World, id: &str) -> Result<()> {
+    let agent = chat::find_agent(world, &AgentKey::parent(id));
+    let store = world.resource::<Store>().clone();
+    store
+        .companion(id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    store.remove_companion(id)?;
+    if let Some(agent) = agent {
+        world.trigger(rig_ecs::session_log::Retire { entity: agent });
+    }
+    Ok(())
 }

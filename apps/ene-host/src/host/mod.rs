@@ -1,50 +1,60 @@
-//! Owns the headless Rig App, its command thread, host snapshots and shutdown.
+//! One headless Rig app, its command thread, resources and shutdown.
+pub(crate) mod agent;
+pub(crate) mod body;
 pub(crate) mod chat;
 pub(crate) mod client;
+pub(crate) mod compaction;
+pub(crate) mod companion;
+pub(crate) mod consolidation;
 pub(crate) mod db;
-pub(crate) mod kernel;
+pub(crate) mod error;
+pub(crate) mod failure;
+pub(crate) mod memory;
 pub(crate) mod mind;
 pub(crate) mod model;
+pub(crate) mod notify;
+pub(crate) mod receipt;
+pub(crate) mod resources;
+pub(crate) mod schedule;
 pub(crate) mod settings;
+pub(crate) mod tools;
+pub(crate) mod wire;
 pub(crate) mod work;
 
 #[cfg(test)]
 mod tests;
 
 use self::{
-    db::{Database, Result, document, is_storage, new_id, now, validate_id},
-    mind::CompanionRecord,
-    model::Credentials,
-    work::WorkRecord,
+    agent::AgentKey,
+    db::{Result, Store},
+    error::HostError,
+    model::{Binding, Credentials, ModelSource, Providers},
+    notify::Notifier,
+    resources::{
+        CompactionQueue, ConsolidationQueue, DeviceStreams, DeviceTimeout, HostOptions, HostState,
+        Inactivity, Models,
+    },
 };
 use bevy_ecs::prelude::*;
-use connectrpc::ConnectError;
-use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
 use ene_rpc as w;
-use rig_ecs::{
-    prelude::*,
-    session_log::{SessionLog, open_session},
-};
+use rig_ecs::{prelude::*, session_log::SessionLog};
 use rig_memory::DirStore;
-use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet},
+    error::Error,
     path::Path,
     sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::Duration,
 };
 use tokio::sync::{broadcast, oneshot};
-use uuid::Uuid;
 
-type StartError = Box<dyn std::error::Error + Send + Sync>;
-
-const EVENTS: usize = 256;
 const QUEUE: usize = 256;
+const MAX_COMPANIONS: usize = 16;
+const MAX_INPUT: usize = 65_536;
 
+type StartError = Box<dyn Error + Send + Sync>;
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 
-/// What the command thread waits for: control never queues behind a wake.
 enum Step {
     Job(Job),
     Wake,
@@ -58,8 +68,8 @@ pub(crate) struct Runtime {
 }
 
 struct Handle {
-    commands: Sender<Job>,
-    shutdown: Sender<()>,
+    commands: crossbeam_channel::Sender<Job>,
+    shutdown: crossbeam_channel::Sender<()>,
     thread: Mutex<Option<JoinHandle<Result<()>>>>,
 }
 
@@ -74,33 +84,11 @@ impl Drop for Handle {
     }
 }
 
-#[derive(Resource)]
-pub(crate) struct Host {
-    pub(crate) db: Database,
-    pub(crate) credentials: Credentials,
-    outbox: Vec<w::Notification>,
-    pub(crate) events: broadcast::Sender<w::Notification>,
-    epoch: String,
-    sequence: u64,
-    pub(crate) failed: Option<String>,
-    pub(crate) closing: bool,
-    pub(crate) device_streams: HashMap<String, tokio::sync::mpsc::Sender<w::DeviceOperation>>,
-    pub(crate) models: Arc<dyn model::ModelSource>,
-    pub(crate) consolidate: bool,
-    pub(crate) consolidation_queue: HashSet<String>,
-    /// How long a device operation may stay unanswered before the turn goes on.
-    pub(crate) device_timeout: Duration,
-}
-
-/// How `Runtime::start_with` supplies models and consolidation.
-///
-/// The defaults are the running host: built-in providers and consolidation
-/// on. Tests bring their own `ModelSource`, and switch consolidation with
-/// the same option instead of a mutable flag on `Host`.
 pub(crate) struct Options {
-    pub(crate) models: Option<Arc<dyn model::ModelSource>>,
+    pub(crate) models: Option<Arc<dyn ModelSource>>,
     pub(crate) consolidate: bool,
     pub(crate) device_timeout: Duration,
+    pub(crate) compaction: compaction::Options,
 }
 
 impl Default for Options {
@@ -109,117 +97,8 @@ impl Default for Options {
             models: None,
             consolidate: true,
             device_timeout: Duration::from_secs(120),
+            compaction: compaction::Options::default(),
         }
-    }
-}
-
-impl Host {
-    pub(crate) fn ready(&self) -> Result<()> {
-        if let Some(reason) = &self.failed {
-            return Err(ConnectError::unavailable(reason.clone()));
-        }
-        if self.closing {
-            return Err(ConnectError::unavailable("host is shutting down"));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn cursor(&self) -> w::Cursor {
-        w::Cursor {
-            epoch: self.epoch.clone(),
-            seq: self.sequence,
-            ..Default::default()
-        }
-    }
-
-    pub(crate) fn notify(
-        &mut self,
-        companion: Option<String>,
-        client: Option<String>,
-        event: w::notification::Event,
-    ) {
-        self.outbox.push(w::Notification {
-            companion_id: companion,
-            client_id: client,
-            event: Some(event),
-            ..Default::default()
-        });
-    }
-}
-
-#[derive(Component, Clone, Debug)]
-pub(crate) struct Owner(pub(crate) w::Target);
-
-impl Owner {
-    pub(crate) fn companion(&self) -> &str {
-        &self.0.companion_id
-    }
-
-    pub(crate) fn work(&self) -> &str {
-        &self.0.work_id
-    }
-
-    pub(crate) fn is_work(&self) -> bool {
-        !self.0.work_id.is_empty()
-    }
-
-    pub(crate) fn conversation_id(&self) -> String {
-        chat::conversation_id(&self.0)
-    }
-
-    pub(crate) fn tool_access(&self) -> ToolAccess {
-        let names = if self.is_work() {
-            kernel::WORK_TOOLS
-        } else {
-            kernel::PARENT_TOOLS
-        };
-        ToolAccess::Only(names.iter().copied().map(str::to_owned).collect())
-    }
-}
-
-/// Queues a client-visible warning about `companion`.
-pub(crate) fn notice(host: &mut Host, companion: &str, code: &str, message: &str) {
-    host.notify(
-        Some(companion.into()),
-        None,
-        w::notification::Event::Notice(Box::new(w::Notice {
-            code: code.into(),
-            message: crate::truncate_chars(message, 500),
-            ..Default::default()
-        })),
-    );
-}
-
-pub(crate) fn revoke_and_stop(world: &mut World, companion: Option<&str>) {
-    let entities: Vec<Entity> = world
-        .query::<(Entity, &Owner)>()
-        .iter(world)
-        .filter(|(_, owner)| companion.is_none_or(|id| owner.companion() == id))
-        .map(|(entity, _)| entity)
-        .collect();
-    for entity in &entities {
-        if let Some(binding) = world.get::<model::Binding>(*entity) {
-            model::revoke(binding);
-        }
-        world
-            .entity_mut(*entity)
-            .remove::<(model::Binding, rig_ecs::model::Connection)>();
-        world.trigger(StopTurn {
-            entity: *entity,
-            reason: Some("permissions changed".into()),
-        });
-    }
-    let calls: Vec<Entity> = world
-        .query::<(Entity, &ForAgent, &model::Binding)>()
-        .iter(world)
-        .filter(|(_, agent, _)| entities.contains(&agent.0))
-        .map(|(call, _, binding)| {
-            model::revoke(binding);
-            call
-        })
-        .collect();
-    for call in calls {
-        world.entity_mut(call).remove::<model::Binding>();
     }
 }
 
@@ -232,35 +111,27 @@ impl Runtime {
         state: &Path,
         options: Options,
     ) -> std::result::Result<Self, StartError> {
-        let db = Database::open(&state.join("host.sqlite3")).map_err(io_error)?;
-        seed(&db).map_err(io_error)?;
-        let credentials = Credentials::load(&db).await;
-        let logs = DirStore::open(state.join("rig")).map_err(io_error)?;
-        let (commands, command_rx) = bounded::<Job>(QUEUE);
-        let (wake_tx, wake_rx) = bounded::<()>(1);
-        let (shutdown, shutdown_rx) = bounded(1);
-        let (ready_tx, initialized) = mpsc::sync_channel(1);
-        let wake = wake_tx.clone();
-        let host = Host {
-            db,
-            credentials: credentials.clone(),
-            outbox: Vec::new(),
-            events: broadcast::channel(EVENTS).0,
-            epoch: Uuid::new_v4().to_string(),
-            sequence: 0,
-            failed: None,
-            closing: false,
-            device_streams: HashMap::new(),
-            models: options.models.unwrap_or_else(|| Arc::new(model::Providers)),
+        let store = Store::open(&state.join("host.sqlite3")).map_err(boxed)?;
+        let credentials = Credentials::load(&store).await;
+        let logs = DirStore::open(state.join("rig")).map_err(boxed)?;
+        let (commands, command_rx) = crossbeam_channel::bounded::<Job>(QUEUE);
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded::<()>(1);
+        let (shutdown, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let models: Arc<dyn ModelSource> = options.models.clone().unwrap_or_else(|| {
+            Arc::new(Providers {
+                credentials: credentials.clone(),
+            })
+        });
+        let host_options = HostOptions {
             consolidate: options.consolidate,
-            consolidation_queue: HashSet::new(),
-            device_timeout: options.device_timeout,
+            compaction: options.compaction.clone(),
         };
+        let wake = wake_tx.clone();
         let thread = std::thread::Builder::new()
             .name("ene-host-rig".into())
             .spawn(move || {
                 let mut app = App::new();
-                // One agent's work does not need a pool per core.
                 app.add_plugins(TaskPoolPlugin {
                     task_pool_options: TaskPoolOptions {
                         max_total_threads: 3,
@@ -268,22 +139,26 @@ impl Runtime {
                     },
                 })
                 .insert_resource(Wake::new(move || {
-                    // A wake is a hint that coalesces: `Wake` keeps its
-                    // sender for the loop's life, so this never spins.
                     let _ = wake.try_send(());
                 }))
-                .insert_resource(host)
-                .add_plugins((
-                    AgentPlugin,
-                    SessionLogPlugin,
-                    kernel::KernelPlugin,
-                ));
+                .insert_resource(store)
+                .insert_resource(HostState::default())
+                .insert_resource(Notifier::new())
+                .insert_resource(Models(models))
+                .insert_resource(DeviceStreams::default())
+                .insert_resource(DeviceTimeout(options.device_timeout))
+                .insert_resource(ConsolidationQueue::default())
+                .insert_resource(CompactionQueue::default())
+                .insert_resource(Inactivity::default())
+                .insert_resource(resources::Perception::default())
+                .insert_resource(host_options)
+                .add_plugins((AgentPlugin, SessionLogPlugin, agent::KernelPlugin));
                 app.finish();
                 if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
                     time.set_max_delta(Duration::from_secs(60));
                 }
-                let result = open_session(app.world_mut(), Arc::new(logs))
-                    .map_err(io_error)
+                let result = rig_ecs::session_log::open_session(app.world_mut(), Arc::new(logs))
+                    .map_err(|error| HostError::storage(error.to_string()))
                     .and_then(|()| {
                         tick(&mut app);
                         restore(&mut app)
@@ -298,23 +173,23 @@ impl Runtime {
                         Step::Job(job) => job(&mut app),
                         Step::Wake => tick(&mut app),
                         Step::Stop => {
-                            app.world_mut().resource_mut::<Host>().closing = true;
+                            app.world_mut().resource_mut::<HostState>().closing = true;
                             revoke_and_stop(app.world_mut(), None);
                             app.world_mut().write_message(AppExit::Success);
                             tick(&mut app);
-                            return match &app.world().resource::<Host>().failed {
-                                Some(reason) => Err(ConnectError::unavailable(reason.clone())),
+                            return match &app.world().resource::<HostState>().failed {
+                                Some(reason) => Err(HostError::unavailable(reason.clone())),
                                 None => Ok(()),
                             };
                         }
                     }
                 }
             })
-            .map_err(io_error)?;
-        initialized
+            .map_err(boxed)?;
+        ready_rx
             .recv()
-            .map_err(|_| io_error("Rig kernel did not start"))?
-            .map_err(io_error)?;
+            .map_err(|_| boxed("Rig kernel did not start"))?
+            .map_err(boxed)?;
         Ok(Self {
             handle: Arc::new(Handle {
                 commands,
@@ -337,25 +212,21 @@ impl Runtime {
             Box::new(move |app| {
                 let result = app
                     .world()
-                    .resource::<Host>()
+                    .resource::<HostState>()
                     .ready()
                     .and_then(|()| operation(app));
-                if result.as_ref().is_err_and(is_storage) {
+                if result.as_ref().is_err_and(HostError::is_storage) {
                     fail(app.world_mut(), "state storage failed".into());
                 }
                 tick(app);
-                let result = app.world().resource::<Host>().ready().and(result);
+                let result = app.world().resource::<HostState>().ready().and(result);
                 let _ = reply.send(result);
             })
         })
         .await
     }
 
-    /// Runs a read on the command thread without advancing a frame.
-    ///
-    /// Reads change nothing, so they need no `tick`: a tick would run the
-    /// turn pipeline and move `Time<Virtual>` for a snapshot or a page of
-    /// history.
+    /// Runs a read without advancing the agent loop or virtual time.
     pub(crate) async fn read<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut App) -> Result<T> + Send + 'static,
@@ -364,9 +235,12 @@ impl Runtime {
             Box::new(move |app| {
                 let result = app
                     .world()
-                    .resource::<Host>()
+                    .resource::<HostState>()
                     .ready()
                     .and_then(|()| operation(app));
+                if result.as_ref().is_err_and(HostError::is_storage) {
+                    fail(app.world_mut(), "state storage failed".into());
+                }
                 let _ = reply.send(result);
             })
         })
@@ -378,18 +252,19 @@ impl Runtime {
         job: impl FnOnce(oneshot::Sender<Result<T>>) -> Job,
     ) -> Result<T> {
         let (reply, received) = oneshot::channel();
-        self.handle.commands.try_send(job(reply)).map_err(|_| {
-            ConnectError::resource_exhausted("host command queue is full or closed")
-        })?;
+        self.handle
+            .commands
+            .try_send(job(reply))
+            .map_err(|_| HostError::exhausted("host command queue is full or closed"))?;
         received
             .await
-            .map_err(|_| ConnectError::unavailable("Rig kernel stopped"))?
+            .map_err(|_| HostError::unavailable("Rig kernel stopped"))?
     }
 
     pub(crate) async fn begin_shutdown(&self) {
         let _ = self
             .call(|app| {
-                app.world_mut().resource_mut::<Host>().closing = true;
+                app.world_mut().resource_mut::<HostState>().closing = true;
                 Ok(())
             })
             .await;
@@ -401,24 +276,27 @@ impl Runtime {
             .handle
             .thread
             .lock()
-            .map_err(|_| ConnectError::unavailable("Rig kernel lock failed"))?
+            .map_err(|_| HostError::internal("Rig kernel lock failed"))?
             .take();
         tokio::task::spawn_blocking(move || {
             thread.map_or(Ok(()), |thread| {
                 let _ = shutdown.try_send(());
                 thread
                     .join()
-                    .map_err(|_| ConnectError::unavailable("Rig kernel panicked"))?
+                    .map_err(|_| HostError::internal("Rig kernel panicked"))?
             })
         })
         .await
-        .map_err(|_| ConnectError::unavailable("Rig kernel join failed"))?
+        .map_err(|_| HostError::internal("Rig kernel join failed"))?
     }
 }
 
-/// Waits for the next thing the command thread does: stop wins over work.
-fn next(commands: &Receiver<Job>, wake: &Receiver<()>, shutdown: &Receiver<()>) -> Step {
-    select_biased! {
+fn next(
+    commands: &crossbeam_channel::Receiver<Job>,
+    wake: &crossbeam_channel::Receiver<()>,
+    shutdown: &crossbeam_channel::Receiver<()>,
+) -> Step {
+    crossbeam_channel::select_biased! {
         recv(shutdown) -> _ => Step::Stop,
         recv(commands) -> job => match job {
             Ok(job) => Step::Job(job),
@@ -429,123 +307,104 @@ fn next(commands: &Receiver<Job>, wake: &Receiver<()>, shutdown: &Receiver<()>) 
     }
 }
 
-fn seed(database: &Database) -> Result<()> {
-    if database.get::<w::Settings>("settings")?.is_none() {
-        database.put(
-            "settings",
-            &w::Settings {
-                revision: 1,
-                ..Default::default()
-            },
-        )?;
-    }
-    if database.list::<CompanionRecord>("companion:")?.is_empty() {
-        let record = CompanionRecord::seed(new_id(), now());
-        database.put(&format!("companion:{}", record.companion.id), &record)?;
-    }
-    Ok(())
-}
-
-fn io_error(error: impl std::fmt::Display) -> StartError {
-    std::io::Error::other(error.to_string()).into()
-}
-
 pub(crate) fn tick(app: &mut App) {
     app.update();
     if let Some(reason) = app.world().resource::<SessionLog>().failure() {
         fail(app.world_mut(), reason);
     }
-    if app.world().resource::<Host>().failed.is_some() {
-        app.world_mut().resource_mut::<Host>().outbox.clear();
+    if app.world().resource::<HostState>().failed.is_some() {
+        app.world_mut().resource_mut::<Notifier>().clear();
         return;
     }
-    let mut host = app.world_mut().resource_mut::<Host>();
-    let outbox = std::mem::take(&mut host.outbox);
-    for mut event in outbox {
-        host.sequence += 1;
-        event.cursor = w::Cursor {
-            epoch: host.epoch.clone(),
-            seq: host.sequence,
-            ..Default::default()
-        }
-        .into();
-        let _ = host.events.send(event);
-    }
+    app.world_mut().resource_mut::<Notifier>().flush();
 }
 
 pub(crate) fn fail(world: &mut World, reason: String) {
-    if world.resource::<Host>().failed.is_some() {
+    if world.resource::<HostState>().failed.is_some() {
         return;
     }
     tracing::error!(%reason, "the host stopped");
     revoke_and_stop(world, None);
-    let (events, epoch, sequence) = {
-        let mut host = world.resource_mut::<Host>();
-        host.failed = Some(reason.clone());
-        host.outbox.clear();
-        host.sequence += 1;
-        (host.events.clone(), host.epoch.clone(), host.sequence)
-    };
-    let _ = events.send(w::Notification {
-        cursor: w::Cursor {
-            epoch,
-            seq: sequence,
-            ..Default::default()
-        }
-        .into(),
-        event: Some(w::notification::Event::HostStorageFailed(Box::new(
-            w::HostStorageFailed {
-                failure: w::Failure {
-                    code: "storage_error".into(),
-                    message: crate::truncate_chars(&reason, 1024),
-                    ..Default::default()
-                }
-                .into(),
-                ..Default::default()
-            },
-        ))),
-        ..Default::default()
-    });
+    world.resource_mut::<HostState>().failed = Some(reason.clone());
+    world.resource_mut::<Notifier>().fail(&reason);
 }
 
-fn restore(app: &mut App) -> std::result::Result<(), StartError> {
-    chat::restore(app.world_mut()).map_err(io_error)?;
-    work::restore(app.world_mut()).map_err(io_error)?;
-    client::restore(app.world_mut()).map_err(io_error)?;
+pub(crate) fn revoke_and_stop(world: &mut World, companion: Option<&str>) {
+    let agents: Vec<(Entity, AgentKey)> = world
+        .query::<(Entity, &AgentKey)>()
+        .iter(world)
+        .filter(|(_, key)| companion.is_none_or(|id| key.companion() == id))
+        .map(|(entity, key)| (entity, key.clone()))
+        .collect();
+    for (entity, _) in &agents {
+        if let Some(binding) = world.get::<Binding>(*entity) {
+            model::revoke(binding);
+        }
+        world
+            .entity_mut(*entity)
+            .remove::<(Binding, rig_ecs::model::Connection)>();
+        world.trigger(StopTurn {
+            entity: *entity,
+            reason: Some("permissions changed".into()),
+        });
+    }
+    let calls: Vec<(Entity, Binding)> = world
+        .query::<(Entity, &ForAgent, &Binding)>()
+        .iter(world)
+        .filter(|(_, agent, _)| agents.iter().any(|(entity, _)| *entity == agent.0))
+        .map(|(call, _, binding)| (call, binding.clone()))
+        .collect();
+    for (call, binding) in calls {
+        model::revoke(&binding);
+        world.entity_mut(call).remove::<Binding>();
+    }
+}
+
+fn restore(app: &mut App) -> Result<()> {
+    agent::restore(app.world_mut())?;
+    compaction::restore(app.world_mut());
+    work::restore(app.world_mut())?;
+    chat::restore(app.world_mut())?;
+    client::restore(app.world_mut())?;
+    mind::restore(app.world_mut())?;
     tick(app);
-    let _ = mind::restore(app.world_mut());
     Ok(())
 }
 
-pub(crate) fn snapshot(app: &mut App, _subscription: Option<String>) -> Result<w::Snapshot> {
-    let host = app.world().resource::<Host>();
+pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
+    let store = app.world().resource::<Store>().clone();
+    let state = app.world().resource::<HostState>();
+    let notifier = app.world().resource::<Notifier>();
+    let streams = app.world().resource::<DeviceStreams>();
+    let companions = mind::companions(&store)?;
+    let clients = client::list(&store, streams)?;
+    let settings = settings::settings(&store)?;
+    let works = store.works()?.iter().map(wire::work_session).collect();
+    let active_companion_id = store
+        .activations()?
+        .into_iter()
+        .next()
+        .map(|(companion, _, _)| companion);
     let health = w::HostHealth {
-        ready: host.ready().is_ok(),
-        recovery_required: host.failed.is_some(),
-        stopping: host.closing,
+        ready: state.ready().is_ok(),
+        recovery_required: state.failed.is_some(),
+        stopping: state.closing,
         ..Default::default()
     };
-    let works = host
-        .db
-        .list::<WorkRecord>("work:")?
-        .into_iter()
-        .map(|(_, record)| record.session)
-        .collect();
     Ok(w::Snapshot {
-        host_id: host.db.host_id()?,
-        environment_id: host.db.environment_id()?,
+        server_version: env!("CARGO_PKG_VERSION").into(),
+        health: health.into(),
         capabilities: w::HostCapabilities {
-            limits: document(
-                json!({"max_input_bytes": chat::MAX_INPUT, "max_companions": mind::MAX_COMPANIONS}),
-            )
-            .into(),
+            limits: wire::json(&serde_json::json!({
+                "max_input_bytes": MAX_INPUT,
+                "max_companions": MAX_COMPANIONS,
+            })),
             features: [
                 "history",
                 "notifications",
                 "chat",
                 "connections",
                 "credentials",
-                "grants",
                 "mind",
                 "work",
                 "clients",
@@ -553,18 +412,22 @@ pub(crate) fn snapshot(app: &mut App, _subscription: Option<String>) -> Result<w
             .into_iter()
             .map(Into::into)
             .collect(),
-            adapters: model::descriptors().into_iter().map(|p| p.id).collect(),
+            adapters: model::descriptors()
+                .into_iter()
+                .map(|provider| provider.id)
+                .collect(),
             transport: "/rpc".into(),
             ..Default::default()
         }
         .into(),
-        cursor: host.cursor().into(),
-        companions: mind::companions(&host.db)?,
-        clients: client::list(host)?,
-        settings: settings::settings(&host.db)?.into(),
-        grants: settings::grants(&host.db, None)?,
-        works,
-        health: health.into(),
+        settings: settings.into(),
+        companions,
+        work_sessions: works,
+        active_companion_id,
+        pending_approvals: store.pending_approvals()?,
+        clients,
+        cursor: Some(notifier.cursor()).into(),
+        policy_rules: store.policy_rules()?,
         ..Default::default()
     })
 }
@@ -572,21 +435,18 @@ pub(crate) fn snapshot(app: &mut App, _subscription: Option<String>) -> Result<w
 pub(crate) fn subscribe(
     app: &mut App,
     client_id: Option<&str>,
-) -> Result<(
-    w::Snapshot,
-    tokio::sync::broadcast::Receiver<w::Notification>,
-    String,
-)> {
+) -> Result<(w::Snapshot, broadcast::Receiver<w::Notification>)> {
+    let store = app.world().resource::<Store>().clone();
     if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
-        validate_id(client_id)?;
-        let _ = app
-            .world()
-            .resource::<Host>()
-            .db
-            .get::<w::Client>(&format!("client:{client_id}"))?;
+        db::validate_id(client_id)?;
+        if store.client(client_id)?.is_none() {
+            return Err(HostError::not_found("client not found"));
+        }
     }
-    let receiver = app.world().resource::<Host>().events.subscribe();
-    let subscription = Uuid::new_v4().to_string();
-    let snapshot = snapshot(app, Some(subscription.clone()))?;
-    Ok((snapshot, receiver, subscription))
+    let receiver = app.world().resource::<Notifier>().subscribe();
+    Ok((snapshot(app)?, receiver))
+}
+
+fn boxed(error: impl std::fmt::Display) -> StartError {
+    std::io::Error::other(error.to_string()).into()
 }

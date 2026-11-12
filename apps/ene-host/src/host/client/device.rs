@@ -1,73 +1,87 @@
-//! Device operation streams, non-retrying execution receipts and the `device_request` tool.
+//! Device operations, their streams and non-retrying execution receipts.
 use crate::host::{
-    Host, Owner,
-    db::{Result, aborted, document, invalid, is_storage, not_found, now, permission, validate_id},
-    fail, kernel,
-    mind::companion,
+    agent::AgentKey,
+    db::{Result, Store, now, validate_id},
+    error::HostError,
+    failure::Failure,
+    resources::{DeviceStreams, DeviceTimeout},
+    tools, wire,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-/// A device operation this host is waiting on, and when it stops waiting.
-///
-/// The turn holds its tool call open until it is answered, so an operation
-/// nobody completes would keep the turn running and every later message
-/// steered into it.
-#[derive(Component, Clone)]
-pub(crate) struct PendingDevice {
-    pub(crate) operation: String,
-    deadline: std::time::Instant,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceStatus {
+    Pending,
+    Dispatched,
+    Completed,
+    Failed,
+    Uncertain,
 }
 
+impl DeviceStatus {
+    pub(crate) fn parse(value: &str) -> Self {
+        match value {
+            "pending" => Self::Pending,
+            "dispatched" => Self::Dispatched,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            _ => Self::Uncertain,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Dispatched => "dispatched",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Uncertain => "uncertain",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceResult {
+    pub(crate) success: bool,
+    pub(crate) output: Value,
+    pub(crate) failure: Option<Failure>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceOperation {
+    pub(crate) id: String,
+    pub(crate) client_id: String,
+    pub(crate) companion_id: String,
+    pub(crate) capability: String,
+    pub(crate) input: Value,
+    pub(crate) status: DeviceStatus,
+    pub(crate) result: Option<DeviceResult>,
+    pub(crate) subscription_id: Option<String>,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Debug)]
 pub(crate) struct DeviceSubscription {
     pub(crate) id: String,
     pub(crate) receiver: mpsc::Receiver<w::DeviceOperation>,
     pub(crate) pending: Vec<w::DeviceOperation>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct DeviceRecord {
-    pub(crate) operation_id: String,
-    pub(crate) client_id: String,
-    pub(crate) companion_id: String,
-    pub(crate) capability: String,
-    pub(crate) input: Value,
-    pub(crate) status: String,
-    pub(crate) result: Option<w::DeviceOperationResult>,
-    pub(crate) subscription_id: Option<String>,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
+#[derive(Component, Clone)]
+pub(crate) struct PendingDevice {
+    pub(crate) operation: String,
+    deadline: std::time::Instant,
 }
 
-impl DeviceRecord {
-    pub(crate) fn state(&self) -> w::DeviceOperationState {
-        w::DeviceOperationState {
-            operation_id: self.operation_id.clone(),
-            client_id: self.client_id.clone(),
-            status: self.status.clone(),
-            result: self.result.clone().into(),
-            ..Default::default()
-        }
-    }
-
-    pub(crate) fn operation(&self, subscription: &str) -> w::DeviceOperation {
-        w::DeviceOperation {
-            operation_id: self.operation_id.clone(),
-            capability: self.capability.clone(),
-            input: document(self.input.clone()).into(),
-            subscription_id: subscription.into(),
-            ..Default::default()
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DeviceRequestArgs {
     capability: String,
@@ -85,10 +99,6 @@ pub(crate) fn register_tools(app: &mut App) {
         );
 }
 
-/// Answers a request no terminal replied to in time.
-///
-/// The answer is `uncertain`, not a failure: the operation may still have
-/// run, and retrying it blindly could do the same thing twice.
 fn expire(pending: Query<(Entity, &PendingDevice)>, mut commands: Commands) {
     let now = std::time::Instant::now();
     for (call, entry) in &pending {
@@ -99,57 +109,50 @@ fn expire(pending: Query<(Entity, &PendingDevice)>, mut commands: Commands) {
             if world.get::<PendingDevice>(call).is_none() {
                 return;
             }
-            // Removing it lets `release_device` record the operation as
-            // `uncertain`; the call still needs its answer.
             world.entity_mut(call).remove::<PendingDevice>();
-            kernel::answer(world, call, Err(aborted("device operation timed out")));
+            tools::answer(
+                world,
+                call,
+                Err(HostError::conflict("device operation timed out")),
+            );
         });
     }
 }
 
 pub(crate) fn restore(world: &mut World) -> Result<()> {
-    let db = &world.resource::<Host>().db;
-    for (key, mut record) in db.list::<DeviceRecord>("device:")? {
-        let status = match record.status.as_str() {
-            "dispatched" => "uncertain",
-            "pending" => "failed",
+    let store = world.resource::<Store>().clone();
+    for mut record in store.devices()? {
+        let status = match record.status {
+            DeviceStatus::Dispatched => DeviceStatus::Uncertain,
+            DeviceStatus::Pending => DeviceStatus::Failed,
             _ => continue,
         };
-        record.status = status.into();
+        record.status = status;
         record.updated_at = now();
-        db.put(&key, &record)?;
+        store.save_device(&record)?;
     }
     Ok(())
 }
 
-pub(crate) fn subscribe(app: &mut App, client: &str) -> Result<DeviceSubscription> {
+pub(crate) fn subscribe(world: &mut World, client: &str) -> Result<DeviceSubscription> {
     validate_id(client)?;
-    let host = app.world().resource::<Host>();
-    if host
-        .db
-        .get::<w::Client>(&format!("client:{client}"))?
-        .is_none()
-    {
-        return Err(not_found("client not found"));
+    let store = world.resource::<Store>().clone();
+    if store.client(client)?.is_none() {
+        return Err(HostError::not_found("client not found"));
     }
     let (sender, receiver) = mpsc::channel(64);
     let id = Uuid::new_v4().to_string();
-    let pending = host
-        .db
-        .list::<DeviceRecord>("device:")?
-        .into_iter()
-        .filter(|(_, record)| record.client_id == client && record.status == "pending")
-        .map(|(key, mut record)| {
-            record.status = "dispatched".into();
-            record.subscription_id = Some(id.clone());
-            record.updated_at = now();
-            host.db.put(&key, &record)?;
-            Ok(record.operation(&id))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    app.world_mut()
-        .resource_mut::<Host>()
-        .device_streams
+    let mut pending = Vec::new();
+    for mut record in store.pending_devices(client)? {
+        record.status = DeviceStatus::Dispatched;
+        record.subscription_id = Some(id.clone());
+        record.updated_at = now();
+        store.save_device(&record)?;
+        pending.push(wire::device_task(&record, &id));
+    }
+    world
+        .resource_mut::<DeviceStreams>()
+        .0
         .insert(client.into(), sender);
     Ok(DeviceSubscription {
         id,
@@ -159,99 +162,102 @@ pub(crate) fn subscribe(app: &mut App, client: &str) -> Result<DeviceSubscriptio
 }
 
 pub(crate) fn complete(
-    app: &mut App,
+    world: &mut World,
     result: w::DeviceOperationResult,
 ) -> Result<w::DeviceOperationState> {
     validate_id(&result.client_id)?;
     validate_id(&result.operation_id)?;
-    let key = format!("device:{}", result.operation_id);
-    let host = app.world().resource::<Host>();
-    let mut record = host
-        .db
-        .get::<DeviceRecord>(&key)?
-        .ok_or_else(|| not_found("operation not found"))?;
+    let store = world.resource::<Store>().clone();
+    let mut record = store
+        .device(&result.operation_id)?
+        .ok_or_else(|| HostError::not_found("operation not found"))?;
     if record.client_id != result.client_id {
-        return Err(not_found("operation not found"));
+        return Err(HostError::not_found("operation not found"));
     }
-    if record.status == "completed" {
-        return Ok(record.state());
+    if record.status == DeviceStatus::Completed {
+        return Ok(wire::device_state(&record));
     }
-    if record.status != "dispatched" && record.status != "uncertain" {
-        return Err(aborted("operation is not waiting"));
+    if record.status != DeviceStatus::Dispatched && record.status != DeviceStatus::Uncertain {
+        return Err(HostError::conflict("operation is not waiting"));
     }
     record.status = if result.success {
-        "completed"
+        DeviceStatus::Completed
     } else {
-        "failed"
-    }
-    .into();
-    record.result = Some(result.clone());
+        DeviceStatus::Failed
+    };
+    record.result = Some(DeviceResult {
+        success: result.success,
+        output: wire::parse(&result.output)?,
+        failure: result.failure.as_option().map(|failure| Failure {
+            code: failure.code.clone(),
+            message: failure.message.clone(),
+        }),
+    });
     record.updated_at = now();
-    host.db.put(&key, &record)?;
-    let waiting = app
-        .world_mut()
+    store.save_device(&record)?;
+    let waiting = world
         .query::<(Entity, &PendingDevice)>()
-        .iter(app.world())
+        .iter(world)
         .find_map(|(call, pending)| (pending.operation == result.operation_id).then_some(call));
     if let Some(call) = waiting {
-        app.world_mut().entity_mut(call).remove::<PendingDevice>();
+        world.entity_mut(call).remove::<PendingDevice>();
         let text = if result.success {
-            result
-                .output
-                .as_option()
-                .map(|doc| doc.json.clone())
+            record
+                .result
+                .as_ref()
+                .map(|value| wire::json(&value.output))
                 .unwrap_or_default()
         } else {
-            result
-                .failure
-                .as_option()
-                .map(|f| f.message.clone())
+            record
+                .result
+                .as_ref()
+                .and_then(|value| value.failure.as_ref())
+                .map(|failure| failure.message.clone())
                 .unwrap_or_else(|| "device operation failed".into())
         };
-        kernel::answer(
-            app.world_mut(),
+        tools::answer(
+            world,
             call,
             if result.success {
                 Ok(text)
             } else {
-                Err(aborted("device operation failed"))
+                Err(HostError::conflict("device operation failed"))
             },
         );
     }
-    Ok(record.state())
+    Ok(wire::device_state(&record))
 }
 
-pub(crate) fn get_operation(app: &mut App, id: &str) -> Result<w::DeviceOperationState> {
+pub(crate) fn get_operation(world: &mut World, id: &str) -> Result<w::DeviceOperationState> {
     validate_id(id)?;
-    app.world()
-        .resource::<Host>()
-        .db
-        .get::<DeviceRecord>(&format!("device:{id}"))?
-        .ok_or_else(|| not_found("operation not found"))
-        .map(|record| record.state())
+    let store = world.resource::<Store>().clone();
+    store
+        .device(id)?
+        .ok_or_else(|| HostError::not_found("operation not found"))
+        .map(|record| wire::device_state(&record))
 }
 
-/// Marks the operations of a terminal that went away as `uncertain`.
-pub(crate) fn sweep_closed(host: &mut Host) -> Result<()> {
-    let closed: Vec<String> = host
-        .device_streams
+/// Marks operations of terminals that went away as `uncertain`.
+pub(crate) fn sweep_closed(store: &Store, streams: &mut DeviceStreams) -> Result<()> {
+    let closed: Vec<String> = streams
+        .0
         .iter()
         .filter(|(_, sender)| sender.is_closed())
         .map(|(client, _)| client.clone())
         .collect();
-    if !closed.is_empty() {
-        for client in &closed {
-            for (key, mut record) in host.db.list::<DeviceRecord>("device:")? {
-                if record.client_id == *client && record.status == "dispatched" {
-                    record.status = "uncertain".into();
-                    record.updated_at = now();
-                    host.db.put(&key, &record)?;
-                }
-            }
-        }
-        host.device_streams
-            .retain(|client, _| !closed.contains(client));
+    if closed.is_empty() {
+        return Ok(());
     }
+    for record in store.devices()? {
+        if !closed.contains(&record.client_id) || record.status != DeviceStatus::Dispatched {
+            continue;
+        }
+        let mut record = record;
+        record.status = DeviceStatus::Uncertain;
+        record.updated_at = now();
+        store.save_device(&record)?;
+    }
+    streams.0.retain(|client, _| !closed.contains(client));
     Ok(())
 }
 
@@ -264,25 +270,18 @@ fn release_device(
         return;
     };
     commands.queue(move |world: &mut World| {
-        let key = format!("device:{}", entry.operation);
-        let result = {
-            let host = world.resource::<Host>();
-            match host.db.get::<DeviceRecord>(&key) {
-                Ok(Some(mut record))
-                    if record.status == "pending" || record.status == "dispatched" =>
-                {
-                    record.status = "uncertain".into();
-                    record.updated_at = now();
-                    host.db.put(&key, &record)
-                }
-                Ok(_) => Ok(()),
-                Err(error) => Err(error),
-            }
+        let store = world.resource::<Store>().clone();
+        let Ok(Some(mut record)) = store.device(&entry.operation) else {
+            return;
         };
-        if let Err(error) = result
-            && is_storage(&error)
-        {
-            fail(world, error.to_string());
+        if record.status == DeviceStatus::Pending || record.status == DeviceStatus::Dispatched {
+            record.status = DeviceStatus::Uncertain;
+            record.updated_at = now();
+            if let Err(error) = store.save_device(&record)
+                && error.is_storage()
+            {
+                crate::host::fail(world, error.to_string());
+            }
         }
     });
 }
@@ -292,7 +291,7 @@ fn device_requested(called: On<ToolCalled<DeviceRequestArgs>>, mut commands: Com
     let (call, agent, args) = (event.call, event.agent, event.args.clone());
     commands.queue(move |world: &mut World| {
         if let Err(error) = request_device(world, agent, call, args) {
-            kernel::answer(world, call, Err(error));
+            tools::answer(world, call, Err(error));
         }
     });
 }
@@ -303,56 +302,56 @@ fn request_device(
     call: Entity,
     args: DeviceRequestArgs,
 ) -> Result<()> {
-    let owner = world
-        .get::<Owner>(agent)
+    let key = world
+        .get::<AgentKey>(agent)
         .cloned()
-        .ok_or_else(|| permission("unbound agent"))?;
+        .ok_or_else(|| HostError::permission("unbound agent"))?;
     if args.capability.is_empty() || args.capability.len() > 100 {
-        return Err(invalid("invalid capability"));
+        return Err(HostError::invalid("invalid capability"));
     }
-    let host = world.resource::<Host>();
-    let deadline = std::time::Instant::now() + host.device_timeout;
-    let companion = companion(&host.db, owner.companion())?;
-    // Only the companion's active terminal: a model does not choose one and
-    // so cannot step around the exclusive activation.
-    let client_id = companion
-        .companion
-        .active_client
+    let store = world.resource::<Store>().clone();
+    store
+        .companion(key.companion())?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let client_id = store
+        .activation(key.companion())?
+        .map(|(client, _)| client)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| aborted("no active client"))?;
-    let client = host
-        .db
-        .get::<w::Client>(&format!("client:{client_id}"))?
-        .ok_or_else(|| not_found("client not found"))?;
+        .ok_or_else(|| HostError::conflict("no active client"))?;
+    let client = store
+        .client(&client_id)?
+        .ok_or_else(|| HostError::not_found("client not found"))?;
     if !client
         .granted_capabilities
         .iter()
-        .any(|c| c == &args.capability)
+        .any(|capability| capability == &args.capability)
     {
-        return Err(permission("capability_not_granted"));
+        return Err(HostError::permission("capability_not_granted"));
     }
+    let deadline = std::time::Instant::now() + world.resource::<DeviceTimeout>().0;
     let id = Uuid::new_v4().to_string();
-    let mut record = DeviceRecord {
-        operation_id: id.clone(),
+    let mut record = DeviceOperation {
+        id: id.clone(),
         client_id: client_id.clone(),
-        companion_id: owner.companion().into(),
+        companion_id: key.companion().into(),
         capability: args.capability,
         input: args.input,
-        status: "pending".into(),
+        status: DeviceStatus::Pending,
         result: None,
         subscription_id: None,
         created_at: now(),
         updated_at: now(),
     };
-    // Recorded before it is sent: a terminal that goes away must be left
-    // `pending`, not an operation nobody knows about.
-    host.db.put(&format!("device:{id}"), &record)?;
-    if let Some(sender) = host.device_streams.get(&client_id) {
+    store.save_device(&record)?;
+    if let Some(sender) = world.resource::<DeviceStreams>().0.get(&client_id) {
         let subscription = format!("{client_id}:{id}");
-        if sender.try_send(record.operation(&subscription)).is_ok() {
-            record.status = "dispatched".into();
+        if sender
+            .try_send(wire::device_task(&record, &subscription))
+            .is_ok()
+        {
+            record.status = DeviceStatus::Dispatched;
             record.subscription_id = Some(subscription);
-            host.db.put(&format!("device:{id}"), &record)?;
+            store.save_device(&record)?;
         }
     }
     world.entity_mut(call).insert(PendingDevice {

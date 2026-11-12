@@ -1,15 +1,14 @@
-//! Parent-only Rig open tools (`mind_recall`, `mind_read`, `mind_update`).
-use super::{
-    ACQUISITIONS, MAX_CONTENT, MAX_ITEMS, MAX_TEXT, MemoryRecord, NORMAL, PRIVATE, SHARED,
-    companion, deliver_state, mind_view, notify_mind,
-};
+//! Parent-only Rig open tools for explicit memory use.
+use super::{MAX_CONTENT, MAX_ITEMS, MAX_TEXT, mind_view, notify_mind};
 use crate::host::{
-    Host,
-    db::{Result, aborted, digest, invalid, next_revision, not_found, now, validate_id},
-    kernel,
+    agent::AgentKey,
+    chat,
+    db::{Result, Store, digest, next_revision, now, validate_id},
+    error::HostError,
+    memory::{Acquisition, Memory, MindOperation, RecallMode, SHARED_AUDIENCE},
+    tools,
 };
 use bevy_ecs::prelude::*;
-use connectrpc::ConnectError;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -20,8 +19,6 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 struct RecallArgs {
     query: String,
-    #[serde(default)]
-    include_forgotten: bool,
     #[serde(default)]
     limit: Option<u32>,
 }
@@ -52,6 +49,8 @@ struct NewMemory {
     appraisal: String,
     acquisition: String,
     #[serde(default)]
+    importance: Option<u8>,
+    #[serde(default)]
     supersedes: Vec<String>,
     #[serde(default)]
     sources: Vec<String>,
@@ -74,13 +73,6 @@ struct StateUpdate {
     concerns: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct OperationRecord {
-    hash: String,
-    response: Value,
-}
-
-/// A tool whose calls change nothing: the kernel may run them side by side.
 fn read_only() -> ToolOptions {
     ToolOptions {
         footprint: Some(Touches::Reads(Scope::Anything)),
@@ -92,43 +84,36 @@ pub(crate) fn register_tools(app: &mut App) {
         "mind_recall",
         "Search the companion's memories. Use it when the current context is not enough.",
         read_only(),
-        kernel::run_tool(|world, agent, _, args| recall(world, agent, &args)),
+        tools::run_tool(|world, agent, _, args| recall(world, agent, args)),
     )
     .add_open_tool::<ReadArgs, _>(
         "mind_read",
         "Read one memory with its provenance.",
         read_only(),
-        kernel::run_tool(|world, agent, _, args| read(world, agent, &args)),
+        tools::run_tool(|world, agent, _, args| read(world, agent, args)),
     )
     .add_open_tool::<UpdateArgs, _>(
         "mind_update",
         "Add or correct memories and update the current mind. The host binds the owner and input source.",
         ToolOptions::default(),
-        kernel::run_tool(|world, agent, call, args| update(world, agent, call, &args)),
+        tools::run_tool(update),
     );
 }
 
-fn recall(world: &mut World, agent: Entity, args: &RecallArgs) -> Result<String> {
-    let owner = kernel::parent_owner(world, agent)?;
+fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<String> {
+    let key = parent_key(world, agent)?;
     if args.query.chars().count() > 4000 {
-        return Err(invalid("query is too long"));
+        return Err(HostError::invalid("query is too long"));
     }
     let limit = args.limit.unwrap_or(8).clamp(1, 16) as usize;
-    let items: Vec<Value> = world
-        .resource::<Host>()
-        .db
-        .search_memories(
-            owner.companion(),
-            &args.query,
-            args.include_forgotten,
-            limit,
-        )?
+    let store = world.resource::<Store>().clone();
+    let items: Vec<Value> = store
+        .recall(key.companion(), &args.query, RecallMode::Explicit, limit)?
         .iter()
-        .map(|memory| memory.view_for(owner.companion()))
+        .map(|memory| memory.view_for(key.companion()))
         .collect();
     Ok(json!({
         "items": items,
-        "lexical": true,
         "semantic": false,
         "pending": false,
         "reason": Value::Null,
@@ -136,39 +121,43 @@ fn recall(world: &mut World, agent: Entity, args: &RecallArgs) -> Result<String>
     .to_string())
 }
 
-fn read(world: &mut World, agent: Entity, args: &ReadArgs) -> Result<String> {
-    let owner = kernel::parent_owner(world, agent)?;
+fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
+    let key = parent_key(world, agent)?;
     validate_id(&args.id)?;
-    let memory = world
-        .resource::<Host>()
-        .db
-        .get_memory(&args.id)?
-        .filter(|m| m.visible_to(owner.companion()))
-        .ok_or_else(|| not_found("memory not found"))?;
-    Ok(memory.view_for(owner.companion()).to_string())
+    let store = world.resource::<Store>().clone();
+    let memory = store
+        .memory(&args.id)?
+        .filter(|memory| memory.visible_to(key.companion()))
+        .ok_or_else(|| HostError::not_found("memory not found"))?;
+    store.touch_memory(&args.id, &now())?;
+    Ok(memory.view_for(key.companion()).to_string())
 }
 
-fn update(world: &mut World, agent: Entity, call: &str, args: &UpdateArgs) -> Result<String> {
-    let owner = kernel::parent_owner(world, agent)?;
-    validate_mind_update(args)?;
-    let companion_id = owner.companion().to_owned();
+fn update(world: &mut World, agent: Entity, call: &str, args: UpdateArgs) -> Result<String> {
+    let key = parent_key(world, agent)?;
+    validate_update(&args)?;
+    let companion_id = key.companion().to_owned();
     let operation_id = format!("{companion_id}:{call}");
     let hash = digest(
-        serde_json::to_string(args)
-            .map_err(|_| invalid("invalid update"))?
+        serde_json::to_string(&args)
+            .map_err(|_| HostError::invalid("invalid update"))?
             .as_bytes(),
     );
-    let op_key = format!("memory-op:{companion_id}:{operation_id}");
-    let db = &world.resource::<Host>().db;
-    if let Some(previous) = db.get::<OperationRecord>(&op_key)? {
+    let store = world.resource::<Store>().clone();
+    if let Some(previous) = store.mind_operation(&companion_id, &operation_id)? {
         if previous.hash == hash {
-            return Ok(previous.response.to_string());
+            return Ok(previous.response);
         }
-        return Err(aborted("operation id reused with different content"));
+        return Err(HostError::conflict(
+            "operation id reused with different content",
+        ));
     }
-    let mut record = companion(db, &companion_id)?;
+    let mut record = store
+        .companion(&companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let previous_revision = record.revision;
     if record.state_revision != args.expected_revision {
-        return Err(ConnectError::aborted(format!(
+        return Err(HostError::conflict(format!(
             "mind revision changed; current revision is {}",
             record.state_revision
         )));
@@ -176,45 +165,55 @@ fn update(world: &mut World, agent: Entity, call: &str, args: &UpdateArgs) -> Re
     for id in args
         .memories
         .iter()
-        .flat_map(|m| m.supersedes.iter().chain(&m.sources))
+        .flat_map(|memory| memory.supersedes.iter().chain(&memory.sources))
     {
-        if db.get_memory(id)?.is_none_or(|m| m.owner != companion_id) {
-            return Err(aborted("memory belongs to another companion"));
+        if store
+            .memory(id)?
+            .is_none_or(|memory| memory.owner != companion_id)
+        {
+            return Err(HostError::conflict("memory belongs to another companion"));
         }
     }
-    let input = world
-        .get::<Conversation>(agent)
-        .and_then(|c| {
-            c.turns()
-                .next_back()
-                .map(|(_, turn)| kernel::input_of(c, turn.start))
-        })
-        .unwrap_or_default();
-    let now = now();
-    let inserted: Vec<MemoryRecord> = args
+    let input = world.get::<Conversation>(agent).and_then(|conversation| {
+        conversation
+            .turns()
+            .next_back()
+            .and_then(|(_, turn)| chat::input_of(conversation, turn.start))
+    });
+    let time = now();
+    let inserted: Vec<Memory> = args
         .memories
         .iter()
-        .map(|memory| MemoryRecord {
-            id: Uuid::new_v4().to_string(),
-            owner: companion_id.clone(),
-            kind: "experience".into(),
-            audience: memory.audience.clone().unwrap_or_else(|| PRIVATE.into()),
-            content: memory.content.clone(),
-            description: memory.description.clone(),
-            appraisal: memory.appraisal.clone(),
-            acquisition: memory.acquisition.clone(),
-            sources: if input.is_empty() {
-                Vec::new()
-            } else {
-                vec![json!({"kind": "input", "id": input})]
-            },
-            recorded_at: now.clone(),
-            occurred_at: memory.occurred_at.clone(),
-            supersedes: memory.supersedes.clone(),
-            recall_preference: NORMAL.into(),
-            created_by: "parent".into(),
-            revision: 1,
-            updated_at: now.clone(),
+        .map(|memory| {
+            let audiences = match memory.audience.as_deref() {
+                None | Some("private") => Vec::new(),
+                Some("shared") => vec![SHARED_AUDIENCE.to_owned()],
+                Some(_) => Vec::new(),
+            };
+            Memory {
+                id: Uuid::new_v4().to_string(),
+                owner: companion_id.clone(),
+                audiences,
+                content: memory.content.clone(),
+                description: memory.description.clone(),
+                appraisal: memory.appraisal.clone(),
+                acquisition: Acquisition::parse(&memory.acquisition)
+                    .unwrap_or(Acquisition::UserStatement),
+                importance: memory.importance.unwrap_or(3).min(10),
+                occurred_at: memory.occurred_at.clone(),
+                recorded_at: time.clone(),
+                last_accessed_at: None,
+                memory_revision: 1,
+                content_revision: 1,
+                emotion: None,
+                source_context: json!({
+                    "input": input,
+                    "sources": memory.sources,
+                }),
+                supersedes: memory.supersedes.clone(),
+                created_by: "parent".into(),
+                updated_at: time.clone(),
+            }
         })
         .collect();
     let mut state_changed = false;
@@ -243,58 +242,70 @@ fn update(world: &mut World, agent: Entity, call: &str, args: &UpdateArgs) -> Re
     if !inserted.is_empty() {
         record.memory_revision = next_revision(record.memory_revision)?;
     }
-    record.companion.updated_at = now;
-    record.companion.revision = next_revision(record.companion.revision)?;
+    if changed {
+        record.revision = next_revision(record.revision)?;
+        record.updated_at = time;
+    }
     let response = json!({
         "operation_id": operation_id,
         "revision": record.state_revision,
         "changed": changed,
-        "memories": inserted.iter().map(|m| json!({"id": m.id, "supersedes": m.supersedes})).collect::<Vec<_>>(),
+        "memories": inserted.iter().map(|memory| json!({
+            "id": memory.id,
+            "supersedes": memory.supersedes,
+        })).collect::<Vec<_>>(),
     });
-    let operation = OperationRecord {
+    let operation = MindOperation {
+        operation_id,
         hash,
-        response: response.clone(),
+        response: response.to_string(),
     };
-    world.resource::<Host>().db.transaction(|tx| {
-        for memory in &inserted {
-            tx.put_memory(memory)?;
-        }
-        tx.put(&format!("companion:{}", record.companion.id), &record)?;
-        tx.put(&op_key, &operation)?;
-        Ok(())
-    })?;
-    let view = mind_view(&world.resource::<Host>().db, &companion_id)?;
-    notify_mind(world, &companion_id, view);
-    deliver_state(world, agent, &companion_id)?;
+    store.apply_mind_update(previous_revision, &record, &inserted, &operation)?;
+    let view = mind_view(&store, &companion_id)?;
+    notify_mind(world, &companion_id, &view);
     Ok(response.to_string())
 }
 
-fn validate_mind_update(args: &UpdateArgs) -> Result<()> {
+fn validate_update(args: &UpdateArgs) -> Result<()> {
     if args.memories.len() > MAX_ITEMS {
-        return Err(invalid("too many memories"));
+        return Err(HostError::invalid("too many memories"));
     }
     for memory in &args.memories {
         if memory.content.trim().is_empty() || memory.content.chars().count() > MAX_CONTENT {
-            return Err(invalid("memory content is too long"));
+            return Err(HostError::invalid("memory content is too long"));
         }
         if memory.description.chars().count() > MAX_TEXT
             || memory.appraisal.chars().count() > MAX_TEXT
         {
-            return Err(invalid("memory text is too long"));
+            return Err(HostError::invalid("memory text is too long"));
         }
-        if !ACQUISITIONS.contains(&memory.acquisition.as_str()) {
-            return Err(invalid("invalid acquisition"));
+        if Acquisition::parse(&memory.acquisition).is_none() {
+            return Err(HostError::invalid("invalid acquisition"));
         }
         if memory.supersedes.len() > MAX_ITEMS || memory.sources.len() > MAX_ITEMS {
-            return Err(invalid("too many memory references"));
+            return Err(HostError::invalid("too many memory references"));
         }
         if memory
             .audience
             .as_deref()
-            .is_some_and(|a| a != PRIVATE && a != SHARED)
+            .is_some_and(|audience| audience != "private" && audience != "shared")
         {
-            return Err(invalid("invalid audience"));
+            return Err(HostError::invalid("invalid audience"));
+        }
+        if memory.importance.is_some_and(|importance| importance > 10) {
+            return Err(HostError::invalid("invalid importance"));
         }
     }
     Ok(())
+}
+
+fn parent_key(world: &mut World, agent: Entity) -> Result<AgentKey> {
+    let key = world
+        .get::<AgentKey>(agent)
+        .cloned()
+        .ok_or_else(|| HostError::permission("unbound agent"))?;
+    if key.is_work() {
+        return Err(HostError::permission("not available to work agents"));
+    }
+    Ok(key)
 }

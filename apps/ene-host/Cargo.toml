@@ -13,6 +13,7 @@ workspace = true
 async-stream.workspace = true
 axum.workspace = true
 bevy_ecs = "=0.20.0"
+bevy_reflect = "=0.20.0"
 bytes.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
 crossbeam-channel = "0.5"
@@ -30,7 +31,7 @@ rig-ecs = "=0.46.0"
 rig-http = "=0.46.0"
 rig-memory = { version = "=0.46.0", features = ["fs"] }
 rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
