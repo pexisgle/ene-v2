@@ -1559,11 +1559,11 @@ async fn stopping_an_approval_does_not_reuse_its_hold_for_the_next_call() {
 }
 
 #[tokio::test]
-async fn an_orphan_receipt_does_not_hide_a_later_valid_receipt() {
+async fn an_orphan_receipt_does_not_hide_a_later_valid_receipt_across_restarts() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = Runtime::start_with(
         temp.path(),
-        scripted(text_model("ok"), text_model("unused"), false),
+        scripted(text_model("unused"), text_model("unused"), false),
     )
     .await
     .unwrap();
@@ -1586,7 +1586,29 @@ async fn an_orphan_receipt_does_not_hide_a_later_valid_receipt() {
         })
         .await
         .unwrap();
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+
+    let runtime = Runtime::start_with(
+        temp.path(),
+        scripted(text_model("ok"), text_model("unused"), false),
+    )
+    .await
+    .unwrap();
     let first = send(&runtime, &companion, "orphan-key", "hello").await;
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+
+    let runtime = Runtime::start_with(
+        temp.path(),
+        super::Options {
+            models: Some(Arc::new(NoModel)),
+            consolidate: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let second = send(&runtime, &companion, "orphan-key", "hello").await;
     assert_eq!(first.request_id, second.request_id);
     let conflict = runtime
@@ -1605,7 +1627,7 @@ async fn an_orphan_receipt_does_not_hide_a_later_valid_receipt() {
             }
         })
         .await;
-    assert!(conflict.is_err());
+    assert!(matches!(conflict, Err(HostError::AlreadyExists(_))));
     runtime.shutdown().await.unwrap();
 }
 
