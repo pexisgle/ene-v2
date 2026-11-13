@@ -501,5 +501,11 @@ fn a_failed_report_ends_the_run_and_releases_the_session() {
             .status,
         super::work::WorkStatus::Idle
     );
+    // The session agent survives a run; closing the session retires it.
+    assert!(
+        super::agent::work_agent_of(harness.app.world_mut(), &run.run_id).is_some(),
+        "the session agent survives a failed run"
+    );
+    super::work::close(harness.app.world_mut(), &session.id).unwrap();
     assert!(super::agent::work_agent_of(harness.app.world_mut(), &run.run_id).is_none());
 }

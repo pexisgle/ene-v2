@@ -544,6 +544,18 @@ fn turn_settled(
                 ..Default::default()
             })),
         );
+        if let Some(companion) = companion {
+            let companion_id = companion.companion_id.clone();
+            // A stopped or failed turn must not speak its flushed remainder.
+            let answered = matches!(outcome, TurnOutcome::Answered(_));
+            commands.queue(move |world: &mut World| {
+                if answered {
+                    super::voice::on_turn_end(world, &companion_id);
+                } else {
+                    let _ = super::voice::flush(world, &companion_id, w::FlushReason::Cancelled);
+                }
+            });
+        }
         if let Some(work) = work {
             let run_id = work.run_id.clone();
             let outcome = outcome.clone();
@@ -561,6 +573,7 @@ fn stream_deltas(
     calls: Query<(), (With<TurnCall>, Without<Settled>)>,
     agents: Query<(&AgentId, Option<&CompanionAgent>)>,
     mut notifier: ResMut<Notifier>,
+    mut commands: Commands,
 ) {
     for delta in deltas.read() {
         if !calls.contains(delta.effect) {
@@ -588,6 +601,11 @@ fn stream_deltas(
                 ..Default::default()
             })),
         );
+        let voice_companion = companion.clone();
+        let voice_text = text.clone();
+        commands.queue(move |world: &mut World| {
+            super::voice::on_stream_text(world, &voice_companion, &voice_text);
+        });
     }
 }
 

@@ -4,14 +4,15 @@
 //! (time, mind, recalled memory, perception) is appended to the turn's own
 //! request message, so the saved conversation is never polluted and the prefix
 //! stays stable across the ReAct steps of one turn.
+use super::consolidate::InjectedMemories;
+use super::embedding::{self, CompactVectorIndex, Embeddings};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent},
     db::{Store, now},
+    model::Credentials,
 };
 use bevy_ecs::prelude::*;
 use rig_core::completion::Message;
-use rig_core::conversation::Author;
-use rig_core::message::UserContent;
 use rig_ecs::prelude::*;
 use std::collections::HashMap;
 
@@ -31,6 +32,9 @@ type TurnRequest<'a> = (&'a mut ModelRequest, &'a CallOf, Option<&'a ForAgent>);
 type AdaptedRequest<'a> = (&'a mut ModelRequest, &'a Adapted, &'a mut Decision);
 
 /// Injects the dynamic tail into the request view only.
+#[allow(clippy::too_many_arguments)]
+/// The system needs the tail sources, the summary snapshot and the compaction
+/// helpers; bundling them hides which resource a failure belongs to.
 fn inject_tail(
     mut calls: Query<TurnRequest<'static>, AdmittedCalls>,
     turns: Query<&Turn>,
@@ -39,6 +43,10 @@ fn inject_tail(
     store: Res<Store>,
     perception: Res<crate::host::resources::Perception>,
     mut cache: ResMut<TailCache>,
+    mut index: ResMut<CompactVectorIndex>,
+    embeddings: Res<Embeddings>,
+    credentials: Option<Res<Credentials>>,
+    mut injected: ResMut<InjectedMemories>,
 ) {
     for (mut call, of, agent) in &mut calls {
         let Ok(turn) = turns.get(of.0) else {
@@ -57,7 +65,18 @@ fn inject_tail(
                 if cache.by_turn.len() > 256 {
                     cache.by_turn.clear();
                 }
-                let tail = render_tail(&store, &agents, &conversations, &perception, agent);
+                let tail = render_tail(
+                    &store,
+                    &agents,
+                    &conversations,
+                    &perception,
+                    agent,
+                    turn_id,
+                    &mut index,
+                    &embeddings,
+                    credentials.as_deref(),
+                    &mut injected,
+                );
                 cache.by_turn.insert(key, tail.clone());
                 tail
             }
@@ -65,6 +84,11 @@ fn inject_tail(
         let Some(history) = call.history.as_mut() else {
             continue;
         };
+        if let Ok(conversation) = conversations.get(agent)
+            && let Some(summary) = crate::host::compaction::summary_of(conversation)
+        {
+            crate::host::compaction::inject_summary(history, &summary);
+        }
         let at = history.start_of(turn.start);
         let author = Author::plugin("ene-host");
         history.edit_each(author, |entry| {
@@ -82,18 +106,33 @@ fn append(message: &Message, tail: &str) -> Message {
     Message::User { content }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_tail(
     store: &Store,
     agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversations: &Query<&Conversation>,
     perception: &crate::host::resources::Perception,
     agent: Entity,
+    turn_id: u64,
+    index: &mut CompactVectorIndex,
+    embeddings: &Embeddings,
+    credentials: Option<&Credentials>,
+    injected: &mut InjectedMemories,
 ) -> String {
     let mut tail = String::from("---\n現在の動的コンテキスト（会話ログには保存されません）\n");
     tail.push_str(&format!("現在日時: {}\n", now()));
     let Some((companion, conversation)) = agent_view(agents, conversations, agent) else {
         return tail;
     };
+    let profile = crate::host::db::memories::profile_lines(store);
+    if !profile.is_empty() {
+        tail.push_str("ユーザー情報:\n");
+        for line in profile {
+            tail.push_str("- ");
+            tail.push_str(&line);
+            tail.push('\n');
+        }
+    }
     // Perception and the clock lead the tail so truncation cannot drop them:
     // the model must always know the current environment.
     if let Some(event) = perception.events.get(&companion) {
@@ -117,16 +156,28 @@ fn render_tail(
                 tail.push('\n');
             }
         }
-        if let Some(query) = recent_user_text(conversation)
-            && let Ok(recalled) =
-                store.recall(&companion, &query, super::memory::RecallMode::Auto, 6)
-            && !recalled.is_empty()
-        {
-            tail.push_str("今の話に関係する記憶:\n");
-            for memory in recalled {
-                tail.push_str("- ");
-                tail.push_str(&memory.memory.content);
-                tail.push('\n');
+        if let Some(query) = recent_user_text(conversation) {
+            let semantic = semantic_ids(store, index, embeddings, credentials, &companion, &query);
+            if let Ok(recalled) = store.recall_hybrid(
+                &companion,
+                &query,
+                super::memory::RecallMode::Auto,
+                &semantic,
+                6,
+            ) && !recalled.items.is_empty()
+            {
+                let ids: Vec<String> = recalled
+                    .items
+                    .iter()
+                    .map(|item| item.memory.id.clone())
+                    .collect();
+                injected.record(&companion, &turn_id.to_string(), ids);
+                tail.push_str("今の話に関係する記憶:\n");
+                for memory in recalled.items {
+                    tail.push_str("- ");
+                    tail.push_str(&memory.memory.content);
+                    tail.push('\n');
+                }
             }
         }
     }
@@ -166,60 +217,21 @@ fn fit(mut calls: Query<AdaptedRequest<'static>, AdmittedCalls>) {
             .map(u64::from)
             .unwrap_or(128_000);
         let reserve = u64::from(adapted.0.spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
-        let budget = limit.saturating_sub(reserve);
         let Some(history) = call.history.as_ref() else {
             continue;
         };
-        let mut tokens = estimate(history);
-        if tokens <= budget {
-            continue;
-        }
+        let plan = crate::host::compaction::plan_fit(history, limit, reserve);
         let Some(history) = call.history.as_mut() else {
             continue;
         };
-        while tokens > budget && history.messages().len() > 2 {
-            let keep = history.messages().len().saturating_sub(2).max(1) / 2;
-            let at = rig_core::conversation::pairing::safe_start(history.messages(), keep)
-                .max(1)
-                .min(history.messages().len());
-            history.splice(..at, [], Author::plugin("ene-host"));
-            tokens = estimate(history);
-        }
-        if tokens > budget {
+        crate::host::compaction::apply_fit(history, &plan);
+        if !crate::host::compaction::fits(history, limit, reserve) {
             decision.decide(
                 Decider::plugin("ene-host"),
                 Outcome::refused("context_exceeded: the request does not fit the model window"),
             );
         }
     }
-}
-
-fn estimate(history: &rig_core::conversation::Conversation) -> u64 {
-    // A conservative character-based estimate: the provider counts tokens
-    // itself, and the host only needs a safe margin.
-    let chars: usize = history
-        .messages()
-        .iter()
-        .map(|message| match &**message {
-            Message::System { content } => content.chars().count(),
-            Message::User { content } => content
-                .iter()
-                .map(|item| match item {
-                    UserContent::Text(text) => text.text.chars().count(),
-                    _ => 64,
-                })
-                .sum(),
-            Message::Assistant(reply) => reply
-                .content
-                .iter()
-                .map(|item| match item {
-                    rig_core::completion::AssistantContent::Text(text) => text.text.chars().count(),
-                    _ => 64,
-                })
-                .sum(),
-        })
-        .sum();
-    (chars / 3) as u64 + 512
 }
 
 /// The systems that manage the request view.
@@ -244,4 +256,36 @@ fn prune_tail(
             cache.by_turn.remove(&(agent.0, turn.start.get()));
         }
     }
+}
+
+/// The semantic candidates for the turn, or none when no embedding space is
+/// configured. A failure degrades to lexical recall; it never fails the turn.
+fn semantic_ids(
+    store: &Store,
+    index: &mut CompactVectorIndex,
+    embeddings: &Embeddings,
+    credentials: Option<&Credentials>,
+    companion: &str,
+    query: &str,
+) -> Vec<String> {
+    let Ok(Some(record)) = store.companion(companion) else {
+        return Vec::new();
+    };
+    let Ok(Some(target)) = embedding::embedding_target(store, credentials, &record) else {
+        return Vec::new();
+    };
+    let Some(source) = embeddings.source() else {
+        return Vec::new();
+    };
+    let Ok(vector) = embedding::embed_query(source, &target, query) else {
+        return Vec::new();
+    };
+    if index.sync(store, &target.space).is_err() {
+        return Vec::new();
+    }
+    index
+        .ranked(&target.space, &vector, 20)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }

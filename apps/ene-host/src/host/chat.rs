@@ -32,6 +32,8 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     let text = request.text.clone();
     let hash = digest(format!("{}:{}", request.companion_id, text).as_bytes());
     let world = app.world_mut();
+    // Only an explicit user action resets the compaction idle clock.
+    super::compaction::note_user_activity(world);
     let store = world.resource::<Store>().clone();
     store
         .companion(&request.companion_id)?
@@ -163,6 +165,8 @@ pub(crate) fn stop(world: &mut World, request: w::StopRequest) -> Result<()> {
             reason: Some("the user stopped the turn".into()),
         });
     }
+    // Stop means stop speaking too; stale playback reports are discarded.
+    let _ = super::voice::flush(world, &request.companion_id, w::FlushReason::Cancelled);
     Ok(())
 }
 

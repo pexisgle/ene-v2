@@ -320,7 +320,7 @@ use rig_ecs::prelude::*;
 use serde_json::Value;
 
 /// How many client tools the host can publish at once.
-pub(crate) const SLOTS: usize = 32;
+pub(crate) const SLOTS: usize = 64;
 
 /// A capability tool slot. Unused slots are `Disabled` and invisible to the
 /// model.
@@ -485,6 +485,7 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
             previous.revision,
         );
         device::invalidate(world, &old_client, previous.revision);
+        super::voice::on_client_moved(world, &request.companion_id, &old_client, previous.revision);
         world
             .resource_mut::<Perception>()
             .events
@@ -580,10 +581,19 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
         };
         for spec in client.tool_specs() {
             if !names.insert(spec.tool_name.clone()) {
-                continue;
+                return Err(HostError::conflict(format!(
+                    "tool name `{}` is declared by more than one active client",
+                    spec.tool_name
+                )));
             }
             desired.push(spec.clone());
         }
+    }
+    if desired.len() > crate::host::client::SLOTS {
+        return Err(HostError::exhausted(format!(
+            "at most {} capability tools can be published",
+            crate::host::client::SLOTS
+        )));
     }
     let slots = world.resource::<Slots>().entities.clone();
     for (index, slot) in slots.iter().copied().enumerate() {

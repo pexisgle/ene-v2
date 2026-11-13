@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+agent-client-protocol.workspace = true
 async-stream.workspace = true
 axum.workspace = true
 bevy_ecs = "=0.20.0"
@@ -23,6 +24,7 @@ http.workspace = true
 io-lifetimes = "3"
 keyring = { version = "4", default-features = false, features = ["v1"] }
 private-fs = "0.2.1"
+process-wrap.workspace = true
 reqwest.workspace = true
 rig-core = { version = "=0.46.0", default-features = false }
 rig-ecs = "=0.46.0"
@@ -36,12 +38,13 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle = "2"
 time.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
+tokio-util = { workspace = true, features = ["rt", "compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 uuid.workspace = true
+which.workspace = true
 
 [dev-dependencies]
 ene-rpc = { workspace = true, features = ["client"] }

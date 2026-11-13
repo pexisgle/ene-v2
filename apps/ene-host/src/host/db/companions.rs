@@ -1,6 +1,8 @@
 //! Companions and their mind: persistence and revision checks.
 use super::{Result, Store, now, to_json};
-use crate::host::mind::{Companion, Profile, State};
+#[cfg(test)]
+use crate::host::mind::State;
+use crate::host::mind::{Companion, Profile};
 use rusqlite::{OptionalExtension, Row, params};
 
 fn row_to_companion(row: &Row<'_>) -> rusqlite::Result<Companion> {
@@ -148,6 +150,7 @@ impl Store {
 
     /// Updates only the mind state, but only when the caller still has the
     /// revision it read.
+    #[cfg(test)]
     pub(crate) fn update_mind_state(
         &self,
         companion_id: &str,

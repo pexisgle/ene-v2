@@ -241,4 +241,14 @@ CREATE TABLE IF NOT EXISTS device_operations (
 CREATE INDEX IF NOT EXISTS idx_operations_client ON device_operations(client_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
+-- Recall lists one owner's recent page.
+CREATE INDEX IF NOT EXISTS idx_memories_owner_rowid ON memories(owner, rowid);
+-- The embedding backfill looks for valid vectors of one space.
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_space
+    ON memories(embedding_model, embedding_content_revision);
+-- `mind_read` walks both directions of the cognitive edges.
+CREATE INDEX IF NOT EXISTS idx_memory_edges_to ON memory_edges(to_id, relation);
+-- Consolidation context and receipts are read per companion.
+CREATE INDEX IF NOT EXISTS idx_mind_operations_companion
+    ON mind_operations(companion_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companion_id, enabled);

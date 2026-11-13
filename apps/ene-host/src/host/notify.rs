@@ -6,16 +6,20 @@
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use serde_json::json;
+use std::collections::VecDeque;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 pub(crate) const CAPACITY: usize = 256;
+/// How many flushed notifications are kept for a resuming cursor.
+pub(crate) const REPLAY: usize = 512;
 
 #[derive(Resource)]
 pub(crate) struct Notifier {
     epoch: String,
     sequence: u64,
     outbox: Vec<w::Notification>,
+    history: VecDeque<w::Notification>,
     events: broadcast::Sender<w::Notification>,
 }
 
@@ -25,6 +29,7 @@ impl Notifier {
             epoch: Uuid::new_v4().to_string(),
             sequence: 0,
             outbox: Vec::new(),
+            history: VecDeque::new(),
             events: broadcast::channel(CAPACITY).0,
         }
     }
@@ -85,8 +90,35 @@ impl Notifier {
                 ..Default::default()
             })
             .into();
+            self.history.push_back(event.clone());
+            if self.history.len() > REPLAY {
+                self.history.pop_front();
+            }
             let _ = self.events.send(event);
         }
+    }
+
+    /// The events after `cursor`, when the caller's epoch is this boot and no
+    /// event it needs has been dropped. `None` asks the caller to resnapshot.
+    pub(crate) fn replay(&self, cursor: &w::Cursor) -> Option<Vec<w::Notification>> {
+        if cursor.epoch != self.epoch || cursor.seq > self.sequence {
+            return None;
+        }
+        let first_needed = cursor.seq + 1;
+        if first_needed > self.sequence {
+            return Some(Vec::new());
+        }
+        let oldest = self.history.front().and_then(seq_of);
+        if oldest.is_none_or(|oldest| oldest > first_needed) {
+            return None;
+        }
+        Some(
+            self.history
+                .iter()
+                .filter(|event| seq_of(event).is_some_and(|seq| seq >= first_needed))
+                .cloned()
+                .collect(),
+        )
     }
 
     pub(crate) fn clear(&mut self) {
@@ -121,6 +153,10 @@ impl Notifier {
     }
 }
 
+fn seq_of(event: &w::Notification) -> Option<u64> {
+    event.cursor.as_option().map(|cursor| cursor.seq)
+}
+
 fn kind_of(event: &w::notification::Event) -> &'static str {
     match event {
         w::notification::Event::Health(_) => "health",
@@ -140,5 +176,44 @@ fn kind_of(event: &w::notification::Event) -> &'static str {
         w::notification::Event::InitialState(_) => "initial_state",
         w::notification::Event::ResyncRequired(_) => "resync",
         w::notification::Event::ActivationUpdated(_) => "activation",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(kind: &str) -> w::notification::Event {
+        w::notification::Event::Generic(Box::new(w::HostEvent {
+            kind: kind.into(),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn a_cursor_resumes_from_the_replay_ring_and_reports_gaps() {
+        let mut notifier = Notifier::new();
+        notifier.push(None, None, event("one"));
+        notifier.flush();
+        let after_one = notifier.cursor();
+        notifier.push(None, None, event("two"));
+        notifier.push(None, None, event("three"));
+        notifier.flush();
+
+        let replay = notifier.replay(&after_one).expect("same epoch");
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[1].cursor.as_option().unwrap().seq, 3);
+
+        let current = notifier.cursor();
+        assert_eq!(notifier.replay(&current).unwrap().len(), 0);
+
+        let mut stale = current.clone();
+        stale.seq = 0;
+        stale.epoch = "another boot".into();
+        assert!(notifier.replay(&stale).is_none());
+
+        let mut ahead = current.clone();
+        ahead.seq = 99;
+        assert!(notifier.replay(&ahead).is_none());
     }
 }

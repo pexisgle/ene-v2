@@ -22,31 +22,68 @@ impl w::HostService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::SubscribeRequest>,
     ) -> ServiceResult<ServiceStream<w::Notification>> {
-        let client_id = (!request.client_id.is_empty()).then(|| request.client_id.to_owned());
+        let request = request.to_owned_message();
+        let subscriber = (!request.client_id.is_empty()).then(|| request.client_id.clone());
+        let subscriber_view = subscriber.clone();
+        let cursor = request.cursor.as_option().cloned();
+        // A cursor from this epoch resumes from the replay ring; an unknown or
+        // stale cursor (or a gap) falls back to a fresh snapshot.
+        let replayed = match cursor.as_ref() {
+            Some(cursor) => self
+                .runtime
+                .read({
+                    let cursor = cursor.clone();
+                    move |app| {
+                        Ok(app
+                            .world()
+                            .resource::<crate::host::notify::Notifier>()
+                            .replay(&cursor))
+                    }
+                })
+                .await
+                .map_err(ConnectError::from)?,
+            None => None,
+        };
         let (snapshot, mut events) = self
             .runtime
-            .read(move |app| host::subscribe(app, client_id.as_deref()))
+            .read(move |app| host::subscribe(app, subscriber.as_deref()))
             .await
             .map_err(ConnectError::from)?;
-        let initial = w::Notification {
-            cursor: snapshot.cursor.clone(),
-            kind: "initial_state".into(),
-            event: Some(w::notification::Event::InitialState(Box::new(snapshot))),
-            ..Default::default()
+        let target_cursor = snapshot.cursor.clone();
+        let start = match replayed {
+            Some(events) => Start::Replay(events),
+            None => Start::Snapshot(Box::new(w::Notification {
+                cursor: snapshot.cursor.clone(),
+                kind: "initial_state".into(),
+                event: Some(w::notification::Event::InitialState(Box::new(snapshot))),
+                ..Default::default()
+            })),
         };
-        let target_cursor = snapshot_cursor(&initial);
         let stream = async_stream::stream! {
-            yield Ok(initial);
+            match start {
+                Start::Replay(events) => {
+                    for event in events {
+                        if visible(&event, subscriber_view.as_deref()) {
+                            yield Ok(event);
+                        }
+                    }
+                }
+                Start::Snapshot(initial) => yield Ok(*initial),
+            }
             loop {
                 match events.recv().await {
-                    Ok(event) => yield Ok(event),
+                    Ok(event) => {
+                        if visible(&event, subscriber_view.as_deref()) {
+                            yield Ok(event);
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         yield Ok(w::Notification {
                             kind: "resync".into(),
                             event: Some(w::notification::Event::ResyncRequired(Box::new(
                                 w::ResyncRequired {
                                     reason: "subscription lagged".into(),
-                                    target_cursor: target_cursor.clone().into(),
+                                    target_cursor: target_cursor.clone(),
                                     ..Default::default()
                                 },
                             ))),
@@ -160,11 +197,17 @@ impl w::HostService for Services {
     }
 }
 
-fn snapshot_cursor(notification: &w::Notification) -> w::Cursor {
-    match notification.event.as_ref() {
-        Some(w::notification::Event::InitialState(snapshot)) => {
-            snapshot.cursor.as_option().cloned().unwrap_or_default()
-        }
-        _ => w::Cursor::default(),
+/// How a subscription starts: replayed events, or a snapshot when resuming is
+/// not possible.
+enum Start {
+    Replay(Vec<w::Notification>),
+    Snapshot(Box<w::Notification>),
+}
+
+/// A notification addressed to one client is not sent to another.
+fn visible(event: &w::Notification, subscriber: Option<&str>) -> bool {
+    match (event.client_id.as_deref(), subscriber) {
+        (Some(target), Some(subscriber)) => target == subscriber,
+        _ => true,
     }
 }

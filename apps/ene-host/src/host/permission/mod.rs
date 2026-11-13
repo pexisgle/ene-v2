@@ -138,7 +138,7 @@ pub(crate) fn hard_denied(capability: &str) -> Option<&'static str> {
 /// Canonical tool arguments and their SHA-256. Key order is canonical because
 /// `serde_json::Value` objects are ordered maps.
 pub(crate) fn canonicalise(tool_name: &str, arguments: &Value) -> (String, Vec<u8>) {
-    let normalized = arguments.to_string();
+    let normalized = canonical_json(arguments);
     let hash = digest(format!("{tool_name}\n{normalized}").as_bytes());
     (normalized, hash)
 }
@@ -661,6 +661,7 @@ pub(crate) fn submit(
             "approval is no longer pending",
         ));
     }
+    super::compaction::note_user_activity(world);
     // A device approval is bound to the client generation it was issued for:
     // a move voids it instead of applying it to the new client.
     if let (Some(client), Some(revision)) =
@@ -831,5 +832,32 @@ pub(crate) fn invalidate_generation(
         {
             let _ = store.resolve_approval(&request, ApprovalStatus::Expired);
         }
+    }
+}
+
+/// JSON with object keys sorted: the hash must not depend on the map order
+/// enabled by the `preserve_order` feature of serde_json.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let entries: Vec<String> = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_default(),
+                        canonical_json(&map[key])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", items.join(","))
+        }
+        other => other.to_string(),
     }
 }

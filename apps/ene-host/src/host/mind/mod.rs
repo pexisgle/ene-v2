@@ -175,6 +175,8 @@ pub(crate) enum Role {
 
 // === Host operations ======================================================
 
+pub(crate) mod consolidate;
+pub(crate) mod embedding;
 pub(crate) mod recall;
 pub(crate) mod tools;
 
@@ -195,6 +197,10 @@ impl Plugin for MindPlugin {
     fn build(&self, app: &mut App) {
         tools::register(app);
         app.add_plugins(recall::RecallPlugin);
+        // The vector cache and its HTTP source, then the consolidation
+        // scheduler that posts model results back to this thread.
+        embedding::register(app);
+        consolidate::register(app);
     }
 }
 

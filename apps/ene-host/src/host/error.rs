@@ -120,10 +120,6 @@ impl Failure {
             message: message.into(),
         }
     }
-
-    pub(crate) fn from_error(error: &HostError) -> Self {
-        Self::new(error.code(), error.message())
-    }
 }
 
 impl From<rusqlite::Error> for HostError {

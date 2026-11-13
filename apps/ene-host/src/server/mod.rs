@@ -40,9 +40,20 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         .init();
     let access = access::Access::acquire(&state, &runtime_path)?;
     let runtime = Runtime::start(&state).await?;
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-    access.publish(&format!("http://{}/rpc", listener.local_addr()?))?;
-    eprintln!("ene-host: authenticated loopback service ready");
+    // Access control is delegated to the OS or a fronting service
+    // (docs/design/host-access.md): the bind address is explicit, and the
+    // Owner Bearer stays mandatory even on a non-loopback listener.
+    let bind = std::env::var("ENE_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
+    let listener = TcpListener::bind(&bind).await?;
+    let local = listener.local_addr()?;
+    if !local.ip().is_loopback() {
+        eprintln!(
+            "ene-host: WARNING listening on {local}; Owner Bearer remains required. \
+             Do not expose this port without the external access control described in docs/design/host-access.md"
+        );
+    }
+    access.publish(&format!("http://{local}/rpc"))?;
+    eprintln!("ene-host: authenticated service ready on {local}");
     let shutdown = CancellationToken::new();
     let app = router(runtime.clone(), access.token.clone(), shutdown.clone());
     let running = runtime.clone();

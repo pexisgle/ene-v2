@@ -1,6 +1,6 @@
 //! Work tools: the parent's commission/steer/stop tools and the hand's
 //! report tool.
-use super::{Inquiry, Run, RunState, WorkStatus};
+use super::{Inquiry, RunState, WorkStatus};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent, WorkReports},
     db::{Result, Store},
@@ -115,39 +115,8 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
         if store.active_run(work_id)?.is_some() {
             return Err(HostError::conflict("the work session is already running"));
         }
-        let companion_record = store
-            .companion(&companion)?
-            .ok_or_else(|| HostError::not_found("companion not found"))?;
-        let run_id = uuid::Uuid::new_v4().to_string();
-        let run = Run {
-            run_id: run_id.clone(),
-            work_id: work_id.to_owned(),
-            instruction: args.instruction.clone(),
-            state: RunState::Running,
-            pending_request_id: None,
-            failure: None,
-            cancellation_requested_at: None,
-            cancellation_reason: None,
-            unverified_pids: Vec::new(),
-            started_at: String::new(),
-            updated_at: String::new(),
-        };
-        store.insert_run(&run)?;
-        store.set_work_status(work_id, WorkStatus::Active)?;
-        let work_agent = agent::spawn_work_agent(
-            world,
-            &companion_record,
-            work_id,
-            &run_id,
-            &args.instruction,
-        );
-        agent::ensure_model(world, work_agent)?;
-        world.trigger(Deliver::new(
-            work_agent,
-            args.instruction.clone(),
-            DeliveryMode::Queue,
-        ));
-        return Ok(json!({"work_id": work_id, "run_id": run_id}).to_string());
+        let run = super::start_run(world, &session, &args.instruction)?;
+        return Ok(json!({"work_id": work_id, "run_id": run.run_id}).to_string());
     }
     let session = super::start(
         world,
@@ -219,8 +188,7 @@ fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
     if session.status == WorkStatus::Closed {
         return Ok(json!({"work_id": session.id, "status": "closed"}).to_string());
     }
-    super::stop(world, &args.work_id)?;
-    let _ = args.reason;
+    super::stop_with(world, &args.work_id, args.reason.as_deref())?;
     Ok(json!({"work_id": session.id, "stopping": true}).to_string())
 }
 
@@ -231,19 +199,35 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
         ));
     };
     let store = world.resource::<Store>().clone();
-    let Some(run) = store.run(&work.run_id)? else {
-        return Err(HostError::not_found("run not found"));
+    // The active run is the source of truth, never the run captured when the
+    // agent was spawned: a session agent serves several runs.
+    let Some(run) = store.active_run(&work.work_id)? else {
+        return Ok(
+            json!({"accepted": false, "reason": "the session has no active run"}).to_string(),
+        );
     };
     if run.state.is_terminal() {
+        return Ok(json!({"accepted": false, "reason": "the run already ended"}).to_string());
+    }
+    if run.run_id != work.run_id {
+        // A report produced by an older turn is audit data only; it must not
+        // touch the run that is active now.
         return Ok(json!({"accepted": false, "reason": "the run already ended"}).to_string());
     }
     if args.content.trim().is_empty() {
         return Err(HostError::invalid("report content is required"));
     }
+    let run_id = run.run_id.clone();
     match args.kind.as_str() {
         "activity" | "message" => {
+            if run.state == RunState::Cancelling {
+                return Ok(
+                    json!({"accepted": false, "reason": "the run is cancelling"}).to_string(),
+                );
+            }
+            super::note_activity(world, &work.work_id, &run_id);
             if let Some(parent) = agent::agent_of(world, &work.companion_id) {
-                let author = Author::agent(agent::work_agent_id(&work.run_id), None);
+                let author = Author::agent(agent::work_agent_id(&run_id), None);
                 world.trigger(
                     Deliver::new(
                         parent,
@@ -256,11 +240,16 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             Ok(json!({"accepted": true}).to_string())
         }
         "question" => {
+            if run.state == RunState::Cancelling {
+                return Ok(
+                    json!({"accepted": false, "reason": "the run is cancelling"}).to_string(),
+                );
+            }
             let request_id = uuid::Uuid::new_v4().to_string();
             store.insert_inquiry(&Inquiry {
                 request_id: request_id.clone(),
                 work_id: work.work_id.clone(),
-                run_id: work.run_id.clone(),
+                run_id: run_id.clone(),
                 prompt: args.content.clone(),
                 choices: Vec::new(),
                 answer: None,
@@ -298,7 +287,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
                 );
             }
             if let Some(parent) = agent::agent_of(world, &companion) {
-                let author = Author::agent(agent::work_agent_id(&work.run_id), None);
+                let author = Author::agent(agent::work_agent_id(&run_id), None);
                 world.trigger(
                     Deliver::new(
                         parent,
@@ -311,10 +300,16 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             Ok(json!({"accepted": true, "request_id": request_id}).to_string())
         }
         "completed" => {
+            if run.state == RunState::Cancelling {
+                return Ok(
+                    json!({"accepted": false, "reason": "the run is cancelling"}).to_string(),
+                );
+            }
+            super::note_activity(world, &work.work_id, &run_id);
             world
                 .resource_mut::<WorkReports>()
                 .completed
-                .insert(work.run_id.clone(), args.content.clone());
+                .insert(run_id, args.content.clone());
             Ok(json!({"accepted": true}).to_string())
         }
         "failed" => {
@@ -323,15 +318,13 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             world
                 .resource_mut::<WorkReports>()
                 .failed
-                .insert(work.run_id.clone(), args.content.clone());
-            if let Some(entity) = agent::work_agent_of(world, &work.run_id) {
-                world.trigger(StopTurn {
-                    entity,
-                    reason: Some("the hand reported a failure".into()),
-                });
-            }
+                .insert(run_id.clone(), args.content.clone());
+            world.trigger(StopTurn {
+                entity: agent,
+                reason: Some("the hand reported a failure".into()),
+            });
             if let Some(parent) = agent::agent_of(world, &work.companion_id) {
-                let author = Author::agent(agent::work_agent_id(&work.run_id), None);
+                let author = Author::agent(agent::work_agent_id(&run_id), None);
                 world.trigger(
                     Deliver::new(
                         parent,

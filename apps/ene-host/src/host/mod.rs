@@ -19,6 +19,7 @@ pub(crate) mod permission;
 pub(crate) mod resources;
 pub(crate) mod settings;
 pub(crate) mod tools;
+pub(crate) mod voice;
 
 #[cfg(test)]
 mod tests;
@@ -141,6 +142,7 @@ impl Runtime {
                         mind::MindPlugin,
                         autonomy::AutonomyPlugin,
                         compaction::CompactionPlugin,
+                        voice::VoicePlugin,
                     ));
                 app.finish();
                 if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
