@@ -63,24 +63,10 @@ pub(crate) fn on_slot_call(
     let spec = slots
         .get(tool)
         .map(|tool| tool.spec.clone())
-        .unwrap_or(CapabilitySpec {
-            name: String::new(),
-            tool_name: String::new(),
-            description: String::new(),
-            input_schema: String::new(),
-            presets: Vec::new(),
-            approval: crate::host::client::CapabilityApproval::Unspecified,
-            approval_target: String::new(),
-            output_schema: String::new(),
-        });
+        .unwrap_or_default();
     commands.queue(move |world: &mut World| {
         if let Err(error) = execute(world, call, agent, &spec, args, false) {
-            match error {
-                HostError::Conflict(reason) | HostError::Permission(reason) => {
-                    permission::refuse(world, call, &reason)
-                }
-                other => permission::refuse(world, call, &other.to_string()),
-            }
+            refuse_error(world, call, error);
         }
     });
 }
@@ -90,7 +76,6 @@ pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut c
     let called = called.event();
     let (call, agent, args) = (called.call, called.agent, called.args.clone());
     commands.queue(move |world: &mut World| {
-        let args = &args;
         let Some(spec) = binding_spec(world, call, &args.capability) else {
             permission::refuse(
                 world,
@@ -100,24 +85,31 @@ pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut c
             return;
         };
         if let Err(error) = execute(world, call, agent, &spec, args.input.clone(), true) {
-            match error {
-                HostError::Conflict(reason) | HostError::Permission(reason) => {
-                    permission::refuse(world, call, &reason)
-                }
-                other => permission::refuse(world, call, &other.to_string()),
-            }
+            refuse_error(world, call, error);
         }
     });
 }
 
+/// The declaration the bound client currently carries for `capability`.
 fn binding_spec(world: &World, call: Entity, capability: &str) -> Option<CapabilitySpec> {
     let binding = world.get::<CallBinding>(call)?;
-    let store = world.resource::<Store>();
-    store
+    world
+        .resource::<Store>()
         .client(&binding.client_id)
         .ok()
         .flatten()
         .and_then(|client| client.spec(capability).cloned())
+}
+
+/// A refused device call keeps its specific conflict/permission message and
+/// stringifies anything else.
+fn refuse_error(world: &mut World, call: Entity, error: HostError) {
+    match error {
+        HostError::Conflict(reason) | HostError::Permission(reason) => {
+            permission::refuse(world, call, &reason)
+        }
+        other => permission::refuse(world, call, &other.to_string()),
+    }
 }
 
 /// Accepts one capability operation against the bound client generation.
@@ -138,7 +130,7 @@ pub(crate) fn execute(
     // never receives an operation accepted for the old one.
     let (companion_id, work_id) = agent_context(world, agent)
         .ok_or_else(|| HostError::internal("a device call without an agent"))?;
-    let current = current_target(&store, &companion_id, work_id.as_deref())?;
+    let current = store.target(&companion_id, work_id.as_deref())?;
     if current.as_ref() != Some(&(binding.client_id.clone(), binding.activation_revision)) {
         return Err(HostError::conflict(
             "client_moved: the active client changed before the operation was dispatched",
@@ -165,7 +157,7 @@ pub(crate) fn execute(
         updated_at: now(),
     };
     store.insert_operation(&operation)?;
-    dispatch(world, &operation, wait_for_result)?;
+    dispatch(world, &operation)?;
     if wait_for_result {
         wait(world, call, &operation_id, deadline(world));
     } else {
@@ -187,29 +179,9 @@ fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>
         .map(|work| (work.companion_id.clone(), Some(work.work_id.clone())))
 }
 
-fn current_target(
-    store: &Store,
-    companion: &str,
-    work: Option<&str>,
-) -> Result<Option<(String, u64)>> {
-    if let Some(work) = work {
-        let session = store
-            .work_session(work)?
-            .ok_or_else(|| HostError::not_found("work session not found"))?;
-        return Ok(session
-            .client_id
-            .map(|client| (client, session.activation_revision)));
-    }
-    Ok(store.activation(companion)?.and_then(|activation| {
-        activation
-            .client_id
-            .map(|client| (client, activation.revision))
-    }))
-}
-
 /// Writes the operation to the client's live stream. A missing stream leaves
 /// the operation pending for the reconnect.
-fn dispatch(world: &mut World, operation: &DeviceOperation, _wait: bool) -> Result<()> {
+fn dispatch(world: &mut World, operation: &DeviceOperation) -> Result<()> {
     let hub = world.resource::<DeviceHub>().clone();
     let store = world.resource::<Store>().clone();
     let Some(subscription) = hub.subscription(&operation.client_id) else {
@@ -241,10 +213,7 @@ fn dispatch(world: &mut World, operation: &DeviceOperation, _wait: bool) -> Resu
 /// Replays operations that were never delivered after a client reconnects.
 pub(crate) fn resend(world: &mut World, client: &str) {
     let store = world.resource::<Store>().clone();
-    let Ok(activation) = store.activation_for_client(client) else {
-        return;
-    };
-    let Some((_companion, revision)) = activation else {
+    let Ok(Some((_companion, revision))) = store.activation_for_client(client) else {
         return;
     };
     let Ok(operations) = store.outstanding_operations(client) else {
@@ -254,7 +223,7 @@ pub(crate) fn resend(world: &mut World, client: &str) {
         if operation.status != DeviceStatus::Pending || operation.activation_revision != revision {
             continue;
         }
-        let _ = dispatch(world, &operation, true);
+        let _ = dispatch(world, &operation);
     }
 }
 

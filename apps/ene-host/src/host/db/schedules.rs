@@ -1,7 +1,7 @@
 //! Schedules: stored reminders for the head. Firing them is not wired yet.
 use super::{Result, Store, now};
 use crate::host::error::HostError;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Schedule {
@@ -34,26 +34,13 @@ impl Store {
             return Err(HostError::invalid("run_at must be an RFC 3339 time"));
         }
         let id = uuid::Uuid::new_v4().to_string();
-        self.conn()?.execute(
+        self.write_one(
             "INSERT INTO schedules (id, companion_id, cron_expr, run_at, title, instruction, \
-             enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+             enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7) \
+             RETURNING id, title, instruction, run_at, cron_expr, enabled",
             params![id, companion, cron_expr, run_at, title, instruction, now()],
-        )?;
-        self.schedule(&id)?
-            .ok_or_else(|| HostError::storage("schedule insert did not persist"))
-    }
-
-    fn schedule(&self, id: &str) -> Result<Option<Schedule>> {
-        let connection = self.conn()?;
-        let schedule = connection
-            .query_row(
-                "SELECT id, title, instruction, run_at, cron_expr, enabled \
-                 FROM schedules WHERE id = ?1",
-                [id],
-                row_to_schedule,
-            )
-            .optional()?;
-        Ok(schedule)
+            row_to_schedule,
+        )
     }
 
     pub(crate) fn schedules(&self, companion: &str) -> Result<Vec<Schedule>> {

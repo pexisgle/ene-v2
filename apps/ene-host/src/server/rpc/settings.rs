@@ -7,10 +7,7 @@ use crate::host::{
     model,
     notify::Notifier,
     permission, settings,
-    settings::{
-        AcpConnection, Connection, ConnectionConfig, ConnectionKind, CredentialState,
-        EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SttConnection, TtsConnection,
-    },
+    settings::{Connection, CredentialState},
     wire,
 };
 use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult};
@@ -39,7 +36,7 @@ impl w::SettingsService for Services {
         let mut inputs = Vec::with_capacity(request.connections.len());
         for input in request.connections {
             let expected = input.expected_revision;
-            inputs.push((connection_from(input)?, expected));
+            inputs.push((wire::connection_from(input)?, expected));
         }
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
@@ -199,7 +196,7 @@ impl w::SettingsService for Services {
             store.set_credential_state(&id, CredentialState::Registered)?;
             notify_settings(app, wire::settings(&store.settings()?));
             Ok(w::CredentialResult {
-                credential_state: wire::credential_state(CredentialState::Registered).into(),
+                credential_state: CredentialState::Registered.as_str().into(),
                 ..Default::default()
             })
         })
@@ -294,80 +291,6 @@ async fn connection(runtime: &Runtime, id: &str) -> Result<Connection, ConnectEr
         })
         .await
         .map_err(ConnectError::from)
-}
-
-fn connection_from(input: w::ConnectionInput) -> Result<Connection, HostError> {
-    let kind = kind_from(input.kind.to_i32())
-        .ok_or_else(|| HostError::invalid("connection kind is required"))?;
-    let config = input
-        .config
-        .into_option()
-        .and_then(config_from)
-        .ok_or_else(|| HostError::invalid("connection config is required"))?;
-    Ok(Connection {
-        id: input.id,
-        name: input.name,
-        enabled: input.enabled,
-        kind,
-        config,
-        credential_state: CredentialState::Absent,
-        revision: 0,
-        last_check: None,
-    })
-}
-
-fn kind_from(kind: i32) -> Option<ConnectionKind> {
-    Some(match kind {
-        1 => ConnectionKind::Llm,
-        2 => ConnectionKind::Tts,
-        3 => ConnectionKind::Stt,
-        4 => ConnectionKind::Embedding,
-        5 => ConnectionKind::Mcp,
-        6 => ConnectionKind::Acp,
-        _ => return None,
-    })
-}
-
-fn config_from(value: w::ConnectionConfig) -> Option<ConnectionConfig> {
-    Some(match value.config? {
-        w::connection_config::Config::Llm(config) => ConnectionConfig::Llm(LlmConnection {
-            endpoint: endpoint_from(config.endpoint.as_option()),
-            model_ids: config.model_ids,
-        }),
-        w::connection_config::Config::Tts(config) => ConnectionConfig::Tts(TtsConnection {
-            endpoint: endpoint_from(config.endpoint.as_option()),
-            voice_ids: config.voice_ids,
-        }),
-        w::connection_config::Config::Stt(config) => ConnectionConfig::Stt(SttConnection {
-            endpoint: endpoint_from(config.endpoint.as_option()),
-            language_hints: config.language_hints,
-        }),
-        w::connection_config::Config::Embedding(config) => {
-            ConnectionConfig::Embedding(EmbeddingConnection {
-                endpoint: endpoint_from(config.endpoint.as_option()),
-                model_id: config.model_id,
-                dimensions: config.dimensions,
-            })
-        }
-        w::connection_config::Config::Mcp(config) => ConnectionConfig::Mcp(McpConnection {
-            endpoint: endpoint_from(config.endpoint.as_option()),
-            allowed_tools: config.allowed_tools,
-        }),
-        w::connection_config::Config::Acp(config) => ConnectionConfig::Acp(AcpConnection {
-            endpoint: endpoint_from(config.endpoint.as_option()),
-            command: config.command,
-            args: config.args,
-        }),
-    })
-}
-
-fn endpoint_from(value: Option<&w::ConnectionEndpoint>) -> Endpoint {
-    value.map_or_else(Endpoint::default, |value| Endpoint {
-        adapter: value.adapter.clone(),
-        endpoint: value.endpoint.clone(),
-        options_schema: value.options_schema.clone(),
-        options: value.options.clone(),
-    })
 }
 
 fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {

@@ -1,22 +1,15 @@
 //! Work sessions and runs: the "hands" of docs/design/work.md.
 //!
-//! A `WorkSession` is the context that survives several runs; a `Run` is one
-//! instruction turn. They are never conflated, and each run is bound to the
-//! client generation captured when the work was commissioned.
-//!
-//! The session owns one long-lived work agent (rig) or one ACP process (see
-//! [`acp`]). A run rebinds that agent to its run id, so `report`, permission
-//! requests and turn settlement always see the active run. When a run ends the
-//! agent survives; only a closed session, a failed start, or an explicitly
-//! retired session releases it.
-pub(crate) mod acp;
-pub(crate) mod continuity;
-pub(crate) mod sandbox;
-pub(crate) mod tools;
+//! A `WorkSession` survives runs and owns one long-lived backend (the rig agent
+//! or one ACP process, see [`acp`]); a `Run` is one instruction turn that
+//! rebinds the session agent to its run id. Only a closed session, a failed
+//! start, or a restart retires the agent, never an ordinary run end.
+mod acp;
+mod tools;
 
 use self::acp::{AcpBackends, AcpEvents};
 use super::{
-    agent::{self, WorkReports},
+    agent::{self, WorkAgent, WorkReports},
     db::{Result, Store, now},
     error::{Failure, HostError},
     mind::{Companion, Role},
@@ -35,16 +28,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How long a run may stay silent before the parent is told once.
-pub(crate) const STALL_TIMEOUT: Duration = Duration::from_secs(90);
-/// How long a stop may take before the process group is forced down.
-pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the forced kill may take before the stop is unverified.
+const STALL_TIMEOUT: Duration = Duration::from_secs(90);
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const FORCE_GRACE: Duration = Duration::from_secs(5);
-/// The interval between streamed ACP updates forwarded to the parent.
 const ACP_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 
-/// The public state of a session, derived from its closed flag and active run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkStatus {
@@ -63,17 +51,10 @@ impl WorkStatus {
     }
 
     pub(crate) fn parse(text: &str) -> Option<Self> {
-        Some(match text {
-            "idle" => Self::Idle,
-            "active" => Self::Active,
-            "closed" => Self::Closed,
-            _ => return None,
-        })
+        serde_json::from_value(text.into()).ok()
     }
 }
 
-/// The state of one run. Detail fields live next to it in the row so a run
-/// always reads back exactly as it was written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RunState {
@@ -102,17 +83,7 @@ impl RunState {
     }
 
     pub(crate) fn parse(text: &str) -> Option<Self> {
-        Some(match text {
-            "starting" => Self::Starting,
-            "running" => Self::Running,
-            "waiting_input" => Self::WaitingInput,
-            "cancelling" => Self::Cancelling,
-            "completed" => Self::Completed,
-            "cancelled" => Self::Cancelled,
-            "cancellation_unconfirmed" => Self::CancellationUnconfirmed,
-            "failed" => Self::Failed,
-            _ => return None,
-        })
+        serde_json::from_value(text.into()).ok()
     }
 
     pub(crate) fn is_terminal(self) -> bool {
@@ -121,33 +92,19 @@ impl RunState {
             Self::Completed | Self::Cancelled | Self::CancellationUnconfirmed | Self::Failed
         )
     }
-
-    /// Whether a run in this state can still produce events.
-    pub(crate) fn is_open(self) -> bool {
-        !self.is_terminal()
-    }
 }
 
-/// The triggers of the run state machine (docs/design/work.md §3.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RunEvent {
-    /// The backend accepted the run.
     Start,
-    /// A stop was requested; the run is cancelling.
     Stop,
-    /// The run finished normally.
     Complete,
-    /// The backend confirmed a cancellation.
     CancelConfirmed,
-    /// The forced stop could not be verified.
     CancelUnconfirmed,
-    /// The run failed.
     Fail,
-    /// A pending inquiry was answered.
     Resume,
 }
 
-/// The documented run transition, or `None` when the event cannot apply.
 pub(crate) fn transition(state: RunState, event: RunEvent) -> Option<RunState> {
     use RunEvent::*;
     use RunState::*;
@@ -195,7 +152,6 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    /// The detail fields the contract carries for a run in this state.
     pub(crate) fn detail(&self) -> RunDetail<'_> {
         RunDetail {
             failure: self.failure.as_ref(),
@@ -215,7 +171,6 @@ pub(crate) struct RunDetail<'a> {
     pub(crate) unverified_pids: &'a [u32],
 }
 
-/// A question the run asked the user, distinct from an approval request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Inquiry {
     pub(crate) request_id: String,
@@ -234,195 +189,224 @@ impl Inquiry {
     }
 }
 
-// === Live run bookkeeping ===============================================
+fn new_run(run_id: String, work_id: &str, instruction: &str, state: RunState) -> Run {
+    Run {
+        run_id,
+        work_id: work_id.to_owned(),
+        instruction: instruction.to_owned(),
+        state,
+        pending_request_id: None,
+        failure: None,
+        cancellation_requested_at: None,
+        cancellation_reason: None,
+        unverified_pids: Vec::new(),
+        started_at: String::new(),
+        updated_at: String::new(),
+    }
+}
 
-/// Per-run liveness, kept out of SQLite because it is sub-minute data.
 #[derive(Resource, Default)]
-pub(crate) struct RunActivity {
-    runs: HashMap<String, Activity>,
-}
+struct Runs(HashMap<String, Live>);
 
-#[derive(Clone, Debug)]
-struct Activity {
-    work_id: String,
+struct Live {
     last: Instant,
-    last_forwarded: Instant,
+    forwarded: Instant,
     warned: bool,
+    stop: Option<Stop>,
 }
 
-impl RunActivity {
-    fn begin(&mut self, work_id: &str, run_id: &str) {
-        let now = Instant::now();
-        self.runs.insert(
-            run_id.to_owned(),
-            Activity {
-                work_id: work_id.to_owned(),
-                last: now,
-                last_forwarded: now,
-                warned: false,
-            },
-        );
-    }
+struct Stop {
+    reason: String,
+    deadline: Instant,
+    forced: bool,
+}
 
-    fn touch(&mut self, work_id: &str, run_id: &str) {
-        match self.runs.get_mut(run_id) {
-            Some(activity) => {
-                activity.last = Instant::now();
-                activity.warned = false;
-            }
-            None => self.begin(work_id, run_id),
+impl Live {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last: now,
+            forwarded: now,
+            warned: false,
+            stop: None,
         }
     }
+}
 
-    fn forward_due(&mut self, run_id: &str, interval: Duration) -> bool {
-        let Some(activity) = self.runs.get_mut(run_id) else {
-            return false;
-        };
-        let now = Instant::now();
-        if now.saturating_duration_since(activity.last_forwarded) < interval {
-            return false;
-        }
-        activity.last_forwarded = now;
-        true
+impl Runs {
+    fn begin(&mut self, run_id: &str) {
+        self.0.insert(run_id.to_owned(), Live::new());
+    }
+
+    fn touch(&mut self, run_id: &str) {
+        let live = self.0.entry(run_id.to_owned()).or_insert_with(Live::new);
+        live.last = Instant::now();
+        live.warned = false;
     }
 
     fn forget(&mut self, run_id: &str) {
-        self.runs.remove(run_id);
+        self.0.remove(run_id);
     }
 
-    fn stalled(&mut self, now: Instant, threshold: Duration) -> Vec<(String, String)> {
-        let mut due = Vec::new();
-        for (run_id, activity) in &mut self.runs {
-            if due_for_stall(activity, now, threshold) {
-                due.push((run_id.clone(), activity.work_id.clone()));
-            }
-        }
-        due
-    }
-}
-
-fn due_for_stall(activity: &mut Activity, now: Instant, threshold: Duration) -> bool {
-    if activity.warned || now.saturating_duration_since(activity.last) < threshold {
-        return false;
-    }
-    activity.warned = true;
-    true
-}
-
-/// Runs waiting for a cooperative stop or for the forced kill timeout.
-#[derive(Resource, Default)]
-pub(crate) struct PendingStops {
-    stops: HashMap<String, PendingStop>,
-}
-
-#[derive(Clone, Debug)]
-struct PendingStop {
-    work_id: String,
-    reason: String,
-    deadline: Instant,
-    force_sent: bool,
-}
-
-impl PendingStops {
-    fn arm(&mut self, run_id: &str, work_id: &str, reason: &str) {
-        self.stops.insert(
-            run_id.to_owned(),
-            PendingStop {
-                work_id: work_id.to_owned(),
-                reason: reason.to_owned(),
-                deadline: Instant::now() + STOP_TIMEOUT,
-                force_sent: false,
-            },
-        );
-    }
-
-    fn take_due(&mut self, now: Instant) -> Vec<(String, PendingStop)> {
-        let due: Vec<String> = self
-            .stops
-            .iter()
-            .filter(|(_, stop)| stop.deadline <= now)
-            .map(|(run_id, _)| run_id.clone())
-            .collect();
-        due.into_iter()
-            .filter_map(|run_id| self.stops.remove(&run_id).map(|stop| (run_id, stop)))
+    fn stalled(&mut self, now: Instant, threshold: Duration) -> Vec<String> {
+        self.0
+            .iter_mut()
+            .filter_map(|(run_id, live)| {
+                if live.warned || now.saturating_duration_since(live.last) < threshold {
+                    return None;
+                }
+                live.warned = true;
+                Some(run_id.clone())
+            })
             .collect()
     }
 
-    fn reinsert(&mut self, run_id: String, stop: PendingStop) {
-        self.stops.insert(run_id, stop);
+    fn arm(&mut self, run_id: &str, reason: &str) {
+        let live = self.0.entry(run_id.to_owned()).or_insert_with(Live::new);
+        live.stop = Some(Stop {
+            reason: reason.to_owned(),
+            deadline: Instant::now() + STOP_TIMEOUT,
+            forced: false,
+        });
     }
 
-    fn remove(&mut self, run_id: &str) {
-        self.stops.remove(run_id);
+    fn set_stop(&mut self, run_id: &str, stop: Option<Stop>) {
+        if let Some(live) = self.0.get_mut(run_id) {
+            live.stop = stop;
+        }
+    }
+
+    fn due_stops(&mut self, now: Instant) -> Vec<(String, Stop)> {
+        self.0
+            .iter_mut()
+            .filter_map(|(run_id, live)| {
+                live.stop
+                    .take_if(|stop| stop.deadline <= now)
+                    .map(|stop| (run_id.clone(), stop))
+            })
+            .collect()
     }
 }
 
-/// How a stop was confirmed, for classification into `Cancelled` /
-/// `CancellationUnconfirmed`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StopConfirmation {
-    /// The backend reported a cooperative stop.
-    Cooperative,
-    /// The process group was killed and its exit was observed.
-    ForcedConfirmed,
-    /// The process could not be verified as gone.
-    ForcedUnconfirmed,
-}
-
-pub(crate) fn classify_stop(confirmation: StopConfirmation) -> RunState {
-    match confirmation {
-        StopConfirmation::Cooperative | StopConfirmation::ForcedConfirmed => RunState::Cancelled,
-        StopConfirmation::ForcedUnconfirmed => RunState::CancellationUnconfirmed,
-    }
-}
-
-/// Idempotent `SendWork` receipts outside the rig conversation log.
-///
-/// The rig backend keeps them in the session log aside (the canonical place),
-/// but an ACP session has no rig conversation to store them in, so the same
-/// receipt is also kept here for the lifetime of the host. They are not
-/// persisted; a restart forgets them (documented approximation).
+/// `SendWork` receipts for ACP sessions; the rig backend keeps the canonical
+/// copy in its session-log aside. Not persisted: a restart forgets them.
 #[derive(Resource, Default)]
-pub(crate) struct Receipts {
-    records: HashMap<String, StoredReceipt>,
-}
-
-#[derive(Clone, Debug)]
-struct StoredReceipt {
-    hash: Vec<u8>,
-    request_id: String,
-}
+struct Receipts(HashMap<String, (Vec<u8>, String)>);
 
 impl Receipts {
-    fn get(&self, work_id: &str, request_key: &str) -> Option<StoredReceipt> {
-        self.records.get(&key(work_id, request_key)).cloned()
+    fn get(&self, work_id: &str, request_key: &str) -> Option<(Vec<u8>, String)> {
+        self.0.get(&format!("{work_id}:{request_key}")).cloned()
     }
 
     fn put(&mut self, work_id: &str, request_key: &str, hash: &[u8], request_id: &str) {
-        self.records.insert(
-            key(work_id, request_key),
-            StoredReceipt {
-                hash: hash.to_vec(),
-                request_id: request_id.to_owned(),
-            },
+        self.0.insert(
+            format!("{work_id}:{request_key}"),
+            (hash.to_vec(), request_id.to_owned()),
         );
     }
 }
 
-fn key(work_id: &str, request_key: &str) -> String {
-    format!("{work_id}:{request_key}")
+fn agent_of(world: &mut World, work_id: &str) -> Option<Entity> {
+    let mut query = world.query::<(Entity, &WorkAgent)>();
+    query
+        .iter(world)
+        .find(|(_, agent)| agent.work_id == work_id)
+        .map(|(entity, _)| entity)
 }
 
-// === Host operations ======================================================
+/// Rebinding keeps `report`, settlement and permissions on the active run.
+fn bind(world: &mut World, entity: Entity, run_id: &str) {
+    if let Some(mut work) = world.get_mut::<WorkAgent>(entity) {
+        work.run_id = run_id.to_owned();
+    }
+}
 
-/// Registers the work tools and the turn-settle path.
+fn ensure(
+    world: &mut World,
+    companion: &Companion,
+    work_id: &str,
+    run_id: &str,
+    instruction: &str,
+) -> Entity {
+    match agent_of(world, work_id) {
+        Some(entity) => {
+            bind(world, entity, run_id);
+            entity
+        }
+        None => agent::spawn_work_agent(world, companion, work_id, run_id, instruction),
+    }
+}
+
+fn retire_entity(world: &mut World, entity: Entity) {
+    world.trigger(Retire { entity });
+    // The session-log observer despawns the agent after saving it. A host
+    // without that plugin must still release the entity.
+    if world.get_entity(entity).is_ok() {
+        world.despawn(entity);
+    }
+}
+
+fn retire(world: &mut World, work_id: &str) {
+    let entities: Vec<Entity> = {
+        let mut query = world.query::<(Entity, &WorkAgent)>();
+        query
+            .iter(world)
+            .filter(|(_, agent)| agent.work_id == work_id)
+            .map(|(entity, _)| entity)
+            .collect()
+    };
+    for entity in entities {
+        retire_entity(world, entity);
+    }
+}
+
+/// Keeps one agent per open session after a restart and restarts the stall
+/// clock of each open run. The active run's agent (else the first) wins.
+fn restore(world: &mut World) {
+    let store = world.resource::<Store>().clone();
+    let agents: Vec<(Entity, String, String)> = {
+        let mut query = world.query::<(Entity, &WorkAgent)>();
+        query
+            .iter(world)
+            .map(|(entity, agent)| (entity, agent.work_id.clone(), agent.run_id.clone()))
+            .collect()
+    };
+    let mut kept: HashMap<String, Entity> = HashMap::new();
+    for (entity, work_id, run_id) in &agents {
+        let active = store
+            .active_run(work_id)
+            .ok()
+            .flatten()
+            .map(|run| run.run_id);
+        let open = store
+            .work_session(work_id)
+            .ok()
+            .flatten()
+            .is_some_and(|session| session.status != WorkStatus::Closed);
+        if open && (active.as_deref() == Some(run_id.as_str()) || !kept.contains_key(work_id)) {
+            kept.insert(work_id.clone(), *entity);
+        }
+    }
+    for (entity, work_id, _) in agents {
+        if kept.get(&work_id) != Some(&entity) {
+            retire_entity(world, entity);
+        }
+    }
+    for companion in store.companions().unwrap_or_default() {
+        for session in store.work_sessions(&companion.id).unwrap_or_default() {
+            if let Ok(Some(run)) = store.active_run(&session.id) {
+                world.resource_mut::<Runs>().begin(&run.run_id);
+            }
+        }
+    }
+}
+
 pub(crate) struct WorkPlugin;
 
 impl Plugin for WorkPlugin {
     fn build(&self, app: &mut App) {
         tools::register(app);
-        app.init_resource::<RunActivity>()
-            .init_resource::<PendingStops>()
+        app.init_resource::<Runs>()
             .init_resource::<Receipts>()
             .init_resource::<AcpEvents>()
             .init_resource::<AcpBackends>()
@@ -436,29 +420,8 @@ impl Plugin for WorkPlugin {
     }
 }
 
-/// Reconciles the long-lived session agents after a restart and restarts the
-/// stall clock of every run that is still open.
-pub(crate) fn restore(world: &mut World) {
-    continuity::restore(world);
-    let store = world.resource::<Store>().clone();
-    let mut open = Vec::new();
-    for companion in store.companions().unwrap_or_default() {
-        for session in store.work_sessions(&companion.id).unwrap_or_default() {
-            if let Ok(Some(run)) = store.active_run(&session.id) {
-                open.push((session.id, run.run_id));
-            }
-        }
-    }
-    let mut activity = world.resource_mut::<RunActivity>();
-    for (work_id, run_id) in open {
-        activity.begin(&work_id, &run_id);
-    }
-}
-
 pub(crate) fn list(store: &Store, companion: &str) -> Result<w::WorkViews> {
-    store
-        .companion(companion)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    require_companion(store, companion)?;
     let mut items = Vec::new();
     for session in store.work_sessions(companion)? {
         items.push(view(store, &session.id)?);
@@ -474,28 +437,45 @@ pub(crate) fn get(store: &Store, work_id: &str) -> Result<w::WorkView> {
 }
 
 fn view(store: &Store, work_id: &str) -> Result<w::WorkView> {
-    let session = store
-        .work_session(work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
+    let session = require_session(store, work_id)?;
     let runs = store.runs(work_id)?;
     let inquiries = store.pending_inquiries(work_id)?;
     Ok(wire::work_view(&session, &runs, &inquiries))
 }
 
-/// Commissions work from a client. The client generation is captured now and
-/// the hand's device operations are bound to it.
+fn require_companion(store: &Store, id: &str) -> Result<Companion> {
+    store
+        .companion(id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))
+}
+
+fn require_session(store: &Store, id: &str) -> Result<WorkSession> {
+    store
+        .work_session(id)?
+        .ok_or_else(|| HostError::not_found("work session not found"))
+}
+
+fn require_inquiry(store: &Store, request_id: &str, work_id: &str) -> Result<Inquiry> {
+    let inquiry = store
+        .inquiry(request_id)?
+        .ok_or_else(|| HostError::not_found("inquiry not found"))?;
+    if inquiry.work_id != work_id {
+        return Err(HostError::invalid(
+            "the inquiry belongs to another work session",
+        ));
+    }
+    Ok(inquiry)
+}
+
 pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w::WorkSession> {
     let store = world.resource::<Store>().clone();
-    let companion = store
-        .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let companion = require_companion(&store, &request.companion_id)?;
     if request.instruction.trim().is_empty() {
         return Err(HostError::invalid("an instruction is required"));
     }
     let (client_id, activation_revision) = binding_for(&store, &request)?;
-    let work_id = uuid::Uuid::new_v4().to_string();
     let session = WorkSession {
-        id: work_id.clone(),
+        id: uuid::Uuid::new_v4().to_string(),
         companion_id: companion.id.clone(),
         title: if request.title.trim().is_empty() {
             super::db::truncate(&request.instruction, 80)
@@ -510,24 +490,19 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
     };
     store.insert_work_session(&session)?;
     if let Err(error) = start_run(world, &session, &request.instruction) {
-        let _ = store.set_work_status(&work_id, WorkStatus::Closed);
-        continuity::retire(world, &work_id);
-        acp::shutdown(world, &work_id);
+        let _ = store.set_work_status(&session.id, WorkStatus::Closed);
+        retire(world, &session.id);
+        acp::shutdown(world, &session.id);
         return Err(error);
     }
-    let session = store
-        .work_session(&work_id)?
-        .ok_or_else(|| HostError::storage("work session insert did not persist"))?;
-    Ok(wire::work_session(&session))
+    let stored = require_session(&store, &session.id)?;
+    Ok(wire::work_session(&stored))
 }
 
-/// The backend a new run of this session must use.
-enum PlannedBackend {
+enum Backend {
     Rig,
-    /// An ACP process must be started for this session.
-    Acp(AcpConnection),
-    /// The ACP process is already running.
-    AcpLive,
+    /// `None` means the same session's ACP process is already running.
+    Acp(Option<AcpConnection>),
 }
 
 fn plan_backend(
@@ -535,43 +510,39 @@ fn plan_backend(
     store: &Store,
     companion: &Companion,
     work_id: &str,
-) -> Result<PlannedBackend> {
-    if world.resource::<AcpBackends>().is_acp(work_id) {
-        return Ok(PlannedBackend::AcpLive);
+) -> Result<Backend> {
+    if world.resource::<AcpBackends>().0.contains_key(work_id) {
+        return Ok(Backend::Acp(None));
     }
-    if continuity::agent_of(world, work_id).is_some() {
-        return Ok(PlannedBackend::Rig);
+    if agent_of(world, work_id).is_some() {
+        return Ok(Backend::Rig);
     }
     let Some(assignment) = companion.model(Role::Task) else {
-        return Ok(PlannedBackend::Rig);
+        return Ok(Backend::Rig);
     };
     let Some(connection) = store.connection(&assignment.connection_id)? else {
-        return Ok(PlannedBackend::Rig);
+        return Ok(Backend::Rig);
     };
-    match connection.config {
-        ConnectionConfig::Acp(config) => {
-            if !connection.enabled {
-                return Err(HostError::unavailable(
-                    "the assigned ACP connection is disabled",
-                ));
-            }
-            if config.command.trim().is_empty() {
-                return Err(HostError::unavailable("the ACP connection has no command"));
-            }
-            // A session that already ran on ACP keeps its context in that
-            // process. Starting a fresh one would silently drop it.
-            if !store.runs(work_id)?.is_empty() {
-                return Err(HostError::unavailable(
-                    "the ACP agent of this work session is no longer running",
-                ));
-            }
-            Ok(PlannedBackend::Acp(config))
-        }
-        _ => Ok(PlannedBackend::Rig),
+    let ConnectionConfig::Acp(config) = connection.config else {
+        return Ok(Backend::Rig);
+    };
+    if !connection.enabled {
+        return Err(HostError::unavailable(
+            "the assigned ACP connection is disabled",
+        ));
     }
+    if config.command.trim().is_empty() {
+        return Err(HostError::unavailable("the ACP connection has no command"));
+    }
+    // A session that already ran on ACP keeps its context in that process.
+    if !store.runs(work_id)?.is_empty() {
+        return Err(HostError::unavailable(
+            "the ACP agent of this work session is no longer running",
+        ));
+    }
+    Ok(Backend::Acp(Some(config)))
 }
 
-/// Starts one run in an existing session, reusing its agent or ACP process.
 pub(crate) fn start_run(
     world: &mut World,
     session: &WorkSession,
@@ -584,42 +555,27 @@ pub(crate) fn start_run(
     if instruction.trim().is_empty() {
         return Err(HostError::invalid("an instruction is required"));
     }
-    // One open run per session: the next instruction is a new run only after
-    // the previous one settles.
     if let Some(active) = store.active_run(&session.id)? {
         return Err(HostError::conflict(format!(
             "the work session is already running run {}",
             active.run_id
         )));
     }
-    let companion = store
-        .companion(&session.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
-    let planned = plan_backend(world, &store, &companion, &session.id)?;
-    let starting = matches!(planned, PlannedBackend::Acp(_));
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let run = Run {
-        run_id: run_id.clone(),
-        work_id: session.id.clone(),
-        instruction: instruction.to_owned(),
-        state: if starting {
-            RunState::Starting
-        } else {
-            RunState::Running
-        },
-        pending_request_id: None,
-        failure: None,
-        cancellation_requested_at: None,
-        cancellation_reason: None,
-        unverified_pids: Vec::new(),
-        started_at: String::new(),
-        updated_at: String::new(),
+    let companion = require_companion(&store, &session.companion_id)?;
+    let backend = plan_backend(world, &store, &companion, &session.id)?;
+    let starting = matches!(backend, Backend::Acp(Some(_)));
+    let state = if starting {
+        RunState::Starting
+    } else {
+        RunState::Running
     };
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let run = new_run(run_id, &session.id, instruction, state);
     store.insert_run(&run)?;
     store.set_work_status(&session.id, WorkStatus::Active)?;
-    let failure = match planned {
-        PlannedBackend::Rig => {
-            let agent = continuity::ensure(world, &companion, &session.id, &run_id, instruction);
+    let failure = match backend {
+        Backend::Rig => {
+            let agent = ensure(world, &companion, &session.id, &run.run_id, instruction);
             match agent::ensure_model(world, agent) {
                 Ok(()) => {
                     world.trigger(Deliver::new(
@@ -632,60 +588,47 @@ pub(crate) fn start_run(
                 Err(error) => Some(error),
             }
         }
-        PlannedBackend::AcpLive => {
-            let prompt = {
-                let backends = world.resource::<AcpBackends>();
-                backends
-                    .handle(&session.id)
-                    .is_some_and(|handle| handle.prompt(&run_id, instruction))
+        Backend::Acp(connection) => {
+            let prompted = match connection {
+                Some(connection) => acp::spawn(world, &session.id, &connection).map(|handle| {
+                    let prompted = handle.prompt(&run.run_id, instruction);
+                    world
+                        .resource_mut::<AcpBackends>()
+                        .0
+                        .insert(session.id.clone(), handle);
+                    prompted
+                }),
+                None => Ok(world
+                    .resource::<AcpBackends>()
+                    .0
+                    .get(&session.id)
+                    .is_some_and(|handle| handle.prompt(&run.run_id, instruction))),
             };
-            if prompt {
-                None
-            } else {
-                Some(HostError::unavailable(
-                    "the ACP agent is not accepting prompts",
-                ))
-            }
-        }
-        PlannedBackend::Acp(connection) => match acp::spawn(world, &session.id, &connection) {
-            Ok(handle) => {
-                let prompt = handle.prompt(&run_id, instruction);
-                world.resource_mut::<AcpBackends>().insert(handle);
-                if prompt {
-                    None
-                } else {
+            match prompted {
+                Ok(true) => None,
+                Ok(false) => {
                     acp::shutdown(world, &session.id);
                     Some(HostError::unavailable(
                         "the ACP agent is not accepting prompts",
                     ))
                 }
+                Err(error) => Some(error),
             }
-            Err(error) => Some(error),
-        },
+        }
     };
     if let Some(error) = failure {
         let _ = fail_run(&store, &run, &error);
         let _ = store.set_work_status(&session.id, WorkStatus::Idle);
         if let Ok(Some(session)) = store.work_session(&session.id) {
             notify_status(world, &session);
-            if let Ok(Some(failed)) = store.run(&run_id) {
-                notify_run(
-                    world,
-                    &session,
-                    &failed,
-                    w::WorkEventKind::RunFinished,
-                    w::work_event::Detail::RunFinished(Box::new(wire::work_run_finished(&failed))),
-                );
+            if let Ok(Some(failed)) = store.run(&run.run_id) {
+                notify_finished(world, &session, &failed);
             }
         }
         return Err(error);
     }
-    world
-        .resource_mut::<RunActivity>()
-        .begin(&session.id, &run_id);
-    let session = store
-        .work_session(&session.id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
+    world.resource_mut::<Runs>().begin(&run.run_id);
+    let session = require_session(&store, &session.id)?;
     notify_status(world, &session);
     notify_run(
         world,
@@ -706,36 +649,31 @@ fn fail_run(store: &Store, run: &Run, error: &HostError) -> Result<()> {
 
 fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<(Option<String>, u64)> {
     let activation = store.activation(&request.companion_id)?;
-    if !request.client_id.is_empty() {
-        super::db::validate_id(&request.client_id)?;
-        store
-            .client(&request.client_id)?
-            .ok_or_else(|| HostError::not_found("client not found"))?;
-        let Some(activation) = activation else {
-            return Err(HostError::conflict(
-                "the companion has no active client to bind the session to",
-            ));
-        };
-        if activation.client_id.as_deref() != Some(request.client_id.as_str()) {
-            return Err(HostError::conflict(
-                "the requested client is not the active client of this companion",
-            ));
-        }
-        return Ok((activation.client_id, activation.revision));
+    if request.client_id.is_empty() {
+        return Ok(activation
+            .map(|activation| (activation.client_id, activation.revision))
+            .unwrap_or((None, 0)));
     }
-    Ok(activation
-        .map(|activation| (activation.client_id, activation.revision))
-        .unwrap_or((None, 0)))
+    super::db::validate_id(&request.client_id)?;
+    store
+        .client(&request.client_id)?
+        .ok_or_else(|| HostError::not_found("client not found"))?;
+    let Some(activation) = activation else {
+        return Err(HostError::conflict(
+            "the companion has no active client to bind the session to",
+        ));
+    };
+    if activation.client_id.as_deref() != Some(request.client_id.as_str()) {
+        return Err(HostError::conflict(
+            "the requested client is not the active client of this companion",
+        ));
+    }
+    Ok((activation.client_id, activation.revision))
 }
 
-/// Adds text to the active run of a session, or starts a new run when the
-/// session is idle. `request_id` binds the text to a pending inquiry;
-/// `request_key` makes a retry return the original acceptance.
 pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::WorkAcceptance> {
     let store = world.resource::<Store>().clone();
-    let session = store
-        .work_session(&request.work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
+    let session = require_session(&store, &request.work_id)?;
     if session.status == WorkStatus::Closed {
         return Err(HostError::conflict("work session is closed"));
     }
@@ -743,113 +681,98 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     let hash = super::db::digest(
         format!("{}:{}:{}", request.work_id, request.text, inquiry_id).as_bytes(),
     );
-    let agent = continuity::agent_of(world, &request.work_id);
+    let agent = agent_of(world, &request.work_id);
     if !request.request_key.is_empty()
-        && let Some(receipt) = receipt(world, agent, &request.work_id, &request.request_key)
+        && let Some((stored, request_id)) =
+            receipt(world, agent, &request.work_id, &request.request_key)
     {
-        if receipt.hash != hash {
+        if stored != hash {
             return Err(HostError::already_exists(
                 "this request key already accepted different content",
             ));
         }
         return Ok(w::WorkAcceptance {
-            request_id: receipt.request_id,
+            request_id,
             ..Default::default()
         });
     }
     let inquiry = if inquiry_id.is_empty() {
         None
     } else {
-        let inquiry = store
-            .inquiry(&inquiry_id)?
-            .ok_or_else(|| HostError::not_found("inquiry not found"))?;
-        if inquiry.work_id != request.work_id {
-            return Err(HostError::invalid(
-                "the inquiry belongs to another work session",
+        Some(require_inquiry(&store, &inquiry_id, &request.work_id)?)
+    };
+    let request_id = if inquiry_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        inquiry_id.clone()
+    };
+    if let Some(mut run) = store.active_run(&request.work_id)? {
+        if run.state.is_terminal() {
+            return Err(HostError::conflict("work session has no active run"));
+        }
+        if world
+            .resource::<AcpBackends>()
+            .0
+            .contains_key(&request.work_id)
+        {
+            return Err(HostError::conflict(
+                "the ACP agent is running a prompt; wait for it to finish before sending more input",
             ));
         }
-        Some(inquiry)
-    };
-    let acceptance = match store.active_run(&request.work_id)? {
-        Some(mut run) => {
-            if run.state.is_terminal() {
-                return Err(HostError::conflict("work session has no active run"));
-            }
-            if world.resource::<AcpBackends>().is_acp(&request.work_id) {
+        let Some(agent) = agent else {
+            return Err(HostError::unavailable("the work agent is not running"));
+        };
+        bind(world, agent, &run.run_id);
+        if let Some(inquiry) = &inquiry {
+            if inquiry.run_id != run.run_id {
                 return Err(HostError::conflict(
-                    "the ACP agent is running a prompt; wait for it to finish before sending more input",
+                    "the inquiry belongs to a run that is no longer active",
                 ));
             }
-            let Some(agent) = agent else {
-                return Err(HostError::unavailable("the work agent is not running"));
-            };
-            continuity::bind(world, agent, &run.run_id);
-            if let Some(inquiry) = &inquiry {
-                if inquiry.run_id != run.run_id {
-                    return Err(HostError::conflict(
-                        "the inquiry belongs to a run that is no longer active",
-                    ));
-                }
-                store.resolve_inquiry(&inquiry_id, &request.text)?;
-                run.state = transition(run.state, RunEvent::Resume).unwrap_or(RunState::Running);
-                run.pending_request_id = None;
-                store.update_run(&run)?;
-                notify_run(
-                    world,
-                    &session,
-                    &run,
-                    w::WorkEventKind::StatusChanged,
-                    w::work_event::Detail::StatusChanged(Box::new(w::WorkStatusChanged {
-                        status: w::WorkStatus::Active.into(),
-                        ..Default::default()
-                    })),
-                );
-            }
-            world.trigger(Deliver::new(
-                agent,
-                request.text.clone(),
-                DeliveryMode::Steer,
-            ));
-            world
-                .resource_mut::<RunActivity>()
-                .touch(&request.work_id, &run.run_id);
-            if inquiry_id.is_empty() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                inquiry_id.clone()
-            }
+            store.resolve_inquiry(&inquiry_id, &request.text)?;
+            resume(&mut run);
+            store.update_run(&run)?;
+            notify_active(world, &session, &run);
         }
-        None => {
-            let run = start_run(world, &session, &request.text)?;
-            if let Some(inquiry) = &inquiry {
-                store.resolve_inquiry(&inquiry.request_id, &request.text)?;
-            }
-            world
-                .resource_mut::<RunActivity>()
-                .touch(&request.work_id, &run.run_id);
-            if inquiry_id.is_empty() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                inquiry_id.clone()
-            }
-        }
-    };
+        world.trigger(Deliver::new(
+            agent,
+            request.text.clone(),
+            DeliveryMode::Steer,
+        ));
+        world.resource_mut::<Runs>().touch(&run.run_id);
+        return accepted(world, &store, request, &hash, request_id);
+    }
+    let run = start_run(world, &session, &request.text)?;
+    if let Some(inquiry) = &inquiry {
+        store.resolve_inquiry(&inquiry.request_id, &request.text)?;
+    }
+    world.resource_mut::<Runs>().touch(&run.run_id);
+    accepted(world, &store, request, &hash, request_id)
+}
+
+fn accepted(
+    world: &mut World,
+    store: &Store,
+    request: w::SendWorkRequest,
+    hash: &[u8],
+    request_id: String,
+) -> Result<w::WorkAcceptance> {
     if !request.request_key.is_empty() {
-        let agent = continuity::agent_of(world, &request.work_id);
+        let agent = agent_of(world, &request.work_id);
         record_receipt(
             world,
             agent,
             &request.work_id,
             &request.request_key,
-            &hash,
-            &acceptance,
+            hash,
+            &request_id,
         );
     }
     if let Ok(Some(session)) = store.work_session(&request.work_id) {
         notify_status(world, &session);
     }
     Ok(w::WorkAcceptance {
-        request_id: acceptance,
+        request_id,
         ..Default::default()
     })
 }
@@ -859,7 +782,7 @@ fn receipt(
     agent: Option<Entity>,
     work_id: &str,
     request_key: &str,
-) -> Option<StoredReceipt> {
+) -> Option<(Vec<u8>, String)> {
     if let Some(agent) = agent
         && let Some(conversation) = world.get::<Conversation>(agent)
     {
@@ -867,32 +790,19 @@ fn receipt(
             .asides()
             .filter(|(_, aside)| aside.kind == "ene.work_accepted")
         {
-            if aside
-                .value
-                .get("request_key")
-                .and_then(|value| value.as_str())
-                != Some(request_key)
-            {
+            if aside.value.get("request_key").and_then(|key| key.as_str()) != Some(request_key) {
                 continue;
             }
-            let hash: Vec<u8> = aside
+            let hash = aside
                 .value
-                .get("hash")
-                .and_then(|hash| hash.as_array())
-                .map(|bytes| {
-                    bytes
-                        .iter()
-                        .filter_map(serde_json::Value::as_u64)
-                        .map(|byte| byte as u8)
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(request_id) = aside.value.get("request_id").and_then(|id| id.as_str()) {
-                return Some(StoredReceipt {
-                    hash,
-                    request_id: request_id.to_owned(),
-                });
-            }
+                .get("hash")?
+                .as_array()?
+                .iter()
+                .filter_map(serde_json::Value::as_u64)
+                .map(|byte| byte as u8)
+                .collect();
+            let request_id = aside.value.get("request_id")?.as_str()?;
+            return Some((hash, request_id.to_owned()));
         }
     }
     world
@@ -927,32 +837,26 @@ fn record_receipt(
         .put(work_id, request_key, hash, request_id);
 }
 
-/// Answers one pending inquiry from the UI.
 pub(crate) fn answer_inquiry(
     world: &mut World,
     request: w::AnswerInquiryRequest,
 ) -> Result<w::WorkAcceptance> {
     let store = world.resource::<Store>().clone();
-    let inquiry = store
-        .inquiry(&request.request_id)?
-        .ok_or_else(|| HostError::not_found("inquiry not found"))?;
-    if inquiry.work_id != request.work_id {
-        return Err(HostError::invalid(
-            "the inquiry belongs to another work session",
-        ));
-    }
-    let session = store
-        .work_session(&request.work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
+    let inquiry = require_inquiry(&store, &request.request_id, &request.work_id)?;
+    let session = require_session(&store, &request.work_id)?;
     if session.status == WorkStatus::Closed {
         return Err(HostError::conflict("work session is closed"));
     }
-    if world.resource::<AcpBackends>().is_acp(&request.work_id) {
+    if world
+        .resource::<AcpBackends>()
+        .0
+        .contains_key(&request.work_id)
+    {
         return Err(HostError::unavailable(
             "ACP work sessions do not report inquiries",
         ));
     }
-    let run = store
+    let mut run = store
         .active_run(&request.work_id)?
         .ok_or_else(|| HostError::conflict("work session has no active run"))?;
     if run.run_id != inquiry.run_id {
@@ -960,51 +864,37 @@ pub(crate) fn answer_inquiry(
             "the inquiry belongs to a run that is no longer active",
         ));
     }
-    let agent = continuity::agent_of(world, &request.work_id)
+    let agent = agent_of(world, &request.work_id)
         .ok_or_else(|| HostError::unavailable("the work agent is not running"))?;
-    continuity::bind(world, agent, &run.run_id);
-    store.resolve_inquiry(&request.request_id, &request.answer)?;
-    let mut answer = run.clone();
-    answer.state = transition(answer.state, RunEvent::Resume).unwrap_or(RunState::Running);
-    answer.pending_request_id = None;
-    store.update_run(&answer)?;
-    world
-        .resource_mut::<RunActivity>()
-        .touch(&request.work_id, &answer.run_id);
+    bind(world, agent, &run.run_id);
+    store.resolve_inquiry(&inquiry.request_id, &request.answer)?;
+    resume(&mut run);
+    store.update_run(&run)?;
+    world.resource_mut::<Runs>().touch(&run.run_id);
     world.trigger(Deliver::new(
         agent,
         format!("ユーザーからの回答: {}", request.answer),
         DeliveryMode::Steer,
     ));
-    notify_run(
-        world,
-        &session,
-        &answer,
-        w::WorkEventKind::StatusChanged,
-        w::work_event::Detail::StatusChanged(Box::new(w::WorkStatusChanged {
-            status: w::WorkStatus::Active.into(),
-            ..Default::default()
-        })),
-    );
+    notify_active(world, &session, &run);
     Ok(w::WorkAcceptance {
         request_id: request.request_id,
         ..Default::default()
     })
 }
 
-/// Requests a cooperative stop. The turn-settle observer records the outcome;
-/// [`expire_stops`] forces the process group down after [`STOP_TIMEOUT`].
+fn resume(run: &mut Run) {
+    run.state = transition(run.state, RunEvent::Resume).unwrap_or(RunState::Running);
+    run.pending_request_id = None;
+}
+
 pub(crate) fn stop(world: &mut World, work_id: &str) -> Result<()> {
     stop_with(world, work_id, None)
 }
 
-/// The same stop with the user's reason recorded on the run.
 pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    let session = store
-        .work_session(work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
-    if session.status == WorkStatus::Closed {
+    if require_session(&store, work_id)?.status == WorkStatus::Closed {
         return Ok(());
     }
     let Some(mut run) = store.active_run(work_id)? else {
@@ -1022,7 +912,7 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
     run.cancellation_reason = Some(reason.clone());
     store.update_run(&run)?;
     if !acp::cancel(world, work_id, &run.run_id)
-        && let Some(agent) = continuity::agent_of(world, work_id)
+        && let Some(agent) = agent_of(world, work_id)
     {
         world.trigger(StopTurn {
             entity: agent,
@@ -1030,36 +920,26 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
         });
     }
     if !already_cancelling {
-        world
-            .resource_mut::<PendingStops>()
-            .arm(&run.run_id, work_id, &reason);
+        world.resource_mut::<Runs>().arm(&run.run_id, &reason);
     }
     Ok(())
 }
 
-/// Closes a session. Any open run is stopped and the agent is released; an ACP
-/// process is terminated with the session.
 pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    let session = store
-        .work_session(work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
-    if session.status == WorkStatus::Closed {
+    if require_session(&store, work_id)?.status == WorkStatus::Closed {
         return Ok(());
     }
     stop_with(world, work_id, Some("the work session is closing"))?;
     store.close_work(work_id)?;
-    let session = store
-        .work_session(work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
-    notify_status(world, &session);
-    continuity::retire(world, work_id);
+    if let Ok(Some(session)) = store.work_session(work_id) {
+        notify_status(world, &session);
+    }
+    retire(world, work_id);
     acp::shutdown(world, work_id);
     Ok(())
 }
 
-/// Called when a work agent's turn settled: records the run, reports to the
-/// parent and keeps the session agent alive.
 pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome) {
     let store = world.resource::<Store>().clone();
     let Ok(Some(run)) = store.run(&run_id) else {
@@ -1069,8 +949,12 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
         return;
     }
     let reported_failure = world.resource::<WorkReports>().failed.get(&run_id).cloned();
-    let (state, text) = match &outcome {
-        TurnOutcome::Answered(message) => {
+    let (state, text) = match (&reported_failure, &outcome) {
+        (Some(reason), _) => (
+            transition(run.state, RunEvent::Fail).unwrap_or(RunState::Failed),
+            Some(reason.clone()),
+        ),
+        (None, TurnOutcome::Answered(message)) => {
             let report = world
                 .resource::<WorkReports>()
                 .completed
@@ -1081,21 +965,18 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
                 report.or_else(|| message_text(message)),
             )
         }
-        TurnOutcome::Stopped(_) => (classify_stop(StopConfirmation::Cooperative), None),
-        TurnOutcome::Failed(why) => (
+        (None, TurnOutcome::Stopped(_)) => (
+            transition(run.state, RunEvent::CancelConfirmed).unwrap_or(RunState::Cancelled),
+            None,
+        ),
+        (None, TurnOutcome::Failed(why)) => (
             transition(run.state, RunEvent::Fail).unwrap_or(RunState::Failed),
             Some(format!("作業を続けられませんでした: {why}")),
         ),
     };
-    let (state, text) = match reported_failure {
-        Some(reason) => (RunState::Failed, Some(reason)),
-        None => (state, text),
-    };
     finish_run(world, run, state, text, None);
 }
 
-/// Records a forced stop, classifying it as `Cancelled` only when the process
-/// is known to be gone.
 pub(crate) fn record_forced_stop(
     world: &mut World,
     run_id: &str,
@@ -1108,27 +989,25 @@ pub(crate) fn record_forced_stop(
         return;
     };
     if run.state.is_terminal() {
-        world.resource_mut::<PendingStops>().remove(run_id);
+        world.resource_mut::<Runs>().set_stop(run_id, None);
         return;
     }
-    let confirmation = if confirmed {
-        StopConfirmation::ForcedConfirmed
-    } else {
-        StopConfirmation::ForcedUnconfirmed
-    };
     let event = if confirmed {
         RunEvent::CancelConfirmed
     } else {
         RunEvent::CancelUnconfirmed
     };
-    let state = transition(run.state, event).unwrap_or_else(|| classify_stop(confirmation));
+    let state = transition(run.state, event).unwrap_or(if confirmed {
+        RunState::Cancelled
+    } else {
+        RunState::CancellationUnconfirmed
+    });
     let text = (state == RunState::CancellationUnconfirmed).then(|| {
         format!("作業を停止しましたが、完全に停止したか確認できませんでした（{reason}）。")
     });
     finish_run(world, run, state, text, Some((reason.to_owned(), pids)));
 }
 
-/// Marks a run as running once its backend is ready.
 pub(crate) fn mark_run_running(world: &mut World, run_id: &str) {
     let store = world.resource::<Store>().clone();
     let Ok(Some(mut run)) = store.run(run_id) else {
@@ -1154,11 +1033,9 @@ fn finish_run(
     cancellation: Option<(String, Vec<u32>)>,
 ) {
     let store = world.resource::<Store>().clone();
-    let was_active = store
-        .active_run(&run.work_id)
-        .ok()
-        .flatten()
-        .is_some_and(|active| active.run_id == run.run_id);
+    let active = store.active_run(&run.work_id).ok().flatten();
+    let was_active = active.is_some_and(|active| active.run_id == run.run_id);
+    let run_id = run.run_id.clone();
     run.state = state;
     run.pending_request_id = None;
     match state {
@@ -1168,9 +1045,7 @@ fn finish_run(
                 text.clone().unwrap_or_else(|| "the run failed".to_owned()),
             ));
         }
-        RunState::Cancelled => {
-            run.unverified_pids.clear();
-        }
+        RunState::Cancelled => run.unverified_pids.clear(),
         RunState::CancellationUnconfirmed => {
             let (reason, pids) = cancellation
                 .unwrap_or_else(|| ("the stop was not confirmed".to_owned(), Vec::new()));
@@ -1184,81 +1059,66 @@ fn finish_run(
         return;
     }
     let session = store.work_session(&run.work_id).ok().flatten();
-    if was_active {
-        if let Some(session) = &session {
-            if session.status != WorkStatus::Closed {
-                let _ = store.set_work_status(&session.id, WorkStatus::Idle);
-            }
-            if let Ok(Some(session)) = store.work_session(&session.id) {
-                notify_status(world, &session);
-                notify_run(
-                    world,
-                    &session,
-                    &run,
-                    w::WorkEventKind::RunFinished,
-                    w::work_event::Detail::RunFinished(Box::new(wire::work_run_finished(&run))),
+    if was_active && let Some(session) = &session {
+        if session.status != WorkStatus::Closed {
+            let _ = store.set_work_status(&session.id, WorkStatus::Idle);
+        }
+        if let Ok(Some(session)) = store.work_session(&session.id) {
+            notify_status(world, &session);
+            notify_finished(world, &session, &run);
+            if let Some(parent) = agent::agent_of(world, &session.companion_id) {
+                let report = text.unwrap_or_else(|| {
+                    match state {
+                        RunState::Cancelled => "作業を中断しました",
+                        _ => "作業が終わりました",
+                    }
+                    .to_owned()
+                });
+                let author = Author::agent(
+                    agent::work_agent_id(&run_id),
+                    Some(RequestId(run_id.clone())),
                 );
-                if let Some(parent) = agent::agent_of(world, &session.companion_id) {
-                    let report = text.unwrap_or_else(|| match state {
-                        RunState::Cancelled => "作業を中断しました".to_owned(),
-                        _ => "作業が終わりました".to_owned(),
-                    });
-                    let author = Author::agent(
-                        agent::work_agent_id(&run.run_id),
-                        Some(RequestId(run.run_id.clone())),
-                    );
-                    world.trigger(
-                        Deliver::new(parent, report, DeliveryMode::Queue).with_author(author),
-                    );
-                }
+                world
+                    .trigger(Deliver::new(parent, report, DeliveryMode::Queue).with_author(author));
             }
         }
     } else if let Some(session) = &session {
-        // A late event of an older run is still an accurate audit record of
-        // that run, but it must never change the new run's session state.
-        notify_run(
-            world,
-            session,
-            &run,
-            w::WorkEventKind::RunFinished,
-            w::work_event::Detail::RunFinished(Box::new(wire::work_run_finished(&run))),
-        );
+        notify_finished(world, session, &run);
     }
-    let closed = session
+    if session
         .as_ref()
-        .is_some_and(|session| session.status == WorkStatus::Closed);
-    if closed {
-        continuity::retire(world, &run.work_id);
+        .is_some_and(|session| session.status == WorkStatus::Closed)
+    {
+        retire(world, &run.work_id);
         acp::shutdown(world, &run.work_id);
     }
-    world.resource_mut::<RunActivity>().forget(&run.run_id);
-    world.resource_mut::<PendingStops>().remove(&run.run_id);
-    world
-        .resource_mut::<WorkReports>()
-        .completed
-        .remove(&run.run_id);
-    world
-        .resource_mut::<WorkReports>()
-        .failed
-        .remove(&run.run_id);
+    world.resource_mut::<Runs>().forget(&run.run_id);
+    let reports = &mut world.resource_mut::<WorkReports>();
+    reports.completed.remove(&run.run_id);
+    reports.failed.remove(&run.run_id);
 }
 
-/// Forwards one streamed ACP update, throttled so the parent's transcript is
-/// not flooded by token-sized chunks.
 pub(crate) fn acp_update(world: &mut World, work_id: &str, run_id: &str, text: &str) {
     let forward = {
-        let mut activity = world.resource_mut::<RunActivity>();
-        activity.touch(work_id, run_id);
-        activity.forward_due(run_id, ACP_UPDATE_INTERVAL)
+        let mut runs = world.resource_mut::<Runs>();
+        runs.touch(run_id);
+        let live = runs.0.get_mut(run_id).expect("touched above");
+        let now = Instant::now();
+        let due = now.saturating_duration_since(live.forwarded) >= ACP_UPDATE_INTERVAL;
+        if due {
+            live.forwarded = now;
+        }
+        due
     };
-    if !forward {
-        return;
-    }
     let text = text.trim();
-    if text.is_empty() {
+    if !forward || text.is_empty() {
         return;
     }
-    let Some(parent) = parent_of(world, work_id) else {
+    let store = world.resource::<Store>().clone();
+    let Ok(Some(session)) = store.work_session(work_id) else {
+        return;
+    };
+    let Some(parent) = agent::agent_of(world, &session.companion_id) else {
         return;
     };
     let author = Author::agent(agent::work_agent_id(run_id), None);
@@ -1272,8 +1132,6 @@ pub(crate) fn acp_update(world: &mut World, work_id: &str, run_id: &str, text: &
     );
 }
 
-/// The ACP connection ended. A cancelling run is classified from the process
-/// result; any other open run fails honestly instead of looking completed.
 pub(crate) fn acp_closed(
     world: &mut World,
     work_id: &str,
@@ -1282,7 +1140,7 @@ pub(crate) fn acp_closed(
     confirmed: bool,
     pids: Vec<u32>,
 ) {
-    world.resource_mut::<AcpBackends>().remove(work_id);
+    world.resource_mut::<AcpBackends>().0.remove(work_id);
     let Some(run_id) = run_id else {
         return;
     };
@@ -1291,7 +1149,7 @@ pub(crate) fn acp_closed(
         return;
     };
     if run.state.is_terminal() {
-        world.resource_mut::<PendingStops>().remove(&run_id);
+        world.resource_mut::<Runs>().set_stop(&run_id, None);
         return;
     }
     if run.state == RunState::Cancelling {
@@ -1311,34 +1169,15 @@ pub(crate) fn acp_closed(
     }
 }
 
-/// Shows a sandbox notice for the session; never claims isolation.
-pub(crate) fn acp_warning(world: &mut World, work_id: &str, message: &str) {
-    let store = world.resource::<Store>().clone();
-    let Ok(Some(session)) = store.work_session(work_id) else {
-        return;
-    };
-    let message = super::db::truncate(message, 500);
-    let mut notifier = world.resource_mut::<Notifier>();
-    notifier.notice(
-        Some(&session.companion_id),
-        sandbox::NON_ISOLATED_CODE,
-        &message,
-    );
+fn note_activity(world: &mut World, run_id: &str) {
+    world.resource_mut::<Runs>().touch(run_id);
 }
 
-/// Records progress from a hand so the stall timer restarts.
-pub(crate) fn note_activity(world: &mut World, work_id: &str, run_id: &str) {
-    world.resource_mut::<RunActivity>().touch(work_id, run_id);
-}
-
-/// Injects one notice into the parent when a running run went silent for
-/// [`STALL_TIMEOUT`]. Exactly once per silence, as `stall_warned` records.
 fn detect_stalls(world: &mut World) {
-    let now = Instant::now();
     let due = world
-        .resource_mut::<RunActivity>()
-        .stalled(now, STALL_TIMEOUT);
-    for (run_id, work_id) in due {
+        .resource_mut::<Runs>()
+        .stalled(Instant::now(), STALL_TIMEOUT);
+    for run_id in due {
         let store = world.resource::<Store>().clone();
         let Ok(Some(run)) = store.run(&run_id) else {
             continue;
@@ -1346,7 +1185,7 @@ fn detect_stalls(world: &mut World) {
         if run.state != RunState::Running {
             continue;
         }
-        let Ok(Some(session)) = store.work_session(&work_id) else {
+        let Ok(Some(session)) = store.work_session(&run.work_id) else {
             continue;
         };
         if session.status == WorkStatus::Closed {
@@ -1366,42 +1205,30 @@ fn detect_stalls(world: &mut World) {
     }
 }
 
-/// Enforces the 30 second stop timeout without blocking the ECS thread.
 fn expire_stops(world: &mut World) {
     let now = Instant::now();
-    let due = world.resource_mut::<PendingStops>().take_due(now);
+    let due = world.resource_mut::<Runs>().due_stops(now);
     for (run_id, mut stop) in due {
         let store = world.resource::<Store>().clone();
         let Ok(Some(run)) = store.run(&run_id) else {
             continue;
         };
-        if !run.state.is_open() {
+        if run.state.is_terminal() {
             continue;
         }
-        if stop.force_sent {
-            let pids = acp::pids(world, &stop.work_id);
+        if stop.forced {
+            let pids = acp::pids(world, &run.work_id);
             let reason = format!("{} (the process group did not exit)", stop.reason);
             record_forced_stop(world, &run_id, false, pids, &reason);
-            continue;
-        }
-        if !acp::force_kill(world, &stop.work_id) {
-            // The rig backend runs in-process: there is no process group to
-            // kill, and a turn that ignored `StopTurn` for 30 seconds is not
-            // verifiably stopped.
+        } else if !acp::force_kill(world, &run.work_id) {
             let reason = format!("{} (no process group to kill)", stop.reason);
             record_forced_stop(world, &run_id, false, Vec::new(), &reason);
-            continue;
+        } else {
+            stop.forced = true;
+            stop.deadline = now + FORCE_GRACE;
+            world.resource_mut::<Runs>().set_stop(&run_id, Some(stop));
         }
-        stop.force_sent = true;
-        stop.deadline = now + FORCE_GRACE;
-        world.resource_mut::<PendingStops>().reinsert(run_id, stop);
     }
-}
-
-fn parent_of(world: &mut World, work_id: &str) -> Option<Entity> {
-    let store = world.resource::<Store>().clone();
-    let session = store.work_session(work_id).ok().flatten()?;
-    agent::agent_of(world, &session.companion_id)
 }
 
 fn message_text(message: &Message) -> Option<String> {
@@ -1421,8 +1248,36 @@ fn message_text(message: &Message) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+fn active_status() -> w::work_event::Detail {
+    w::work_event::Detail::StatusChanged(Box::new(w::WorkStatusChanged {
+        status: w::WorkStatus::Active.into(),
+        ..Default::default()
+    }))
+}
+
+fn notify_active(world: &mut World, session: &WorkSession, run: &Run) {
+    notify_run(
+        world,
+        session,
+        run,
+        w::WorkEventKind::StatusChanged,
+        active_status(),
+    );
+}
+
+fn notify_finished(world: &mut World, session: &WorkSession, run: &Run) {
+    notify_run(
+        world,
+        session,
+        run,
+        w::WorkEventKind::RunFinished,
+        w::work_event::Detail::RunFinished(Box::new(wire::work_run_finished(run))),
+    );
+}
+
 fn notify_status(world: &mut World, session: &WorkSession) {
-    let event = wire::work_event(
+    notify_event(
+        world,
         session,
         w::WorkEventKind::StatusChanged,
         w::work_event::Detail::StatusChanged(Box::new(w::WorkStatusChanged {
@@ -1430,13 +1285,16 @@ fn notify_status(world: &mut World, session: &WorkSession) {
             ..Default::default()
         })),
     );
-    let companion = session.companion_id.clone();
-    let mut notifier = world.resource_mut::<Notifier>();
-    notifier.push(
-        Some(&companion),
-        None,
-        w::notification::Event::WorkEvent(Box::new(event)),
-    );
+}
+
+fn notify_event(
+    world: &mut World,
+    session: &WorkSession,
+    kind: w::WorkEventKind,
+    detail: w::work_event::Detail,
+) {
+    let event = wire::work_event(session, kind, detail);
+    push_event(world, &session.companion_id, event);
 }
 
 fn notify_run(
@@ -1448,10 +1306,12 @@ fn notify_run(
 ) {
     let mut event = wire::work_event(session, kind, detail);
     event.run_id = run.run_id.clone();
-    let companion = session.companion_id.clone();
-    let mut notifier = world.resource_mut::<Notifier>();
-    notifier.push(
-        Some(&companion),
+    push_event(world, &session.companion_id, event);
+}
+
+fn push_event(world: &mut World, companion: &str, event: w::WorkEvent) {
+    world.resource_mut::<Notifier>().push(
+        Some(companion),
         None,
         w::notification::Event::WorkEvent(Box::new(event)),
     );
@@ -1460,13 +1320,6 @@ fn notify_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{
-        agent::WorkAgent,
-        json::JsonDoc,
-        mind::{Companion, Profile, State},
-        notify::Notifier,
-        work::continuity::SessionAgent,
-    };
 
     fn store() -> (tempfile::TempDir, Store) {
         let root = tempfile::tempdir().unwrap();
@@ -1474,9 +1327,9 @@ mod tests {
         (root, store)
     }
 
-    fn session(store: &Store, id: &str) -> WorkSession {
+    fn session(store: &Store) -> WorkSession {
         let session = WorkSession {
-            id: id.into(),
+            id: "w1".into(),
             companion_id: "ene".into(),
             title: "task".into(),
             status: WorkStatus::Active,
@@ -1489,22 +1342,9 @@ mod tests {
         session
     }
 
-    fn insert_run(store: &Store, work_id: &str, run_id: &str, state: RunState) {
-        store
-            .insert_run(&Run {
-                run_id: run_id.into(),
-                work_id: work_id.into(),
-                instruction: "do it".into(),
-                state,
-                pending_request_id: None,
-                failure: None,
-                cancellation_requested_at: None,
-                cancellation_reason: None,
-                unverified_pids: Vec::new(),
-                started_at: format!("2026-01-01T00:00:00Z-{run_id}"),
-                updated_at: String::new(),
-            })
-            .unwrap();
+    fn run(store: &Store, run_id: &str, state: RunState) {
+        let run = new_run(run_id.into(), "w1", "do it", state);
+        store.insert_run(&run).unwrap();
     }
 
     fn world(store: Store) -> World {
@@ -1512,233 +1352,91 @@ mod tests {
         world.insert_resource(store);
         world.insert_resource(Notifier::new());
         world.insert_resource(WorkReports::default());
-        world.insert_resource(RunActivity::default());
-        world.insert_resource(PendingStops::default());
-        world.insert_resource(Receipts::default());
-        world.insert_resource(acp::AcpBackends::default());
-        world.insert_resource(acp::AcpEvents::default());
+        world.insert_resource(Runs::default());
+        world.insert_resource(AcpBackends::default());
         world
     }
 
-    fn companion() -> Companion {
-        Companion {
-            id: "ene".into(),
-            name: "ene".into(),
-            mind: "kind".into(),
-            profile: Profile::default(),
-            profile_revision: 1,
-            state: State::default(),
-            state_revision: 1,
-            body: JsonDoc::new("ene.body.v1", serde_json::json!({})),
-            voice: JsonDoc::new("ene.voice.v1", serde_json::json!({})),
-            assignments: Default::default(),
-            persona: None,
-            voice_identifier: None,
-            revision: 1,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
+    fn agent(world: &mut World, run_id: &str) -> Entity {
+        world
+            .spawn(WorkAgent {
+                work_id: "w1".into(),
+                run_id: run_id.into(),
+                companion_id: "ene".into(),
+            })
+            .id()
+    }
+
+    fn state(store: &Store, run_id: &str) -> RunState {
+        store.run(run_id).unwrap().unwrap().state
     }
 
     #[test]
-    fn run_and_session_status_round_trip() {
-        for state in [
-            RunState::Starting,
-            RunState::Running,
-            RunState::WaitingInput,
-            RunState::Cancelling,
-            RunState::Completed,
-            RunState::Cancelled,
-            RunState::CancellationUnconfirmed,
-            RunState::Failed,
-        ] {
-            assert_eq!(RunState::parse(state.as_str()), Some(state));
-            assert_eq!(state.is_open(), !state.is_terminal());
-        }
-        assert!(RunState::Cancelled.is_terminal());
-        assert!(!RunState::Cancelling.is_terminal());
-        for status in [WorkStatus::Idle, WorkStatus::Active, WorkStatus::Closed] {
-            assert_eq!(WorkStatus::parse(status.as_str()), Some(status));
-        }
-    }
-
-    #[test]
-    fn the_run_state_machine_follows_the_contract() {
-        use RunEvent::*;
-        use RunState::*;
-        assert_eq!(transition(Starting, Start), Some(Running));
-        assert_eq!(transition(Running, Stop), Some(Cancelling));
-        assert_eq!(transition(WaitingInput, Stop), Some(Cancelling));
-        assert_eq!(transition(WaitingInput, Resume), Some(Running));
-        assert_eq!(transition(Running, Complete), Some(Completed));
-        assert_eq!(transition(Cancelling, CancelConfirmed), Some(Cancelled));
-        assert_eq!(
-            transition(Cancelling, CancelUnconfirmed),
-            Some(CancellationUnconfirmed)
-        );
-        assert_eq!(transition(Running, Fail), Some(Failed));
-        for terminal in [Completed, Cancelled, CancellationUnconfirmed, Failed] {
-            assert_eq!(transition(terminal, Stop), None);
-            assert_eq!(transition(terminal, Complete), None);
-        }
-    }
-
-    #[test]
-    fn a_session_agent_survives_a_finished_run() {
+    fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
         let (_root, store) = store();
-        let session = session(&store, "w1");
-        insert_run(&store, "w1", "run-a", RunState::Running);
+        session(&store);
+        run(&store, "run-a", RunState::Running);
         let mut world = world(store.clone());
-        let entity = world
-            .spawn((
-                WorkAgent {
-                    work_id: "w1".into(),
-                    run_id: "run-a".into(),
-                    companion_id: "ene".into(),
-                },
-                SessionAgent {
-                    work_id: "w1".into(),
-                },
-            ))
-            .id();
+        let kept = agent(&mut world, "run-a");
+
+        bind(&mut world, kept, "run-b");
+        assert_eq!(agent_of(&mut world, "w1"), Some(kept));
+        assert_eq!(world.get::<WorkAgent>(kept).unwrap().run_id, "run-b");
+
         settle_run(&mut world, "run-a".into(), TurnOutcome::Stopped(None));
-        let stored = store.run("run-a").unwrap().unwrap();
-        assert_eq!(stored.state, RunState::Cancelled);
+        assert_eq!(state(&store, "run-a"), RunState::Cancelled);
         assert_eq!(
             store.work_session("w1").unwrap().unwrap().status,
-            WorkStatus::Idle,
-            "a finished run leaves the session idle, not closed"
+            WorkStatus::Idle
         );
-        assert!(
-            world.get::<WorkAgent>(entity).is_some(),
-            "the session agent survives the run"
-        );
-        assert_eq!(continuity::agent_of(&mut world, "w1"), Some(entity));
+        assert_eq!(agent_of(&mut world, "w1"), Some(kept));
 
-        // The next run reuses that agent instead of spawning another one.
-        insert_run(&store, "w1", "run-b", RunState::Running);
-        continuity::bind(&mut world, entity, "run-b");
-        assert_eq!(continuity::agent_of(&mut world, "w1"), Some(entity));
-        assert!(agent::work_agent_of(&mut world, "run-b").is_some());
-        assert!(agent::work_agent_of(&mut world, "run-a").is_none());
-        let _ = session;
-    }
+        run(&store, "run-b", RunState::Running);
+        let stale = agent(&mut world, "run-a");
+        store.set_work_status("w1", WorkStatus::Active).unwrap();
+        restore(&mut world);
+        assert_eq!(agent_of(&mut world, "w1"), Some(kept));
+        assert!(world.get::<WorkAgent>(stale).is_none());
 
-    #[test]
-    fn a_new_run_reuses_the_one_session_agent() {
-        let mut world = World::new();
-        let companion = companion();
-        let first = continuity::ensure(&mut world, &companion, "w1", "run-a", "list the folder");
-        let second = continuity::ensure(&mut world, &companion, "w1", "run-b", "summarize it");
-        assert_eq!(
-            first, second,
-            "the second run binds the existing agent instead of spawning one"
-        );
-        assert_eq!(
-            world
-                .get::<WorkAgent>(first)
-                .map(|agent| agent.run_id.clone()),
-            Some("run-b".to_owned())
-        );
-        let count = {
-            let mut query = world.query::<&WorkAgent>();
-            query
-                .iter(&world)
-                .filter(|agent| agent.work_id == "w1")
-                .count()
-        };
-        assert_eq!(count, 1, "a session has exactly one work agent");
-    }
-
-    #[test]
-    fn a_late_run_does_not_overwrite_the_new_run() {
-        let (_root, store) = store();
-        session(&store, "w1");
-        insert_run(&store, "w1", "run-a", RunState::Running);
-        insert_run(&store, "w1", "run-b", RunState::Running);
-        let mut world = world(store.clone());
-        // Run B is the active one; a settlement for run A arrives late.
-        settle_run(&mut world, "run-a".into(), TurnOutcome::Stopped(None));
-        assert_eq!(
-            store.work_session("w1").unwrap().unwrap().status,
-            WorkStatus::Active,
-            "the late run's finish does not idle the session"
-        );
-        assert_eq!(
-            store.run("run-a").unwrap().unwrap().state,
-            RunState::Cancelled
-        );
-        assert_eq!(
-            store.run("run-b").unwrap().unwrap().state,
-            RunState::Running
-        );
+        store.set_work_status("w1", WorkStatus::Closed).unwrap();
+        restore(&mut world);
+        assert!(agent_of(&mut world, "w1").is_none());
     }
 
     #[test]
     fn a_stall_is_warned_once_and_reset_by_activity() {
+        let mut runs = Runs::default();
+        runs.begin("run-a");
         let now = Instant::now();
-        let mut activity = Activity {
-            work_id: "w1".into(),
-            last: now - STALL_TIMEOUT - Duration::from_secs(1),
-            last_forwarded: now,
-            warned: false,
-        };
-        assert!(due_for_stall(&mut activity, now, STALL_TIMEOUT));
-        assert!(
-            !due_for_stall(&mut activity, now, STALL_TIMEOUT),
-            "stall_warned keeps the notice to one"
+        runs.0.get_mut("run-a").unwrap().last = now - STALL_TIMEOUT - Duration::from_secs(1);
+        assert_eq!(runs.stalled(now, STALL_TIMEOUT), vec!["run-a".to_owned()]);
+        assert!(runs.stalled(now, STALL_TIMEOUT).is_empty());
+        runs.touch("run-a");
+        assert!(runs.stalled(now, STALL_TIMEOUT).is_empty());
+        assert_eq!(
+            runs.stalled(now + STALL_TIMEOUT + Duration::from_secs(1), STALL_TIMEOUT),
+            vec!["run-a".to_owned()],
+            "activity resets the silence window"
         );
-        activity.last = now;
-        activity.warned = false;
-        assert!(!due_for_stall(&mut activity, now, STALL_TIMEOUT));
-        assert!(due_for_stall(
-            &mut activity,
-            now + STALL_TIMEOUT + Duration::from_secs(1),
-            STALL_TIMEOUT
-        ));
     }
 
     #[test]
-    fn a_cancellation_timeout_is_classified_honestly() {
-        assert_eq!(
-            classify_stop(StopConfirmation::Cooperative),
-            RunState::Cancelled
-        );
-        assert_eq!(
-            classify_stop(StopConfirmation::ForcedConfirmed),
-            RunState::Cancelled
-        );
-        assert_eq!(
-            classify_stop(StopConfirmation::ForcedUnconfirmed),
-            RunState::CancellationUnconfirmed
-        );
-
-        let mut stops = PendingStops::default();
-        stops.arm("run-a", "w1", "the user stopped the work");
-        assert!(
-            stops.take_due(Instant::now()).is_empty(),
-            "the cooperative wait is still running"
-        );
-        let due = stops.take_due(Instant::now() + STOP_TIMEOUT + Duration::from_secs(1));
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].0, "run-a");
-        assert_eq!(due[0].1.reason, "the user stopped the work");
-        assert!(!due[0].1.force_sent);
-    }
-
-    #[test]
-    fn an_unverified_forced_stop_records_the_unverified_pids() {
+    fn a_stop_is_only_classified_cancelled_when_it_is_confirmed() {
         let (_root, store) = store();
-        session(&store, "w1");
-        insert_run(&store, "w1", "run-a", RunState::Cancelling);
+        session(&store);
+        run(&store, "run-a", RunState::Cancelling);
         let mut world = world(store.clone());
-        record_forced_stop(
-            &mut world,
-            "run-a",
-            false,
-            vec![4242],
-            "the process did not exit",
-        );
+
+        world
+            .resource_mut::<Runs>()
+            .arm("run-a", "the user stopped the work");
+        let due = world
+            .resource_mut::<Runs>()
+            .due_stops(Instant::now() + STOP_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(due.len(), 1);
+        assert!(!due[0].1.forced);
+
+        record_forced_stop(&mut world, "run-a", false, vec![4242], "not exited");
         let stored = store.run("run-a").unwrap().unwrap();
         assert_eq!(stored.state, RunState::CancellationUnconfirmed);
         assert_eq!(stored.unverified_pids, vec![4242]);
@@ -1746,14 +1444,40 @@ mod tests {
             stored
                 .cancellation_reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("did not exit"))
+                .is_some_and(|r| r.contains("not exited"))
         );
 
-        insert_run(&store, "w1", "run-b", RunState::Cancelling);
+        run(&store, "run-b", RunState::Cancelling);
         record_forced_stop(&mut world, "run-b", true, Vec::new(), "killed");
+        assert_eq!(state(&store, "run-b"), RunState::Cancelled);
+    }
+
+    #[test]
+    fn stop_then_close_settles_the_run_and_releases_the_agent() {
+        let (_root, store) = store();
+        session(&store);
+        run(&store, "run-a", RunState::Running);
+        let mut world = world(store.clone());
+        let kept = agent(&mut world, "run-a");
+
+        stop(&mut world, "w1").unwrap();
+        let run = store.run("run-a").unwrap().unwrap();
+        assert_eq!(run.state, RunState::Cancelling);
         assert_eq!(
-            store.run("run-b").unwrap().unwrap().state,
-            RunState::Cancelled
+            run.cancellation_reason.as_deref(),
+            Some("the user stopped the work")
         );
+        assert!(run.cancellation_requested_at.is_some());
+
+        settle_run(&mut world, "run-a".into(), TurnOutcome::Stopped(None));
+        assert_eq!(state(&store, "run-a"), RunState::Cancelled);
+        assert_eq!(agent_of(&mut world, "w1"), Some(kept));
+
+        close(&mut world, "w1").unwrap();
+        assert_eq!(
+            store.work_session("w1").unwrap().unwrap().status,
+            WorkStatus::Closed
+        );
+        assert!(agent_of(&mut world, "w1").is_none());
     }
 }

@@ -1,57 +1,22 @@
 //! Companions and their mind: persistence and revision checks.
-use super::{Result, Store, now, to_json};
+use super::{Result, Store, json_column, now, require, to_json};
 #[cfg(test)]
 use crate::host::mind::State;
 use crate::host::mind::{Companion, Profile};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Row, params};
 
 fn row_to_companion(row: &Row<'_>) -> rusqlite::Result<Companion> {
-    let profile: String = row.get("profile")?;
-    let state: String = row.get("state")?;
-    let body: String = row.get("body")?;
-    let voice: String = row.get("voice")?;
-    let assignments: String = row.get("assignments")?;
     Ok(Companion {
         id: row.get("id")?,
         name: row.get("name")?,
         mind: row.get("mind")?,
-        profile: serde_json::from_str(&profile).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                profile.len(),
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
+        profile: json_column(row, "profile", "stored profile is corrupt")?,
         profile_revision: row.get::<_, u64>("profile_revision")?,
-        state: serde_json::from_str(&state).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                state.len(),
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
+        state: json_column(row, "state", "stored state is corrupt")?,
         state_revision: row.get::<_, u64>("state_revision")?,
-        body: serde_json::from_str(&body).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                body.len(),
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        voice: serde_json::from_str(&voice).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                voice.len(),
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        assignments: serde_json::from_str(&assignments).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                assignments.len(),
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
+        body: json_column(row, "body", "stored body is corrupt")?,
+        voice: json_column(row, "voice", "stored voice is corrupt")?,
+        assignments: json_column(row, "assignments", "stored assignments are corrupt")?,
         persona: row.get("persona")?,
         voice_identifier: row.get("voice_identifier")?,
         revision: row.get::<_, u64>("revision")?,
@@ -66,25 +31,19 @@ pub(crate) const COLUMNS: &str = "id, name, mind, profile, profile_revision, sta
 
 impl Store {
     pub(crate) fn companions(&self) -> Result<Vec<Companion>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
-            "SELECT {COLUMNS} FROM companions ORDER BY created_at, id"
-        ))?;
-        let rows = statement.query_map([], row_to_companion)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!("SELECT {COLUMNS} FROM companions ORDER BY created_at, id"),
+            [],
+            row_to_companion,
+        )
     }
 
     pub(crate) fn companion(&self, id: &str) -> Result<Option<Companion>> {
-        let connection = self.conn()?;
-        let companion = connection
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM companions WHERE id = ?1"),
-                [id],
-                row_to_companion,
-            )
-            .optional()?;
-        Ok(companion)
+        self.fetch(
+            &format!("SELECT {COLUMNS} FROM companions WHERE id = ?1"),
+            [id],
+            row_to_companion,
+        )
     }
 
     pub(crate) fn insert_companion(&self, companion: &Companion) -> Result<()> {
@@ -140,12 +99,7 @@ impl Store {
                 expected,
             ],
         )?;
-        if updated == 0 {
-            return Err(crate::host::error::HostError::conflict(
-                "companion changed since it was read",
-            ));
-        }
-        Ok(())
+        require(updated, "companion changed since it was read")
     }
 
     /// Updates only the mind state, but only when the caller still has the
@@ -163,11 +117,7 @@ impl Store {
              WHERE id = ?1 AND state_revision = ?5",
             params![companion_id, to_json(state)?, next, now(), expected],
         )?;
-        if updated == 0 {
-            return Err(crate::host::error::HostError::conflict(
-                "mind changed since it was read",
-            ));
-        }
+        require(updated, "mind changed since it was read")?;
         Ok(next)
     }
 
@@ -183,11 +133,7 @@ impl Store {
              WHERE id = ?1 AND profile_revision = ?5",
             params![companion_id, to_json(profile)?, next, now(), expected],
         )?;
-        if updated == 0 {
-            return Err(crate::host::error::HostError::conflict(
-                "profile changed since it was read",
-            ));
-        }
+        require(updated, "profile changed since it was read")?;
         Ok(next)
     }
 

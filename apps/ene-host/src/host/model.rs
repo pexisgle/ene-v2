@@ -13,7 +13,7 @@ use rig_ecs::effects::Handler;
 use rig_ecs::model::Connection as ModelConnection;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 const KEYRING_SERVICE: &str = "ene-host";
@@ -53,26 +53,22 @@ impl Credentials {
         credentials
     }
 
-    pub(crate) fn remember(&self, connection: &str, secret: String) {
+    fn cache(&self) -> MutexGuard<'_, HashMap<String, String>> {
         self.cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .insert(connection.to_owned(), secret);
+    }
+
+    pub(crate) fn remember(&self, connection: &str, secret: String) {
+        self.cache().insert(connection.to_owned(), secret);
     }
 
     pub(crate) fn forget(&self, connection: &str) {
-        self.cache
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .remove(connection);
+        self.cache().remove(connection);
     }
 
     pub(crate) fn secret(&self, connection: &str) -> Option<String> {
-        self.cache
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .get(connection)
-            .cloned()
+        self.cache().get(connection).cloned()
     }
 
     pub(crate) fn session_only(&self) -> bool {
@@ -272,7 +268,7 @@ pub(crate) fn models(connection: &Connection) -> Vec<(String, ModelSpec)> {
 /// Probes the connection's model endpoint. A failure is reported, never
 /// treated as healthy.
 pub(crate) async fn probe(
-    store: &Store,
+    _store: &Store,
     credentials: &Credentials,
     connection: &Connection,
 ) -> Check {
@@ -293,8 +289,7 @@ pub(crate) async fn probe(
                 "unsupported",
                 "connection checks are implemented for LLM connections only",
             )),
-            capabilities: Vec::new(),
-            resources: Vec::new(),
+            ..Default::default()
         };
     };
     if config.model_ids.is_empty() && connection.endpoint().endpoint.is_empty() {
@@ -316,22 +311,19 @@ pub(crate) async fn probe(
         Ok(client) => client,
         Err(error) => return failure(format!("http client: {error}")),
     };
-    let response = match client
+    let bytes = match client
         .get(&url)
         .bearer_auth(&secret)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
     {
-        Ok(response) => response,
+        Ok(response) if response.status().is_success() => match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => return failure(format!("endpoint body: {error}")),
+        },
+        Ok(response) => return failure(format!("endpoint answered {}", response.status())),
         Err(error) => return failure(format!("endpoint unreachable: {error}")),
-    };
-    if !response.status().is_success() {
-        return failure(format!("endpoint answered {}", response.status()));
-    }
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(error) => return failure(format!("endpoint body: {error}")),
     };
     if bytes.len() > MAX_PROBE_BYTES {
         return failure("endpoint answered more data than the host reads".into());
@@ -349,8 +341,6 @@ pub(crate) async fn probe(
             }
         }
     }
-    // The probe result is informational; a healthy answer is still recorded.
-    let _ = store;
     Check {
         healthy: true,
         checked_at,

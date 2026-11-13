@@ -9,15 +9,12 @@ use futures_util::StreamExt;
 
 #[allow(refining_impl_trait)]
 impl w::ClientService for Services {
-    async fn register_client(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::RegisterClientRequest>,
-    ) -> ServiceResult<w::Client> {
-        let request = request.to_owned_message();
-        self.call(move |app| client::register(app.world_mut(), request))
-            .await
-    }
+    request!(
+        register_client,
+        w::RegisterClientRequest,
+        w::Client,
+        client::register
+    );
 
     async fn list(
         &self,
@@ -35,25 +32,18 @@ impl w::ClientService for Services {
         .await
     }
 
-    async fn activate(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::ActivationRequest>,
-    ) -> ServiceResult<w::Activation> {
-        let request = request.to_owned_message();
-        self.call(move |app| client::activate(app.world_mut(), request))
-            .await
-    }
-
-    async fn set_capabilities(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::SetCapabilitiesRequest>,
-    ) -> ServiceResult<w::Client> {
-        let request = request.to_owned_message();
-        self.call(move |app| client::set_capabilities(app.world_mut(), request))
-            .await
-    }
+    request!(
+        activate,
+        w::ActivationRequest,
+        w::Activation,
+        client::activate
+    );
+    request!(
+        set_capabilities,
+        w::SetCapabilitiesRequest,
+        w::Client,
+        client::set_capabilities
+    );
 
     async fn device_stream(
         &self,
@@ -114,38 +104,18 @@ impl w::ClientService for Services {
         Response::stream_ok(stream)
     }
 
-    async fn report_perception(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::PerceptionEvent>,
-    ) -> ServiceResult<w::Empty> {
-        let event = request.to_owned_message();
-        self.call(move |app| {
-            client::report_perception(app.world_mut(), event)?;
-            Ok(w::Empty::default())
-        })
-        .await
-    }
-
-    async fn complete_operation(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::DeviceOperationResult>,
-    ) -> ServiceResult<w::DeviceOperationState> {
-        let request = request.to_owned_message();
-        self.call(move |app| client::device::complete(app.world_mut(), request))
-            .await
-    }
-
-    async fn get_operation(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::Id>,
-    ) -> ServiceResult<w::DeviceOperationState> {
-        let request = request.to_owned_message();
-        self.read(move |app| client::device::get(app.world_mut(), request))
-            .await
-    }
+    discard!(
+        report_perception,
+        w::PerceptionEvent,
+        client::report_perception
+    );
+    request!(
+        complete_operation,
+        w::DeviceOperationResult,
+        w::DeviceOperationState,
+        client::device::complete
+    );
+    request!(read get_operation, w::Id, w::DeviceOperationState, client::device::get);
 }
 
 /// Closes a device stream when the response stream is dropped, including a

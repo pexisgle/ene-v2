@@ -3,13 +3,12 @@ use crate::host::{
     agent::CompanionAgent,
     db::{
         Result, Store,
-        memories::{MemoryCorrection, MemoryForget, MemoryWrite, MindStateChange, MindUpdate},
+        memories::{MindStateChange, MindUpdate, NewMemory, StateUpdate, detail},
         now,
     },
     error::HostError,
-    json::JsonDoc,
     mind::{
-        embedding::{self, CompactVectorIndex, Embeddings},
+        embedding::{self, CompactVectorIndex, Embedder},
         memory::RecallMode,
     },
     model::Credentials,
@@ -18,7 +17,7 @@ use crate::host::{
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -49,47 +48,6 @@ pub(crate) struct UpdateArgs {
     /// The current mind to move to (all parts are schema'd documents).
     #[serde(default)]
     pub(crate) state: Option<StateUpdate>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct NewMemory {
-    /// Correct an existing memory instead of recording a new one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) id: Option<String>,
-    /// The memory text; a correction may omit it to change only importance.
-    #[serde(default)]
-    pub(crate) content: String,
-    /// 0-10; 10 is injected every turn, 0-1 are effectively forgotten.
-    #[serde(default)]
-    pub(crate) importance: Option<u8>,
-    /// Share with these companions ("*" for every companion).
-    #[serde(default)]
-    pub(crate) audiences: Vec<String>,
-    #[serde(default)]
-    pub(crate) occurred_at: Option<String>,
-    /// The revision that was read; a stale value is a conflict.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) expected_revision: Option<u64>,
-    /// An existing memory this record supersedes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) supersedes: Option<String>,
-    /// Forget the addressed memory by lowering its importance to zero.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) forget: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct StateUpdate {
-    pub(crate) emotion: Option<Value>,
-    pub(crate) relationships: Option<Value>,
-    pub(crate) tendencies: Option<Value>,
-    pub(crate) concerns: Option<Value>,
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -130,31 +88,18 @@ fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<String> 
     let store = world.resource::<Store>().clone();
     // The semantic half is optional: without a usable embedding connection
     // there is no query vector and recall stays lexical (semantic: false).
-    let mut semantic = Vec::new();
-    let target = store.companion(&companion)?.and_then(|record| {
+    let semantic = world.resource_scope(|world, embedder: Mut<Embedder>| {
         let credentials = world.get_resource::<Credentials>().cloned();
-        embedding::embedding_target(&store, credentials.as_ref(), &record)
-            .ok()
-            .flatten()
+        let mut index = world.resource_mut::<CompactVectorIndex>();
+        embedding::semantic_ids(
+            &store,
+            &embedder,
+            &mut index,
+            credentials.as_ref(),
+            &companion,
+            &args.query,
+        )
     });
-    if let Some(target) = &target {
-        let query_vector = {
-            let embeddings = world.resource::<Embeddings>();
-            embeddings
-                .source()
-                .and_then(|source| embedding::embed_query(source, target, &args.query).ok())
-        };
-        if let Some(query_vector) = query_vector {
-            let mut index = world.resource_mut::<CompactVectorIndex>();
-            if index.sync(&store, &target.space).is_ok() {
-                semantic = index
-                    .ranked(&target.space, &query_vector, 20)
-                    .into_iter()
-                    .map(|(id, _)| id)
-                    .collect();
-            }
-        }
-    }
     let outcome = store.recall_hybrid(
         &companion,
         &args.query,
@@ -205,7 +150,7 @@ fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
         .to_string());
     }
     let relations = store.memory_edges(&args.id)?;
-    Ok(crate::host::db::memories::detail(&memory, &relations).to_string())
+    Ok(detail(&memory, &relations).to_string())
 }
 
 fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> {
@@ -217,75 +162,13 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
         "state": &args.state,
     });
     let hash = store.mind_hash(&request);
-    let mut writes = Vec::with_capacity(args.memories.len());
-    for memory in &args.memories {
-        if memory.forget {
-            let Some(id) = &memory.id else {
-                return Err(HostError::invalid(
-                    "forget needs the id of the memory to lower",
-                ));
-            };
-            writes.push(MemoryWrite::Forget(MemoryForget {
-                id: id.clone(),
-                expected_revision: memory.expected_revision,
-            }));
-            continue;
-        }
-        if let Some(id) = &memory.id {
-            if memory.content.trim().is_empty()
-                && memory.importance.is_none()
-                && memory.supersedes.is_none()
-            {
-                return Err(HostError::invalid(
-                    "a correction needs content, importance or supersedes",
-                ));
-            }
-            writes.push(MemoryWrite::Update(MemoryCorrection {
-                id: id.clone(),
-                expected_revision: memory.expected_revision,
-                content: (!memory.content.trim().is_empty()).then(|| memory.content.clone()),
-                importance: memory.importance,
-                supersedes: memory.supersedes.clone(),
-            }));
-            continue;
-        }
-        if memory.content.trim().is_empty() {
-            return Err(HostError::invalid("memory content is required"));
-        }
-        writes.push(MemoryWrite::Insert {
-            memory: crate::host::db::memories::NewMemory {
-                id: uuid::Uuid::new_v4().to_string(),
-                owner: companion.clone(),
-                audiences: memory.audiences.clone(),
-                content: memory.content.clone(),
-                importance: memory.importance.unwrap_or(3).min(10),
-                occurred_at: memory.occurred_at.clone(),
-                source_context: json!({
-                    "source": "mind_update",
-                    "operation_id": args.operation_id,
-                }),
-            },
-            supersedes: memory.supersedes.clone(),
-        });
-    }
     let state = match &args.state {
         Some(patch) => {
             let current = store
                 .companion(&companion)?
                 .ok_or_else(|| HostError::not_found("companion not found"))?;
             let mut next = current.state.clone();
-            if let Some(emotion) = &patch.emotion {
-                next.emotion = JsonDoc::new("ene.emotion.v1", emotion.clone());
-            }
-            if let Some(relationships) = &patch.relationships {
-                next.relationships = JsonDoc::new("ene.relationships.v1", relationships.clone());
-            }
-            if let Some(tendencies) = &patch.tendencies {
-                next.tendencies = JsonDoc::new("ene.tendencies.v1", tendencies.clone());
-            }
-            if let Some(concerns) = &patch.concerns {
-                next.concerns = JsonDoc::new("ene.concerns.v1", concerns.clone());
-            }
+            patch.apply(&mut next);
             Some(MindStateChange {
                 expected_revision: current.state_revision,
                 state: serde_json::to_string(&next)?,
@@ -294,10 +177,10 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
         None => None,
     };
     let result = store.apply_mind_update(&MindUpdate {
-        operation_id: args.operation_id.clone(),
+        operation_id: args.operation_id,
         companion_id: companion.clone(),
         request_hash: hash,
-        writes,
+        memories: args.memories,
         state,
     })?;
     super::notify_mind(world, &companion);

@@ -14,12 +14,8 @@ The endpoint and Owner token are published in the runtime directory's connection
 ENE_HOST_STATE_DIR overrides the SQLite/rig directory.\n\
 ENE_HOST_RUNTIME_DIR overrides the discovery/lock directory.";
 
-pub fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-    serve()
-}
-
 #[tokio::main(flavor = "multi_thread")]
-async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     if let Some(argument) = std::env::args_os().nth(1) {
         if argument == "-h" || argument == "--help" {
             println!("{USAGE}");

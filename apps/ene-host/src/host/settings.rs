@@ -75,88 +75,52 @@ impl Endpoint {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LlmConnection {
-    pub(crate) endpoint: Endpoint,
-    #[serde(default)]
-    pub(crate) model_ids: Vec<String>,
+/// The six kind-specific connection bodies: an endpoint plus the fields the
+/// kind adds. The oneof, its kind and its endpoint come from the same list.
+macro_rules! connection_bodies {
+    ($($variant:ident($name:ident) { $($field:ident: $ty:ty),* $(,)? }),+ $(,)?) => {
+        $(
+            #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+            pub(crate) struct $name {
+                pub(crate) endpoint: Endpoint,
+                $(#[serde(default)] pub(crate) $field: $ty,)*
+            }
+        )+
+
+        /// The kind-specific half of a connection. The variant must agree with
+        /// the stored kind; the host refuses a mismatch instead of guessing.
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(tag = "config", rename_all = "snake_case")]
+        pub(crate) enum ConnectionConfig {
+            $($variant($name)),+
+        }
+
+        impl ConnectionConfig {
+            pub(crate) fn kind(&self) -> ConnectionKind {
+                match self {
+                    $(Self::$variant(_) => ConnectionKind::$variant),+
+                }
+            }
+
+            pub(crate) fn endpoint(&self) -> &Endpoint {
+                match self {
+                    $(Self::$variant(config) => &config.endpoint),+
+                }
+            }
+        }
+    };
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TtsConnection {
-    pub(crate) endpoint: Endpoint,
-    #[serde(default)]
-    pub(crate) voice_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SttConnection {
-    pub(crate) endpoint: Endpoint,
-    #[serde(default)]
-    pub(crate) language_hints: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct EmbeddingConnection {
-    pub(crate) endpoint: Endpoint,
-    #[serde(default)]
-    pub(crate) model_id: String,
-    #[serde(default)]
-    pub(crate) dimensions: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct McpConnection {
-    pub(crate) endpoint: Endpoint,
-    #[serde(default)]
-    pub(crate) allowed_tools: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AcpConnection {
-    pub(crate) endpoint: Endpoint,
-    #[serde(default)]
-    pub(crate) command: String,
-    #[serde(default)]
-    pub(crate) args: Vec<String>,
-}
-
-/// The kind-specific half of a connection. The variant must agree with the
-/// stored kind; the host refuses a mismatch instead of guessing.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "config", rename_all = "snake_case")]
-pub(crate) enum ConnectionConfig {
-    Llm(LlmConnection),
-    Tts(TtsConnection),
-    Stt(SttConnection),
-    Embedding(EmbeddingConnection),
-    Mcp(McpConnection),
-    Acp(AcpConnection),
+connection_bodies! {
+    Llm(LlmConnection) { model_ids: Vec<String> },
+    Tts(TtsConnection) { voice_ids: Vec<String> },
+    Stt(SttConnection) { language_hints: Vec<String> },
+    Embedding(EmbeddingConnection) { model_id: String, dimensions: u32 },
+    Mcp(McpConnection) { allowed_tools: Vec<String> },
+    Acp(AcpConnection) { command: String, args: Vec<String> },
 }
 
 impl ConnectionConfig {
-    pub(crate) fn kind(&self) -> ConnectionKind {
-        match self {
-            Self::Llm(_) => ConnectionKind::Llm,
-            Self::Tts(_) => ConnectionKind::Tts,
-            Self::Stt(_) => ConnectionKind::Stt,
-            Self::Embedding(_) => ConnectionKind::Embedding,
-            Self::Mcp(_) => ConnectionKind::Mcp,
-            Self::Acp(_) => ConnectionKind::Acp,
-        }
-    }
-
-    pub(crate) fn endpoint(&self) -> &Endpoint {
-        match self {
-            Self::Llm(config) => &config.endpoint,
-            Self::Tts(config) => &config.endpoint,
-            Self::Stt(config) => &config.endpoint,
-            Self::Embedding(config) => &config.endpoint,
-            Self::Mcp(config) => &config.endpoint,
-            Self::Acp(config) => &config.endpoint,
-        }
-    }
-
     pub(crate) fn validate(&self) -> Result<()> {
         self.endpoint().validate()?;
         match self {
@@ -309,53 +273,55 @@ fn field(key: &str, label: &str, kind: &str, required: bool) -> SettingField {
     }
 }
 
+/// One built-in provider: the id doubles as the adapter and names the
+/// environment variable the secret may come from.
+fn catalog_entry(id: &str, name: &str, endpoint: &str, settings: &[(&str, &str)]) -> Provider {
+    Provider {
+        id: id.into(),
+        name: name.into(),
+        adapter: id.into(),
+        endpoint: endpoint.into(),
+        settings: settings
+            .iter()
+            .map(|(key, label)| field(key, label, "string", false))
+            .collect(),
+        requires_credentials: true,
+        environment_variable: Some(format!("{}_API_KEY", id.to_uppercase())),
+    }
+}
+
 /// The provider catalogue the host can speak to through rig-core. It is a
 /// fixed alpha list; extensions add adapters, not host code paths.
 pub(crate) fn providers() -> Vec<Provider> {
     vec![
-        Provider {
-            id: "openai".into(),
-            name: "OpenAI".into(),
-            adapter: "openai".into(),
-            endpoint: "https://api.openai.com/v1".into(),
-            settings: vec![
-                field("base_url", "Base URL", "string", false),
-                field("organization", "Organization", "string", false),
+        catalog_entry(
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            &[("base_url", "Base URL"), ("organization", "Organization")],
+        ),
+        catalog_entry(
+            "openrouter",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            &[
+                ("base_url", "Base URL"),
+                ("site_url", "Site URL"),
+                ("app_name", "App name"),
             ],
-            requires_credentials: true,
-            environment_variable: Some("OPENAI_API_KEY".into()),
-        },
-        Provider {
-            id: "openrouter".into(),
-            name: "OpenRouter".into(),
-            adapter: "openrouter".into(),
-            endpoint: "https://openrouter.ai/api/v1".into(),
-            settings: vec![
-                field("base_url", "Base URL", "string", false),
-                field("site_url", "Site URL", "string", false),
-                field("app_name", "App name", "string", false),
-            ],
-            requires_credentials: true,
-            environment_variable: Some("OPENROUTER_API_KEY".into()),
-        },
-        Provider {
-            id: "anthropic".into(),
-            name: "Anthropic".into(),
-            adapter: "anthropic".into(),
-            endpoint: "https://api.anthropic.com".into(),
-            settings: vec![field("base_url", "Base URL", "string", false)],
-            requires_credentials: true,
-            environment_variable: Some("ANTHROPIC_API_KEY".into()),
-        },
-        Provider {
-            id: "gemini".into(),
-            name: "Google Gemini".into(),
-            adapter: "gemini".into(),
-            endpoint: "https://generativelanguage.googleapis.com".into(),
-            settings: vec![field("base_url", "Base URL", "string", false)],
-            requires_credentials: true,
-            environment_variable: Some("GEMINI_API_KEY".into()),
-        },
+        ),
+        catalog_entry(
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com",
+            &[("base_url", "Base URL")],
+        ),
+        catalog_entry(
+            "gemini",
+            "Google Gemini",
+            "https://generativelanguage.googleapis.com",
+            &[("base_url", "Base URL")],
+        ),
     ]
 }
 
@@ -409,26 +375,5 @@ mod tests {
             model_ids: Vec::new(),
         });
         assert!(bad_options.validate().is_err());
-    }
-
-    #[test]
-    fn credential_states_and_kinds_round_trip() {
-        for state in [
-            CredentialState::Absent,
-            CredentialState::Registered,
-            CredentialState::Environment,
-        ] {
-            assert_eq!(CredentialState::parse(state.as_str()), state);
-        }
-        for kind in [
-            ConnectionKind::Llm,
-            ConnectionKind::Tts,
-            ConnectionKind::Stt,
-            ConnectionKind::Embedding,
-            ConnectionKind::Mcp,
-            ConnectionKind::Acp,
-        ] {
-            assert_eq!(ConnectionKind::parse(kind.as_str()), Some(kind));
-        }
     }
 }

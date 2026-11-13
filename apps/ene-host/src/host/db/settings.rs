@@ -1,57 +1,36 @@
 //! Settings and connections.
-use super::{Result, Store, now, to_json};
+use super::{
+    Result, Store, corrupt, enum_column, json_column, now, optional_json_column, require_found,
+    to_json,
+};
 use crate::host::error::HostError;
 use crate::host::settings::{Check, Connection, ConnectionConfig, ConnectionKind, Settings};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Row, params};
 use std::collections::HashSet;
 
 fn row_to_connection(row: &Row<'_>) -> rusqlite::Result<Connection> {
-    let kind: String = row.get("kind")?;
-    let kind = ConnectionKind::parse(&kind).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            kind.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("unknown connection kind")),
-        )
-    })?;
-    let config: String = row.get("config")?;
-    let config: ConnectionConfig = serde_json::from_str(&config).map_err(|_| {
-        rusqlite::Error::FromSqlConversionFailure(
-            config.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("stored connection config is corrupt")),
-        )
-    })?;
+    let kind = enum_column(
+        row,
+        "kind",
+        "unknown connection kind",
+        ConnectionKind::parse,
+    )?;
+    let config: ConnectionConfig =
+        json_column(row, "config", "stored connection config is corrupt")?;
     if config.kind() != kind {
-        return Err(rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(
-                "stored connection kind and config disagree",
-            )),
-        ));
+        return Err(corrupt("", "stored connection kind and config disagree"));
     }
-    let last_check: Option<String> = row.get("last_check")?;
-    let credential_state: String = row.get("credential_state")?;
     Ok(Connection {
         id: row.get("id")?,
         name: row.get("name")?,
         enabled: row.get("enabled")?,
         kind,
         config,
-        credential_state: crate::host::settings::CredentialState::parse(&credential_state),
+        credential_state: crate::host::settings::CredentialState::parse(
+            &row.get::<_, String>("credential_state")?,
+        ),
         revision: row.get::<_, u64>("revision")?,
-        last_check: last_check
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|_| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::other("stored connection check is corrupt")),
-                )
-            })?,
+        last_check: optional_json_column(row, "last_check", "stored connection check is corrupt")?,
     })
 }
 
@@ -59,30 +38,26 @@ const COLUMNS: &str = "id, name, enabled, kind, config, credential_state, last_c
 
 impl Store {
     pub(crate) fn settings(&self) -> Result<Settings> {
-        let connection = self.conn()?;
-        let row: Option<(u64, String)> = connection
-            .query_row(
-                "SELECT revision, updated_at FROM settings_state WHERE id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let (revision, updated_at) = match row {
+        let (revision, updated_at) = match self.fetch(
+            "SELECT revision, updated_at FROM settings_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )? {
             Some(row) => row,
             None => {
                 let stamp = now();
-                connection.execute(
+                self.conn()?.execute(
                     "INSERT INTO settings_state (id, revision, updated_at) VALUES (1, 1, ?1)",
                     [&stamp],
                 )?;
                 (1, stamp)
             }
         };
-        let mut statement =
-            connection.prepare(&format!("SELECT {COLUMNS} FROM connections ORDER BY id"))?;
-        let connections = statement
-            .query_map([], row_to_connection)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let connections = self.fetch_all(
+            &format!("SELECT {COLUMNS} FROM connections ORDER BY id"),
+            [],
+            row_to_connection,
+        )?;
         Ok(Settings {
             revision,
             connections,
@@ -95,15 +70,11 @@ impl Store {
     }
 
     pub(crate) fn connection(&self, id: &str) -> Result<Option<Connection>> {
-        let connection = self.conn()?;
-        let connection = connection
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM connections WHERE id = ?1"),
-                [id],
-                row_to_connection,
-            )
-            .optional()?;
-        Ok(connection)
+        self.fetch(
+            &format!("SELECT {COLUMNS} FROM connections WHERE id = ?1"),
+            [id],
+            row_to_connection,
+        )
     }
 
     /// Applies a settings batch. The expected settings revision must match,
@@ -135,23 +106,19 @@ impl Store {
                 .iter()
                 .find(|existing| existing.id == input.id);
             let revision = match existing {
-                Some(existing) => {
-                    if *expected != existing.revision {
-                        return Err(HostError::conflict(format!(
-                            "connection `{}` changed since it was read",
-                            input.id
-                        )));
-                    }
-                    existing.revision + 1
+                Some(existing) if *expected == existing.revision => existing.revision + 1,
+                Some(_) => {
+                    return Err(HostError::conflict(format!(
+                        "connection `{}` changed since it was read",
+                        input.id
+                    )));
                 }
+                None if *expected == 0 => 1,
                 None => {
-                    if *expected != 0 {
-                        return Err(HostError::conflict(format!(
-                            "connection `{}` does not exist",
-                            input.id
-                        )));
-                    }
-                    1
+                    return Err(HostError::conflict(format!(
+                        "connection `{}` does not exist",
+                        input.id
+                    )));
                 }
             };
             let changed = transaction.execute(
@@ -204,10 +171,7 @@ impl Store {
             "UPDATE connections SET credential_state = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, state.as_str(), now()],
         )?;
-        if changed == 0 {
-            return Err(HostError::not_found("connection not found"));
-        }
-        Ok(())
+        require_found(changed, "connection not found")
     }
 
     pub(crate) fn set_check(&self, id: &str, check: &Check) -> Result<()> {
@@ -215,10 +179,7 @@ impl Store {
             "UPDATE connections SET last_check = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, to_json(check)?, now()],
         )?;
-        if changed == 0 {
-            return Err(HostError::not_found("connection not found"));
-        }
-        Ok(())
+        require_found(changed, "connection not found")
     }
 }
 

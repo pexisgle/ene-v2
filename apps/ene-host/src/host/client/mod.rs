@@ -36,7 +36,7 @@ pub(crate) enum CapabilityApproval {
 
 /// A capability a client declares, with the JSON Schema the host validates
 /// operations against.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CapabilitySpec {
     pub(crate) name: String,
     #[serde(default)]
@@ -371,17 +371,38 @@ impl Plugin for ClientPlugin {
 
 /// Every registered client, with its live connection state.
 pub(crate) fn clients(store: &Store, hub: &DeviceHub) -> Result<Vec<w::Client>> {
-    let mut clients = Vec::new();
-    for client in store.clients()? {
-        let active: Vec<String> = store
-            .activations()?
-            .into_iter()
-            .filter(|activation| activation.client_id.as_deref() == Some(client.id.as_str()))
-            .map(|activation| activation.companion_id)
-            .collect();
-        clients.push(wire::client(&client, hub.connected(&client.id), active));
-    }
-    Ok(clients)
+    let activations = store.activations()?;
+    Ok(store
+        .clients()?
+        .into_iter()
+        .map(|client| {
+            let active: Vec<String> = activations
+                .iter()
+                .filter(|activation| activation.client_id.as_deref() == Some(client.id.as_str()))
+                .map(|activation| activation.companion_id.clone())
+                .collect();
+            wire::client(&client, hub.connected(&client.id), active)
+        })
+        .collect())
+}
+
+/// Converts and validates one declaration set.
+fn declarations(
+    specs: &[w::ClientCapabilitySpec],
+    capabilities: &[String],
+) -> Result<Vec<CapabilitySpec>> {
+    let specs: Vec<CapabilitySpec> = specs.iter().map(wire::capability_spec_from).collect();
+    super::client::validate_declarations(capabilities, &specs)?;
+    Ok(specs)
+}
+
+/// Publishes the client view, refreshes the capability tools and returns it.
+fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
+    let connected = world.resource::<DeviceHub>().connected(&client.id);
+    let view = wire::client(client, connected, Vec::new());
+    notify_client(world, &view);
+    sync_tools(world)?;
+    Ok(view)
 }
 
 /// Registers or refreshes a client declaration. A client never sends grants:
@@ -389,27 +410,16 @@ pub(crate) fn clients(store: &Store, hub: &DeviceHub) -> Result<Vec<w::Client>> 
 /// operation-level gate still decides every call.
 pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
-    let capabilities = request.capabilities;
-    let specs: Vec<super::client::CapabilitySpec> = request
-        .capability_specs
-        .iter()
-        .map(wire::capability_spec_from)
-        .collect();
-    super::client::validate_declarations(&capabilities, &specs)?;
+    let specs = declarations(&request.capability_specs, &request.capabilities)?;
     let client = store.register_client(&super::db::clients::ClientDeclaration {
         id: &request.id,
         name: &request.name,
         platform: &request.platform,
-        capabilities: &capabilities,
+        capabilities: &request.capabilities,
         specs: &specs,
         expected_revision: request.expected_revision,
     })?;
-    let hub = world.resource::<DeviceHub>();
-    let connected = hub.connected(&client.id);
-    let view = wire::client(&client, connected, Vec::new());
-    notify_client(world, &view);
-    sync_tools(world)?;
-    Ok(view)
+    publish(world, &client)
 }
 
 pub(crate) fn set_capabilities(
@@ -417,12 +427,7 @@ pub(crate) fn set_capabilities(
     request: w::SetCapabilitiesRequest,
 ) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
-    let specs: Vec<super::client::CapabilitySpec> = request
-        .capability_specs
-        .iter()
-        .map(wire::capability_spec_from)
-        .collect();
-    super::client::validate_declarations(&request.capabilities, &specs)?;
+    let specs = declarations(&request.capability_specs, &request.capabilities)?;
     if !request.granted_capabilities.is_empty() {
         return Err(HostError::permission(
             "a client cannot grant capabilities to itself",
@@ -434,11 +439,7 @@ pub(crate) fn set_capabilities(
         &specs,
         request.revision,
     )?;
-    let hub = world.resource::<DeviceHub>();
-    let view = wire::client(&client, hub.connected(&client.id), Vec::new());
-    notify_client(world, &view);
-    sync_tools(world)?;
-    Ok(view)
+    publish(world, &client)
 }
 
 fn notify_client(world: &mut World, client: &w::Client) {
@@ -491,21 +492,19 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
             .events
             .remove(&request.companion_id);
         // The old client keeps its stream but is no longer the active one.
-        let old = store.client(&old_client)?;
-        if let Some(old) = old {
+        if let Some(old) = store.client(&old_client)? {
             let hub = world.resource::<DeviceHub>();
-            let view = wire::client(&old, hub.connected(&old.id), Vec::new());
-            notify_client(world, &view);
+            notify_client(
+                world,
+                &wire::client(&old, hub.connected(&old.id), Vec::new()),
+            );
         }
     }
-    {
-        let mut notifier = world.resource_mut::<Notifier>();
-        notifier.push(
-            Some(&request.companion_id),
-            None,
-            w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
-        );
-    }
+    world.resource_mut::<Notifier>().push(
+        Some(&request.companion_id),
+        None,
+        w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
+    );
     sync_tools(world)?;
     Ok(wire::activation(&activation))
 }
@@ -518,16 +517,12 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
     store
         .client(&event.client_id)?
         .ok_or_else(|| HostError::not_found("client not found"))?;
-    let activations = store.activations()?;
-    let Some(activation) = activations
-        .into_iter()
-        .find(|activation| activation.client_id.as_deref() == Some(event.client_id.as_str()))
-    else {
+    let Some((companion_id, revision)) = store.activation_for_client(&event.client_id)? else {
         // A connected client that is not active produces nothing the head may
         // act on. Not an error: the event is simply discarded.
         return Ok(());
     };
-    if event.activation_revision != activation.revision {
+    if event.activation_revision != revision {
         return Ok(());
     }
     let Some(summary) = perception_summary(&event) else {
@@ -536,7 +531,7 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
     world
         .resource_mut::<Perception>()
         .events
-        .insert(activation.companion_id.clone(), PerceptionEvent { summary });
+        .insert(companion_id, PerceptionEvent { summary });
     Ok(())
 }
 
@@ -589,10 +584,9 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
             desired.push(spec.clone());
         }
     }
-    if desired.len() > crate::host::client::SLOTS {
+    if desired.len() > SLOTS {
         return Err(HostError::exhausted(format!(
-            "at most {} capability tools can be published",
-            crate::host::client::SLOTS
+            "at most {SLOTS} capability tools can be published"
         )));
     }
     let slots = world.resource::<Slots>().entities.clone();
@@ -629,12 +623,8 @@ mod tests {
         CapabilitySpec {
             name: "body.motion".into(),
             tool_name: "body_motion".into(),
-            description: String::new(),
-            input_schema: "{}".into(),
-            presets: Vec::new(),
             approval: CapabilityApproval::Auto,
-            approval_target: String::new(),
-            output_schema: String::new(),
+            ..Default::default()
         }
     }
 

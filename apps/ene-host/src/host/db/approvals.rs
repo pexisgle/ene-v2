@@ -1,18 +1,16 @@
 //! Approval requests: persistence, resolution and startup expiry.
-use super::{Result, Store, now};
+use super::{Result, Store, enum_column, now};
 use crate::host::error::HostError;
 use crate::host::permission::{Approval, ApprovalStatus};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Row, params};
 
 fn row_to_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
-    let status: String = row.get("status")?;
-    let status = ApprovalStatus::parse(&status).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            status.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("unknown approval status")),
-        )
-    })?;
+    let status = enum_column(
+        row,
+        "status",
+        "unknown approval status",
+        ApprovalStatus::parse,
+    )?;
     Ok(Approval {
         request_id: row.get("request_id")?,
         session_id: row.get("session_id")?,
@@ -58,25 +56,21 @@ impl Store {
     }
 
     pub(crate) fn approval(&self, request_id: &str) -> Result<Option<Approval>> {
-        let connection = self.conn()?;
-        let approval = connection
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM approval_requests WHERE request_id = ?1"),
-                [request_id],
-                row_to_approval,
-            )
-            .optional()?;
-        Ok(approval)
+        self.fetch(
+            &format!("SELECT {COLUMNS} FROM approval_requests WHERE request_id = ?1"),
+            [request_id],
+            row_to_approval,
+        )
     }
 
     pub(crate) fn approvals(&self, status: ApprovalStatus) -> Result<Vec<Approval>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
-            "SELECT {COLUMNS} FROM approval_requests WHERE status = ?1 ORDER BY created_at"
-        ))?;
-        let rows = statement.query_map([status.as_str()], row_to_approval)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!(
+                "SELECT {COLUMNS} FROM approval_requests WHERE status = ?1 ORDER BY created_at"
+            ),
+            [status.as_str()],
+            row_to_approval,
+        )
     }
 
     /// Resolves a pending approval. Resolving it twice is a conflict, never a
@@ -87,18 +81,15 @@ impl Store {
         status: ApprovalStatus,
     ) -> Result<Approval> {
         let resolved = now();
-        let changed = self.conn()?.execute(
-            "UPDATE approval_requests SET status = ?2, resolved_at = ?3 \
-             WHERE request_id = ?1 AND status = 'pending'",
+        self.fetch(
+            &format!(
+                "UPDATE approval_requests SET status = ?2, resolved_at = ?3 \
+                 WHERE request_id = ?1 AND status = 'pending' RETURNING {COLUMNS}"
+            ),
             params![request_id, status.as_str(), resolved],
-        )?;
-        if changed == 0 {
-            return Err(HostError::conflict(
-                "approval is missing or no longer pending",
-            ));
-        }
-        self.approval(request_id)?
-            .ok_or_else(|| HostError::storage("approval update did not persist"))
+            row_to_approval,
+        )?
+        .ok_or_else(|| HostError::conflict("approval is missing or no longer pending"))
     }
 
     /// Startup: an approval whose call cannot be resolved is expired rather

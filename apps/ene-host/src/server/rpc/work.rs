@@ -32,59 +32,14 @@ impl w::WorkService for Services {
         .await
     }
 
-    async fn start_work(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::StartWorkRequest>,
-    ) -> ServiceResult<w::WorkSession> {
-        let request = request.to_owned_message();
-        self.call(move |app| work::start(app.world_mut(), request))
-            .await
-    }
-
-    async fn send_work(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::SendWorkRequest>,
-    ) -> ServiceResult<w::WorkAcceptance> {
-        let request = request.to_owned_message();
-        self.call(move |app| work::send(app.world_mut(), request))
-            .await
-    }
-
-    async fn answer_inquiry(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::AnswerInquiryRequest>,
-    ) -> ServiceResult<w::WorkAcceptance> {
-        let request = request.to_owned_message();
-        self.call(move |app| work::answer_inquiry(app.world_mut(), request))
-            .await
-    }
-
-    async fn stop_work(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::StopWorkRequest>,
-    ) -> ServiceResult<w::Empty> {
-        let id = request.work_id.to_owned();
-        self.call(move |app| {
-            work::stop(app.world_mut(), &id)?;
-            Ok(w::Empty::default())
-        })
-        .await
-    }
-
-    async fn close_work(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::WorkRequest>,
-    ) -> ServiceResult<w::Empty> {
-        let id = request.work_id.to_owned();
-        self.call(move |app| {
-            work::close(app.world_mut(), &id)?;
-            Ok(w::Empty::default())
-        })
-        .await
-    }
+    request!(start_work, w::StartWorkRequest, w::WorkSession, work::start);
+    request!(send_work, w::SendWorkRequest, w::WorkAcceptance, work::send);
+    request!(
+        answer_inquiry,
+        w::AnswerInquiryRequest,
+        w::WorkAcceptance,
+        work::answer_inquiry
+    );
+    discard_id!(stop_work, w::StopWorkRequest, work_id, work::stop);
+    discard_id!(close_work, w::WorkRequest, work_id, work::close);
 }

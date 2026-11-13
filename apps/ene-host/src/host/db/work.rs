@@ -1,23 +1,18 @@
 //! Work sessions, runs and inquiries.
-use super::{Result, Store, now, to_json};
+use super::{
+    Result, Store, enum_column, json_column, now, optional_json_column, or_stamp, require_found,
+    to_json,
+};
 use crate::host::error::{Failure, HostError};
 use crate::host::work::{Inquiry, Run, RunState, WorkSession, WorkStatus};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Row, params};
 
 fn row_to_session(row: &Row<'_>) -> rusqlite::Result<WorkSession> {
-    let status: String = row.get("status")?;
-    let status = WorkStatus::parse(&status).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            status.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("unknown work status")),
-        )
-    })?;
     Ok(WorkSession {
         id: row.get("id")?,
         companion_id: row.get("companion_id")?,
         title: row.get("title")?,
-        status,
+        status: enum_column(row, "status", "unknown work status", WorkStatus::parse)?,
         client_id: row.get("client_id")?,
         activation_revision: row.get::<_, u64>("activation_revision")?,
         created_at: row.get("created_at")?,
@@ -29,42 +24,16 @@ const SESSION_COLUMNS: &str =
     "id, companion_id, title, status, client_id, activation_revision, created_at, updated_at";
 
 fn row_to_run(row: &Row<'_>) -> rusqlite::Result<Run> {
-    let state: String = row.get("state")?;
-    let state = RunState::parse(&state).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            state.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("unknown run state")),
-        )
-    })?;
-    let failure: Option<String> = row.get("failure")?;
-    let pids: String = row.get("unverified_pids")?;
     Ok(Run {
         run_id: row.get("run_id")?,
         work_id: row.get("work_id")?,
         instruction: row.get("instruction")?,
-        state,
+        state: enum_column(row, "state", "unknown run state", RunState::parse)?,
         pending_request_id: row.get("pending_request_id")?,
-        failure: failure
-            .as_deref()
-            .map(serde_json::from_str::<Failure>)
-            .transpose()
-            .map_err(|_| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::other("stored failure is corrupt")),
-                )
-            })?,
+        failure: optional_json_column::<Failure>(row, "failure", "stored failure is corrupt")?,
         cancellation_requested_at: row.get("cancellation_requested_at")?,
         cancellation_reason: row.get("cancellation_reason")?,
-        unverified_pids: serde_json::from_str(&pids).map_err(|_| {
-            rusqlite::Error::FromSqlConversionFailure(
-                pids.len(),
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::other("stored pid list is corrupt")),
-            )
-        })?,
+        unverified_pids: json_column(row, "unverified_pids", "stored pid list is corrupt")?,
         started_at: row.get("started_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -73,20 +42,16 @@ fn row_to_run(row: &Row<'_>) -> rusqlite::Result<Run> {
 const RUN_COLUMNS: &str = "run_id, work_id, instruction, state, pending_request_id, failure, \
      cancellation_requested_at, cancellation_reason, unverified_pids, started_at, updated_at";
 
+const INQUIRY_COLUMNS: &str =
+    "request_id, work_id, run_id, prompt, choices, answer, created_at, resolved_at";
+
 fn row_to_inquiry(row: &Row<'_>) -> rusqlite::Result<Inquiry> {
-    let choices: String = row.get("choices")?;
     Ok(Inquiry {
         request_id: row.get("request_id")?,
         work_id: row.get("work_id")?,
         run_id: row.get("run_id")?,
         prompt: row.get("prompt")?,
-        choices: serde_json::from_str(&choices).map_err(|_| {
-            rusqlite::Error::FromSqlConversionFailure(
-                choices.len(),
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::other("stored inquiry choices are corrupt")),
-            )
-        })?,
+        choices: json_column(row, "choices", "stored inquiry choices are corrupt")?,
         answer: row.get("answer")?,
         created_at: row.get("created_at")?,
         resolved_at: row.get("resolved_at")?,
@@ -103,26 +68,22 @@ pub(crate) fn open_state(state: RunState) -> bool {
 
 impl Store {
     pub(crate) fn work_sessions(&self, companion: &str) -> Result<Vec<WorkSession>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
-            "SELECT {SESSION_COLUMNS} FROM work_sessions WHERE companion_id = ?1 \
-             ORDER BY updated_at DESC, id"
-        ))?;
-        let rows = statement.query_map([companion], row_to_session)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!(
+                "SELECT {SESSION_COLUMNS} FROM work_sessions WHERE companion_id = ?1 \
+                 ORDER BY updated_at DESC, id"
+            ),
+            [companion],
+            row_to_session,
+        )
     }
 
     pub(crate) fn work_session(&self, id: &str) -> Result<Option<WorkSession>> {
-        let connection = self.conn()?;
-        let session = connection
-            .query_row(
-                &format!("SELECT {SESSION_COLUMNS} FROM work_sessions WHERE id = ?1"),
-                [id],
-                row_to_session,
-            )
-            .optional()?;
-        Ok(session)
+        self.fetch(
+            &format!("SELECT {SESSION_COLUMNS} FROM work_sessions WHERE id = ?1"),
+            [id],
+            row_to_session,
+        )
     }
 
     pub(crate) fn insert_work_session(&self, session: &WorkSession) -> Result<()> {
@@ -138,16 +99,8 @@ impl Store {
                 session.status.as_str(),
                 session.client_id,
                 session.activation_revision,
-                if session.created_at.is_empty() {
-                    stamp.clone()
-                } else {
-                    session.created_at.clone()
-                },
-                if session.updated_at.is_empty() {
-                    stamp
-                } else {
-                    session.updated_at.clone()
-                },
+                or_stamp(&session.created_at, &stamp),
+                or_stamp(&session.updated_at, &stamp),
             ],
         )?;
         Ok(())
@@ -158,10 +111,7 @@ impl Store {
             "UPDATE work_sessions SET status = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, status.as_str(), now()],
         )?;
-        if changed == 0 {
-            return Err(HostError::not_found("work session not found"));
-        }
-        Ok(())
+        require_found(changed, "work session not found")
     }
 
     pub(crate) fn close_work(&self, id: &str) -> Result<()> {
@@ -175,43 +125,35 @@ impl Store {
     }
 
     pub(crate) fn runs(&self, work: &str) -> Result<Vec<Run>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
-            "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 ORDER BY started_at, run_id"
-        ))?;
-        let rows = statement.query_map([work], row_to_run)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 ORDER BY started_at, run_id"
+            ),
+            [work],
+            row_to_run,
+        )
     }
 
     pub(crate) fn run(&self, run_id: &str) -> Result<Option<Run>> {
-        let connection = self.conn()?;
-        let run = connection
-            .query_row(
-                &format!("SELECT {RUN_COLUMNS} FROM work_runs WHERE run_id = ?1"),
-                [run_id],
-                row_to_run,
-            )
-            .optional()?;
-        Ok(run)
+        self.fetch(
+            &format!("SELECT {RUN_COLUMNS} FROM work_runs WHERE run_id = ?1"),
+            [run_id],
+            row_to_run,
+        )
     }
 
     /// The run a session is currently executing, if any. At most one run per
     /// session is open.
     pub(crate) fn active_run(&self, work: &str) -> Result<Option<Run>> {
-        let connection = self.conn()?;
-        let run = connection
-            .query_row(
-                &format!(
-                    "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 \
-                     AND state IN ('starting','running','waiting_input','cancelling') \
-                     ORDER BY started_at DESC LIMIT 1"
-                ),
-                [work],
-                row_to_run,
-            )
-            .optional()?;
-        Ok(run)
+        self.fetch(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 \
+                 AND state IN ('starting','running','waiting_input','cancelling') \
+                 ORDER BY started_at DESC LIMIT 1"
+            ),
+            [work],
+            row_to_run,
+        )
     }
 
     pub(crate) fn insert_run(&self, run: &Run) -> Result<()> {
@@ -230,11 +172,7 @@ impl Store {
                 run.cancellation_requested_at,
                 run.cancellation_reason,
                 to_json(&run.unverified_pids)?,
-                if run.started_at.is_empty() {
-                    stamp.clone()
-                } else {
-                    run.started_at.clone()
-                },
+                or_stamp(&run.started_at, &stamp),
                 stamp,
             ],
         )?;
@@ -257,21 +195,17 @@ impl Store {
                 now(),
             ],
         )?;
-        if changed == 0 {
-            return Err(HostError::not_found("run not found"));
-        }
-        Ok(())
+        require_found(changed, "run not found")
     }
 
     pub(crate) fn inquiries(&self, work: &str) -> Result<Vec<Inquiry>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(
-            "SELECT request_id, work_id, run_id, prompt, choices, answer, created_at, resolved_at \
-             FROM work_inquiries WHERE work_id = ?1 ORDER BY created_at",
-        )?;
-        let rows = statement.query_map([work], row_to_inquiry)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!(
+                "SELECT {INQUIRY_COLUMNS} FROM work_inquiries WHERE work_id = ?1 ORDER BY created_at"
+            ),
+            [work],
+            row_to_inquiry,
+        )
     }
 
     pub(crate) fn pending_inquiries(&self, work: &str) -> Result<Vec<Inquiry>> {
@@ -283,16 +217,11 @@ impl Store {
     }
 
     pub(crate) fn inquiry(&self, request_id: &str) -> Result<Option<Inquiry>> {
-        let connection = self.conn()?;
-        let inquiry = connection
-            .query_row(
-                "SELECT request_id, work_id, run_id, prompt, choices, answer, created_at, \
-                 resolved_at FROM work_inquiries WHERE request_id = ?1",
-                [request_id],
-                row_to_inquiry,
-            )
-            .optional()?;
-        Ok(inquiry)
+        self.fetch(
+            &format!("SELECT {INQUIRY_COLUMNS} FROM work_inquiries WHERE request_id = ?1"),
+            [request_id],
+            row_to_inquiry,
+        )
     }
 
     pub(crate) fn insert_inquiry(&self, inquiry: &Inquiry) -> Result<()> {
@@ -305,11 +234,7 @@ impl Store {
                 inquiry.run_id,
                 inquiry.prompt,
                 to_json(&inquiry.choices)?,
-                if inquiry.created_at.is_empty() {
-                    now()
-                } else {
-                    inquiry.created_at.clone()
-                },
+                or_stamp(&inquiry.created_at, &now()),
             ],
         )?;
         Ok(())
@@ -321,18 +246,15 @@ impl Store {
         if answer.trim().is_empty() || answer.chars().count() > 16_000 {
             return Err(HostError::invalid("answer must be 1-16000 characters"));
         }
-        let changed = self.conn()?.execute(
-            "UPDATE work_inquiries SET answer = ?2, resolved_at = ?3 \
-             WHERE request_id = ?1 AND resolved_at IS NULL",
+        self.fetch(
+            &format!(
+                "UPDATE work_inquiries SET answer = ?2, resolved_at = ?3 \
+                 WHERE request_id = ?1 AND resolved_at IS NULL RETURNING {INQUIRY_COLUMNS}"
+            ),
             params![request_id, answer, now()],
-        )?;
-        if changed == 0 {
-            return Err(HostError::conflict(
-                "inquiry is missing or already answered",
-            ));
-        }
-        self.inquiry(request_id)?
-            .ok_or_else(|| HostError::storage("inquiry update did not persist"))
+            row_to_inquiry,
+        )?
+        .ok_or_else(|| HostError::conflict("inquiry is missing or already answered"))
     }
 }
 

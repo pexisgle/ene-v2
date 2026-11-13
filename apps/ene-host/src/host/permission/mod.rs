@@ -4,9 +4,9 @@
 //! every-time confirmation, saved rules, then the user. The alpha does not run
 //! the auxiliary decision model yet, so an unregistered device operation falls
 //! through to the confirmation card (fail-safe).
-use super::client::{CapabilityApproval, CapabilitySpec};
+use super::client::{BUILTIN_TOOLS, CapabilityApproval, CapabilitySpec};
 use super::db::{digest, truncate};
-use super::error::Failure;
+use super::error::{Failure, HostError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,24 +18,31 @@ pub(crate) enum PolicyEffect {
     Confirm,
 }
 
-impl PolicyEffect {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Allow => "allow",
-            Self::Deny => "deny",
-            Self::Confirm => "confirm",
-        }
-    }
+/// An enum stored and sent as a snake_case name, with its two conversions.
+macro_rules! string_enum {
+    ($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+        impl $name {
+            pub(crate) fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text),+
+                }
+            }
 
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        Some(match text {
-            "allow" => Self::Allow,
-            "deny" => Self::Deny,
-            "confirm" => Self::Confirm,
-            _ => return None,
-        })
-    }
+            pub(crate) fn parse(text: &str) -> Option<Self> {
+                $(if text == $text {
+                    return Some(Self::$variant);
+                })+
+                None
+            }
+        }
+    };
 }
+
+string_enum!(PolicyEffect {
+    Allow => "allow",
+    Deny => "deny",
+    Confirm => "confirm",
+});
 
 /// A saved rule ("always approve" is one-shot in the alpha and saves no rule).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,26 +64,12 @@ pub(crate) enum ApprovalStatus {
     Expired,
 }
 
-impl ApprovalStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Approved => "approved",
-            Self::Denied => "denied",
-            Self::Expired => "expired",
-        }
-    }
-
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        Some(match text {
-            "pending" => Self::Pending,
-            "approved" => Self::Approved,
-            "denied" => Self::Denied,
-            "expired" => Self::Expired,
-            _ => return None,
-        })
-    }
-}
+string_enum!(ApprovalStatus {
+    Pending => "pending",
+    Approved => "approved",
+    Denied => "denied",
+    Expired => "expired",
+});
 
 /// An approval request, immutable in the parts that identify the operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,23 +102,10 @@ pub(crate) enum Verdict {
 const HARD_DENIED: &[&str] = &["payment.", "securities.", "banking.", "crypto.transfer."];
 
 /// Tools that belong to the host process itself. The permission docs never
-/// gate them: they are conversation, memory and work management.
+/// gate them: they are conversation, memory and work management. The generic
+/// device dispatcher is the one builtin that is gated.
 pub(crate) fn is_host_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "mind_recall"
-            | "mind_read"
-            | "mind_update"
-            | "start_work"
-            | "send_work"
-            | "list_works"
-            | "stop_work"
-            | "noop"
-            | "report"
-            | "schedule_create"
-            | "schedule_list"
-            | "schedule_cancel"
-    )
+    tool_name != "device_request" && BUILTIN_TOOLS.contains(&tool_name)
 }
 
 pub(crate) fn hard_denied(capability: &str) -> Option<&'static str> {
@@ -259,67 +239,26 @@ mod tests {
     fn spec(approval: CapabilityApproval) -> CapabilitySpec {
         CapabilitySpec {
             name: "device.files".into(),
-            tool_name: String::new(),
             description: "files".into(),
             input_schema: r#"{"type":"object"}"#.into(),
-            presets: Vec::new(),
             approval,
-            approval_target: String::new(),
-            output_schema: String::new(),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn hard_denied_capabilities_never_reach_a_card() {
-        let verdict = decide_capability(
+    fn hard_denied_and_undeclared_operations_fail_safe() {
+        let denied = decide_capability(
             &[],
             Some(&spec(CapabilityApproval::Auto)),
             "payment.transfer",
             "device_request",
             &json!({}),
         );
-        assert!(matches!(verdict, Verdict::Deny { .. }));
-    }
-
-    #[test]
-    fn confirm_and_deny_rules_outrank_allows() {
-        let allow = rule(PolicyEffect::Allow, "device_request", "*");
-        let confirm = rule(PolicyEffect::Confirm, "device_request", "/tmp/x");
-        let denied = decide_capability(
-            &[allow.clone(), confirm],
-            Some(&spec(CapabilityApproval::Auto)),
-            "device.files",
-            "device_request",
-            &json!({"path": "/tmp/x"}),
-        );
-        assert!(matches!(denied, Verdict::Confirm { .. }));
-        let stamped = {
-            let mut confirm = rule(PolicyEffect::Confirm, "*", "*");
-            confirm.id = "r2".into();
-            confirm
-        };
-        let allow_after = decide_capability(
-            &[stamped],
-            Some(&spec(CapabilityApproval::Auto)),
-            "body.motion",
-            "body_motion",
-            &json!({"motion": "nod"}),
-        );
-        assert!(matches!(allow_after, Verdict::Confirm { .. }));
-        let allow_only = decide_capability(
-            &[allow],
-            Some(&spec(CapabilityApproval::Auto)),
-            "device.files",
-            "device_request",
-            &json!({"path": "/tmp/y"}),
-        );
-        assert_eq!(allow_only, Verdict::Allow);
-    }
-
-    #[test]
-    fn undeclared_operations_fall_through_to_confirmation() {
-        let verdict = decide_capability(&[], None, "device.screen", "device_request", &json!({}));
-        assert!(matches!(verdict, Verdict::Confirm { .. }));
+        assert!(matches!(denied, Verdict::Deny { .. }));
+        let undeclared =
+            decide_capability(&[], None, "device.screen", "device_request", &json!({}));
+        assert!(matches!(undeclared, Verdict::Confirm { .. }));
         let auto = decide_capability(
             &[],
             Some(&spec(CapabilityApproval::Auto)),
@@ -331,20 +270,45 @@ mod tests {
     }
 
     #[test]
-    fn a_deny_rule_beats_a_confirm_rule_and_an_allow_bypasses_a_default_confirm() {
-        let confirm = rule(PolicyEffect::Confirm, "device_request", "*");
+    fn rules_decide_by_precedence() {
+        let allow = rule(PolicyEffect::Allow, "device_request", "*");
+        let confirm = rule(PolicyEffect::Confirm, "device_request", "/tmp/x");
+        let verdict = decide_capability(
+            &[allow.clone(), confirm],
+            Some(&spec(CapabilityApproval::Auto)),
+            "device.files",
+            "device_request",
+            &json!({"path": "/tmp/x"}),
+        );
+        assert!(matches!(verdict, Verdict::Confirm { .. }));
+        let allow_only = decide_capability(
+            std::slice::from_ref(&allow),
+            Some(&spec(CapabilityApproval::Auto)),
+            "device.files",
+            "device_request",
+            &json!({"path": "/tmp/y"}),
+        );
+        assert_eq!(allow_only, Verdict::Allow);
+        let wildcard = decide_capability(
+            &[rule(PolicyEffect::Confirm, "*", "*")],
+            Some(&spec(CapabilityApproval::Auto)),
+            "body.motion",
+            "body_motion",
+            &json!({"motion": "nod"}),
+        );
+        assert!(matches!(wildcard, Verdict::Confirm { .. }));
         let mut deny = rule(PolicyEffect::Deny, "device_request", "*");
         deny.id = "r2".into();
         let verdict = decide_capability(
-            &[confirm, deny],
+            &[rule(PolicyEffect::Confirm, "device_request", "*"), deny],
             Some(&spec(CapabilityApproval::Auto)),
             "device.files",
             "device_request",
             &json!({"path": "/tmp/x"}),
         );
         assert!(matches!(verdict, Verdict::Deny { .. }));
-
-        let allow = rule(PolicyEffect::Allow, "device_request", "*");
+        // A saved allow bypasses a capability's default confirmation, but not
+        // a deny or a confirm rule.
         let verdict = decide_capability(
             &[allow],
             Some(&spec(CapabilityApproval::Confirm)),
@@ -441,23 +405,19 @@ fn gate(world: &mut World) {
         if is_host_tool(&tool_name) {
             continue;
         }
-        let (companion_id, work_id, run_id, bound) = binding_of(world, agent);
+        let (companion_id, work_id, run_id) = binding_of(world, agent);
         let Some((client_id, activation_revision)) =
-            target_client(&companion_id, &store, &bound, &work_id)
+            target_client(&companion_id, &store, work_id.as_deref())
         else {
-            decide(
+            refuse(
                 world,
                 call,
-                Outcome::refused("no_active_client: no client is bound to this agent"),
+                "no_active_client: no client is bound to this agent",
             );
             continue;
         };
         let Some(client) = store.client(&client_id).ok().flatten() else {
-            decide(
-                world,
-                call,
-                Outcome::refused("the bound client is not registered"),
-            );
+            refuse(world, call, "the bound client is not registered");
             continue;
         };
         // A tool that is neither a host tool nor a declared capability is
@@ -465,18 +425,14 @@ fn gate(world: &mut World) {
         let Some((capability, input, spec)) =
             resolve_capability(world, &client, &tool_name, &arguments)
         else {
-            decide(
-                world,
-                call,
-                Outcome::refused(format!("unknown device tool `{tool_name}`")),
-            );
+            refuse(world, call, &format!("unknown device tool `{tool_name}`"));
             continue;
         };
         if !client.is_granted(&capability) {
-            decide(
+            refuse(
                 world,
                 call,
-                Outcome::refused(format!("capability `{capability}` is not granted")),
+                &format!("capability `{capability}` is not granted"),
             );
             continue;
         }
@@ -488,9 +444,7 @@ fn gate(world: &mut World) {
         });
         match verdict {
             Verdict::Allow => {}
-            Verdict::Deny { reason } => {
-                decide(world, call, Outcome::refused(reason));
-            }
+            Verdict::Deny { reason } => refuse(world, call, &reason),
             Verdict::Confirm { target } => {
                 let hold = world.spawn(HoldOf(call)).id();
                 let request_id = uuid::Uuid::new_v4().to_string();
@@ -529,7 +483,6 @@ fn gate(world: &mut World) {
                         ..Default::default()
                     })),
                 );
-                let mut notifier = world.resource_mut::<Notifier>();
                 notifier.notice(
                     Some(&companion_id),
                     "approval_required",
@@ -540,36 +493,20 @@ fn gate(world: &mut World) {
     }
 }
 
-/// The companion, work session and run an agent serves.
-fn binding_of(world: &World, agent: Entity) -> (String, String, String, AgentRole) {
+/// The companion, work session and run an agent serves. A work agent carries
+/// both ids; a companion agent leaves the work ones empty.
+fn binding_of(world: &World, agent: Entity) -> (String, Option<String>, String) {
     if let Some(companion) = world.get::<super::agent::CompanionAgent>(agent) {
-        return (
-            companion.companion_id.clone(),
-            String::new(),
-            String::new(),
-            AgentRole::Parent,
-        );
+        return (companion.companion_id.clone(), None, String::new());
     }
-    if let Some(work) = world.get::<super::agent::WorkAgent>(agent) {
-        return (
+    match world.get::<super::agent::WorkAgent>(agent) {
+        Some(work) => (
             work.companion_id.clone(),
-            work.work_id.clone(),
+            Some(work.work_id.clone()),
             work.run_id.clone(),
-            AgentRole::Work,
-        );
+        ),
+        None => (String::new(), None, String::new()),
     }
-    (
-        String::new(),
-        String::new(),
-        String::new(),
-        AgentRole::Parent,
-    )
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AgentRole {
-    Parent,
-    Work,
 }
 
 /// The capability a device tool call names, with its input and declaration.
@@ -607,22 +544,9 @@ fn resolve_capability(
 fn target_client(
     companion_id: &str,
     store: &Store,
-    bound: &AgentRole,
-    work_id: &str,
+    work_id: Option<&str>,
 ) -> Option<(String, u64)> {
-    if *bound == AgentRole::Work {
-        let session = store.work_session(work_id).ok().flatten()?;
-        return Some((session.client_id?, session.activation_revision));
-    }
-    store
-        .activation(companion_id)
-        .ok()
-        .flatten()
-        .and_then(|activation| {
-            activation
-                .client_id
-                .map(|client| (client, activation.revision))
-        })
+    store.target(companion_id, work_id).ok().flatten()
 }
 
 fn decide(world: &mut World, call: Entity, outcome: Outcome) {
@@ -645,6 +569,18 @@ pub(crate) fn refuse(world: &mut World, call: Entity, reason: &str) {
     decide(world, call, Outcome::refused(reason));
 }
 
+/// Takes a held call out of the map and despawns its hold marker.
+fn release(world: &mut World, request: &str) -> Option<Hold> {
+    let hold = world
+        .resource_mut::<Approvals>()
+        .by_request
+        .remove(request)?;
+    if world.get_entity(hold.hold).is_ok() {
+        world.entity_mut(hold.hold).despawn();
+    }
+    Some(hold)
+}
+
 /// Approves or denies a pending request. The caller must still have a live
 /// tool call (an approval is never replayed onto another one).
 pub(crate) fn submit(
@@ -655,11 +591,9 @@ pub(crate) fn submit(
     let store = world.resource::<Store>().clone();
     let approval = store
         .approval(request_id)?
-        .ok_or_else(|| crate::host::error::HostError::not_found("approval not found"))?;
+        .ok_or_else(|| HostError::not_found("approval not found"))?;
     if approval.status != ApprovalStatus::Pending {
-        return Err(crate::host::error::HostError::conflict(
-            "approval is no longer pending",
-        ));
+        return Err(HostError::conflict("approval is no longer pending"));
     }
     super::compaction::note_user_activity(world);
     // A device approval is bound to the client generation it was issued for:
@@ -672,28 +606,17 @@ pub(crate) fn submit(
             .and_then(|activation| activation.client_id.map(|id| (id, activation.revision)));
         if current.as_ref() != Some(&(client.to_owned(), revision)) {
             store.resolve_approval(request_id, ApprovalStatus::Expired)?;
-            if let Some(hold) = world
-                .resource_mut::<Approvals>()
-                .by_request
-                .remove(request_id)
-            {
-                if world.get_entity(hold.hold).is_ok() {
-                    world.entity_mut(hold.hold).despawn();
-                }
+            if let Some(hold) = release(world, request_id) {
                 refuse(world, hold.call, "client_moved: the active client moved");
             }
-            return Err(crate::host::error::HostError::conflict(
+            return Err(HostError::conflict(
                 "client_moved: the approval is bound to an old client generation",
             ));
         }
     }
-    let hold = world
-        .resource_mut::<Approvals>()
-        .by_request
-        .remove(request_id);
-    let Some(hold) = hold else {
+    let Some(hold) = release(world, request_id) else {
         store.resolve_approval(request_id, ApprovalStatus::Expired)?;
-        return Err(crate::host::error::HostError::conflict(
+        return Err(HostError::conflict(
             "approval is not attached to a live tool call",
         ));
     };
@@ -709,35 +632,23 @@ pub(crate) fn submit(
         .is_none_or(|hash| hash != approval.action_payload_hash);
     if changed {
         store.resolve_approval(request_id, ApprovalStatus::Expired)?;
-        let hold_entity = hold.hold;
-        if world.get_entity(hold_entity).is_ok() {
-            world.entity_mut(hold_entity).despawn();
-        }
         refuse(
             world,
             hold.call,
             "the operation arguments changed after the approval was requested",
         );
-        return Err(crate::host::error::HostError::conflict(
+        return Err(HostError::conflict(
             "approval no longer matches the call arguments",
         ));
     }
     match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
             world.entity_mut(hold.call).insert(Approved);
-            let hold_entity = hold.hold;
-            if world.get_entity(hold_entity).is_ok() {
-                world.entity_mut(hold_entity).despawn();
-            }
             let approval = store.resolve_approval(request_id, ApprovalStatus::Approved)?;
             notify_resolved(world, &approval);
             Ok(approval)
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
-            let hold_entity = hold.hold;
-            if world.get_entity(hold_entity).is_ok() {
-                world.entity_mut(hold_entity).despawn();
-            }
             refuse(world, hold.call, "the user denied this operation");
             let approval = store.resolve_approval(request_id, ApprovalStatus::Denied)?;
             notify_resolved(world, &approval);
@@ -768,16 +679,7 @@ fn expire_orphaned_approvals(world: &mut World) {
             .collect()
     };
     for request in orphans {
-        let hold = world
-            .resource_mut::<Approvals>()
-            .by_request
-            .remove(&request);
-        if let Some(hold) = hold {
-            let hold_entity = hold.hold;
-            if world.get_entity(hold_entity).is_ok() {
-                world.entity_mut(hold_entity).despawn();
-            }
-        }
+        release(world, &request);
         if let Ok(store) = world.resource::<Store>().approval(&request)
             && store.is_some_and(|approval| approval.status == ApprovalStatus::Pending)
         {
@@ -809,14 +711,7 @@ pub(crate) fn invalidate_generation(
             .collect()
     };
     for request in requests {
-        let hold = world
-            .resource_mut::<Approvals>()
-            .by_request
-            .remove(&request);
-        if let Some(hold) = hold {
-            if world.get_entity(hold.hold).is_ok() {
-                world.entity_mut(hold.hold).despawn();
-            }
+        if let Some(hold) = release(world, &request) {
             refuse(
                 world,
                 hold.call,

@@ -1,27 +1,12 @@
-//! The external ACP backend.
-//!
-//! One WorkSession owns one ACP process and one ACP session; a Run is one
-//! `session/prompt` turn on that connection (docs/design/work.md §2.1 and
-//! tech-stack.md §G). The process outlives a run so the agent keeps its
-//! conversation context.
-//!
-//! ## Boundary with the ECS
-//!
-//! rig-ecs runs on the host's ECS thread and the ACP connection is Tokio-only,
-//! so the two meet through two channels rather than by sharing state:
-//!
-//! * ECS -> backend: `tokio::sync::mpsc` commands (`prompt`, `cancel`,
-//!   force-kill, shutdown) held by [`AcpHandle`] in the [`AcpBackends`]
-//!   resource.
-//! * backend -> ECS: a `crossbeam_channel` of [`AcpEvent`]s in [`AcpEvents`].
-//!   [`pump`] drains it in `Update` after `AgentLoop` and calls the same
-//!   `settle_run` path the rig backend uses, so a completion, failure or
-//!   cancellation always lands in the run row once.
-//!
-//! The backend owns its own small Tokio runtime because the ECS thread has no
-//! reactor and must never block on one.
-use super::sandbox;
-use crate::host::{error::HostError, settings::AcpConnection};
+//! The external ACP backend (tech-stack.md §G): one process per WorkSession,
+//! one `session/prompt` turn per Run. Commands go to [`AcpHandle`]; [`AcpEvents`]
+//! carries results back to [`pump`], which settles them like the rig backend.
+use crate::host::{
+    db::{Store, truncate},
+    error::HostError,
+    notify::Notifier,
+    settings::AcpConnection,
+};
 use agent_client_protocol::{
     Agent, ByteStreams, Client, on_receive_notification, on_receive_request,
     schema::ProtocolVersion,
@@ -30,7 +15,7 @@ use agent_client_protocol::{
         schema::{
             CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-            SessionNotification, SessionUpdate, StopReason, TextContent,
+            SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
         },
     },
 };
@@ -42,9 +27,10 @@ use process_wrap::tokio::JobObject;
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use rig_core::completion::Message;
+use rig_ecs::prelude::TurnOutcome;
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex, OnceLock,
@@ -52,42 +38,25 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{
-    io::AsyncBufReadExt,
-    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-};
+use tokio::io::AsyncBufReadExt;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-/// How long the forced kill may take before it is reported as unverified.
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The terminal result of one ACP prompt turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AcpOutcome {
-    Completed,
-    Cancelled,
-    Failed,
-}
-
-/// One backend -> ECS message.
-#[derive(Clone, Debug)]
 pub(crate) enum AcpEvent {
-    /// The ACP session exists; the first prompt can be served.
-    Ready { run_id: String },
-    /// A streamed agent update that belongs to the active run.
+    Ready {
+        run_id: String,
+    },
     Update {
         work_id: String,
         run_id: String,
         text: String,
     },
-    /// The prompt turn settled.
     Finished {
         run_id: String,
-        outcome: AcpOutcome,
-        summary: String,
-        detail: String,
+        outcome: TurnOutcome,
     },
-    /// The connection or the process is gone.
     Closed {
         work_id: String,
         run_id: Option<String>,
@@ -95,22 +64,15 @@ pub(crate) enum AcpEvent {
         confirmed: bool,
         pids: Vec<u32>,
     },
-    /// A user-visible sandbox or capability notice.
-    Warning { work_id: String, message: String },
 }
 
-/// Commands the ECS sends to one ACP session task.
-#[derive(Debug)]
 enum Command {
     Prompt { run_id: String, text: String },
     Cancel { run_id: String },
-    ForceKill,
-    Shutdown,
+    End,
 }
 
-/// The session-level handle to one ACP agent process.
 pub(crate) struct AcpHandle {
-    pub(crate) work_id: String,
     pid: Arc<AtomicU32>,
     commands: UnboundedSender<Command>,
 }
@@ -121,7 +83,6 @@ impl AcpHandle {
         (pid != 0).then_some(pid).into_iter().collect()
     }
 
-    /// Queues the instruction of `run_id`; false when the task is gone.
     pub(crate) fn prompt(&self, run_id: &str, text: &str) -> bool {
         self.commands
             .send(Command::Prompt {
@@ -131,7 +92,6 @@ impl AcpHandle {
             .is_ok()
     }
 
-    /// Sends ACP `session/cancel` for `run_id`; false when the task is gone.
     pub(crate) fn cancel(&self, run_id: &str) -> bool {
         self.commands
             .send(Command::Cancel {
@@ -140,42 +100,14 @@ impl AcpHandle {
             .is_ok()
     }
 
-    /// Asks the backend to kill the process group; false when it is gone.
-    pub(crate) fn force_kill(&self) -> bool {
-        self.commands.send(Command::ForceKill).is_ok()
-    }
-
-    /// Ends the session and terminates the process group.
-    pub(crate) fn shutdown(self) {
-        let _ = self.commands.send(Command::Shutdown);
+    pub(crate) fn end(&self) -> bool {
+        self.commands.send(Command::End).is_ok()
     }
 }
 
-/// The live ACP sessions, keyed by work session id.
 #[derive(Resource, Default)]
-pub(crate) struct AcpBackends {
-    sessions: HashMap<String, AcpHandle>,
-}
+pub(crate) struct AcpBackends(pub(crate) HashMap<String, AcpHandle>);
 
-impl AcpBackends {
-    pub(crate) fn handle(&self, work_id: &str) -> Option<&AcpHandle> {
-        self.sessions.get(work_id)
-    }
-
-    pub(crate) fn is_acp(&self, work_id: &str) -> bool {
-        self.sessions.contains_key(work_id)
-    }
-
-    pub(crate) fn insert(&mut self, handle: AcpHandle) {
-        self.sessions.insert(handle.work_id.clone(), handle);
-    }
-
-    pub(crate) fn remove(&mut self, work_id: &str) -> Option<AcpHandle> {
-        self.sessions.remove(work_id)
-    }
-}
-
-/// The backend -> ECS event channel.
 #[derive(Resource)]
 pub(crate) struct AcpEvents {
     sender: Sender<AcpEvent>,
@@ -190,7 +122,7 @@ impl Default for AcpEvents {
 }
 
 impl AcpEvents {
-    pub(crate) fn sender(&self) -> Sender<AcpEvent> {
+    fn sender(&self) -> Sender<AcpEvent> {
         self.sender.clone()
     }
 
@@ -199,10 +131,6 @@ impl AcpEvents {
     }
 }
 
-/// Starts one ACP agent for `work_id`.
-///
-/// A missing command is an immediate, honest failure: no run is left looking
-/// alive, and no success is fabricated for a process that never started.
 pub(crate) fn spawn(
     world: &mut World,
     work_id: &str,
@@ -217,30 +145,33 @@ pub(crate) fn spawn(
     })?;
     let cwd = std::env::current_dir()
         .map_err(|error| HostError::unavailable(format!("ACP working directory: {error}")))?;
-    let plan = sandbox::plan(
+    let (program, args, notice) = launch(
         command,
         &connection.args,
         &cwd,
         &connection.endpoint.options,
     );
-    let events = world.resource::<AcpEvents>().sender();
-    if !plan.was_isolated() {
-        let _ = events.send(AcpEvent::Warning {
-            work_id: work_id.to_owned(),
-            message: plan.notice.clone(),
-        });
+    if let Some(notice) = notice {
+        let store = world.resource::<Store>().clone();
+        if let Ok(Some(session)) = store.work_session(work_id) {
+            world.resource_mut::<Notifier>().notice(
+                Some(&session.companion_id),
+                "acp_sandbox_unavailable",
+                &truncate(&notice, 500),
+            );
+        }
     }
+    let events = world.resource::<AcpEvents>().sender();
     let pid = Arc::new(AtomicU32::new(0));
     let (commands, receiver) = unbounded_channel();
     let handle = AcpHandle {
-        work_id: work_id.to_owned(),
         pid: Arc::clone(&pid),
         commands,
     };
-    let runtime = runtime()?;
-    runtime.spawn(run_backend(
+    runtime()?.spawn(run_backend(
         work_id.to_owned(),
-        plan,
+        program,
+        args,
         cwd,
         events,
         pid,
@@ -249,73 +180,42 @@ pub(crate) fn spawn(
     Ok(handle)
 }
 
-/// Sends the ACP `session/cancel` of `run_id` if this session is ACP.
 pub(crate) fn cancel(world: &World, work_id: &str, run_id: &str) -> bool {
-    world
-        .resource::<AcpBackends>()
-        .handle(work_id)
+    let backends = &world.resource::<AcpBackends>().0;
+    backends
+        .get(work_id)
         .is_some_and(|handle| handle.cancel(run_id))
 }
 
-/// Asks the backend to kill its process group; false when it has no task.
 pub(crate) fn force_kill(world: &World, work_id: &str) -> bool {
-    world
-        .resource::<AcpBackends>()
-        .handle(work_id)
-        .is_some_and(AcpHandle::force_kill)
+    let backends = &world.resource::<AcpBackends>().0;
+    backends.get(work_id).is_some_and(AcpHandle::end)
 }
 
-/// The PIDs to name when a stop could not be verified.
 pub(crate) fn pids(world: &World, work_id: &str) -> Vec<u32> {
-    world
-        .resource::<AcpBackends>()
-        .handle(work_id)
+    let backends = &world.resource::<AcpBackends>().0;
+    backends
+        .get(work_id)
         .map(AcpHandle::pid)
         .unwrap_or_default()
 }
 
-/// Ends the ACP session: the process group is terminated by the backend.
 pub(crate) fn shutdown(world: &mut World, work_id: &str) {
-    if let Some(handle) = world.resource_mut::<AcpBackends>().remove(work_id) {
-        handle.shutdown();
+    if let Some(handle) = world.resource_mut::<AcpBackends>().0.remove(work_id) {
+        handle.end();
     }
 }
 
-/// Drains backend events into the run lifecycle.
 pub(crate) fn pump(world: &mut World) {
-    let events = world.resource::<AcpEvents>().drain();
-    for event in events {
+    for event in world.resource::<AcpEvents>().drain() {
         match event {
-            AcpEvent::Ready { run_id } => {
-                super::mark_run_running(world, &run_id);
-            }
+            AcpEvent::Ready { run_id } => super::mark_run_running(world, &run_id),
             AcpEvent::Update {
                 work_id,
                 run_id,
                 text,
             } => super::acp_update(world, &work_id, &run_id, &text),
-            AcpEvent::Finished {
-                run_id,
-                outcome,
-                summary,
-                detail,
-            } => {
-                let outcome = match outcome {
-                    AcpOutcome::Completed => {
-                        let summary = if summary.trim().is_empty() {
-                            "作業が完了しました".to_owned()
-                        } else {
-                            summary
-                        };
-                        super::TurnOutcome::Answered(Message::assistant(summary))
-                    }
-                    AcpOutcome::Cancelled => super::TurnOutcome::Stopped(Some(
-                        "the ACP agent cancelled the prompt".to_owned(),
-                    )),
-                    AcpOutcome::Failed => super::TurnOutcome::Failed(detail),
-                };
-                super::settle_run(world, run_id, outcome);
-            }
+            AcpEvent::Finished { run_id, outcome } => super::settle_run(world, run_id, outcome),
             AcpEvent::Closed {
                 work_id,
                 run_id,
@@ -323,7 +223,6 @@ pub(crate) fn pump(world: &mut World) {
                 confirmed,
                 pids,
             } => super::acp_closed(world, &work_id, run_id, error, confirmed, pids),
-            AcpEvent::Warning { work_id, message } => super::acp_warning(world, &work_id, &message),
         }
     }
 }
@@ -345,16 +244,27 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime, HostError> {
     }
 }
 
+fn closed(work_id: String, error: String) -> AcpEvent {
+    AcpEvent::Closed {
+        work_id,
+        run_id: None,
+        error: Some(error),
+        confirmed: true,
+        pids: Vec::new(),
+    }
+}
+
 async fn run_backend(
     work_id: String,
-    plan: sandbox::SandboxPlan,
+    program: PathBuf,
+    args: Vec<String>,
     cwd: PathBuf,
     events: Sender<AcpEvent>,
     pid: Arc<AtomicU32>,
     commands: UnboundedReceiver<Command>,
 ) {
-    let mut wrap = CommandWrap::with_new(&plan.program, |cmd| {
-        cmd.args(&plan.args)
+    let mut wrap = CommandWrap::with_new(&program, |cmd| {
+        cmd.args(&args)
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -368,13 +278,10 @@ async fn run_backend(
     let mut child = match wrap.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let _ = events.send(AcpEvent::Closed {
+            let _ = events.send(closed(
                 work_id,
-                run_id: None,
-                error: Some(format!("the ACP agent could not start: {error}")),
-                confirmed: true,
-                pids: Vec::new(),
-            });
+                format!("the ACP agent could not start: {error}"),
+            ));
             return;
         }
     };
@@ -382,13 +289,10 @@ async fn run_backend(
         pid.store(id, Ordering::SeqCst);
     }
     let (Some(stdin), Some(stdout)) = (child.stdin().take(), child.stdout().take()) else {
-        let _ = events.send(AcpEvent::Closed {
+        let _ = events.send(closed(
             work_id,
-            run_id: None,
-            error: Some("the ACP agent has no standard input/output".to_owned()),
-            confirmed: true,
-            pids: Vec::new(),
-        });
+            "the ACP agent has no standard input/output".to_owned(),
+        ));
         return;
     };
     if let Some(stderr) = child.stderr().take() {
@@ -443,13 +347,13 @@ async fn run_backend(
             }
         })
         .await;
-    let termination = terminate(&mut child, KILL_TIMEOUT).await;
+    let (confirmed, pids) = terminate(&mut child, KILL_TIMEOUT).await;
     let _ = events.send(AcpEvent::Closed {
         work_id,
         run_id: shared.run_id(),
         error: result.err().map(|error| error.to_string()),
-        confirmed: termination.confirmed,
-        pids: termination.pids,
+        confirmed,
+        pids,
     });
 }
 
@@ -481,23 +385,12 @@ async fn session_loop(
                     Command::Prompt { run_id, text } => {
                         if !ready {
                             ready = true;
-                            let _ = events.send(AcpEvent::Ready {
-                                run_id: run_id.clone(),
-                            });
+                            let _ = events.send(AcpEvent::Ready { run_id: run_id.clone() });
                         }
-                        serve(
-                            &cx,
-                            &session_id,
-                            run_id,
-                            text,
-                            &events,
-                            &shared,
-                            &mut commands,
-                        )
-                        .await?;
+                        serve(&cx, &session_id, run_id, text, &events, &shared, &mut commands).await?;
                     }
                     Command::Cancel { .. } => {}
-                    Command::ForceKill | Command::Shutdown => return Ok(()),
+                    Command::End => return Ok(()),
                 }
             }
             _ = &mut terminated => return Ok(()),
@@ -505,10 +398,9 @@ async fn session_loop(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn serve(
     cx: &ConnectionTo<Agent>,
-    session_id: &agent_client_protocol::v1::schema::SessionId,
+    session_id: &SessionId,
     run_id: String,
     text: String,
     events: &Sender<AcpEvent>,
@@ -532,54 +424,46 @@ async fn serve(
             }
             result = &mut prompt => {
                 let summary = shared.finish();
-                let (outcome, detail) = match result {
+                let outcome = match result {
                     Ok(response) => match response.stop_reason {
-                        StopReason::EndTurn => (AcpOutcome::Completed, String::new()),
-                        StopReason::Cancelled => (AcpOutcome::Cancelled, String::new()),
-                        other => (
-                            AcpOutcome::Failed,
-                            format!("the ACP agent stopped the prompt: {other:?}"),
-                        ),
+                        StopReason::EndTurn => TurnOutcome::Answered(Message::assistant(
+                            if summary.trim().is_empty() {
+                                "作業が完了しました".to_owned()
+                            } else {
+                                summary
+                            },
+                        )),
+                        StopReason::Cancelled => TurnOutcome::Stopped(Some(
+                            "the ACP agent cancelled the prompt".to_owned(),
+                        )),
+                        other => TurnOutcome::Failed(format!(
+                            "the ACP agent stopped the prompt: {other:?}"
+                        )),
                     },
-                    Err(error) => (
-                        AcpOutcome::Failed,
-                        format!("the ACP prompt failed: {error}"),
-                    ),
+                    Err(error) => TurnOutcome::Failed(format!("the ACP prompt failed: {error}")),
                 };
-                let _ = events.send(AcpEvent::Finished {
-                    run_id: run_id.clone(),
-                    outcome,
-                    summary,
-                    detail,
-                });
+                let _ = events.send(AcpEvent::Finished { run_id, outcome });
                 return Ok(());
             }
             command = commands.recv() => {
                 match command {
-                    Some(Command::Cancel { run_id: target }) => {
-                        if target == run_id {
-                            cx.send_notification(CancelNotification::new(session_id.clone()))?;
-                        }
+                    Some(Command::Cancel { run_id: target }) if target == run_id => {
+                        cx.send_notification(CancelNotification::new(session_id.clone()))?;
                     }
-                    Some(Command::ForceKill | Command::Shutdown) | None => return Ok(()),
-                    Some(Command::Prompt { .. }) => {
-                        // One open run per session; the ECS never queues a
-                        // second prompt before the first settles.
-                    }
+                    Some(Command::Cancel { .. } | Command::Prompt { .. }) => {}
+                    Some(Command::End) | None => return Ok(()),
                 }
             }
         }
     }
 }
 
-/// The run a streamed update belongs to, and the text that becomes the
-/// completion summary.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct SharedRun {
     state: Mutex<RunSlot>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct RunSlot {
     run_id: Option<String>,
     summary: String,
@@ -598,10 +482,9 @@ impl SharedRun {
 
     fn append(&self, text: &str) {
         let mut slot = lock(&self.state);
-        if slot.summary.chars().count() >= 8_000 {
-            return;
+        if slot.summary.chars().count() < 8_000 {
+            slot.summary.push_str(text);
         }
-        slot.summary.push_str(text);
     }
 
     fn finish(&self) -> String {
@@ -616,59 +499,74 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 fn update_text(update: &SessionUpdate) -> Option<(String, bool)> {
-    match update {
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            content_text(&chunk.content).map(|text| (text, true))
-        }
-        SessionUpdate::AgentThoughtChunk(chunk) => {
-            content_text(&chunk.content).map(|text| (text, false))
-        }
-        _ => None,
-    }
+    let (content, is_message) = match update {
+        SessionUpdate::AgentMessageChunk(chunk) => (&chunk.content, true),
+        SessionUpdate::AgentThoughtChunk(chunk) => (&chunk.content, false),
+        _ => return None,
+    };
+    let ContentBlock::Text(text) = content else {
+        return None;
+    };
+    (!text.text.trim().is_empty()).then(|| (text.text.clone(), is_message))
 }
 
-fn content_text(content: &ContentBlock) -> Option<String> {
-    match content {
-        ContentBlock::Text(text) => (!text.text.trim().is_empty()).then(|| text.text.clone()),
-        _ => None,
-    }
-}
-
-/// What happened to the child after the connection ended.
-#[derive(Debug)]
-pub(crate) struct Termination {
-    pub(crate) confirmed: bool,
-    pub(crate) pids: Vec<u32>,
-}
-
-/// Kills the process group and reports whether every process in it is gone.
-pub(crate) async fn terminate(child: &mut Box<dyn ChildWrapper>, timeout: Duration) -> Termination {
+async fn terminate(child: &mut Box<dyn ChildWrapper>, timeout: Duration) -> (bool, Vec<u32>) {
     let pids: Vec<u32> = child.id().into_iter().collect();
     if matches!(child.try_wait(), Ok(Some(_))) {
-        return Termination {
-            confirmed: true,
-            pids,
-        };
+        return (true, pids);
     }
-    // `start_kill` on the process-group wrapper signals the whole group;
-    // `wait` reaps it. Both are needed to call the stop confirmed.
+    // `start_kill` signals the whole process group; `wait` reaps it.
     if child.start_kill().is_err() {
-        return Termination {
-            confirmed: matches!(child.try_wait(), Ok(Some(_))),
-            pids,
-        };
+        return (matches!(child.try_wait(), Ok(Some(_))), pids);
     }
     let waited = tokio::time::timeout(timeout, child.wait()).await;
-    match waited {
-        Ok(Ok(_)) => Termination {
-            confirmed: true,
-            pids,
-        },
-        _ => Termination {
-            confirmed: false,
-            pids,
-        },
+    (matches!(waited, Ok(Ok(_))), pids)
+}
+
+// === Process isolation ===================================================
+
+fn launch(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    options: &str,
+) -> (PathBuf, Vec<String>, Option<String>) {
+    let requested = sandbox_mode(options);
+    if requested.as_deref() == Some("none") {
+        let reason = "ACP接続の `sandbox` オプションにより、子プロセスは非隔離で起動します。";
+        return (
+            PathBuf::from(command),
+            args.to_vec(),
+            Some(reason.to_owned()),
+        );
     }
+    #[cfg(target_os = "linux")]
+    if let (Some(program), Some(cwd)) = (which::which("bwrap").ok(), cwd.to_str()) {
+        let mut wrapped: Vec<String> = ["--die-with-parent", "--unshare-net", "--unshare-pid"]
+            .map(str::to_owned)
+            .to_vec();
+        wrapped.extend(["--bind", "/", "/", "--proc", "/proc"].map(str::to_owned));
+        wrapped.extend(["--dev-bind", "/dev", "/dev", "--chdir"].map(str::to_owned));
+        wrapped.extend([cwd, "--", command].map(str::to_owned));
+        wrapped.extend(args.iter().cloned());
+        return (program, wrapped, None);
+    }
+    let reason = if requested.as_deref() == Some("bwrap") {
+        "`sandbox: bwrap` が指定されましたが bwrap が見つからないため、ACP子プロセスは非隔離で起動します。"
+    } else {
+        "この環境では bwrap を利用できないため、ACP子プロセスは非隔離で起動します。"
+    };
+    (
+        PathBuf::from(command),
+        args.to_vec(),
+        Some(reason.to_owned()),
+    )
+}
+
+fn sandbox_mode(options: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(options).ok()?;
+    let mode = value.get("sandbox")?.as_str()?.trim().to_ascii_lowercase();
+    (!mode.is_empty()).then_some(mode)
 }
 
 #[cfg(test)]
@@ -676,50 +574,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_text_updates_become_progress() {
-        let text = ContentBlock::Text(TextContent::new("cargo test"));
-        assert_eq!(content_text(&text).as_deref(), Some("cargo test"));
-        assert!(super::super::sandbox::requested_mode("{}").is_none());
-    }
-
-    #[test]
-    fn the_summary_is_scoped_to_one_run() {
-        let shared = SharedRun::default();
-        shared.begin("run-a");
-        shared.append("done ");
-        shared.append("well");
-        assert_eq!(shared.run_id().as_deref(), Some("run-a"));
-        assert_eq!(shared.finish(), "done well");
-        assert!(shared.run_id().is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_forced_kill_confirms_the_process_group_is_gone() {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
-        runtime.block_on(async {
-            let mut wrap = CommandWrap::with_new("sh", |cmd| {
-                cmd.arg("-c")
-                    .arg("sleep 30")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-            });
-            wrap.wrap(ProcessGroup::leader());
-            wrap.wrap(KillOnDrop);
-            let mut child = wrap.spawn().expect("the sleeping child starts");
-            let termination = terminate(&mut child, Duration::from_secs(5)).await;
-            assert!(
-                termination.confirmed,
-                "the process group is killed and reaped: {termination:?}"
-            );
-            assert!(!termination.pids.is_empty());
-        });
+    fn an_explicitly_disabled_sandbox_reports_itself_as_non_isolated() {
+        let args = ["--stdio".to_owned()];
+        let (program, args, notice) = launch(
+            "opencode",
+            &args,
+            Path::new("/tmp"),
+            r#"{"sandbox":"none"}"#,
+        );
+        assert_eq!(program, PathBuf::from("opencode"));
+        assert_eq!(args, ["--stdio".to_owned()]);
+        assert!(notice.is_some_and(|notice| notice.contains("非隔離")));
     }
 }

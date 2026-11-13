@@ -80,21 +80,26 @@ pub(crate) fn work_agent_of(world: &mut World, run: &str) -> Option<Entity> {
         .map(|(entity, _)| entity)
 }
 
+/// The companion an agent belongs to, whichever role it serves.
+fn companion_of<'a>(
+    companion: Option<&'a CompanionAgent>,
+    work: Option<&'a WorkAgent>,
+) -> Option<&'a str> {
+    companion
+        .map(|agent| agent.companion_id.as_str())
+        .or_else(|| work.map(|agent| agent.companion_id.as_str()))
+}
+
 /// The system prompt of a companion: static persona only. Everything that
 /// changes per turn is injected into the request view instead.
 pub(crate) fn system_prompt(companion: &Companion) -> String {
-    let mut prompt = String::new();
-    prompt.push_str(&format!(
-        "あなたはデスクトップ常駐AIコンパニオン「{}」です。ユーザーとは一人のキャラクターとして対話します。\n",
-        companion.name
-    ));
-    prompt.push_str("次の核となる人格・世界観を守ってください:\n");
-    prompt.push_str(&companion.mind);
-    prompt.push('\n');
+    let mut prompt = format!(
+        "あなたはデスクトップ常駐AIコンパニオン「{}」です。ユーザーとは一人のキャラクターとして対話します。\n\
+         次の核となる人格・世界観を守ってください:\n{}\n",
+        companion.name, companion.mind
+    );
     if let Some(persona) = &companion.persona {
-        prompt.push_str("\n話し方・振る舞いの設定:\n");
-        prompt.push_str(persona);
-        prompt.push('\n');
+        prompt.push_str(&format!("\n話し方・振る舞いの設定:\n{persona}\n"));
     }
     for (label, entries) in [
         ("性格の側面", &companion.profile.facets),
@@ -107,9 +112,7 @@ pub(crate) fn system_prompt(companion: &Companion) -> String {
         }
         prompt.push_str(&format!("\n{label}:\n"));
         for entry in entries {
-            prompt.push_str("- ");
-            prompt.push_str(entry);
-            prompt.push('\n');
+            prompt.push_str(&format!("- {entry}\n"));
         }
     }
     prompt.push_str(
@@ -231,13 +234,6 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
     Ok(())
 }
 
-/// Enforces the model check before a turn is accepted.
-pub(crate) fn require_model(world: &mut World, companion: &str) -> Result<()> {
-    let entity =
-        agent_of(world, companion).ok_or_else(|| HostError::not_found("companion not found"))?;
-    ensure_model(world, entity)
-}
-
 /// Rebuilds the system prompt after a companion edit, and drops the agent when
 /// the companion is gone.
 pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()> {
@@ -250,8 +246,7 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
                 .entity_mut(entity)
                 .insert(SystemPrompt(system_prompt(&companion)));
             world.entity_mut(entity).remove::<Binding>();
-            require_model(world, companion_id)?;
-            Ok(())
+            ensure_model(world, entity)
         }
         None => {
             if let Some(entity) = entity {
@@ -267,83 +262,49 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
 pub(crate) fn reconcile(world: &mut World) {
     let store = world.resource::<Store>().clone();
     let companions = store.companions().unwrap_or_default();
-    let existing: Vec<(Entity, AgentId)> = {
-        let mut query = world.query::<(
-            Entity,
-            &AgentId,
-            Option<&CompanionAgent>,
-            Option<&WorkAgent>,
-        )>();
-        query
-            .iter(world)
-            .filter(|(_, _, companion, work)| companion.is_some() || work.is_some())
-            .map(|(entity, id, _, _)| (entity, id.clone()))
-            .collect()
-    };
+    let existing: Vec<Entity> = world
+        .query_filtered::<Entity, Or<(With<CompanionAgent>, With<WorkAgent>)>>()
+        .iter(world)
+        .collect();
     for companion in &companions {
         spawn_companion(world, companion);
-    }
-    // Work agents for runs that are still open.
-    let works: Vec<String> = companions
-        .iter()
-        .map(|companion| companion.id.clone())
-        .collect();
-    for companion_id in works {
-        let Ok(sessions) = store.work_sessions(&companion_id) else {
+        // Work agents for runs that are still open.
+        let Ok(sessions) = store.work_sessions(&companion.id) else {
             continue;
         };
         for session in sessions {
             let Ok(Some(run)) = store.active_run(&session.id) else {
                 continue;
             };
-            if let Some(companion) = store.companion(&companion_id).ok().flatten() {
-                spawn_work_agent(
-                    world,
-                    &companion,
-                    &session.id,
-                    &run.run_id,
-                    &run.instruction,
-                );
-            }
+            spawn_work_agent(world, companion, &session.id, &run.run_id, &run.instruction);
         }
     }
-    // Retire the kernel.s default agent and any agent without a role.
-    let stray: Vec<Entity> = {
-        let mut query = world.query::<(Entity, Option<&CompanionAgent>, Option<&WorkAgent>)>();
-        query
-            .iter(world)
-            .filter(|(_, companion, work)| companion.is_none() && work.is_none())
-            .map(|(entity, _, _)| entity)
-            .collect()
-    };
+    // Retire the kernel's default agent and any agent without a role.
+    let stray: Vec<Entity> = world
+        .query_filtered::<Entity, (Without<CompanionAgent>, Without<WorkAgent>)>()
+        .iter(world)
+        .collect();
     for entity in stray {
         world.trigger(Retire { entity });
     }
     // Retire agents whose run closed or whose companion disappeared.
-    for (entity, id) in existing {
-        let keep = world
-            .get::<CompanionAgent>(entity)
-            .map(|agent| {
-                store
-                    .companion(&agent.companion_id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
-            .or_else(|| {
-                world.get::<WorkAgent>(entity).map(|agent| {
-                    store
-                        .run(&agent.run_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|run| crate::host::db::work::open_state(run.state))
-                })
-            })
-            .unwrap_or(false);
+    for entity in existing {
+        let keep = world.get::<CompanionAgent>(entity).is_some_and(|agent| {
+            store
+                .companion(&agent.companion_id)
+                .ok()
+                .flatten()
+                .is_some()
+        }) || world.get::<WorkAgent>(entity).is_some_and(|agent| {
+            store
+                .run(&agent.run_id)
+                .ok()
+                .flatten()
+                .is_some_and(|run| crate::host::db::work::open_state(run.state))
+        });
         if !keep {
             world.trigger(Retire { entity });
         }
-        let _ = id;
     }
     // Bind every remaining agent's model; a missing model is a notice, not a
     // startup failure.
@@ -352,9 +313,7 @@ pub(crate) fn reconcile(world: &mut World) {
         query
             .iter(world)
             .filter_map(|(entity, companion, work)| {
-                companion
-                    .map(|agent| (entity, agent.companion_id.clone()))
-                    .or_else(|| work.map(|agent| (entity, agent.companion_id.clone())))
+                companion_of(companion, work).map(|companion| (entity, companion.to_owned()))
             })
             .collect()
     };
@@ -420,16 +379,12 @@ type AgentRows = (
 
 /// Projects every new conversation entry into `MessageCreated` notifications.
 fn publish_messages(
-    mut commands: Commands,
     agents: Query<AgentRows>,
     mut notifier: ResMut<Notifier>,
     mut published: ResMut<Published>,
 ) {
     for (id, conversation, companion, work) in &agents {
-        let companion_id = companion
-            .map(|agent| agent.companion_id.clone())
-            .or_else(|| work.map(|agent| agent.companion_id.clone()))
-            .unwrap_or_default();
+        let companion_id = companion_of(companion, work).unwrap_or_default();
         let last = published.cursor.get(&id.0).copied().unwrap_or(0);
         let mut newest = last;
         for entry in conversation.entries() {
@@ -443,7 +398,7 @@ fn publish_messages(
             };
             let message = w::Message {
                 id: sequence.to_string(),
-                companion_id: companion_id.clone(),
+                companion_id: companion_id.to_owned(),
                 work_id: work.map(|agent| agent.work_id.clone()).unwrap_or_default(),
                 role: role_of(&entry).into(),
                 text,
@@ -460,7 +415,7 @@ fn publish_messages(
                 ..Default::default()
             };
             notifier.push(
-                Some(&companion_id),
+                Some(companion_id),
                 None,
                 w::notification::Event::MessageCreated(Box::new(w::MessageCreated {
                     message: Some(message).into(),
@@ -472,7 +427,6 @@ fn publish_messages(
             published.cursor.insert(id.0.clone(), newest);
         }
     }
-    let _ = &mut commands;
 }
 
 /// Reports a turn that appeared this frame as streaming.
@@ -513,10 +467,7 @@ fn turn_settled(
         let Ok((id, companion, work)) = agents.get(of.0) else {
             continue;
         };
-        let companion_id = companion
-            .map(|agent| agent.companion_id.clone())
-            .or_else(|| work.map(|agent| agent.companion_id.clone()))
-            .unwrap_or_default();
+        let companion_id = companion_of(companion, work).unwrap_or_default();
         let turn_id = turns
             .get(turn_entity)
             .map(|turn| turn.start.get().to_string())
@@ -534,10 +485,10 @@ fn turn_settled(
             ),
         };
         notifier.push(
-            Some(&companion_id),
+            Some(companion_id),
             None,
             w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
-                companion_id: companion_id.clone(),
+                companion_id: companion_id.to_owned(),
                 turn_id,
                 status: status.into(),
                 failure: failure.into(),

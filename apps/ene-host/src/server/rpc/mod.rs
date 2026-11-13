@@ -1,4 +1,94 @@
 //! Connect service implementations and the owner-authentication boundary.
+
+/// Declares a service method that hands its owned request to one host
+/// operation. The first form selects the read-only lane, `app` passes the
+/// `App` itself instead of its world, and the bare form is a write on the
+/// world; the expansion keeps the connectrpc call/read shape.
+macro_rules! request {
+    (read $name:ident, $request:ty, $response:ty, $op:path) => {
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, $request>,
+        ) -> connectrpc::ServiceResult<$response> {
+            let request = request.to_owned_message();
+            self.read(move |app| $op(app.world_mut(), request)).await
+        }
+    };
+    (app $name:ident, $request:ty, $response:ty, $op:path) => {
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, $request>,
+        ) -> connectrpc::ServiceResult<$response> {
+            let request = request.to_owned_message();
+            self.call(move |app| $op(app, request)).await
+        }
+    };
+    ($name:ident, $request:ty, $response:ty, $op:path) => {
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, $request>,
+        ) -> connectrpc::ServiceResult<$response> {
+            let request = request.to_owned_message();
+            self.call(move |app| $op(app.world_mut(), request)).await
+        }
+    };
+}
+
+/// Declares a write method that answers `Empty` once the operation succeeded.
+macro_rules! discard {
+    ($name:ident, $request:ty, $op:path) => {
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, $request>,
+        ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
+            let request = request.to_owned_message();
+            self.call(move |app| {
+                $op(app.world_mut(), request)?;
+                Ok(ene_rpc::Empty::default())
+            })
+            .await
+        }
+    };
+}
+
+/// Declares a read method addressed by `Id` that hands the id to one store
+/// operation.
+macro_rules! read_id {
+    ($name:ident, $response:ty, $op:path) => {
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, ene_rpc::Id>,
+        ) -> connectrpc::ServiceResult<$response> {
+            let id = request.id.to_owned();
+            self.read(move |app| $op(app.world().resource::<crate::host::db::Store>(), &id))
+                .await
+        }
+    };
+}
+
+/// Declares a write method addressed by one id field that answers `Empty`.
+macro_rules! discard_id {
+    ($name:ident, $request:ty, $field:ident, $op:path) => {
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, $request>,
+        ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
+            let id = request.$field.to_owned();
+            self.call(move |app| {
+                $op(app.world_mut(), &id)?;
+                Ok(ene_rpc::Empty::default())
+            })
+            .await
+        }
+    };
+}
+
 mod chat;
 mod client;
 mod host;

@@ -113,88 +113,34 @@ impl w::HostService for Services {
         .await
     }
 
-    async fn get_companion(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::Id>,
-    ) -> ServiceResult<w::Companion> {
-        let id = request.id.to_owned();
-        self.read(move |app| mind::get(app.world().resource::<Store>(), &id))
-            .await
-    }
-
-    async fn create_companion(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::CreateCompanionRequest>,
-    ) -> ServiceResult<w::Companion> {
-        let request = request.to_owned_message();
-        self.call(move |app| mind::create(app.world_mut(), request))
-            .await
-    }
-
-    async fn update_companion(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::UpdateCompanionRequest>,
-    ) -> ServiceResult<w::Companion> {
-        let request = request.to_owned_message();
-        self.call(move |app| mind::update(app.world_mut(), request))
-            .await
-    }
-
-    async fn delete_companion(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::Id>,
-    ) -> ServiceResult<w::Empty> {
-        let id = request.id.to_owned();
-        self.call(move |app| {
-            mind::delete(app.world_mut(), &id)?;
-            Ok(w::Empty::default())
-        })
-        .await
-    }
-
-    async fn get_mind(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::Id>,
-    ) -> ServiceResult<w::MindView> {
-        let id = request.id.to_owned();
-        self.read(move |app| mind::mind_view(app.world().resource::<Store>(), &id))
-            .await
-    }
-
-    async fn update_mind_profile(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::UpdateMindProfileRequest>,
-    ) -> ServiceResult<w::MindView> {
-        let request = request.to_owned_message();
-        self.call(move |app| mind::update_profile(app.world_mut(), request))
-            .await
-    }
-
-    async fn control_memory(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::MemoryControlRequest>,
-    ) -> ServiceResult<w::MemoryControlResult> {
-        let request = request.to_owned_message();
-        self.call(move |app| mind::control_memory(app.world_mut(), request))
-            .await
-    }
-
-    async fn list_memories(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::ListMemoriesRequest>,
-    ) -> ServiceResult<w::Memories> {
-        let request = request.to_owned_message();
-        self.read(move |app| mind::list_memories(app.world_mut(), request))
-            .await
-    }
+    read_id!(get_companion, w::Companion, mind::get);
+    request!(
+        create_companion,
+        w::CreateCompanionRequest,
+        w::Companion,
+        mind::create
+    );
+    request!(
+        update_companion,
+        w::UpdateCompanionRequest,
+        w::Companion,
+        mind::update
+    );
+    discard_id!(delete_companion, w::Id, id, mind::delete);
+    read_id!(get_mind, w::MindView, mind::mind_view);
+    request!(
+        update_mind_profile,
+        w::UpdateMindProfileRequest,
+        w::MindView,
+        mind::update_profile
+    );
+    request!(
+        control_memory,
+        w::MemoryControlRequest,
+        w::MemoryControlResult,
+        mind::control_memory
+    );
+    request!(read list_memories, w::ListMemoriesRequest, w::Memories, mind::list_memories);
 }
 
 /// How a subscription starts: replayed events, or a snapshot when resuming is

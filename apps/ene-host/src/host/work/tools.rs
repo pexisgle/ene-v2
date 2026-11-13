@@ -1,11 +1,9 @@
-//! Work tools: the parent's commission/steer/stop tools and the hand's
-//! report tool.
-use super::{Inquiry, RunState, WorkStatus};
+//! Work tools: the parent's commission/steer/stop tools and the hand's report.
+use super::{Inquiry, RunState, WorkSession, WorkStatus};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent, WorkReports},
     db::{Result, Store},
     error::HostError,
-    notify::Notifier,
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
@@ -94,24 +92,27 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
         .ok_or_else(|| HostError::internal("this tool belongs to a companion"))
 }
 
+fn own_session(world: &World, work_id: &str, companion: &str) -> Result<WorkSession> {
+    let session = super::require_session(world.resource::<Store>(), work_id)?;
+    if session.companion_id != companion {
+        return Err(HostError::permission(
+            "this work session belongs to another companion",
+        ));
+    }
+    Ok(session)
+}
+
 fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     let companion = companion(world, agent)?;
     if args.instruction.trim().is_empty() {
         return Err(HostError::invalid("an instruction is required"));
     }
-    let store = world.resource::<Store>().clone();
     if let Some(work_id) = args.work_id.as_deref().filter(|id| !id.is_empty()) {
-        let session = store
-            .work_session(work_id)?
-            .ok_or_else(|| HostError::not_found("work session not found"))?;
-        if session.companion_id != companion {
-            return Err(HostError::permission(
-                "this work session belongs to another companion",
-            ));
-        }
+        let session = own_session(world, work_id, &companion)?;
         if session.status == WorkStatus::Closed {
             return Err(HostError::conflict("work session is closed"));
         }
+        let store = world.resource::<Store>().clone();
         if store.active_run(work_id)?.is_some() {
             return Err(HostError::conflict("the work session is already running"));
         }
@@ -131,23 +132,14 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
 
 fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
     let companion = companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
-    let session = store
-        .work_session(&args.work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
-    if session.companion_id != companion {
-        return Err(HostError::permission(
-            "this work session belongs to another companion",
-        ));
-    }
-    let request_id = args.request_id.clone().unwrap_or_default();
+    own_session(world, &args.work_id, &companion)?;
     let acceptance = super::send(
         world,
         w::SendWorkRequest {
             work_id: args.work_id,
             request_key: uuid::Uuid::new_v4().to_string(),
             text: args.text,
-            request_id: Some(request_id),
+            request_id: Some(args.request_id.unwrap_or_default()),
             ..Default::default()
         },
     )?;
@@ -176,15 +168,7 @@ fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
 
 fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
     let companion = companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
-    let session = store
-        .work_session(&args.work_id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))?;
-    if session.companion_id != companion {
-        return Err(HostError::permission(
-            "this work session belongs to another companion",
-        ));
-    }
+    let session = own_session(world, &args.work_id, &companion)?;
     if session.status == WorkStatus::Closed {
         return Ok(json!({"work_id": session.id, "status": "closed"}).to_string());
     }
@@ -206,44 +190,34 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             json!({"accepted": false, "reason": "the session has no active run"}).to_string(),
         );
     };
-    if run.state.is_terminal() {
-        return Ok(json!({"accepted": false, "reason": "the run already ended"}).to_string());
-    }
-    if run.run_id != work.run_id {
-        // A report produced by an older turn is audit data only; it must not
-        // touch the run that is active now.
+    if run.state.is_terminal() || run.run_id != work.run_id {
+        // A report from an older turn is audit data only; it must not touch
+        // the run that is active now.
         return Ok(json!({"accepted": false, "reason": "the run already ended"}).to_string());
     }
     if args.content.trim().is_empty() {
         return Err(HostError::invalid("report content is required"));
     }
     let run_id = run.run_id.clone();
+    let cancelling = run.state == RunState::Cancelling;
     match args.kind.as_str() {
         "activity" | "message" => {
-            if run.state == RunState::Cancelling {
-                return Ok(
-                    json!({"accepted": false, "reason": "the run is cancelling"}).to_string(),
-                );
+            if cancelling {
+                return cancelled();
             }
-            super::note_activity(world, &work.work_id, &run_id);
-            if let Some(parent) = agent::agent_of(world, &work.companion_id) {
-                let author = Author::agent(agent::work_agent_id(&run_id), None);
-                world.trigger(
-                    Deliver::new(
-                        parent,
-                        format!("[作業報告] {}", args.content),
-                        DeliveryMode::Inform,
-                    )
-                    .with_author(author),
-                );
-            }
+            super::note_activity(world, &run_id);
+            inform(
+                world,
+                &work.companion_id,
+                &run_id,
+                format!("[作業報告] {}", args.content),
+                DeliveryMode::Inform,
+            );
             Ok(json!({"accepted": true}).to_string())
         }
         "question" => {
-            if run.state == RunState::Cancelling {
-                return Ok(
-                    json!({"accepted": false, "reason": "the run is cancelling"}).to_string(),
-                );
+            if cancelling {
+                return cancelled();
             }
             let request_id = uuid::Uuid::new_v4().to_string();
             store.insert_inquiry(&Inquiry {
@@ -263,7 +237,8 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             let session = store
                 .work_session(&work.work_id)?
                 .ok_or_else(|| HostError::not_found("work session not found"))?;
-            let event = crate::host::wire::work_event(
+            super::notify_event(
+                world,
                 &session,
                 w::WorkEventKind::InquiryCreated,
                 w::work_event::Detail::InquiryCreated(Box::new(w::WorkInquiryCreated {
@@ -277,44 +252,28 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
                     ..Default::default()
                 })),
             );
-            let companion = session.companion_id.clone();
-            {
-                let mut notifier = world.resource_mut::<Notifier>();
-                notifier.push(
-                    Some(&companion),
-                    None,
-                    w::notification::Event::WorkEvent(Box::new(event)),
-                );
-            }
-            if let Some(parent) = agent::agent_of(world, &companion) {
-                let author = Author::agent(agent::work_agent_id(&run_id), None);
-                world.trigger(
-                    Deliver::new(
-                        parent,
-                        format!("[作業からの質問 request_id={request_id}] {}", args.content),
-                        DeliveryMode::Queue,
-                    )
-                    .with_author(author),
-                );
-            }
+            inform(
+                world,
+                &work.companion_id,
+                &run_id,
+                format!("[作業からの質問 request_id={request_id}] {}", args.content),
+                DeliveryMode::Queue,
+            );
             Ok(json!({"accepted": true, "request_id": request_id}).to_string())
         }
         "completed" => {
-            if run.state == RunState::Cancelling {
-                return Ok(
-                    json!({"accepted": false, "reason": "the run is cancelling"}).to_string(),
-                );
+            if cancelling {
+                return cancelled();
             }
-            super::note_activity(world, &work.work_id, &run_id);
+            super::note_activity(world, &run_id);
             world
                 .resource_mut::<WorkReports>()
                 .completed
-                .insert(run_id, args.content.clone());
+                .insert(run_id, args.content);
             Ok(json!({"accepted": true}).to_string())
         }
         "failed" => {
-            // Record the reason and stop the turn; the settle path owns the
-            // run's terminal state so the session and agent are cleaned up.
+            // The settle path owns the run's terminal state and cleanup.
             world
                 .resource_mut::<WorkReports>()
                 .failed
@@ -323,19 +282,85 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
                 entity: agent,
                 reason: Some("the hand reported a failure".into()),
             });
-            if let Some(parent) = agent::agent_of(world, &work.companion_id) {
-                let author = Author::agent(agent::work_agent_id(&run_id), None);
-                world.trigger(
-                    Deliver::new(
-                        parent,
-                        format!("[作業失敗] {}", args.content),
-                        DeliveryMode::Queue,
-                    )
-                    .with_author(author),
-                );
-            }
+            inform(
+                world,
+                &work.companion_id,
+                &run_id,
+                format!("[作業失敗] {}", args.content),
+                DeliveryMode::Queue,
+            );
             Ok(json!({"accepted": true}).to_string())
         }
         other => Err(HostError::invalid(format!("unknown report kind `{other}`"))),
+    }
+}
+
+fn cancelled() -> Result<String> {
+    Ok(json!({"accepted": false, "reason": "the run is cancelling"}).to_string())
+}
+
+fn inform(world: &mut World, companion: &str, run_id: &str, text: String, mode: DeliveryMode) {
+    let Some(parent) = agent::agent_of(world, companion) else {
+        return;
+    };
+    let author = Author::agent(agent::work_agent_id(run_id), None);
+    world.trigger(Deliver::new(parent, text, mode).with_author(author));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::work::{Runs, new_run};
+
+    #[test]
+    fn report_binds_to_the_active_run_not_the_spawned_one() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+        store
+            .insert_work_session(&WorkSession {
+                id: "w1".into(),
+                companion_id: "ene".into(),
+                title: "task".into(),
+                status: WorkStatus::Active,
+                client_id: None,
+                activation_revision: 0,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap();
+        store
+            .insert_run(&new_run("run-b".into(), "w1", "do it", RunState::Running))
+            .unwrap();
+        let mut world = World::new();
+        world.insert_resource(store);
+        world.insert_resource(Runs::default());
+        world.insert_resource(WorkReports::default());
+        let agent = world
+            .spawn(WorkAgent {
+                work_id: "w1".into(),
+                run_id: "run-a".into(),
+                companion_id: "ene".into(),
+            })
+            .id();
+        let args = || ReportArgs {
+            kind: "activity".into(),
+            content: "working".into(),
+        };
+
+        assert!(
+            super::report(&mut world, agent, args())
+                .unwrap()
+                .contains("\"accepted\":false")
+        );
+        world.entity_mut(agent).insert(WorkAgent {
+            work_id: "w1".into(),
+            run_id: "run-b".into(),
+            companion_id: "ene".into(),
+        });
+        assert!(
+            super::report(&mut world, agent, args())
+                .unwrap()
+                .contains("\"accepted\":true")
+        );
     }
 }

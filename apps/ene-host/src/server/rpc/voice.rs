@@ -27,174 +27,104 @@ impl w::VoiceService for Services {
         _: RequestContext,
         mut inbound: InboundStream<w::AudioInputChunk>,
     ) -> ServiceResult<ServiceStream<w::TranscriptionEvent>> {
-        let source = match self
+        let engine = match self
             .runtime
             .read(|app| Ok(voice::stt_source(app.world())))
             .await
             .map_err(ConnectError::from)?
         {
-            Ok(source) => source,
+            Ok(engine) => engine,
             Err(error) => return Err(setup_error(error)),
         };
-        let engine = source.engine();
         let runtime = self.runtime.clone();
         let stream = async_stream::stream! {
-            let mut binding: Option<voice::InputBinding> = None;
-            let mut pending: Vec<u8> = Vec::new();
-            let mut sample_rate = voice::SAMPLE_RATE;
-            let mut transcription_id = String::new();
-            let mut speaking = false;
+            let mut recognition = Recognition::new();
             loop {
-                let waited = tokio::time::timeout(voice::STT_SILENCE_WINDOW, inbound.next()).await;
-                let chunk = match waited {
-                    Err(_silence) => {
+                let (flush_after, end) =
+                    match tokio::time::timeout(voice::STT_SILENCE_WINDOW, inbound.next()).await {
                         // A pause ends the utterance even if the client keeps
                         // the stream open.
-                        match flush(
-                            &runtime,
-                            &engine,
-                            binding.as_ref(),
-                            &mut pending,
-                            sample_rate,
-                            &mut transcription_id,
-                            &mut speaking,
-                        ).await {
-                            Ok(Some(event)) => yield Ok(event),
-                            Ok(None) => {}
-                            Err(error) => {
-                                yield Err(error);
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                    Ok(None) => {
-                        match flush(
-                            &runtime,
-                            &engine,
-                            binding.as_ref(),
-                            &mut pending,
-                            sample_rate,
-                            &mut transcription_id,
-                            &mut speaking,
-                        ).await {
-                            Ok(Some(event)) => yield Ok(event),
-                            Ok(None) => {}
-                            Err(error) => yield Err(error),
-                        }
-                        break;
-                    }
-                    Ok(Some(Err(error))) => {
-                        yield Err(error);
-                        break;
-                    }
-                    Ok(Some(Ok(message))) => message.to_owned_message(),
-                };
-                if binding.is_none() {
-                    let candidate = chunk.clone();
-                    match runtime
-                        .read(move |app| Ok(voice::bind_input(app.world(), &candidate)))
-                        .await
-                        .map_err(ConnectError::from)?
-                    {
-                        Ok(bound) => binding = Some(bound),
-                        Err(error) => {
-                            yield Err(ConnectError::from(error));
-                            break;
-                        }
-                    }
-                }
-                let Some(bound) = binding.as_ref() else {
-                    continue;
-                };
-                if !bound.accepts(&chunk) {
-                    // A stale generation's chunk is discarded silently.
-                    continue;
-                }
-                if chunk.is_companion_speaking {
-                    // Frames captured while the companion is playing are never
-                    // treated as user speech or as approval evidence.
-                    pending.clear();
-                    speaking = false;
-                    transcription_id.clear();
-                    continue;
-                }
-                if chunk.sample_rate != 0 {
-                    if !voice::STT_SAMPLE_RATES.contains(&chunk.sample_rate) {
-                        yield Err(ConnectError::invalid_argument(
-                            "audio must be 16 kHz or 24 kHz mono PCM",
-                        ));
-                        break;
-                    }
-                    if chunk.sample_rate != sample_rate && !pending.is_empty() {
-                        match flush(
-                            &runtime,
-                            &engine,
-                            binding.as_ref(),
-                            &mut pending,
-                            sample_rate,
-                            &mut transcription_id,
-                            &mut speaking,
-                        ).await {
-                            Ok(Some(event)) => yield Ok(event),
-                            Ok(None) => {}
-                            Err(error) => {
-                                yield Err(error);
-                                break;
-                            }
-                        }
-                    }
-                    sample_rate = chunk.sample_rate;
-                }
-                if chunk.pcm_data.is_empty() {
-                    // An empty chunk is the client's explicit end of speech.
-                    match flush(
-                        &runtime,
-                        &engine,
-                        binding.as_ref(),
-                        &mut pending,
-                        sample_rate,
-                        &mut transcription_id,
-                        &mut speaking,
-                    ).await {
-                        Ok(Some(event)) => yield Ok(event),
-                        Ok(None) => {}
-                        Err(error) => {
+                        Err(_silence) => (true, false),
+                        Ok(None) => (true, true),
+                        Ok(Some(Err(error))) => {
                             yield Err(error);
                             break;
                         }
-                    }
-                    continue;
-                }
-                if !speaking {
-                    if transcription_id.is_empty() {
-                        transcription_id = uuid::Uuid::new_v4().to_string();
-                    }
-                    speaking = true;
-                    yield Ok(w::TranscriptionEvent {
-                        transcription_id: transcription_id.clone(),
-                        is_speaking: true,
-                        ..Default::default()
-                    });
-                }
-                pending.extend_from_slice(&chunk.pcm_data);
-                if pending.len() >= voice::MAX_STT_BYTES {
-                    match flush(
-                        &runtime,
-                        &engine,
-                        binding.as_ref(),
-                        &mut pending,
-                        sample_rate,
-                        &mut transcription_id,
-                        &mut speaking,
-                    ).await {
-                        Ok(Some(event)) => yield Ok(event),
-                        Ok(None) => {}
-                        Err(error) => {
-                            yield Err(error);
-                            break;
+                        Ok(Some(Ok(message))) => {
+                            let chunk = message.to_owned_message();
+                            if recognition.binding.is_none() {
+                                let candidate = chunk.clone();
+                                match runtime
+                                    .read(move |app| Ok(voice::bind_input(app.world(), &candidate)))
+                                    .await
+                                    .map_err(ConnectError::from)?
+                                {
+                                    Ok(binding) => recognition.binding = Some(binding),
+                                    Err(error) => {
+                                        yield Err(ConnectError::from(error));
+                                        break;
+                                    }
+                                }
+                            }
+                            if !recognition.accepts(&chunk) {
+                                continue;
+                            }
+                            if chunk.is_companion_speaking {
+                                // Frames captured while the companion is playing
+                                // are never user speech or approval evidence.
+                                recognition.discard();
+                                continue;
+                            }
+                            if chunk.sample_rate != 0 {
+                                if !voice::STT_SAMPLE_RATES.contains(&chunk.sample_rate) {
+                                    yield Err(ConnectError::invalid_argument(
+                                        "audio must be 16 kHz or 24 kHz mono PCM",
+                                    ));
+                                    break;
+                                }
+                                if chunk.sample_rate != recognition.sample_rate
+                                    && !recognition.pending.is_empty()
+                                {
+                                    let event =
+                                        recognition.flush(&runtime, &engine).await?;
+                                    if let Some(event) = event {
+                                        yield Ok(event);
+                                    }
+                                }
+                                recognition.sample_rate = chunk.sample_rate;
+                            }
+                            if chunk.pcm_data.is_empty() {
+                                // An empty chunk is the client's explicit end of speech.
+                                (true, false)
+                            } else {
+                                if !recognition.speaking {
+                                    recognition.speaking = true;
+                                    if recognition.transcription_id.is_empty() {
+                                        recognition.transcription_id =
+                                            uuid::Uuid::new_v4().to_string();
+                                    }
+                                    yield Ok(w::TranscriptionEvent {
+                                        transcription_id: recognition.transcription_id.clone(),
+                                        is_speaking: true,
+                                        ..Default::default()
+                                    });
+                                }
+                                recognition.pending.extend_from_slice(&chunk.pcm_data);
+                                (
+                                    recognition.pending.len() >= voice::MAX_STT_BYTES,
+                                    false,
+                                )
+                            }
                         }
+                    };
+                if flush_after {
+                    let event = recognition.flush(&runtime, &engine).await?;
+                    if let Some(event) = event {
+                        yield Ok(event);
                     }
+                }
+                if end {
+                    break;
                 }
             }
         }
@@ -218,7 +148,11 @@ impl w::VoiceService for Services {
             Err(error) => return Err(setup_error(error)),
         }
         let request = request.to_owned_message();
-        let subscription = self
+        let voice::AudioSubscription {
+            subscription_id,
+            mut receiver,
+            mut control,
+        } = self
             .runtime
             .read({
                 let request = request.clone();
@@ -226,11 +160,6 @@ impl w::VoiceService for Services {
             })
             .await
             .map_err(ConnectError::from)?;
-        let voice::AudioSubscription {
-            subscription_id,
-            mut receiver,
-            mut control,
-        } = subscription;
         let guard = StreamGuard {
             runtime: self.runtime.clone(),
             client_id: request.client_id.clone(),
@@ -294,75 +223,91 @@ fn setup_error(error: SetupError) -> ConnectError {
     }
 }
 
-/// Flushes the accumulated utterance into one final transcription event, or
-/// nothing when the audio was noise. A recognition failure is explicit.
-#[allow(clippy::too_many_arguments)]
-async fn flush(
-    runtime: &Runtime,
-    engine: &Arc<dyn SttEngine>,
-    binding: Option<&voice::InputBinding>,
-    pending: &mut Vec<u8>,
+/// The mutable state of one `StreamAudioInput` request.
+#[derive(Default)]
+struct Recognition {
+    binding: Option<voice::InputBinding>,
+    pending: Vec<u8>,
     sample_rate: u32,
-    transcription_id: &mut String,
-    speaking: &mut bool,
-) -> std::result::Result<Option<w::TranscriptionEvent>, ConnectError> {
-    *speaking = false;
-    if pending.len() < voice::MIN_STT_BYTES {
-        pending.clear();
-        return Ok(None);
+    transcription_id: String,
+    speaking: bool,
+}
+
+impl Recognition {
+    fn new() -> Self {
+        Self {
+            sample_rate: voice::SAMPLE_RATE,
+            ..Default::default()
+        }
     }
-    let pcm = std::mem::take(pending);
-    let Some(binding) = binding else {
-        return Ok(None);
-    };
-    let binding = binding.clone();
-    let binding_now = binding.clone();
-    let active = runtime
-        .read(move |app| Ok(voice::is_still_active(app.world(), &binding_now)))
-        .await
-        .map_err(ConnectError::from)?;
-    if !active {
-        // The client moved: the old generation's audio is discarded.
-        return Ok(None);
+
+    /// Drops the frames captured while the companion was speaking.
+    fn discard(&mut self) {
+        self.pending.clear();
+        self.speaking = false;
+        self.transcription_id.clear();
     }
-    let request = voice::SttRequest { pcm, sample_rate };
-    let recognized =
-        match tokio::time::timeout(voice::STT_TIMEOUT, engine.transcribe(request)).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                return Err(ConnectError::unavailable(format!(
-                    "speech recognition failed: {error}"
-                )));
-            }
-            Err(_) => {
-                return Err(ConnectError::deadline_exceeded(
-                    "speech recognition timed out",
-                ));
-            }
+
+    fn accepts(&self, chunk: &w::AudioInputChunk) -> bool {
+        self.binding
+            .as_ref()
+            .is_some_and(|binding| binding.accepts(chunk))
+    }
+
+    /// Flushes the accumulated utterance into one final transcription event, or
+    /// nothing when the audio was noise. A recognition failure is explicit.
+    async fn flush(
+        &mut self,
+        runtime: &Runtime,
+        engine: &Arc<dyn SttEngine>,
+    ) -> std::result::Result<Option<w::TranscriptionEvent>, ConnectError> {
+        self.speaking = false;
+        if self.pending.len() < voice::MIN_STT_BYTES {
+            self.pending.clear();
+            return Ok(None);
+        }
+        let pcm = std::mem::take(&mut self.pending);
+        let Some(binding) = self.binding.clone() else {
+            return Ok(None);
         };
-    let text = recognized.text.trim().to_owned();
-    if text.is_empty() {
-        transcription_id.clear();
-        return Ok(None);
+        let client_id = binding.client_id.clone();
+        if !runtime
+            .read(move |app| Ok(voice::is_still_active(app.world(), &binding)))
+            .await
+            .map_err(ConnectError::from)?
+        {
+            // The client moved: the old generation's audio is discarded.
+            return Ok(None);
+        }
+        let text =
+            tokio::time::timeout(voice::STT_TIMEOUT, engine.transcribe(pcm, self.sample_rate))
+                .await
+                .map_err(|_| ConnectError::deadline_exceeded("speech recognition timed out"))?
+                .map_err(|error| {
+                    ConnectError::unavailable(format!("speech recognition failed: {error}"))
+                })?;
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            self.transcription_id.clear();
+            return Ok(None);
+        }
+        let transcription_id = std::mem::take(&mut self.transcription_id);
+        let _ = runtime
+            .call({
+                let id = transcription_id.clone();
+                let text = text.clone();
+                move |app| voice::accept_transcription(app.world_mut(), &id, &text, &client_id)
+            })
+            .await
+            .map_err(ConnectError::from)?;
+        Ok(Some(w::TranscriptionEvent {
+            transcription_id,
+            text,
+            is_final: true,
+            is_speaking: false,
+            ..Default::default()
+        }))
     }
-    let id = std::mem::take(transcription_id);
-    let client_id = binding.client_id.clone();
-    let delivered = runtime
-        .call({
-            let id = id.clone();
-            let text = text.clone();
-            move |app| voice::accept_transcription(app.world_mut(), &id, &text, &client_id)
-        })
-        .await
-        .map_err(ConnectError::from)?;
-    let _ = delivered;
-    Ok(Some(w::TranscriptionEvent {
-        transcription_id: id,
-        text,
-        is_final: true,
-        is_speaking: false,
-        ..Default::default()
-    }))
 }
 
 /// Closes the audio stream when the response stream is dropped, including a

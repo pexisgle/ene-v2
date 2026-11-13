@@ -1,29 +1,21 @@
 //! Clients, their declared capabilities, activation generations and bound
 //! device operations.
-use super::{Result, Store, now, to_json};
+use super::{Result, Store, enum_column, json_column, now, optional_json_column, to_json};
 use crate::host::client::{Activation, CapabilitySpec, Client, DeviceOperation, DeviceStatus};
 use crate::host::error::{Failure, HostError};
 use rusqlite::{OptionalExtension, Row, params};
-use std::collections::HashSet;
-
 fn row_to_client(row: &Row<'_>) -> rusqlite::Result<Client> {
-    let capabilities: String = row.get("capabilities")?;
-    let granted: String = row.get("granted_capabilities")?;
-    let specs: String = row.get("capability_specs")?;
-    let corrupt = |text: &str| {
-        rusqlite::Error::FromSqlConversionFailure(
-            text.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("stored client JSON is corrupt")),
-        )
-    };
     Ok(Client {
         id: row.get("id")?,
         name: row.get("name")?,
         platform: row.get("platform")?,
-        capabilities: serde_json::from_str(&capabilities).map_err(|_| corrupt(&capabilities))?,
-        granted_capabilities: serde_json::from_str(&granted).map_err(|_| corrupt(&granted))?,
-        capability_specs: serde_json::from_str(&specs).map_err(|_| corrupt(&specs))?,
+        capabilities: json_column(row, "capabilities", "stored client JSON is corrupt")?,
+        granted_capabilities: json_column(
+            row,
+            "granted_capabilities",
+            "stored client JSON is corrupt",
+        )?,
+        capability_specs: json_column(row, "capability_specs", "stored client JSON is corrupt")?,
         revision: row.get::<_, u64>("revision")?,
         last_seen: row.get("last_seen")?,
     })
@@ -31,6 +23,32 @@ fn row_to_client(row: &Row<'_>) -> rusqlite::Result<Client> {
 
 const CLIENT_COLUMNS: &str = "id, name, platform, capabilities, granted_capabilities, \
      capability_specs, revision, last_seen";
+
+const ACTIVATION_COLUMNS: &str = "companion_id, client_id, revision";
+
+fn row_to_activation(row: &Row<'_>) -> rusqlite::Result<Activation> {
+    Ok(Activation {
+        companion_id: row.get(0)?,
+        client_id: row.get(1)?,
+        revision: row.get::<_, u64>(2)?,
+    })
+}
+
+/// The grants a declaration keeps: every declared capability is granted, and
+/// a grant for a capability that is no longer declared is dropped.
+fn grants(existing: &[String], declared: &[String]) -> Vec<String> {
+    let mut granted: Vec<String> = existing
+        .iter()
+        .filter(|capability| declared.iter().any(|name| name == *capability))
+        .cloned()
+        .collect();
+    for capability in declared {
+        if !granted.iter().any(|name| name == capability) {
+            granted.push(capability.clone());
+        }
+    }
+    granted
+}
 
 /// Everything a client declares on registration, with the revision it saw.
 #[derive(Clone, Copy)]
@@ -46,25 +64,19 @@ pub(crate) struct ClientDeclaration<'a> {
 
 impl Store {
     pub(crate) fn clients(&self) -> Result<Vec<Client>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
-            "SELECT {CLIENT_COLUMNS} FROM clients ORDER BY last_seen DESC, id"
-        ))?;
-        let rows = statement.query_map([], row_to_client)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!("SELECT {CLIENT_COLUMNS} FROM clients ORDER BY last_seen DESC, id"),
+            [],
+            row_to_client,
+        )
     }
 
     pub(crate) fn client(&self, id: &str) -> Result<Option<Client>> {
-        let connection = self.conn()?;
-        let client = connection
-            .query_row(
-                &format!("SELECT {CLIENT_COLUMNS} FROM clients WHERE id = ?1"),
-                [id],
-                row_to_client,
-            )
-            .optional()?;
-        Ok(client)
+        self.fetch(
+            &format!("SELECT {CLIENT_COLUMNS} FROM clients WHERE id = ?1"),
+            [id],
+            row_to_client,
+        )
     }
 
     /// Registers or re-registers a client. `expected_revision` must match what
@@ -88,25 +100,22 @@ impl Store {
         }
         let revision = current + 1;
         // Alpha policy: the host grants the capabilities it validated. A
-        // declaration never carries a grant, and the operation-level gate remains
-        // authoritative. Grants for capabilities no longer declared are dropped.
-        let mut granted: Vec<String> = existing
+        // declaration never carries a grant, and the operation-level gate
+        // remains authoritative.
+        let previous = existing
             .as_ref()
-            .map(|client| client.granted_capabilities.clone())
-            .unwrap_or_default();
-        granted.retain(|capability| capabilities.iter().any(|name| name == capability));
-        for capability in capabilities {
-            if !granted.iter().any(|name| name == capability) {
-                granted.push(capability.clone());
-            }
-        }
-        let changed = self.conn()?.execute(
-            "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
-             capability_specs, revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-             ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform, \
-             capabilities = excluded.capabilities, granted_capabilities = excluded.granted_capabilities, \
-             capability_specs = excluded.capability_specs, revision = excluded.revision, \
-             last_seen = excluded.last_seen WHERE clients.revision = ?9",
+            .map_or(&[][..], |client| client.granted_capabilities.as_slice());
+        let granted = grants(previous, capabilities);
+        let changed = self.conn()?.query_row(
+            &format!(
+                "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
+                 capability_specs, revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform, \
+                 capabilities = excluded.capabilities, granted_capabilities = excluded.granted_capabilities, \
+                 capability_specs = excluded.capability_specs, revision = excluded.revision, \
+                 last_seen = excluded.last_seen WHERE clients.revision = ?9 \
+                 RETURNING {CLIENT_COLUMNS}"
+            ),
             params![
                 id,
                 name,
@@ -118,14 +127,11 @@ impl Store {
                 now(),
                 current,
             ],
-        )?;
-        if changed == 0 {
-            return Err(HostError::conflict(
-                "client changed since it was registered",
-            ));
-        }
-        self.client(id)?
-            .ok_or_else(|| HostError::storage("client registration did not persist"))
+            row_to_client,
+        );
+        changed
+            .optional()?
+            .ok_or_else(|| HostError::conflict("client changed since it was registered"))
     }
 
     /// Replaces the declaration of a client; grants that no longer have a
@@ -143,23 +149,14 @@ impl Store {
         if revision != existing.revision {
             return Err(HostError::conflict("client changed since it was read"));
         }
-        let declared: HashSet<&str> = capabilities.iter().map(String::as_str).collect();
-        let mut granted: Vec<String> = existing
-            .granted_capabilities
-            .iter()
-            .filter(|capability| declared.contains(capability.as_str()))
-            .cloned()
-            .collect();
-        for capability in capabilities {
-            if !granted.iter().any(|name| name == capability) {
-                granted.push(capability.clone());
-            }
-        }
+        let granted = grants(&existing.granted_capabilities, capabilities);
         let next = existing.revision + 1;
-        let changed = self.conn()?.execute(
-            "UPDATE clients SET capabilities = ?2, granted_capabilities = ?3, \
-             capability_specs = ?4, revision = ?5, last_seen = ?6 \
-             WHERE id = ?1 AND revision = ?7",
+        let changed = self.conn()?.query_row(
+            &format!(
+                "UPDATE clients SET capabilities = ?2, granted_capabilities = ?3, \
+                 capability_specs = ?4, revision = ?5, last_seen = ?6 \
+                 WHERE id = ?1 AND revision = ?7 RETURNING {CLIENT_COLUMNS}"
+            ),
             params![
                 id,
                 to_json(&capabilities.to_vec())?,
@@ -169,46 +166,27 @@ impl Store {
                 now(),
                 existing.revision,
             ],
-        )?;
-        if changed == 0 {
-            return Err(HostError::conflict("client changed since it was read"));
-        }
-        self.client(id)?
-            .ok_or_else(|| HostError::storage("capability update did not persist"))
+            row_to_client,
+        );
+        changed
+            .optional()?
+            .ok_or_else(|| HostError::conflict("client changed since it was read"))
     }
 
     pub(crate) fn activations(&self) -> Result<Vec<Activation>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(
-            "SELECT companion_id, client_id, revision FROM activations ORDER BY companion_id",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(Activation {
-                companion_id: row.get(0)?,
-                client_id: row.get(1)?,
-                revision: row.get::<_, u64>(2)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!("SELECT {ACTIVATION_COLUMNS} FROM activations ORDER BY companion_id"),
+            [],
+            row_to_activation,
+        )
     }
 
     pub(crate) fn activation(&self, companion: &str) -> Result<Option<Activation>> {
-        let connection = self.conn()?;
-        let activation = connection
-            .query_row(
-                "SELECT companion_id, client_id, revision FROM activations WHERE companion_id = ?1",
-                [companion],
-                |row| {
-                    Ok(Activation {
-                        companion_id: row.get(0)?,
-                        client_id: row.get(1)?,
-                        revision: row.get::<_, u64>(2)?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(activation)
+        self.fetch(
+            &format!("SELECT {ACTIVATION_COLUMNS} FROM activations WHERE companion_id = ?1"),
+            [companion],
+            row_to_activation,
+        )
     }
 
     /// Moves or releases the active client and returns the new generation.
@@ -226,22 +204,40 @@ impl Store {
             return Err(HostError::conflict("activation changed since it was read"));
         }
         let next = revision + 1;
-        let changed = self.conn()?.execute(
-            "INSERT INTO activations (companion_id, client_id, revision, updated_at) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(companion_id) DO UPDATE SET client_id = excluded.client_id, \
-             revision = excluded.revision, updated_at = excluded.updated_at \
-             WHERE activations.revision = ?5",
+        self.fetch(
+            &format!(
+                "INSERT INTO activations (companion_id, client_id, revision, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(companion_id) DO UPDATE SET client_id = excluded.client_id, \
+                 revision = excluded.revision, updated_at = excluded.updated_at \
+                 WHERE activations.revision = ?5 RETURNING {ACTIVATION_COLUMNS}"
+            ),
             params![companion, client, next, now(), expected],
-        )?;
-        if changed == 0 {
-            return Err(HostError::conflict("activation changed since it was read"));
+            row_to_activation,
+        )?
+        .ok_or_else(|| HostError::conflict("activation changed since it was read"))
+    }
+
+    /// The client generation an agent's calls must target: the active client
+    /// for a companion, or the client the run's work session is bound to.
+    pub(crate) fn target(
+        &self,
+        companion: &str,
+        work: Option<&str>,
+    ) -> Result<Option<(String, u64)>> {
+        if let Some(work) = work {
+            let session = self
+                .work_session(work)?
+                .ok_or_else(|| HostError::not_found("work session not found"))?;
+            return Ok(session
+                .client_id
+                .map(|client| (client, session.activation_revision)));
         }
-        Ok(Activation {
-            companion_id: companion.to_owned(),
-            client_id: client.map(ToOwned::to_owned),
-            revision: next,
-        })
+        Ok(self.activation(companion)?.and_then(|activation| {
+            activation
+                .client_id
+                .map(|client| (client, activation.revision))
+        }))
     }
 
     pub(crate) fn insert_operation(&self, operation: &DeviceOperation) -> Result<()> {
@@ -266,17 +262,11 @@ impl Store {
     }
 
     pub(crate) fn operation(&self, id: &str) -> Result<Option<DeviceOperation>> {
-        let connection = self.conn()?;
-        let operation = connection
-            .query_row(
-                "SELECT operation_id, client_id, activation_revision, capability, input, \
-                 work_id, status, output, failure, created_at, updated_at \
-                 FROM device_operations WHERE operation_id = ?1",
-                [id],
-                row_to_operation,
-            )
-            .optional()?;
-        Ok(operation)
+        self.fetch(
+            &format!("SELECT {OPERATION_COLUMNS} FROM device_operations WHERE operation_id = ?1"),
+            [id],
+            row_to_operation,
+        )
     }
 
     pub(crate) fn set_operation_status(&self, id: &str, status: DeviceStatus) -> Result<()> {
@@ -308,9 +298,13 @@ impl Store {
         } else {
             DeviceStatus::Failed
         };
-        self.conn()?.execute(
-            "UPDATE device_operations SET status = ?2, output = ?3, failure = ?4, \
-             updated_at = ?5 WHERE operation_id = ?1 AND status NOT IN ('completed','failed','uncertain')",
+        let updated = self.conn()?.query_row(
+            &format!(
+                "UPDATE device_operations SET status = ?2, output = ?3, failure = ?4, \
+                 updated_at = ?5 WHERE operation_id = ?1 \
+                 AND status NOT IN ('completed','failed','uncertain') \
+                 RETURNING {OPERATION_COLUMNS}"
+            ),
             params![
                 id,
                 status.as_str(),
@@ -318,23 +312,26 @@ impl Store {
                 failure.map(to_json).transpose()?,
                 now(),
             ],
-        )?;
-        self.operation(id)
+            row_to_operation,
+        );
+        match updated.optional()? {
+            Some(operation) => Ok(Some(operation)),
+            None => self.operation(id),
+        }
     }
 
     /// Operations a client may still receive after reconnecting: pending, or
     /// dispatched but never answered.
     pub(crate) fn outstanding_operations(&self, client: &str) -> Result<Vec<DeviceOperation>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(
-            "SELECT operation_id, client_id, activation_revision, capability, input, work_id, \
-             status, output, failure, created_at, updated_at FROM device_operations \
-             WHERE client_id = ?1 AND status IN ('pending','dispatched') \
-             ORDER BY created_at",
-        )?;
-        let rows = statement.query_map([client], row_to_operation)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.fetch_all(
+            &format!(
+                "SELECT {OPERATION_COLUMNS} FROM device_operations \
+                 WHERE client_id = ?1 AND status IN ('pending','dispatched') \
+                 ORDER BY created_at"
+            ),
+            [client],
+            row_to_operation,
+        )
     }
 
     /// A generation ended: every open operation bound to it fails as
@@ -362,43 +359,21 @@ impl Store {
     }
 }
 
+const OPERATION_COLUMNS: &str = "operation_id, client_id, activation_revision, capability, input, \
+     work_id, status, output, failure, created_at, updated_at";
+
 fn row_to_operation(row: &Row<'_>) -> rusqlite::Result<DeviceOperation> {
-    let status: String = row.get("status")?;
-    let status = DeviceStatus::parse(&status).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            status.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("unknown device status")),
-        )
-    })?;
-    let input: String = row.get("input")?;
-    let output: Option<String> = row.get("output")?;
-    let failure: Option<String> = row.get("failure")?;
-    let corrupt = |text: &str| {
-        rusqlite::Error::FromSqlConversionFailure(
-            text.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("stored operation JSON is corrupt")),
-        )
-    };
+    let status = enum_column(row, "status", "unknown device status", DeviceStatus::parse)?;
     Ok(DeviceOperation {
         id: row.get("operation_id")?,
         client_id: row.get("client_id")?,
         activation_revision: row.get::<_, u64>("activation_revision")?,
         capability: row.get("capability")?,
-        input: serde_json::from_str(&input).map_err(|_| corrupt(&input))?,
+        input: json_column(row, "input", "stored operation JSON is corrupt")?,
         work_id: row.get("work_id")?,
         status,
-        output: output
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|_| corrupt(output.as_deref().unwrap_or_default()))?,
-        failure: failure
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|_| corrupt(failure.as_deref().unwrap_or_default()))?,
+        output: optional_json_column(row, "output", "stored operation JSON is corrupt")?,
+        failure: optional_json_column(row, "failure", "stored operation JSON is corrupt")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -409,9 +384,14 @@ impl Store {
     /// generation.
     pub(crate) fn activation_for_client(&self, client: &str) -> Result<Option<(String, u64)>> {
         Ok(self
-            .activations()?
-            .into_iter()
-            .find(|activation| activation.client_id.as_deref() == Some(client))
+            .fetch(
+                &format!(
+                    "SELECT {ACTIVATION_COLUMNS} FROM activations \
+                     WHERE client_id = ?1 ORDER BY companion_id"
+                ),
+                [client],
+                row_to_activation,
+            )?
             .map(|activation| (activation.companion_id, activation.revision)))
     }
 }
@@ -424,12 +404,8 @@ mod tests {
         CapabilitySpec {
             name: name.into(),
             tool_name: tool.into(),
-            description: String::new(),
-            input_schema: "{}".into(),
-            presets: Vec::new(),
             approval: crate::host::client::CapabilityApproval::Auto,
-            approval_target: String::new(),
-            output_schema: String::new(),
+            ..Default::default()
         }
     }
 

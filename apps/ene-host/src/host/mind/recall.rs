@@ -5,7 +5,7 @@
 //! request message, so the saved conversation is never polluted and the prefix
 //! stays stable across the ReAct steps of one turn.
 use super::consolidate::InjectedMemories;
-use super::embedding::{self, CompactVectorIndex, Embeddings};
+use super::embedding::{self, CompactVectorIndex, Embedder};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent},
     db::{Store, now},
@@ -44,7 +44,7 @@ fn inject_tail(
     perception: Res<crate::host::resources::Perception>,
     mut cache: ResMut<TailCache>,
     mut index: ResMut<CompactVectorIndex>,
-    embeddings: Res<Embeddings>,
+    embedder: Res<Embedder>,
     credentials: Option<Res<Credentials>>,
     mut injected: ResMut<InjectedMemories>,
 ) {
@@ -73,7 +73,7 @@ fn inject_tail(
                     agent,
                     turn_id,
                     &mut index,
-                    &embeddings,
+                    &embedder,
                     credentials.as_deref(),
                     &mut injected,
                 );
@@ -115,7 +115,7 @@ fn render_tail(
     agent: Entity,
     turn_id: u64,
     index: &mut CompactVectorIndex,
-    embeddings: &Embeddings,
+    embedder: &Embedder,
     credentials: Option<&Credentials>,
     injected: &mut InjectedMemories,
 ) -> String {
@@ -157,7 +157,8 @@ fn render_tail(
             }
         }
         if let Some(query) = recent_user_text(conversation) {
-            let semantic = semantic_ids(store, index, embeddings, credentials, &companion, &query);
+            let semantic =
+                embedding::semantic_ids(store, embedder, index, credentials, &companion, &query);
             if let Ok(recalled) = store.recall_hybrid(
                 &companion,
                 &query,
@@ -256,36 +257,4 @@ fn prune_tail(
             cache.by_turn.remove(&(agent.0, turn.start.get()));
         }
     }
-}
-
-/// The semantic candidates for the turn, or none when no embedding space is
-/// configured. A failure degrades to lexical recall; it never fails the turn.
-fn semantic_ids(
-    store: &Store,
-    index: &mut CompactVectorIndex,
-    embeddings: &Embeddings,
-    credentials: Option<&Credentials>,
-    companion: &str,
-    query: &str,
-) -> Vec<String> {
-    let Ok(Some(record)) = store.companion(companion) else {
-        return Vec::new();
-    };
-    let Ok(Some(target)) = embedding::embedding_target(store, credentials, &record) else {
-        return Vec::new();
-    };
-    let Some(source) = embeddings.source() else {
-        return Vec::new();
-    };
-    let Ok(vector) = embedding::embed_query(source, &target, query) else {
-        return Vec::new();
-    };
-    if index.sync(store, &target.space).is_err() {
-        return Vec::new();
-    }
-    index
-        .ranked(&target.space, &vector, 20)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect()
 }

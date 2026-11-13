@@ -3,27 +3,138 @@ use super::{
     client::{
         Activation, CapabilityApproval, CapabilitySpec, Client, DeviceOperation, DeviceStatus,
     },
-    error::Failure,
+    error::{Failure, HostError},
     json::JsonDoc,
     mind::memory::Memory,
     mind::{Assignment, Assignments, Companion, Profile, State},
     permission::{Approval, ApprovalStatus, PolicyEffect, PolicyRule},
     settings::{
-        Check, Connection, ConnectionConfig, ConnectionKind, CredentialState, Provider, Settings,
+        AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
+        EmbeddingConnection, Endpoint, LlmConnection, McpConnection, Provider, Settings,
+        SttConnection, TtsConnection,
     },
     work::{Inquiry, Run, RunState, WorkSession, WorkStatus},
 };
 use ene_rpc as w;
 use serde_json::Value;
 
-pub(crate) fn json_text(value: &Value) -> String {
-    value.to_string()
+/// Maps an enum whose variants the contract carries under the same names.
+macro_rules! wire_enum {
+    ($name:ident: $from:ty => $to:ty { $($variant:ident),+ $(,)? }) => {
+        pub(crate) fn $name(value: $from) -> $to {
+            match value {
+                $(<$from>::$variant => <$to>::$variant),+
+            }
+        }
+    };
 }
+
+/// Maps the connection-config oneof in both directions from one variant list:
+/// the domain and proto config structs share their names and their kind-specific
+/// fields.
+macro_rules! connection_configs {
+    ($($variant:ident($config:ident) { $($field:ident),* $(,)? }),+ $(,)?) => {
+        fn config_to_wire(
+            value: &ConnectionConfig,
+            endpoint: &w::ConnectionEndpoint,
+        ) -> w::connection_config::Config {
+            match value {
+                $(ConnectionConfig::$variant(config) => {
+                    w::connection_config::Config::$variant(Box::new(w::$config {
+                        endpoint: Some(endpoint.clone()).into(),
+                        $($field: config.$field.clone(),)*
+                        ..Default::default()
+                    }))
+                }),+
+            }
+        }
+
+        fn config_from_wire(value: w::connection_config::Config) -> ConnectionConfig {
+            match value {
+                $(w::connection_config::Config::$variant(config) => {
+                    ConnectionConfig::$variant($config {
+                        endpoint: endpoint_from(config.endpoint.as_option()),
+                        $($field: config.$field,)*
+                    })
+                }),+
+            }
+        }
+    };
+}
+
+connection_configs! {
+    Llm(LlmConnection) { model_ids },
+    Tts(TtsConnection) { voice_ids },
+    Stt(SttConnection) { language_hints },
+    Embedding(EmbeddingConnection) { model_id, dimensions },
+    Mcp(McpConnection) { allowed_tools },
+    Acp(AcpConnection) { command, args },
+}
+
+/// Rebuilds the common endpoint from the contract.
+pub(crate) fn endpoint_from(value: Option<&w::ConnectionEndpoint>) -> Endpoint {
+    value.map_or_else(Endpoint::default, |value| Endpoint {
+        adapter: value.adapter.clone(),
+        endpoint: value.endpoint.clone(),
+        options_schema: value.options_schema.clone(),
+        options: value.options.clone(),
+    })
+}
+
+/// Rebuilds a connection from a settings write.
+pub(crate) fn connection_from(input: w::ConnectionInput) -> Result<Connection, HostError> {
+    let kind = match input.kind.to_i32() {
+        1 => ConnectionKind::Llm,
+        2 => ConnectionKind::Tts,
+        3 => ConnectionKind::Stt,
+        4 => ConnectionKind::Embedding,
+        5 => ConnectionKind::Mcp,
+        6 => ConnectionKind::Acp,
+        _ => return Err(HostError::invalid("connection kind is required")),
+    };
+    let config = input
+        .config
+        .into_option()
+        .and_then(|config| config.config)
+        .map(config_from_wire)
+        .ok_or_else(|| HostError::invalid("connection config is required"))?;
+    Ok(Connection {
+        id: input.id,
+        name: input.name,
+        enabled: input.enabled,
+        kind,
+        config,
+        credential_state: CredentialState::Absent,
+        revision: 0,
+        last_check: None,
+    })
+}
+
+/// Copies the listed fields into the target type, cloning each.
+macro_rules! wire_copy {
+    ($name:ident, $from:ty => $to:path { $($field:ident),+ $(,)? }) => {
+        pub(crate) fn $name(value: &$from) -> $to {
+            $to {
+                $($field: value.$field.clone(),)+
+                ..Default::default()
+            }
+        }
+    };
+    (exact $name:ident, $from:ty => $to:path { $($field:ident),+ $(,)? }) => {
+        pub(crate) fn $name(value: &$from) -> $to {
+            $to {
+                $($field: value.$field.clone(),)+
+            }
+        }
+    };
+}
+
+wire_copy!(failure, Failure => w::Failure { code, message });
 
 pub(crate) fn document(document: &JsonDoc) -> w::JsonDocument {
     w::JsonDocument {
         schema: document.schema.clone(),
-        json: json_text(&document.json),
+        json: document.json.to_string(),
         ..Default::default()
     }
 }
@@ -33,25 +144,11 @@ pub(crate) fn document_from(value: &w::JsonDocument) -> JsonDoc {
     JsonDoc::new(value.schema.clone(), json)
 }
 
-pub(crate) fn failure(value: &Failure) -> w::Failure {
-    w::Failure {
-        code: value.code.clone(),
-        message: value.message.clone(),
-        ..Default::default()
-    }
-}
-
 pub(crate) fn failure_from(value: &w::Failure) -> Failure {
     Failure::new(value.code.clone(), value.message.clone())
 }
 
-fn assignment(value: &Assignment) -> w::ModelAssignment {
-    w::ModelAssignment {
-        connection_id: value.connection_id.clone(),
-        model_id: value.model_id.clone(),
-        ..Default::default()
-    }
-}
+wire_copy!(assignment, Assignment => w::ModelAssignment { connection_id, model_id });
 
 pub(crate) fn assignments(value: &Assignments) -> w::ModelAssignments {
     w::ModelAssignments {
@@ -113,14 +210,7 @@ pub(crate) fn mind_profile(value: &Companion) -> w::MindProfile {
     }
 }
 
-pub(crate) fn profile_from(value: &w::MindProfile) -> Profile {
-    Profile {
-        facets: value.facets.clone(),
-        examples: value.examples.clone(),
-        background: value.background.clone(),
-        expression: value.expression.clone(),
-    }
-}
+wire_copy!(exact profile_from, w::MindProfile => Profile { facets, examples, background, expression });
 
 pub(crate) fn mind_state(value: &Companion) -> w::MindState {
     let state: &State = &value.state;
@@ -150,72 +240,20 @@ pub(crate) fn memory(value: &Memory) -> w::MemoryItem {
     }
 }
 
-pub(crate) fn connection_kind(value: ConnectionKind) -> w::ConnectionKind {
-    match value {
-        ConnectionKind::Llm => w::ConnectionKind::Llm,
-        ConnectionKind::Tts => w::ConnectionKind::Tts,
-        ConnectionKind::Stt => w::ConnectionKind::Stt,
-        ConnectionKind::Embedding => w::ConnectionKind::Embedding,
-        ConnectionKind::Mcp => w::ConnectionKind::Mcp,
-        ConnectionKind::Acp => w::ConnectionKind::Acp,
-    }
-}
+wire_enum!(connection_kind: ConnectionKind => w::ConnectionKind {
+    Llm, Tts, Stt, Embedding, Mcp, Acp
+});
 
 pub(crate) fn connection(value: &Connection) -> w::Connection {
     let endpoint = value.endpoint();
-    let endpoint = || w::ConnectionEndpoint {
+    let endpoint = w::ConnectionEndpoint {
         adapter: endpoint.adapter.clone(),
         endpoint: endpoint.endpoint.clone(),
         options_schema: endpoint.options_schema.clone(),
         options: endpoint.options.clone(),
         ..Default::default()
     };
-    let config = match &value.config {
-        ConnectionConfig::Llm(config) => {
-            w::connection_config::Config::Llm(Box::new(w::LlmConnection {
-                endpoint: Some(endpoint()).into(),
-                model_ids: config.model_ids.clone(),
-                ..Default::default()
-            }))
-        }
-        ConnectionConfig::Tts(config) => {
-            w::connection_config::Config::Tts(Box::new(w::TtsConnection {
-                endpoint: Some(endpoint()).into(),
-                voice_ids: config.voice_ids.clone(),
-                ..Default::default()
-            }))
-        }
-        ConnectionConfig::Stt(config) => {
-            w::connection_config::Config::Stt(Box::new(w::SttConnection {
-                endpoint: Some(endpoint()).into(),
-                language_hints: config.language_hints.clone(),
-                ..Default::default()
-            }))
-        }
-        ConnectionConfig::Embedding(config) => {
-            w::connection_config::Config::Embedding(Box::new(w::EmbeddingConnection {
-                endpoint: Some(endpoint()).into(),
-                model_id: config.model_id.clone(),
-                dimensions: config.dimensions,
-                ..Default::default()
-            }))
-        }
-        ConnectionConfig::Mcp(config) => {
-            w::connection_config::Config::Mcp(Box::new(w::McpConnection {
-                endpoint: Some(endpoint()).into(),
-                allowed_tools: config.allowed_tools.clone(),
-                ..Default::default()
-            }))
-        }
-        ConnectionConfig::Acp(config) => {
-            w::connection_config::Config::Acp(Box::new(w::AcpConnection {
-                endpoint: Some(endpoint()).into(),
-                command: config.command.clone(),
-                args: config.args.clone(),
-                ..Default::default()
-            }))
-        }
-    };
+    let config = config_to_wire(&value.config, &endpoint);
     w::Connection {
         id: value.id.clone(),
         name: value.name.clone(),
@@ -277,14 +315,9 @@ pub(crate) fn provider(value: &Provider) -> w::LlmProvider {
     }
 }
 
-pub(crate) fn approval_status(value: ApprovalStatus) -> w::ApprovalStatus {
-    match value {
-        ApprovalStatus::Pending => w::ApprovalStatus::Pending,
-        ApprovalStatus::Approved => w::ApprovalStatus::Approved,
-        ApprovalStatus::Denied => w::ApprovalStatus::Denied,
-        ApprovalStatus::Expired => w::ApprovalStatus::Expired,
-    }
-}
+wire_enum!(approval_status: ApprovalStatus => w::ApprovalStatus {
+    Pending, Approved, Denied, Expired
+});
 
 pub(crate) fn approval(value: &Approval) -> w::ApprovalRequest {
     w::ApprovalRequest {
@@ -303,13 +336,9 @@ pub(crate) fn approval(value: &Approval) -> w::ApprovalRequest {
     }
 }
 
-pub(crate) fn policy_effect(value: PolicyEffect) -> w::PolicyEffect {
-    match value {
-        PolicyEffect::Allow => w::PolicyEffect::Allow,
-        PolicyEffect::Deny => w::PolicyEffect::Deny,
-        PolicyEffect::Confirm => w::PolicyEffect::Confirm,
-    }
-}
+wire_enum!(policy_effect: PolicyEffect => w::PolicyEffect {
+    Allow, Deny, Confirm
+});
 
 pub(crate) fn policy_rule(value: &PolicyRule) -> w::PolicyRule {
     w::PolicyRule {
@@ -322,13 +351,9 @@ pub(crate) fn policy_rule(value: &PolicyRule) -> w::PolicyRule {
     }
 }
 
-pub(crate) fn capability_approval(value: CapabilityApproval) -> w::CapabilityApproval {
-    match value {
-        CapabilityApproval::Unspecified => w::CapabilityApproval::Unspecified,
-        CapabilityApproval::Auto => w::CapabilityApproval::Auto,
-        CapabilityApproval::Confirm => w::CapabilityApproval::Confirm,
-    }
-}
+wire_enum!(capability_approval: CapabilityApproval => w::CapabilityApproval {
+    Unspecified, Auto, Confirm
+});
 
 pub(crate) fn capability_spec(value: &CapabilitySpec) -> w::ClientCapabilitySpec {
     w::ClientCapabilitySpec {
@@ -377,35 +402,16 @@ pub(crate) fn client(value: &Client, connected: bool, active: Vec<String>) -> w:
     }
 }
 
-pub(crate) fn activation(value: &Activation) -> w::Activation {
-    w::Activation {
-        companion_id: value.companion_id.clone(),
-        client_id: value.client_id.clone(),
-        revision: value.revision,
-        ..Default::default()
-    }
-}
+wire_copy!(activation, Activation => w::Activation { companion_id, client_id, revision });
 
-pub(crate) fn work_status(value: WorkStatus) -> w::WorkStatus {
-    match value {
-        WorkStatus::Idle => w::WorkStatus::Idle,
-        WorkStatus::Active => w::WorkStatus::Active,
-        WorkStatus::Closed => w::WorkStatus::Closed,
-    }
-}
+wire_enum!(work_status: WorkStatus => w::WorkStatus {
+    Idle, Active, Closed
+});
 
-pub(crate) fn run_state(value: RunState) -> w::RunStatus {
-    match value {
-        RunState::Starting => w::RunStatus::Starting,
-        RunState::Running => w::RunStatus::Running,
-        RunState::WaitingInput => w::RunStatus::WaitingInput,
-        RunState::Cancelling => w::RunStatus::Cancelling,
-        RunState::Completed => w::RunStatus::Completed,
-        RunState::Cancelled => w::RunStatus::Cancelled,
-        RunState::CancellationUnconfirmed => w::RunStatus::CancellationUnconfirmed,
-        RunState::Failed => w::RunStatus::Failed,
-    }
-}
+wire_enum!(run_state: RunState => w::RunStatus {
+    Starting, Running, WaitingInput, Cancelling, Completed, Cancelled,
+    CancellationUnconfirmed, Failed
+});
 
 pub(crate) fn work_session(value: &WorkSession) -> w::WorkSession {
     w::WorkSession {
@@ -421,29 +427,31 @@ pub(crate) fn work_session(value: &WorkSession) -> w::WorkSession {
     }
 }
 
-pub(crate) fn run_info(value: &Run) -> w::RunInfo {
-    let detail = value.detail();
-    w::RunInfo {
-        run_id: value.run_id.clone(),
-        work_id: value.work_id.clone(),
-        state: run_state(value.state).into(),
-        failure: detail.failure.map(failure).into(),
-        pending_request_id: detail.pending_request_id.map(ToOwned::to_owned),
-        cancellation_requested_at: detail.cancellation_requested_at.map(ToOwned::to_owned),
-        cancellation_reason: detail.cancellation_reason.map(ToOwned::to_owned),
-        unverified_pids: detail.unverified_pids.to_vec(),
-        ..Default::default()
-    }
+/// The contract shape of a run's shared detail fields.
+macro_rules! run_wire {
+    ($type:ident, $value:expr, { $($extra:ident: $extra_value:expr),* $(,)? }) => {{
+        let detail = $value.detail();
+        w::$type {
+            $($extra: $extra_value,)*
+            state: run_state($value.state).into(),
+            failure: detail.failure.map(failure).into(),
+            pending_request_id: detail.pending_request_id.map(ToOwned::to_owned),
+            cancellation_requested_at: detail.cancellation_requested_at.map(ToOwned::to_owned),
+            cancellation_reason: detail.cancellation_reason.map(ToOwned::to_owned),
+            unverified_pids: detail.unverified_pids.to_vec(),
+            ..Default::default()
+        }
+    }};
 }
 
-pub(crate) fn inquiry(value: &Inquiry) -> w::WorkInquiry {
-    w::WorkInquiry {
-        request_id: value.request_id.clone(),
-        prompt: value.prompt.clone(),
-        choices: value.choices.clone(),
-        ..Default::default()
-    }
+pub(crate) fn run_info(value: &Run) -> w::RunInfo {
+    run_wire!(RunInfo, value, {
+        run_id: value.run_id.clone(),
+        work_id: value.work_id.clone(),
+    })
 }
+
+wire_copy!(inquiry, Inquiry => w::WorkInquiry { request_id, prompt, choices });
 
 pub(crate) fn work_view(session: &WorkSession, runs: &[Run], inquiries: &[Inquiry]) -> w::WorkView {
     w::WorkView {
@@ -455,16 +463,7 @@ pub(crate) fn work_view(session: &WorkSession, runs: &[Run], inquiries: &[Inquir
 }
 
 pub(crate) fn work_run_finished(value: &Run) -> w::WorkRunFinished {
-    let detail = value.detail();
-    w::WorkRunFinished {
-        state: run_state(value.state).into(),
-        failure: detail.failure.map(failure).into(),
-        pending_request_id: detail.pending_request_id.map(ToOwned::to_owned),
-        cancellation_requested_at: detail.cancellation_requested_at.map(ToOwned::to_owned),
-        cancellation_reason: detail.cancellation_reason.map(ToOwned::to_owned),
-        unverified_pids: detail.unverified_pids.to_vec(),
-        ..Default::default()
-    }
+    run_wire!(WorkRunFinished, value, {})
 }
 
 pub(crate) fn work_event(
@@ -480,21 +479,15 @@ pub(crate) fn work_event(
     }
 }
 
-pub(crate) fn device_status(value: DeviceStatus) -> w::DeviceOperationStatus {
-    match value {
-        DeviceStatus::Pending => w::DeviceOperationStatus::Pending,
-        DeviceStatus::Dispatched => w::DeviceOperationStatus::Dispatched,
-        DeviceStatus::Completed => w::DeviceOperationStatus::Completed,
-        DeviceStatus::Failed => w::DeviceOperationStatus::Failed,
-        DeviceStatus::Uncertain => w::DeviceOperationStatus::Uncertain,
-    }
-}
+wire_enum!(device_status: DeviceStatus => w::DeviceOperationStatus {
+    Pending, Dispatched, Completed, Failed, Uncertain
+});
 
 pub(crate) fn device_operation(value: &DeviceOperation, subscription: &str) -> w::DeviceOperation {
     w::DeviceOperation {
         operation_id: value.id.clone(),
         capability: value.capability.clone(),
-        input: json_text(&value.input),
+        input: value.input.to_string(),
         subscription_id: subscription.into(),
         client_id: value.client_id.clone(),
         activation_revision: value.activation_revision,
@@ -508,7 +501,11 @@ pub(crate) fn device_result(value: &DeviceOperation) -> w::DeviceOperationResult
         client_id: value.client_id.clone(),
         operation_id: value.id.clone(),
         success: value.status == DeviceStatus::Completed,
-        output: value.output.as_ref().map(json_text).unwrap_or_default(),
+        output: value
+            .output
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
         failure: value.failure.as_ref().map(failure).into(),
         activation_revision: value.activation_revision,
         ..Default::default()
@@ -525,9 +522,4 @@ pub(crate) fn device_state(value: &DeviceOperation) -> w::DeviceOperationState {
             .into(),
         ..Default::default()
     }
-}
-
-/// A credential state name for the wire.
-pub(crate) fn credential_state(value: CredentialState) -> &'static str {
-    value.as_str()
 }

@@ -1,19 +1,12 @@
 //! Saved policy rules.
-use super::{Result, Store};
+use super::{Result, Store, enum_column};
 use crate::host::error::HostError;
 use crate::host::permission::{PolicyEffect, PolicyRule};
 use rusqlite::{Row, params};
 use std::collections::HashSet;
 
 fn row_to_rule(row: &Row<'_>) -> rusqlite::Result<PolicyRule> {
-    let effect: String = row.get("effect")?;
-    let effect = PolicyEffect::parse(&effect).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            effect.len(),
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other("unknown policy effect")),
-        )
-    })?;
+    let effect = enum_column(row, "effect", "unknown policy effect", PolicyEffect::parse)?;
     Ok(PolicyRule {
         id: row.get("id")?,
         tool_name: row.get("tool_name")?,
@@ -25,14 +18,12 @@ fn row_to_rule(row: &Row<'_>) -> rusqlite::Result<PolicyRule> {
 
 impl Store {
     pub(crate) fn policy_rules(&self) -> Result<Vec<PolicyRule>> {
-        let connection = self.conn()?;
-        let mut statement = connection.prepare(
+        self.fetch_all(
             "SELECT id, tool_name, pattern, effect, created_at FROM policy_rules \
              ORDER BY created_at, id",
-        )?;
-        let rows = statement.query_map([], row_to_rule)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+            [],
+            row_to_rule,
+        )
     }
 
     /// Applies an add-or-update and remove batch, then returns the full list.

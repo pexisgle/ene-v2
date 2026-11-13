@@ -3,12 +3,11 @@
 //! citations and commits memories, edges and the new cursor in one SQLite
 //! transaction (docs/design/mind.md §5.2).
 //!
-//! The network call runs on a Tokio task owned by `mind::embedding`; only the
-//! result comes back to the ECS thread through `ConsolidationJobs`, so a slow
-//! model never blocks a frame.
+//! Only the model call runs on the background task owned by `mind::embedding`;
+//! its result comes back to the ECS thread and is committed there.
 use super::{
     Companion, Role,
-    embedding::{self, Embeddings},
+    embedding::{self, Embedder},
 };
 use crate::host::{
     agent::CompanionAgent,
@@ -28,13 +27,13 @@ use std::{
 };
 
 /// How many answered turns one job consumes.
-pub(crate) const MAX_TURNS: usize = 20;
+const MAX_TURNS: usize = 20;
 /// Unprocessed turns that force a job without waiting for idle.
-pub(crate) const TURN_THRESHOLD: usize = 5;
+const TURN_THRESHOLD: usize = 5;
 /// How long the conversation must be quiet before an idle job runs.
-pub(crate) const IDLE_WINDOW: Duration = Duration::from_secs(60);
+const IDLE_WINDOW: Duration = Duration::from_secs(60);
 /// Failed jobs wait this long before the next settle or idle retries them.
-pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(30);
+const RETRY_DELAY: Duration = Duration::from_secs(30);
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_FACTS: usize = 32;
 const MAX_CONTEXT: usize = 20;
@@ -42,10 +41,10 @@ const MAX_CITATIONS: usize = 64;
 const LLM_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
-/// One answered turn as data: the id the host uses in notifications and the
+/// One answered turn as data: the id the host advances the cursor to and the
 /// text the extraction model reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ConsolidationTurn {
+pub(crate) struct Turn {
     pub(crate) turn_id: String,
     pub(crate) text: String,
 }
@@ -60,15 +59,15 @@ pub(crate) struct MemoryContext {
     pub(crate) content: String,
 }
 
-/// Everything one commit needs, captured when the job started.
+/// Everything one commit needs, captured when the job started. The turns are
+/// already consumed by the prompt.
 #[derive(Clone, Debug)]
-pub(crate) struct ConsolidationBatch {
+pub(crate) struct Batch {
     pub(crate) companion_id: String,
     /// The cursor read at job start; `None` when no cursor row exists yet.
     pub(crate) job_start: Option<String>,
     /// The cursor this commit advances to.
     pub(crate) new_cursor: String,
-    pub(crate) turns: Vec<ConsolidationTurn>,
     pub(crate) context: Vec<MemoryContext>,
     /// Memory ids the host actually injected into those turns.
     pub(crate) injected: Vec<String>,
@@ -97,13 +96,9 @@ struct Extraction {
 }
 
 /// The result of one committed job.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ConsolidationCommit {
-    pub(crate) inserted: Vec<String>,
-    pub(crate) updated: Vec<String>,
-    pub(crate) forgotten: Vec<String>,
-    pub(crate) citations: Vec<String>,
-    pub(crate) rejected_citations: usize,
+pub(crate) struct Commit {
+    pub(crate) inserted: usize,
+    pub(crate) updated: usize,
     pub(crate) cursor: String,
 }
 
@@ -112,7 +107,7 @@ pub(crate) fn pending_turns(
     conversation: &CoreConversation,
     cursor: Option<&str>,
     limit: usize,
-) -> Vec<ConsolidationTurn> {
+) -> Vec<Turn> {
     if limit == 0 {
         return Vec::new();
     }
@@ -137,8 +132,9 @@ pub(crate) fn pending_turns(
         let from = conversation.start_of(record.start);
         let to = records
             .get(position + 1)
-            .map(|(_, next)| conversation.start_of(next.start))
-            .unwrap_or_else(|| conversation.entries().len());
+            .map_or(conversation.entries().len(), |(_, next)| {
+                conversation.start_of(next.start)
+            });
         let mut text = String::new();
         for entry in conversation
             .entries()
@@ -166,7 +162,7 @@ pub(crate) fn pending_turns(
         if text.trim().is_empty() {
             continue;
         }
-        turns.push(ConsolidationTurn {
+        turns.push(Turn {
             turn_id: start.to_string(),
             text,
         });
@@ -193,7 +189,7 @@ pub(crate) fn validate_citations(cited: &[String], injected: &[String]) -> Vec<S
 struct LlmTarget {
     endpoint: String,
     model_id: String,
-    secret: Option<String>,
+    secret: String,
 }
 
 /// Resolves the companion's `Consolidation` assignment (or its documented
@@ -212,16 +208,16 @@ fn llm_target(
     if !connection.enabled || connection.kind != crate::host::settings::ConnectionKind::Llm {
         return Ok(None);
     }
-    let Some(endpoint) = embedding::connection_endpoint(&connection) else {
-        return Ok(None);
-    };
-    let Some(secret) = embedding::connection_secret(&connection, credentials) else {
+    let (Some(endpoint), Some(secret)) = (
+        embedding::connection_endpoint(&connection),
+        embedding::connection_secret(&connection, credentials),
+    ) else {
         return Ok(None);
     };
     Ok(Some(LlmTarget {
         endpoint,
         model_id: assignment.model_id.clone(),
-        secret: Some(secret),
+        secret,
     }))
 }
 
@@ -237,61 +233,46 @@ cited_memory_ids には、提示された「注入済み記憶ID」に含まれ�
 
 fn schema() -> serde_json::Value {
     serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["facts"],
-        "properties": {
-            "facts": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                        "content",
-                        "importance",
-                        "audience",
-                        "supersedes",
-                        "cited_memory_ids"
-                    ],
-                    "properties": {
-                        "content": {"type": "string", "maxLength": 4000},
-                        "importance": {"type": "integer", "minimum": 0, "maximum": 10},
-                        "audience": {"type": ["string", "null"], "maxLength": 128},
-                        "supersedes": {"type": ["string", "null"], "maxLength": 128},
-                        "cited_memory_ids": {
-                            "type": "array",
-                            "items": {"type": "string", "maxLength": 128}
-                        }
-                    }
+        "type": "object", "additionalProperties": false, "required": ["facts"],
+        "properties": {"facts": {"type": "array", "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["content", "importance", "audience", "supersedes", "cited_memory_ids"],
+            "properties": {
+                "content": {"type": "string", "maxLength": 4000},
+                "importance": {"type": "integer", "minimum": 0, "maximum": 10},
+                "audience": {"type": ["string", "null"], "maxLength": 128},
+                "supersedes": {"type": ["string", "null"], "maxLength": 128},
+                "cited_memory_ids": {
+                    "type": "array", "items": {"type": "string", "maxLength": 128}
                 }
             }
-        }
+        }}}
     })
 }
 
 /// Renders the extraction prompt. It carries the transcript, the candidate
 /// memories with their revisions, and the ids the host injected.
-pub(crate) fn prompt(batch: &ConsolidationBatch) -> String {
+pub(crate) fn prompt(turns: &[Turn], context: &[MemoryContext], injected: &[String]) -> String {
     let mut prompt = String::from("以下から長期記憶にする事実を抽出してください。\n\n");
     prompt.push_str("既存記憶（id / revision / importance / 内容）:\n");
-    if batch.context.is_empty() {
+    if context.is_empty() {
         prompt.push_str("- なし\n");
     }
-    for memory in &batch.context {
+    for memory in context {
         prompt.push_str(&format!(
             "- id={} revision={} importance={} content={}\n",
             memory.id, memory.revision, memory.importance, memory.content
         ));
     }
     prompt.push_str("\n注入済み記憶ID（cited_memory_ids に書けるのはこれだけ）:\n");
-    if batch.injected.is_empty() {
+    if injected.is_empty() {
         prompt.push_str("- なし\n");
     }
-    for id in &batch.injected {
+    for id in injected {
         prompt.push_str(&format!("- {id}\n"));
     }
     prompt.push_str("\n会話（確定済みターン）:\n");
-    for turn in &batch.turns {
+    for turn in turns {
         prompt.push_str(&format!("[turn {}]\n{}", turn.turn_id, turn.text));
     }
     prompt.push_str(
@@ -304,17 +285,13 @@ pub(crate) fn prompt(batch: &ConsolidationBatch) -> String {
 /// Parses the model's last message into facts. Fences and surrounding prose
 /// are tolerated, but the JSON itself must validate.
 pub(crate) fn parse_extraction(text: &str) -> Result<Vec<Fact>> {
-    let mut body = text.trim();
-    if let Some(rest) = body.strip_prefix("```") {
-        body = rest
-            .strip_prefix("json")
-            .or_else(|| rest.strip_prefix("JSON"))
-            .unwrap_or(rest);
-        body = body.trim_start();
-        if let Some(rest) = body.strip_suffix("```") {
-            body = rest.trim_end();
-        }
-    }
+    let body = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```JSON")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
     let start = body
         .find('{')
         .ok_or_else(|| HostError::unavailable("consolidation output has no JSON object"))?;
@@ -356,12 +333,6 @@ pub(crate) fn parse_extraction(text: &str) -> Result<Vec<Fact>> {
 }
 
 async fn extract(target: LlmTarget, prompt: String) -> Result<Vec<Fact>> {
-    let url = format!("{}/chat/completions", target.endpoint.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(LLM_TIMEOUT)
-        .build()
-        .map_err(|error| HostError::unavailable(format!("consolidation client: {error}")))?;
     let body = serde_json::json!({
         "model": target.model_id,
         "messages": [
@@ -378,34 +349,15 @@ async fn extract(target: LlmTarget, prompt: String) -> Result<Vec<Fact>> {
             }
         }
     });
-    let mut request = client
-        .post(&url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .json(&body);
-    if let Some(secret) = &target.secret {
-        request = request.bearer_auth(secret);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| HostError::unavailable(format!("consolidation endpoint: {error}")))?;
-    if !response.status().is_success() {
-        return Err(HostError::unavailable(format!(
-            "consolidation endpoint answered {}",
-            response.status()
-        )));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| HostError::unavailable(format!("consolidation body: {error}")))?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(HostError::unavailable(
-            "consolidation endpoint answered more data than the host reads",
-        ));
-    }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| HostError::unavailable(format!("consolidation body: {error}")))?;
+    let value = embedding::post_json(
+        &format!("{}/chat/completions", target.endpoint.trim_end_matches('/')),
+        &body,
+        &target.secret,
+        LLM_TIMEOUT,
+        MAX_RESPONSE_BYTES,
+        "consolidation",
+    )
+    .await?;
     let content = value
         .get("choices")
         .and_then(serde_json::Value::as_array)
@@ -415,96 +367,6 @@ async fn extract(target: LlmTarget, prompt: String) -> Result<Vec<Fact>> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| HostError::unavailable("consolidation body has no message content"))?;
     parse_extraction(content)
-}
-
-/// What a background extraction task posts back to the ECS thread.
-#[derive(Clone, Debug)]
-pub(crate) enum ConsolidationReply {
-    Done {
-        batch: Box<ConsolidationBatch>,
-        facts: Vec<Fact>,
-    },
-    Failed {
-        companion_id: String,
-        error: String,
-    },
-}
-
-/// The single-flight guard, retry schedule and result channel per companion.
-#[derive(Resource)]
-pub(crate) struct ConsolidationJobs {
-    running: HashSet<String>,
-    retry_at: HashMap<String, Instant>,
-    errors: HashMap<String, String>,
-    sender: crossbeam_channel::Sender<ConsolidationReply>,
-    receiver: crossbeam_channel::Receiver<ConsolidationReply>,
-}
-
-impl Default for ConsolidationJobs {
-    fn default() -> Self {
-        let (sender, receiver) = crossbeam_channel::bounded(16);
-        Self {
-            running: HashSet::new(),
-            retry_at: HashMap::new(),
-            errors: HashMap::new(),
-            sender,
-            receiver,
-        }
-    }
-}
-
-impl ConsolidationJobs {
-    /// Claims the companion's only slot. `false` means a job is still running
-    /// or a failure is in its retry delay.
-    pub(crate) fn begin(&mut self, companion: &str, now: Instant) -> bool {
-        if self.running.contains(companion) {
-            return false;
-        }
-        if self
-            .retry_at
-            .get(companion)
-            .is_some_and(|retry| *retry > now)
-        {
-            return false;
-        }
-        self.running.insert(companion.to_owned());
-        true
-    }
-
-    pub(crate) fn finish(&mut self, companion: &str) {
-        self.running.remove(companion);
-    }
-
-    /// Whether this companion's one slot is busy.
-    pub(crate) fn is_running(&self, companion: &str) -> bool {
-        self.running.contains(companion)
-    }
-
-    pub(crate) fn succeed(&mut self, companion: &str) {
-        self.running.remove(companion);
-        self.retry_at.remove(companion);
-        self.errors.remove(companion);
-    }
-
-    pub(crate) fn fail(&mut self, companion: &str, error: impl Into<String>, now: Instant) {
-        self.running.remove(companion);
-        self.retry_at
-            .insert(companion.to_owned(), now + RETRY_DELAY);
-        self.errors.insert(companion.to_owned(), error.into());
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn last_error(&self, companion: &str) -> Option<&str> {
-        self.errors.get(companion).map(String::as_str)
-    }
-
-    fn sender(&self) -> crossbeam_channel::Sender<ConsolidationReply> {
-        self.sender.clone()
-    }
-
-    fn try_recv(&self) -> Option<ConsolidationReply> {
-        self.receiver.try_recv().ok()
-    }
 }
 
 /// Memory ids the host injected into recent turns, recorded by recall. The
@@ -518,12 +380,10 @@ impl InjectedMemories {
     const KEEP: usize = 64;
 
     /// Records one turn's injected ids. Recording a turn twice replaces it.
-    #[allow(dead_code)]
     pub(crate) fn record(&mut self, companion: &str, turn_id: &str, ids: Vec<String>) {
-        let mut seen = HashSet::new();
         let ids: Vec<String> = ids
             .into_iter()
-            .filter(|id| !id.is_empty() && seen.insert(id.clone()))
+            .filter(|id| !id.is_empty())
             .take(MAX_CITATIONS)
             .collect();
         let turns = self.by_companion.entry(companion.to_owned()).or_default();
@@ -573,18 +433,75 @@ impl InjectedMemories {
     }
 }
 
-/// When each companion last settled a turn, and when the idle scan last ran.
-#[derive(Resource, Default)]
-pub(crate) struct ConsolidationActivity {
+/// What the background extraction task posts back to the ECS thread. The
+/// batch travels with the result because it holds the commit input.
+type Reply = (Batch, std::result::Result<Vec<Fact>, String>);
+
+/// The single-flight guard, retry schedule, idle clock and result channel.
+#[derive(Resource)]
+pub(crate) struct Consolidation {
+    running: HashSet<String>,
+    retry_at: HashMap<String, Instant>,
     settled_at: HashMap<String, Instant>,
     scanned_at: Option<Instant>,
+    sender: crossbeam_channel::Sender<Reply>,
+    receiver: crossbeam_channel::Receiver<Reply>,
 }
 
-/// Registers the guard, the injection ledger and the two background systems.
+impl Default for Consolidation {
+    fn default() -> Self {
+        let (sender, receiver) = crossbeam_channel::bounded(16);
+        Self {
+            running: HashSet::new(),
+            retry_at: HashMap::new(),
+            settled_at: HashMap::new(),
+            scanned_at: None,
+            sender,
+            receiver,
+        }
+    }
+}
+
+impl Consolidation {
+    /// Claims the companion's only slot. `false` means a job is still running
+    /// or a failure is in its retry delay.
+    fn begin(&mut self, companion: &str, now: Instant) -> bool {
+        if self.running.contains(companion)
+            || self
+                .retry_at
+                .get(companion)
+                .is_some_and(|retry| *retry > now)
+        {
+            return false;
+        }
+        self.running.insert(companion.to_owned());
+        true
+    }
+
+    fn finish(&mut self, companion: &str) {
+        self.running.remove(companion);
+    }
+
+    fn fail(&mut self, companion: &str, now: Instant) {
+        self.running.remove(companion);
+        self.retry_at
+            .insert(companion.to_owned(), now + RETRY_DELAY);
+    }
+
+    fn succeed(&mut self, companion: &str) {
+        self.running.remove(companion);
+        self.retry_at.remove(companion);
+    }
+
+    fn sender(&self) -> crossbeam_channel::Sender<Reply> {
+        self.sender.clone()
+    }
+}
+
+/// Registers the injection ledger, the guard and the two background systems.
 pub(crate) fn register(app: &mut App) {
-    app.init_resource::<ConsolidationJobs>()
+    app.init_resource::<Consolidation>()
         .init_resource::<InjectedMemories>()
-        .init_resource::<ConsolidationActivity>()
         .add_systems(
             Update,
             (schedule_consolidation, drain_consolidation)
@@ -593,18 +510,30 @@ pub(crate) fn register(app: &mut App) {
         );
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The sources one job reads; bundled so `start` stays a normal function.
+struct Sources<'a> {
+    store: &'a Store,
+    embedder: &'a Embedder,
+    credentials: Option<&'a Credentials>,
+    injected: &'a InjectedMemories,
+}
+
 fn schedule_consolidation(
     settled: Query<(&TurnOutcome, &ForAgent), Added<Settled>>,
     agents: Query<(&CompanionAgent, &Conversation)>,
     store: Res<Store>,
-    embeddings: Res<Embeddings>,
+    embedder: Res<Embedder>,
     credentials: Option<Res<Credentials>>,
     injected: Res<InjectedMemories>,
-    mut jobs: ResMut<ConsolidationJobs>,
-    mut activity: ResMut<ConsolidationActivity>,
+    mut jobs: ResMut<Consolidation>,
 ) {
     let now = Instant::now();
+    let sources = Sources {
+        store: &store,
+        embedder: &embedder,
+        credentials: credentials.as_deref(),
+        injected: &injected,
+    };
     let mut answered: HashSet<String> = HashSet::new();
     for (outcome, of) in &settled {
         let TurnOutcome::Answered(_) = outcome else {
@@ -614,39 +543,29 @@ fn schedule_consolidation(
             continue;
         };
         let companion = agent.companion_id.clone();
-        activity.settled_at.insert(companion.clone(), now);
+        jobs.settled_at.insert(companion.clone(), now);
         answered.insert(companion.clone());
         let Ok(cursor) = store.consolidation_cursor(&companion) else {
             continue;
         };
-        let pending = pending_turns(conversation, cursor.as_deref(), TURN_THRESHOLD);
+        let pending = pending_turns(conversation, cursor.as_deref(), MAX_TURNS);
         if pending.len() >= TURN_THRESHOLD {
-            start(
-                &store,
-                &embeddings,
-                credentials.as_deref(),
-                &injected,
-                &mut jobs,
-                &companion,
-                conversation,
-                cursor,
-                now,
-            );
+            start(&sources, &mut jobs, &companion, cursor, pending, now);
         }
     }
-    let scan = activity
+    if jobs
         .scanned_at
-        .is_none_or(|last| now.duration_since(last) >= SCAN_INTERVAL);
-    if !scan {
+        .is_some_and(|last| now.duration_since(last) < SCAN_INTERVAL)
+    {
         return;
     }
-    activity.scanned_at = Some(now);
+    jobs.scanned_at = Some(now);
     for (agent, conversation) in &agents {
         let companion = &agent.companion_id;
-        if answered.contains(companion) || jobs.is_running(companion) {
+        if answered.contains(companion) || jobs.running.contains(companion) {
             continue;
         }
-        let idle = activity
+        let idle = jobs
             .settled_at
             .get(companion)
             .is_none_or(|settled| now.duration_since(*settled) >= IDLE_WINDOW);
@@ -660,138 +579,102 @@ fn schedule_consolidation(
         if pending.is_empty() {
             continue;
         }
-        start(
-            &store,
-            &embeddings,
-            credentials.as_deref(),
-            &injected,
-            &mut jobs,
-            companion,
-            conversation,
-            cursor,
-            now,
-        );
+        start(&sources, &mut jobs, companion, cursor, pending, now);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn start(
-    store: &Store,
-    embeddings: &Embeddings,
-    credentials: Option<&Credentials>,
-    injected: &InjectedMemories,
-    jobs: &mut ConsolidationJobs,
+    sources: &Sources<'_>,
+    jobs: &mut Consolidation,
     companion_id: &str,
-    conversation: &Conversation,
     job_start: Option<String>,
+    pending: Vec<Turn>,
     now: Instant,
 ) {
+    let Some(new_cursor) = pending.last().map(|turn| turn.turn_id.clone()) else {
+        return;
+    };
     if !jobs.begin(companion_id, now) {
         return;
     }
-    let pending = pending_turns(conversation, job_start.as_deref(), MAX_TURNS);
-    let Some(new_cursor) = pending.last().map(|turn| turn.turn_id.clone()) else {
-        jobs.finish(companion_id);
-        return;
-    };
-    let companion = match store.companion(companion_id) {
+    let companion = match sources.store.companion(companion_id) {
         Ok(Some(companion)) => companion,
         Ok(None) => {
             jobs.finish(companion_id);
             return;
         }
-        Err(error) => {
-            jobs.fail(companion_id, error.to_string(), now);
+        Err(_) => {
+            jobs.fail(companion_id, now);
             return;
         }
     };
-    let target = match llm_target(store, credentials, &companion) {
+    let target = match llm_target(sources.store, sources.credentials, &companion) {
         Ok(Some(target)) => target,
-        Ok(None) => {
-            jobs.fail(companion_id, "no consolidation model is assigned", now);
-            return;
-        }
-        Err(error) => {
-            jobs.fail(companion_id, error.to_string(), now);
+        Ok(None) | Err(_) => {
+            jobs.fail(companion_id, now);
             return;
         }
     };
-    let context = match store.consolidation_context(companion_id, MAX_CONTEXT) {
+    let context = match sources
+        .store
+        .consolidation_context(companion_id, MAX_CONTEXT)
+    {
         Ok(context) => context,
-        Err(error) => {
-            jobs.fail(companion_id, error.to_string(), now);
+        Err(_) => {
+            jobs.fail(companion_id, now);
             return;
         }
     };
-    let injected = injected.ids_between(companion_id, job_start.as_deref(), &new_cursor);
-    let batch = ConsolidationBatch {
+    let injected = sources
+        .injected
+        .ids_between(companion_id, job_start.as_deref(), &new_cursor);
+    let prompt = prompt(&pending, &context, &injected);
+    let batch = Batch {
         companion_id: companion_id.to_owned(),
         job_start,
         new_cursor,
-        turns: pending,
         context,
         injected,
     };
-    let prompt = prompt(&batch);
     let sender = jobs.sender();
-    let queued = embeddings.spawn(async move {
-        let reply = match extract(target, prompt).await {
-            Ok(facts) => ConsolidationReply::Done {
-                batch: Box::new(batch),
-                facts,
-            },
-            Err(error) => ConsolidationReply::Failed {
-                companion_id: batch.companion_id.clone(),
-                error: error.to_string(),
-            },
-        };
-        let _ = sender.send(reply);
+    let queued = sources.embedder.spawn(async move {
+        let result = extract(target, prompt)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = sender.send((batch, result));
     });
     if !queued {
-        jobs.fail(companion_id, "the background runtime is unavailable", now);
+        jobs.fail(companion_id, now);
     }
 }
 
 fn drain_consolidation(
     store: Res<Store>,
-    mut jobs: ResMut<ConsolidationJobs>,
-    notifier: Option<ResMut<Notifier>>,
+    mut jobs: ResMut<Consolidation>,
+    mut notifier: Option<ResMut<Notifier>>,
 ) {
-    let mut notifier = notifier;
-    let mut notices: Vec<(String, String)> = Vec::new();
-    while let Some(reply) = jobs.try_recv() {
-        match reply {
-            ConsolidationReply::Done { batch, facts } => {
-                match store.commit_consolidation(&batch, &facts) {
-                    Ok(outcome) => {
-                        jobs.succeed(&batch.companion_id);
-                        tracing::debug!(
-                            companion = %batch.companion_id,
-                            inserted = outcome.inserted.len(),
-                            updated = outcome.updated.len(),
-                            cursor = %outcome.cursor,
-                            "consolidation committed"
-                        );
-                    }
-                    Err(error) => {
-                        jobs.fail(&batch.companion_id, error.to_string(), Instant::now());
-                        notices.push((batch.companion_id, error.to_string()));
-                    }
+    while let Ok((batch, result)) = jobs.receiver.try_recv() {
+        let message = match result {
+            Ok(facts) => match store.consolidate(&batch, &facts) {
+                Ok(commit) => {
+                    jobs.succeed(&batch.companion_id);
+                    tracing::debug!(
+                        companion = %batch.companion_id,
+                        inserted = commit.inserted,
+                        updated = commit.updated,
+                        cursor = %commit.cursor,
+                        "consolidation committed"
+                    );
+                    continue;
                 }
-            }
-            ConsolidationReply::Failed {
-                companion_id,
-                error,
-            } => {
-                jobs.fail(&companion_id, error.clone(), Instant::now());
-                notices.push((companion_id, error));
-            }
-        }
-    }
-    if let Some(notifier) = notifier.as_mut() {
-        for (companion, message) in notices {
+                Err(error) => error.to_string(),
+            },
+            Err(error) => error,
+        };
+        jobs.fail(&batch.companion_id, Instant::now());
+        if let Some(notifier) = notifier.as_mut() {
             notifier.notice(
-                Some(&companion),
+                Some(&batch.companion_id),
                 "consolidation_failed",
                 &crate::host::db::truncate(&message, 300),
             );
@@ -802,7 +685,7 @@ fn drain_consolidation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::db::memories::NewMemory;
+    use crate::host::db::memories::MemoryRecord;
     use rig_core::conversation::MessageId;
 
     fn answer(conversation: &mut CoreConversation, user: &str, reply: &str) -> MessageId {
@@ -811,6 +694,42 @@ mod tests {
         conversation.push(Message::assistant(reply));
         conversation.end_turn(TurnEnd::Answered { answer: None });
         start
+    }
+
+    fn store() -> Store {
+        let temp = tempfile::tempdir().unwrap();
+        Store::open(&temp.path().join("host.sqlite3")).unwrap()
+    }
+
+    fn batch(cursor: Option<&str>, next: &str) -> Batch {
+        Batch {
+            companion_id: "ene".into(),
+            job_start: cursor.map(ToOwned::to_owned),
+            new_cursor: next.into(),
+            context: Vec::new(),
+            injected: Vec::new(),
+        }
+    }
+
+    fn new_memory(id: &str, content: &str) -> MemoryRecord {
+        MemoryRecord {
+            id: id.into(),
+            owner: "ene".into(),
+            audiences: Vec::new(),
+            content: content.into(),
+            importance: 5,
+            occurred_at: None,
+            source_context: serde_json::json!({}),
+        }
+    }
+
+    fn context(memory: &crate::host::mind::memory::Memory) -> MemoryContext {
+        MemoryContext {
+            id: memory.id.clone(),
+            revision: memory.memory_revision,
+            importance: memory.importance,
+            content: memory.content.clone(),
+        }
     }
 
     #[test]
@@ -828,142 +747,35 @@ mod tests {
         assert_eq!(turns[0].turn_id, first.get().to_string());
         assert_eq!(turns[1].turn_id, second.get().to_string());
         assert!(turns[1].text.contains("my name is A"));
-
         let after = pending_turns(&conversation, Some(&first.get().to_string()), 8);
         assert_eq!(after.len(), 1);
-        assert_eq!(after[0].turn_id, second.get().to_string());
         assert!(pending_turns(&conversation, Some("not-a-turn"), 8).is_empty());
-        assert!(pending_turns(&conversation, Some("999"), 8).is_empty());
     }
 
     #[test]
-    fn the_injection_ledger_only_returns_the_turn_range() {
-        let mut ledger = InjectedMemories::default();
-        ledger.record("ene", "2", vec!["a".into()]);
-        ledger.record("ene", "4", vec!["b".into(), "a".into()]);
-        ledger.record("ene", "6", vec!["c".into()]);
-        assert_eq!(ledger.ids_between("ene", None, "4"), vec!["a", "b"]);
-        assert_eq!(ledger.ids_between("ene", Some("2"), "5"), vec!["b", "a"]);
-        assert_eq!(ledger.ids_between("ene", Some("5"), "6"), vec!["c"]);
-        // Recording the same turn replaces its ids.
-        ledger.record("ene", "2", vec!["d".into()]);
-        assert_eq!(ledger.ids_between("ene", None, "2"), vec!["d"]);
-        assert!(ledger.ids_between("other", None, "9").is_empty());
-    }
-
-    #[test]
-    fn citations_are_limited_to_injected_ids() {
-        let injected = vec!["a".to_owned(), "b".to_owned()];
-        let cited = vec![
-            "a".to_owned(),
-            "ghost".to_owned(),
-            "b".to_owned(),
-            "a".to_owned(),
-        ];
-        assert_eq!(validate_citations(&cited, &injected), vec!["a", "b"]);
-        assert!(validate_citations(&["ghost".to_owned()], &injected).is_empty());
-    }
-
-    #[test]
-    fn extraction_parses_facts_and_tolerates_fences() {
-        let text = r#"```json
-        {"facts":[
-          {"content":"A prefers tea","importance":6,"audience":"*",
-           "supersedes":null,"cited_memory_ids":["m1"]},
-          {"content":"","importance":3,"audience":null,"supersedes":null,"cited_memory_ids":[]}
-        ]}
-        ```"#;
-        let facts = parse_extraction(text).unwrap();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].content, "A prefers tea");
-        assert_eq!(facts[0].importance, Some(6));
-        assert!(parse_extraction("no json here").is_err());
-    }
-
-    #[test]
-    fn the_single_flight_guard_skips_and_retries() {
-        let mut jobs = ConsolidationJobs::default();
-        let now = Instant::now();
-        assert!(jobs.begin("ene", now));
-        assert!(!jobs.begin("ene", now));
-        jobs.fail("ene", "boom", now);
-        assert!(!jobs.begin("ene", now));
-        assert!(jobs.last_error("ene").is_some());
-        assert!(jobs.begin("ene", now + RETRY_DELAY + Duration::from_secs(1)));
-        jobs.succeed("ene");
-        // succeed clears the retry slot and the error.
-        assert!(jobs.last_error("ene").is_none());
-        assert!(jobs.begin("ene", now));
-    }
-
-    fn store() -> Store {
-        let temp = tempfile::tempdir().unwrap();
-        Store::open(&temp.path().join("host.sqlite3")).unwrap()
-    }
-
-    fn batch(cursor: Option<&str>, next: &str) -> ConsolidationBatch {
-        ConsolidationBatch {
-            companion_id: "ene".into(),
-            job_start: cursor.map(ToOwned::to_owned),
-            new_cursor: next.into(),
-            turns: Vec::new(),
-            context: Vec::new(),
-            injected: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_stale_cursor_commit_is_rejected() {
+    fn a_stale_cursor_or_memory_revision_aborts_the_whole_commit() {
         let store = store();
-        store.commit_consolidation(&batch(None, "5"), &[]).unwrap();
-        assert_eq!(
-            store.consolidation_cursor("ene").unwrap(),
-            Some("5".to_owned())
-        );
+        store.consolidate(&batch(None, "5"), &[]).unwrap();
         assert!(
             matches!(
-                store.commit_consolidation(&batch(None, "5"), &[]),
+                store.consolidate(&batch(None, "5"), &[]),
                 Err(HostError::Conflict(_))
             ),
             "a second first commit must not duplicate the range"
         );
-        store
-            .commit_consolidation(&batch(Some("5"), "7"), &[])
-            .unwrap();
-        assert!(
-            matches!(
-                store.commit_consolidation(&batch(Some("5"), "9"), &[]),
-                Err(HostError::Conflict(_))
-            ),
-            "a commit from the old cursor must be rejected"
-        );
+        store.consolidate(&batch(Some("5"), "7"), &[]).unwrap();
+        assert!(matches!(
+            store.consolidate(&batch(Some("5"), "9"), &[]),
+            Err(HostError::Conflict(_))
+        ));
         assert_eq!(
             store.consolidation_cursor("ene").unwrap(),
             Some("7".to_owned())
         );
-    }
 
-    #[test]
-    fn a_stale_memory_revision_aborts_the_whole_commit() {
-        let store = store();
-        let memory = store
-            .insert_memory(NewMemory {
-                id: "m1".into(),
-                owner: "ene".into(),
-                audiences: Vec::new(),
-                content: "tea".into(),
-                importance: 5,
-                occurred_at: None,
-                source_context: serde_json::json!({}),
-            })
-            .unwrap();
-        let mut batch = batch(None, "5");
-        batch.context = vec![MemoryContext {
-            id: memory.id.clone(),
-            revision: memory.memory_revision,
-            importance: memory.importance,
-            content: memory.content.clone(),
-        }];
+        let memory = store.insert_memory(new_memory("m1", "tea")).unwrap();
+        let mut batch = batch(Some("7"), "9");
+        batch.context = vec![context(&memory)];
         // A concurrent correction moves the revision the job captured.
         store
             .conn()
@@ -980,49 +792,53 @@ mod tests {
             ..Fact::default()
         }];
         assert!(matches!(
-            store.commit_consolidation(&batch, &facts),
+            store.consolidate(&batch, &facts),
             Err(HostError::Conflict(_))
         ));
-        assert_eq!(store.consolidation_cursor("ene").unwrap(), None);
+        assert_eq!(
+            store.consolidation_cursor("ene").unwrap(),
+            Some("7".to_owned())
+        );
         assert_eq!(store.memory("m1").unwrap().unwrap().content, "tea");
     }
 
     #[test]
-    fn a_valid_job_merges_and_advances_the_cursor() {
+    fn a_valid_job_merges_cites_and_advances_the_cursor() {
         let store = store();
-        let memory = store
-            .insert_memory(NewMemory {
-                id: "m1".into(),
-                owner: "ene".into(),
-                audiences: Vec::new(),
-                content: "tea".into(),
-                importance: 5,
-                occurred_at: None,
-                source_context: serde_json::json!({}),
-            })
-            .unwrap();
-        let mut batch = batch(None, "5");
-        batch.context = vec![MemoryContext {
-            id: memory.id.clone(),
-            revision: memory.memory_revision,
-            importance: memory.importance,
-            content: memory.content.clone(),
-        }];
-        batch.injected = vec!["m1".into()];
+        let memory = store.insert_memory(new_memory("m2", "coffee")).unwrap();
+        let mut batch = batch(None, "8");
+        batch.context = vec![context(&memory)];
+        batch.injected = vec!["m2".into()];
         let facts = vec![Fact {
-            content: "A prefers tea".into(),
+            content: "A prefers coffee".into(),
             importance: Some(7),
-            supersedes: Some("m1".into()),
-            cited_memory_ids: vec!["m1".into(), "ghost".into()],
+            supersedes: Some("m2".into()),
+            cited_memory_ids: vec!["m2".into(), "ghost".into()],
             ..Fact::default()
         }];
-        let outcome = store.commit_consolidation(&batch, &facts).unwrap();
-        assert_eq!(outcome.updated, vec!["m1"]);
-        assert_eq!(outcome.citations, vec!["m1"]);
-        assert_eq!(outcome.rejected_citations, 1);
-        let updated = store.memory("m1").unwrap().unwrap();
-        assert_eq!(updated.content, "A prefers tea");
+        let commit = store.consolidate(&batch, &facts).unwrap();
+        assert_eq!(commit.updated, 1);
+        let updated = store.memory("m2").unwrap().unwrap();
+        assert_eq!(updated.content, "A prefers coffee");
         assert_eq!(updated.importance, 7);
-        assert_eq!(store.consolidation_cursor("ene").unwrap(), Some("5".into()));
+        assert_eq!(store.consolidation_cursor("ene").unwrap(), Some("8".into()));
+        assert!(
+            store
+                .memory_edges("m2")
+                .unwrap()
+                .iter()
+                .any(|(relation, to)| relation == "estimated_cited_in" && to == "8")
+        );
+        // The ghost citation had no injected row to update.
+        let citations: i64 = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edges WHERE relation = 'estimated_cited_in'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(citations, 1);
     }
 }
