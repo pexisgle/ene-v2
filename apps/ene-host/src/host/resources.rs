@@ -163,3 +163,8 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 }
+
+/// The host's Tokio runtime, shared with subsystems that need background I/O
+/// without creating a runtime or thread of their own.
+#[derive(Resource, Clone)]
+pub(crate) struct HostRuntime(pub(crate) tokio::runtime::Handle);

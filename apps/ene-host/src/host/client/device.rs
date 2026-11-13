@@ -4,7 +4,7 @@
 //! writes the operation first, then tries to deliver it; a client that is
 //! offline leaves it `pending` until it reconnects. A delivered operation
 //! whose result never arrives is `uncertain`, never a success.
-use super::{CapabilityTool, DeviceRequestArgs, Slots};
+use super::DeviceRequestArgs;
 use crate::host::{
     agent::{CompanionAgent, WorkAgent},
     client::{CapabilitySpec, DeviceOperation, DeviceStatus},
@@ -17,59 +17,9 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use rig_ecs::prelude::ToolCalled;
 use rig_ecs::prelude::*;
 use serde_json::{Value, json};
 use std::time::Instant;
-
-/// Runs once after plugin build: disables every slot until a capability is
-/// published and remembers the slot entities.
-pub(crate) fn init_slots(world: &mut World) {
-    let mut entities = Vec::new();
-    for index in 0..crate::host::client::SLOTS {
-        let name = format!("ene_cap_{index}");
-        let found = {
-            let mut query = world.query::<(Entity, &rig_ecs::prelude::ToolDef)>();
-            query
-                .iter(world)
-                .find(|(_, definition)| definition.0.name.as_str() == name)
-                .map(|(entity, _)| entity)
-        };
-        if let Some(entity) = found {
-            world.entity_mut(entity).insert(Disabled);
-            entities.push(entity);
-        }
-    }
-    world.resource_mut::<Slots>().entities = entities;
-    if let Err(error) = crate::host::client::sync_tools(world) {
-        crate::host::fail(world, error.to_string());
-    }
-}
-
-/// A call of a published capability tool. The client does not have to answer
-/// immediate tools; the host returns the operation id.
-pub(crate) fn on_slot_call(
-    called: On<ToolCalled<Value>>,
-    slots: Query<&CapabilityTool>,
-    mut commands: Commands,
-) {
-    let called = called.event();
-    let (call, agent, tool, args) = (
-        called.call,
-        called.agent,
-        called.entity,
-        called.args.clone(),
-    );
-    let spec = slots
-        .get(tool)
-        .map(|tool| tool.spec.clone())
-        .unwrap_or_default();
-    commands.queue(move |world: &mut World| {
-        if let Err(error) = execute(world, call, agent, &spec, args, false) {
-            refuse_error(world, call, error);
-        }
-    });
-}
 
 /// A generic `device_request` call. The tool waits for the client's result.
 pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut commands: Commands) {
@@ -121,13 +71,30 @@ pub(crate) fn execute(
     input: Value,
     wait_for_result: bool,
 ) -> Result<()> {
+    let (operation_id, answer) = accept(world, call, agent, spec, input)?;
+    if wait_for_result {
+        wait(world, call, &operation_id, deadline(world));
+    } else {
+        permission::answer(world, call, &answer);
+    }
+    Ok(())
+}
+
+/// Writes and dispatches one operation, returning its id and the tool answer.
+/// The generation is revalidated immediately before dispatch: a moved client
+/// never receives an operation accepted for the old one.
+pub(crate) fn accept(
+    world: &mut World,
+    call: Entity,
+    agent: Entity,
+    spec: &CapabilitySpec,
+    input: Value,
+) -> Result<(String, String)> {
     let store = world.resource::<Store>().clone();
     let binding = world
         .get::<CallBinding>(call)
         .cloned()
         .ok_or_else(|| HostError::internal("a device call without a binding"))?;
-    // Revalidate the generation immediately before dispatch: a moved client
-    // never receives an operation accepted for the old one.
     let (companion_id, work_id) = agent_context(world, agent)
         .ok_or_else(|| HostError::internal("a device call without an agent"))?;
     let current = store.target(&companion_id, work_id.as_deref())?;
@@ -158,16 +125,8 @@ pub(crate) fn execute(
     };
     store.insert_operation(&operation)?;
     dispatch(world, &operation)?;
-    if wait_for_result {
-        wait(world, call, &operation_id, deadline(world));
-    } else {
-        permission::answer(
-            world,
-            call,
-            &json!({"operation_id": operation_id, "status": "pending"}).to_string(),
-        );
-    }
-    Ok(())
+    let answer = json!({"operation_id": operation_id, "status": "pending"}).to_string();
+    Ok((operation_id, answer))
 }
 
 fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>)> {

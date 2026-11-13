@@ -79,6 +79,9 @@ pub(crate) struct Approval {
     /// run for the hand).
     pub(crate) session_id: String,
     pub(crate) run_id: String,
+    /// The work session the call belongs to, stored when the gate issues a
+    /// work approval so submission does not have to follow the run.
+    pub(crate) work_id: Option<String>,
     pub(crate) action_payload_hash: Vec<u8>,
     pub(crate) tool_name: String,
     pub(crate) normalized_arguments: String,
@@ -422,9 +425,21 @@ fn gate(world: &mut World) {
         };
         // A tool that is neither a host tool nor a declared capability is
         // refused: a future tool must opt into one of the two paths.
-        let Some((capability, input, spec)) =
-            resolve_capability(world, &client, &tool_name, &arguments)
-        else {
+        let resolved = match resolve_capability(
+            world,
+            agent,
+            &client,
+            activation_revision,
+            &tool_name,
+            &arguments,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                refuse(world, call, error.message());
+                continue;
+            }
+        };
+        let Some((capability, input, spec)) = resolved else {
             refuse(world, call, &format!("unknown device tool `{tool_name}`"));
             continue;
         };
@@ -452,6 +467,7 @@ fn gate(world: &mut World) {
                     request_id: request_id.clone(),
                     session_id: companion_id.clone(),
                     run_id: run_id.clone(),
+                    work_id: work_id.clone(),
                     action_payload_hash: canonicalise(&tool_name, &arguments).1,
                     tool_name: tool_name.clone(),
                     normalized_arguments: arguments.to_string(),
@@ -511,33 +527,72 @@ fn binding_of(world: &World, agent: Entity) -> (String, Option<String>, String) 
 
 /// The capability a device tool call names, with its input and declaration.
 /// The client is already resolved, so the hand resolves against the client it
-/// is bound to, not against the companion's current activation.
+/// is bound to, not against the companion's current activation. A capability
+/// tool is parent-only and must have been published for the bound generation;
+/// a call that no longer matches is refused with a reason instead of being
+/// treated as an unknown tool.
 fn resolve_capability(
     world: &mut World,
+    agent: Entity,
     client: &Client,
+    activation_revision: u64,
     tool_name: &str,
     arguments: &Value,
-) -> Option<(String, Value, Option<CapabilitySpec>)> {
+) -> Result<Option<(String, Value, Option<CapabilitySpec>)>> {
     if tool_name == "device_request" {
-        let capability = arguments.get("capability")?.as_str()?.to_owned();
-        if !client.capabilities.iter().any(|name| name == &capability) {
-            return None;
+        let Some(capability) = arguments.get("capability").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        if !client.capabilities.iter().any(|name| name == capability) {
+            return Ok(None);
         }
         let input = arguments
             .get("input")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
-        return Some((capability.clone(), input, client.spec(&capability).cloned()));
+        return Ok(Some((
+            capability.to_owned(),
+            input,
+            client.spec(capability).cloned(),
+        )));
     }
-    let mut query = world.query::<(&ToolDef, &super::client::CapabilityTool)>();
-    let spec = query
-        .iter(world)
-        .find(|(def, _)| def.0.name.as_str() == tool_name)
-        .map(|(_, tool)| tool.spec.clone())?;
-    if !client.capabilities.iter().any(|name| name == &spec.name) {
-        return None;
+    // Declared capability tools are offered to the parent only; the hand uses
+    // the generic dispatcher so its work-session binding stays explicit.
+    if world.get::<super::agent::WorkAgent>(agent).is_some() {
+        return Err(HostError::permission(
+            "capability tools are offered to the parent only",
+        ));
     }
-    Some((spec.name.clone(), arguments.clone(), Some(spec)))
+    let published = {
+        let mut query = world.query::<(&ToolDef, &super::client::CapabilityTool)>();
+        query
+            .iter(world)
+            .find(|(definition, _)| definition.0.name.as_str() == tool_name)
+            .map(|(_, tool)| tool.clone())
+    };
+    let Some(tool) = published else {
+        return Ok(None);
+    };
+    if tool.client_id != client.id || tool.activation_revision != activation_revision {
+        return Err(HostError::conflict(
+            "client_moved: the capability tool is not published for the bound generation",
+        ));
+    }
+    if !client
+        .capabilities
+        .iter()
+        .any(|name| name == &tool.spec.name)
+    {
+        return Ok(None);
+    }
+    let Some(spec) = client.spec(&tool.spec.name) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        spec.name.clone(),
+        arguments.clone(),
+        Some(spec.clone()),
+    )))
 }
 
 /// The client and generation the call must be sent to.
@@ -582,9 +637,21 @@ fn release(world: &mut World, request: &str) -> Option<Hold> {
 }
 
 /// The client generation an approval is bound to. The head follows the
-/// companion's activation; the hand follows the work session's saved binding,
-/// derived from the run the approval belongs to.
+/// companion's activation. The hand follows the work session stored with the
+/// approval; only an approval row from before the column existed (or one
+/// inserted without it) is resolved through its run.
 fn bound_generation(store: &Store, approval: &Approval) -> Result<Option<(String, u64)>> {
+    if let Some(work_id) = approval.work_id.as_deref().filter(|id| !id.is_empty()) {
+        let Some(session) = store.work_session(work_id)? else {
+            return Ok(None);
+        };
+        if session.companion_id != approval.session_id {
+            return Ok(None);
+        }
+        return Ok(session
+            .client_id
+            .map(|client| (client, session.activation_revision)));
+    }
     if approval.run_id.is_empty() {
         return Ok(store
             .activation(&approval.session_id)?

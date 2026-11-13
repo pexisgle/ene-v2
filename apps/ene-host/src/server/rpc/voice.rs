@@ -1,9 +1,8 @@
 //! Voice service: microphone input (STT), synthesized speech output (TTS) and
 //! playback reports. The host owns generations, the audio-owning client and the
 //! speech floor (docs/design/voice-avatar.md §4–§6). `StreamAudioInput` binds
-//! the request stream to the client's activation and recognizes each finished
-//! utterance; `SubscribeAudioOutput` only pumps the host's generation-gated
-//! channel.
+//! the stream to the client's activation and recognizes each finished utterance;
+//! `SubscribeAudioOutput` only pumps the host's generation-gated channel.
 use super::Services;
 use crate::host::{
     Runtime,
@@ -35,7 +34,10 @@ impl w::VoiceService for Services {
         };
         let runtime = self.runtime.clone();
         let stream = async_stream::stream! {
-            let mut recognition = Recognition::new();
+            let mut recognition = Recognition {
+                sample_rate: voice::SAMPLE_RATE,
+                ..Default::default()
+            };
             loop {
                 let (flush_after, end) =
                     match tokio::time::timeout(voice::STT_SILENCE_WINDOW, inbound.next()).await {
@@ -61,11 +63,17 @@ impl w::VoiceService for Services {
                                     }
                                 }
                             }
-                            if !recognition.accepts(&chunk) {
+                            if !recognition
+                                .binding
+                                .as_ref()
+                                .is_some_and(|binding| binding.accepts(&chunk))
+                            {
                                 continue;
                             }
                             if chunk.is_companion_speaking {
-                                recognition.discard();
+                                recognition.pending.clear();
+                                recognition.speaking = false;
+                                recognition.transcription_id.clear();
                                 continue;
                             }
                             if chunk.sample_rate != 0 {
@@ -131,14 +139,13 @@ impl w::VoiceService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::SubscribeAudioRequest>,
     ) -> ServiceResult<ServiceStream<w::AudioOutputEvent>> {
-        match self
+        if let Err(error) = self
             .runtime
             .read(|app| Ok(voice::tts_source(app.world())))
             .await
             .map_err(ConnectError::from)?
         {
-            Ok(_) => {}
-            Err(error) => return Err(setup_error(error)),
+            return Err(setup_error(error));
         }
         let request = request.to_owned_message();
         let voice::AudioSubscription {
@@ -164,9 +171,7 @@ impl w::VoiceService for Services {
                     event = receiver.recv() => event,
                     event = control.recv() => event,
                 };
-                let Some(event) = event else {
-                    break;
-                };
+                let Some(event) = event else { break };
                 yield Ok(event);
             }
             drop(guard);
@@ -220,25 +225,6 @@ struct Recognition {
 }
 
 impl Recognition {
-    fn new() -> Self {
-        Self {
-            sample_rate: voice::SAMPLE_RATE,
-            ..Default::default()
-        }
-    }
-
-    fn discard(&mut self) {
-        self.pending.clear();
-        self.speaking = false;
-        self.transcription_id.clear();
-    }
-
-    fn accepts(&self, chunk: &w::AudioInputChunk) -> bool {
-        self.binding
-            .as_ref()
-            .is_some_and(|binding| binding.accepts(chunk))
-    }
-
     async fn flush(
         &mut self,
         runtime: &Runtime,
@@ -253,14 +239,14 @@ impl Recognition {
         let Some(binding) = self.binding.clone() else {
             return Ok(None);
         };
-        if !runtime
+        let active = runtime
             .read({
                 let binding = binding.clone();
                 move |app| Ok(voice::is_still_active(app.world(), &binding))
             })
             .await
-            .map_err(ConnectError::from)?
-        {
+            .map_err(ConnectError::from)?;
+        if !active {
             return Ok(None);
         }
         let text =

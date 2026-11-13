@@ -307,6 +307,7 @@ fn summarise(input: &serde_json::Value) -> String {
 // operation is still gated by `permission::gate` and dispatched to the client
 // as a `DeviceOperation`.
 pub(crate) mod device;
+pub(crate) mod dynamic;
 
 use super::{
     db::Store,
@@ -380,25 +381,7 @@ impl FromWorld for CapabilityPolicy {
     }
 }
 
-/// How many client tools the host can publish at once. Capability tools stay
-/// fixed open-tool slots: `World::spawn_tool` registers ordinary typed tools
-/// whose handlers run off the host thread, while a capability must follow the
-/// open-tool `ToolCalled`/`Decision` path the gate binds to a client
-/// generation.
-pub(crate) const SLOTS: usize = 64;
-
-/// A capability tool slot. Unused slots are `Disabled` and invisible to the
-/// model.
-#[derive(Component, Clone, Debug)]
-pub(crate) struct CapabilityTool {
-    pub(crate) spec: super::client::CapabilitySpec,
-}
-
-/// The slot entities, in registration order.
-#[derive(Resource, Default)]
-pub(crate) struct Slots {
-    pub(crate) entities: Vec<Entity>,
-}
+pub(crate) use dynamic::{CapabilityTool, CapabilityTools};
 
 #[derive(Clone, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DeviceRequestArgs {
@@ -409,19 +392,18 @@ pub(crate) struct DeviceRequestArgs {
     pub(crate) input: Value,
 }
 
-/// Registers the capability tools, the generic dispatcher and their systems.
+/// Registers the generic dispatcher, the dynamic capability tools and their
+/// systems. A capability tool is spawned when a client grants it and despawned
+/// when the declaration or the activation changes.
 pub(crate) struct ClientPlugin;
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
-        for index in 0..SLOTS {
-            app.add_open_tool::<Value, _>(
-                &format!("ene_cap_{index}"),
-                "A client capability that is not currently declared.",
-                ToolOptions::default(),
-                device::on_slot_call,
-            );
-        }
+        let wake = app
+            .world()
+            .get_resource::<rig_ecs::tasks::Wake>()
+            .cloned()
+            .unwrap_or_default();
         app.add_open_tool::<DeviceRequestArgs, _>(
             "device_request",
             "Run a capability the active client declared. The host binds the target client. \
@@ -429,9 +411,11 @@ impl Plugin for ClientPlugin {
             ToolOptions::default(),
             device::on_device_request,
         )
+        .insert_resource(dynamic::CapabilityCalls::new(wake))
         .init_resource::<CapabilityPolicy>()
-        .init_resource::<Slots>()
-        .add_systems(Startup, device::init_slots);
+        .init_resource::<CapabilityTools>()
+        .add_systems(Startup, dynamic::init)
+        .add_systems(Update, dynamic::drain.after(AgentLoop));
     }
 }
 
@@ -467,7 +451,7 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
     let connected = world.resource::<DeviceHub>().connected(&client.id);
     let view = wire::client(client, connected, Vec::new());
     notify_client(world, &view);
-    sync_tools(world)?;
+    dynamic::sync_tools(world)?;
     Ok(view)
 }
 
@@ -581,7 +565,7 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         None,
         w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
     );
-    sync_tools(world)?;
+    dynamic::sync_tools(world)?;
     Ok(wire::activation(&activation))
 }
 
@@ -634,60 +618,6 @@ fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
         }
     };
     Some(super::db::truncate(&summary, 1_000))
-}
-
-/// Repairs the published capability tools after any declaration or activation
-/// change. Only granted capabilities of active clients with a `tool_name` are
-/// visible, and a duplicate tool name is refused.
-pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
-    let store = world.resource::<Store>().clone();
-    let mut desired: Vec<super::client::CapabilitySpec> = Vec::new();
-    let mut names = std::collections::HashSet::new();
-    for activation in store.activations()? {
-        let Some(client_id) = activation.client_id else {
-            continue;
-        };
-        let Some(client) = store.client(&client_id)? else {
-            continue;
-        };
-        for spec in client.tool_specs() {
-            if !names.insert(spec.tool_name.clone()) {
-                return Err(HostError::conflict(format!(
-                    "tool name `{}` is declared by more than one active client",
-                    spec.tool_name
-                )));
-            }
-            desired.push(spec.clone());
-        }
-    }
-    if desired.len() > SLOTS {
-        return Err(HostError::exhausted(format!(
-            "at most {SLOTS} capability tools can be published"
-        )));
-    }
-    let slots = world.resource::<Slots>().entities.clone();
-    for (index, slot) in slots.iter().copied().enumerate() {
-        match desired.get(index) {
-            Some(spec) => {
-                let definition = rig_core::completion::ToolDefinition::new(
-                    rig_core::message::ToolName::new(spec.tool_name.clone())
-                        .map_err(|_| HostError::internal("a capability tool name was empty"))?,
-                    spec.tool_description(),
-                    super::json::parse_schema(&spec.input_schema)?,
-                );
-                world.entity_mut(slot).insert((
-                    rig_ecs::prelude::ToolDef(std::sync::Arc::new(definition)),
-                    CapabilityTool { spec: spec.clone() },
-                ));
-                world.entity_mut(slot).remove::<Disabled>();
-            }
-            None => {
-                world.entity_mut(slot).remove::<CapabilityTool>();
-                world.entity_mut(slot).insert(Disabled);
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

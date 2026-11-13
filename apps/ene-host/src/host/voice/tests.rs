@@ -54,6 +54,21 @@ impl SttEngine for FakeStt {
     }
 }
 
+/// A synchronous test has no runtime of its own; the leaked current-thread
+/// runtime gives the voice tasks a home they never have to reach.
+fn test_runtime() -> tokio::runtime::Handle {
+    tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
+        Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        ))
+        .handle()
+        .clone()
+    })
+}
+
 fn current_owner(world: &World, companion: &str) -> Owner {
     world
         .resource::<Voice>()
@@ -64,15 +79,20 @@ fn current_owner(world: &World, companion: &str) -> Owner {
         .clone()
 }
 
-fn test_world() -> (World, mpsc::UnboundedReceiver<Job>) {
-    let (voice, jobs) = Voice::new();
+#[derive(Resource, Default)]
+pub(super) struct TestEngines {
+    pub(super) tts: Option<Arc<dyn TtsEngine>>,
+    pub(super) stt: Option<Arc<dyn SttEngine>>,
+}
+
+fn test_world() -> World {
     let mut world = World::new();
-    world.insert_resource(voice);
+    world.insert_resource(Voice::new(test_runtime()));
     world.insert_resource(TestEngines {
         tts: Some(Arc::new(FakeTts { fail: false })),
         stt: Some(Arc::new(FakeStt)),
     });
-    (world, jobs)
+    world
 }
 
 fn store_with_client() -> (tempfile::TempDir, Store) {
@@ -162,7 +182,7 @@ fn a_skipped_sentence_unblocks_the_next_one() {
 
 #[tokio::test]
 async fn a_flush_invalidates_the_older_generation() {
-    let (mut world, _jobs) = test_world();
+    let mut world = test_world();
     let subscription = world.resource::<Voice>().register("c1");
     let mut events = subscription.control;
     let _audio = subscription.receiver;
@@ -185,9 +205,8 @@ async fn a_flush_invalidates_the_older_generation() {
         generation_id: first,
         ..Default::default()
     });
-    let voice = world.resource::<Voice>().shared();
     assert!(matches!(
-        deliver(&voice, "ene", first, stale),
+        deliver(&mut world.resource::<Voice>().lock(), "ene", first, stale),
         Dispatch::Stale
     ));
 
@@ -200,7 +219,12 @@ async fn a_flush_invalidates_the_older_generation() {
         ..Default::default()
     });
     assert!(matches!(
-        deliver(&voice, "ene", second, current),
+        deliver(
+            &mut world.resource::<Voice>().lock(),
+            "ene",
+            second,
+            current
+        ),
         Dispatch::Sent
     ));
 }
@@ -208,7 +232,7 @@ async fn a_flush_invalidates_the_older_generation() {
 #[test]
 fn a_stale_playback_report_is_ignored() {
     let (_root, store) = store_with_client();
-    let (mut world, _jobs) = test_world();
+    let mut world = test_world();
     world.insert_resource(store);
     world.insert_resource(Notifier::new());
     world.resource::<Voice>().publish("ene", "c1", 1);
@@ -279,7 +303,7 @@ fn audio_bound_to_a_moved_activation_is_discarded() {
 #[test]
 fn a_moved_activation_discards_the_transcription() {
     let (_root, store) = store_with_client();
-    let (mut world, _jobs) = test_world();
+    let mut world = test_world();
     world.insert_resource(store.clone());
     let chunk = w::AudioInputChunk {
         client_id: "c1".into(),
@@ -423,46 +447,30 @@ async fn fake_engines_drive_both_traits_without_a_network() {
 
 #[tokio::test]
 async fn the_worker_orders_audio_and_finishes_the_utterance() {
-    let (voice, jobs) = Voice::new();
+    let voice = Voice::new(tokio::runtime::Handle::current());
     let mut events = voice.register("c1").receiver;
     voice.publish("ene", "c1", 1);
-    voice.begin(
-        "ene",
-        TtsSource {
-            key: None,
-            engine: Arc::new(FakeTts { fail: false }),
-        },
-        String::new(),
-    );
-    let (utterance_id, generation_id) = {
+    voice.begin("ene", Arc::new(FakeTts { fail: false }), String::new());
+    let utterance_id = {
         let state = voice.lock();
-        let utterance = state.owners["ene"].utterance.as_ref().unwrap();
-        (utterance.id.clone(), utterance.generation_id)
+        state.owners["ene"].utterance.as_ref().unwrap().id.clone()
     };
-    let source = TtsSource {
-        key: None,
-        engine: Arc::new(FakeTts { fail: false }),
-    };
-    let (worker, completed) = Worker::new(voice.shared());
-    let worker = tokio::spawn(worker.run(jobs, completed));
-    // The second sentence is queued first: the ordering gate still emits
-    // sequence 0 before sequence 1.
-    for sequence_no in [1u32, 0] {
-        voice.job(Job::Sentence(Sentence {
-            companion: "ene".into(),
-            utterance_id: utterance_id.clone(),
-            generation_id,
-            sequence_no,
-            text: format!("s{sequence_no}"),
-            source: source.clone(),
-            voice: String::new(),
-        }));
+    {
+        let mut state = voice.lock();
+        let work = state.works.get_mut(&utterance_id).unwrap();
+        // The second sentence is queued first: the ordering gate still emits
+        // sequence 0 before sequence 1.
+        for sequence_no in [1u32, 0] {
+            work.pending.push_back(Sentence {
+                sequence_no,
+                text: format!("s{sequence_no}"),
+                source: Arc::new(FakeTts { fail: false }),
+                voice: String::new(),
+            });
+        }
+        work.emitter.finish(2);
+        voice.pump(&mut state, &utterance_id);
     }
-    voice.job(Job::Finish {
-        utterance_id,
-        total_sentences: 2,
-    });
-    drop(voice);
     let collected = tokio::time::timeout(Duration::from_secs(5), async {
         let mut collected = Vec::new();
         while let Some(event) = events.recv().await {
@@ -478,39 +486,24 @@ async fn the_worker_orders_audio_and_finishes_the_utterance() {
     .expect("the worker finishes the utterance");
     assert_eq!(chunks(&collected), [0, 1]);
     assert_eq!(finished(&collected), Some(2));
-    worker.await.unwrap();
 }
 
 #[tokio::test]
 async fn a_stalled_owner_does_not_block_another() {
-    let (mut world, jobs) = test_world();
-    let voice = world.resource::<Voice>().clone();
+    let voice = Voice::new(tokio::runtime::Handle::current());
     let slow = voice.register("c1");
     let mut slow_control = slow.control;
     let _slow_audio = slow.receiver; // never drained: the owner is stalled
     let mut fast = voice.register("c2").receiver;
     voice.publish("ene", "c1", 1);
     voice.publish("kuro", "c2", 1);
-    let source = TtsSource {
-        key: None,
-        engine: Arc::new(BigTts),
-    };
-    voice.begin("ene", source.clone(), String::new());
+    voice.begin("ene", Arc::new(BigTts), String::new());
     voice.speak("ene", "slow。");
     voice.end_turn("ene");
-    voice.begin("kuro", source, String::new());
+    voice.begin("kuro", Arc::new(BigTts), String::new());
     voice.speak("kuro", "fast。");
-    {
-        let mut state = voice.lock();
-        state.floor = Some("kuro".into());
-    }
+    voice.lock().floor = Some("kuro".into());
     voice.end_turn("kuro");
-
-    let shared = voice.shared();
-    let (worker, completed) = Worker::new(Arc::clone(&shared));
-    let worker = tokio::spawn(worker.run(jobs, completed));
-    drop(voice);
-    world.remove_resource::<Voice>();
 
     let collected = tokio::time::timeout(Duration::from_secs(5), async {
         let mut collected = Vec::new();
@@ -537,6 +530,5 @@ async fn a_stalled_owner_does_not_block_another() {
         Some(w::audio_output_event::Event::Flush(flush))
             if flush.reason == w::FlushReason::Cancelled
     ));
-    assert!(!shared.lock().unwrap().owners.contains_key("ene"));
-    worker.await.unwrap();
+    assert!(!voice.lock().owners.contains_key("ene"));
 }

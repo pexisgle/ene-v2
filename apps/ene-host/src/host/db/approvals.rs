@@ -15,6 +15,7 @@ fn row_to_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
         request_id: row.get("request_id")?,
         session_id: row.get("session_id")?,
         run_id: row.get("run_id")?,
+        work_id: row.get("work_id")?,
         action_payload_hash: row.get("action_payload_hash")?,
         tool_name: row.get("tool_name")?,
         normalized_arguments: row.get("normalized_arguments")?,
@@ -27,7 +28,7 @@ fn row_to_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
     })
 }
 
-const COLUMNS: &str = "request_id, session_id, run_id, action_payload_hash, tool_name, \
+const COLUMNS: &str = "request_id, session_id, run_id, work_id, action_payload_hash, tool_name, \
      normalized_arguments, status, created_at, resolved_at, client_id, activation_revision, \
      capability";
 
@@ -35,12 +36,13 @@ impl Store {
     pub(crate) fn insert_approval(&self, approval: &Approval) -> Result<()> {
         self.conn()?.execute(
             &format!(
-                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ),
             params![
                 approval.request_id,
                 approval.session_id,
                 approval.run_id,
+                approval.work_id,
                 approval.action_payload_hash,
                 approval.tool_name,
                 approval.normalized_arguments,
@@ -124,6 +126,7 @@ mod tests {
             request_id: id.into(),
             session_id: "ene".into(),
             run_id: "run".into(),
+            work_id: Some("work-1".into()),
             action_payload_hash: vec![1, 2, 3],
             tool_name: "device_request".into(),
             normalized_arguments: "{\"capability\":\"x\"}".into(),
@@ -143,6 +146,22 @@ mod tests {
         store.insert_approval(&approval("a1")).unwrap();
         store.insert_approval(&approval("a2")).unwrap();
         assert_eq!(store.approvals(ApprovalStatus::Pending).unwrap().len(), 2);
+        // The work session is stored with the row; a head approval stores none.
+        assert_eq!(
+            store.approval("a1").unwrap().unwrap().work_id.as_deref(),
+            Some("work-1")
+        );
+        store
+            .insert_approval(&Approval {
+                work_id: None,
+                ..approval("a3")
+            })
+            .unwrap();
+        assert_eq!(
+            store.approval("a3").unwrap().unwrap().work_id,
+            None,
+            "a head approval may not carry a work session"
+        );
         let resolved = store
             .resolve_approval("a1", ApprovalStatus::Approved)
             .unwrap();
@@ -153,8 +172,8 @@ mod tests {
                 .resolve_approval("a1", ApprovalStatus::Denied)
                 .is_err()
         );
-        assert_eq!(store.expire_pending_approvals().unwrap(), 1);
+        assert_eq!(store.expire_pending_approvals().unwrap(), 2);
         assert!(store.approvals(ApprovalStatus::Pending).unwrap().is_empty());
-        assert_eq!(store.approvals(ApprovalStatus::Expired).unwrap().len(), 1);
+        assert_eq!(store.approvals(ApprovalStatus::Expired).unwrap().len(), 2);
     }
 }

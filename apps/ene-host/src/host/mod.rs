@@ -32,7 +32,7 @@ use self::{
     model::Credentials,
     notify::Notifier,
     permission::Approvals,
-    resources::{DeviceHub, DeviceTimeout, HostState, Options, Perception, Waiting},
+    resources::{DeviceHub, DeviceTimeout, HostRuntime, HostState, Options, Perception, Waiting},
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -106,6 +106,7 @@ impl Runtime {
         let device_timeout = options.device_timeout;
         let wake = wake_tx.clone();
         let thread_hub = hub.clone();
+        let host_runtime = tokio::runtime::Handle::current();
         let thread_store = store.clone();
         let thread_credentials = credentials.clone();
         let thread = std::thread::Builder::new()
@@ -121,6 +122,7 @@ impl Runtime {
                     })
                     .insert_resource(thread_store)
                     .insert_resource(thread_credentials)
+                    .insert_resource(HostRuntime(host_runtime.clone()))
                     .insert_resource(thread_hub.clone())
                     .insert_resource(HostState::default())
                     .insert_resource(Notifier::new())

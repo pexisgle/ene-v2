@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     request_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
+    -- The work session of a work-originated approval; NULL for the head.
+    work_id TEXT,
     action_payload_hash BLOB NOT NULL,
     tool_name TEXT NOT NULL,
     normalized_arguments TEXT NOT NULL,

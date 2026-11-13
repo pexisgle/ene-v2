@@ -265,15 +265,10 @@ fn fit(
             anchor,
             sent,
         };
-        let Some(view) = history.as_ref() else {
-            continue;
-        };
-        let plan = compaction::plan_fit(view, &weight, limit, reserve);
         let Some(view) = history.as_mut() else {
             continue;
         };
-        compaction::apply_fit(view, &plan);
-        let fits = compaction::fits(view, &weight, limit, reserve);
+        let fits = compaction::fit(view, &weight, limit, reserve);
         // What Start will send, for the next reply's anchor to be checked
         // against (rig-memory's `RequestStart`).
         if let Some(agent) = agent {
