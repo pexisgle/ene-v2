@@ -10,7 +10,8 @@ mod runtime;
 mod schema;
 
 use bevy::{app::AnimationSystems, prelude::*, transform::TransformSystems};
-pub use runtime::{SpringRig, Vrm};
+pub use runtime::{SpringJointProps, SpringRig, Vrm};
+pub use vrm_spec::vrmc_vrm_1_0::{HumanBoneName, Meta};
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VrmSystems {
@@ -52,7 +53,6 @@ impl Plugin for VrmPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{runtime::SpringJointProps, schema::HumanBoneName};
     use bevy::{
         animation::{AnimatedBy, AnimationTargetId},
         asset::LoadState,
@@ -384,6 +384,11 @@ mod tests {
             })
             .collect();
         assert_eq!(rigs.len(), 2);
+        assert_eq!(
+            app.world().get::<Vrm>(rigs[0].0).unwrap().meta.name,
+            "Test",
+            "Vrm must expose the parsed VRM meta"
+        );
         let bone_count: usize = app
             .world_mut()
             .query::<&Vrm>()
@@ -456,20 +461,33 @@ mod tests {
             "VRMA gaze did not rotate the eye bone"
         );
 
-        // A stopped gaze animation leaves the eye at rest.
-        let (root, _, _, _, eye) = rigs[0];
-        let eye_rest = app
-            .world()
-            .get::<animation::RestPose>(eye)
-            .unwrap()
-            .local
-            .rotation;
+        // A stopped animation leaves every humanoid bone at rest.
+        let (root, hips, spine, _, eye) = rigs[0];
+        let rest = [("hips", hips), ("spine", spine), ("eye", eye)].map(|(name, entity)| {
+            (
+                name,
+                entity,
+                app.world()
+                    .get::<animation::RestPose>(entity)
+                    .unwrap()
+                    .local,
+            )
+        });
+        let eye_rest = rest[2].2.rotation;
         app.world_mut()
             .get_mut::<AnimationPlayer>(root)
             .unwrap()
             .stop_all();
         app.update();
         assert!(!gaze_input_active(&app, root));
+        for (name, entity, expected) in rest {
+            let actual = *app.world().get::<Transform>(entity).unwrap();
+            assert!(
+                actual.rotation.abs_diff_eq(expected.rotation, 1e-5)
+                    && actual.translation.abs_diff_eq(expected.translation, 1e-5),
+                "{name} did not return to rest: {actual:?} != {expected:?}"
+            );
+        }
         assert!(
             app.world()
                 .get::<Transform>(eye)

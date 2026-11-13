@@ -74,16 +74,22 @@ fn reset(
 
 fn apply(mut poses: Query<(&Pose, &RestPose, &mut Transform)>) {
     for (pose, rest, mut transform) in &mut poses {
-        let mut next = *transform;
-        if let Some(rotation) = pose.rotation {
-            next.rotation =
-                denormalize_rotation(rest.local.rotation, rest.global_rotation, rotation);
-        }
-        if let Some(translation) = pose.translation {
-            next.translation =
-                rest.local.translation + rest.translation_from_normalized * translation;
-        }
-        transform.set_if_neq(next);
+        // A stopped animation leaves no input for its bones. Restore the rest
+        // pose instead of freezing the last frame, so stopping a clip and
+        // switching to one that does not bind a bone both return to rest.
+        let rotation = pose.rotation.map_or(rest.local.rotation, |rotation| {
+            denormalize_rotation(rest.local.rotation, rest.global_rotation, rotation)
+        });
+        let translation = pose
+            .translation
+            .map_or(rest.local.translation, |translation| {
+                rest.local.translation + rest.translation_from_normalized * translation
+            });
+        transform.set_if_neq(Transform {
+            rotation,
+            translation,
+            ..*transform
+        });
     }
 }
 
@@ -342,4 +348,77 @@ pub(crate) fn retarget_motion(
         return Err(invalid("VRMA requires an animation"));
     }
     Ok(clips)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn app_with_bone(rest: Transform) -> (App, Entity) {
+        let mut app = App::new();
+        let entity = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                RestPose {
+                    local: rest,
+                    global_rotation: Quat::IDENTITY,
+                    translation_from_normalized: bevy::math::Mat3A::IDENTITY,
+                },
+                Pose::default(),
+            ))
+            .id();
+        (app, entity)
+    }
+
+    #[test]
+    fn bones_without_animation_input_return_to_rest() {
+        let rest = Transform::from_xyz(0., 1., 0.).with_rotation(Quat::from_rotation_z(0.4));
+        let (mut app, entity) = app_with_bone(rest);
+
+        app.world_mut().get_mut::<Pose>(entity).unwrap().rotation =
+            Some(Quat::from_rotation_x(0.5));
+        app.world_mut()
+            .run_system_once(apply)
+            .expect("apply animation pose");
+        let animated = *app.world().get::<Transform>(entity).unwrap();
+        assert!(
+            animated
+                .rotation
+                .abs_diff_eq(rest.rotation * Quat::from_rotation_x(0.5), 1e-6)
+        );
+        assert!(
+            animated.translation.abs_diff_eq(rest.translation, 1e-6),
+            "a rotation-only pose must not inherit a previous translation"
+        );
+
+        {
+            let mut pose = app.world_mut().get_mut::<Pose>(entity).unwrap();
+            pose.rotation = Some(Quat::from_rotation_x(0.5));
+            pose.translation = Some(Vec3::new(2., 3., 4.));
+        }
+        app.world_mut()
+            .run_system_once(apply)
+            .expect("apply animation pose");
+        let animated = *app.world().get::<Transform>(entity).unwrap();
+        assert!(
+            animated
+                .translation
+                .abs_diff_eq(rest.translation + Vec3::new(2., 3., 4.), 1e-6)
+        );
+
+        // The next frame has no animation input at all.
+        *app.world_mut().get_mut::<Pose>(entity).unwrap() = Pose::default();
+        app.world_mut()
+            .run_system_once(apply)
+            .expect("apply rest pose");
+        let at_rest = *app.world().get::<Transform>(entity).unwrap();
+        assert!(at_rest.rotation.abs_diff_eq(rest.rotation, 1e-6));
+        assert!(at_rest.translation.abs_diff_eq(rest.translation, 1e-6));
+        assert!(
+            at_rest.scale.abs_diff_eq(Vec3::ONE, 1e-6),
+            "scale is untouched"
+        );
+    }
 }

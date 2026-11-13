@@ -138,6 +138,9 @@ impl MaterialExtension for MToonExtension {
         _: &MeshVertexBufferLayoutRef,
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // VRMC_materials_mtoon-1.0 "Vertex Colors": MToon ignores vertex
+        // colors, so drop the def Bevy's standard material pipeline adds for
+        // the glTF COLOR_0 attribute instead of multiplying base color by it.
         descriptor
             .vertex
             .shader_defs

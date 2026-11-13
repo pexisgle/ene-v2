@@ -8,6 +8,7 @@ Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する非公
 
 - `Vrm::bone(HumanBoneName::Hips)`でボーン、`vrm.meta`で`vrm-spec`のメタ情報を取得します。
 - `SpringRig::paused`／`SpringJointProps`で物理を制御します。表情と視線はアニメーション入力に従います。
+- モーションを停止すると、そのモーションがバインドしていたボーンはレストポーズへ戻ります。停止中のポーズを保持するには`AnimationPlayer::pause_all`を使います。
 - 実行順はアニメーション→姿勢→LookAt→表情→制約→SpringBone→Transform伝播です。
 
 ## 対象外と制限
@@ -15,6 +16,7 @@ Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する非公
 - VRM 0.x、BodyTracking、`firstPerson`、SpringBoneの拡張collider、MToonのpoint/spot light・プリパス（Depth／Normal／Motion Vector）・影、遅延描画、scene-less VRMA。
 - モデル本体のglTF `animations`／`cameras`は読みません（VRMAでは読みます）。
 - MToonの`renderQueueOffsetNumber`と`transparentWithZWrite`は対象外で、半透明はBevy標準の距離ソートと合成を使います。OITも無効です。
+- MToon仕様の「Vertex Colors」に従い、glTFの頂点カラー（`COLOR_0`）は無視します。baseColorへは乗算しません。
 - MToonのテクスチャは用途別の色空間（数値用途は線形、色用途はsRGB）で読みます。コア材質と共有してBevyが逆向きの形式を選んだ場合は、`(texture index, color space)`ごとに画像を複製します。GLB埋め込み画像だけが対象です。
 - 表情の`emissionColor`はglTFの`emissiveFactor`として扱い、読み込み時の`KHR_materials_emissive_strength`倍率を目標値にも適用します。
 - 表情が材質に書き込むのは、その表情のバインドが指定する色・UV・MToonパラメータだけです。バインドされていない項目はアプリ側の変更を保持します。
