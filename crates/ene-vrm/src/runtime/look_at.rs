@@ -1,6 +1,6 @@
 use crate::{
     VrmSystems,
-    animation::{self, RestPose},
+    animation::RestPose,
     expressions::{self, ExpressionName},
     schema,
 };
@@ -120,11 +120,12 @@ fn look_at(
                     && let Ok(rest) = rests.get(eye)
                     && let Ok(mut t) = transforms.p0().get_mut(eye)
                 {
-                    t.rotation = animation::denormalize_rotation(
-                        rest.local.rotation,
-                        rest.global_rotation,
-                        Quat::from_euler(EulerRot::YXZ, yaw.to_radians(), -pitch.to_radians(), 0.),
-                    );
+                    t.rotation = rest.frame.localize(Quat::from_euler(
+                        EulerRot::YXZ,
+                        yaw.to_radians(),
+                        -pitch.to_radians(),
+                        0.,
+                    ));
                 }
             }
         } else {

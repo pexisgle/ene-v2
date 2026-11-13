@@ -9,8 +9,9 @@ import bevy_pbr::render::{
     skinning,
     view_transformations::position_world_to_clip,
 };
-import super::toon::{
-    animated_uvs, texture_uv, toon, width_sampler, width_texture,
+import super::mtoon_common::{
+    SLOT_OUTLINE_WIDTH, animated_uvs, has_slot, outline_width_sampler, outline_width_texture,
+    slot_uv, toon,
 };
 
 // The standard mesh vertex entry point cannot be imported (WESL forbids calling
@@ -116,8 +117,13 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
         let uvs = animated_uvs(raw_uv0, raw_uv1, globals.time);
         let uv0 = uvs.xy;
         let uv1 = uvs.zw;
-        if (toon.texture_flags & 32u) != 0u {
-            width *= textureSampleLevel(width_texture, width_sampler, texture_uv(uv0, uv1, 5u), 0.).g;
+        if has_slot(SLOT_OUTLINE_WIDTH) {
+            width *= textureSampleLevel(
+                outline_width_texture,
+                outline_width_sampler,
+                slot_uv(uv0, uv1, 5u),
+                0.0,
+            ).g;
         }
     }
     @if(SCREEN_SPACE_OUTLINE) {

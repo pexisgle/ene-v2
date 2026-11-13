@@ -106,7 +106,10 @@ pub(crate) fn attach(
         world.entity_mut(entity).insert((
             RestPose {
                 local,
-                global_rotation: global.rotation().normalize(),
+                frame: animation::RestFrame {
+                    local: local.rotation,
+                    global: global.rotation().normalize(),
+                },
                 translation_from_normalized: (local.compute_affine() * global.affine().inverse())
                     .matrix3
                     * height,

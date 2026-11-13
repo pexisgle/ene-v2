@@ -1,6 +1,6 @@
 # ene-vrm
 
-Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する非公開クレートです。glTFのデコード、シーン・スキン・モーフ、アニメーションの補間、描画はBevyが担当し、VRMC拡張の解析と、ヒューマノイド姿勢・表情・視線・ノード制約・SpringBone・MToon（輪郭を含む）の適用だけを担います。`VRMC_vrm`／`VRMC_vrm_animation`／`VRMC_springBone`／`VRMC_materials_mtoon`の型は`vrm-spec`、制約の依存順序は`petgraph`を使います。
+Bevy 0.20.0 の glTF 拡張フックに VRM 1.0／VRMA 1.0 を実装する非公開クレートです。glTFのデコード、シーン・スキン・モーフ、アニメーションの補間、描画はBevyが担当し、VRMC拡張の解析と、ヒューマノイド姿勢・表情・視線・ノード制約・SpringBone・MToon（輪郭を含む）の適用だけを担います。`VRMC_vrm`／`VRMC_vrm_animation`／`VRMC_springBone`／`VRMC_materials_mtoon`の型は`vrm-spec`を使い、ノード制約の依存順序は読み込み時にクレート内で解決します。
 
 ## 使い方
 
@@ -37,4 +37,4 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 GPUテストは`--ignored`です。合成シーンのMToonパイプラインスモークと、平行光・環境光・併用時に材質色と透過背景を保つ描画テストをlavapipe（CI）で実行します。Windows／Wayland実機の透過表示は未検証です。
 
-姿勢・制約・SpringBoneの数式とMToon照明の一部はbevy_vrm1（MIT OR Apache-2.0、`LICENSE-bevy_vrm1-*`）を参照しています。
+姿勢・制約・SpringBoneの数式とMToon照明は、各`VRMC_*`拡張1.0仕様の非規範的な擬似コードに基づいて実装しています。輪郭の頂点シェーダーだけは、WESLが別シェーダーのエントリーポイントを呼べないため、前述のとおりBevy 0.20.0の標準処理をコピーしています。

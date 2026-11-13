@@ -232,7 +232,7 @@ impl MToonExtension {
 pub(crate) fn setup(app: &mut App) {
     embedded_asset!(app, "shaders/mtoon.wesl");
     embedded_asset!(app, "shaders/outline.wesl");
-    bevy::shader::load_shader_library!(app, "shaders/toon.wesl");
+    bevy::shader::load_shader_library!(app, "shaders/mtoon_common.wesl");
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()
         .register_type::<BaseUv>()

@@ -35,11 +35,44 @@ pub(crate) struct Pose {
     pub translation: Option<Vec3>,
 }
 
+/// The bind-pose orientation of one bone, used to move rotations between the
+/// pose space a VRMA clip was authored in and this model's local bone space.
+///
+/// `specification/VRMC_vrm_animation-1.0/how_to_transform_human_pose.md`
+/// defines the intermediate `NormalizedLocalRotation` for a source model with
+/// world rest rotation `W` and local rest rotation `L`:
+///
+/// ```text
+/// model     = W * L^-1 * local * W^-1
+/// local     = L * W^-1 * model * W
+/// ```
+///
+/// `model` is the rotation a clip stores; `local` is the bone's local
+/// rotation. Using a different `W`/`L` on each side lets one clip drive models
+/// whose T-poses differ.
+#[derive(Clone, Copy, Reflect)]
+pub(crate) struct RestFrame {
+    pub local: Quat,
+    pub global: Quat,
+}
+
+impl RestFrame {
+    /// Converts a clip rotation into this model's local bone space.
+    pub(crate) fn localize(self, rotation: Quat) -> Quat {
+        self.local * self.global.inverse() * rotation * self.global
+    }
+
+    /// Converts this model's local bone rotation into clip space.
+    pub(crate) fn normalize(self, rotation: Quat) -> Quat {
+        self.global * self.local.inverse() * rotation * self.global.inverse()
+    }
+}
+
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct RestPose {
     pub local: Transform,
-    pub global_rotation: Quat,
+    pub frame: RestFrame,
     pub translation_from_normalized: bevy::math::Mat3A,
 }
 
@@ -78,7 +111,7 @@ fn apply(mut poses: Query<(&Pose, &RestPose, &mut Transform)>) {
         // pose instead of freezing the last frame, so stopping a clip and
         // switching to one that does not bind a bone both return to rest.
         let rotation = pose.rotation.map_or(rest.local.rotation, |rotation| {
-            denormalize_rotation(rest.local.rotation, rest.global_rotation, rotation)
+            rest.frame.localize(rotation)
         });
         let translation = pose
             .translation
@@ -91,13 +124,6 @@ fn apply(mut poses: Query<(&Pose, &RestPose, &mut Transform)>) {
             ..*transform
         });
     }
-}
-
-fn normalize_rotation(local: Quat, global: Quat, value: Quat) -> Quat {
-    global * local.inverse() * value * global.inverse()
-}
-pub(crate) fn denormalize_rotation(local: Quat, global: Quat, value: Quat) -> Quat {
-    local * global.inverse() * value * global
 }
 
 /// Collects the animation target id for every node reachable from a scene.
@@ -285,7 +311,10 @@ pub(crate) fn retarget_motion(
                 .entity(entity)
                 .components::<(&Transform, &GlobalTransform)>();
             let global = GlobalTransform::from(root_inv * global.affine());
-            let global_rot = global.rotation().normalize();
+            let frame = RestFrame {
+                local: local.rotation,
+                global: global.rotation().normalize(),
+            };
             let eval = curve.0.evaluator_id();
             if eval == rot_id
                 && let Some(bone) = bone
@@ -298,9 +327,7 @@ pub(crate) fn retarget_motion(
                             pose.rotation.get_or_insert(Quat::IDENTITY)
                         }),
                         FunctionCurve::new(domain, move |t| {
-                            normalize_rotation(
-                                local.rotation,
-                                global_rot,
+                            frame.normalize(
                                 *curve
                                     .0
                                     .sample_clamped(t)
@@ -363,7 +390,10 @@ mod tests {
                 Transform::default(),
                 RestPose {
                     local: rest,
-                    global_rotation: Quat::IDENTITY,
+                    frame: RestFrame {
+                        local: rest.rotation,
+                        global: Quat::IDENTITY,
+                    },
                     translation_from_normalized: bevy::math::Mat3A::IDENTITY,
                 },
                 Pose::default(),

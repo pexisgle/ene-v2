@@ -562,7 +562,13 @@ mod tests {
             assert_eq!(rig.chains.len(), 2);
             for chain in &rig.chains {
                 assert_eq!(chain.colliders, vec![0]);
-                assert!(chain.joints[0].state.unwrap().iter().all(|p| p.is_finite()));
+                assert!(
+                    chain.joints[0]
+                        .motion
+                        .unwrap()
+                        .iter()
+                        .all(|p| p.is_finite())
+                );
                 assert!(
                     app.world()
                         .get::<SpringJointProps>(chain.joints[0].entity)
@@ -580,7 +586,7 @@ mod tests {
         }
         let mut q = app.world_mut().query::<&SpringRig>();
         let rig = q.single(app.world()).unwrap();
-        assert!(rig.chains[0].joints[0].state.is_some());
+        assert!(rig.chains[0].joints[0].motion.is_some());
     }
 
     #[test]
