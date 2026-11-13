@@ -88,6 +88,8 @@ pub enum RunStatus {
 }
 ```
 
+プロトコルでは`RunInfo.state`と`WorkRunFinished.state`を`RunStatus` enumで表し、`WaitingInput`の`request_id`、`Cancelling`の`requested_at`、`CancellationUnconfirmed`の`reason`/`unverified_pids`は対応フィールドに載せる。`Failed`の`error_code`/`message`は`Failure`に載せる。`TurnStatus`は会話ターン専用であり、Run状態には使わない。
+
 ### 3.2 状態遷移契約（State Machine Transitions）
 
 | 現在の状態 | イベント / トリガー | 次の状態 | 確定点とホストの動作 |
@@ -283,7 +285,9 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
 | **`report`** | `kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。**`session_id` と `run_id` はホスト実行環境がコンテキストから自動束縛**し、LLMに引数として書かせない。ACP外部プロセスの場合は `agent_client_protocol::v1::schema` の通知へ相互変換される |
-| **`device_request`** | `capability: String`<br>`input: Object` | アクティブ端末の機能を実行する。ホストが端末の許可済みcapabilityと照合し、結果は後続のモデル呼び出しで返る |
+| **`device_request`** | `capability: String`<br>`input: Object` | 端末の機能を実行する。対象端末はLLMが指定せず、ホストがWorkSessionの`client_id`と`activation_revision`へ束縛する。ホストが許可済みcapability、`ClientCapabilitySpec.input_schema`、`Stage::Gate`を照合し、結果は後続のモデル呼び出しで返る |
+
+`device_request`の対象端末はLLMが引数で指定しない。`StartWork`時に受け取った`client_id`と`activation_revision`をWorkSessionに保存し、手からの操作はその端末にだけ束縛する。`client_id`が空の場合は、その時点のアクティブクライアントを解決して保存する。どちらも得られない場合、`device_request`は`no_active_client`で失敗する。受付後にユーザーが別端末へ移動した場合、操作は新しい端末へ追従せず`client_moved`として失敗する。端末能力の許可は操作単位の承認を省略せず、必要な操作は`Stage::Gate`と`ApprovalRequest`を通す。
 
 ---
 
@@ -295,7 +299,7 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 - **Connect-RPC `WorkService` の用途区分**:
   1. **UI一覧表示・状態取得（通常利用）**:
      - `ListWorks`: 実行中および直近の WorkSession 一覧取得（UIサイドバーやタスクパネル表示用）。
-     - `GetWork`: 特定 WorkSession の詳細状態（`WorkSession`）、実行履歴（`runs`）、未決要求（`pending_requests`）、および成果物の取得。再接続時に未決の承認要求や質問を再取得できる。
+     - `GetWork`: 特定 WorkSession の詳細状態（`WorkSession`）、実行履歴（`runs`）、未決要求（`pending_inquiries`）、および成果物の取得。再接続時に未決の承認要求や質問を再取得できる。
      - **単一イベントストリームへの統合**: 個別のストリーム（`SubscribeWorkEvents`）は設けず、リアルタイムの作業進捗ログ・質問・完了イベントはすべて `HostService.Subscribe`（単一の `HostEvent` ストリーム）内の `HostEvent::WorkEvent`（`WorkEventEnvelope`）として集約配信される。
   2. **ユーザー主導の緊急直接停止（即時制御）**:
      - `StopWork`: ユーザーがクライアントUI上の「作業中断」ボタンを押下した際、親LLMの思考待ちを介さず即座に停止要求を発行する。
@@ -306,6 +310,7 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 > [!NOTE]
 > **カノニカル RPC 定義**:
 > `WorkService` の完全な Protobuf サービス定義およびメッセージ（`WorkSession`, `WorkInquiry`, `WorkView`, `SendWorkRequest` 等）は、[ホストAPI設計 カノニカル Protobuf 定義](../api.md#7-カノニカル-protobuf-定義-hostproto) を正本とする。重複する定義は保守しない。
+> プロトコル上の`WorkEvent`はUI向けの状態・Run・質問イベントを`WorkEventKind`と型付き`oneof detail`で表す。`WorkEventEnvelope`の`Activity`/`Message`/`Completed`等はホスト内の報告パイプラインで処理し、必要に応じて親へのメッセージや上記のイベントへ変換する。
 
 ---
 

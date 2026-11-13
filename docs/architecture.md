@@ -1,6 +1,6 @@
 # ene システムアーキテクチャ
 
-状態：Alpha採用設計（2026-11-11策定）。[構想](vision.md)、[機能一覧](features/README.md)、[技術スタック](design/tech-stack.md)、[心と自動記憶](design/mind.md)、[作業相手API](design/work.md)、[コンテキスト圧縮](design/compaction.md)、[知覚・音声](design/voice-avatar.md)、[権限・Sandbox](design/permissions.md)、[プラグイン](design/plugins.md)を統合する全体構造を定義する。
+状態：Alpha採用設計（2026-11-11策定）。[構想](vision.md)、[機能一覧](features/README.md)、[技術スタック](design/tech-stack.md)、[心と自動記憶](design/mind.md)、[作業相手API](design/work.md)、[コンテキスト圧縮](design/compaction.md)、[知覚・音声の共通仕様](design/voice-avatar.md)、[デスクトップクライアント](design/desktop-client.md)、[権限・Sandbox](design/permissions.md)、[プラグイン](design/plugins.md)を統合する全体構造を定義する。
 
 ---
 
@@ -11,18 +11,18 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 ```text
                      ┌───────────────────────────────────┐
-                     │         ユーザー / デスクトップ      │
+                     │     ユーザー / クライアント環境      │
                      └───────┬───────────────────▲───────┘
-          OSイベント / 画面知覚 │                   │ 音声出力 / 透過アバター表示
+        知覚イベント / 環境情報 │                   │ 音声出力 / アバター表示
                              ▼                   │
   ┌──────────────────────────────────────────────┴─────────────────────────────┐
   │ 【クライアント層】                                                          │
-  │   ・アバター描画（Body）: ene-avatar（Bevy + ene-vrm、透過ウィンドウ）       │
-  │   ・リップシンク: クライアント側RMS音量解析（フレーム連動口パク）           │
-  │   ・知覚センサー（Eyes）: OSイベントフック ＋ アイドルサンプリング（15〜30秒） │
-  │   ・音声入出力: ストリーミングSTT同報配信 / 音声Server Streaming受信       │
+  │   ・表現（Body）: クライアント固有の描画・モーション・リップシンク         │
+  │   ・知覚（Eyes）: プラットフォーム固有のイベント収集と知覚イベント送信     │
+  │   ・音声入出力: クライアント所有のマイク・スピーカーと再生進捗報告         │
+  │   ・能力宣言: RegisterClient / capability_specs による自己申告             │
   └──────────────────────────────┬─────────────────────────────────────────────┘
-                                 │ Connect-RPC
+                                 │ Connect-RPC（能力宣言・DeviceStream・音声）
   ┌──────────────────────────────▼─────────────────────────────────────────────┐
   │ 【ホスト層（ene-host）】                                                    │
   │                                                                            │
@@ -32,7 +32,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │   │   ・会話ログ正本（rig-memory: DirStore 公式標準）                 │   │
   │   │   ・MCPツール動的登録（world.spawn_tool: ene設定所有）             │   │
   │   │   ・ECS制御: 先行TTS（Stage::Review StreamDelta）、承認保留（HoldOf） │   │
-  │   │   ・ツール群: start_work, send_work, stop_work, body_motion, noop   │   │
+  │   │   ・ツール群: start_work, send_work, stop_work, device_request, noop │   │
   │   └───────────────┬────────────────────────────────────┬───────────────┘   │
   │                   │                                    │                   │
   │                   ▼ start_work / send_work             ▼ 記憶・設定アクセス │
@@ -63,12 +63,15 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 | 境界 | 主な構成要素 | 責務と役割 |
 | :--- | :--- | :--- |
-| **「頭」<br>(Brain / 親)** | `rig-ecs` Bevy ECS 単一ループ<br>（`SessionLogPlugin` ＋ `DirStore`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・アバターのモーション・表情の直接指示（`body_motion`）<br>・実務タスクの「手」への自然言語委託（`start_work`, `send_work`, `list_works`, `stop_work`）<br>・「目」への動的Watcher登録（`set_eye_watch`）<br>・自律スケジュール管理（`schedule_create`, `schedule_list`, `schedule_cancel`） |
+| **「頭」<br>(Brain / 親)** | `rig-ecs` Bevy ECS 単一ループ<br>（`SessionLogPlugin` ＋ `DirStore`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・クライアントが宣言した能力に応じたツール公開（例: `body_motion`, `set_eye_watch`, クライアント固有ツール）<br>・`device_request`による端末能力の実行委譲<br>・実務タスクの「手」への自然言語委託（`start_work`, `send_work`, `list_works`, `stop_work`）<br>・自律スケジュール管理（`schedule_create`, `schedule_list`, `schedule_cancel`） |
 | **「手」<br>(Hands / 子)** | WorkSession / Run<br>MCP（`rig-rmcp`） / ACP<br>（WasmはPhase 2） | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けたクリーンアップと30秒タイムアウト強制終了 |
-| **「目」<br>(Eyes / 知覚)** | クライアントセンサー<br>知覚要約生成器 | ・OSイベント（フォーカス切替、ファイル保存等）の即時フック<br>・無操作時のアイドルサンプリング（15〜30秒間隔）<br>・高解像度な作業状況を簡潔なPerception Summaryへ要約<br>・動的Watcher条件合致時の優先割り込み通知（Priority Interrupt） |
-| **「体」<br>(Body / 表現)** | `apps/ene-avatar`<br>音声ストリーミング | ・透過デスクトップウィンドウ上でのVRM 1.0 3D描画（Bevy）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
+| **「目」<br>(Eyes / 知覚)** | クライアントセンサー<br>知覚要約生成器 | ・プラットフォーム固有イベント（フォーカス切替、ファイル保存等）の収集（デスクトップ実装例: OSネイティブフック）<br>・無操作時のアイドルサンプリング（15〜30秒間隔）<br>・知覚イベントを簡潔なPerception Summaryへ要約<br>・動的Watcher条件合致時の優先割り込み通知（Priority Interrupt） |
+| **「体」<br>(Body / 表現)** | クライアント表現エンジン<br>（デスクトップ実装例: `apps/ene-avatar`）<br>音声ストリーミング | ・クライアント固有の表現エンジンによるアバター描画（デスクトップ実装例: 透過ウィンドウ + Bevy + VRM）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
 
-### 親エージェント（頭）の正規ツールセット一覧
+> [!NOTE]
+> `apps/ene-avatar`、OSネイティブウィンドウフック、Bevy/VRM描画はデスクトップクライアントのリファレンス実装である。ホストはそれらの実装に依存せず、`RegisterClient`で宣言された能力名・入力スキーマ・プリセットだけを保持して、`DeviceOperation`でクライアントへ委譲する。デスクトップ実装の詳細は[デスクトップクライアント設計](design/desktop-client.md)を参照する。
+
+### 親エージェント（頭）のツールセット（クライアント能力に応じて動的化）
 
 | カテゴリ | ツール名とシグネチャ | 役割と責務 |
 | :--- | :--- | :--- |
@@ -79,13 +82,16 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 | | `send_work(work_id: String, text: String, request_id: Option<String>)` | 進行中タスクへの追加入力や未決質問（`WorkInquiry`）への回答 |
 | | `list_works()` | 担当するWorkSessionの一覧・進捗状況を取得 |
 | | `stop_work(work_id: String, reason: Option<String>)` | 進行中タスクの中断を要求 |
-| **身体・知覚 (Body & Eye)** | `body_motion(motion: String, expression: Option<String>)` | アバターのモーション・表情を自律指示 |
-| | `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)` | クライアント知覚センサーに動的監視ルールを設定 |
-| | `device_request(capability: String, input: Object)` | アクティブ端末の機能（ファイル・画面など）を実行し、結果を後続のモデル呼び出しで受け取る |
-| | `noop()` | 何も行動しない（沈黙・見守り。自律tickの空ターンはログから自動巻き戻し） |
+| **端末・身体・知覚 (Client capabilities)** | `device_request(capability: String, input: Object)` | 宣言・許可された端末能力を実行する。対象端末はホストが受付時に束縛し、操作単位の`Stage::Gate`と承認を通す。結果は後続のモデル呼び出しで受け取る |
+| | `body_motion(motion: String, expression: Option<String>)` | `body.motion`を宣言し許可されたアクティブクライアントの表現を指示（スキーマとプリセットはクライアントが定義） |
+| | `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)` | `eye.watch`を宣言し許可されたアクティブクライアントの知覚センサーに監視ルールを設定（スキーマはクライアントが定義） |
+| **共通** | `noop()` | 何も行動しない（沈黙・見守り。自律tickの空ターンはログから自動巻き戻し） |
 | **自律スケジュール** | `schedule_create(title: String, instruction: String, run_at: Option<String>, cron_expr: Option<String>)` | タイマーや定期リマインドを登録 |
 | | `schedule_list()` | 登録済みスケジュール一覧を取得 |
 | | `schedule_cancel(schedule_id: String)` | スケジュールを解除 |
+
+> [!NOTE]
+> `device_request`は汎用の能力ディスパッチャとして常時登録される。`body_motion`、`set_eye_watch`、および`window_perch`のようなクライアント固有ツールは、ホストが固定で持つものではない。アクティブクライアントが`RegisterClient` / `SetCapabilities`で宣言した`capability_specs`（`tool_name`、`input_schema`、`presets`）に基づいて動的に登録・解除され、宣言または許可がないクライアントではモデルへ公開されない。ホストは能力名・スキーマ・プリセットだけを保持し、描画・OSフック・ギミックの実装詳細を解釈しない。親（頭）は会話中の軽量な端末参照、手（WorkSession）は実務上の端末操作に使い、どちらも対象端末を引数で指定しない。
 
 > [!NOTE]
 > 現在日時は `PrepareSystems::Edit` により毎ターン最新が Dynamic Tail としてインメモリ注入されるためツール呼び出しは不要。また、外部Web検索は「手」（WorkSession）のツールまたは外部MCPサーバーへ委譲する。

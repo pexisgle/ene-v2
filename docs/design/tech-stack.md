@@ -1,6 +1,6 @@
 # 技術スタック選定・ライブラリ・実装リファレンス設計
 
-状態：Alpha採用設計（2026-11-11策定）。[全体アーキテクチャ](../architecture.md)、[心と自動記憶](mind.md)、[作業相手API](work.md)、[知覚・音声](voice-avatar.md)、[権限・Sandbox](permissions.md)を支える具体的な技術スタック・採用ライブラリ・実装例の所在を定義する。
+状態：Alpha採用設計（2026-11-11策定）。[全体アーキテクチャ](../architecture.md)、[心と自動記憶](mind.md)、[作業相手API](work.md)、[知覚・音声](voice-avatar.md)、[デスクトップクライアント](desktop-client.md)、[権限・Sandbox](permissions.md)を支える具体的な技術スタック・採用ライブラリ・実装例の所在を定義する。
 
 ---
 
@@ -315,7 +315,7 @@ pub trait TtsEngine: Send + Sync {
 
 ### F. デスクトップクライアント技術スタック（Desktop Client）
 
-ホストデーモン（`apps/ene-host`）と協調して動作するデスクトップクライアント（UI/知覚/オーディオ）の技術スタック。
+ホストデーモン（`apps/ene-host`）と協調して動作するデスクトップクライアント（UI/知覚/オーディオ）の技術スタック。実装固有の仕様は[デスクトップクライアント設計](desktop-client.md)を参照する。
 
 | コンポーネント | 採用技術 | 選定理由と責務 |
 | :--- | :--- | :--- |
