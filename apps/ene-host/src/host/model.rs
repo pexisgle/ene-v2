@@ -135,13 +135,19 @@ fn secret_for(
     connection: &Connection,
     credentials: &Credentials,
 ) -> std::result::Result<String, HostError> {
-    if let Some(secret) = credentials.secret(&connection.id) {
-        return Ok(secret);
-    }
-    if let Some(name) = connection.environment_variable()
-        && let Ok(secret) = std::env::var(name)
-        && !secret.is_empty()
-    {
+    let environment = connection
+        .environment_variable()
+        .and_then(|name| std::env::var(name).ok())
+        .filter(|secret| !secret.is_empty());
+    if let Some(secret) = credentials.secret(&connection.id).or(environment) {
+        // A real credential only ever travels over TLS, or to a loopback
+        // endpoint when the user deliberately points the connection at a
+        // local server.
+        if !credential_endpoint(&connection.endpoint().endpoint) {
+            return Err(HostError::unavailable(
+                "a credential is only sent to an https or loopback endpoint",
+            ));
+        }
         return Ok(secret);
     }
     // A loopback endpoint is a local server; it may accept any key and the
@@ -154,13 +160,31 @@ fn secret_for(
     ))
 }
 
+/// Whether a real secret may be sent to `endpoint`. An empty endpoint uses
+/// the provider's HTTPS default; a non-empty one must be HTTPS or loopback,
+/// so a plain `http://` remote URL never receives a credential.
+fn credential_endpoint(endpoint: &str) -> bool {
+    if endpoint.trim().is_empty() {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => loopback_host(&url),
+        _ => false,
+    }
+}
+
 fn loopback_endpoint(endpoint: &str) -> bool {
     let Ok(url) = url::Url::parse(endpoint) else {
         return false;
     };
-    if !matches!(url.scheme(), "http" | "https") {
-        return false;
-    }
+    matches!(url.scheme(), "http" | "https") && loopback_host(&url)
+}
+
+fn loopback_host(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Ipv4(address)) => address.is_loopback(),
         Some(url::Host::Ipv6(address)) => address.is_loopback(),
@@ -355,7 +379,7 @@ mod tests {
     use super::*;
     use crate::host::settings::{Endpoint, LlmConnection};
 
-    fn connection() -> Connection {
+    fn connection_at(endpoint: &str) -> Connection {
         Connection {
             id: "c1".into(),
             name: "main".into(),
@@ -364,7 +388,7 @@ mod tests {
             config: ConnectionConfig::Llm(LlmConnection {
                 endpoint: Endpoint {
                     adapter: "openai".into(),
-                    endpoint: "https://api.openai.com/v1".into(),
+                    endpoint: endpoint.into(),
                     options_schema: String::new(),
                     options: "{}".into(),
                 },
@@ -374,6 +398,10 @@ mod tests {
             revision: 1,
             last_check: None,
         }
+    }
+
+    fn connection() -> Connection {
+        connection_at("https://api.openai.com/v1")
     }
 
     #[test]
@@ -397,5 +425,32 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].0, "gpt-5-mini");
         let _ = store;
+    }
+
+    #[test]
+    fn a_real_secret_never_travels_over_plain_http_to_a_remote_endpoint() {
+        let credentials = Credentials::default();
+        credentials.remember("c1", "secret".into());
+        assert_eq!(
+            secret_for(&connection_at("https://api.example.com/v1"), &credentials).unwrap(),
+            "secret"
+        );
+        assert_eq!(
+            secret_for(&connection_at("http://127.0.0.1:11434/v1"), &credentials).unwrap(),
+            "secret"
+        );
+        assert_eq!(
+            secret_for(&connection_at("http://localhost:11434/v1"), &credentials).unwrap(),
+            "secret"
+        );
+        assert!(secret_for(&connection_at("http://api.example.com/v1"), &credentials).is_err());
+        // The loopback dummy key still needs no real credential, and a remote
+        // plain-http endpoint never gets one either way.
+        let anonymous = Credentials::default();
+        assert_eq!(
+            secret_for(&connection_at("http://127.0.0.1:11434/v1"), &anonymous).unwrap(),
+            "ene-local"
+        );
+        assert!(secret_for(&connection_at("http://api.example.com/v1"), &anonymous).is_err());
     }
 }

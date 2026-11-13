@@ -152,6 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companio
     - `memory_revision` 更新時のみ差分同期することで、毎ターンのコサイン類似度走査は数十マイクロ秒・ゼロアロケーションで実行される。
   - 会話セッションログ正本は公式標準の `rig_memory::DirStore`（`<state_dir>/rig/`）により保存され、受理レシートも `Conversation::add_aside` でセッションログ内に記録されるため、SQLiteとの2相不整合は原理的に発生しない。
   - 記憶整理（Consolidation）のLLM呼び出しや埋め込みベクトル生成（Embedding API）などの長時間非同期処理のみ、専用のTokioバックグラウンドタスクおよび別コネクションへ分離する。
+  - 埋め込みのバックフィルは、`Store` のDBパスから開いた読み書き用の副接続（同じ WAL / `busy_timeout = 5000` / `synchronous = NORMAL` 設定）をタスクごとに使う。ECS スレッドの `Mutex<Connection>` はバックフィルの書き込み中に保持しない。
 
 ### 3.3 所有権と共有（Privacy & Sharing）
 - **原所有者（`owner`）の不変性**: 記憶の `owner` は作成したコンパニオンのIDを常に保持する。他コンパニオンへ共有する場合も `owner = "shared"` で上書きせず、`audiences` JSON配列に対象コンパニオンIDを追加する。

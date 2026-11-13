@@ -19,25 +19,36 @@ pub(super) async fn authenticate(
         .and_then(|header| header.to_str().ok())
         .and_then(|header| header.strip_prefix("Bearer "))
         .is_some_and(|value| bool::from(value.as_bytes().ct_eq(token.as_bytes())));
-    // A browser Origin must be the host itself; an absent Host is left to the
-    // transport (HTTP/2 carries it as :authority), but anything present must
+    // A browser Origin must be the host itself; Host is required where the
+    // protocol does not carry the authority itself, and anything present must
     // be a literal loopback authority.
-    let host_ok = request
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|header| header.to_str().ok())
-        .is_none_or(loopback_host);
-    let origin_ok = request
-        .headers()
-        .get(http::header::ORIGIN)
-        .and_then(|header| header.to_str().ok())
-        .is_none_or(loopback_origin);
+    let host_ok = host_allowed(request.version(), request.headers());
+    let origin_ok = match request.headers().get(http::header::ORIGIN) {
+        Some(header) => header.to_str().is_ok_and(loopback_origin),
+        None => true,
+    };
     if !allowed || !host_ok || !origin_ok {
         return ConnectError::unauthenticated("owner credential required")
             .into_http_response(request.headers())
             .map(axum::body::Body::new);
     }
     next.run(request).await
+}
+
+/// The `Host` authority this transport carries. HTTP/2 and HTTP/3 send the
+/// authority in the protocol (`:authority`), so an absent `Host` is accepted
+/// there; every other version, HTTP/1.1 included, must name one. Whatever is
+/// present is still checked, and a repeated `Host` is never trusted.
+fn host_allowed(version: http::Version, headers: &http::HeaderMap) -> bool {
+    let mut values = headers.get_all(http::header::HOST).iter();
+    let host = values.next();
+    if values.next().is_some() {
+        return false;
+    }
+    match host {
+        Some(header) => header.to_str().is_ok_and(loopback_host),
+        None => matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3),
+    }
 }
 
 /// A `Host` authority: `localhost`, `127.0.0.1` or `[::1]`, with a numeric
@@ -102,6 +113,40 @@ fn loopback_origin(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hosts(values: &[&str]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for value in values {
+            headers.append(
+                http::header::HOST,
+                http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn http_1_1_requires_a_host_and_http_2_carries_the_authority_itself() {
+        use http::Version;
+        assert!(host_allowed(Version::HTTP_11, &hosts(&["127.0.0.1:1234"])));
+        assert!(host_allowed(Version::HTTP_11, &hosts(&["[::1]"])));
+        assert!(!host_allowed(Version::HTTP_11, &hosts(&[])));
+        assert!(!host_allowed(Version::HTTP_11, &hosts(&["example.com"])));
+        assert!(!host_allowed(
+            Version::HTTP_11,
+            &hosts(&["localhost", "localhost"])
+        ));
+        assert!(host_allowed(Version::HTTP_2, &hosts(&[])));
+        assert!(host_allowed(Version::HTTP_2, &hosts(&["localhost:1234"])));
+        assert!(!host_allowed(Version::HTTP_2, &hosts(&["example.com"])));
+        assert!(host_allowed(Version::HTTP_3, &hosts(&[])));
+        let mut unreadable = http::HeaderMap::new();
+        unreadable.insert(
+            http::header::HOST,
+            http::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        assert!(!host_allowed(Version::HTTP_2, &unreadable));
+    }
 
     #[test]
     fn only_loopback_authorities_and_origins_are_trusted() {

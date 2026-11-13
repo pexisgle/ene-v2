@@ -319,7 +319,72 @@ use ene_rpc as w;
 use rig_ecs::prelude::*;
 use serde_json::Value;
 
-/// How many client tools the host can publish at once.
+/// The environment variable that decides which declared capabilities the host
+/// grants: a comma list of names, or `*` for every declaration. It is read
+/// once when the app is built; an unset or empty value grants nothing.
+pub(crate) const ALLOWED_CAPABILITIES_ENV: &str = "ENE_HOST_ALLOWED_CAPABILITIES";
+
+/// What the host is willing to grant a client. A declaration alone grants
+/// nothing: the policy is the host-side decision, and the operation-level
+/// gate still decides every call.
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapabilityPolicy {
+    pub(crate) allowed: Vec<String>,
+    /// `*` in the environment: grant whatever a client declares.
+    pub(crate) all: bool,
+}
+
+impl CapabilityPolicy {
+    /// Nothing is granted: the default when the environment names no policy.
+    pub(crate) fn none() -> Self {
+        Self {
+            allowed: Vec::new(),
+            all: false,
+        }
+    }
+
+    pub(crate) fn parse(text: &str) -> Self {
+        let mut policy = Self::none();
+        for capability in text
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if capability == "*" {
+                policy.all = true;
+            } else if !policy.allowed.iter().any(|allowed| allowed == capability) {
+                policy.allowed.push(capability.to_owned());
+            }
+        }
+        policy
+    }
+
+    pub(crate) fn allows(&self, capability: &str) -> bool {
+        self.all || self.allowed.iter().any(|allowed| allowed == capability)
+    }
+
+    /// The declared capabilities this policy grants, in declaration order.
+    pub(crate) fn grants(&self, declared: &[String]) -> Vec<String> {
+        declared
+            .iter()
+            .filter(|capability| self.allows(capability))
+            .cloned()
+            .collect()
+    }
+}
+
+impl FromWorld for CapabilityPolicy {
+    fn from_world(_world: &mut World) -> Self {
+        std::env::var(ALLOWED_CAPABILITIES_ENV)
+            .map_or_else(|_| Self::none(), |text| Self::parse(&text))
+    }
+}
+
+/// How many client tools the host can publish at once. Capability tools stay
+/// fixed open-tool slots: `World::spawn_tool` registers ordinary typed tools
+/// whose handlers run off the host thread, while a capability must follow the
+/// open-tool `ToolCalled`/`Decision` path the gate binds to a client
+/// generation.
 pub(crate) const SLOTS: usize = 64;
 
 /// A capability tool slot. Unused slots are `Disabled` and invisible to the
@@ -364,6 +429,7 @@ impl Plugin for ClientPlugin {
             ToolOptions::default(),
             device::on_device_request,
         )
+        .init_resource::<CapabilityPolicy>()
         .init_resource::<Slots>()
         .add_systems(Startup, device::init_slots);
     }
@@ -406,19 +472,25 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
 }
 
 /// Registers or refreshes a client declaration. A client never sends grants:
-/// the host grants the capabilities it validated (alpha policy), and the
-/// operation-level gate still decides every call.
+/// the host's [`CapabilityPolicy`] decides them, and the operation-level gate
+/// still decides every call.
 pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
-    let client = store.register_client(&super::db::clients::ClientDeclaration {
-        id: &request.id,
-        name: &request.name,
-        platform: &request.platform,
-        capabilities: &request.capabilities,
-        specs: &specs,
-        expected_revision: request.expected_revision,
-    })?;
+    let granted = world
+        .resource::<CapabilityPolicy>()
+        .grants(&request.capabilities);
+    let client = store.register_client_with_grants(
+        &super::db::clients::ClientDeclaration {
+            id: &request.id,
+            name: &request.name,
+            platform: &request.platform,
+            capabilities: &request.capabilities,
+            specs: &specs,
+            expected_revision: request.expected_revision,
+        },
+        &granted,
+    )?;
     publish(world, &client)
 }
 
@@ -433,9 +505,13 @@ pub(crate) fn set_capabilities(
             "a client cannot grant capabilities to itself",
         ));
     }
+    let granted = world
+        .resource::<CapabilityPolicy>()
+        .grants(&request.capabilities);
     let client = store.set_capabilities(
         &request.client_id,
         &request.capabilities,
+        &granted,
         &specs,
         request.revision,
     )?;
@@ -658,5 +734,22 @@ mod tests {
             ..motion()
         };
         assert!(validate_declarations(&["body.motion".into()], &[shadow]).is_err());
+    }
+
+    #[test]
+    fn only_the_host_policy_turns_declarations_into_grants() {
+        let declared = vec!["body.motion".to_owned(), "device.files".to_owned()];
+        assert!(CapabilityPolicy::none().grants(&declared).is_empty());
+        assert!(CapabilityPolicy::parse("  , ").grants(&declared).is_empty());
+        assert_eq!(
+            CapabilityPolicy::parse("body.motion, body.motion").grants(&declared),
+            vec!["body.motion".to_owned()]
+        );
+        assert_eq!(CapabilityPolicy::parse("*").grants(&declared), declared);
+        assert!(
+            CapabilityPolicy::parse("payment.transfer")
+                .grants(&["body.motion".to_owned()])
+                .is_empty()
+        );
     }
 }

@@ -1,16 +1,13 @@
 //! Voice service: microphone input (STT), synthesized speech output (TTS) and
-//! playback reports. The host owns the generations, the audio-owning client
-//! and the speech floor; see docs/design/voice-avatar.md §4–§6.
-//!
-//! `StreamAudioInput` runs speech recognition where the bidirectional request
-//! already lives: the Connect layer consumes the provisional request stream,
-//! binds it to the client's activation, and sends each finished utterance to
-//! the configured STT connection. `SubscribeAudioOutput` only pumps the host's
-//! generation-gated audio channel.
+//! playback reports. The host owns generations, the audio-owning client and the
+//! speech floor (docs/design/voice-avatar.md §4–§6). `StreamAudioInput` binds
+//! the request stream to the client's activation and recognizes each finished
+//! utterance; `SubscribeAudioOutput` only pumps the host's generation-gated
+//! channel.
 use super::Services;
 use crate::host::{
     Runtime,
-    voice::{self, SetupError, SttEngine},
+    voice::{self, InputBinding, SetupError, SttEngine},
 };
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
@@ -42,8 +39,6 @@ impl w::VoiceService for Services {
             loop {
                 let (flush_after, end) =
                     match tokio::time::timeout(voice::STT_SILENCE_WINDOW, inbound.next()).await {
-                        // A pause ends the utterance even if the client keeps
-                        // the stream open.
                         Err(_silence) => (true, false),
                         Ok(None) => (true, true),
                         Ok(Some(Err(error))) => {
@@ -70,8 +65,6 @@ impl w::VoiceService for Services {
                                 continue;
                             }
                             if chunk.is_companion_speaking {
-                                // Frames captured while the companion is playing
-                                // are never user speech or approval evidence.
                                 recognition.discard();
                                 continue;
                             }
@@ -82,19 +75,19 @@ impl w::VoiceService for Services {
                                     ));
                                     break;
                                 }
-                                if chunk.sample_rate != recognition.sample_rate
+                                if let Some(event) = if chunk.sample_rate
+                                    != recognition.sample_rate
                                     && !recognition.pending.is_empty()
                                 {
-                                    let event =
-                                        recognition.flush(&runtime, &engine).await?;
-                                    if let Some(event) = event {
-                                        yield Ok(event);
-                                    }
+                                    recognition.flush(&runtime, &engine).await?
+                                } else {
+                                    None
+                                } {
+                                    yield Ok(event);
                                 }
                                 recognition.sample_rate = chunk.sample_rate;
                             }
                             if chunk.pcm_data.is_empty() {
-                                // An empty chunk is the client's explicit end of speech.
                                 (true, false)
                             } else {
                                 if !recognition.speaking {
@@ -117,11 +110,12 @@ impl w::VoiceService for Services {
                             }
                         }
                     };
-                if flush_after {
-                    let event = recognition.flush(&runtime, &engine).await?;
-                    if let Some(event) = event {
-                        yield Ok(event);
-                    }
+                if let Some(event) = if flush_after {
+                    recognition.flush(&runtime, &engine).await?
+                } else {
+                    None
+                } {
+                    yield Ok(event);
                 }
                 if end {
                     break;
@@ -137,7 +131,6 @@ impl w::VoiceService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::SubscribeAudioRequest>,
     ) -> ServiceResult<ServiceStream<w::AudioOutputEvent>> {
-        // A host without a usable TTS connection never pretends to speak.
         match self
             .runtime
             .read(|app| Ok(voice::tts_source(app.world())))
@@ -162,12 +155,11 @@ impl w::VoiceService for Services {
             .map_err(ConnectError::from)?;
         let guard = StreamGuard {
             runtime: self.runtime.clone(),
-            client_id: request.client_id.clone(),
+            client_id: request.client_id,
             subscription: subscription_id,
         };
         let stream = async_stream::stream! {
             loop {
-                // Audio waits for the network; control (a flush) never waits.
                 let event = tokio::select! {
                     event = receiver.recv() => event,
                     event = control.recv() => event,
@@ -188,8 +180,6 @@ impl w::VoiceService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::PlaybackStatusReport>,
     ) -> ServiceResult<w::ReportPlaybackStatusResponse> {
-        // A report only needs the output capability to exist, not to be
-        // healthy: a broken engine must not strand the speech floor.
         match self
             .runtime
             .read(|app| {
@@ -210,9 +200,6 @@ impl w::VoiceService for Services {
     }
 }
 
-/// Maps a setup failure onto the wire. A missing engine stays
-/// `unimplemented`; a disabled one is a failed precondition; a broken one is
-/// unavailable. None of them is a fake success.
 fn setup_error(error: SetupError) -> ConnectError {
     match error {
         SetupError::Missing => ConnectError::unimplemented(voice::VOICE_UNAVAILABLE),
@@ -223,10 +210,9 @@ fn setup_error(error: SetupError) -> ConnectError {
     }
 }
 
-/// The mutable state of one `StreamAudioInput` request.
 #[derive(Default)]
 struct Recognition {
-    binding: Option<voice::InputBinding>,
+    binding: Option<InputBinding>,
     pending: Vec<u8>,
     sample_rate: u32,
     transcription_id: String,
@@ -241,7 +227,6 @@ impl Recognition {
         }
     }
 
-    /// Drops the frames captured while the companion was speaking.
     fn discard(&mut self) {
         self.pending.clear();
         self.speaking = false;
@@ -254,8 +239,6 @@ impl Recognition {
             .is_some_and(|binding| binding.accepts(chunk))
     }
 
-    /// Flushes the accumulated utterance into one final transcription event, or
-    /// nothing when the audio was noise. A recognition failure is explicit.
     async fn flush(
         &mut self,
         runtime: &Runtime,
@@ -270,13 +253,14 @@ impl Recognition {
         let Some(binding) = self.binding.clone() else {
             return Ok(None);
         };
-        let client_id = binding.client_id.clone();
         if !runtime
-            .read(move |app| Ok(voice::is_still_active(app.world(), &binding)))
+            .read({
+                let binding = binding.clone();
+                move |app| Ok(voice::is_still_active(app.world(), &binding))
+            })
             .await
             .map_err(ConnectError::from)?
         {
-            // The client moved: the old generation's audio is discarded.
             return Ok(None);
         }
         let text =
@@ -292,14 +276,17 @@ impl Recognition {
             return Ok(None);
         }
         let transcription_id = std::mem::take(&mut self.transcription_id);
-        let _ = runtime
+        let accepted = runtime
             .call({
                 let id = transcription_id.clone();
                 let text = text.clone();
-                move |app| voice::accept_transcription(app.world_mut(), &id, &text, &client_id)
+                move |app| voice::accept_transcription(app.world_mut(), &id, &text, &binding)
             })
             .await
             .map_err(ConnectError::from)?;
+        if !accepted {
+            return Ok(None);
+        }
         Ok(Some(w::TranscriptionEvent {
             transcription_id,
             text,
@@ -310,8 +297,6 @@ impl Recognition {
     }
 }
 
-/// Closes the audio stream when the response stream is dropped, including a
-/// client disconnect.
 struct StreamGuard {
     runtime: Runtime,
     client_id: String,

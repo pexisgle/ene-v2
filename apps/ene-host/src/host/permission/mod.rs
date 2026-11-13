@@ -6,7 +6,7 @@
 //! through to the confirmation card (fail-safe).
 use super::client::{BUILTIN_TOOLS, CapabilityApproval, CapabilitySpec};
 use super::db::{digest, truncate};
-use super::error::{Failure, HostError};
+use super::error::{Failure, HostError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -581,6 +581,33 @@ fn release(world: &mut World, request: &str) -> Option<Hold> {
     Some(hold)
 }
 
+/// The client generation an approval is bound to. The head follows the
+/// companion's activation; the hand follows the work session's saved binding,
+/// derived from the run the approval belongs to.
+fn bound_generation(store: &Store, approval: &Approval) -> Result<Option<(String, u64)>> {
+    if approval.run_id.is_empty() {
+        return Ok(store
+            .activation(&approval.session_id)?
+            .and_then(|activation| {
+                activation
+                    .client_id
+                    .map(|client| (client, activation.revision))
+            }));
+    }
+    let Some(run) = store.run(&approval.run_id)? else {
+        return Ok(None);
+    };
+    let Some(session) = store.work_session(&run.work_id)? else {
+        return Ok(None);
+    };
+    if session.companion_id != approval.session_id {
+        return Ok(None);
+    }
+    Ok(session
+        .client_id
+        .map(|client| (client, session.activation_revision)))
+}
+
 /// Approves or denies a pending request. The caller must still have a live
 /// tool call (an approval is never replayed onto another one).
 pub(crate) fn submit(
@@ -597,13 +624,13 @@ pub(crate) fn submit(
     }
     super::compaction::note_user_activity(world);
     // A device approval is bound to the client generation it was issued for:
-    // a move voids it instead of applying it to the new client.
+    // a move voids it instead of applying it to the new client. A work
+    // approval is bound to the work session's generation, which does not
+    // follow the companion's activation.
     if let (Some(client), Some(revision)) =
         (approval.client_id.as_deref(), approval.activation_revision)
     {
-        let current = store
-            .activation(&approval.session_id)?
-            .and_then(|activation| activation.client_id.map(|id| (id, activation.revision)));
+        let current = bound_generation(&store, &approval)?;
         if current.as_ref() != Some(&(client.to_owned(), revision)) {
             store.resolve_approval(request_id, ApprovalStatus::Expired)?;
             if let Some(hold) = release(world, request_id) {

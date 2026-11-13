@@ -30,7 +30,10 @@ use std::{
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
-const FORCE_GRACE: Duration = Duration::from_secs(5);
+/// Time a forced kill gets to be reaped before the stop counts as
+/// unconfirmed. Must outlast [`acp::KILL_TIMEOUT`], or a clean kill races the
+/// `CancellationUnconfirmed` classification.
+const FORCE_GRACE: Duration = Duration::from_secs(10);
 const ACP_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +125,16 @@ pub(crate) fn transition(state: RunState, event: RunEvent) -> Option<RunState> {
     })
 }
 
+/// Settles an answered turn. A stop request outranks the completion that
+/// raced it: the run ends cancelled, never completed.
+fn settled_state(state: RunState, cancelled: bool) -> RunState {
+    if cancelled {
+        transition(state, RunEvent::CancelConfirmed).unwrap_or(RunState::Cancelled)
+    } else {
+        transition(state, RunEvent::Complete).unwrap_or(RunState::Completed)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkSession {
     pub(crate) id: String,
@@ -160,6 +173,10 @@ impl Run {
             cancellation_reason: self.cancellation_reason.as_deref(),
             unverified_pids: &self.unverified_pids,
         }
+    }
+
+    fn is_cancelling(&self) -> bool {
+        self.state == RunState::Cancelling || self.cancellation_requested_at.is_some()
     }
 }
 
@@ -239,9 +256,27 @@ impl Runs {
     }
 
     fn touch(&mut self, run_id: &str) {
-        let live = self.0.entry(run_id.to_owned()).or_insert_with(Live::new);
+        let Some(live) = self.0.get_mut(run_id) else {
+            return;
+        };
         live.last = Instant::now();
         live.warned = false;
+    }
+
+    /// Touches a live run and reports whether the parent is due a forwarded
+    /// progress update. A finished run stays forgotten.
+    fn forward(&mut self, run_id: &str) -> bool {
+        let now = Instant::now();
+        let Some(live) = self.0.get_mut(run_id) else {
+            return false;
+        };
+        live.last = now;
+        live.warned = false;
+        if now.saturating_duration_since(live.forwarded) < ACP_UPDATE_INTERVAL {
+            return false;
+        }
+        live.forwarded = now;
+        true
     }
 
     fn forget(&mut self, run_id: &str) {
@@ -949,6 +984,7 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
         return;
     }
     let reported_failure = world.resource::<WorkReports>().failed.get(&run_id).cloned();
+    let cancelled = run.is_cancelling();
     let (state, text) = match (&reported_failure, &outcome) {
         (Some(reason), _) => (
             transition(run.state, RunEvent::Fail).unwrap_or(RunState::Failed),
@@ -961,7 +997,7 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
                 .get(&run_id)
                 .cloned();
             (
-                transition(run.state, RunEvent::Complete).unwrap_or(RunState::Completed),
+                settled_state(run.state, cancelled),
                 report.or_else(|| message_text(message)),
             )
         }
@@ -1099,19 +1135,11 @@ fn finish_run(
 }
 
 pub(crate) fn acp_update(world: &mut World, work_id: &str, run_id: &str, text: &str) {
-    let forward = {
-        let mut runs = world.resource_mut::<Runs>();
-        runs.touch(run_id);
-        let live = runs.0.get_mut(run_id).expect("touched above");
-        let now = Instant::now();
-        let due = now.saturating_duration_since(live.forwarded) >= ACP_UPDATE_INTERVAL;
-        if due {
-            live.forwarded = now;
-        }
-        due
-    };
+    if !world.resource_mut::<Runs>().forward(run_id) {
+        return;
+    }
     let text = text.trim();
-    if !forward || text.is_empty() {
+    if text.is_empty() {
         return;
     }
     let store = world.resource::<Store>().clone();
@@ -1479,5 +1507,152 @@ mod tests {
             WorkStatus::Closed
         );
         assert!(agent_of(&mut world, "w1").is_none());
+    }
+
+    #[test]
+    fn a_successful_force_kill_is_not_classified_unconfirmed() {
+        assert!(
+            FORCE_GRACE > acp::KILL_TIMEOUT,
+            "the grace ({FORCE_GRACE:?}) must outlast the ACP kill timeout ({:?})",
+            acp::KILL_TIMEOUT
+        );
+        let mut runs = Runs::default();
+        runs.begin("run-a");
+        let now = Instant::now();
+        runs.set_stop(
+            "run-a",
+            Some(Stop {
+                reason: "the user stopped the work".into(),
+                deadline: now + FORCE_GRACE,
+                forced: true,
+            }),
+        );
+        assert!(
+            runs.due_stops(now + acp::KILL_TIMEOUT).is_empty(),
+            "a kill still in progress must not be classified unconfirmed"
+        );
+        assert_eq!(
+            runs.due_stops(now + FORCE_GRACE + Duration::from_millis(1))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_completion_that_races_a_stop_is_cancelled() {
+        let (_root, store) = store();
+        session(&store);
+        run(&store, "run-a", RunState::Cancelling);
+        let mut stopped = store.run("run-a").unwrap().unwrap();
+        stopped.cancellation_requested_at = Some(now());
+        store.update_run(&stopped).unwrap();
+        let mut world = world(store.clone());
+
+        settle_run(
+            &mut world,
+            "run-a".into(),
+            TurnOutcome::Answered(Message::assistant("done")),
+        );
+        assert_eq!(state(&store, "run-a"), RunState::Cancelled);
+
+        run(&store, "run-b", RunState::Running);
+        settle_run(
+            &mut world,
+            "run-b".into(),
+            TurnOutcome::Answered(Message::assistant("done")),
+        );
+        assert_eq!(state(&store, "run-b"), RunState::Completed);
+    }
+
+    #[cfg(unix)]
+    fn await_pid(world: &World, work_id: &str, timeout: Duration) -> Option<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(pid) = acp::pids(world, work_id).first() {
+                return Some(*pid);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn settle_within(
+        world: &mut World,
+        store: &Store,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Option<RunState> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            acp::pump(world);
+            if let Ok(Some(run)) = store.run(run_id)
+                && run.state.is_terminal()
+            {
+                return Some(run.state);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    fn kill_group(world: &World, work_id: &str) {
+        for pid in acp::pids(world, work_id) {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL".to_owned(), format!("-{pid}")])
+                .status();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_during_initialization_ends_the_agent_and_the_run() {
+        use crate::host::settings::Endpoint;
+
+        let (_root, store) = store();
+        session(&store);
+        run(&store, "run-a", RunState::Starting);
+        let mut world = world(store.clone());
+        world.insert_resource(AcpEvents::default());
+        let connection = AcpConnection {
+            endpoint: Endpoint {
+                adapter: "acp".into(),
+                endpoint: String::new(),
+                options_schema: String::new(),
+                options: r#"{"sandbox":"none"}"#.into(),
+            },
+            command: "sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+        };
+        let handle = acp::spawn(&mut world, "w1", &connection).unwrap();
+        assert!(handle.prompt("run-a", "hello"));
+        world
+            .resource_mut::<AcpBackends>()
+            .0
+            .insert("w1".into(), handle);
+        let pid = await_pid(&world, "w1", Duration::from_secs(5)).expect("the agent started");
+
+        stop(&mut world, "w1").unwrap();
+        let started = Instant::now();
+        let settled = settle_within(&mut world, &store, "run-a", Duration::from_secs(5));
+        if settled.is_none() {
+            kill_group(&world, "w1");
+        }
+        assert_eq!(
+            settled,
+            Some(RunState::Cancelled),
+            "a stop during initialization was ignored (pid {pid}, took {:?})",
+            started.elapsed()
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "the agent process must be reaped"
+        );
     }
 }

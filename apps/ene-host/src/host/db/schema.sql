@@ -88,6 +88,16 @@ CREATE TABLE IF NOT EXISTS memory_edges (
     PRIMARY KEY (from_id, relation, to_id)
 );
 
+-- Which memory ids the host injected into each turn: the citation guard reads
+-- the verified injection set back after a restart (docs/design/mind.md §4.2).
+CREATE TABLE IF NOT EXISTS memory_injections (
+    companion_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (companion_id, turn_id, memory_id)
+);
+
 CREATE TABLE IF NOT EXISTS consolidation_state (
     companion_id TEXT PRIMARY KEY,
     last_processed_turn_id TEXT NOT NULL,
@@ -246,6 +256,12 @@ CREATE INDEX IF NOT EXISTS idx_memories_owner_rowid ON memories(owner, rowid);
 -- The embedding backfill looks for valid vectors of one space.
 CREATE INDEX IF NOT EXISTS idx_memories_embedding_space
     ON memories(embedding_model, embedding_content_revision);
+-- The vector index keeps one owner's key space, so it reads one owner only.
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_owner
+    ON memories(owner, embedding_model, embedding_content_revision);
+-- The citation guard reads the newest injection records of one companion.
+CREATE INDEX IF NOT EXISTS idx_memory_injections_turn
+    ON memory_injections(companion_id, turn_id);
 -- `mind_read` walks both directions of the cognitive edges.
 CREATE INDEX IF NOT EXISTS idx_memory_edges_to ON memory_edges(to_id, relation);
 -- Consolidation context and receipts are read per companion.

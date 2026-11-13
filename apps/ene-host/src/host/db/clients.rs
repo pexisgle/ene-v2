@@ -34,22 +34,6 @@ fn row_to_activation(row: &Row<'_>) -> rusqlite::Result<Activation> {
     })
 }
 
-/// The grants a declaration keeps: every declared capability is granted, and
-/// a grant for a capability that is no longer declared is dropped.
-fn grants(existing: &[String], declared: &[String]) -> Vec<String> {
-    let mut granted: Vec<String> = existing
-        .iter()
-        .filter(|capability| declared.iter().any(|name| name == *capability))
-        .cloned()
-        .collect();
-    for capability in declared {
-        if !granted.iter().any(|name| name == capability) {
-            granted.push(capability.clone());
-        }
-    }
-    granted
-}
-
 /// Everything a client declares on registration, with the revision it saw.
 #[derive(Clone, Copy)]
 pub(crate) struct ClientDeclaration<'a> {
@@ -79,9 +63,14 @@ impl Store {
         )
     }
 
-    /// Registers or re-registers a client. `expected_revision` must match what
-    /// the client last saw; the host never accepts a client's own grants.
-    pub(crate) fn register_client(&self, declaration: &ClientDeclaration<'_>) -> Result<Client> {
+    /// Registers or re-registers a client, persisting exactly the grants the
+    /// host's policy decided. `expected_revision` must match what the client
+    /// last saw; the database never derives a grant from a declaration.
+    pub(crate) fn register_client_with_grants(
+        &self,
+        declaration: &ClientDeclaration<'_>,
+        granted: &[String],
+    ) -> Result<Client> {
         let ClientDeclaration {
             id,
             name,
@@ -99,13 +88,6 @@ impl Store {
             ));
         }
         let revision = current + 1;
-        // Alpha policy: the host grants the capabilities it validated. A
-        // declaration never carries a grant, and the operation-level gate
-        // remains authoritative.
-        let previous = existing
-            .as_ref()
-            .map_or(&[][..], |client| client.granted_capabilities.as_slice());
-        let granted = grants(previous, capabilities);
         let changed = self.conn()?.query_row(
             &format!(
                 "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
@@ -134,12 +116,21 @@ impl Store {
             .ok_or_else(|| HostError::conflict("client changed since it was registered"))
     }
 
-    /// Replaces the declaration of a client; grants that no longer have a
-    /// declaration are dropped.
+    /// Test-only shorthand for a client that is granted nothing. The host
+    /// always passes its policy decision through
+    /// [`register_client_with_grants`](Self::register_client_with_grants).
+    #[cfg(test)]
+    pub(crate) fn register_client(&self, declaration: &ClientDeclaration<'_>) -> Result<Client> {
+        self.register_client_with_grants(declaration, &[])
+    }
+
+    /// Replaces the declaration of a client and persists exactly the grants
+    /// the host decided.
     pub(crate) fn set_capabilities(
         &self,
         id: &str,
         capabilities: &[String],
+        granted: &[String],
         specs: &[CapabilitySpec],
         revision: u64,
     ) -> Result<Client> {
@@ -149,7 +140,6 @@ impl Store {
         if revision != existing.revision {
             return Err(HostError::conflict("client changed since it was read"));
         }
-        let granted = grants(&existing.granted_capabilities, capabilities);
         let next = existing.revision + 1;
         let changed = self.conn()?.query_row(
             &format!(
@@ -410,40 +400,66 @@ mod tests {
     }
 
     #[test]
-    fn registration_grants_only_declared_capabilities() {
+    fn registration_persists_exactly_the_grants_the_host_decided() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let declaration = ClientDeclaration {
+            id: "c1",
+            name: "desk",
+            platform: "linux",
+            capabilities: &["body.motion".into()],
+            specs: &[spec("body.motion", "body_motion")],
+            expected_revision: 0,
+        };
         let client = store
-            .register_client(&ClientDeclaration {
-                id: "c1",
-                name: "desk",
-                platform: "linux",
-                capabilities: &["body.motion".into()],
-                specs: &[spec("body.motion", "body_motion")],
-                expected_revision: 0,
-            })
+            .register_client_with_grants(&declaration, &["body.motion".to_owned()])
             .unwrap();
         assert_eq!(client.revision, 1);
-        assert!(client.is_granted("body.motion"));
+        assert_eq!(client.granted_capabilities, ["body.motion"]);
         // A stale revision conflicts.
-        assert!(
-            store
-                .register_client(&ClientDeclaration {
-                    id: "c1",
-                    name: "desk",
-                    platform: "linux",
-                    capabilities: &[],
-                    specs: &[],
-                    expected_revision: 0,
-                })
-                .is_err()
-        );
-        // The client cannot grant itself anything that it does not declare.
+        assert!(store.register_client(&declaration).is_err());
+        // The next registration stores the host's new decision, not the one
+        // the declaration would imply.
         let client = store
-            .set_capabilities("c1", &[], &[], client.revision)
+            .register_client_with_grants(
+                &ClientDeclaration {
+                    expected_revision: client.revision,
+                    ..declaration
+                },
+                &[],
+            )
             .unwrap();
+        assert_eq!(client.capabilities, ["body.motion"]);
         assert!(client.granted_capabilities.is_empty());
         assert_eq!(client.revision, 2);
+        // A capability update persists exactly the grants it is given: a
+        // previously granted name does not survive a decision that drops it.
+        let specs = [
+            spec("body.motion", "body_motion"),
+            spec("device.files", "device_files"),
+        ];
+        let client = store
+            .set_capabilities(
+                "c1",
+                &["body.motion".into(), "device.files".into()],
+                &["device.files".into()],
+                &specs,
+                client.revision,
+            )
+            .unwrap();
+        assert_eq!(client.granted_capabilities, ["device.files"]);
+        assert_eq!(client.revision, 3);
+        let client = store
+            .set_capabilities(
+                "c1",
+                &["body.motion".into(), "device.files".into()],
+                &["body.motion".into()],
+                &specs,
+                client.revision,
+            )
+            .unwrap();
+        assert_eq!(client.granted_capabilities, ["body.motion"]);
+        assert_eq!(client.revision, 4);
     }
 
     #[test]

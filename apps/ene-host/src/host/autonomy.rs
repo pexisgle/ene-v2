@@ -1,5 +1,8 @@
 //! Small parent tools that the design declares before their engines exist:
-//! `noop` and the schedule registry. Firing schedules is not wired yet.
+//! `noop` and the schedule registry. Firing schedules and staged promotion
+//! remain unimplemented in this pass; only the storage and its validation
+//! (exactly one of `run_at`/`cron_expr`, RFC 3339 `run_at`, five-field cron
+//! ranges) are wired.
 use crate::host::{
     agent::CompanionAgent,
     db::{Result, Store},

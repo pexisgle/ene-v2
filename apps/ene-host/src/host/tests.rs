@@ -37,6 +37,12 @@ struct Harness {
 
 impl Harness {
     fn new(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>) -> Self {
+        Self::with_policy(turns, "*")
+    }
+
+    /// The default harness grants every declaration; a test that checks the
+    /// policy passes the exact `ENE_HOST_ALLOWED_CAPABILITIES` value instead.
+    fn with_policy(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>, policy: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let model = MockCompletionModel::from_stream_turns(turns);
         let state = root.path();
@@ -48,6 +54,7 @@ impl Harness {
             .add_plugins(TaskPoolPlugin::default())
             .insert_resource(store)
             .insert_resource(super::model::Credentials::default())
+            .insert_resource(client::CapabilityPolicy::parse(policy))
             .insert_resource(DeviceHub::default())
             .insert_resource(super::HostState::default())
             .insert_resource(super::notify::Notifier::new())
@@ -183,6 +190,17 @@ fn spec(name: &str) -> w::ClientCapabilitySpec {
     }
 }
 
+/// A declared capability that always needs a Stage::Gate approval.
+fn files_capability() -> w::ClientCapabilitySpec {
+    w::ClientCapabilitySpec {
+        approval: w::CapabilityApproval::Confirm.into(),
+        input_schema:
+            r#"{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}"#
+                .into(),
+        ..spec("device.files")
+    }
+}
+
 fn register(world: &mut World, id: &str, spec: w::ClientCapabilitySpec) -> w::Client {
     let capability = spec.name.clone();
     client::register(
@@ -249,17 +267,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
         ],
         text_turn("書いたよ"),
     ]);
-    register(
-        harness.app.world_mut(),
-        "c1",
-        w::ClientCapabilitySpec {
-            approval: w::CapabilityApproval::Confirm.into(),
-            input_schema:
-                r#"{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}"#
-                    .into(),
-            ..spec("device.files")
-        },
-    );
+    register(harness.app.world_mut(), "c1", files_capability());
     activate(harness.app.world_mut(), &harness.companion, "c1", 0);
     let (subscription, mut stream) = harness
         .app
@@ -329,6 +337,83 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
             .iter()
             .any(|item| item.text == "書いたよ")
     );
+}
+
+#[test]
+fn a_client_is_granted_only_what_the_host_policy_allows() {
+    let mut harness = Harness::with_policy([], "body.motion");
+    let client = client::register(
+        harness.app.world_mut(),
+        w::RegisterClientRequest {
+            id: "c1".into(),
+            name: "desk".into(),
+            platform: "linux".into(),
+            capabilities: vec!["body.motion".into(), "device.files".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(client.capabilities, ["body.motion", "device.files"]);
+    assert_eq!(client.granted_capabilities, ["body.motion"]);
+}
+
+#[test]
+fn a_work_approval_is_bound_to_the_work_session_not_the_head_activation() {
+    let mut harness = Harness::new([
+        vec![
+            MockStreamEvent::tool_call(
+                "call-1",
+                "device_request",
+                serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}}),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        text_turn("終わったよ"),
+    ]);
+    for id in ["c1", "c2"] {
+        register(harness.app.world_mut(), id, files_capability());
+    }
+    let first = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    let session = start_work(&mut harness);
+    // The hand stays bound to c1/rev1; only the head moves to c2.
+    let second = activate(
+        harness.app.world_mut(),
+        &harness.companion,
+        "c2",
+        first.revision,
+    );
+    assert_eq!(second.revision, first.revision + 1);
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .approvals(permission::ApprovalStatus::Pending)
+            .unwrap()
+            .is_empty()
+    });
+    let run = harness.store().runs(&session.id).unwrap()[0].run_id.clone();
+    let request = harness
+        .store()
+        .approvals(permission::ApprovalStatus::Pending)
+        .unwrap()[0]
+        .clone();
+    assert_eq!(request.run_id, run);
+    assert_eq!(request.client_id.as_deref(), Some("c1"));
+    assert_eq!(request.activation_revision, Some(first.revision));
+    let approval = permission::submit(
+        harness.app.world_mut(),
+        &request.request_id,
+        permission::ApprovalDecision::Approve,
+    )
+    .unwrap();
+    assert_eq!(approval.status, permission::ApprovalStatus::Approved);
+    // The approved operation still targets the hand's client.
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .outstanding_operations("c1")
+            .unwrap()
+            .is_empty()
+    });
 }
 
 #[test]

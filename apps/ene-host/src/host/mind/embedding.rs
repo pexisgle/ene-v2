@@ -2,7 +2,7 @@
 //! keeps as the canonical copy, and the flat in-memory index recall scans.
 //!
 //! The database stays canonical: every vector is written back through
-//! `Store::set_embedding`, and the index only mirrors rows whose
+//! the backfill writer, and the index only mirrors rows whose
 //! `embedding_content_revision` still matches their `content_revision`. A
 //! memory whose content changed is re-embedded, never mixed with the stale
 //! vector (docs/design/mind.md §4.1).
@@ -66,6 +66,20 @@ pub(crate) struct PendingEmbedding {
     pub(crate) content_revision: u64,
 }
 
+/// The one HTTP client the host's background requests share: its connection
+/// pool is reused across embedding calls instead of built per request.
+fn http_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| HostError::unavailable(format!("http client: {error}")))?;
+    Ok(CLIENT.get_or_init(|| client))
+}
+
 /// POSTs a JSON body to an OpenAI-compatible endpoint and returns its JSON
 /// answer. The one wire shape the host reads; another format is not guessed.
 pub(crate) async fn post_json(
@@ -76,13 +90,9 @@ pub(crate) async fn post_json(
     max_bytes: usize,
     what: &str,
 ) -> Result<serde_json::Value> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
-        .build()
-        .map_err(|error| HostError::unavailable(format!("{what} client: {error}")))?;
-    let response = client
+    let response = http_client()?
         .post(url)
+        .timeout(timeout)
         .header(reqwest::header::ACCEPT, "application/json")
         .bearer_auth(secret)
         .json(body)
@@ -197,16 +207,21 @@ impl Embedder {
         Ok(vector)
     }
 
+    /// Spawns one background task and keeps its handle, so a caller can abort
+    /// it and drop the request in flight.
+    pub(crate) fn spawn_handle<F>(&self, future: F) -> Option<tokio::task::JoinHandle<()>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.runtime().map(|runtime| runtime.spawn(future))
+    }
+
     /// Spawns one background task. `false` means this host cannot run it.
     pub(crate) fn spawn<F>(&self, future: F) -> bool
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.runtime()
-            .map(|runtime| {
-                runtime.spawn(future);
-            })
-            .is_some()
+        self.spawn_handle(future).is_some()
     }
 }
 
@@ -321,11 +336,11 @@ pub(crate) fn semantic_ids(
     let Ok(vector) = embedder.embed(&target, query) else {
         return Vec::new();
     };
-    if index.sync(store, &target.space).is_err() {
+    if index.sync(store, companion, &target.space).is_err() {
         return Vec::new();
     }
     index
-        .ranked(&target.space, &vector, 20)
+        .ranked(companion, &target.space, &vector, 20)
         .into_iter()
         .map(|(id, _)| id)
         .collect()
@@ -418,26 +433,59 @@ impl Space {
     }
 }
 
-/// The ECS cache of the canonical vectors. Each embedding space keeps one
-/// flat `Vec<f32>`; `ranked` scans it without a per-candidate allocation.
+/// One candidate of a ranking. `Ord` is its rank: a higher score is better,
+/// and on a tie the earlier entry is.
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    score: f32,
+    index: usize,
+}
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for Candidate {}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.index.cmp(&self.index))
+    }
+}
+
+/// The ECS cache of the canonical vectors. Each `(owner, space)` keeps one
+/// flat `Vec<f32>`, so another companion's vectors can never take the top-k
+/// slots of the owner's ranking; `ranked` keeps only the best `limit` without
+/// sorting or allocating for the rest.
 #[derive(Resource, Default)]
 pub(crate) struct CompactVectorIndex {
-    spaces: HashMap<String, Space>,
+    spaces: HashMap<(String, String), Space>,
 }
 
 impl CompactVectorIndex {
-    /// Mirrors one space from SQLite. Vectors whose content revision still
-    /// matches are reused, so an unchanged space reads no BLOB column.
-    pub(crate) fn sync(&mut self, store: &Store, space: &str) -> Result<()> {
-        let rows = store.embedding_revisions(space)?;
+    /// Mirrors one owner's space from SQLite. Vectors whose content revision
+    /// still matches are reused, so an unchanged space reads no BLOB column.
+    pub(crate) fn sync(&mut self, store: &Store, owner: &str, space: &str) -> Result<()> {
+        let rows = store.embedding_revisions(space, owner)?;
+        let key = (owner.to_owned(), space.to_owned());
         if self
             .spaces
-            .get(space)
+            .get(&key)
             .is_some_and(|current| current.matches(&rows))
         {
             return Ok(());
         }
-        let previous = self.spaces.remove(space);
+        let previous = self.spaces.remove(&key);
         let mut next = Space {
             dimensions: previous
                 .as_ref()
@@ -473,40 +521,50 @@ impl CompactVectorIndex {
             }
             next.push(id, *revision, &vector);
         }
-        self.spaces.insert(space.to_owned(), next);
+        self.spaces.insert(key, next);
         Ok(())
     }
 
-    /// The cosine ranking of one space, highest first.
-    pub(crate) fn ranked(&self, space: &str, query: &[f32], limit: usize) -> Vec<(String, f32)> {
-        let Some(current) = self.spaces.get(space) else {
+    /// The cosine ranking of one owner's space, highest first. Only the best
+    /// `limit` candidates are kept, so the scan neither sorts the whole space
+    /// nor allocates an entry per memory.
+    pub(crate) fn ranked(
+        &self,
+        owner: &str,
+        space: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> Vec<(String, f32)> {
+        let Some(current) = self.spaces.get(&(owner.to_owned(), space.to_owned())) else {
             return Vec::new();
         };
-        if query.len() != current.dimensions {
+        if query.len() != current.dimensions || limit == 0 {
             return Vec::new();
         }
-        let mut scored: Vec<(usize, f32)> = (0..current.entries.len())
-            .map(|index| {
-                let score = current
-                    .vector(index)
-                    .map_or(0.0, |vector| cosine_similarity(query, vector));
-                (index, score)
-            })
-            .collect();
-        scored.sort_by(|left, right| {
-            right
-                .1
-                .total_cmp(&left.1)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        scored.truncate(limit);
-        scored
+        let mut best: std::collections::BinaryHeap<std::cmp::Reverse<Candidate>> =
+            std::collections::BinaryHeap::with_capacity(limit.min(current.entries.len()));
+        for index in 0..current.entries.len() {
+            let score = current
+                .vector(index)
+                .map_or(0.0, |vector| cosine_similarity(query, vector));
+            let candidate = Candidate { score, index };
+            if best.len() < limit {
+                best.push(std::cmp::Reverse(candidate));
+            } else if best
+                .peek()
+                .is_some_and(|std::cmp::Reverse(worst)| candidate > *worst)
+            {
+                best.pop();
+                best.push(std::cmp::Reverse(candidate));
+            }
+        }
+        best.into_sorted_vec()
             .into_iter()
-            .filter_map(|(index, score)| {
+            .filter_map(|std::cmp::Reverse(candidate)| {
                 current
                     .entries
-                    .get(index)
-                    .map(|(id, _)| (id.clone(), score))
+                    .get(candidate.index)
+                    .map(|(id, _)| (id.clone(), candidate.score))
             })
             .collect()
     }
@@ -533,9 +591,11 @@ impl Default for Backfill {
     }
 }
 
-/// Embeds what is missing for each companion with a usable connection. The
-/// database is written from the task through the shared `Store`; the ECS
-/// thread only schedules and reports.
+/// Embeds what is missing for each companion with a usable connection. Each
+/// task writes through its own SQLite connection opened from the store's path
+/// (docs/design/mind.md §3.2), so the ECS thread's `Mutex<Connection>` is not
+/// held while the background writes; the ECS thread only schedules and
+/// reports.
 fn backfill(
     store: Res<Store>,
     embedder: Res<Embedder>,
@@ -589,7 +649,13 @@ fn backfill(
         let sender = state.sender.clone();
         let store = store.clone();
         let queued = embedder.spawn(async move {
-            let result = fill(&store, &target).await;
+            // The ECS connection is not moved: the task opens its own
+            // connection to the same database, with the same WAL pragmas, so
+            // the store's lock is never held while it writes.
+            let result = match store.open_secondary() {
+                Ok(connection) => fill(connection, &target).await,
+                Err(error) => Err(error),
+            };
             let _ = sender.send((companion_id, result));
         });
         if !queued {
@@ -598,11 +664,16 @@ fn backfill(
     }
 }
 
-/// Embeds missing and stale vectors until the batch budget is spent.
-async fn fill(store: &Store, target: &Target) -> Result<usize> {
+/// Embeds missing and stale vectors until the batch budget is spent. All
+/// reads and writes go through the task's own connection.
+async fn fill(connection: rusqlite::Connection, target: &Target) -> Result<usize> {
     let mut written = 0;
     while written < MAX_BACKFILL {
-        let pending = store.memories_missing_embedding(&target.space, MAX_EMBED_BATCH)?;
+        let pending = crate::host::db::memories::missing_embeddings(
+            &connection,
+            &target.space,
+            MAX_EMBED_BATCH,
+        )?;
         if pending.is_empty() {
             break;
         }
@@ -619,7 +690,8 @@ async fn fill(store: &Store, target: &Target) -> Result<usize> {
                     "embedding dimensions do not match the connection",
                 ));
             }
-            if store.set_embedding(
+            if crate::host::db::memories::write_embedding(
+                &connection,
                 &row.id,
                 row.content_revision,
                 &target.space,
@@ -665,15 +737,15 @@ mod tests {
     }
 
     fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector: &[f32]) {
-        store
-            .set_embedding(
-                &memory.id,
-                memory.content_revision,
-                space,
-                dimensions,
-                &encode(vector),
-            )
-            .unwrap();
+        crate::host::db::memories::write_embedding(
+            &store.conn().unwrap(),
+            &memory.id,
+            memory.content_revision,
+            space,
+            dimensions,
+            &encode(vector),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -686,17 +758,20 @@ mod tests {
         embed(&store, &first, &two, 2, &[1.0, 0.0]);
         embed(&store, &second, &three, 3, &[0.0, 0.0, 1.0]);
         let mut index = CompactVectorIndex::default();
-        index.sync(&store, &two).unwrap();
-        let ranked = index.ranked(&two, &[1.0, 0.1], 8);
+        index.sync(&store, "ene", &two).unwrap();
+        let ranked = index.ranked("ene", &two, &[1.0, 0.1], 8);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].0, first.id);
         assert!(
-            index.ranked(&two, &[1.0, 0.1, 0.0], 8).is_empty(),
+            index.ranked("ene", &two, &[1.0, 0.1, 0.0], 8).is_empty(),
             "a query of another dimension is not this space"
         );
-        index.sync(&store, &three).unwrap();
-        assert_eq!(index.ranked(&three, &[0.0, 1.0, 0.0], 8)[0].0, second.id);
-        assert!(index.ranked(&three, &[1.0, 0.0], 8).is_empty());
+        index.sync(&store, "ene", &three).unwrap();
+        assert_eq!(
+            index.ranked("ene", &three, &[0.0, 1.0, 0.0], 8)[0].0,
+            second.id
+        );
+        assert!(index.ranked("ene", &three, &[1.0, 0.0], 8).is_empty());
 
         // A content change invalidates the vector; the next sync drops it.
         store
@@ -709,13 +784,72 @@ mod tests {
                 [&first.id],
             )
             .unwrap();
-        index.sync(&store, &two).unwrap();
-        assert!(index.ranked(&two, &[1.0, 0.1], 8).is_empty());
+        index.sync(&store, "ene", &two).unwrap();
+        assert!(index.ranked("ene", &two, &[1.0, 0.1], 8).is_empty());
 
         // A vector of another preprocessing version is a different space.
         let legacy = "fake:2:v0";
         embed(&store, &second, legacy, 2, &[1.0, 0.0]);
-        index.sync(&store, legacy).unwrap();
-        assert!(index.ranked(legacy, &[1.0, 0.0], 8).is_empty());
+        index.sync(&store, "ene", legacy).unwrap();
+        assert!(index.ranked("ene", legacy, &[1.0, 0.0], 8).is_empty());
+    }
+
+    #[test]
+    fn another_owners_vectors_cannot_take_the_owners_top_k() {
+        let store = store();
+        let space = space_id("fake", 2);
+        let mine = store.insert_memory(memory("mine")).unwrap();
+        embed(&store, &mine, &space, 2, &[1.0, 0.0]);
+        // Other companions hold equally close vectors for the same query.
+        let mut others = Vec::new();
+        for index in 0..5 {
+            let mut other = memory(&format!("other {index}"));
+            other.owner = format!("other-{index}");
+            let other = store.insert_memory(other).unwrap();
+            embed(&store, &other, &space, 2, &[1.0, 0.0]);
+            others.push(other);
+        }
+        let mut index = CompactVectorIndex::default();
+        index.sync(&store, "ene", &space).unwrap();
+        let ranked = index.ranked("ene", &space, &[1.0, 0.0], 1);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].0, mine.id, "the owner's top-k is not crowded out");
+        // Each owner has its own key space: syncing one does not expose
+        // another's memories in its ranking.
+        index.sync(&store, "other-0", &space).unwrap();
+        let theirs = index.ranked("other-0", &space, &[1.0, 0.0], 10);
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].0, others[0].id);
+        assert!(
+            theirs.iter().all(|(id, _)| id != &mine.id),
+            "another owner's vector is never in this owner's space"
+        );
+    }
+
+    #[test]
+    fn the_backfill_connection_writes_without_the_store_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("host.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let memory = store.insert_memory(memory("tea")).unwrap();
+        let space = space_id("fake", 2);
+        let connection = store.open_secondary().unwrap();
+        // The store's own connection is not borrowed for the write.
+        let pending =
+            crate::host::db::memories::missing_embeddings(&connection, &space, 8).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            crate::host::db::memories::write_embedding(
+                &connection,
+                &memory.id,
+                memory.content_revision,
+                &space,
+                2,
+                &encode(&[1.0, 0.0]),
+            )
+            .unwrap()
+        );
+        let stored = store.embedding_blob(&memory.id, &space).unwrap();
+        assert_eq!(stored.unwrap().0, 2);
     }
 }

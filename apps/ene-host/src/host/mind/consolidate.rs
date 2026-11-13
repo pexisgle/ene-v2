@@ -7,22 +7,27 @@
 //! its result comes back to the ECS thread and is committed there.
 use super::{
     Companion, Role,
-    embedding::{self, Embedder},
+    embedding::{self, CompactVectorIndex, Embedder},
 };
 use crate::host::{
     agent::CompanionAgent,
     db::{Result, Store},
     error::HostError,
-    model::Credentials,
+    model::{self, Credentials},
     notify::Notifier,
 };
 use bevy_ecs::prelude::*;
-use rig_core::completion::Message;
+use rig_core::catalog::ModelSpec;
+use rig_core::completion::{CompletionRequest, Message};
 use rig_core::conversation::{Conversation as CoreConversation, TurnEnd};
+use rig_core::effect::{Answered, EffectId, EffectKind};
+use rig_core::serve::{Dispatch, ErasedHandler};
+use rig_ecs::model::Models;
 use rig_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -38,8 +43,10 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_FACTS: usize = 32;
 const MAX_CONTEXT: usize = 20;
 const MAX_CITATIONS: usize = 64;
-const LLM_TIMEOUT: Duration = Duration::from_secs(90);
-const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// The longest turn text used as the retrieval query for merge candidates.
+const MAX_QUERY_CHARS: usize = 2_000;
+/// How many newest turns are joined into that query.
+const QUERY_TURNS: usize = 4;
 
 /// One answered turn as data: the id the host advances the cursor to and the
 /// text the extraction model reads.
@@ -185,40 +192,34 @@ pub(crate) fn validate_citations(cited: &[String], injected: &[String]) -> Vec<S
         .collect()
 }
 
-#[derive(Clone, Debug)]
-struct LlmTarget {
-    endpoint: String,
-    model_id: String,
-    secret: String,
+/// The model connection a consolidation job calls: the same provider-agnostic
+/// path compaction uses, so Anthropic and Gemini assignments work too.
+struct Target {
+    spec: Arc<ModelSpec>,
+    handler: ErasedHandler,
 }
 
 /// Resolves the companion's `Consolidation` assignment (or its documented
-/// companion fallback) to a chat-completions target.
-fn llm_target(
+/// companion fallback) to a connected model.
+fn target(
     store: &Store,
     credentials: Option<&Credentials>,
+    models: &Models,
     companion: &Companion,
-) -> Result<Option<LlmTarget>> {
-    let Some(assignment) = companion.model(Role::Consolidation) else {
-        return Ok(None);
-    };
-    let Some(connection) = store.connection(&assignment.connection_id)? else {
-        return Ok(None);
-    };
-    if !connection.enabled || connection.kind != crate::host::settings::ConnectionKind::Llm {
-        return Ok(None);
-    }
-    let (Some(endpoint), Some(secret)) = (
-        embedding::connection_endpoint(&connection),
-        embedding::connection_secret(&connection, credentials),
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(LlmTarget {
-        endpoint,
-        model_id: assignment.model_id.clone(),
-        secret,
-    }))
+) -> Option<Target> {
+    let credentials = credentials?;
+    let bound = model::connect(
+        store,
+        credentials,
+        models.0.catalog(),
+        companion,
+        Role::Consolidation,
+    )
+    .ok()?;
+    Some(Target {
+        spec: Arc::clone(&bound.connection.spec),
+        handler: bound.connection.handler.0.clone(),
+    })
 }
 
 /// The extraction system prompt: facts only, separate records, never revive
@@ -332,105 +333,53 @@ pub(crate) fn parse_extraction(text: &str) -> Result<Vec<Fact>> {
     Ok(facts)
 }
 
-async fn extract(target: LlmTarget, prompt: String) -> Result<Vec<Fact>> {
-    let body = serde_json::json!({
-        "model": target.model_id,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.0,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "ene.consolidation.v1",
-                "strict": true,
-                "schema": schema(),
-            }
-        }
-    });
-    let value = embedding::post_json(
-        &format!("{}/chat/completions", target.endpoint.trim_end_matches('/')),
-        &body,
-        &target.secret,
-        LLM_TIMEOUT,
-        MAX_RESPONSE_BYTES,
-        "consolidation",
-    )
-    .await?;
-    let content = value
-        .get("choices")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| HostError::unavailable("consolidation body has no message content"))?;
-    parse_extraction(content)
+/// The request for one extraction, on the connection's own model.
+fn request(target: &Target, prompt: String) -> Result<CompletionRequest> {
+    let schema = schemars::Schema::try_from(schema())
+        .map_err(|error| HostError::internal(format!("consolidation schema: {error}")))?;
+    Ok(CompletionRequest::new(Message::user(prompt))
+        .preamble(SYSTEM_PROMPT)
+        .output_schema(schema)
+        .options(target.spec.default_options(None)))
 }
 
-/// Memory ids the host injected into recent turns, recorded by recall. The
-/// citation guard can only accept ids found here.
-#[derive(Resource, Default)]
-pub(crate) struct InjectedMemories {
-    by_companion: HashMap<String, VecDeque<(String, Vec<String>)>>,
+/// One unary model call through the connection's effect handler. The request
+/// is fitted to the model it goes to, as a turn's request is, so a provider
+/// other than OpenAI-compatible ones is answered in its own dialect.
+async fn extract(target: &Target, prompt: String) -> Result<Vec<Fact>> {
+    let request = request(target, prompt)?;
+    let kind = EffectKind::Completion {
+        request: Arc::new(request),
+        stream: false,
+    };
+    let dispatch = Dispatch::new(EffectId::from_raw(0), false);
+    match target
+        .handler
+        .handle(kind, dispatch)
+        .await
+        .into_outcome()
+        .await
+    {
+        Ok(Answered::Completion(response)) => parse_extraction(&response.text()),
+        Ok(_) => Err(HostError::unavailable(
+            "the consolidation model answered something other than a completion",
+        )),
+        Err(report) => Err(HostError::unavailable(format!(
+            "consolidation request: {report}"
+        ))),
+    }
 }
 
-impl InjectedMemories {
-    const KEEP: usize = 64;
-
-    /// Records one turn's injected ids. Recording a turn twice replaces it.
-    pub(crate) fn record(&mut self, companion: &str, turn_id: &str, ids: Vec<String>) {
-        let ids: Vec<String> = ids
-            .into_iter()
-            .filter(|id| !id.is_empty())
-            .take(MAX_CITATIONS)
-            .collect();
-        let turns = self.by_companion.entry(companion.to_owned()).or_default();
-        if let Some(existing) = turns.iter_mut().find(|(turn, _)| turn == turn_id) {
-            existing.1 = ids;
-            return;
-        }
-        turns.push_back((turn_id.to_owned(), ids));
-        while turns.len() > Self::KEEP {
-            turns.pop_front();
-        }
+/// The retrieval query for a job's merge candidates: the newest turns' text,
+/// bounded so a long transcript cannot become an unbounded FTS expression.
+fn turn_query(turns: &[Turn]) -> String {
+    let from = turns.len().saturating_sub(QUERY_TURNS);
+    let mut query = String::new();
+    for turn in turns.get(from..).unwrap_or_default() {
+        query.push_str(&turn.text);
+        query.push('\n');
     }
-
-    /// The ids injected into turns after `after` (exclusive) through
-    /// `through` (inclusive). Ids of unreadable turn numbers are kept, since
-    /// dropping them would weaken the guard.
-    pub(crate) fn ids_between(
-        &self,
-        companion: &str,
-        after: Option<&str>,
-        through: &str,
-    ) -> Vec<String> {
-        let lower = after.and_then(|after| after.parse::<u64>().ok());
-        let upper = through.parse::<u64>().ok();
-        let mut seen = HashSet::new();
-        let mut ids = Vec::new();
-        let Some(turns) = self.by_companion.get(companion) else {
-            return ids;
-        };
-        for (turn, injected) in turns {
-            let Ok(turn) = turn.parse::<u64>() else {
-                continue;
-            };
-            if upper.is_some_and(|upper| turn > upper) {
-                continue;
-            }
-            if lower.is_some_and(|lower| turn <= lower) {
-                continue;
-            }
-            for id in injected {
-                if seen.insert(id.as_str()) {
-                    ids.push(id.clone());
-                }
-            }
-        }
-        ids
-    }
+    crate::host::db::truncate(&query, MAX_QUERY_CHARS)
 }
 
 /// What the background extraction task posts back to the ECS thread. The
@@ -498,41 +447,43 @@ impl Consolidation {
     }
 }
 
-/// Registers the injection ledger, the guard and the two background systems.
+/// Registers the guard and the two background systems.
 pub(crate) fn register(app: &mut App) {
-    app.init_resource::<Consolidation>()
-        .init_resource::<InjectedMemories>()
-        .add_systems(
-            Update,
-            (schedule_consolidation, drain_consolidation)
-                .chain()
-                .after(AgentLoop),
-        );
+    app.init_resource::<Consolidation>().add_systems(
+        Update,
+        (schedule_consolidation, drain_consolidation)
+            .chain()
+            .after(AgentLoop),
+    );
 }
 
 /// The sources one job reads; bundled so `start` stays a normal function.
 struct Sources<'a> {
     store: &'a Store,
     embedder: &'a Embedder,
+    index: &'a mut CompactVectorIndex,
     credentials: Option<&'a Credentials>,
-    injected: &'a InjectedMemories,
+    models: &'a Models,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn schedule_consolidation(
     settled: Query<(&TurnOutcome, &ForAgent), Added<Settled>>,
     agents: Query<(&CompanionAgent, &Conversation)>,
     store: Res<Store>,
     embedder: Res<Embedder>,
+    mut index: ResMut<CompactVectorIndex>,
     credentials: Option<Res<Credentials>>,
-    injected: Res<InjectedMemories>,
+    models: Res<Models>,
     mut jobs: ResMut<Consolidation>,
 ) {
     let now = Instant::now();
-    let sources = Sources {
+    let mut sources = Sources {
         store: &store,
         embedder: &embedder,
+        index: &mut index,
         credentials: credentials.as_deref(),
-        injected: &injected,
+        models: &models,
     };
     let mut answered: HashSet<String> = HashSet::new();
     for (outcome, of) in &settled {
@@ -550,7 +501,7 @@ fn schedule_consolidation(
         };
         let pending = pending_turns(conversation, cursor.as_deref(), MAX_TURNS);
         if pending.len() >= TURN_THRESHOLD {
-            start(&sources, &mut jobs, &companion, cursor, pending, now);
+            start(&mut sources, &mut jobs, &companion, cursor, pending, now);
         }
     }
     if jobs
@@ -579,12 +530,12 @@ fn schedule_consolidation(
         if pending.is_empty() {
             continue;
         }
-        start(&sources, &mut jobs, companion, cursor, pending, now);
+        start(&mut sources, &mut jobs, companion, cursor, pending, now);
     }
 }
 
 fn start(
-    sources: &Sources<'_>,
+    sources: &mut Sources<'_>,
     jobs: &mut Consolidation,
     companion_id: &str,
     job_start: Option<String>,
@@ -608,26 +559,50 @@ fn start(
             return;
         }
     };
-    let target = match llm_target(sources.store, sources.credentials, &companion) {
-        Ok(Some(target)) => target,
-        Ok(None) | Err(_) => {
-            jobs.fail(companion_id, now);
-            return;
-        }
+    let Some(target) = target(
+        sources.store,
+        sources.credentials,
+        sources.models,
+        &companion,
+    ) else {
+        jobs.fail(companion_id, now);
+        return;
     };
-    let context = match sources
-        .store
-        .consolidation_context(companion_id, MAX_CONTEXT)
-    {
-        Ok(context) => context,
-        Err(_) => {
-            jobs.fail(companion_id, now);
-            return;
-        }
-    };
-    let injected = sources
-        .injected
-        .ids_between(companion_id, job_start.as_deref(), &new_cursor);
+    // Merge candidates come from the same hybrid retrieval recall uses: FTS5
+    // over the newest turns plus vector similarity, with pinned and important
+    // memories only as a fallback. Forgotten memories surface when the topic
+    // matches, so the model sees that the user asked to forget them.
+    let query = turn_query(&pending);
+    let semantic = embedding::semantic_ids(
+        sources.store,
+        sources.embedder,
+        sources.index,
+        sources.credentials,
+        companion_id,
+        &query,
+    );
+    let context =
+        match sources
+            .store
+            .consolidation_context(companion_id, &query, &semantic, MAX_CONTEXT)
+        {
+            Ok(context) => context,
+            Err(_) => {
+                jobs.fail(companion_id, now);
+                return;
+            }
+        };
+    let injected =
+        match sources
+            .store
+            .injected_between(companion_id, job_start.as_deref(), &new_cursor)
+        {
+            Ok(ids) => ids,
+            Err(_) => {
+                jobs.fail(companion_id, now);
+                return;
+            }
+        };
     let prompt = prompt(&pending, &context, &injected);
     let batch = Batch {
         companion_id: companion_id.to_owned(),
@@ -638,7 +613,7 @@ fn start(
     };
     let sender = jobs.sender();
     let queued = sources.embedder.spawn(async move {
-        let result = extract(target, prompt)
+        let result = extract(&target, prompt)
             .await
             .map_err(|error| error.to_string());
         let _ = sender.send((batch, result));

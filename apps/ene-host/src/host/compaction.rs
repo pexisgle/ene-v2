@@ -10,29 +10,28 @@
 use super::{
     agent::CompanionAgent,
     db::Store,
-    mind::Role,
+    mind::{Role, embedding::Embedder},
     model::{self, Credentials},
     resources::HostState,
 };
 use bevy_ecs::prelude::*;
 use rig_core::catalog::ModelSpec;
-use rig_core::completion::Message;
+use rig_core::completion::{Message, ToolDefinition};
 use rig_core::conversation::{
     Aside, Author, AuthorKind, Conversation as History, Entry, EntryRef, MessageId, pairing,
 };
 use rig_core::effect::{Answered, EffectId, EffectKind};
-use rig_core::message::UserContent;
 use rig_core::serve::{Dispatch, ErasedHandler};
 use rig_ecs::prelude::*;
 use rig_memory::recent::{TokenBudget, view};
-use rig_memory::{ClearToolOutputs, CompactReason, CompactionPolicy, Summarizer, SummaryState};
+use rig_memory::{
+    Anchor, ClearToolOutputs, CompactReason, CompactionPolicy, HeuristicTokenCounter, Prepared,
+    RequestStart, Summarizer, SummaryState, TokenCounter, next_request_tokens,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -114,6 +113,8 @@ pub(crate) fn summary_of(conversation: &History) -> Option<Summary> {
 
 /// Injects `summary` at the head of the request view, in place of the messages
 /// it stands for. Only the view changes; the session log keeps every entry.
+/// The block is a system message so it never puts two user messages in a row
+/// (docs/design/compaction.md §6).
 pub(crate) fn inject_summary(history: &mut History, summary: &Summary) {
     let len = history.messages().len();
     if len == 0 || is_summary_entry(history.entries().next()) {
@@ -127,7 +128,7 @@ pub(crate) fn inject_summary(history: &mut History, summary: &Summary) {
     // Never split a tool call from its result, and never drop the message the
     // model is answering.
     let at = pairing::safe_start(history.messages(), count).min(len - 1);
-    let summary = Entry::new(Message::user(render(&summary.text))).by(by.clone());
+    let summary = Entry::new(Message::system(render(&summary.text))).by(by.clone());
     history.splice(..at, [summary], by);
 }
 
@@ -143,8 +144,7 @@ fn is_summary_entry(entry: Option<EntryRef<'_>>) -> bool {
     let ours = matches!(entry.author.map(|author| &author.kind), Some(AuthorKind::Plugin(name)) if name == "ene-host");
     ours && matches!(
         entry.message,
-        Message::User { content }
-            if matches!(content.first(), Some(UserContent::Text(text)) if text.text.starts_with(SUMMARY_HEAD))
+        Message::System { content } if content.starts_with(SUMMARY_HEAD)
     )
 }
 
@@ -159,24 +159,111 @@ pub(crate) struct FitPlan {
     pub(crate) notice: Option<String>,
 }
 
-/// The estimated tokens of `history`.
+/// How a request is weighed: the fixed parts every call sends before its
+/// messages (the system prompt and the tool schemas), and rig-memory's
+/// [`Anchor`]: the usage a provider reported for the last reply, valid only
+/// while `sent` — the [`RequestStart`] of the request it answered — still
+/// describes the same prefix. Without a valid anchor the whole request is
+/// counted heuristically, fixed parts included (docs/design/compaction.md §5.2).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Weigher<'a> {
+    /// The model reference the request goes to.
+    pub(crate) model: &'a str,
+    /// The system prompt, as one message.
+    pub(crate) prompt: Option<&'a str>,
+    /// The tool schemas the request offers.
+    pub(crate) tools: &'a [Arc<ToolDefinition>],
+    /// What the provider reported for the reply to `sent`.
+    pub(crate) anchor: Option<Anchor>,
+    /// The start of the request that reply answered, when the host kept it.
+    pub(crate) sent: Option<RequestStart>,
+}
+
+impl Weigher<'_> {
+    fn prepared<'a>(&'a self, history: &'a History) -> Prepared<'a> {
+        Prepared {
+            model: self.model,
+            prompt: self.prompt,
+            tools: self.tools,
+            history,
+        }
+    }
+
+    /// The tokens of the fixed parts: the system prompt and the tool schemas,
+    /// counted as the provider reads them.
+    pub(crate) fn fixed(&self) -> u64 {
+        let counter = HeuristicTokenCounter::default();
+        let prompt = self
+            .prompt
+            .map_or(0, |prompt| counter.count(&Message::system(prompt)));
+        let tools = self
+            .tools
+            .iter()
+            .map(|tool| counter.count_tool(tool))
+            .fold(0, usize::saturating_add);
+        u64::try_from(prompt.saturating_add(tools)).unwrap_or(u64::MAX)
+    }
+
+    /// The tokens the request is expected to send: the anchored provider
+    /// count while it still describes the request, the whole request
+    /// otherwise.
+    pub(crate) fn tokens(&self, history: &History) -> u64 {
+        next_request_tokens(self.anchor.as_ref(), self.sent, &self.prepared(history))
+    }
+
+    /// The request's [`RequestStart`], to keep for the next anchor.
+    pub(crate) fn start(&self, history: &History) -> RequestStart {
+        self.prepared(history).start()
+    }
+}
+
+/// The estimated tokens of `history` alone.
 pub(crate) fn estimate(history: &History) -> u64 {
     rig_memory::estimate_tokens(history.messages())
 }
 
+/// The estimated tokens of one message, by the same counter the weigher uses.
+fn message_tokens(message: &Message) -> u64 {
+    u64::try_from(HeuristicTokenCounter::default().count(message)).unwrap_or(u64::MAX)
+}
+
+/// The tokens [`apply_fit`] injects in front of the kept messages: the summary
+/// block when the head holds one, and the system notice a cut puts after it.
+fn injected_tokens(history: &History) -> u64 {
+    let head = history
+        .entries()
+        .next()
+        .filter(|entry| is_summary_entry(Some(*entry)))
+        .map_or(0, |entry| message_tokens(entry.message));
+    head.saturating_add(message_tokens(&Message::system(NOTICE)))
+}
+
 /// Whether `history` fits `limit_tokens` while `output_reserve` stays free.
-pub(crate) fn fits(history: &History, limit_tokens: u64, output_reserve: u64) -> bool {
-    estimate(history) <= limit_tokens.saturating_sub(output_reserve)
+/// The fixed parts of the request count too, not only the messages.
+pub(crate) fn fits(
+    history: &History,
+    weigher: &Weigher<'_>,
+    limit_tokens: u64,
+    output_reserve: u64,
+) -> bool {
+    weigher.tokens(history) <= limit_tokens.saturating_sub(output_reserve)
 }
 
 /// Plans how to keep a request within the model window: clear old oversized
 /// tool outputs first, then drop the oldest complete turns, never splitting a
-/// tool call from its result and never dropping the newest turn. A plan that
-/// drops nothing while the view still does not fit is the documented refusal;
-/// the caller checks it with [`fits`] after [`apply_fit`].
-pub(crate) fn plan_fit(history: &History, limit_tokens: u64, output_reserve: u64) -> FitPlan {
+/// tool call from its result and never dropping the newest turn. The summary
+/// and the `[System Notice: ...]` line the cut injects are reserved out of the
+/// same budget, so [`fits`] holds again after [`apply_fit`]. A plan that drops
+/// nothing while the view still does not fit is the documented refusal; the
+/// caller checks it with [`fits`] after [`apply_fit`].
+pub(crate) fn plan_fit(
+    history: &History,
+    weigher: &Weigher<'_>,
+    limit_tokens: u64,
+    output_reserve: u64,
+) -> FitPlan {
     let budget = limit_tokens.saturating_sub(output_reserve);
-    let tokens = estimate(history);
+    let tokens = weigher.tokens(history);
     if history.messages().is_empty() || tokens <= budget {
         return FitPlan::default();
     }
@@ -188,16 +275,22 @@ pub(crate) fn plan_fit(history: &History, limit_tokens: u64, output_reserve: u64
             ..FitPlan::default()
         };
     }
-    // Still too large after clearing: keep the newest messages within the
-    // budget and start the window where a turn starts, so no turn is cut in
-    // half. A copy is cleared to measure what the view will hold.
-    let mut cleared = history.clone();
-    clearing.clear_conversation(&mut cleared, Author::plugin("ene-host"));
-    let budget = usize::try_from(budget).unwrap_or(usize::MAX);
-    let kept = view(cleared.messages(), &TokenBudget::new(budget)).len();
+    // Still too large after clearing: keep the newest messages within what is
+    // left of the budget once the fixed parts and the injected blocks are
+    // paid for. Only the shared messages are copied to measure the cleared
+    // view; the conversation itself is not cloned.
     let len = history.messages().len();
     let head = usize::from(is_summary_entry(history.entries().next()));
-    let mut at = pairing::safe_start(history.messages(), len - kept);
+    let mut messages = history.messages().to_vec();
+    clearing.clear(&mut messages);
+    let keep_budget = budget
+        .saturating_sub(weigher.fixed())
+        .saturating_sub(injected_tokens(history));
+    let keep_budget = usize::try_from(keep_budget).unwrap_or(usize::MAX);
+    let kept = view(&messages, &TokenBudget::new(keep_budget)).len();
+    let mut at = pairing::safe_start(&messages, len - kept);
+    // Start the window where a request starts, so no turn is cut in half, and
+    // never drop the newest turn the model is answering.
     if let Some(next) = history.entries().skip(at).find(|entry| entry.is_request()) {
         at = next.index;
     }
@@ -213,7 +306,9 @@ pub(crate) fn plan_fit(history: &History, limit_tokens: u64, output_reserve: u64
 }
 
 /// Applies a [`FitPlan`] to the request view: one recorded splice by the host,
-/// with the system notice standing where the dropped entries were.
+/// with the system notice standing where the dropped entries were. Both the
+/// notice and the summary block are system messages, so injection never puts
+/// two user messages in a row.
 pub(crate) fn apply_fit(history: &mut History, plan: &FitPlan) {
     let by = Author::plugin("ene-host");
     let head = usize::from(is_summary_entry(history.entries().next()));
@@ -228,7 +323,7 @@ pub(crate) fn apply_fit(history: &mut History, plan: &FitPlan) {
         let with: Vec<Entry> = plan
             .notice
             .iter()
-            .map(|notice| Entry::new(Message::user(notice.clone())).by(by.clone()))
+            .map(|notice| Entry::new(Message::system(notice.clone())).by(by.clone()))
             .collect();
         history.splice(head..at, with, by.clone());
     }
@@ -254,10 +349,12 @@ fn last_turn(history: &History) -> usize {
         .unwrap_or_else(|| history.messages().len().saturating_sub(1))
 }
 
-/// A summary task running off the ECS thread.
+/// A summary task running off the ECS thread on the host's one background
+/// runtime. Cancelling it aborts the task, so the in-flight model request is
+/// dropped instead of only being ignored once it finishes.
 struct RunningSummary {
     companion: String,
-    cancel: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
     result: crossbeam_channel::Receiver<std::result::Result<Summary, String>>,
 }
 
@@ -272,7 +369,7 @@ pub(crate) struct CompactionState {
 impl CompactionState {
     fn cancel_running(&mut self) {
         if let Some(running) = self.running.take() {
-            running.cancel.store(true, Ordering::Relaxed);
+            running.task.abort();
         }
     }
 }
@@ -316,6 +413,7 @@ fn summarize_when_idle(
     credentials: Option<Res<Credentials>>,
     models: Option<Res<Models>>,
     host: Option<Res<HostState>>,
+    embedder: Option<Res<Embedder>>,
     wake: Option<Res<Wake>>,
 ) {
     if state.running.is_some() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
@@ -325,7 +423,9 @@ fn summarize_when_idle(
     if state.retry_after.is_some_and(|after| now < after) {
         return;
     }
-    let (Some(store), Some(credentials), Some(models)) = (store, credentials, models) else {
+    let (Some(store), Some(credentials), Some(models), Some(embedder)) =
+        (store, credentials, models, embedder)
+    else {
         return;
     };
     let idle = tracker.idle_duration();
@@ -364,30 +464,28 @@ fn summarize_when_idle(
         let spec = Arc::clone(&bound.connection.spec);
         let handler = bound.connection.handler.0.clone();
         let (sender, result) = crossbeam_channel::unbounded();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let thread_cancel = Arc::clone(&cancel);
-        let thread_wake = wake.as_deref().cloned();
-        let spawned = std::thread::Builder::new()
-            .name("ene-compaction".into())
-            .spawn(move || {
-                let summary = generate(history, previous, spec, handler, &thread_cancel);
-                if !thread_cancel.load(Ordering::Relaxed) {
-                    let _ = sender.send(summary);
-                    if let Some(wake) = thread_wake {
-                        wake.wake();
-                    }
-                }
-            });
+        let task_wake = wake.as_deref().cloned();
+        // One background runtime serves every summary; the task is aborted on
+        // cancellation, which drops the request in flight.
+        let spawned = embedder.spawn_handle(async move {
+            let summary = generate(history, previous, spec, handler).await;
+            let _ = sender.send(summary);
+            if let Some(wake) = task_wake {
+                wake.wake();
+            }
+        });
         match spawned {
-            Ok(_) => {
+            Some(task) => {
                 state.running = Some(RunningSummary {
                     companion: agent.companion_id.clone(),
-                    cancel,
+                    task,
                     result,
                 });
             }
-            Err(error) => {
-                tracing::warn!(%error, "the compaction task did not start");
+            None => {
+                tracing::warn!(
+                    "the background runtime is unavailable; the summary was not started"
+                );
                 state.retry_after = Some(now + RETRY);
             }
         }
@@ -439,17 +537,14 @@ fn collect_summaries(
     }
 }
 
-/// Plans and asks for the summary on the compaction thread.
-fn generate(
+/// Plans and asks for the summary on the shared background runtime. Dropping
+/// this future (as `abort` does) drops the request in flight.
+async fn generate(
     history: History,
     previous: String,
     spec: Arc<ModelSpec>,
     handler: ErasedHandler,
-    cancel: &AtomicBool,
 ) -> std::result::Result<Summary, String> {
-    if cancel.load(Ordering::Relaxed) {
-        return Err("cancelled".to_owned());
-    }
     let state = SummaryState {
         summary: previous,
         tracked: Vec::new(),
@@ -460,11 +555,7 @@ fn generate(
         .ok_or_else(|| "the conversation is too short to summarize".to_owned())?;
     let through = through_message_id(&history, plan.keep_from)
         .ok_or_else(|| "there is nothing new to summarize".to_owned())?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("compaction runtime: {error}"))?;
-    let text = runtime.block_on(completion(plan.request, handler))?;
+    let text = completion(plan.request, handler).await?;
     Ok(Summary {
         text,
         through_message_id: through,
@@ -557,10 +648,9 @@ mod tests {
         ]);
     }
 
-    #[test]
-    fn a_fit_keeps_tool_pairs_and_drops_whole_turns() {
+    fn conversation(turns: usize) -> History {
         let mut history = History::new();
-        for turn in 0..8 {
+        for turn in 0..turns {
             history.push(Message::user(format!("question {turn} {}", "x".repeat(40))));
             tool_turn(&mut history, &format!("call-{turn}"), "z".repeat(400));
             history.push(Message::assistant(format!(
@@ -569,12 +659,31 @@ mod tests {
             )));
         }
         history
+    }
+
+    fn tool(description: &str) -> Arc<ToolDefinition> {
+        Arc::new(ToolDefinition::new(
+            ToolName::new("read").unwrap(),
+            description,
+            serde_json::json!({ "type": "object", "properties": {} }),
+        ))
+    }
+
+    fn is_user(message: &Message) -> bool {
+        matches!(message, Message::User { .. })
+    }
+
+    #[test]
+    fn a_fit_keeps_tool_pairs_and_drops_whole_turns() {
+        let mut history = conversation(8);
+        history
             .validate()
             .expect("the fixture is a canonical conversation");
+        let weight = Weigher::default();
         let limit = 600;
         let reserve = 50;
-        assert!(!fits(&history, limit, reserve));
-        let plan = plan_fit(&history, limit, reserve);
+        assert!(!fits(&history, &weight, limit, reserve));
+        let plan = plan_fit(&history, &weight, limit, reserve);
         let keep_from = plan.keep_from.expect("old turns are dropped");
         assert!(plan.notice.is_some());
         apply_fit(&mut history, &plan);
@@ -583,13 +692,12 @@ mod tests {
         let notice = entries.next().expect("the system notice");
         assert!(matches!(
             notice.message,
-            Message::User { content }
-                if matches!(content.first(), Some(UserContent::Text(text)) if text.text == NOTICE)
+            Message::System { content } if content == NOTICE
         ));
         let first = entries.next().expect("a kept entry");
         assert_eq!(first.id.get(), keep_from);
         assert!(first.is_request(), "a window starts where a turn starts");
-        assert!(fits(&history, limit, reserve));
+        assert!(fits(&history, &weight, limit, reserve));
     }
 
     #[test]
@@ -599,10 +707,83 @@ mod tests {
             Message::user("q".repeat(20_000)),
             Message::assistant("a short answer"),
         ]);
-        let plan = plan_fit(&history, 1_000, 100);
+        let weight = Weigher::default();
+        let plan = plan_fit(&history, &weight, 1_000, 100);
         assert_eq!(plan, FitPlan::default());
         apply_fit(&mut history, &plan);
-        assert!(!fits(&history, 1_000, 100));
+        assert!(!fits(&history, &weight, 1_000, 100));
+    }
+
+    #[test]
+    fn the_fixed_request_weight_counts_against_the_window() {
+        let prompt = "あなたはデスクトップ常駐AIコンパニオンです。".repeat(60);
+        let tools = [tool(&"t".repeat(2_000))];
+        let weight = Weigher {
+            model: "test/model",
+            prompt: Some(&prompt),
+            tools: &tools,
+            ..Weigher::default()
+        };
+        let limit = 1_200;
+        let reserve = 100;
+        let mut history = conversation(6);
+        // The messages alone fit, but the system prompt and tool schemas the
+        // request also sends do not: the fixed parts share the same budget.
+        assert!(estimate(&history) <= limit - reserve);
+        assert!(!fits(&history, &weight, limit, reserve));
+        let plan = plan_fit(&history, &weight, limit, reserve);
+        assert!(plan.keep_from.is_some(), "the history is cut");
+        apply_fit(&mut history, &plan);
+        assert!(
+            !fits(&history, &weight, limit, reserve),
+            "fixed parts alone can still make the request refuse"
+        );
+        // A window that takes the fixed parts cuts fewer turns; the injected
+        // notice and the kept messages fit inside the same budget.
+        let limit = 2_000;
+        let mut history = conversation(6);
+        let plan = plan_fit(&history, &weight, limit, reserve);
+        assert!(plan.keep_from.is_some(), "the history is still cut");
+        apply_fit(&mut history, &plan);
+        assert!(fits(&history, &weight, limit, reserve));
+    }
+
+    #[test]
+    fn injected_blocks_are_system_and_never_two_user_messages() {
+        let mut history = conversation(6);
+        let through = history.entries().nth(3).unwrap().id.get();
+        inject_summary(
+            &mut history,
+            &Summary {
+                text: "これまでの流れ: テスト".to_owned(),
+                through_message_id: through,
+            },
+        );
+        history.validate().expect("the summary keeps tool pairs");
+        let first = history.entries().next().expect("the summary");
+        assert!(
+            matches!(first.message, Message::System { content } if content.starts_with(SUMMARY_HEAD)),
+            "the summary block is a system message"
+        );
+        let weight = Weigher::default();
+        let plan = plan_fit(&history, &weight, 700, 50);
+        assert!(plan.keep_from.is_some(), "the window is cut");
+        apply_fit(&mut history, &plan);
+        history.validate().expect("the notice keeps tool pairs");
+        let messages: Vec<&Message> = history.messages().iter().map(Arc::as_ref).collect();
+        for pair in messages.windows(2) {
+            assert!(
+                !(is_user(pair[0]) && is_user(pair[1])),
+                "injection never puts two user messages in a row"
+            );
+        }
+        let notices = history
+            .entries()
+            .filter(
+                |entry| matches!(entry.message, Message::System { content } if content == NOTICE),
+            )
+            .count();
+        assert_eq!(notices, 1, "the notice is a system message");
     }
 
     #[test]
@@ -636,22 +817,45 @@ mod tests {
         );
     }
 
+    /// Sets `dropped` when the task it guards is dropped, as an aborted
+    /// summary drops its in-flight request.
+    struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     #[test]
-    fn user_activity_cancels_a_running_summary() {
+    fn user_activity_aborts_a_running_summary() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = Dropped(std::sync::Arc::clone(&dropped));
+        let task = runtime.spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
         let mut world = World::new();
         world.insert_resource(InactivityTracker::default());
-        let cancel = Arc::new(AtomicBool::new(false));
         let (_sender, result) = crossbeam_channel::unbounded();
         world.insert_resource(CompactionState {
             running: Some(RunningSummary {
                 companion: "ene".to_owned(),
-                cancel: Arc::clone(&cancel),
+                task,
                 result,
             }),
             retry_after: None,
         });
         note_user_activity(&mut world);
-        assert!(cancel.load(Ordering::Relaxed));
         assert!(world.resource::<CompactionState>().running.is_none());
+        runtime.block_on(tokio::task::yield_now());
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::Relaxed),
+            "cancellation drops the in-flight request, not only a flag"
+        );
     }
 }

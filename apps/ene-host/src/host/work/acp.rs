@@ -30,6 +30,7 @@ use rig_core::completion::Message;
 use rig_ecs::prelude::TurnOutcome;
 use std::{
     collections::HashMap,
+    ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -42,7 +43,9 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-const KILL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest a forced kill may take to be reaped; `work::FORCE_GRACE` is the
+/// wait that must outlast it before a stop counts as unconfirmed.
+pub(super) const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) enum AcpEvent {
     Ready {
@@ -150,7 +153,8 @@ pub(crate) fn spawn(
         &connection.args,
         &cwd,
         &connection.endpoint.options,
-    );
+    )
+    .map_err(HostError::Unavailable)?;
     if let Some(notice) = notice {
         let store = world.resource::<Store>().clone();
         if let Ok(Some(session)) = store.work_session(work_id) {
@@ -168,10 +172,12 @@ pub(crate) fn spawn(
         pid: Arc::clone(&pid),
         commands,
     };
+    let env = child_env(&connection.endpoint.options, |name: &str| {
+        std::env::var_os(name)
+    });
     runtime()?.spawn(run_backend(
         work_id.to_owned(),
-        program,
-        args,
+        command_wrap(&program, &args, &cwd, env),
         cwd,
         events,
         pid,
@@ -254,18 +260,17 @@ fn closed(work_id: String, error: String) -> AcpEvent {
     }
 }
 
-async fn run_backend(
-    work_id: String,
-    program: PathBuf,
-    args: Vec<String>,
-    cwd: PathBuf,
-    events: Sender<AcpEvent>,
-    pid: Arc<AtomicU32>,
-    commands: UnboundedReceiver<Command>,
-) {
-    let mut wrap = CommandWrap::with_new(&program, |cmd| {
-        cmd.args(&args)
-            .current_dir(&cwd)
+fn command_wrap(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: Vec<(OsString, OsString)>,
+) -> CommandWrap {
+    let mut wrap = CommandWrap::with_new(program, |cmd| {
+        cmd.args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -275,6 +280,17 @@ async fn run_backend(
     #[cfg(windows)]
     wrap.wrap(JobObject);
     wrap.wrap(KillOnDrop);
+    wrap
+}
+
+async fn run_backend(
+    work_id: String,
+    mut wrap: CommandWrap,
+    cwd: PathBuf,
+    events: Sender<AcpEvent>,
+    pid: Arc<AtomicU32>,
+    commands: UnboundedReceiver<Command>,
+) {
     let mut child = match wrap.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -364,15 +380,23 @@ async fn session_loop(
     shared: Arc<SharedRun>,
     mut commands: UnboundedReceiver<Command>,
 ) -> Result<(), agent_client_protocol::Error> {
-    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-        .block_task()
-        .await?;
-    let session = cx
-        .send_request(NewSessionRequest::new(cwd))
-        .block_task()
-        .await?;
-    let session_id = session.session_id;
+    let Some((session_id, first)) = open(&cx, &cwd, &shared, &mut commands).await? else {
+        return Ok(());
+    };
     let mut ready = false;
+    if let Some((run_id, text)) = first {
+        announce(&mut ready, &events, &run_id);
+        serve(
+            &cx,
+            &session_id,
+            run_id,
+            text,
+            &events,
+            &shared,
+            &mut commands,
+        )
+        .await?;
+    }
     let terminated = cx.terminated();
     tokio::pin!(terminated);
     loop {
@@ -383,10 +407,7 @@ async fn session_loop(
                 };
                 match command {
                     Command::Prompt { run_id, text } => {
-                        if !ready {
-                            ready = true;
-                            let _ = events.send(AcpEvent::Ready { run_id: run_id.clone() });
-                        }
+                        announce(&mut ready, &events, &run_id);
                         serve(&cx, &session_id, run_id, text, &events, &shared, &mut commands).await?;
                     }
                     Command::Cancel { .. } => {}
@@ -395,6 +416,74 @@ async fn session_loop(
             }
             _ = &mut terminated => return Ok(()),
         }
+    }
+}
+
+/// Runs `InitializeRequest` and `NewSessionRequest` while watching the command
+/// channel. A handshake cannot be cancelled through ACP, so a stop request
+/// aborts the connection and the caller force-kills the child. The prompt that
+/// arrived meanwhile is returned to be served after the session exists.
+async fn open(
+    cx: &ConnectionTo<Agent>,
+    cwd: &Path,
+    shared: &SharedRun,
+    commands: &mut UnboundedReceiver<Command>,
+) -> Result<Option<(SessionId, Option<(String, String)>)>, agent_client_protocol::Error> {
+    let initialize = cx
+        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+        .block_task();
+    tokio::pin!(initialize);
+    let mut first = None;
+    loop {
+        tokio::select! {
+            result = &mut initialize => {
+                result?;
+                break;
+            }
+            command = commands.recv() => match command {
+                Some(Command::Prompt { run_id, text }) => {
+                    first.get_or_insert((run_id, text));
+                }
+                Some(Command::Cancel { .. } | Command::End) | None => {
+                    if let Some((run_id, _)) = &first {
+                        shared.begin(run_id);
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    let session = cx
+        .send_request(NewSessionRequest::new(cwd.to_path_buf()))
+        .block_task();
+    tokio::pin!(session);
+    loop {
+        tokio::select! {
+            result = &mut session => {
+                let session = result?;
+                return Ok(Some((session.session_id, first)));
+            }
+            command = commands.recv() => match command {
+                Some(Command::Prompt { run_id, text }) => {
+                    first.get_or_insert((run_id, text));
+                }
+                Some(Command::Cancel { .. } | Command::End) | None => {
+                    if let Some((run_id, _)) = &first {
+                        shared.begin(run_id);
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
+fn announce(ready: &mut bool, events: &Sender<AcpEvent>, run_id: &str) {
+    if !*ready {
+        *ready = true;
+        let _ = events.send(AcpEvent::Ready {
+            run_id: run_id.to_owned(),
+        });
     }
 }
 
@@ -523,6 +612,64 @@ async fn terminate(child: &mut Box<dyn ChildWrapper>, timeout: Duration) -> (boo
     (matches!(waited, Ok(Ok(_))), pids)
 }
 
+// === Child environment ====================================================
+
+/// The only parent variables an ACP child inherits; provider keys and every
+/// other secret stay out.
+#[cfg(windows)]
+const INHERITED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "COMSPEC",
+    "PATHEXT",
+];
+#[cfg(not(windows))]
+const INHERITED_ENV: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+
+fn child_env(
+    options: &str,
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(OsString, OsString)> {
+    let mut envs: Vec<(OsString, OsString)> = INHERITED_ENV
+        .iter()
+        .filter_map(|name| lookup(name).map(|value| (OsString::from(name), value)))
+        .collect();
+    for (name, value) in configured_env(options) {
+        let name = OsString::from(name);
+        match envs
+            .iter_mut()
+            .find(|entry| entry.0.as_os_str() == name.as_os_str())
+        {
+            Some((_, inherited)) => *inherited = OsString::from(value),
+            None => envs.push((name, OsString::from(value))),
+        }
+    }
+    envs
+}
+
+/// Values the connection options add to the child environment.
+fn configured_env(options: &str) -> Vec<(String, String)> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(options) else {
+        return Vec::new();
+    };
+    let Some(env) = value.get("env").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    env.iter()
+        .filter_map(|(name, value)| value.as_str().map(|value| (name.clone(), value.to_owned())))
+        .collect()
+}
+
 // === Process isolation ===================================================
 
 fn launch(
@@ -530,37 +677,58 @@ fn launch(
     args: &[String],
     cwd: &Path,
     options: &str,
-) -> (PathBuf, Vec<String>, Option<String>) {
+) -> Result<(PathBuf, Vec<String>, Option<String>), String> {
     let requested = sandbox_mode(options);
     if requested.as_deref() == Some("none") {
-        let reason = "ACP接続の `sandbox` オプションにより、子プロセスは非隔離で起動します。";
-        return (
+        let notice = "ACP接続の `sandbox: none` オプションにより、子プロセスは非隔離で起動します。";
+        return Ok((
             PathBuf::from(command),
             args.to_vec(),
-            Some(reason.to_owned()),
-        );
+            Some(notice.to_owned()),
+        ));
     }
-    #[cfg(target_os = "linux")]
-    if let (Some(program), Some(cwd)) = (which::which("bwrap").ok(), cwd.to_str()) {
-        let mut wrapped: Vec<String> = ["--die-with-parent", "--unshare-net", "--unshare-pid"]
-            .map(str::to_owned)
-            .to_vec();
-        wrapped.extend(["--bind", "/", "/", "--proc", "/proc"].map(str::to_owned));
-        wrapped.extend(["--dev-bind", "/dev", "/dev", "--chdir"].map(str::to_owned));
-        wrapped.extend([cwd, "--", command].map(str::to_owned));
-        wrapped.extend(args.iter().cloned());
-        return (program, wrapped, None);
-    }
-    let reason = if requested.as_deref() == Some("bwrap") {
-        "`sandbox: bwrap` が指定されましたが bwrap が見つからないため、ACP子プロセスは非隔離で起動します。"
-    } else {
-        "この環境では bwrap を利用できないため、ACP子プロセスは非隔離で起動します。"
-    };
-    (
-        PathBuf::from(command),
-        args.to_vec(),
-        Some(reason.to_owned()),
+    plan(
+        command,
+        args,
+        cwd,
+        requested.as_deref(),
+        which::which("bwrap").ok().as_deref(),
     )
+}
+
+/// Builds the bwrap command line. The system stays read-only (`--ro-bind / /`)
+/// and only the working directory is writable; without bwrap the child cannot
+/// be isolated, so the launch is refused unless the connection already opted
+/// out with `sandbox: none`.
+fn plan(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    requested: Option<&str>,
+    bwrap: Option<&Path>,
+) -> Result<(PathBuf, Vec<String>, Option<String>), String> {
+    let Some(bwrap) = bwrap else {
+        let requested = match requested {
+            Some(mode) => format!("接続オプション `sandbox: {mode}` が指定されましたが、"),
+            None => String::new(),
+        };
+        return Err(format!(
+            "{requested}この環境では bwrap が見つからず、ACP子プロセスを隔離できません。\
+             非隔離での実行を明示的に承認するには、接続オプションに `sandbox: none` を設定してください。"
+        ));
+    };
+    let cwd = cwd
+        .to_str()
+        .ok_or_else(|| "ACPの作業ディレクトリをUTF-8で表せません".to_owned())?;
+    let mut wrapped: Vec<String> = ["--die-with-parent", "--unshare-net", "--unshare-pid"]
+        .map(str::to_owned)
+        .to_vec();
+    wrapped.extend(["--ro-bind", "/", "/", "--bind", cwd, cwd].map(str::to_owned));
+    wrapped.extend(["--proc", "/proc", "--dev", "/dev", "--chdir", cwd].map(str::to_owned));
+    wrapped.push("--".to_owned());
+    wrapped.push(command.to_owned());
+    wrapped.extend(args.iter().cloned());
+    Ok((bwrap.to_path_buf(), wrapped, None))
 }
 
 fn sandbox_mode(options: &str) -> Option<String> {
@@ -581,9 +749,121 @@ mod tests {
             &args,
             Path::new("/tmp"),
             r#"{"sandbox":"none"}"#,
-        );
+        )
+        .unwrap();
         assert_eq!(program, PathBuf::from("opencode"));
         assert_eq!(args, ["--stdio".to_owned()]);
         assert!(notice.is_some_and(|notice| notice.contains("非隔離")));
+    }
+
+    #[test]
+    fn a_sandboxed_agent_reads_the_system_and_writes_only_the_work_directory() {
+        let args = ["--stdio".to_owned()];
+        let (program, wrapped, notice) = plan(
+            "opencode",
+            &args,
+            Path::new("/work/project"),
+            None,
+            Some(Path::new("/usr/bin/bwrap")),
+        )
+        .unwrap();
+        assert_eq!(program, PathBuf::from("/usr/bin/bwrap"));
+        assert!(notice.is_none());
+        let wrapped: Vec<&str> = wrapped.iter().map(String::as_str).collect();
+
+        assert!(
+            wrapped
+                .windows(3)
+                .any(|bind| bind[0] == "--ro-bind" && bind[1] == "/" && bind[2] == "/")
+        );
+        let bind = wrapped
+            .iter()
+            .position(|arg| *arg == "--bind")
+            .expect("a writable bind");
+        assert_eq!(wrapped[bind + 1], "/work/project");
+        assert_eq!(wrapped[bind + 2], "/work/project");
+        for flag in [
+            "--unshare-net",
+            "--unshare-pid",
+            "--die-with-parent",
+            "--proc",
+            "--dev",
+        ] {
+            assert!(
+                wrapped.contains(&flag),
+                "{flag} is missing from {wrapped:?}"
+            );
+        }
+        assert!(
+            !wrapped
+                .windows(3)
+                .any(|bind| bind[0] == "--bind" && bind[1] == "/" && bind[2] == "/"),
+            "the root must not be writable: {wrapped:?}"
+        );
+        assert_eq!(wrapped.last().copied(), Some("--stdio"));
+    }
+
+    #[test]
+    fn an_agent_that_cannot_be_isolated_is_refused_without_the_explicit_opt_out() {
+        let args = ["--stdio".to_owned()];
+        let error = plan("opencode", &args, Path::new("/work/project"), None, None).unwrap_err();
+        assert!(error.contains("bwrap"), "{error}");
+        assert!(error.contains("隔離"), "{error}");
+        assert!(error.contains("sandbox: none"), "{error}");
+
+        let explicit = plan(
+            "opencode",
+            &args,
+            Path::new("/work/project"),
+            Some("bwrap"),
+            None,
+        )
+        .unwrap_err();
+        assert!(explicit.contains("sandbox: bwrap"), "{explicit}");
+    }
+
+    #[test]
+    fn the_child_environment_keeps_only_the_allowlist_and_configured_values() {
+        let env = child_env(
+            r#"{"env":{"PATH":"/custom/bin","ENE_ACP_TEST":"1"}}"#,
+            |name| match name {
+                "PATH" | "OPENAI_API_KEY" => Some(OsString::from(format!("/inherited/{name}"))),
+                _ => None,
+            },
+        );
+        let value = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key.to_str() == Some(name))
+                .map(|(_, value)| value.to_str().unwrap())
+        };
+        assert_eq!(value("PATH"), Some("/custom/bin"));
+        assert_eq!(value("ENE_ACP_TEST"), Some("1"));
+        assert_eq!(value("OPENAI_API_KEY"), None);
+    }
+
+    #[test]
+    fn a_late_update_after_finish_does_not_recreate_the_run() {
+        let mut world = World::new();
+        world.insert_resource(AcpEvents::default());
+        world.insert_resource(super::super::Runs::default());
+        world.resource_mut::<super::super::Runs>().begin("run-a");
+        world.resource_mut::<super::super::Runs>().forget("run-a");
+        world
+            .resource::<AcpEvents>()
+            .sender()
+            .send(AcpEvent::Update {
+                work_id: "w1".into(),
+                run_id: "run-a".into(),
+                text: "late progress".into(),
+            })
+            .unwrap();
+        pump(&mut world);
+        assert!(
+            !world
+                .resource::<super::super::Runs>()
+                .0
+                .contains_key("run-a"),
+            "a finished run must not be recreated"
+        );
     }
 }
