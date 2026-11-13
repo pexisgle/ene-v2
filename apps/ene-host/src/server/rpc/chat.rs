@@ -20,9 +20,9 @@ impl w::ChatService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::StopRequest>,
     ) -> ServiceResult<w::Empty> {
-        let companion = request.companion_id.to_owned();
+        let request = request.to_owned_message();
         self.call(move |app| {
-            chat::stop(app, &companion)?;
+            chat::stop(app.world_mut(), request)?;
             Ok(w::Empty::default())
         })
         .await
@@ -44,7 +44,7 @@ impl w::ChatService for Services {
         request: ServiceRequest<'_, w::MessageRequest>,
     ) -> ServiceResult<w::Message> {
         let request = request.to_owned_message();
-        self.read(move |app| chat::message(app.world_mut(), request))
+        self.read(move |app| chat::message_by_id(app.world_mut(), request))
             .await
     }
 }

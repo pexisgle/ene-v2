@@ -1,223 +1,225 @@
-//! Dynamic context injected into one model request, never into the session log.
+//! The dynamic tail and context fitting.
+//!
+//! Static persona lives in the system prompt. Everything that changes per turn
+//! (time, mind, recalled memory, perception) is appended to the turn's own
+//! request message, so the saved conversation is never polluted and the prefix
+//! stays stable across the ReAct steps of one turn.
 use crate::host::{
-    agent::AgentKey,
-    chat,
-    db::{Result, Store, now},
-    error::HostError,
-    mind::Companion,
-    mind::RecallMode,
+    agent::{self, CompanionAgent, WorkAgent},
+    db::{Store, now},
 };
 use bevy_ecs::prelude::*;
-use rig_core::{
-    completion::Message,
-    conversation::{Author, AuthorKind, Entry, MessageId},
-};
+use rig_core::completion::Message;
+use rig_core::conversation::Author;
+use rig_core::message::UserContent;
 use rig_ecs::prelude::*;
-use rig_memory::{HeuristicTokenCounter, TokenCounter};
+use std::collections::HashMap;
 
-const PINNED_BUDGET: usize = 1_000;
-const REMEMBERED: usize = 3;
-
-#[derive(Component)]
-pub(crate) struct ContextInjected;
-
-#[derive(Component, Clone)]
-pub(crate) struct ContextSnapshot {
-    text: String,
-    /// The turn input the tail is inserted before; the same entry on every
-    /// ReAct step keeps the prefix identical.
-    before: MessageId,
+/// The tail rendered once per turn so every step of the turn sends the same
+/// bytes.
+#[derive(Resource, Default)]
+pub(crate) struct TailCache {
+    by_turn: HashMap<u64, String>,
 }
 
-/// Builds the tail for one parent turn (a user message or an agent report).
-pub(crate) fn build_context(
-    store: &Store,
-    companion_id: &str,
-    input: &str,
-    perception: Option<&str>,
-) -> Result<Option<String>> {
-    let companion = store
-        .companion(companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
-    let mut text = format!(
-        "現在の心（revision {}）:\n{}",
-        companion.state_revision,
-        mind_text(&companion)
-    );
-    let pinned = store.pinned(companion_id, 16)?;
-    let recalled = store.recall(companion_id, input, RecallMode::Automatic, REMEMBERED)?;
-    let mut seen = std::collections::HashSet::new();
-    let mut memories = Vec::new();
-    let counter = HeuristicTokenCounter::default();
-    let mut used = 0usize;
-    for memory in pinned.into_iter().chain(recalled) {
-        if !seen.insert(memory.id.clone()) {
-            continue;
-        }
-        let tokens = counter.count(&Message::user(&memory.content));
-        if !memories.is_empty() && used + tokens > PINNED_BUDGET {
-            break;
-        }
-        used = used.saturating_add(tokens);
-        memories.push(format!("- {}", memory.content));
-    }
-    if !memories.is_empty() {
-        text.push_str("\n\n関連する記憶:\n");
-        text.push_str(&memories.join("\n"));
-    }
-    if let Some(perception) = perception.filter(|text| !text.is_empty()) {
-        text.push_str("\n\n知覚:\n");
-        text.push_str(perception);
-    }
-    text.push_str(&format!("\n\n現在時刻: {}", now()));
-    Ok(Some(text))
-}
+/// The request calls the host prepared in this pass.
+type AdmittedCalls = (Added<Admitted>, With<TurnCall>);
+/// A request call with the agent it serves.
+type TurnRequest<'a> = (&'a mut ModelRequest, &'a CallOf, Option<&'a ForAgent>);
+/// A request call with the model it was adapted to.
+type AdaptedRequest<'a> = (&'a mut ModelRequest, &'a Adapted, &'a mut Decision);
 
-fn mind_text(companion: &Companion) -> String {
-    if companion.state.is_empty() {
-        "（まだ何もありません）".into()
-    } else {
-        serde_json::to_string(&companion.state).unwrap_or_default()
-    }
-}
-
-/// Inserts the tail before the turn's input entry, at the same position for
-/// every ReAct step of the turn.
-#[allow(clippy::type_complexity)]
-pub(crate) fn inject_context(
-    mut commands: Commands,
-    mut calls: Query<
-        (Entity, &mut ModelRequest, &ForAgent, &CallOf),
-        (With<TurnCall>, Added<Admitted>, Without<ContextInjected>),
-    >,
-    keys: Query<&AgentKey>,
-    snapshots: Query<&ContextSnapshot>,
+/// Injects the dynamic tail into the request view only.
+fn inject_tail(
+    mut calls: Query<TurnRequest<'static>, AdmittedCalls>,
+    turns: Query<&Turn>,
+    agents: Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+    conversations: Query<&Conversation>,
     store: Res<Store>,
     perception: Res<crate::host::resources::Perception>,
-    mut notifier: ResMut<crate::host::notify::Notifier>,
+    mut cache: ResMut<TailCache>,
 ) {
-    for (call, mut request, agent, turn) in &mut calls {
-        let Ok(key) = keys.get(agent.0) else {
+    for (mut call, of, agent) in &mut calls {
+        let Ok(turn) = turns.get(of.0) else {
             continue;
         };
-        let Some(history) = request.history.as_mut() else {
+        let Some(agent) = agent.map(|agent| agent.0) else {
             continue;
         };
-        let snapshot = snapshots.get(turn.0).ok().cloned();
-        let (text, before) = match snapshot {
-            Some(snapshot) => (snapshot.text, snapshot.before),
+        let turn_id = turn.start.get();
+        let tail = match cache.by_turn.get(&turn_id) {
+            Some(tail) => tail.clone(),
             None => {
-                let Some((before, input)) = latest_input(history) else {
-                    continue;
-                };
-                let context = if key.is_work() {
-                    Ok(Some(format!("現在時刻: {}", now())))
-                } else {
-                    build_context(
-                        &store,
-                        key.companion(),
-                        &input,
-                        perception.0.get(key.companion()).map(String::as_str),
-                    )
-                };
-                match context {
-                    Ok(Some(text)) => {
-                        commands.entity(turn.0).insert(ContextSnapshot {
-                            text: text.clone(),
-                            before,
-                        });
-                        (text, before)
-                    }
-                    Ok(None) => continue,
-                    Err(error) if error.is_storage() => {
-                        let reason = error.to_string();
-                        commands.queue(move |world: &mut World| {
-                            crate::host::fail(world, reason);
-                        });
-                        continue;
-                    }
-                    Err(error) => {
-                        notifier.notice(key.companion(), "context_unavailable", &error.to_string());
-                        commands.entity(call).insert(ContextInjected);
-                        continue;
-                    }
-                }
+                let tail = render_tail(&store, &agents, &conversations, &perception, agent);
+                cache.by_turn.insert(turn_id, tail.clone());
+                tail
             }
         };
-        let index = context_index(history, before);
-        history.splice(
-            index..index,
-            [Entry::new(Message::user(text))],
-            Author::plugin("ene.context"),
-        );
-        commands.entity(call).insert(ContextInjected);
+        let Some(history) = call.history.as_mut() else {
+            continue;
+        };
+        let at = history.start_of(turn.start);
+        let author = Author::plugin("ene-host");
+        history.edit_each(author, |entry| {
+            (entry.index == at).then(|| append(entry.message, &tail))
+        });
     }
 }
 
-/// Where the tail goes: before the turn input, or after a summary when a
-/// mid-turn compaction already covered that input.
-///
-/// The fallback position stays the same for every later step of the turn, so
-/// the injected tail does not move and the prefix cache keeps working.
-fn context_index(history: &rig_core::conversation::Conversation, before: MessageId) -> usize {
-    if let Some(index) = history
-        .entries()
-        .find_map(|entry| (entry.id == before).then_some(entry.index))
-    {
-        return index;
-    }
-    usize::from(
-        history
-            .entries()
-            .next()
-            .and_then(|entry| chat::entry_text(entry.message))
-            .is_some_and(|text| text.starts_with("<summary>")),
-    )
+fn append(message: &Message, tail: &str) -> Message {
+    let Message::User { content } = message else {
+        return message.clone();
+    };
+    let mut content = content.clone();
+    content.push(UserContent::text(tail.to_owned()));
+    Message::User { content }
 }
 
-/// The entry that asked this turn: the user's own text or an agent's
-/// instruction. Assistant replies and tool results carry no author (or rig's),
-/// so they are never the tail's anchor.
-fn latest_input(history: &rig_core::conversation::Conversation) -> Option<(MessageId, String)> {
-    history.entries().rev().find_map(|entry| {
-        let author = entry.author.as_ref()?;
-        if !matches!(author.kind, AuthorKind::User | AuthorKind::Agent) {
-            return None;
+fn render_tail(
+    store: &Store,
+    agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+    conversations: &Query<&Conversation>,
+    perception: &crate::host::resources::Perception,
+    agent: Entity,
+) -> String {
+    let mut tail = String::from("---\n現在の動的コンテキスト（会話ログには保存されません）\n");
+    tail.push_str(&format!("現在日時: {}\n", now()));
+    let Some((companion, conversation)) = agent_view(agents, conversations, agent) else {
+        return tail;
+    };
+    if let Ok(Some(state)) = store.companion(&companion) {
+        tail.push_str(&format!(
+            "現在の心: 感情={} 関係={} 傾向={} 懸念={}\n",
+            state.state.emotion.json,
+            state.state.relationships.json,
+            state.state.tendencies.json,
+            state.state.concerns.json
+        ));
+        if let Ok(pinned) = store.pinned(&companion)
+            && !pinned.is_empty()
+        {
+            tail.push_str("常に覚えていること:\n");
+            for memory in pinned {
+                tail.push_str("- ");
+                tail.push_str(&memory.content);
+                tail.push('\n');
+            }
         }
-        let text = chat::entry_text(entry.message)?;
-        (!text.is_empty()).then_some((entry.id, text))
-    })
+        if let Some(query) = recent_user_text(conversation)
+            && let Ok(recalled) =
+                store.recall(&companion, &query, super::memory::RecallMode::Auto, 6)
+            && !recalled.is_empty()
+        {
+            tail.push_str("今の話に関係する記憶:\n");
+            for memory in recalled {
+                tail.push_str("- ");
+                tail.push_str(&memory.memory.content);
+                tail.push('\n');
+            }
+        }
+    }
+    if let Some(event) = perception.events.get(&companion) {
+        tail.push_str(&format!("知覚: {}\n", event.summary));
+    }
+    tail.push_str("---");
+    crate::host::db::truncate(&tail, 4_000)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rig_core::conversation::Conversation;
+fn agent_view<'a>(
+    agents: &'a Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+    conversations: &'a Query<&Conversation>,
+    agent: Entity,
+) -> Option<(String, Option<&'a Conversation>)> {
+    let (companion, work) = agents.get(agent).ok()?;
+    let companion = companion
+        .map(|agent| agent.companion_id.clone())
+        .or_else(|| work.map(|agent| agent.companion_id.clone()))?;
+    Some((companion, conversations.get(agent).ok()))
+}
 
-    #[test]
-    fn the_tail_stays_before_the_input_or_falls_back_after_a_summary() {
-        let mut history = Conversation::from_messages([Message::user("話しかけた")]);
-        let before = history.entries().next().unwrap().id;
-        assert_eq!(context_index(&history, before), 0);
+fn recent_user_text(conversation: Option<&Conversation>) -> Option<String> {
+    let conversation = conversation?;
+    conversation
+        .entries()
+        .rev()
+        .find(|entry| entry.is_users_own())
+        .and_then(|entry| agent::entry_text(&entry))
+}
 
-        history.splice(
-            0..1,
-            [Entry::new(Message::user(
-                "<summary>\n古い会話の要約\n</summary>",
-            ))],
-            Author::plugin("ene.compaction"),
-        );
-        assert_eq!(
-            context_index(&history, before),
-            1,
-            "a summary-covered input falls back to just after the summary"
-        );
+/// Keeps the request within the model's input limit. Oldest complete turns are
+/// dropped first; a request that cannot fit at all is refused instead of sent.
+fn fit(mut calls: Query<AdaptedRequest<'static>, AdmittedCalls>) {
+    for (mut call, adapted, mut decision) in &mut calls {
+        let limit = adapted
+            .0
+            .spec
+            .input_limit()
+            .map(u64::from)
+            .unwrap_or(128_000);
+        let reserve = u64::from(adapted.0.spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
+        let budget = limit.saturating_sub(reserve);
+        let Some(history) = call.history.as_ref() else {
+            continue;
+        };
+        let mut tokens = estimate(history);
+        if tokens <= budget {
+            continue;
+        }
+        let Some(history) = call.history.as_mut() else {
+            continue;
+        };
+        while tokens > budget && history.messages().len() > 2 {
+            let keep = history.messages().len().saturating_sub(2).max(1) / 2;
+            let at = rig_core::conversation::pairing::safe_start(history.messages(), keep)
+                .max(1)
+                .min(history.messages().len());
+            history.splice(..at, [], Author::plugin("ene-host"));
+            tokens = estimate(history);
+        }
+        if tokens > budget {
+            decision.decide(
+                Decider::plugin("ene-host"),
+                Outcome::refused("context_exceeded: the request does not fit the model window"),
+            );
+        }
     }
+}
 
-    #[test]
-    fn the_tail_starts_at_the_head_without_a_summary() {
-        let history = Conversation::from_messages([Message::assistant("応答")]);
-        let missing = MessageId::default();
-        assert_eq!(context_index(&history, missing), 0);
+fn estimate(history: &rig_core::conversation::Conversation) -> u64 {
+    // A conservative character-based estimate: the provider counts tokens
+    // itself, and the host only needs a safe margin.
+    let chars: usize = history
+        .messages()
+        .iter()
+        .map(|message| match &**message {
+            Message::System { content } => content.chars().count(),
+            Message::User { content } => content
+                .iter()
+                .map(|item| match item {
+                    UserContent::Text(text) => text.text.chars().count(),
+                    _ => 64,
+                })
+                .sum(),
+            Message::Assistant(reply) => reply
+                .content
+                .iter()
+                .map(|item| match item {
+                    rig_core::completion::AssistantContent::Text(text) => text.text.chars().count(),
+                    _ => 64,
+                })
+                .sum(),
+        })
+        .sum();
+    (chars / 3) as u64 + 512
+}
+
+/// The systems that manage the request view.
+pub(crate) struct RecallPlugin;
+
+impl Plugin for RecallPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<TailCache>()
+            .add_systems(AgentPass, inject_tail.in_set(PrepareSystems::Edit))
+            .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit));
     }
 }

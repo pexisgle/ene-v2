@@ -1,11 +1,15 @@
 //! The single notification outbox and its broadcast stream.
+//!
+//! Systems push events into the outbox; one tick assigns the epoch/sequence
+//! cursor and broadcasts them. Persisted state stays canonical, so a client
+//! that misses events can always resnapshot.
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use serde_json::json;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-pub(crate) const EVENTS: usize = 256;
+pub(crate) const CAPACITY: usize = 256;
 
 #[derive(Resource)]
 pub(crate) struct Notifier {
@@ -21,7 +25,7 @@ impl Notifier {
             epoch: Uuid::new_v4().to_string(),
             sequence: 0,
             outbox: Vec::new(),
-            events: broadcast::channel(EVENTS).0,
+            events: broadcast::channel(CAPACITY).0,
         }
     }
 
@@ -37,32 +41,35 @@ impl Notifier {
         self.events.subscribe()
     }
 
+    /// Queues one event for the next tick.
     pub(crate) fn push(
         &mut self,
-        companion: Option<String>,
-        client: Option<String>,
+        companion: Option<&str>,
+        client: Option<&str>,
         event: w::notification::Event,
     ) {
         self.outbox.push(w::Notification {
-            companion_id: companion,
-            client_id: client,
             kind: kind_of(&event).into(),
+            companion_id: companion.map(ToOwned::to_owned),
+            client_id: client.map(ToOwned::to_owned),
             event: Some(event),
             ..Default::default()
         });
     }
 
-    pub(crate) fn notice(&mut self, companion: &str, code: &str, message: &str) {
+    /// A host-level notice the clients can display.
+    pub(crate) fn notice(&mut self, companion: Option<&str>, code: &str, message: &str) {
+        let document = w::JsonDocument {
+            schema: "ene.notice.v1".into(),
+            json: json!({"code": code, "message": message}).to_string(),
+            ..Default::default()
+        };
         self.push(
-            Some(companion.into()),
+            companion,
             None,
             w::notification::Event::Generic(Box::new(w::HostEvent {
                 kind: "notice".into(),
-                payload: json!({
-                    "code": code,
-                    "message": crate::truncate_chars(message, 500),
-                })
-                .to_string(),
+                payload: Some(document).into(),
                 ..Default::default()
             })),
         );
@@ -86,9 +93,15 @@ impl Notifier {
         self.outbox.clear();
     }
 
+    /// Reports a fatal host failure to every subscriber.
     pub(crate) fn fail(&mut self, reason: &str) {
         self.outbox.clear();
         self.sequence += 1;
+        let document = w::JsonDocument {
+            schema: "ene.notice.v1".into(),
+            json: json!({"code": "storage_error", "message": reason}).to_string(),
+            ..Default::default()
+        };
         let event = w::Notification {
             cursor: Some(w::Cursor {
                 epoch: self.epoch.clone(),
@@ -99,11 +112,7 @@ impl Notifier {
             kind: "host_storage_failed".into(),
             event: Some(w::notification::Event::Generic(Box::new(w::HostEvent {
                 kind: "host_storage_failed".into(),
-                payload: json!({
-                    "code": "storage_error",
-                    "message": crate::truncate_chars(reason, 1024),
-                })
-                .to_string(),
+                payload: Some(document).into(),
                 ..Default::default()
             }))),
             ..Default::default()
@@ -130,5 +139,6 @@ fn kind_of(event: &w::notification::Event) -> &'static str {
         w::notification::Event::Generic(_) => "generic",
         w::notification::Event::InitialState(_) => "initial_state",
         w::notification::Event::ResyncRequired(_) => "resync",
+        w::notification::Event::ActivationUpdated(_) => "activation",
     }
 }

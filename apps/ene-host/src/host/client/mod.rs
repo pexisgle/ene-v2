@@ -1,315 +1,601 @@
-//! Connected terminals, exclusive companion activation and device operations.
-pub(crate) mod device;
+//! The domain of a declared client: capabilities, grants, activation
+//! generations and device operations.
 
-pub(crate) use self::device::{
-    DeviceOperation, DeviceResult, DeviceStatus, complete, get_operation, register_tools, restore,
-    subscribe, sweep_closed,
-};
+use super::error::{Failure, HostError, Result};
+use super::json;
+use serde::{Deserialize, Serialize};
 
-use super::{
-    db::{Result, Store, next_revision, now, validate_id},
-    error::HostError,
-    notify::Notifier,
-    resources::DeviceStreams,
-    wire,
-};
-use bevy_ecs::prelude::*;
-use ene_rpc as w;
-use rig_ecs::prelude::App;
+/// Tools the host itself owns. A client capability may not shadow one.
+pub(crate) const BUILTIN_TOOLS: &[&str] = &[
+    "mind_recall",
+    "mind_read",
+    "mind_update",
+    "start_work",
+    "send_work",
+    "list_works",
+    "stop_work",
+    "device_request",
+    "noop",
+    "schedule_create",
+    "schedule_list",
+    "schedule_cancel",
+    "report",
+];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CapabilityApproval {
+    /// Follow the host's default policy; an unknown capability needs confirmation.
+    #[default]
+    Unspecified,
+    /// Run when policy allows it.
+    Auto,
+    /// A Stage::Gate approval is required for every operation.
+    Confirm,
+}
+
+/// A capability a client declares, with the JSON Schema the host validates
+/// operations against.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CapabilitySpec {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) tool_name: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    #[serde(default = "default_schema")]
+    pub(crate) input_schema: String,
+    #[serde(default)]
+    pub(crate) presets: Vec<String>,
+    #[serde(default)]
+    pub(crate) approval: CapabilityApproval,
+    #[serde(default)]
+    pub(crate) approval_target: String,
+    #[serde(default)]
+    pub(crate) output_schema: String,
+}
+
+fn default_schema() -> String {
+    r#"{"type":"object"}"#.into()
+}
+
+impl CapabilitySpec {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let name = self.name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.contains(char::is_whitespace) {
+            return Err(HostError::invalid(
+                "capability names must be 1-64 non-space characters",
+            ));
+        }
+        if !self.tool_name.is_empty() {
+            if self.tool_name.chars().count() > 64
+                || self
+                    .tool_name
+                    .bytes()
+                    .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+            {
+                return Err(HostError::invalid(
+                    "capability tool names must be 1-64 [A-Za-z0-9_-] characters",
+                ));
+            }
+            if BUILTIN_TOOLS.contains(&self.tool_name.as_str()) {
+                return Err(HostError::invalid(format!(
+                    "tool name `{}` is reserved by the host",
+                    self.tool_name
+                )));
+            }
+        }
+        if self.description.chars().count() > 2_000 {
+            return Err(HostError::invalid("capability description is too long"));
+        }
+        if self.approval_target.chars().count() > 500 {
+            return Err(HostError::invalid("capability approval target is too long"));
+        }
+        let schema = json::parse_schema(&self.input_schema)?;
+        if !schema.is_object() {
+            return Err(HostError::invalid(
+                "capability input schema must be an object",
+            ));
+        }
+        if !self.output_schema.trim().is_empty() {
+            json::parse_schema(&self.output_schema)?;
+        }
+        if self.presets.len() > 64
+            || self
+                .presets
+                .iter()
+                .any(|preset| preset.chars().count() > 64)
+        {
+            return Err(HostError::invalid("capability presets are too long"));
+        }
+        Ok(())
+    }
+
+    /// The model-facing description, with the presets the client declared.
+    pub(crate) fn tool_description(&self) -> String {
+        let mut description = self.description.clone();
+        if !self.presets.is_empty() {
+            if !description.is_empty() {
+                description.push(' ');
+            }
+            description.push_str("Presets: ");
+            description.push_str(&self.presets.join(", "));
+            description.push('.');
+        }
+        description
+    }
+}
+
+/// Validates a whole declaration set: every spec names a declared capability,
+/// names are unique and tool names do not collide.
+pub(crate) fn validate_declarations(
+    capabilities: &[String],
+    specs: &[CapabilitySpec],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let mut tools = std::collections::HashSet::new();
+    for capability in capabilities {
+        if !seen.insert(capability.as_str()) {
+            return Err(HostError::invalid(format!(
+                "capability `{capability}` is declared twice"
+            )));
+        }
+    }
+    for spec in specs {
+        if !capabilities.iter().any(|name| name == &spec.name) {
+            return Err(HostError::invalid(format!(
+                "capability spec `{}` is not in capabilities",
+                spec.name
+            )));
+        }
+        spec.validate()?;
+        if !spec.tool_name.is_empty() && !tools.insert(spec.tool_name.as_str()) {
+            return Err(HostError::invalid(format!(
+                "tool name `{}` is declared twice",
+                spec.tool_name
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Client {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) platform: String,
     pub(crate) capabilities: Vec<String>,
     pub(crate) granted_capabilities: Vec<String>,
+    pub(crate) capability_specs: Vec<CapabilitySpec>,
     pub(crate) revision: u64,
     pub(crate) last_seen: String,
 }
 
 impl Client {
-    pub(crate) fn connected(&self, streams: &DeviceStreams) -> bool {
-        streams
-            .0
-            .get(&self.id)
-            .is_some_and(|sender| !sender.is_closed())
+    pub(crate) fn is_granted(&self, capability: &str) -> bool {
+        self.granted_capabilities
+            .iter()
+            .any(|name| name == capability)
+    }
+
+    pub(crate) fn spec(&self, capability: &str) -> Option<&CapabilitySpec> {
+        self.capability_specs
+            .iter()
+            .find(|spec| spec.name == capability)
+    }
+
+    /// The capabilities that give the parent a tool.
+    pub(crate) fn tool_specs(&self) -> impl Iterator<Item = &CapabilitySpec> {
+        self.capability_specs
+            .iter()
+            .filter(|spec| !spec.tool_name.is_empty() && self.is_granted(&spec.name))
     }
 }
 
-pub(crate) fn register(app: &mut App, request: w::RegisterClientRequest) -> Result<w::Client> {
-    validate_id(&request.id)?;
-    if request.name.chars().count() > 200 || request.platform.chars().count() > 100 {
-        return Err(HostError::invalid("invalid client name"));
-    }
-    if request
-        .capabilities
-        .iter()
-        .any(|capability| capability.is_empty() || capability.len() > 100)
-    {
-        return Err(HostError::invalid("invalid capability"));
-    }
-    let store = app.world().resource::<Store>().clone();
-    let existing = store.client(&request.id)?;
-    let revision = if let Some(existing) = &existing {
-        if existing.revision != request.expected_revision && request.expected_revision != 0 {
-            return Err(HostError::conflict("client revision changed"));
-        }
-        if existing.name == request.name
-            && existing.platform == request.platform
-            && existing.capabilities == request.capabilities
-        {
-            existing.revision
-        } else {
-            next_revision(existing.revision)?
-        }
-    } else {
-        1
-    };
-    let granted = existing
-        .map(|client| {
-            client
-                .granted_capabilities
-                .into_iter()
-                .filter(|capability| request.capabilities.contains(capability))
-                .collect()
-        })
-        .unwrap_or_default();
-    let client = Client {
-        id: request.id,
-        name: request.name,
-        platform: request.platform,
-        capabilities: request.capabilities,
-        granted_capabilities: granted,
-        revision,
-        last_seen: now(),
-    };
-    store.save_client(&client)?;
-    notify(app.world_mut(), &client, false, Vec::new());
-    Ok(wire::client(&client, false, Vec::new()))
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Activation {
+    pub(crate) companion_id: String,
+    pub(crate) client_id: Option<String>,
+    /// The generation that binds audio, perception and device operations.
+    pub(crate) revision: u64,
 }
 
-pub(crate) fn list(store: &Store, streams: &DeviceStreams) -> Result<Vec<w::Client>> {
-    let activations = store.activations()?;
-    Ok(store
-        .clients()?
-        .iter()
-        .map(|client| {
-            let active = activations
-                .iter()
-                .filter(|(_, client_id, _)| client_id == &client.id)
-                .map(|(companion, _, _)| companion.clone())
-                .collect();
-            wire::client(client, client.connected(streams), active)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeviceStatus {
+    #[default]
+    Pending,
+    Dispatched,
+    Completed,
+    Failed,
+    Uncertain,
+}
+
+impl DeviceStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Dispatched => "dispatched",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Uncertain => "uncertain",
+        }
+    }
+
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "pending" => Self::Pending,
+            "dispatched" => Self::Dispatched,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "uncertain" => Self::Uncertain,
+            _ => return None,
         })
-        .collect())
+    }
+
+    pub(crate) fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Uncertain)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DeviceOperation {
+    pub(crate) id: String,
+    pub(crate) client_id: String,
+    pub(crate) activation_revision: u64,
+    pub(crate) capability: String,
+    pub(crate) input: serde_json::Value,
+    pub(crate) work_id: Option<String>,
+    pub(crate) status: DeviceStatus,
+    pub(crate) output: Option<serde_json::Value>,
+    pub(crate) failure: Option<Failure>,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
+/// Validates `input` against the declared schema of `spec`.
+pub(crate) fn validate_input(spec: &CapabilitySpec, input: &serde_json::Value) -> Result<()> {
+    let schema = json::parse_schema(&spec.input_schema)?;
+    json::validate(&schema, input).map_err(HostError::invalid)
+}
+
+/// Validates a client's operation output against its declared output schema.
+pub(crate) fn validate_output(spec: &CapabilitySpec, output: &serde_json::Value) -> Result<()> {
+    if spec.output_schema.trim().is_empty() {
+        return Ok(());
+    }
+    let schema = json::parse_schema(&spec.output_schema)?;
+    json::validate(&schema, output).map_err(HostError::invalid)
+}
+
+/// Fills the approval-card target from the client's template and the verified
+/// input. A template that references a field the input lacks leaves that part
+/// empty; the host never trusts a client-supplied target.
+pub(crate) fn approval_target(spec: &CapabilitySpec, input: &serde_json::Value) -> String {
+    if spec.approval_target.trim().is_empty() {
+        return format!("{} {}", spec.name, summarise(input));
+    }
+    let mut rendered = String::new();
+    let mut rest = spec.approval_target.as_str();
+    while let Some(start) = rest.find('{') {
+        rendered.push_str(&rest[..start]);
+        let Some(end) = rest[start + 1..].find('}') else {
+            rendered.push_str(&rest[start..]);
+            return rendered;
+        };
+        let key = &rest[start + 1..start + end];
+        let value = input
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        rendered.push_str(value);
+        rest = &rest[start + end + 1..];
+    }
+    rendered.push_str(rest);
+    rendered
+}
+
+fn summarise(input: &serde_json::Value) -> String {
+    super::db::truncate(&input.to_string(), 200)
+}
+// Clients: capability declarations, activation generations and perception.
+//
+// The host stores capability names, JSON Schema, presets and approval
+// declarations only. A declared capability with a `tool_name` becomes a tool
+// for the parent while it is granted and the client is active; every
+// operation is still gated by `permission::gate` and dispatched to the client
+// as a `DeviceOperation`.
+pub(crate) mod device;
+
+use super::{
+    db::Store,
+    notify::Notifier,
+    resources::{DeviceHub, Perception, PerceptionEvent},
+    wire,
+};
+use bevy_ecs::prelude::*;
+use ene_rpc as w;
+use rig_ecs::prelude::*;
+use serde_json::Value;
+
+/// How many client tools the host can publish at once.
+pub(crate) const SLOTS: usize = 32;
+
+/// A capability tool slot. Unused slots are `Disabled` and invisible to the
+/// model.
+#[derive(Component, Clone, Debug)]
+pub(crate) struct CapabilityTool {
+    pub(crate) spec: super::client::CapabilitySpec,
+}
+
+/// The slot entities, in registration order.
+#[derive(Resource, Default)]
+pub(crate) struct Slots {
+    pub(crate) entities: Vec<Entity>,
+}
+
+#[derive(Clone, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct DeviceRequestArgs {
+    /// The capability name the client declared.
+    pub(crate) capability: String,
+    /// The capability input, validated against the declared JSON Schema.
+    #[serde(default)]
+    pub(crate) input: Value,
+}
+
+/// Registers the capability tools, the generic dispatcher and their systems.
+pub(crate) struct ClientPlugin;
+
+impl Plugin for ClientPlugin {
+    fn build(&self, app: &mut App) {
+        for index in 0..SLOTS {
+            app.add_open_tool::<Value, _>(
+                &format!("ene_cap_{index}"),
+                "A client capability that is not currently declared.",
+                ToolOptions::default(),
+                device::on_slot_call,
+            );
+        }
+        app.add_open_tool::<DeviceRequestArgs, _>(
+            "device_request",
+            "Run a capability the active client declared. The host binds the target client. \
+             The validated result arrives in a later model call.",
+            ToolOptions::default(),
+            device::on_device_request,
+        )
+        .init_resource::<Slots>()
+        .add_systems(Startup, device::init_slots);
+    }
+}
+
+/// Every registered client, with its live connection state.
+pub(crate) fn clients(store: &Store, hub: &DeviceHub) -> Result<Vec<w::Client>> {
+    let mut clients = Vec::new();
+    for client in store.clients()? {
+        let active: Vec<String> = store
+            .activations()?
+            .into_iter()
+            .filter(|activation| activation.client_id.as_deref() == Some(client.id.as_str()))
+            .map(|activation| activation.companion_id)
+            .collect();
+        clients.push(wire::client(&client, hub.connected(&client.id), active));
+    }
+    Ok(clients)
+}
+
+/// Registers or refreshes a client declaration. `granted_capabilities` from
+/// the client is ignored: the host decides what is granted.
+pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
+    let store = world.resource::<Store>().clone();
+    let capabilities = request.capabilities;
+    let specs: Vec<super::client::CapabilitySpec> = request
+        .capability_specs
+        .iter()
+        .map(wire::capability_spec_from)
+        .collect();
+    super::client::validate_declarations(&capabilities, &specs)?;
+    let client = store.register_client(&super::db::clients::ClientDeclaration {
+        id: &request.id,
+        name: &request.name,
+        platform: &request.platform,
+        capabilities: &capabilities,
+        granted_capabilities: &[],
+        specs: &specs,
+        expected_revision: request.expected_revision,
+    })?;
+    let hub = world.resource::<DeviceHub>();
+    let connected = hub.connected(&client.id);
+    let view = wire::client(&client, connected, Vec::new());
+    notify_client(world, &view);
+    sync_tools(world)?;
+    Ok(view)
 }
 
 pub(crate) fn set_capabilities(
-    app: &mut App,
+    world: &mut World,
     request: w::SetCapabilitiesRequest,
 ) -> Result<w::Client> {
-    validate_id(&request.client_id)?;
-    let store = app.world().resource::<Store>().clone();
-    let mut client = store
-        .client(&request.client_id)?
-        .ok_or_else(|| HostError::not_found("client not found"))?;
-    if client.revision != request.revision {
-        return Err(HostError::conflict("client revision changed"));
-    }
-    client.capabilities = request.capabilities;
-    client.granted_capabilities = request
-        .granted_capabilities
-        .into_iter()
-        .filter(|capability| client.capabilities.contains(capability))
-        .collect();
-    client.revision = next_revision(client.revision)?;
-    client.last_seen = now();
-    store.save_client(&client)?;
-    notify(app.world_mut(), &client, false, Vec::new());
-    Ok(wire::client(&client, false, Vec::new()))
-}
-
-pub(crate) fn activate(app: &mut App, request: w::ActivationRequest) -> Result<w::Activation> {
-    validate_id(&request.companion_id)?;
-    validate_id(&request.client_id)?;
-    let store = app.world().resource::<Store>().clone();
-    store
-        .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
-    let (current_client, current_revision) = store
-        .activation(&request.companion_id)?
-        .unwrap_or_else(|| (String::new(), 1));
-    if current_revision != request.expected_revision {
-        return Err(HostError::conflict("activation revision changed"));
-    }
-    if request.release {
-        store.remove_activation(&request.companion_id)?;
-        app.world_mut()
-            .resource_mut::<super::resources::Perception>()
-            .0
-            .remove(&request.companion_id);
-        notify_activation(app.world_mut(), &request.client_id);
-        return Ok(w::Activation {
-            companion_id: request.companion_id,
-            client_id: None,
-            revision: current_revision.saturating_add(1),
-            ..Default::default()
-        });
-    }
-    store
-        .client(&request.client_id)?
-        .ok_or_else(|| HostError::not_found("client not found"))?;
-    let revision = next_revision(current_revision)?;
-    store.save_activation(&request.companion_id, &request.client_id, revision)?;
-    app.world_mut()
-        .resource_mut::<super::resources::Perception>()
-        .0
-        .remove(&request.companion_id);
-    let _ = current_client;
-    notify_activation(app.world_mut(), &request.client_id);
-    Ok(w::Activation {
-        companion_id: request.companion_id,
-        client_id: Some(request.client_id),
-        revision,
-        ..Default::default()
-    })
-}
-
-pub(crate) fn activate_on_send(world: &mut World, companion_id: &str, client: &str) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    let current = store.activation(companion_id)?;
-    if current.as_ref().is_some_and(|(id, _)| id == client) || store.client(client)?.is_none() {
-        return Ok(());
+    let specs: Vec<super::client::CapabilitySpec> = request
+        .capability_specs
+        .iter()
+        .map(wire::capability_spec_from)
+        .collect();
+    super::client::validate_declarations(&request.capabilities, &specs)?;
+    if !request.granted_capabilities.is_empty() {
+        return Err(HostError::permission(
+            "a client cannot grant capabilities to itself",
+        ));
     }
-    let revision = next_revision(current.map_or(1, |(_, revision)| revision))?;
-    store.save_activation(companion_id, client, revision)?;
-    world
-        .resource_mut::<super::resources::Perception>()
-        .0
-        .remove(companion_id);
-    notify_activation(world, client);
-    Ok(())
+    let client = store.set_capabilities(
+        &request.client_id,
+        &request.capabilities,
+        &specs,
+        request.revision,
+    )?;
+    let hub = world.resource::<DeviceHub>();
+    let view = wire::client(&client, hub.connected(&client.id), Vec::new());
+    notify_client(world, &view);
+    sync_tools(world)?;
+    Ok(view)
 }
 
-fn notify_activation(world: &mut World, client_id: &str) {
-    if let Ok(Some(client)) = world.resource::<Store>().client(client_id) {
-        notify(world, &client, false, Vec::new());
-    }
-}
-
-fn notify(world: &mut World, client: &Client, connected: bool, active: Vec<String>) {
-    let view = wire::client(client, connected, active);
-    world.resource_mut::<Notifier>().push(
-        Some(client.id.clone()),
+fn notify_client(world: &mut World, client: &w::Client) {
+    let mut notifier = world.resource_mut::<Notifier>();
+    notifier.push(
         None,
+        Some(&client.id),
         w::notification::Event::ClientUpdated(Box::new(w::ClientUpdated {
-            client: view.into(),
+            client: Some(client.clone()).into(),
             ..Default::default()
         })),
     );
 }
 
-pub(crate) fn sweep(store: Res<Store>, mut streams: ResMut<DeviceStreams>, mut commands: Commands) {
-    if let Err(error) = sweep_closed(&store, &mut streams)
-        && error.is_storage()
-    {
-        commands.queue(move |world: &mut World| crate::host::fail(world, error.to_string()));
+/// Moves or releases the active client. A move invalidates the old generation:
+/// its open operations fail as `client_moved`, its perception is dropped and
+/// its approvals are expired.
+pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Result<w::Activation> {
+    let store = world.resource::<Store>().clone();
+    store
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    if !request.release {
+        super::db::validate_id(&request.client_id)?;
+        store
+            .client(&request.client_id)?
+            .ok_or_else(|| HostError::not_found("client not found"))?;
     }
+    let previous = store.activation(&request.companion_id)?;
+    let client = (!request.release).then_some(request.client_id.as_str());
+    let activation = store.activate(&request.companion_id, client, request.expected_revision)?;
+    if let Some(previous) = previous
+        && let Some(old_client) = previous.client_id
+        && (client != Some(old_client.as_str()) || previous.revision != activation.revision)
+    {
+        store.fail_operations_of(&old_client, previous.revision)?;
+        store.expire_approvals_for(&request.companion_id)?;
+        world
+            .resource_mut::<Perception>()
+            .events
+            .remove(&request.companion_id);
+        // The old client keeps its stream but is no longer the active one.
+        let old = store.client(&old_client)?;
+        if let Some(old) = old {
+            let hub = world.resource::<DeviceHub>();
+            let view = wire::client(&old, hub.connected(&old.id), Vec::new());
+            notify_client(world, &view);
+        }
+    }
+    {
+        let mut notifier = world.resource_mut::<Notifier>();
+        notifier.push(
+            Some(&request.companion_id),
+            None,
+            w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
+        );
+    }
+    sync_tools(world)?;
+    Ok(wire::activation(&activation))
 }
 
+/// Projects a perception event into the companion's dynamic tail. A stale
+/// generation is discarded.
 pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
-    let text = match event.event.as_ref() {
-        Some(w::perception_event::Event::PerceptionSummary(summary)) => {
-            if summary.summary.trim().is_empty() {
-                None
-            } else {
-                Some(summary.summary.clone())
-            }
-        }
-        Some(w::perception_event::Event::ActiveWindow(window)) => {
-            let title = window.title.trim();
-            if title.is_empty() {
-                None
-            } else {
-                Some(format!("{} ({})", title, window.app_id))
-            }
-        }
-        Some(w::perception_event::Event::UserActivity(activity)) => Some(if activity.is_active {
-            "ユーザーは操作中です".into()
-        } else {
-            format!("ユーザーは{}秒間無操作です", activity.idle_seconds)
-        }),
-        None => None,
+    let store = world.resource::<Store>().clone();
+    super::db::validate_id(&event.client_id)?;
+    store
+        .client(&event.client_id)?
+        .ok_or_else(|| HostError::not_found("client not found"))?;
+    let activations = store.activations()?;
+    let Some(activation) = activations
+        .into_iter()
+        .find(|activation| activation.client_id.as_deref() == Some(event.client_id.as_str()))
+    else {
+        // A connected client that is not active produces nothing the head may
+        // act on. Not an error: the event is simply discarded.
+        return Ok(());
     };
-    if let Some(text) = text {
-        let client_id = event.client_id.as_str();
-        if !client_id.is_empty() {
-            let text = crate::truncate_chars(&text, 1000);
-            let companions: Vec<String> = world
-                .resource::<Store>()
-                .activations()?
-                .into_iter()
-                .filter(|(_, client, _)| client == client_id)
-                .map(|(companion, _, _)| companion)
-                .collect();
-            let mut perception = world.resource_mut::<super::resources::Perception>();
-            for companion in companions {
-                perception.0.insert(companion, text.clone());
+    if event.activation_revision != activation.revision {
+        return Ok(());
+    }
+    let Some(summary) = perception_summary(&event) else {
+        return Ok(());
+    };
+    world
+        .resource_mut::<Perception>()
+        .events
+        .insert(activation.companion_id.clone(), PerceptionEvent { summary });
+    Ok(())
+}
+
+fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
+    let summary = match event.event.as_ref()? {
+        w::perception_event::Event::ActiveWindow(active) => {
+            if active.title.is_empty() && active.app_id.is_empty() {
+                return None;
+            }
+            format!("アクティブウィンドウ: {} ({})", active.title, active.app_id)
+        }
+        w::perception_event::Event::UserActivity(state) => {
+            if state.is_active {
+                "ユーザーは操作中です".to_owned()
+            } else {
+                format!("ユーザーは離席中です (idle {} 秒)", state.idle_seconds)
+            }
+        }
+        w::perception_event::Event::PerceptionSummary(summary) => {
+            if summary.summary.trim().is_empty() {
+                return None;
+            }
+            summary.summary.clone()
+        }
+    };
+    Some(super::db::truncate(&summary, 1_000))
+}
+
+/// Repairs the published capability tools after any declaration or activation
+/// change. Only granted capabilities of active clients with a `tool_name` are
+/// visible, and a duplicate tool name is refused.
+pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
+    let store = world.resource::<Store>().clone();
+    let mut desired: Vec<super::client::CapabilitySpec> = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for activation in store.activations()? {
+        let Some(client_id) = activation.client_id else {
+            continue;
+        };
+        let Some(client) = store.client(&client_id)? else {
+            continue;
+        };
+        for spec in client.tool_specs() {
+            if !names.insert(spec.tool_name.clone()) {
+                continue;
+            }
+            desired.push(spec.clone());
+        }
+    }
+    let slots = world.resource::<Slots>().entities.clone();
+    for (index, slot) in slots.iter().copied().enumerate() {
+        match desired.get(index) {
+            Some(spec) => {
+                let definition = rig_core::completion::ToolDefinition::new(
+                    rig_core::message::ToolName::new(spec.tool_name.clone())
+                        .map_err(|_| HostError::internal("a capability tool name was empty"))?,
+                    spec.tool_description(),
+                    super::json::parse_schema(&spec.input_schema)?,
+                );
+                world.entity_mut(slot).insert((
+                    rig_ecs::prelude::ToolDef(std::sync::Arc::new(definition)),
+                    CapabilityTool { spec: spec.clone() },
+                ));
+                world.entity_mut(slot).remove::<Disabled>();
+            }
+            None => {
+                world.entity_mut(slot).remove::<CapabilityTool>();
+                world.entity_mut(slot).insert(Disabled);
             }
         }
     }
     Ok(())
-}
-
-/// Fire-and-forget host-to-client operation. Used by `eye.watch` and
-/// `body.motion`, which do not wait for a device result.
-pub(crate) fn send_operation(
-    world: &mut World,
-    companion: &str,
-    capability: &str,
-    input: String,
-) -> Result<String> {
-    let store = world.resource::<Store>().clone();
-    let client_id = store
-        .activation(companion)?
-        .map(|(client, _)| client)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| HostError::conflict("no active client"))?;
-    let client = store
-        .client(&client_id)?
-        .ok_or_else(|| HostError::not_found("client not found"))?;
-    if !client
-        .granted_capabilities
-        .iter()
-        .any(|granted| granted == capability)
-    {
-        return Err(HostError::permission("capability_not_granted"));
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    let mut record = device::DeviceOperation {
-        id: id.clone(),
-        client_id: client_id.clone(),
-        companion_id: companion.into(),
-        capability: capability.into(),
-        input: super::db::parse_json(&input)?,
-        status: device::DeviceStatus::Pending,
-        result: None,
-        subscription_id: None,
-        created_at: now(),
-        updated_at: now(),
-    };
-    store.save_device(&record)?;
-    if let Some(sender) = world.resource::<DeviceStreams>().0.get(&client_id) {
-        let subscription = format!("{client_id}:{id}");
-        if sender
-            .try_send(wire::device_task(&record, &subscription))
-            .is_ok()
-        {
-            record.status = device::DeviceStatus::Dispatched;
-            record.subscription_id = Some(subscription);
-            store.save_device(&record)?;
-        }
-    }
-    Ok(id)
 }

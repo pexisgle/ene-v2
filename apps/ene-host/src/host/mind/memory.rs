@@ -1,60 +1,40 @@
-//! Episodic memory, its provenance, visibility and control.
-use serde_json::{Value, json};
+//! Episodic memory: ownership, sharing, recall scoring and the semantics of
+//! forgetting (docs/design/mind.md §3-§4).
+//!
+//! Forgetting is never a delete or a boolean flag: it lowers `importance` and
+//! lets the scoring function make the memory rarer on its own.
+use super::super::db::epoch;
 
+/// A memory owned by another companion and shared with every companion.
 pub(crate) const SHARED_AUDIENCE: &str = "*";
+pub(crate) const MAX_IMPORTANCE: u8 = 10;
+/// Pinned memories (`importance == 10`) are injected within this budget.
+pub(crate) const PINNED_BUDGET_CHARS: usize = 4_000;
 
+/// Why a recall runs. Automatic recall skips what the user asked to forget;
+/// an explicit question about the past may reach everything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Acquisition {
-    DirectExperience,
-    UserStatement,
-    Report,
-    Shared,
-    Inference,
+pub(crate) enum RecallMode {
+    Auto,
+    Explicit,
 }
 
-impl Acquisition {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::DirectExperience,
-        Self::UserStatement,
-        Self::Report,
-        Self::Shared,
-        Self::Inference,
-    ];
-
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|acquisition| acquisition.as_str() == value)
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
+impl RecallMode {
+    pub(crate) fn minimum_importance(self) -> u8 {
         match self {
-            Self::DirectExperience => "direct_experience",
-            Self::UserStatement => "user_statement",
-            Self::Report => "report",
-            Self::Shared => "shared",
-            Self::Inference => "inference",
+            Self::Auto => 2,
+            Self::Explicit => 0,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RecallMode {
-    /// Every-turn injection: forgotten memories are left out.
-    Automatic,
-    /// An explicit `mind_recall`: everything the viewer may see is eligible.
-    Explicit,
-}
-
-#[derive(Clone, Debug)]
+/// One stored memory as the host sees it.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Memory {
     pub(crate) id: String,
     pub(crate) owner: String,
     pub(crate) audiences: Vec<String>,
     pub(crate) content: String,
-    pub(crate) description: String,
-    pub(crate) appraisal: String,
-    pub(crate) acquisition: Acquisition,
     pub(crate) importance: u8,
     pub(crate) occurred_at: Option<String>,
     pub(crate) recorded_at: String,
@@ -62,102 +42,169 @@ pub(crate) struct Memory {
     pub(crate) memory_revision: u64,
     pub(crate) content_revision: u64,
     pub(crate) emotion: Option<String>,
-    pub(crate) source_context: Value,
-    pub(crate) supersedes: Vec<String>,
-    pub(crate) created_by: String,
-    pub(crate) updated_at: String,
+    pub(crate) source_context: serde_json::Value,
 }
 
 impl Memory {
-    pub(crate) fn visible_to(&self, viewer: &str) -> bool {
-        self.owner == viewer
+    /// Whether `companion` may recall this memory. The owner always may.
+    pub(crate) fn visible_to(&self, companion: &str) -> bool {
+        self.owner == companion
             || self
                 .audiences
                 .iter()
-                .any(|audience| audience == viewer || audience == SHARED_AUDIENCE)
-    }
-
-    /// The memory as a tool or RPC client sees it.
-    pub(crate) fn view_for(&self, viewer: &str) -> Value {
-        if self.owner != viewer {
-            return json!({
-                "id": self.id,
-                "content": self.content,
-                "importance": self.importance,
-                "occurred_at": self.occurred_at,
-                "recorded_at": self.recorded_at,
-            });
-        }
-        json!({
-            "id": self.id,
-            "owner": self.owner,
-            "audiences": self.audiences,
-            "content": self.content,
-            "description": self.description,
-            "appraisal": self.appraisal,
-            "acquisition": self.acquisition.as_str(),
-            "importance": self.importance,
-            "occurred_at": self.occurred_at,
-            "recorded_at": self.recorded_at,
-            "last_accessed_at": self.last_accessed_at,
-            "revision": self.memory_revision,
-            "content_revision": self.content_revision,
-            "emotion": self.emotion,
-            "sources": self.source_context,
-            "supersedes": self.supersedes,
-            "created_by": self.created_by,
-        })
+                .any(|audience| audience == SHARED_AUDIENCE || audience == companion)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MemoryAction {
-    Forget,
-    Remember,
-    Share,
-    Unshare,
+/// A recall candidate with the score components kept apart for the model.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Scored {
+    pub(crate) memory: Memory,
+    pub(crate) score: f64,
+    pub(crate) relevance: f64,
 }
 
-impl MemoryAction {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "forget" => Some(Self::Forget),
-            "remember" => Some(Self::Remember),
-            "share" => Some(Self::Share),
-            "unshare" => Some(Self::Unshare),
-            _ => None,
+/// Recall score from docs/design/mind.md §4.1: a decay coefficient by
+/// importance times the weighted relevance, importance and recency.
+pub(crate) fn score(
+    relevance: f64,
+    importance: u8,
+    last_touched: Option<&str>,
+    occurred_at: Option<&str>,
+    recorded_at: &str,
+    now_epoch: i64,
+) -> f64 {
+    let importance = f64::from(importance) / 10.0;
+    let decay = (importance / 0.3).min(1.0);
+    let relevance = relevance.clamp(0.0, 1.0);
+    let touched = last_touched.or(occurred_at).unwrap_or(recorded_at);
+    let days = epoch(touched)
+        .map(|then| ((now_epoch - then) as f64 / 86_400.0).max(0.0))
+        .unwrap_or(0.0);
+    let recency = (-0.05 * days).exp();
+    decay * (0.5 * relevance + 0.3 * importance + 0.2 * recency)
+}
+
+/// Reciprocal Rank Fusion over the ranked lists that exist. Semantic ranking
+/// is currently absent (no embedding connection), so the normalisation uses
+/// the lists present rather than a hypothetical second list.
+pub(crate) fn fuse(lists: &[&[String]], k: f64) -> Vec<(String, f64)> {
+    use std::collections::HashMap;
+    let mut fused: HashMap<&str, f64> = HashMap::new();
+    for list in lists {
+        for (index, id) in list.iter().enumerate() {
+            *fused.entry(id.as_str()).or_default() += 1.0 / (k + (index + 1) as f64);
         }
     }
+    let ceiling = lists.iter().filter(|list| !list.is_empty()).count().max(1) as f64 / (k + 1.0);
+    let mut ranked: Vec<(String, f64)> = fused
+        .into_iter()
+        .map(|(id, value)| (id.to_owned(), (value / ceiling).clamp(0.0, 1.0)))
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    ranked
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct MindOperation {
-    pub(crate) operation_id: String,
-    pub(crate) hash: String,
-    pub(crate) response: String,
+/// Splits a query into FTS5 tokens: whitespace and punctuation only. Tokens
+/// shorter than three characters cannot match a trigram index, so they are
+/// dropped and the caller falls back to `LIKE`.
+pub(crate) fn tokens(query: &str) -> Vec<String> {
+    query
+        .split(|character: char| character.is_whitespace() || is_punctuation(character))
+        .map(|token| token.trim())
+        .filter(|token| token.chars().count() >= 3)
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect()
 }
 
-// Memory control and the read side used by the mind tools.
-use super::{mind_view, notify_mind};
-use crate::host::{db::Result, db::Store, error::HostError};
-use bevy_ecs::prelude::*;
-use ene_rpc as w;
+fn is_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        ',' | '.'
+            | '、'
+            | '。'
+            | '!'
+            | '?'
+            | '！'
+            | '？'
+            | ':'
+            | ';'
+            | '「'
+            | '」'
+            | '('
+            | ')'
+            | '（'
+            | '）'
+            | '['
+            | ']'
+            | '【'
+            | '】'
+            | '・'
+            | '…'
+            | '/'
+            | '\\'
+            | '"'
+            | '\''
+            | '“'
+            | '”'
+    )
+}
 
-pub(crate) fn control_memory(
-    world: &mut World,
-    request: w::MemoryControlRequest,
-) -> Result<w::MemoryControlResult> {
-    let action = MemoryAction::parse(&request.action)
-        .ok_or_else(|| HostError::invalid("unknown memory action"))?;
-    let store = world.resource::<Store>().clone();
-    let memory = store.control_memory(&request.companion_id, &request.memory_id, action)?;
-    let view = mind_view(&store, &request.companion_id)?;
-    notify_mind(world, &request.companion_id, &view);
-    Ok(w::MemoryControlResult {
-        memory_id: memory.id,
-        importance: u32::from(memory.importance),
-        audiences: memory.audiences,
-        revision: memory.memory_revision,
-        ..Default::default()
-    })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory(importance: u8) -> Memory {
+        Memory {
+            id: "m1".into(),
+            owner: "ene".into(),
+            audiences: vec![SHARED_AUDIENCE.into()],
+            content: "the user prefers tea".into(),
+            importance,
+            occurred_at: None,
+            recorded_at: "2026-01-01T00:00:00Z".into(),
+            last_accessed_at: None,
+            memory_revision: 1,
+            content_revision: 1,
+            emotion: None,
+            source_context: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn forgetting_lowers_the_score_without_deleting() {
+        let now = epoch("2026-01-02T00:00:00Z").unwrap();
+        let important = score(1.0, 10, None, None, "2026-01-01T00:00:00Z", now);
+        let forgotten = score(1.0, 0, None, None, "2026-01-01T00:00:00Z", now);
+        assert!(important > forgotten);
+        assert_eq!(forgotten, 0.0);
+        assert!(memory(1).visible_to("other"));
+    }
+
+    #[test]
+    fn sharing_filters_and_photocopies_are_not_leaked() {
+        let mut private = memory(5);
+        private.audiences = vec![];
+        assert!(private.visible_to("ene"));
+        assert!(!private.visible_to("other"));
+        let shared = memory(5);
+        assert!(shared.visible_to("other"));
+    }
+
+    #[test]
+    fn fusion_ranks_the_top_of_each_list() {
+        let first = vec!["a".to_owned(), "b".to_owned()];
+        let fused = fuse(&[first.as_slice()], 60.0);
+        assert_eq!(fused[0].0, "a");
+        assert!((fused[0].1 - 1.0).abs() < 1e-9);
+        assert!(fused[1].1 < fused[0].1);
+        assert!(tokens("hello world").len() == 2);
+        assert!(tokens("犬 AI").is_empty());
+        assert_eq!(tokens("東京都 の").len(), 1);
+    }
 }

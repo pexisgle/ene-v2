@@ -1,5 +1,6 @@
 //! Process startup, private discovery and graceful shutdown of the host API.
 mod access;
+mod auth;
 pub(crate) mod rpc;
 
 use self::rpc::router;
@@ -14,15 +15,10 @@ ENE_HOST_STATE_DIR overrides the SQLite/rig directory.\n\
 ENE_HOST_RUNTIME_DIR overrides the discovery/lock directory.";
 
 pub fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let result = runtime.block_on(serve());
-    // Keyring calls run on blocking slots and cannot be aborted by Tokio.
-    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
-    result
+    serve()
 }
 
+#[tokio::main(flavor = "multi_thread")]
 async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     if let Some(argument) = std::env::args_os().nth(1) {
         if argument == "-h" || argument == "--help" {

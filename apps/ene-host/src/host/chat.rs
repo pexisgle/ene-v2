@@ -1,494 +1,199 @@
-//! Conversation binding, input acceptance, idempotent delivery and history.
+//! Chat: idempotent acceptance, stop and the history projection.
 use super::{
-    agent::AgentKey,
-    client, compaction,
-    db::{Result, Store, digest, validate_id, validate_key},
-    error::{Failure, HostError},
-    model::{self, Binding},
-    resources::{HostState, Inactivity, Models},
-    tick,
+    agent,
+    db::{Result, Store, digest, now},
+    error::HostError,
 };
-use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use rig_core::completion::Message;
-use rig_core::conversation::{Aside, Author, AuthorKind, MessageId, RequestId, TurnEnd};
+use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
-use rig_memory::{HeuristicTokenCounter, TokenCounter};
 use serde_json::json;
-use uuid::Uuid;
 
-/// The ingress limit for one user message: 8,000 tokens, about 32,000
-/// characters. A message that alone could fill the window is refused before
-/// it reaches the conversation loop; it is never truncated.
+/// The ingress limits from docs/design/compaction.md §5.1.
 pub(crate) const MAX_INPUT_TOKENS: usize = 8_000;
 pub(crate) const MAX_INPUT_CHARS: usize = 32_000;
-const MAX_PENDING_INPUTS: usize = 32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TurnState {
-    Running,
-    Answered,
-    Stopped,
-    Failed,
-}
-
-impl TurnState {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "streaming",
-            Self::Answered => "answered",
-            Self::Stopped => "stopped",
-            Self::Failed => "failed",
-        }
+/// Accepts a user message. The returned id is only produced after the message
+/// is in the session log; the same request key returns the same id.
+pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w::Acceptance> {
+    if request.text.trim().is_empty() {
+        return Err(HostError::invalid("a message is required"));
     }
-}
+    if request.text.chars().count() > MAX_INPUT_CHARS {
+        return Err(HostError::invalid("the message is too large"));
+    }
+    if estimate_tokens(&request.text) > MAX_INPUT_TOKENS {
+        return Err(HostError::invalid("the message is too large"));
+    }
+    super::db::validate_id(&request.companion_id)?;
+    if !request.request_key.is_empty() {
+        super::db::validate_id(&request.request_key)?;
+    }
+    let text = request.text.clone();
+    let hash = digest(format!("{}:{}", request.companion_id, text).as_bytes());
+    let world = app.world_mut();
+    let store = world.resource::<Store>().clone();
+    store
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let agent = agent::agent_of(world, &request.companion_id)
+        .ok_or_else(|| HostError::not_found("companion agent not found"))?;
+    agent::ensure_model(world, agent)?;
 
-pub(crate) const PARENT_TOOLS: &[&str] = &[
-    "mind_recall",
-    "mind_read",
-    "mind_update",
-    "start_work",
-    "send_work",
-    "stop_work",
-    "list_works",
-    "set_eye_watch",
-    "body_motion",
-    "noop",
-    "device_request",
-];
-pub(crate) const WORK_TOOLS: &[&str] = &["report", "device_request"];
-
-pub(crate) fn tool_access(key: &AgentKey) -> ToolAccess {
-    let names = if key.is_work() {
-        WORK_TOOLS
-    } else {
-        PARENT_TOOLS
-    };
-    ToolAccess::Only(names.iter().map(|name| (*name).to_owned()).collect())
-}
-
-pub(crate) fn find_agent(world: &mut World, key: &AgentKey) -> Option<Entity> {
-    world
-        .query::<(Entity, &AgentKey)>()
-        .iter(world)
-        .find_map(|(entity, found)| (found == key).then_some(entity))
-}
-
-pub(crate) fn find_target(world: &mut World, key: &AgentKey) -> Result<Option<Entity>> {
-    let store = world.resource::<Store>();
-    match key {
-        AgentKey::Parent { companion } => {
-            store
-                .companion(companion)?
-                .ok_or_else(|| HostError::not_found("companion not found"))?;
-        }
-        AgentKey::Work { companion, work } => {
-            let session = store
-                .work(work)?
-                .ok_or_else(|| HostError::not_found("work not found"))?;
-            if session.companion_id != *companion {
-                return Err(HostError::not_found("work not found"));
+    // A receipt is only trusted when the input it names is actually in the
+    // conversation; an orphan receipt is ignored and a new accept proceeds.
+    if !request.request_key.is_empty() {
+        for (key, request_id, recorded) in receipts(world, agent) {
+            if key != request.request_key {
+                continue;
+            }
+            if recorded != hash {
+                return Err(HostError::already_exists(
+                    "this request key already accepted different content",
+                ));
+            }
+            if has_input(world, agent, &request_id) {
+                return Ok(w::Acceptance {
+                    request_id,
+                    ..Default::default()
+                });
             }
         }
     }
-    let Some(entity) = find_agent(world, key) else {
-        return Ok(None);
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let author = Author {
+        request: Some(RequestId(request_id.clone())),
+        ..Author::user()
     };
-    attach_agent(world, entity, key);
-    Ok(Some(entity))
-}
-
-pub(crate) fn ensure_target(world: &mut World, key: &AgentKey) -> Result<Entity> {
-    Ok(match find_target(world, key)? {
-        Some(entity) => entity,
-        None => spawn_agent(world, key),
-    })
-}
-
-pub(crate) fn spawn_agent(world: &mut World, key: &AgentKey) -> Entity {
-    let entity = world
-        .spawn((
-            Agent,
-            AgentId(key.agent_id()),
-            key.clone(),
-            SystemPrompt(String::new()),
-        ))
-        .id();
-    attach_agent(world, entity, key);
-    entity
-}
-
-pub(crate) fn attach_agent(world: &mut World, entity: Entity, key: &AgentKey) {
-    world
-        .entity_mut(entity)
-        .insert((key.clone(), tool_access(key)));
-    if key.is_work() {
-        return;
-    }
-    let Ok(Some(companion)) = world.resource::<Store>().companion(key.companion()) else {
-        return;
-    };
-    world
-        .entity_mut(entity)
-        .insert(SystemPrompt(companion.mind.clone()));
-    set_sections(world, entity, &companion);
-}
-
-fn set_sections(world: &mut World, agent: Entity, companion: &super::mind::Companion) {
-    let existing: Vec<Entity> = world
-        .query::<(Entity, &SectionOf)>()
-        .iter(world)
-        .filter(|(_, section)| section.0 == agent)
-        .map(|(entity, _)| entity)
-        .collect();
-    for entity in existing {
-        let _ = world.despawn(entity);
-    }
-    for (order, tag, text) in prompt_sections(companion) {
-        world.spawn((PromptSection::new(order, tag, text), SectionOf(agent)));
-    }
-}
-
-fn prompt_sections(companion: &super::mind::Companion) -> Vec<(i32, String, String)> {
-    let mut sections = Vec::new();
-    for (index, (tag, items)) in companion.profile.sections().into_iter().enumerate() {
-        if items.is_empty() {
-            continue;
-        }
-        let text = items
-            .iter()
-            .map(|item| format!("- {item}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        sections.push((PromptSection::ORDER_ROLE + index as i32, tag.into(), text));
-    }
-    sections.push((
-        PromptSection::ORDER_PROJECT,
-        "ene".into(),
-        "作業報告には、ユーザーへ伝える必要がある分だけ答えてください。伝える必要がなければ空の返答にして構いません。"
-            .into(),
-    ));
-    sections
-}
-
-pub(crate) fn refresh_prompt(world: &mut World, companion_id: &str) {
-    let Ok(Some(companion)) = world.resource::<Store>().companion(companion_id) else {
-        return;
-    };
-    let Some(agent) = find_agent(world, &AgentKey::parent(companion_id)) else {
-        return;
-    };
-    world
-        .entity_mut(agent)
-        .insert(SystemPrompt(companion.mind.clone()));
-    set_sections(world, agent, &companion);
-}
-
-pub(crate) fn ensure_model(
-    world: &mut World,
-    entity: Entity,
-    companion_id: &str,
-    purpose: model::Purpose,
-) -> Result<()> {
-    if let Some(binding) = world.get::<Binding>(entity)
-        && model::unchanged(world.resource::<Store>(), companion_id, purpose, binding)?
+    world.trigger(Deliver::new(agent, text, DeliveryMode::Steer).with_author(author));
+    super::tick(app);
+    if let Some(reason) = app
+        .world()
+        .resource::<super::resources::HostState>()
+        .failed
+        .clone()
     {
-        return Ok(());
+        return Err(HostError::unavailable(reason));
     }
-    let models = world.resource::<Models>().0.clone();
-    let store = world.resource::<Store>().clone();
-    if let Some(old) = world.get::<Binding>(entity) {
-        model::revoke(old);
+    if !has_input(app.world_mut(), agent, &request_id) {
+        return Err(HostError::unavailable("the input was not saved"));
     }
-    world
-        .entity_mut(entity)
-        .remove::<(Binding, rig_ecs::model::Connection)>();
-    let (connection, binding) = models.connect(&store, companion_id, purpose)?;
-    world.entity_mut(entity).insert((connection, binding));
-    Ok(())
-}
-
-pub(crate) fn has_input(world: &mut World, entity: Entity, id: &str) -> bool {
-    world
-        .get::<Conversation>(entity)
-        .is_some_and(|conversation| {
-            conversation.entries().any(|entry| {
-                entry
-                    .author
-                    .and_then(|author| author.request.as_ref())
-                    .is_some_and(|request| request.0 == id)
-            })
-        })
-        || world
-            .get::<Conversation>(entity)
-            .is_some_and(|conversation| {
-                conversation.asides().any(|(_, aside)| {
-                    aside.kind == "ene.turn_input"
-                        && aside.value.get("input_id").and_then(|value| value.as_str()) == Some(id)
-                })
-            })
-        || world
-            .query_filtered::<(&Incoming, &ForAgent), (With<Started>, Without<Outcome>)>()
-            .iter(world)
-            .any(|(input, agent)| {
-                agent.0 == entity
-                    && input
-                        .author
-                        .request
-                        .as_ref()
-                        .is_some_and(|request| request.0 == id)
-            })
-}
-
-pub(crate) fn has_request(world: &mut World, entity: Entity, id: &str) -> bool {
-    has_input(world, entity, id)
-        || world
-            .get::<Conversation>(entity)
-            .is_some_and(|conversation| {
-                conversation.asides().any(|(_, aside)| {
-                    aside.kind == "ene.accepted"
-                        && (aside.value.as_str() == Some(id)
-                            || aside
-                                .value
-                                .get("request_id")
-                                .and_then(|value| value.as_str())
-                                == Some(id))
-                })
-            })
-}
-
-pub(crate) fn turn_state(end: Option<&TurnEnd>) -> (TurnState, Option<Failure>) {
-    match end {
-        None => (TurnState::Running, None),
-        Some(TurnEnd::Answered { .. }) => (TurnState::Answered, None),
-        Some(TurnEnd::Stopped { why, .. }) => (
-            TurnState::Stopped,
-            why.as_deref()
-                .map(|why| Failure::new("stopped", crate::truncate_chars(why, 1024))),
-        ),
-        Some(TurnEnd::Failed { why }) => (
-            TurnState::Failed,
-            Some(Failure::new("failed", crate::truncate_chars(why, 1024))),
-        ),
-    }
-}
-
-pub(crate) fn last_assistant(
-    conversation: &Conversation,
-    start: MessageId,
-) -> Option<(u64, String)> {
-    conversation
-        .entries()
-        .rev()
-        .take_while(|entry| entry.id >= start)
-        .find_map(|entry| match entry.message {
-            message::Message::Assistant(assistant) => Some((entry.id.get(), assistant.text())),
-            _ => None,
-        })
-}
-
-pub(crate) fn input_of(conversation: &Conversation, start: MessageId) -> Option<String> {
-    conversation
-        .request(start)
-        .and_then(|entry| entry.author)
-        .and_then(|author| author.request.as_ref())
-        .map(|request| request.0.clone())
-        .or_else(|| {
-            conversation.asides().find_map(|(_, aside)| {
-                (aside.kind == "ene.turn_input"
-                    && aside.value["start"].as_u64() == Some(start.get()))
-                .then(|| aside.value["input_id"].as_str().map(str::to_owned))
-                .flatten()
-            })
-        })
-}
-
-pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w::Acceptance> {
-    validate_id(&request.companion_id)?;
-    validate_key(&request.request_key)?;
-    if request.text.trim().is_empty() || input_too_large(&request.text) {
-        return Err(HostError::invalid(
-            "message exceeds the 8,000-token ingress limit",
+    let world = app.world_mut();
+    if let Some(mut conversation) = world.get_mut::<Conversation>(agent) {
+        conversation.add_aside(Aside::new(
+            "ene.accepted",
+            Author::plugin("ene-host"),
+            json!({
+                "request_key": request.request_key,
+                "request_id": request_id,
+                "hash": hash,
+                "accepted_at": now(),
+            }),
         ));
     }
-    if !request.client_id.is_empty() {
-        validate_id(&request.client_id)?;
-    }
-    let key = AgentKey::parent(request.companion_id);
-    let entity = ensure_target(app.world_mut(), &key)?;
-    let hash = digest(format!("{}:{}", key.companion(), request.text).as_bytes());
-    if let Some(accepted) = accepted(app.world_mut(), entity, &request.request_key) {
-        if accepted.hash != hash {
-            return Err(HostError::already_exists(
-                "request key was used with different content",
-            ));
-        }
-        return Ok(w::Acceptance {
-            request_id: accepted.request_id,
-            ..Default::default()
-        });
-    }
-    if !request.client_id.is_empty() {
-        client::activate_on_send(app.world_mut(), key.companion(), &request.client_id)?;
-    }
-    // A user who speaks while a background summary runs wants the reply, not
-    // the summary: drop the in-flight job and schedule it for the next idle
-    // period. The summary view is never written over the live log.
-    compaction::interrupt(app.world_mut(), key.companion());
-    let now = app.world().resource::<Time<Virtual>>().elapsed();
-    app.world_mut()
-        .resource_mut::<Inactivity>()
-        .0
-        .insert(key.companion().into(), now);
-    let request_id = deliver_accepted(app, entity, &request.request_key, hash, request.text)?;
+    super::tick(app);
     Ok(w::Acceptance {
         request_id,
         ..Default::default()
     })
 }
 
-fn input_too_large(text: &str) -> bool {
-    text.chars().count() > MAX_INPUT_CHARS
-        || HeuristicTokenCounter::default().count(&Message::user(text)) > MAX_INPUT_TOKENS
-}
-
-pub(crate) fn deliver_accepted(
-    app: &mut App,
-    entity: Entity,
-    request_key: &str,
-    hash: String,
-    text: String,
-) -> Result<String> {
-    let pending = app
-        .world_mut()
-        .query_filtered::<&ForAgent, (With<Incoming>, Without<Settled>)>()
-        .iter(app.world())
-        .filter(|agent| agent.0 == entity)
-        .count();
-    if pending >= MAX_PENDING_INPUTS {
-        return Err(HostError::exhausted("inbox is full"));
-    }
-    let request_id = Uuid::new_v4().to_string();
-    let author = Author {
-        request: Some(RequestId(request_id.clone())),
-        ..Author::user()
+fn receipts(world: &World, agent: Entity) -> Vec<(String, String, Vec<u8>)> {
+    let Some(conversation) = world.get::<Conversation>(agent) else {
+        return Vec::new();
     };
-    app.world_mut()
-        .trigger(Deliver::new(entity, text, DeliveryMode::Steer).with_author(author));
-    let aside = record_accepted(app.world_mut(), entity, request_key, &hash, &request_id);
-    tick(app);
-    let failed = app.world().resource::<HostState>().failed.is_some();
-    if failed || !has_input(app.world_mut(), entity, &request_id) {
-        if let (Some(aside), Some(mut conversation)) =
-            (aside, app.world_mut().get_mut::<Conversation>(entity))
-        {
-            conversation.remove_aside(aside);
-        }
-        return Err(HostError::unavailable("input was not saved"));
-    }
-    Ok(request_id)
-}
-
-pub(crate) fn accepted(world: &mut World, entity: Entity, request_key: &str) -> Option<Accepted> {
-    let candidates: Vec<(String, String)> = world
-        .get::<Conversation>(entity)
-        .map(|conversation| {
-            conversation
-                .asides()
-                .filter_map(|(_, aside)| {
-                    (aside.kind == "ene.accepted"
-                        && aside
+    conversation
+        .asides()
+        .filter(|(_, aside)| aside.kind == "ene.accepted")
+        .filter_map(|(_, aside)| {
+            Some((
+                aside.value.get("request_key")?.as_str()?.to_owned(),
+                aside.value.get("request_id")?.as_str()?.to_owned(),
+                aside
+                    .value
+                    .get("hash")?
+                    .as_str()
+                    .map(|hash| hash.as_bytes().to_vec())
+                    .or_else(|| {
+                        aside
                             .value
-                            .get("request_key")
-                            .and_then(|value| value.as_str())
-                            == Some(request_key))
-                    .then(|| {
-                        Some((
-                            aside.value.get("hash")?.as_str()?.to_owned(),
-                            aside.value.get("request_id")?.as_str()?.to_owned(),
-                        ))
-                    })
-                    .flatten()
-                })
-                .collect()
+                            .get("hash")
+                            .and_then(|hash| hash.as_array())
+                            .map(|bytes| {
+                                bytes
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_u64)
+                                    .map(|byte| byte as u8)
+                                    .collect()
+                            })
+                    })?,
+            ))
         })
-        .unwrap_or_default();
-    candidates
-        .into_iter()
-        .find(|(_, request_id)| has_input(world, entity, request_id))
-        .map(|(hash, request_id)| Accepted { hash, request_id })
+        .collect()
 }
 
-pub(crate) struct Accepted {
-    pub(crate) hash: String,
-    pub(crate) request_id: String,
+/// A conservative character-based token estimate; the provider counts tokens
+/// itself and the host only needs a safe margin.
+fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(3)
 }
 
-pub(crate) fn record_accepted(
-    world: &mut World,
-    entity: Entity,
-    request_key: &str,
-    hash: &str,
-    request_id: &str,
-) -> Option<rig_core::conversation::AsideId> {
-    let mut conversation = world.get_mut::<Conversation>(entity)?;
-    Some(conversation.add_aside(Aside::new(
-        "ene.accepted",
-        Author::rig(),
-        json!({
-            "request_key": request_key,
-            "hash": hash,
-            "request_id": request_id,
-        }),
-    )))
-}
-
-pub(crate) fn stop(app: &mut App, companion_id: &str) -> Result<()> {
-    let key = AgentKey::parent(companion_id);
-    let entity = match find_target(app.world_mut(), &key) {
-        Ok(Some(entity)) => entity,
-        Ok(None) => return Ok(()),
-        Err(HostError::NotFound(_)) => return Ok(()),
-        Err(error) => return Err(error),
+fn has_input(world: &World, agent: Entity, request_id: &str) -> bool {
+    let Some(conversation) = world.get::<Conversation>(agent) else {
+        return false;
     };
-    app.world_mut().trigger(StopTurn {
-        entity,
-        reason: Some("user stopped".into()),
-    });
-    tick(app);
+    conversation.entries().any(|entry| {
+        entry
+            .author
+            .and_then(|author| author.request.as_ref())
+            .is_some_and(|request| request.0 == request_id && entry.is_request())
+    })
+}
+
+/// Stops the current turn.
+pub(crate) fn stop(world: &mut World, request: w::StopRequest) -> Result<()> {
+    let store = world.resource::<Store>().clone();
+    store
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    if let Some(agent) = agent::agent_of(world, &request.companion_id) {
+        world.trigger(StopTurn {
+            entity: agent,
+            reason: Some("the user stopped the turn".into()),
+        });
+    }
     Ok(())
 }
 
+/// The conversation transcript, oldest first, paged by message id.
 pub(crate) fn history(world: &mut World, request: w::HistoryRequest) -> Result<w::History> {
-    validate_id(&request.companion_id)?;
-    let key = AgentKey::parent(request.companion_id.clone());
-    world
-        .resource::<Store>()
+    let store = world.resource::<Store>().clone();
+    store
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::not_found("companion not found"))?;
-    let Some(entity) = find_agent(world, &key) else {
-        return Ok(w::History::default());
-    };
-    let cursor = request
+    let agent = agent::agent_of(world, &request.companion_id)
+        .ok_or_else(|| HostError::not_found("companion agent not found"))?;
+    let after = request
         .cursor
         .as_deref()
-        .and_then(|value| value.split(':').next())
-        .and_then(|value| value.parse::<u64>().ok());
-    let limit = request.limit.unwrap_or(50).clamp(1, 200) as usize;
-    let include_context = request.include_context.unwrap_or(false);
+        .and_then(|cursor| cursor.parse::<u64>().ok())
+        .map(|after| after + 1);
+    let limit = request.limit.unwrap_or(100).clamp(1, 200) as usize;
     let mut items = Vec::new();
-    if let Some(conversation) = world.get::<Conversation>(entity) {
+    if let Some(conversation) = world.get::<Conversation>(agent) {
         for entry in conversation.entries() {
-            if cursor.is_some_and(|cursor| entry.id.get() <= cursor) {
+            if after.is_some_and(|after| entry.id.get() < after) {
                 continue;
             }
-            if let Some(message) = to_message(&key, &entry, include_context) {
-                items.push(message);
-                if items.len() >= limit {
-                    break;
-                }
-            }
+            let Some(text) = agent::entry_text(&entry) else {
+                continue;
+            };
+            items.push(message(&request.companion_id, "", &entry, &text));
         }
+    }
+    if items.len() > limit {
+        items = items.split_off(items.len() - limit);
     }
     Ok(w::History {
         items,
@@ -496,77 +201,41 @@ pub(crate) fn history(world: &mut World, request: w::HistoryRequest) -> Result<w
     })
 }
 
-pub(crate) fn message(world: &mut World, request: w::MessageRequest) -> Result<w::Message> {
-    validate_id(&request.companion_id)?;
-    let key = AgentKey::parent(request.companion_id.clone());
-    let id = request
+/// One message by id.
+pub(crate) fn message_by_id(world: &mut World, request: w::MessageRequest) -> Result<w::Message> {
+    let agent = agent::agent_of(world, &request.companion_id)
+        .ok_or_else(|| HostError::not_found("companion agent not found"))?;
+    let wanted = request
         .message_id
         .parse::<u64>()
-        .map_err(|_| HostError::invalid("invalid message id"))?;
-    world
-        .resource::<Store>()
-        .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
-    let entity =
-        find_agent(world, &key).ok_or_else(|| HostError::not_found("message not found"))?;
-    world
-        .get::<Conversation>(entity)
-        .ok_or_else(|| HostError::not_found("message not found"))?
-        .entries()
-        .find(|entry| entry.id.get() == id)
-        .and_then(|entry| to_message(&key, &entry, true))
-        .ok_or_else(|| HostError::not_found("message not found"))
-}
-
-pub(crate) fn entry_text(message: &message::Message) -> Option<String> {
-    match message {
-        message::Message::System { .. } => None,
-        message::Message::User { content } => Some(
-            content
-                .iter()
-                .filter_map(|part| match part {
-                    UserContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        message::Message::Assistant(assistant) => Some(assistant.text()),
+        .map_err(|_| HostError::invalid("message id is not a number"))?;
+    let conversation = world
+        .get::<Conversation>(agent)
+        .ok_or_else(|| HostError::not_found("message not found"))?;
+    for entry in conversation.entries() {
+        if entry.id.get() != wanted {
+            continue;
+        }
+        let Some(text) = agent::entry_text(&entry) else {
+            continue;
+        };
+        return Ok(message(&request.companion_id, "", &entry, &text));
     }
+    Err(HostError::not_found("message not found"))
 }
 
-pub(crate) fn role_of(entry: &rig_core::conversation::EntryRef<'_>) -> Option<&'static str> {
-    match entry.message {
-        message::Message::System { .. } => None,
-        message::Message::Assistant(_) => Some("assistant"),
-        message::Message::User { .. } => match entry.author.map(|author| &author.kind) {
-            None | Some(AuthorKind::User) => Some("user"),
-            Some(AuthorKind::Agent) => Some("agent"),
-            Some(AuthorKind::Plugin(_)) => Some("context"),
-            Some(AuthorKind::Rig) => None,
-        },
-    }
-}
-
-fn to_message(
-    target: &AgentKey,
+fn message(
+    companion: &str,
+    work: &str,
     entry: &rig_core::conversation::EntryRef<'_>,
-    include_context: bool,
-) -> Option<w::Message> {
-    let role = role_of(entry)?;
-    if role == "context" && !include_context {
-        return None;
-    }
-    let text = entry_text(entry.message)?;
-    if text.is_empty() {
-        return None;
-    }
-    Some(w::Message {
+    text: &str,
+) -> w::Message {
+    w::Message {
         id: entry.id.get().to_string(),
-        companion_id: target.companion().into(),
-        work_id: target.work_id().unwrap_or_default().into(),
-        role: role.into(),
-        text,
+        companion_id: companion.to_owned(),
+        work_id: work.to_owned(),
+        role: role(entry).into(),
+        text: text.to_owned(),
         created_at: entry.made.to_string(),
         sequence: entry.id.get(),
         request_id: entry
@@ -575,12 +244,19 @@ fn to_message(
             .map(|request| request.0.clone()),
         author: entry
             .author
-            .map_or_else(String::new, |author| author.label()),
+            .map(|author| author.label())
+            .unwrap_or_default(),
         ..Default::default()
-    })
+    }
 }
 
-pub(crate) fn ensure_parent(world: &mut World, companion: &str) -> Entity {
-    let key = AgentKey::parent(companion);
-    find_agent(world, &key).unwrap_or_else(|| spawn_agent(world, &key))
+fn role(entry: &rig_core::conversation::EntryRef<'_>) -> w::MessageRole {
+    use rig_core::conversation::AuthorKind;
+    match (entry.author.map(|author| &author.kind), &entry.message) {
+        (None, rig_core::completion::Message::User { .. }) => w::MessageRole::User,
+        (None, _) => w::MessageRole::Assistant,
+        (Some(AuthorKind::User), _) => w::MessageRole::User,
+        (Some(AuthorKind::Agent), _) => w::MessageRole::Agent,
+        _ => w::MessageRole::Context,
+    }
 }

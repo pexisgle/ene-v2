@@ -2980,7 +2980,6 @@ dependencies = [
  "async-stream",
  "axum",
  "bevy_ecs",
- "bevy_reflect",
  "bytes",
  "connectrpc",
  "crossbeam-channel",

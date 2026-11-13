@@ -1,192 +1,140 @@
-//! The typed SQLite store. The ECS owns the one connection.
-mod clients;
-mod companions;
-mod memories;
-mod settings;
-mod work;
+//! The one SQLite connection, its baseline schema and small helpers.
+pub(crate) mod approvals;
+pub(crate) mod clients;
+pub(crate) mod companions;
+pub(crate) mod memories;
+pub(crate) mod policies;
+pub(crate) mod settings;
+pub(crate) mod work;
 
-pub(crate) use super::error::Result;
-use super::{error::HostError, mind::Companion};
-use bevy_ecs::prelude::Resource;
-use rusqlite::{Connection, OptionalExtension};
+pub(crate) use super::error::{HostError, Result};
+use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
-const SCHEMA: &str = include_str!("schema.sql");
+/// A baseline schema version. Databases with another version are refused, as
+/// this alpha has no in-place migration path.
+pub(crate) const VERSION: i64 = 1;
 
-/// The one SQLite connection, shared by the ECS systems.
-///
-/// The connection is synchronous and fast enough for the host's PK, FTS5 and
-/// rule lookups; it never leaves the Rig thread. The mutex is only needed so
-/// the Bevy resource can be shared by systems.
-#[derive(Clone, Resource)]
-pub(crate) struct Store {
-    connection: Arc<Mutex<Connection>>,
-}
+/// The relational state, shared by every system on the Rig thread.
+#[derive(Clone, bevy_ecs::prelude::Resource)]
+pub(crate) struct Store(Arc<Mutex<Connection>>);
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut connection = Connection::open(path)?;
-        initialize(&mut connection)?;
-        let store = Self {
-            connection: Arc::new(Mutex::new(connection)),
-        };
-        store.seed()?;
-        Ok(store)
+        let connection = Connection::open(path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version > VERSION {
+            return Err(HostError::storage(format!(
+                "state database version {version} is newer than this host ({VERSION})"
+            )));
+        }
+        connection.execute_batch(include_str!("schema.sql"))?;
+        connection.pragma_update(None, "user_version", VERSION)?;
+        Ok(Self(Arc::new(Mutex::new(connection))))
     }
 
-    /// Runs `operation` on the ECS thread.
-    fn call<T>(&self, operation: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
-        let mut connection = self
-            .connection
+    /// Borrows the connection. Every host access runs on the Rig thread, so
+    /// the lock is never contended; a poisoned lock means state is unusable.
+    pub(crate) fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.0
             .lock()
-            .map_err(|_| HostError::internal("state storage lock is poisoned"))?;
-        operation(&mut connection)
-    }
-
-    fn seed(&self) -> Result<()> {
-        if self.companions()?.is_empty() {
-            let now = now();
-            let companion = Companion::seed(new_id(), now);
-            self.save_companion(&companion)?;
-        }
-        Ok(())
+            .map_err(|_| HostError::storage("state database lock was poisoned"))
     }
 }
 
-fn initialize(connection: &mut Connection) -> Result<()> {
-    connection.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
-    )?;
-    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 0 {
-        if has_tables(connection)? {
-            return Err(HostError::storage(
-                "state database is not compatible; delete the state directory",
-            ));
-        }
-        let transaction = connection.transaction()?;
-        transaction.execute_batch(SCHEMA)?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        transaction.commit()?;
-    } else if version != SCHEMA_VERSION {
-        return Err(HostError::storage(
-            "state database schema is newer than this host",
-        ));
-    }
-    if !has_schema(connection)? {
-        return Err(HostError::storage(
-            "state database is not the ene host schema",
-        ));
-    }
-    ensure_settings(connection)
-}
-
-fn has_tables(connection: &Connection) -> Result<bool> {
-    let count: i64 = connection.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-fn has_schema(connection: &Connection) -> Result<bool> {
-    for table in [
-        "settings",
-        "companions",
-        "connections",
-        "activations",
-        "policy_rules",
-        "approval_requests",
-        "schedules",
-        "clients",
-        "work_sessions",
-        "work_inquiries",
-        "device_operations",
-        "mind_operations",
-        "memories",
-        "memories_fts",
-        "memory_edges",
-        "consolidation_state",
-    ] {
-        let found: Option<String> = connection
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name=?1",
-                [table],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if found.is_none() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn ensure_settings(connection: &mut Connection) -> Result<()> {
-    let transaction = connection.transaction()?;
-    transaction.execute(
-        "INSERT OR IGNORE INTO settings(id, revision, updated_at) VALUES (1, 1, ?1)",
-        [now()],
-    )?;
-    transaction.commit()?;
-    Ok(())
-}
-
+/// The current time in UTC, RFC 3339.
 pub(crate) fn now() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
-pub(crate) fn new_id() -> String {
-    Uuid::new_v4().to_string()
+/// Parses RFC 3339 into seconds since the Unix epoch.
+pub(crate) fn epoch(text: &str) -> Option<i64> {
+    OffsetDateTime::parse(text, &Rfc3339)
+        .ok()
+        .map(|time| time.unix_timestamp())
 }
 
-pub(crate) fn next_revision(value: u64) -> Result<u64> {
-    value
-        .checked_add(1)
-        .ok_or_else(|| HostError::conflict("revision exhausted"))
+/// The SHA-256 of `bytes`, used for action payloads and idempotency hashes.
+pub(crate) fn digest(bytes: &[u8]) -> Vec<u8> {
+    Sha256::digest(bytes).to_vec()
 }
 
-pub(crate) fn digest(value: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(value))
-}
-
-pub(crate) fn validate_id(value: &str) -> Result<()> {
-    if !value.is_empty()
-        && value.len() <= 200
-        && !value.trim().is_empty()
-        && !value.chars().any(char::is_control)
+/// Opaque ids are 1..=128 printable ASCII characters. Anything else is a
+/// client mistake, not a lookup miss.
+pub(crate) fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.chars().count() > 128
+        || id.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
     {
-        Ok(())
-    } else {
-        Err(HostError::invalid("invalid identifier"))
+        return Err(HostError::invalid(
+            "id must be 1-128 printable ASCII characters",
+        ));
     }
+    Ok(())
 }
 
-pub(crate) fn validate_key(value: &str) -> Result<()> {
-    if !value.is_empty() && value.len() <= 200 && value.bytes().all(|b| (0x21..=0x7e).contains(&b))
-    {
-        Ok(())
-    } else {
-        Err(HostError::invalid("invalid request key"))
-    }
+/// Parses a stored JSON column.
+pub(crate) fn json(text: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(text).map_err(|_| HostError::storage("stored JSON is corrupt"))
 }
 
-pub(crate) fn parse_json(value: &str) -> Result<serde_json::Value> {
-    if value.trim().is_empty() {
-        return Ok(serde_json::json!({}));
+pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
+    serde_json::to_string(value).map_err(Into::into)
+}
+
+/// Truncates `value` to at most `limit` characters.
+pub(crate) fn truncate(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_and_times_are_strict() {
+        for id in ["a", "companion-1", "A_b.c-9"] {
+            assert!(validate_id(id).is_ok(), "{id}");
+        }
+        for id in ["", "has space", "line\nbreak", "日本語"] {
+            assert!(validate_id(id).is_err(), "{id:?}");
+        }
+        assert_eq!(epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch("not a time"), None);
     }
-    serde_json::from_str(value).map_err(|_| HostError::invalid("invalid JSON document"))
+
+    #[test]
+    fn a_database_round_trips_and_refuses_a_newer_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("host.sqlite3");
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .conn()
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |row| { row.get::<_, i64>(0) })
+                .unwrap(),
+            VERSION
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        store
+            .conn()
+            .unwrap()
+            .pragma_update(None, "user_version", VERSION + 1)
+            .unwrap();
+        drop(store);
+        assert!(Store::open(&path).is_err());
+    }
 }

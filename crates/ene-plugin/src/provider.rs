@@ -13,7 +13,7 @@ pub enum AuthProfile {
 }
 
 // Reuse the shared data schema; plugin transport belongs to the runtime.
-pub use ene_rpc::{Model, ModelMetadata, ProviderCapabilities, SettingField};
+pub use ene_rpc::{LlmProviderCapabilities, Model, ModelMetadata, SettingField};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {

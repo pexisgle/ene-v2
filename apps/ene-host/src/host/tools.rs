@@ -1,44 +1,37 @@
-//! The one dispatch path shared by every host-bound open tool: run a handler
-//! against the World and answer the effect with a tool result or refusal.
-use super::{error::HostError, fail};
+//! The one dispatch path for host-bound open tools: run a handler against the
+//! world and answer the effect with a tool result or a refusal.
+use super::error::HostError;
 use bevy_ecs::prelude::*;
-use rig_core::tool::ToolResult;
 use rig_ecs::prelude::*;
 
+/// Wraps a synchronous world handler into an open-tool observer.
 pub(crate) fn run_tool<A: Clone + Send + Sync + 'static>(
     handler: fn(&mut World, Entity, &str, A) -> std::result::Result<String, HostError>,
 ) -> impl Fn(On<ToolCalled<A>>, Commands) {
     move |called: On<ToolCalled<A>>, mut commands: Commands| {
-        let ToolCalled {
-            call,
-            agent,
-            tool_call,
-            args,
-            ..
-        } = called.event().clone();
-        let call_id = tool_call.id.to_string();
+        let event = called.event();
+        let (call, agent, tool_call, args) = (
+            event.call,
+            event.agent,
+            event.tool_call.clone(),
+            event.args.clone(),
+        );
+        let _ = tool_call;
         commands.queue(move |world: &mut World| {
+            let call_id = world
+                .get::<ToolRequest>(call)
+                .map(|request| request.call.id.to_string())
+                .unwrap_or_default();
             let result = handler(world, agent, &call_id, args);
-            answer(world, call, result);
-        });
-    }
-}
-
-pub(crate) fn answer(
-    world: &mut World,
-    call: Entity,
-    result: std::result::Result<String, HostError>,
-) {
-    let outcome = match result {
-        Ok(text) => Outcome::from(ToolResult::success(text.into())),
-        Err(error) => {
-            if error.is_storage() {
-                fail(world, error.to_string());
+            match result {
+                Ok(text) => super::permission::answer(world, call, &text),
+                Err(error) => {
+                    if error.is_storage() {
+                        super::fail(world, error.to_string());
+                    }
+                    super::permission::refuse(world, call, &error.to_string());
+                }
             }
-            Outcome::refused(error.to_string())
-        }
-    };
-    if let Some(mut decision) = world.get_mut::<Decision>(call) {
-        decision.decide(Decider::plugin("ene-host"), outcome);
+        });
     }
 }

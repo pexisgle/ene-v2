@@ -1,5 +1,4 @@
 //! Connect service implementations and the owner-authentication boundary.
-mod auth;
 mod chat;
 mod client;
 mod host;
@@ -7,6 +6,7 @@ mod settings;
 mod voice;
 mod work;
 
+use super::auth;
 use crate::host::{Runtime, error::HostError};
 use axum::middleware;
 use connectrpc::{ConnectError, Response, Router, ServiceResult};

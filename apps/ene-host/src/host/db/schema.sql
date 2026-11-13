@@ -1,177 +1,86 @@
-CREATE TABLE settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    revision INTEGER NOT NULL,
-    updated_at TEXT NOT NULL
-);
+-- The host's relational state. The conversation itself is not here: it lives
+-- in the rig session log (rig_memory::DirStore) and this file never mirrors it.
+--
+-- Baseline schema. Unknown newer user_version values are rejected at startup;
+-- there is no in-place migration of older development databases.
 
-CREATE TABLE companions (
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+PRAGMA synchronous = NORMAL;
+
+-- Companions: the author's profile, the grown mind and the assigned models.
+CREATE TABLE IF NOT EXISTS companions (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    -- The immutable core of the persona (equivalent to MindProfile.core).
     mind TEXT NOT NULL,
+    -- JSON: facets / examples / background / expression.
+    profile TEXT NOT NULL,
+    profile_revision INTEGER NOT NULL DEFAULT 1,
+    -- JSON: emotion / relationships / tendencies / concerns.
+    state TEXT NOT NULL,
+    state_revision INTEGER NOT NULL DEFAULT 1,
+    -- JSON: JsonDocument { schema, json }.
     body TEXT NOT NULL,
     voice TEXT NOT NULL,
-    companion_connection TEXT NOT NULL,
-    companion_model TEXT NOT NULL,
-    task_connection TEXT NOT NULL,
-    task_model TEXT NOT NULL,
-    perception_connection TEXT NOT NULL,
-    perception_model TEXT NOT NULL,
-    compaction_connection TEXT NOT NULL,
-    compaction_model TEXT NOT NULL,
-    consolidation_connection TEXT NOT NULL,
-    consolidation_model TEXT NOT NULL,
-    decision_connection TEXT NOT NULL,
-    decision_model TEXT NOT NULL,
-    embedding_connection TEXT NOT NULL,
-    embedding_model TEXT NOT NULL,
-    profile TEXT NOT NULL,
-    state TEXT NOT NULL,
+    -- JSON: the seven ModelAssignment fields.
+    assignments TEXT NOT NULL,
     persona TEXT,
     voice_identifier TEXT,
-    revision INTEGER NOT NULL,
-    profile_revision INTEGER NOT NULL,
-    state_revision INTEGER NOT NULL,
-    memory_revision INTEGER NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE activations (
-    companion_id TEXT PRIMARY KEY REFERENCES companions(id) ON DELETE CASCADE,
-    client_id TEXT NOT NULL,
-    revision INTEGER NOT NULL
-);
-
-CREATE TABLE connections (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    adapter TEXT NOT NULL,
-    endpoint TEXT NOT NULL,
-    options TEXT NOT NULL,
-    credential_ref TEXT,
-    credential_state TEXT NOT NULL,
-    last_check TEXT NOT NULL,
-    enabled INTEGER NOT NULL
-);
-
-CREATE TABLE policy_rules (
-    id TEXT PRIMARY KEY,
-    tool_name TEXT NOT NULL,
-    pattern TEXT NOT NULL,
-    effect TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE approval_requests (
-    request_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    action_payload_hash BLOB NOT NULL,
-    tool_name TEXT NOT NULL,
-    normalized_arguments TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX approval_requests_status ON approval_requests(status);
-
-CREATE TABLE clients (
+CREATE TABLE IF NOT EXISTS user_profiles (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    capabilities TEXT NOT NULL,
-    granted_capabilities TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    last_seen TEXT NOT NULL
-);
-
-CREATE TABLE work_sessions (
-    id TEXT PRIMARY KEY,
-    companion_id TEXT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL,
-    reported_run TEXT,
-    closed INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
+    preferences TEXT NOT NULL DEFAULT '[]',
+    static_constraints TEXT NOT NULL DEFAULT '[]',
     updated_at TEXT NOT NULL
 );
-CREATE INDEX work_sessions_companion ON work_sessions(companion_id);
 
-CREATE TABLE device_operations (
-    id TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
-    companion_id TEXT NOT NULL,
-    capability TEXT NOT NULL,
-    input TEXT NOT NULL,
-    status TEXT NOT NULL,
-    result TEXT,
-    subscription_id TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX device_operations_client_status ON device_operations(client_id, status);
-
-CREATE TABLE mind_operations (
-    companion_id TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    hash TEXT NOT NULL,
-    response TEXT NOT NULL,
-    PRIMARY KEY (companion_id, operation_id)
-);
-
-CREATE TABLE memories (
+-- Episodic memory. The explicit INTEGER PRIMARY KEY is SQLite's rowid alias,
+-- so the FTS5 external-content table below keeps a stable integer key.
+CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
-    owner TEXT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
-    audiences TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    audiences TEXT NOT NULL DEFAULT '[]',
     content TEXT NOT NULL,
-    description TEXT NOT NULL,
-    appraisal TEXT NOT NULL,
-    acquisition TEXT NOT NULL,
     importance INTEGER NOT NULL CHECK (importance >= 0 AND importance <= 10),
     occurred_at TEXT,
     recorded_at TEXT NOT NULL,
     last_accessed_at TEXT,
-    memory_revision INTEGER NOT NULL,
-    content_revision INTEGER NOT NULL,
+    memory_revision INTEGER NOT NULL DEFAULT 1,
+    content_revision INTEGER NOT NULL DEFAULT 1,
     emotion TEXT,
-    source_context TEXT NOT NULL,
+    source_context TEXT NOT NULL DEFAULT '{}',
     embedding BLOB,
     embedding_model TEXT,
     embedding_dimensions INTEGER,
-    embedding_content_revision INTEGER,
-    created_by TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    embedding_content_revision INTEGER
 );
-CREATE INDEX memories_owner_importance ON memories(owner, importance);
-CREATE INDEX memories_owner_recorded_at ON memories(owner, recorded_at DESC);
 
-CREATE VIRTUAL TABLE memories_fts USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
-    description,
-    appraisal,
-    content = 'memories',
-    content_rowid = 'rowid',
-    tokenize = 'trigram'
+    content='memories',
+    content_rowid='rowid',
+    tokenize='trigram'
 );
 
-CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, content, description, appraisal)
-    VALUES (new.rowid, new.content, new.description, new.appraisal);
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF content ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 
-CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content, description, appraisal)
-    VALUES ('delete', old.rowid, old.content, old.description, old.appraisal);
-END;
-
-CREATE TRIGGER memories_au AFTER UPDATE OF content, description, appraisal ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content, description, appraisal)
-    VALUES ('delete', old.rowid, old.content, old.description, old.appraisal);
-    INSERT INTO memories_fts(rowid, content, description, appraisal)
-    VALUES (new.rowid, new.content, new.description, new.appraisal);
-END;
-
-CREATE TABLE memory_edges (
+CREATE TABLE IF NOT EXISTS memory_edges (
     from_id TEXT NOT NULL,
     relation TEXT NOT NULL,
     to_id TEXT NOT NULL,
@@ -179,22 +88,22 @@ CREATE TABLE memory_edges (
     PRIMARY KEY (from_id, relation, to_id)
 );
 
-CREATE TABLE consolidation_state (
-    companion_id TEXT PRIMARY KEY REFERENCES companions(id) ON DELETE CASCADE,
-    last_sequence INTEGER NOT NULL,
-    last_offset INTEGER NOT NULL,
-    method_revision TEXT NOT NULL,
-    state TEXT NOT NULL,
-    reason TEXT,
-    jobs INTEGER NOT NULL,
-    model_calls INTEGER NOT NULL,
-    input_chars INTEGER NOT NULL,
-    skipped INTEGER NOT NULL,
-    attempts INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS consolidation_state (
+    companion_id TEXT PRIMARY KEY,
+    last_processed_turn_id TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE schedules (
+-- Idempotency of mind_update: one row per tool operation.
+CREATE TABLE IF NOT EXISTS mind_operations (
+    operation_id TEXT PRIMARY KEY,
+    companion_id TEXT NOT NULL,
+    request_hash BLOB NOT NULL,
+    result TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
     id TEXT PRIMARY KEY,
     companion_id TEXT NOT NULL,
     cron_expr TEXT,
@@ -205,15 +114,131 @@ CREATE TABLE schedules (
     created_at TEXT NOT NULL,
     last_triggered_at TEXT
 );
-CREATE INDEX schedules_companion_enabled ON schedules(companion_id, enabled);
 
-CREATE TABLE work_inquiries (
+-- Settings: one row per connection, kind and config kept apart so the kind can
+-- be checked against the config oneof on every read.
+CREATE TABLE IF NOT EXISTS connections (
     id TEXT PRIMARY KEY,
-    work_id TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    choices TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    answered_at TEXT
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL,
+    config TEXT NOT NULL,
+    credential_state TEXT NOT NULL DEFAULT 'absent',
+    last_check TEXT,
+    revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
 );
-CREATE INDEX work_inquiries_work_open ON work_inquiries(work_id, answered_at);
+
+CREATE TABLE IF NOT EXISTS settings_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS policy_rules (
+    id TEXT PRIMARY KEY,
+    tool_name TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    effect TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Approval requests outlive the effect that asked, so a restart can expire
+-- them instead of silently running the operation.
+CREATE TABLE IF NOT EXISTS approval_requests (
+    request_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    action_payload_hash BLOB NOT NULL,
+    tool_name TEXT NOT NULL,
+    normalized_arguments TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    client_id TEXT,
+    activation_revision INTEGER,
+    capability TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approval_requests(status);
+
+-- Clients declare capabilities; the host records what it granted.
+CREATE TABLE IF NOT EXISTS clients (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL DEFAULT '',
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    granted_capabilities TEXT NOT NULL DEFAULT '[]',
+    capability_specs TEXT NOT NULL DEFAULT '[]',
+    revision INTEGER NOT NULL DEFAULT 1,
+    last_seen TEXT NOT NULL
+);
+
+-- One activation row per companion: the active client and the revision that
+-- binds audio, perception, approvals and device operations to a generation.
+CREATE TABLE IF NOT EXISTS activations (
+    companion_id TEXT PRIMARY KEY,
+    client_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_sessions (
+    id TEXT PRIMARY KEY,
+    companion_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    client_id TEXT,
+    activation_revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_runs (
+    run_id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    state TEXT NOT NULL,
+    pending_request_id TEXT,
+    failure TEXT,
+    cancellation_requested_at TEXT,
+    cancellation_reason TEXT,
+    unverified_pids TEXT NOT NULL DEFAULT '[]',
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_inquiries (
+    request_id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    choices TEXT NOT NULL DEFAULT '[]',
+    answer TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_work ON work_runs(work_id, state);
+CREATE INDEX IF NOT EXISTS idx_inquiries_work ON work_inquiries(work_id, resolved_at);
+
+-- Device operations: the idempotency key, the bound client generation and the
+-- terminal state the host can answer again after a reconnect.
+CREATE TABLE IF NOT EXISTS device_operations (
+    operation_id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    activation_revision INTEGER NOT NULL,
+    capability TEXT NOT NULL,
+    input TEXT NOT NULL,
+    work_id TEXT,
+    status TEXT NOT NULL,
+    output TEXT,
+    failure TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operations_client ON device_operations(client_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
+CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companion_id, enabled);

@@ -1,6 +1,6 @@
 //! Work-session services.
 use super::Services;
-use crate::host::work;
+use crate::host::{db::Store, work};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use ene_rpc as w;
 
@@ -13,10 +13,8 @@ impl w::WorkService for Services {
     ) -> ServiceResult<w::WorkViews> {
         let companion = request.companion_id.to_owned();
         self.read(move |app| {
-            Ok(w::WorkViews {
-                items: work::list(app.world_mut(), &companion)?,
-                ..Default::default()
-            })
+            let store = app.world().resource::<Store>().clone();
+            work::list(&store, &companion)
         })
         .await
     }
@@ -27,7 +25,11 @@ impl w::WorkService for Services {
         request: ServiceRequest<'_, w::WorkRequest>,
     ) -> ServiceResult<w::WorkView> {
         let id = request.work_id.to_owned();
-        self.read(move |app| work::view(app.world_mut(), &id)).await
+        self.read(move |app| {
+            let store = app.world().resource::<Store>().clone();
+            work::get(&store, &id)
+        })
+        .await
     }
 
     async fn start_work(
@@ -36,16 +38,8 @@ impl w::WorkService for Services {
         request: ServiceRequest<'_, w::StartWorkRequest>,
     ) -> ServiceResult<w::WorkSession> {
         let request = request.to_owned_message();
-        self.call(move |app| {
-            work::start(
-                app,
-                request.companion_id,
-                request.title,
-                request.instruction,
-                request.client_id,
-            )
-        })
-        .await
+        self.call(move |app| work::start(app.world_mut(), request))
+            .await
     }
 
     async fn send_work(
@@ -54,7 +48,8 @@ impl w::WorkService for Services {
         request: ServiceRequest<'_, w::SendWorkRequest>,
     ) -> ServiceResult<w::WorkAcceptance> {
         let request = request.to_owned_message();
-        self.call(move |app| work::send(app, request)).await
+        self.call(move |app| work::send(app.world_mut(), request))
+            .await
     }
 
     async fn answer_inquiry(
@@ -63,7 +58,7 @@ impl w::WorkService for Services {
         request: ServiceRequest<'_, w::AnswerInquiryRequest>,
     ) -> ServiceResult<w::WorkAcceptance> {
         let request = request.to_owned_message();
-        self.call(move |app| work::answer_inquiry(app, request))
+        self.call(move |app| work::answer_inquiry(app.world_mut(), request))
             .await
     }
 
@@ -74,7 +69,7 @@ impl w::WorkService for Services {
     ) -> ServiceResult<w::Empty> {
         let id = request.work_id.to_owned();
         self.call(move |app| {
-            work::stop(app, &id)?;
+            work::stop(app.world_mut(), &id)?;
             Ok(w::Empty::default())
         })
         .await
@@ -87,7 +82,7 @@ impl w::WorkService for Services {
     ) -> ServiceResult<w::Empty> {
         let id = request.work_id.to_owned();
         self.call(move |app| {
-            work::close(app, &id)?;
+            work::close(app.world_mut(), &id)?;
             Ok(w::Empty::default())
         })
         .await

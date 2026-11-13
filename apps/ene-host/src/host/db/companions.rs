@@ -1,175 +1,241 @@
-//! Companion rows.
-use super::{Store, parse_json};
-use crate::host::{
-    db::Result,
-    error::HostError,
-    mind::{Assignments, Companion, ModelAssignment},
-};
-use rusqlite::{Connection, OptionalExtension, params};
+//! Companions and their mind: persistence and revision checks.
+use super::{Result, Store, now, to_json};
+use crate::host::mind::{Companion, Profile, State};
+use rusqlite::{OptionalExtension, Row, params};
 
-const COLUMNS: &str = "id, name, mind, body, voice, companion_connection, companion_model, \
-    task_connection, task_model, perception_connection, perception_model, \
-    compaction_connection, compaction_model, consolidation_connection, consolidation_model, \
-    decision_connection, decision_model, embedding_connection, embedding_model, profile, state, \
-    persona, voice_identifier, revision, profile_revision, state_revision, memory_revision, \
-    created_at, updated_at";
-
-impl Store {
-    pub(crate) fn companions(&self) -> Result<Vec<Companion>> {
-        self.call(|connection| {
-            let mut statement = connection.prepare(&format!(
-                "SELECT {COLUMNS} FROM companions ORDER BY created_at, id"
-            ))?;
-            statement
-                .query_map([], row_to_companion)?
-                .map(|row| row.map_err(Into::into))
-                .collect()
-        })
-    }
-
-    pub(crate) fn companion(&self, id: &str) -> Result<Option<Companion>> {
-        let id = id.to_owned();
-        self.call(move |connection| read_companion(connection, &id).map_err(Into::into))
-    }
-
-    pub(crate) fn save_companion(&self, companion: &Companion) -> Result<()> {
-        let companion = companion.clone();
-        self.call(move |connection| {
-            write_companion(connection, &companion)?;
-            Ok(())
-        })
-    }
-
-    pub(crate) fn remove_companion(&self, id: &str) -> Result<()> {
-        let id = id.to_owned();
-        self.call(move |connection| {
-            connection.execute("DELETE FROM companions WHERE id=?1", [&id])?;
-            Ok(())
-        })
-    }
-}
-
-pub(super) fn read_companion(
-    connection: &Connection,
-    id: &str,
-) -> rusqlite::Result<Option<Companion>> {
-    connection
-        .query_row(
-            &format!("SELECT {COLUMNS} FROM companions WHERE id=?1"),
-            [id],
-            row_to_companion,
-        )
-        .optional()
-}
-
-pub(super) fn write_companion(
-    connection: &Connection,
-    companion: &Companion,
-) -> rusqlite::Result<()> {
-    connection.execute(
-        "INSERT INTO companions(id, name, mind, body, voice, companion_connection, \
-         companion_model, task_connection, task_model, perception_connection, perception_model, \
-         compaction_connection, compaction_model, consolidation_connection, consolidation_model, \
-         decision_connection, decision_model, embedding_connection, embedding_model, profile, \
-         state, persona, voice_identifier, revision, profile_revision, state_revision, \
-         memory_revision, created_at, updated_at) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29) \
-         ON CONFLICT(id) DO UPDATE SET name=excluded.name, mind=excluded.mind, \
-         body=excluded.body, voice=excluded.voice, companion_connection=excluded.companion_connection, \
-         companion_model=excluded.companion_model, task_connection=excluded.task_connection, \
-         task_model=excluded.task_model, perception_connection=excluded.perception_connection, \
-         perception_model=excluded.perception_model, compaction_connection=excluded.compaction_connection, \
-         compaction_model=excluded.compaction_model, consolidation_connection=excluded.consolidation_connection, \
-         consolidation_model=excluded.consolidation_model, decision_connection=excluded.decision_connection, \
-         decision_model=excluded.decision_model, embedding_connection=excluded.embedding_connection, \
-         embedding_model=excluded.embedding_model, profile=excluded.profile, state=excluded.state, \
-         persona=excluded.persona, voice_identifier=excluded.voice_identifier, \
-         revision=excluded.revision, profile_revision=excluded.profile_revision, \
-         state_revision=excluded.state_revision, memory_revision=excluded.memory_revision, \
-         updated_at=excluded.updated_at",
-        params![
-            companion.id,
-            companion.name,
-            companion.mind,
-            companion.body.to_string(),
-            companion.voice.to_string(),
-            text(companion.assignments.companion.as_ref().map(|a| a.connection.as_str())),
-            text(companion.assignments.companion.as_ref().map(|a| a.model.as_str())),
-            text(companion.assignments.task.as_ref().map(|a| a.connection.as_str())),
-            text(companion.assignments.task.as_ref().map(|a| a.model.as_str())),
-            text(companion.assignments.perception.as_ref().map(|a| a.connection.as_str())),
-            text(companion.assignments.perception.as_ref().map(|a| a.model.as_str())),
-            text(companion.assignments.compaction.as_ref().map(|a| a.connection.as_str())),
-            text(companion.assignments.compaction.as_ref().map(|a| a.model.as_str())),
-            text(companion.assignments.consolidation.as_ref().map(|a| a.connection.as_str())),
-            text(companion.assignments.consolidation.as_ref().map(|a| a.model.as_str())),
-            text(companion.assignments.decision.as_ref().map(|a| a.connection.as_str())),
-            text(companion.assignments.decision.as_ref().map(|a| a.model.as_str())),
-            text(companion.assignments.embedding.as_ref().map(|a| a.connection.as_str())),
-            text(companion.assignments.embedding.as_ref().map(|a| a.model.as_str())),
-            serde_json::to_string(&companion.profile).map_err(json_error)?,
-            serde_json::to_string(&companion.state).map_err(json_error)?,
-            companion.persona,
-            companion.voice_identifier,
-            companion.revision,
-            companion.profile_revision,
-            companion.state_revision,
-            companion.memory_revision,
-            companion.created_at,
-            companion.updated_at,
-        ],
-    )?;
-    Ok(())
-}
-
-fn text(value: Option<&str>) -> &str {
-    value.unwrap_or("")
-}
-
-fn row_to_companion(row: &rusqlite::Row<'_>) -> rusqlite::Result<Companion> {
-    let profile: String = row.get(19)?;
-    let state: String = row.get(20)?;
+fn row_to_companion(row: &Row<'_>) -> rusqlite::Result<Companion> {
+    let profile: String = row.get("profile")?;
+    let state: String = row.get("state")?;
+    let body: String = row.get("body")?;
+    let voice: String = row.get("voice")?;
+    let assignments: String = row.get("assignments")?;
     Ok(Companion {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        mind: row.get(2)?,
-        body: json(row, 3)?,
-        voice: json(row, 4)?,
-        assignments: Assignments {
-            companion: assignment(row.get(5)?, row.get(6)?),
-            task: assignment(row.get(7)?, row.get(8)?),
-            perception: assignment(row.get(9)?, row.get(10)?),
-            compaction: assignment(row.get(11)?, row.get(12)?),
-            consolidation: assignment(row.get(13)?, row.get(14)?),
-            decision: assignment(row.get(15)?, row.get(16)?),
-            embedding: assignment(row.get(17)?, row.get(18)?),
-        },
-        profile: serde_json::from_str(&profile).map_err(json_error)?,
-        state: serde_json::from_str(&state).map_err(json_error)?,
-        persona: row.get(21)?,
-        voice_identifier: row.get(22)?,
-        revision: row.get(23)?,
-        profile_revision: row.get(24)?,
-        state_revision: row.get(25)?,
-        memory_revision: row.get(26)?,
-        created_at: row.get(27)?,
-        updated_at: row.get(28)?,
+        id: row.get("id")?,
+        name: row.get("name")?,
+        mind: row.get("mind")?,
+        profile: serde_json::from_str(&profile).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                profile.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        profile_revision: row.get::<_, u64>("profile_revision")?,
+        state: serde_json::from_str(&state).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                state.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        state_revision: row.get::<_, u64>("state_revision")?,
+        body: serde_json::from_str(&body).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                body.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        voice: serde_json::from_str(&voice).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                voice.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        assignments: serde_json::from_str(&assignments).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                assignments.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        persona: row.get("persona")?,
+        voice_identifier: row.get("voice_identifier")?,
+        revision: row.get::<_, u64>("revision")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
     })
 }
 
-fn json(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<serde_json::Value> {
-    let value: String = row.get(index)?;
-    parse_json(&value).map_err(json_error)
+pub(crate) const COLUMNS: &str = "id, name, mind, profile, profile_revision, state, \
+     state_revision, body, voice, assignments, persona, voice_identifier, revision, \
+     created_at, updated_at";
+
+impl Store {
+    pub(crate) fn companions(&self) -> Result<Vec<Companion>> {
+        let connection = self.conn()?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {COLUMNS} FROM companions ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map([], row_to_companion)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn companion(&self, id: &str) -> Result<Option<Companion>> {
+        let connection = self.conn()?;
+        let companion = connection
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM companions WHERE id = ?1"),
+                [id],
+                row_to_companion,
+            )
+            .optional()?;
+        Ok(companion)
+    }
+
+    pub(crate) fn insert_companion(&self, companion: &Companion) -> Result<()> {
+        let connection = self.conn()?;
+        connection.execute(
+            "INSERT INTO companions (id, name, mind, profile, profile_revision, state, \
+             state_revision, body, voice, assignments, persona, voice_identifier, revision, \
+             created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                companion.id,
+                companion.name,
+                companion.mind,
+                to_json(&companion.profile)?,
+                companion.profile_revision,
+                to_json(&companion.state)?,
+                companion.state_revision,
+                to_json(&companion.body)?,
+                to_json(&companion.voice)?,
+                to_json(&companion.assignments)?,
+                companion.persona,
+                companion.voice_identifier,
+                companion.revision,
+                companion.created_at,
+                companion.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Saves an edited companion with an optimistic revision check.
+    pub(crate) fn update_companion(&self, companion: &Companion, expected: u64) -> Result<()> {
+        let updated = self.conn()?.execute(
+            "UPDATE companions SET name = ?2, mind = ?3, profile = ?4, profile_revision = ?5, \
+             state = ?6, state_revision = ?7, body = ?8, voice = ?9, assignments = ?10, \
+             persona = ?11, voice_identifier = ?12, revision = ?13, updated_at = ?14 \
+             WHERE id = ?1 AND revision = ?15",
+            params![
+                companion.id,
+                companion.name,
+                companion.mind,
+                to_json(&companion.profile)?,
+                companion.profile_revision,
+                to_json(&companion.state)?,
+                companion.state_revision,
+                to_json(&companion.body)?,
+                to_json(&companion.voice)?,
+                to_json(&companion.assignments)?,
+                companion.persona,
+                companion.voice_identifier,
+                companion.revision,
+                companion.updated_at,
+                expected,
+            ],
+        )?;
+        if updated == 0 {
+            return Err(crate::host::error::HostError::conflict(
+                "companion changed since it was read",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Updates only the mind state, but only when the caller still has the
+    /// revision it read.
+    pub(crate) fn update_mind_state(
+        &self,
+        companion_id: &str,
+        expected: u64,
+        state: &State,
+    ) -> Result<u64> {
+        let next = expected + 1;
+        let updated = self.conn()?.execute(
+            "UPDATE companions SET state = ?2, state_revision = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND state_revision = ?5",
+            params![companion_id, to_json(state)?, next, now(), expected],
+        )?;
+        if updated == 0 {
+            return Err(crate::host::error::HostError::conflict(
+                "mind changed since it was read",
+            ));
+        }
+        Ok(next)
+    }
+
+    pub(crate) fn update_mind_profile(
+        &self,
+        companion_id: &str,
+        expected: u64,
+        profile: &Profile,
+    ) -> Result<u64> {
+        let next = expected + 1;
+        let updated = self.conn()?.execute(
+            "UPDATE companions SET profile = ?2, profile_revision = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND profile_revision = ?5",
+            params![companion_id, to_json(profile)?, next, now(), expected],
+        )?;
+        if updated == 0 {
+            return Err(crate::host::error::HostError::conflict(
+                "profile changed since it was read",
+            ));
+        }
+        Ok(next)
+    }
+
+    pub(crate) fn delete_companion(&self, id: &str) -> Result<bool> {
+        let deleted = self
+            .conn()?
+            .execute("DELETE FROM companions WHERE id = ?1", [id])?;
+        Ok(deleted > 0)
+    }
 }
 
-fn json_error(error: impl std::fmt::Display) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        0,
-        rusqlite::types::Type::Text,
-        Box::new(HostError::storage(error.to_string())),
-    )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::mind::{Assignments, Companion};
 
-fn assignment(connection: String, model: String) -> Option<ModelAssignment> {
-    (!connection.is_empty() && !model.is_empty()).then_some(ModelAssignment { connection, model })
+    fn companion(id: &str) -> Companion {
+        Companion {
+            id: id.into(),
+            name: "ene".into(),
+            mind: "core".into(),
+            profile: Profile::default(),
+            profile_revision: 1,
+            state: State::default(),
+            state_revision: 1,
+            body: crate::host::json::JsonDoc::new("ene.body.v1", serde_json::json!({})),
+            voice: crate::host::json::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
+            assignments: Assignments::default(),
+            persona: None,
+            voice_identifier: None,
+            revision: 1,
+            created_at: super::now(),
+            updated_at: super::now(),
+        }
+    }
+
+    #[test]
+    fn companions_round_trip_and_reject_stale_revisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let mut first = companion("c1");
+        store.insert_companion(&first).unwrap();
+        assert_eq!(store.companions().unwrap().len(), 1);
+        first.name = "ene".into();
+        assert!(store.update_companion(&first, 2).is_err());
+        first.revision = 2;
+        store.update_companion(&first, 1).unwrap();
+        let state = State::default();
+        assert!(store.update_mind_state("c1", 99, &state).is_err());
+        assert_eq!(store.update_mind_state("c1", 1, &state).unwrap(), 2);
+        assert!(store.delete_companion("c1").unwrap());
+        assert!(store.companions().unwrap().is_empty());
+    }
 }

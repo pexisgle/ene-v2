@@ -1,369 +1,583 @@
-//! Agent identity, prompts and the Rig kernel extension points.
+//! Agents: the head companions and the work agents, their models, prompts,
+//! stream notifications and turn lifecycle.
+//!
+//! The kernel owns turns and conversations; this module binds an agent to a
+//! companion (or a work run), keeps its model connection current and projects
+//! the conversation into the host's notification stream.
 use super::{
-    body, chat, client, compaction,
     db::{Result, Store},
-    mind,
-    model::{self, Binding, Refusal},
+    error::HostError,
+    mind::{Companion, Role},
+    model::{self, Credentials},
     notify::Notifier,
-    permission,
-    resources::{CompactionQueue, ConsolidationQueue},
-    wire, work,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use rig_core::conversation::Author;
-use rig_ecs::{WriteLogs, prelude::*};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use rig_core::completion::{AssistantContent, Message as CompletionMessage};
+use rig_core::conversation::{AuthorKind, EntryRef};
+use rig_core::message::UserContent;
+use rig_ecs::model::{Connection as ModelConnection, Models};
+use rig_ecs::prelude::*;
+use std::collections::HashMap;
 
-/// Which conversation an agent is, independent of Rig's opaque id.
-///
-/// Saved with the session, so a restart never parses an id prefix.
-#[derive(Component, Clone, Debug, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
-#[reflect(Component, Saved, Clone, Serialize, Deserialize)]
-pub(crate) enum AgentKey {
-    Parent { companion: String },
-    Work { companion: String, work: String },
+/// One agent per companion, addressed by the companion id.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompanionAgent {
+    pub(crate) companion_id: String,
 }
 
-impl AgentKey {
-    pub(crate) fn parent(companion: impl Into<String>) -> Self {
-        Self::Parent {
-            companion: companion.into(),
-        }
-    }
-
-    pub(crate) fn work(companion: impl Into<String>, work: impl Into<String>) -> Self {
-        Self::Work {
-            companion: companion.into(),
-            work: work.into(),
-        }
-    }
-
-    pub(crate) fn companion(&self) -> &str {
-        match self {
-            Self::Parent { companion } | Self::Work { companion, .. } => companion,
-        }
-    }
-
-    pub(crate) fn work_id(&self) -> Option<&str> {
-        match self {
-            Self::Parent { .. } => None,
-            Self::Work { work, .. } => Some(work),
-        }
-    }
-
-    pub(crate) fn is_work(&self) -> bool {
-        matches!(self, Self::Work { .. })
-    }
-
-    pub(crate) fn agent_id(&self) -> String {
-        match self {
-            Self::Parent { companion } => format!("parent-{companion}"),
-            Self::Work { work, .. } => format!("work-{work}"),
-        }
-    }
+/// One agent per open run, addressed by its run id.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkAgent {
+    pub(crate) work_id: String,
+    pub(crate) run_id: String,
+    pub(crate) companion_id: String,
 }
 
-pub(crate) struct KernelPlugin;
-
-impl Plugin for KernelPlugin {
-    fn build(&self, app: &mut App) {
-        app.register_type::<AgentKey>()
-            .add_observer(turn_input)
-            .add_observer(turn_started)
-            .add_observer(turn_settled)
-            .add_observer(follow_successor::<Binding>)
-            .add_observer(follow_successor::<mind::Batch>)
-            .add_observer(follow_successor::<compaction::SummaryJob>)
-            .add_observer(permission::hold_released)
-            .add_systems(
-                Update,
-                (client::sweep, mind::start_consolidation, compaction::start).before(AgentLoop),
-            )
-            .add_systems(AgentPass, bindings.in_set(PrepareSystems::Compose))
-            .add_systems(AgentPass, prepare.in_set(PrepareSystems::Edit))
-            .add_systems(
-                AgentPass,
-                compaction::inject
-                    .in_set(PrepareSystems::Edit)
-                    .after(prepare),
-            )
-            .add_systems(
-                AgentPass,
-                mind::inject_context
-                    .in_set(PrepareSystems::Edit)
-                    .after(compaction::inject),
-            )
-            .add_systems(AgentPass, compaction::fit.in_set(PrepareSystems::Fit))
-            .add_systems(AgentPass, permission::gate.in_set(Stage::Gate))
-            .add_systems(AgentPass, streams.in_set(Stage::Review))
-            .add_systems(
-                AgentPass,
-                (output_limit, compaction::apply, mind::apply_consolidation)
-                    .in_set(ReviewSystems::Edit),
-            )
-            .add_systems(PostUpdate, recalled)
-            .add_systems(Last, changes.after(WriteLogs));
-        mind::register_tools(app);
-        work::register_tools(app);
-        client::register_tools(app);
-        body::register_tools(app);
-    }
+/// What the agent's model connection was built from, to keep it current.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Binding {
+    pub(crate) connection_id: String,
+    pub(crate) model_id: String,
+    pub(crate) settings_revision: u64,
 }
 
-pub(crate) fn restore(world: &mut World) -> Result<()> {
-    let store = world.resource::<Store>().clone();
-    let agents: Vec<(Entity, Option<AgentKey>)> = world
-        .query::<(Entity, Option<&AgentKey>, &Agent)>()
+/// The last conversation entry this host projected per agent.
+#[derive(Resource, Default)]
+pub(crate) struct Published {
+    cursor: HashMap<String, u64>,
+}
+
+/// The last summary a work run reported through `report`.
+#[derive(Resource, Default)]
+pub(crate) struct WorkReports {
+    pub(crate) completed: HashMap<String, String>,
+}
+
+pub(crate) fn companion_agent_id(companion: &str) -> String {
+    format!("companion:{companion}")
+}
+
+pub(crate) fn work_agent_id(run: &str) -> String {
+    format!("work:{run}")
+}
+
+pub(crate) fn agent_of(world: &mut World, companion: &str) -> Option<Entity> {
+    let mut query = world.query::<(Entity, &CompanionAgent)>();
+    query
         .iter(world)
-        .map(|(entity, key, _)| (entity, key.cloned()))
-        .collect();
-    let default_companion = store.companions()?.into_iter().next();
-    for (entity, key) in agents {
-        match key {
-            Some(AgentKey::Parent { companion }) => {
-                if store.companion(&companion)?.is_some() {
-                    chat::attach_agent(world, entity, &AgentKey::parent(companion));
-                } else {
-                    world.trigger(Retire { entity });
-                }
-            }
-            Some(AgentKey::Work { companion, work }) => {
-                let exists = store
-                    .work(&work)?
-                    .is_some_and(|session| session.companion_id == companion && !session.closed);
-                if exists {
-                    chat::attach_agent(world, entity, &AgentKey::work(companion, work));
-                } else {
-                    world.trigger(Retire { entity });
-                }
-            }
-            None => {
-                let Some(companion) = &default_companion else {
-                    world.trigger(Retire { entity });
-                    continue;
-                };
-                let key = AgentKey::parent(&companion.id);
-                world
-                    .entity_mut(entity)
-                    .insert((key.clone(), AgentId(key.agent_id())));
-                chat::attach_agent(world, entity, &key);
-            }
+        .find(|(_, agent)| agent.companion_id == companion)
+        .map(|(entity, _)| entity)
+}
+
+pub(crate) fn work_agent_of(world: &mut World, run: &str) -> Option<Entity> {
+    let mut query = world.query::<(Entity, &WorkAgent)>();
+    query
+        .iter(world)
+        .find(|(_, agent)| agent.run_id == run)
+        .map(|(entity, _)| entity)
+}
+
+/// The system prompt of a companion: static persona only. Everything that
+/// changes per turn is injected into the request view instead.
+pub(crate) fn system_prompt(companion: &Companion) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(&format!(
+        "あなたはデスクトップ常駐AIコンパニオン「{}」です。ユーザーとは一人のキャラクターとして対話します。\n",
+        companion.name
+    ));
+    prompt.push_str("次の核となる人格・世界観を守ってください:\n");
+    prompt.push_str(&companion.mind);
+    prompt.push('\n');
+    if let Some(persona) = &companion.persona {
+        prompt.push_str("\n話し方・振る舞いの設定:\n");
+        prompt.push_str(persona);
+        prompt.push('\n');
+    }
+    for (label, entries) in [
+        ("性格の側面", &companion.profile.facets),
+        ("会話例", &companion.profile.examples),
+        ("背景", &companion.profile.background),
+        ("表現語彙", &companion.profile.expression),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+        prompt.push_str(&format!("\n{label}:\n"));
+        for entry in entries {
+            prompt.push_str("- ");
+            prompt.push_str(entry);
+            prompt.push('\n');
         }
     }
+    prompt.push_str(
+        "\n振る舞いの原則:\n\
+         - 作業を任せた場合も、作業エージェントはあなた自身の「手」です。報告は必ず一人称（「私が今〜しているよ」）で行い、第三者表現を使いません。\n\
+         - 沈黙が適切なときは noop を呼びます。\n\
+         - 端末操作は device_request とクライアントが宣言した能力ツールで行い、対象端末は指定しません。ホストが束縛します。\n\
+         - 記憶は mind_recall / mind_read / mind_update で扱い、推測を事実として保存しません。\n\
+         - 現在日時・心の状態・想起記憶・知覚は毎ターン動的コンテキストとして注入されます。\n",
+    );
+    prompt
+}
+
+pub(crate) fn work_prompt(companion: &Companion, instruction: &str) -> String {
+    format!(
+        "あなたは「{}」の「手」として実務タスクを実行します。ユーザーから見れば「{}」本人です。\n\
+         進捗・質問・完了は report ツールで報告してください（session_id と run_id はホストが束縛します）。\n\
+         端末操作は device_request を使い、対象端末は指定しません。\n\
+         現在の指示:\n{instruction}\n",
+        companion.name, companion.name
+    )
+}
+
+/// Spawns the agent of a companion if it does not exist yet.
+pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entity {
+    if let Some(entity) = agent_of(world, &companion.id) {
+        return entity;
+    }
+    world
+        .spawn((
+            Name::new(format!("companion:{}", companion.id)),
+            Agent,
+            AgentId(companion_agent_id(&companion.id)),
+            CompanionAgent {
+                companion_id: companion.id.clone(),
+            },
+            SystemPrompt(system_prompt(companion)),
+            ToolAccess::All,
+        ))
+        .id()
+}
+
+pub(crate) fn spawn_work_agent(
+    world: &mut World,
+    companion: &Companion,
+    work_id: &str,
+    run_id: &str,
+    instruction: &str,
+) -> Entity {
+    if let Some(entity) = work_agent_of(world, run_id) {
+        return entity;
+    }
+    world
+        .spawn((
+            Name::new(format!("work:{run_id}")),
+            Agent,
+            AgentId(work_agent_id(run_id)),
+            WorkAgent {
+                work_id: work_id.to_owned(),
+                run_id: run_id.to_owned(),
+                companion_id: companion.id.clone(),
+            },
+            SystemPrompt(work_prompt(companion, instruction)),
+            ToolAccess::Only(vec!["report".into(), "device_request".into()]),
+        ))
+        .id()
+}
+
+/// Binds the agent's model when its assignment or the settings changed.
+pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
+    #[cfg(test)]
+    if let Some(test) = world.get_resource::<TestModel>() {
+        let bound = (test.0)();
+        world.entity_mut(entity).insert((
+            bound.connection,
+            Binding {
+                connection_id: "test".into(),
+                model_id: "test".into(),
+                settings_revision: 0,
+            },
+        ));
+        return Ok(());
+    }
+    let (companion_id, role) = match world.get::<CompanionAgent>(entity) {
+        Some(agent) => (agent.companion_id.clone(), Role::Companion),
+        None => match world.get::<WorkAgent>(entity) {
+            Some(agent) => (agent.companion_id.clone(), Role::Task),
+            None => return Err(HostError::internal("an agent without a role")),
+        },
+    };
+    let store = world.resource::<Store>().clone();
+    let companion = store
+        .companion(&companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let assignment = companion
+        .model(role)
+        .ok_or_else(|| HostError::unavailable("no model is assigned to this role"))?;
+    let settings_revision = store.settings_revision()?;
+    let current = world.get::<Binding>(entity).cloned();
+    let current_ok = current.as_ref().is_some_and(|binding| {
+        binding.connection_id == assignment.connection_id
+            && binding.model_id == assignment.model_id
+            && binding.settings_revision == settings_revision
+    }) && world.get::<ModelConnection>(entity).is_some();
+    if current_ok {
+        return Ok(());
+    }
+    let credentials = world.resource::<Credentials>().clone();
+    let catalog = world.resource::<Models>().0.catalog().clone();
+    let bound = model::connect(&store, &credentials, &catalog, &companion, role)?;
+    world.entity_mut(entity).insert((
+        bound.connection,
+        Binding {
+            connection_id: assignment.connection_id.clone(),
+            model_id: assignment.model_id.clone(),
+            settings_revision,
+        },
+    ));
     Ok(())
 }
 
-fn turn_input(
-    started: On<Add<TurnOf>>,
-    turns: Query<(&TurnOf, &Turn)>,
-    mut conversations: Query<&mut Conversation>,
-) {
-    let Ok((agent, turn)) = turns.get(started.entity) else {
-        return;
-    };
-    let Ok(mut conversation) = conversations.get_mut(agent.0) else {
-        return;
-    };
-    if let Some(input) = chat::input_of(&conversation, turn.start) {
-        conversation.add_aside(Aside::new(
-            "ene.turn_input",
-            Author::rig(),
-            json!({"start": turn.start.get(), "input_id": input}),
-        ));
+/// Enforces the model check before a turn is accepted.
+pub(crate) fn require_model(world: &mut World, companion: &str) -> Result<()> {
+    let entity =
+        agent_of(world, companion).ok_or_else(|| HostError::not_found("companion not found"))?;
+    ensure_model(world, entity)
+}
+
+/// Rebuilds the system prompt after a companion edit, and drops the agent when
+/// the companion is gone.
+pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()> {
+    let store = world.resource::<Store>().clone();
+    let entity = agent_of(world, companion_id);
+    match store.companion(companion_id)? {
+        Some(companion) => {
+            let entity = entity.unwrap_or_else(|| spawn_companion(world, &companion));
+            world
+                .entity_mut(entity)
+                .insert(SystemPrompt(system_prompt(&companion)));
+            world.entity_mut(entity).remove::<Binding>();
+            require_model(world, companion_id)?;
+            Ok(())
+        }
+        None => {
+            if let Some(entity) = entity {
+                world.trigger(Retire { entity });
+            }
+            Ok(())
+        }
     }
 }
 
-fn turn_started(
-    started: On<Add<TurnOf>>,
-    turns: Query<&TurnOf>,
-    keys: Query<&AgentKey>,
-    mut commands: Commands,
-) {
-    let Ok(&TurnOf(agent)) = turns.get(started.entity) else {
-        return;
+/// Startup reconciliation: one agent per companion, one per open run, and no
+/// agent whose companion or run is gone.
+pub(crate) fn reconcile(world: &mut World) {
+    let store = world.resource::<Store>().clone();
+    let companions = store.companions().unwrap_or_default();
+    let existing: Vec<(Entity, AgentId)> = {
+        let mut query = world.query::<(
+            Entity,
+            &AgentId,
+            Option<&CompanionAgent>,
+            Option<&WorkAgent>,
+        )>();
+        query
+            .iter(world)
+            .filter(|(_, _, companion, work)| companion.is_some() || work.is_some())
+            .map(|(entity, id, _, _)| (entity, id.clone()))
+            .collect()
     };
-    let Ok(key) = keys.get(agent) else {
-        return;
+    for companion in &companions {
+        spawn_companion(world, companion);
+    }
+    // Work agents for runs that are still open.
+    let works: Vec<String> = companions
+        .iter()
+        .map(|companion| companion.id.clone())
+        .collect();
+    for companion_id in works {
+        let Ok(sessions) = store.work_sessions(&companion_id) else {
+            continue;
+        };
+        for session in sessions {
+            let Ok(Some(run)) = store.active_run(&session.id) else {
+                continue;
+            };
+            if let Some(companion) = store.companion(&companion_id).ok().flatten() {
+                spawn_work_agent(
+                    world,
+                    &companion,
+                    &session.id,
+                    &run.run_id,
+                    &run.instruction,
+                );
+            }
+        }
+    }
+    // Retire the kernel.s default agent and any agent without a role.
+    let stray: Vec<Entity> = {
+        let mut query = world.query::<(Entity, Option<&CompanionAgent>, Option<&WorkAgent>)>();
+        query
+            .iter(world)
+            .filter(|(_, companion, work)| companion.is_none() && work.is_none())
+            .map(|(entity, _, _)| entity)
+            .collect()
     };
-    let key = key.clone();
-    let turn_entity = started.entity;
-    commands.queue(move |world: &mut World| {
-        let Some(turn) = world.get::<Turn>(turn_entity) else {
-            return;
-        };
-        let event = w::TurnEvent {
-            companion_id: key.companion().into(),
-            turn_id: format!("{}:{}", key.agent_id(), turn.start.get()),
-            status: "streaming".into(),
-            ..Default::default()
-        };
-        world.resource_mut::<Notifier>().push(
-            Some(key.companion().into()),
-            None,
-            w::notification::Event::TurnEvent(Box::new(event)),
-        );
-    });
+    for entity in stray {
+        world.trigger(Retire { entity });
+    }
+    // Retire agents whose run closed or whose companion disappeared.
+    for (entity, id) in existing {
+        let keep = world
+            .get::<CompanionAgent>(entity)
+            .map(|agent| {
+                store
+                    .companion(&agent.companion_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+            .or_else(|| {
+                world.get::<WorkAgent>(entity).map(|agent| {
+                    store
+                        .run(&agent.run_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|run| crate::host::db::work::open_state(run.state))
+                })
+            })
+            .unwrap_or(false);
+        if !keep {
+            world.trigger(Retire { entity });
+        }
+        let _ = id;
+    }
+    // Bind every remaining agent's model; a missing model is a notice, not a
+    // startup failure.
+    let agents: Vec<(Entity, String)> = {
+        let mut query = world.query::<(Entity, Option<&CompanionAgent>, Option<&WorkAgent>)>();
+        query
+            .iter(world)
+            .filter_map(|(entity, companion, work)| {
+                companion
+                    .map(|agent| (entity, agent.companion_id.clone()))
+                    .or_else(|| work.map(|agent| (entity, agent.companion_id.clone())))
+            })
+            .collect()
+    };
+    for (entity, companion) in agents {
+        if let Err(error) = ensure_model(world, entity) {
+            let mut notifier = world.resource_mut::<Notifier>();
+            notifier.notice(
+                Some(&companion),
+                "model_unavailable",
+                &crate::host::db::truncate(&error.to_string(), 300),
+            );
+        }
+    }
+    let mut notifier = world.resource_mut::<Notifier>();
+    notifier.notice(None, "host_ready", "the host restored its state");
 }
 
-fn turn_settled(
-    settled: On<Add<Settled>>,
-    turns: Query<&ForAgent, With<Turn>>,
-    mut commands: Commands,
-) {
-    let Ok(&ForAgent(agent)) = turns.get(settled.entity) else {
-        return;
-    };
-    commands.queue(move |world: &mut World| {
-        let Some(key) = world.get::<AgentKey>(agent).cloned() else {
-            return;
-        };
-        if !key.is_work() {
-            world
-                .resource_mut::<ConsolidationQueue>()
-                .0
-                .insert(key.companion().into());
-            world
-                .resource_mut::<CompactionQueue>()
-                .0
-                .insert(key.companion().into());
-            if let Err(error) = work::finalize_reports(world, key.companion())
-                && error.is_storage()
-            {
-                super::fail(world, error.to_string());
+/// The conversation text of one entry, when it belongs in the transcript.
+pub(crate) fn entry_text(entry: &EntryRef<'_>) -> Option<String> {
+    match entry.message {
+        CompletionMessage::User { content } => {
+            let mut text = String::new();
+            for item in content {
+                if let UserContent::Text(item) = item {
+                    text.push_str(&item.text);
+                }
             }
-        } else if let Err(error) = work::report_work(world, agent)
-            && error.is_storage()
-        {
-            super::fail(world, error.to_string());
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
         }
-        let Some(conversation) = world.get::<Conversation>(agent) else {
-            return;
-        };
-        let Some((_, record)) = conversation.turns().next_back() else {
-            return;
-        };
-        let start = record.start;
-        let (state, failure) = chat::turn_state(record.end.as_ref());
-        if let Some((id, text)) = chat::last_assistant(conversation, start) {
-            world.resource_mut::<Notifier>().push(
-                Some(key.companion().into()),
+        CompletionMessage::Assistant(reply) => {
+            let mut text = String::new();
+            for item in &reply.content {
+                if let AssistantContent::Text(item) = item {
+                    text.push_str(&item.text);
+                }
+            }
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        CompletionMessage::System { .. } => None,
+    }
+}
+
+fn role_of(entry: &EntryRef<'_>) -> w::MessageRole {
+    match (entry.author.map(|author| &author.kind), entry.message) {
+        (None, CompletionMessage::User { .. }) => w::MessageRole::User,
+        (None, CompletionMessage::System { .. }) => w::MessageRole::Context,
+        (None, CompletionMessage::Assistant(_)) => w::MessageRole::Assistant,
+        (Some(AuthorKind::User), _) => w::MessageRole::User,
+        (Some(AuthorKind::Agent), _) => w::MessageRole::Agent,
+        (Some(AuthorKind::Plugin(_)), _) | (Some(AuthorKind::Rig), _) => w::MessageRole::Context,
+    }
+}
+
+/// The agent rows a message projection needs.
+type AgentRows = (
+    &'static AgentId,
+    &'static Conversation,
+    Option<&'static CompanionAgent>,
+    Option<&'static WorkAgent>,
+);
+
+/// Projects every new conversation entry into `MessageCreated` notifications.
+fn publish_messages(
+    mut commands: Commands,
+    agents: Query<AgentRows>,
+    mut notifier: ResMut<Notifier>,
+    mut published: ResMut<Published>,
+) {
+    for (id, conversation, companion, work) in &agents {
+        let companion_id = companion
+            .map(|agent| agent.companion_id.clone())
+            .or_else(|| work.map(|agent| agent.companion_id.clone()))
+            .unwrap_or_default();
+        let last = published.cursor.get(&id.0).copied().unwrap_or(0);
+        let mut newest = last;
+        for entry in conversation.entries() {
+            let sequence = entry.id.get();
+            newest = newest.max(sequence);
+            if sequence <= last {
+                continue;
+            }
+            let Some(text) = entry_text(&entry) else {
+                continue;
+            };
+            let message = w::Message {
+                id: sequence.to_string(),
+                companion_id: companion_id.clone(),
+                work_id: work.map(|agent| agent.work_id.clone()).unwrap_or_default(),
+                role: role_of(&entry).into(),
+                text,
+                created_at: entry.made.to_string(),
+                sequence,
+                request_id: entry
+                    .author
+                    .and_then(|author| author.request.as_ref())
+                    .map(|request| request.0.clone()),
+                author: entry
+                    .author
+                    .map(|author| author.label())
+                    .unwrap_or_default(),
+                ..Default::default()
+            };
+            notifier.push(
+                Some(&companion_id),
                 None,
                 w::notification::Event::MessageCreated(Box::new(w::MessageCreated {
-                    message: w::Message {
-                        id: id.to_string(),
-                        companion_id: key.companion().into(),
-                        work_id: key.work_id().unwrap_or_default().into(),
-                        role: "assistant".into(),
-                        text,
-                        sequence: id,
-                        ..Default::default()
-                    }
-                    .into(),
+                    message: Some(message).into(),
                     ..Default::default()
                 })),
             );
         }
-        let event = w::TurnEvent {
-            companion_id: key.companion().into(),
-            turn_id: format!("{}:{}", key.agent_id(), start.get()),
-            status: state.as_str().into(),
-            failure: failure.as_ref().map(wire::failure).into(),
-            ..Default::default()
-        };
-        world.resource_mut::<Notifier>().push(
-            Some(key.companion().into()),
-            None,
-            w::notification::Event::TurnEvent(Box::new(event)),
-        );
-    });
-}
-
-fn bindings(world: &mut World) {
-    let calls: Vec<(Entity, Option<Entity>)> = world
-        .query_filtered::<(Entity, Option<&ForAgent>), ReadyToStart>()
-        .iter(world)
-        .map(|(call, agent)| (call, agent.map(|agent| agent.0)))
-        .collect();
-    let mut ready = Vec::new();
-    for (call, agent) in calls {
-        let Some(agent) = agent else {
-            continue;
-        };
-        if world
-            .get::<ModelRequest>(call)
-            .is_some_and(|request| request.connection.is_some())
-        {
-            continue;
-        }
-        let needs_model =
-            world.get::<ModelRequest>(call).is_some() || world.get::<ToolRequest>(call).is_some();
-        if needs_model {
-            ready.push((call, agent));
+        if newest > last {
+            published.cursor.insert(id.0.clone(), newest);
         }
     }
-    for (call, agent) in ready {
-        let Some(key) = world.get::<AgentKey>(agent).cloned() else {
-            continue;
-        };
-        let purpose = if key.is_work() {
-            model::Purpose::Task
-        } else {
-            model::Purpose::Conversation
-        };
-        if let Err(error) = chat::ensure_model(world, agent, key.companion(), purpose) {
-            world.entity_mut(call).insert(Refusal(error.to_string()));
-        }
-    }
+    let _ = &mut commands;
 }
 
-fn prepare(
-    mut calls: Query<(&mut ModelRequest, &ForAgent), Added<Admitted>>,
-    connections: Query<&rig_ecs::model::Connection>,
+/// Reports a turn that appeared this frame as streaming.
+fn turn_started(
+    turns: Query<(&Turn, &TurnOf, Option<&ForAgent>), Added<TurnOf>>,
+    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
+    mut notifier: ResMut<Notifier>,
 ) {
-    for (mut call, agent) in &mut calls {
-        let openai = call
-            .connection
-            .as_ref()
-            .or_else(|| connections.get(agent.0).ok())
-            .is_some_and(|connection| connection.spec.reference().starts_with("openai/"));
-        if openai {
-            call.request_mut().additional_params = Some(json!({"store": false}));
+    for (turn, of, _) in &turns {
+        let companion = agents
+            .get(of.0)
+            .ok()
+            .and_then(|(_, agent)| agent.map(|agent| agent.companion_id.clone()))
+            .unwrap_or_default();
+        notifier.push(
+            Some(companion.as_str()),
+            None,
+            w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
+                companion_id: companion.clone(),
+                turn_id: turn.start.get().to_string(),
+                status: w::TurnStatus::Streaming.into(),
+                failure: None.into(),
+                ..Default::default()
+            })),
+        );
+    }
+}
+
+/// Publishes the final turn event once a turn settles.
+fn turn_settled(
+    mut commands: Commands,
+    settled: Query<(&TurnOutcome, &ForAgent), Added<Settled>>,
+    turns: Query<&Turn>,
+    agents: Query<(&AgentId, Option<&CompanionAgent>, Option<&WorkAgent>)>,
+    mut notifier: ResMut<Notifier>,
+) {
+    for (outcome, of) in &settled {
+        let Ok((id, companion, work)) = agents.get(of.0) else {
+            continue;
+        };
+        let companion_id = companion
+            .map(|agent| agent.companion_id.clone())
+            .or_else(|| work.map(|agent| agent.companion_id.clone()))
+            .unwrap_or_default();
+        let turn_id = turns
+            .get(of.0)
+            .map(|turn| turn.start.get().to_string())
+            .unwrap_or_else(|_| id.0.clone());
+        let (status, failure) = match outcome {
+            TurnOutcome::Answered(_) => (w::TurnStatus::Answered, None),
+            TurnOutcome::Stopped(_) => (w::TurnStatus::Stopped, None),
+            TurnOutcome::Failed(why) => (
+                w::TurnStatus::Failed,
+                Some(w::Failure {
+                    code: "turn_failed".into(),
+                    message: crate::host::db::truncate(why, 500),
+                    ..Default::default()
+                }),
+            ),
+        };
+        notifier.push(
+            Some(&companion_id),
+            None,
+            w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
+                companion_id: companion_id.clone(),
+                turn_id,
+                status: status.into(),
+                failure: failure.into(),
+                ..Default::default()
+            })),
+        );
+        if let Some(work) = work {
+            let run_id = work.run_id.clone();
+            let outcome = outcome.clone();
+            commands.queue(move |world: &mut World| {
+                crate::host::work::settle_run(world, run_id, outcome);
+            });
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn streams(
+/// Reports text deltas of ordinary conversation turns only: never reasoning,
+/// summaries or child-agent output.
+fn stream_deltas(
     mut deltas: MessageReader<StreamDelta>,
-    calls: Query<(&Effect, &CallOf), With<TurnCall>>,
-    turns: Query<&Turn>,
-    keys: Query<&AgentKey>,
+    calls: Query<(), (With<TurnCall>, Without<Settled>)>,
+    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
     mut notifier: ResMut<Notifier>,
 ) {
     for delta in deltas.read() {
-        let Ok((_effect, &CallOf(turn_entity))) = calls.get(delta.effect) else {
+        if !calls.contains(delta.effect) {
             continue;
-        };
-        let Some(agent) = delta.agent else {
-            continue;
-        };
-        let Ok(key) = keys.get(agent) else {
-            continue;
-        };
-        let Ok(turn) = turns.get(turn_entity) else {
-            continue;
-        };
+        }
         let StreamEvent::Text { text, .. } = &delta.event else {
             continue;
         };
+        let companion = delta
+            .agent
+            .and_then(|agent| agents.get(agent).ok())
+            .and_then(|(_, companion)| companion.map(|agent| agent.companion_id.clone()))
+            .unwrap_or_default();
         notifier.push(
-            Some(key.companion().into()),
+            Some(companion.as_str()),
             None,
             w::notification::Event::MessageDelta(Box::new(w::MessageDelta {
-                companion_id: key.companion().into(),
-                stream_id: format!("{}:{}", key.agent_id(), turn.start.get()),
+                companion_id: companion.clone(),
+                stream_id: delta.effect.to_string(),
                 delta: text.clone(),
                 ..Default::default()
             })),
@@ -371,66 +585,103 @@ fn streams(
     }
 }
 
-fn output_limit(mut calls: Query<&mut Outcome, (With<TurnCall>, ReadyToSettle)>) {
-    const MAX_OUTPUT: usize = 128_000;
-    for mut outcome in &mut calls {
-        if outcome
-            .completion()
-            .is_some_and(|response| response.text().chars().count() > MAX_OUTPUT)
-        {
-            *outcome = Outcome::refused("output_limit");
+/// Answers device tool calls whose client never responded.
+fn expire_devices(world: &mut World) {
+    let now = std::time::Instant::now();
+    let expired: Vec<String> = {
+        let waiting = world.resource::<super::resources::Waiting>();
+        waiting
+            .by_operation
+            .iter()
+            .filter(|(_, waiter)| waiter.deadline <= now)
+            .map(|(operation, _)| operation.clone())
+            .collect()
+    };
+    for operation in expired {
+        super::client::device::expire(world, &operation);
+    }
+}
+
+/// The host's agent plugin: reconciliation, projection and device timeouts.
+pub(crate) struct AgentPlugin;
+
+impl Plugin for AgentPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Published>()
+            .init_resource::<WorkReports>()
+            .add_systems(Startup, reconcile)
+            .add_systems(
+                Update,
+                (
+                    publish_messages.after(AgentLoop),
+                    turn_started.after(AgentLoop),
+                    turn_settled.after(AgentLoop),
+                    expire_devices.after(AgentLoop),
+                ),
+            )
+            .add_systems(AgentPass, stream_deltas.in_set(ReviewSystems::Edit));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::json::JsonDoc;
+    use crate::host::mind::{Profile, State};
+
+    fn companion() -> Companion {
+        Companion {
+            id: "ene".into(),
+            name: "ene".into(),
+            mind: "kind".into(),
+            profile: Profile::default(),
+            profile_revision: 1,
+            state: State::default(),
+            state_revision: 1,
+            body: JsonDoc::new("ene.body.v1", serde_json::json!({})),
+            voice: JsonDoc::new("ene.voice.v1", serde_json::json!({})),
+            assignments: Default::default(),
+            persona: None,
+            voice_identifier: None,
+            revision: 1,
+            created_at: String::new(),
+            updated_at: String::new(),
         }
     }
-}
 
-fn recalled(
-    mut recalled: MessageReader<Recalled>,
-    keys: Query<&AgentKey>,
-    mut notifier: ResMut<Notifier>,
-) {
-    for input in recalled.read() {
-        let Ok(key) = keys.get(input.agent) else {
-            continue;
-        };
-        notifier.push(
-            Some(key.companion().into()),
-            None,
-            w::notification::Event::Generic(Box::new(w::HostEvent {
-                kind: "recalled_input".into(),
-                payload: json!({
-                    "companion_id": key.companion(),
-                    "work_id": key.work_id().unwrap_or_default(),
-                    "text": input.text,
-                    "reason": input.why,
-                })
-                .to_string(),
-                ..Default::default()
-            })),
-        );
+    #[test]
+    fn prompts_carry_the_persona_and_the_one_persona_rule() {
+        let prompt = system_prompt(&companion());
+        assert!(prompt.contains("kind"));
+        assert!(prompt.contains("一人称"));
+        assert!(prompt.contains("noop"));
+        let work = work_prompt(&companion(), "list the folder");
+        assert!(work.contains("list the folder"));
+        assert!(work.contains("report"));
+    }
+
+    #[test]
+    fn message_roles_follow_the_author() {
+        let conversation =
+            rig_core::conversation::Conversation::from_messages([CompletionMessage::user("hello")]);
+        let entry = conversation.entries().next().expect("one entry");
+        assert_eq!(role_of(&entry), w::MessageRole::User);
+        assert_eq!(entry_text(&entry).as_deref(), Some("hello"));
+
+        let conversation =
+            rig_core::conversation::Conversation::from_messages([CompletionMessage::assistant(
+                "hi",
+            )]);
+        let entry = conversation.entries().next().expect("one entry");
+        assert_eq!(role_of(&entry), w::MessageRole::Assistant);
+        assert_eq!(entry_text(&entry).as_deref(), Some("hi"));
     }
 }
 
-fn changes(
-    mut changed: MessageReader<ConversationChanged>,
-    keys: Query<&AgentKey>,
-    mut notifier: ResMut<Notifier>,
-) {
-    for change in changed.read() {
-        let Ok(key) = keys.get(change.agent) else {
-            continue;
-        };
-        notifier.push(
-            Some(key.companion().into()),
-            None,
-            w::notification::Event::Generic(Box::new(w::HostEvent {
-                kind: "conversation_changed".into(),
-                payload: json!({
-                    "companion_id": key.companion(),
-                    "work_id": key.work_id().unwrap_or_default(),
-                })
-                .to_string(),
-                ..Default::default()
-            })),
-        );
-    }
-}
+/// Test-only model injection: the host never builds provider connections in
+/// a unit test.
+#[cfg(test)]
+#[derive(Resource, Clone)]
+pub(crate) struct TestModel(
+    pub(crate) std::sync::Arc<dyn Fn() -> super::model::Bound + Send + Sync>,
+);

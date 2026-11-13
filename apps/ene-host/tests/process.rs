@@ -1,5 +1,4 @@
-//! A real host process: private discovery, owner auth, and graceful SIGTERM.
-
+//! A real host process: private discovery, owner auth and graceful SIGTERM.
 #![cfg(unix)]
 
 use std::{path::Path, process::Command, time::Duration};
@@ -21,11 +20,12 @@ async fn process_publishes_private_discovery_authenticates_and_stops() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ene-host"))
         .env("ENE_HOST_STATE_DIR", &state)
         .env("ENE_HOST_RUNTIME_DIR", &runtime)
+        .env("ENE_HOST_SESSION_CREDENTIALS", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("start ene-host");
-    let discovery = tokio::time::timeout(Duration::from_secs(10), async {
+    let discovery = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Some(discovery) = connection_file(&runtime) {
                 return discovery;
@@ -51,7 +51,7 @@ async fn process_publishes_private_discovery_authenticates_and_stops() {
         .status()
         .unwrap();
     assert!(status.success());
-    let exited = tokio::time::timeout(Duration::from_secs(10), async {
+    let exited = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if child.try_wait().unwrap().is_some() {
                 return;

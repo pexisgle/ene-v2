@@ -1,234 +1,343 @@
-//! Parent-facing work tools and the worker's report tool.
-use super::{
-    MAX_INSTRUCTION, WorkStatus, list,
-    rig::{current_run, deliver_to_parent, notify, notify_run, parent_key, start_in_world},
-};
+//! Work tools: the parent's commission/steer/stop tools and the hand's
+//! report tool.
+use super::{Inquiry, Run, RunState, WorkStatus};
 use crate::host::{
-    agent::AgentKey,
-    chat,
-    db::{Result, Store, now},
+    agent::{self, CompanionAgent, WorkAgent, WorkReports},
+    db::{Result, Store},
     error::HostError,
-    tools,
+    notify::Notifier,
+    tools::run_tool,
 };
 use bevy_ecs::prelude::*;
-use rig_core::conversation::{Author, RequestId};
+use ene_rpc as w;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Value, json};
-use uuid::Uuid;
+use serde_json::json;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct StartArgs {
-    instruction: String,
+pub(crate) struct StartArgs {
+    pub(crate) instruction: String,
+    /// Continue this session instead of starting a new one.
     #[serde(default)]
-    work_id: Option<String>,
+    pub(crate) work_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SendArgs {
-    work_id: String,
-    text: String,
+pub(crate) struct SendArgs {
+    pub(crate) work_id: String,
+    pub(crate) text: String,
+    /// The pending inquiry this text answers.
     #[serde(default)]
-    request_id: Option<String>,
+    pub(crate) request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct ListArgs {}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StopArgs {
+    pub(crate) work_id: String,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct WorkArgs {
-    work_id: String,
-    #[serde(default)]
-    reason: Option<String>,
+pub(crate) struct ReportArgs {
+    /// activity | message | question | completed | failed
+    pub(crate) kind: String,
+    pub(crate) content: String,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ReportArgs {
-    kind: String,
-    content: String,
-    #[serde(default)]
-    artifacts: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct Empty {}
-
-pub(crate) fn register_tools(app: &mut App) {
+pub(crate) fn register(app: &mut App) {
     app.add_open_tool::<StartArgs, _>(
         "start_work",
-        "Start independent work and return its work id immediately.",
+        "Commission a task to your hands. Pass work_id to continue an existing session.",
         ToolOptions::default(),
-        tools::run_tool(|world, agent, _, args| start_tool(world, agent, args)),
+        run_tool(|world, agent, _, args| start(world, agent, args)),
     )
     .add_open_tool::<SendArgs, _>(
         "send_work",
-        "Send more instructions to an existing work session.",
+        "Send more input to a running task, or answer a pending question.",
         ToolOptions::default(),
-        tools::run_tool(|world, agent, _, args| send_tool(world, agent, args)),
+        run_tool(|world, agent, _, args| send(world, agent, args)),
     )
-    .add_open_tool::<WorkArgs, _>(
-        "stop_work",
-        "Stop a work session. The parent conversation keeps running.",
-        ToolOptions::default(),
-        tools::run_tool(|world, agent, _, args: WorkArgs| {
-            stop_tool(world, agent, &args.work_id, args.reason.as_deref())
-        }),
-    )
-    .add_open_tool::<Empty, _>(
+    .add_open_tool::<ListArgs, _>(
         "list_works",
-        "List this companion's work sessions.",
-        ToolOptions {
-            footprint: Some(Touches::Reads(Scope::Anything)),
-        },
-        tools::run_tool(|world, agent, _, _: Empty| list_works_tool(world, agent)),
+        "List the work sessions you own and their runs.",
+        ToolOptions::default(),
+        run_tool(|world, agent, _, args| list(world, agent, args)),
+    )
+    .add_open_tool::<StopArgs, _>(
+        "stop_work",
+        "Ask a running task to stop.",
+        ToolOptions::default(),
+        run_tool(|world, agent, _, args| stop(world, agent, args)),
     )
     .add_open_tool::<ReportArgs, _>(
         "report",
-        "Report progress or a result to the parent companion.",
+        "Report progress, ask the user a question, or report completion or failure. \
+         The host binds the session and run.",
         ToolOptions::default(),
-        tools::run_tool(|world, agent, _, args: ReportArgs| report_tool(world, agent, args)),
+        run_tool(|world, agent, _, args| report(world, agent, args)),
     );
 }
 
-fn start_tool(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
-    let key = parent_key(world, agent)?;
-    if let Some(work_id) = args.work_id {
-        return continue_work(world, &key, &work_id, args.instruction, None);
-    }
-    Ok(start_in_world(world, key.companion(), "", &args.instruction)?.id)
+fn companion(world: &World, agent: Entity) -> Result<String> {
+    world
+        .get::<CompanionAgent>(agent)
+        .map(|agent| agent.companion_id.clone())
+        .ok_or_else(|| HostError::internal("this tool belongs to a companion"))
 }
 
-fn send_tool(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
-    let key = parent_key(world, agent)?;
-    continue_work(world, &key, &args.work_id, args.text, args.request_id)
-}
-
-fn continue_work(
-    world: &mut World,
-    key: &AgentKey,
-    work_id: &str,
-    text: String,
-    request_id: Option<String>,
-) -> Result<String> {
-    if text.trim().is_empty() || text.len() > MAX_INSTRUCTION {
-        return Err(HostError::invalid("invalid work instruction"));
+fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
+    let companion = companion(world, agent)?;
+    if args.instruction.trim().is_empty() {
+        return Err(HostError::invalid("an instruction is required"));
     }
     let store = world.resource::<Store>().clone();
-    let mut session = store
-        .work(work_id)?
-        .ok_or_else(|| HostError::not_found("work not found"))?;
-    if session.companion_id != key.companion() || session.closed {
-        return Err(HostError::not_found("work not found"));
+    if let Some(work_id) = args.work_id.as_deref().filter(|id| !id.is_empty()) {
+        let session = store
+            .work_session(work_id)?
+            .ok_or_else(|| HostError::not_found("work session not found"))?;
+        if session.companion_id != companion {
+            return Err(HostError::permission(
+                "this work session belongs to another companion",
+            ));
+        }
+        if session.status == WorkStatus::Closed {
+            return Err(HostError::conflict("work session is closed"));
+        }
+        if store.active_run(work_id)?.is_some() {
+            return Err(HostError::conflict("the work session is already running"));
+        }
+        let companion_record = store
+            .companion(&companion)?
+            .ok_or_else(|| HostError::not_found("companion not found"))?;
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let run = Run {
+            run_id: run_id.clone(),
+            work_id: work_id.to_owned(),
+            instruction: args.instruction.clone(),
+            state: RunState::Running,
+            pending_request_id: None,
+            failure: None,
+            cancellation_requested_at: None,
+            cancellation_reason: None,
+            unverified_pids: Vec::new(),
+            started_at: String::new(),
+            updated_at: String::new(),
+        };
+        store.insert_run(&run)?;
+        store.set_work_status(work_id, WorkStatus::Active)?;
+        let work_agent = agent::spawn_work_agent(
+            world,
+            &companion_record,
+            work_id,
+            &run_id,
+            &args.instruction,
+        );
+        agent::ensure_model(world, work_agent)?;
+        world.trigger(Deliver::new(
+            work_agent,
+            args.instruction.clone(),
+            DeliveryMode::Queue,
+        ));
+        return Ok(json!({"work_id": work_id, "run_id": run_id}).to_string());
     }
-    let child = chat::find_agent(world, &AgentKey::work(&session.companion_id, work_id))
-        .ok_or_else(|| HostError::not_found("work not found"))?;
-    if let Some(inquiry) = request_id.as_deref() {
-        store.answer_inquiry(work_id, inquiry)?;
-    }
-    world.trigger(
-        Deliver::new(child, text, DeliveryMode::Steer).with_author(Author::agent(
-            key.agent_id(),
-            Some(RequestId(request_id.unwrap_or_else(|| work_id.to_owned()))),
-        )),
-    );
-    session.status = WorkStatus::Active;
-    session.updated_at = now();
-    store.save_work(&session)?;
-    notify(world, &session, "run_started", json!({}));
-    Ok(work_id.to_owned())
+    let session = super::start(
+        world,
+        w::StartWorkRequest {
+            companion_id: companion,
+            instruction: args.instruction,
+            ..Default::default()
+        },
+    )?;
+    Ok(json!({"work_id": session.id}).to_string())
 }
 
-pub(crate) fn stop_tool(
-    world: &mut World,
-    agent: Entity,
-    id: &str,
-    reason: Option<&str>,
-) -> Result<String> {
-    let key = parent_key(world, agent)?;
+fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
+    let companion = companion(world, agent)?;
     let store = world.resource::<Store>().clone();
     let session = store
-        .work(id)?
-        .ok_or_else(|| HostError::not_found("work not found"))?;
-    if session.companion_id != key.companion() {
-        return Err(HostError::not_found("work not found"));
+        .work_session(&args.work_id)?
+        .ok_or_else(|| HostError::not_found("work session not found"))?;
+    if session.companion_id != companion {
+        return Err(HostError::permission(
+            "this work session belongs to another companion",
+        ));
     }
-    if session.closed {
-        return Ok(id.into());
-    }
-    if let Some(child) = chat::find_agent(world, &AgentKey::work(&session.companion_id, id)) {
-        world.trigger(StopTurn {
-            entity: child,
-            reason: Some(reason.unwrap_or("parent stopped work").into()),
-        });
-    }
-    let mut session = session;
-    session.status = WorkStatus::Idle;
-    session.updated_at = now();
-    world.resource::<Store>().save_work(&session)?;
-    notify(world, &session, "status_changed", json!({"status": "idle"}));
-    Ok(id.into())
+    let request_id = args.request_id.clone().unwrap_or_default();
+    let acceptance = super::send(
+        world,
+        w::SendWorkRequest {
+            work_id: args.work_id,
+            request_key: uuid::Uuid::new_v4().to_string(),
+            text: args.text,
+            request_id: Some(request_id),
+            ..Default::default()
+        },
+    )?;
+    Ok(json!({"request_id": acceptance.request_id}).to_string())
 }
 
-fn list_works_tool(world: &mut World, agent: Entity) -> Result<String> {
-    let key = parent_key(world, agent)?;
-    let items: Vec<Value> = list(world, key.companion())?
-        .into_iter()
-        .map(|view| serde_json::to_value(view).unwrap_or(Value::Null))
-        .collect();
-    Ok(Value::Array(items).to_string())
+fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
+    let companion = companion(world, agent)?;
+    let store = world.resource::<Store>().clone();
+    let mut sessions = Vec::new();
+    for session in store.work_sessions(&companion)? {
+        let runs: Vec<String> = store
+            .runs(&session.id)?
+            .iter()
+            .map(|run| format!("{} ({})", run.run_id, run.state.as_str()))
+            .collect();
+        sessions.push(json!({
+            "work_id": session.id,
+            "title": session.title,
+            "status": session.status.as_str(),
+            "runs": runs,
+        }));
+    }
+    Ok(json!({"sessions": sessions}).to_string())
 }
 
-fn report_tool(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> {
-    let key = world
-        .get::<AgentKey>(agent)
-        .cloned()
-        .ok_or_else(|| HostError::permission("unbound agent"))?;
-    let Some(work) = key.work_id() else {
-        return Err(HostError::permission("only work agents report"));
+fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
+    let companion = companion(world, agent)?;
+    let store = world.resource::<Store>().clone();
+    let session = store
+        .work_session(&args.work_id)?
+        .ok_or_else(|| HostError::not_found("work session not found"))?;
+    if session.companion_id != companion {
+        return Err(HostError::permission(
+            "this work session belongs to another companion",
+        ));
+    }
+    if session.status == WorkStatus::Closed {
+        return Ok(json!({"work_id": session.id, "status": "closed"}).to_string());
+    }
+    super::stop(world, &args.work_id)?;
+    let _ = args.reason;
+    Ok(json!({"work_id": session.id, "stopping": true}).to_string())
+}
+
+fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> {
+    let Some(work) = world.get::<WorkAgent>(agent).cloned() else {
+        return Err(HostError::permission(
+            "report is only available to a running task",
+        ));
     };
-    if args.content.trim().is_empty() || args.content.len() > MAX_INSTRUCTION {
-        return Err(HostError::invalid("invalid report"));
+    let store = world.resource::<Store>().clone();
+    let Some(run) = store.run(&work.run_id)? else {
+        return Err(HostError::not_found("run not found"));
+    };
+    if run.state.is_terminal() {
+        return Ok(json!({"accepted": false, "reason": "the run already ended"}).to_string());
     }
-    if !matches!(
-        args.kind.as_str(),
-        "activity" | "message" | "question" | "completed" | "failed"
-    ) {
-        return Err(HostError::invalid("invalid report kind"));
+    if args.content.trim().is_empty() {
+        return Err(HostError::invalid("report content is required"));
     }
-    let mut text = args.content;
-    if !args.artifacts.is_empty() {
-        text.push_str("\n\n添付:");
-        for artifact in &args.artifacts {
-            text.push_str("\n- ");
-            text.push_str(artifact);
+    match args.kind.as_str() {
+        "activity" | "message" => {
+            if let Some(parent) = agent::agent_of(world, &work.companion_id) {
+                let author = Author::agent(agent::work_agent_id(&work.run_id), None);
+                world.trigger(
+                    Deliver::new(
+                        parent,
+                        format!("[作業報告] {}", args.content),
+                        DeliveryMode::Inform,
+                    )
+                    .with_author(author),
+                );
+            }
+            Ok(json!({"accepted": true}).to_string())
         }
+        "question" => {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            store.insert_inquiry(&Inquiry {
+                request_id: request_id.clone(),
+                work_id: work.work_id.clone(),
+                run_id: work.run_id.clone(),
+                prompt: args.content.clone(),
+                choices: Vec::new(),
+                answer: None,
+                created_at: String::new(),
+                resolved_at: None,
+            })?;
+            let mut waiting = run.clone();
+            waiting.state = RunState::WaitingInput;
+            waiting.pending_request_id = Some(request_id.clone());
+            store.update_run(&waiting)?;
+            let session = store
+                .work_session(&work.work_id)?
+                .ok_or_else(|| HostError::not_found("work session not found"))?;
+            let event = crate::host::wire::work_event(
+                &session,
+                w::WorkEventKind::InquiryCreated,
+                w::work_event::Detail::InquiryCreated(Box::new(w::WorkInquiryCreated {
+                    inquiry: Some(w::WorkInquiry {
+                        request_id: request_id.clone(),
+                        prompt: args.content.clone(),
+                        choices: Vec::new(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..Default::default()
+                })),
+            );
+            let companion = session.companion_id.clone();
+            {
+                let mut notifier = world.resource_mut::<Notifier>();
+                notifier.push(
+                    Some(&companion),
+                    None,
+                    w::notification::Event::WorkEvent(Box::new(event)),
+                );
+            }
+            if let Some(parent) = agent::agent_of(world, &companion) {
+                let author = Author::agent(agent::work_agent_id(&work.run_id), None);
+                world.trigger(
+                    Deliver::new(
+                        parent,
+                        format!("[作業からの質問 request_id={request_id}] {}", args.content),
+                        DeliveryMode::Queue,
+                    )
+                    .with_author(author),
+                );
+            }
+            Ok(json!({"accepted": true, "request_id": request_id}).to_string())
+        }
+        "completed" => {
+            world
+                .resource_mut::<WorkReports>()
+                .completed
+                .insert(work.run_id.clone(), args.content.clone());
+            Ok(json!({"accepted": true}).to_string())
+        }
+        "failed" => {
+            let mut failed = run.clone();
+            failed.state = RunState::Failed;
+            failed.failure = Some(crate::host::error::Failure::new(
+                "work_failed",
+                args.content.clone(),
+            ));
+            store.update_run(&failed)?;
+            if let Some(parent) = agent::agent_of(world, &work.companion_id) {
+                let author = Author::agent(agent::work_agent_id(&work.run_id), None);
+                world.trigger(
+                    Deliver::new(
+                        parent,
+                        format!("[作業失敗] {}", args.content),
+                        DeliveryMode::Queue,
+                    )
+                    .with_author(author),
+                );
+            }
+            Ok(json!({"accepted": true}).to_string())
+        }
+        other => Err(HostError::invalid(format!("unknown report kind `{other}`"))),
     }
-    if args.kind == "question" {
-        let request_id = Uuid::new_v4().to_string();
-        world
-            .resource::<Store>()
-            .add_inquiry(work, &request_id, &text, &[])?;
-        deliver_to_parent(
-            world,
-            key.companion(),
-            work,
-            &format!("作業からの質問 (request_id: {request_id}):\n{text}"),
-            Some(&format!("inquiry:{request_id}")),
-        );
-        let run = current_run(world, agent, work);
-        notify_run(
-            world,
-            key.companion(),
-            work,
-            &run,
-            "inquiry_created",
-            json!({"request_id": request_id, "text": text}),
-        );
-        return Ok(request_id);
-    }
-    deliver_to_parent(world, key.companion(), work, &text, None);
-    Ok("reported".into())
 }

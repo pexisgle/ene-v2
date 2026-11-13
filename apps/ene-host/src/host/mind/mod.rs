@@ -1,336 +1,484 @@
-//! Companions, authored profiles and the current mind.
-pub(crate) mod companion;
-mod consolidate;
+//! The companion: the author's profile, the mind it grew and its model
+//! assignments. Query functions live in `db::companions`.
 pub(crate) mod memory;
-mod recall;
-mod tools;
 
-pub(crate) use self::companion::{Assignments, Companion, ModelAssignment, Profile};
-pub(crate) use self::memory::{
-    Acquisition, Memory, MemoryAction, MindOperation, RecallMode, SHARED_AUDIENCE,
-};
-pub(crate) use self::{
-    consolidate::{
-        Batch, Consolidation, apply as apply_consolidation, start as start_consolidation,
-    },
-    memory::control_memory,
-    recall::inject_context,
-    tools::register_tools,
-};
+use super::error::{HostError, Result};
+use super::json::JsonDoc;
+use serde::{Deserialize, Serialize};
+
+/// The seven model roles from the contract. `companion` and `task` are
+/// required to run anything; the rest fall back as docs/design/work.md says.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Assignments {
+    pub(crate) companion: Assignment,
+    pub(crate) task: Assignment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) perception: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compaction: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) consolidation: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) decision: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) embedding: Option<Assignment>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Assignment {
+    pub(crate) connection_id: String,
+    pub(crate) model_id: String,
+}
+
+impl Assignment {
+    pub(crate) fn is_set(&self) -> bool {
+        !self.connection_id.is_empty() && !self.model_id.is_empty()
+    }
+}
+
+/// The profile material the author edits apart from the core.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Profile {
+    #[serde(default)]
+    pub(crate) facets: Vec<String>,
+    #[serde(default)]
+    pub(crate) examples: Vec<String>,
+    #[serde(default)]
+    pub(crate) background: Vec<String>,
+    #[serde(default)]
+    pub(crate) expression: Vec<String>,
+}
+
+/// The mind grown through interaction. Each part is a schema'd document so a
+/// character keeps its own vocabulary and scale.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct State {
+    pub(crate) emotion: JsonDoc,
+    pub(crate) relationships: JsonDoc,
+    pub(crate) tendencies: JsonDoc,
+    pub(crate) concerns: JsonDoc,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            emotion: JsonDoc::new("ene.emotion.v1", serde_json::json!({})),
+            relationships: JsonDoc::new("ene.relationships.v1", serde_json::json!([])),
+            tendencies: JsonDoc::new("ene.tendencies.v1", serde_json::json!([])),
+            concerns: JsonDoc::new("ene.concerns.v1", serde_json::json!([])),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Companion {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    /// The immutable core of the persona (`MindProfile.core`).
+    pub(crate) mind: String,
+    pub(crate) profile: Profile,
+    pub(crate) profile_revision: u64,
+    pub(crate) state: State,
+    pub(crate) state_revision: u64,
+    pub(crate) body: JsonDoc,
+    pub(crate) voice: JsonDoc,
+    pub(crate) assignments: Assignments,
+    pub(crate) persona: Option<String>,
+    pub(crate) voice_identifier: Option<String>,
+    /// Optimistic concurrency for edits of the author's settings.
+    pub(crate) revision: u64,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
+impl Companion {
+    pub(crate) fn validate(&self) -> Result<()> {
+        super::db::validate_id(&self.id)?;
+        if self.name.trim().is_empty() || self.name.chars().count() > 128 {
+            return Err(HostError::invalid(
+                "companion name must be 1-128 characters",
+            ));
+        }
+        if self.mind.chars().count() > 8_000 {
+            return Err(HostError::invalid("companion mind is too long"));
+        }
+        if self
+            .persona
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > 8_000)
+        {
+            return Err(HostError::invalid("companion persona is too long"));
+        }
+        if self
+            .voice_identifier
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > 128)
+        {
+            return Err(HostError::invalid("voice identifier is too long"));
+        }
+        self.body.validate()?;
+        self.voice.validate()?;
+        for text in [
+            &self.profile.facets,
+            &self.profile.examples,
+            &self.profile.background,
+            &self.profile.expression,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if text.chars().count() > 4_000 {
+                return Err(HostError::invalid("profile entry is too long"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The model assignment for one role, with the documented fallbacks.
+    pub(crate) fn model(&self, role: Role) -> Option<&Assignment> {
+        let assignments = &self.assignments;
+        let chosen = match role {
+            Role::Companion => Some(&assignments.companion),
+            Role::Task => Some(&assignments.task),
+            Role::Perception => assignments
+                .perception
+                .as_ref()
+                .or(Some(&assignments.companion)),
+            Role::Compaction => assignments
+                .compaction
+                .as_ref()
+                .or(Some(&assignments.companion)),
+            Role::Consolidation => assignments
+                .consolidation
+                .as_ref()
+                .or(Some(&assignments.companion)),
+            Role::Decision => assignments.decision.as_ref().or(Some(&assignments.task)),
+            Role::Embedding => assignments.embedding.as_ref(),
+        }?;
+        chosen.is_set().then_some(chosen)
+    }
+}
+
+// Model roles are addressed by name from the contract, so not every variant
+// is constructed yet; `Companion::model` is what selects one.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    Companion,
+    Task,
+    Perception,
+    Compaction,
+    Consolidation,
+    Decision,
+    Embedding,
+}
+
+// === Host operations ======================================================
+
+pub(crate) mod recall;
+pub(crate) mod tools;
 
 use super::{
-    agent::AgentKey,
-    chat,
-    db::{Result, Store, new_id, next_revision, now, validate_id},
-    error::HostError,
+    agent,
+    db::{Store, now},
     notify::Notifier,
-    resources::ConsolidationQueue,
     wire,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use rig_ecs::prelude::*;
 
-pub(crate) const MAX_COMPANIONS: usize = 16;
-const MAX_CONTENT: usize = 4000;
-const MAX_TEXT: usize = 1000;
-const MAX_ITEMS: usize = 16;
+/// Registers the parent's memory tools and the dynamic-context systems.
+pub(crate) struct MindPlugin;
 
-pub(crate) fn companions(store: &Store) -> Result<Vec<w::Companion>> {
+impl Plugin for MindPlugin {
+    fn build(&self, app: &mut App) {
+        tools::register(app);
+        app.add_plugins(recall::RecallPlugin);
+    }
+}
+
+pub(crate) fn list(store: &Store) -> Result<Vec<w::Companion>> {
     Ok(store.companions()?.iter().map(wire::companion).collect())
 }
 
-pub(crate) fn companion(store: &Store, id: &str) -> Result<Companion> {
-    validate_id(id)?;
+pub(crate) fn get(store: &Store, id: &str) -> Result<w::Companion> {
     store
         .companion(id)?
+        .map(|companion| wire::companion(&companion))
         .ok_or_else(|| HostError::not_found("companion not found"))
 }
 
-pub(crate) fn create_companion(
+fn document_field(field: Option<&w::JsonDocument>) -> JsonDoc {
+    field
+        .map(wire::document_from)
+        .unwrap_or_else(JsonDoc::empty)
+}
+
+pub(crate) fn create(
     world: &mut World,
     request: w::CreateCompanionRequest,
 ) -> Result<w::Companion> {
-    if request.name.trim().is_empty() || request.name.chars().count() > 200 {
-        return Err(HostError::invalid("invalid companion name"));
-    }
-    if request.mind.chars().count() > 16_000 {
-        return Err(HostError::invalid("companion mind is too long"));
-    }
     let store = world.resource::<Store>().clone();
-    if store.companions()?.len() >= MAX_COMPANIONS {
+    if store.companions()?.len() >= 16 {
         return Err(HostError::exhausted("too many companions"));
-    }
-    let mut record = Companion::seed(new_id(), now());
-    record.name = request.name;
-    record.mind = request.mind;
-    record.body = wire::parse(&request.body)?;
-    record.voice = wire::parse(&request.voice)?;
-    record.assignments = assignments_from(request.assignments.as_option());
-    record.persona = request.persona.clone();
-    record.voice_identifier = request.voice_identifier.clone();
-    if let Some(profile) = request.profile.as_option() {
-        record.profile = Profile {
-            facets: profile.facets.clone(),
-            examples: profile.examples.clone(),
-            background: profile.background.clone(),
-            expression: profile.expression.clone(),
-        };
-    }
-    store.save_companion(&record)?;
-    notify_companion(world, &record);
-    Ok(wire::companion(&record))
-}
-
-pub(crate) fn update_companion(
-    world: &mut World,
-    request: w::UpdateCompanionRequest,
-) -> Result<w::Companion> {
-    let store = world.resource::<Store>().clone();
-    let mut record = companion(&store, &request.id)?;
-    if record.revision != request.revision {
-        return Err(HostError::conflict("companion revision changed"));
-    }
-    let mut changed = false;
-    if let Some(name) = request.name {
-        if name.trim().is_empty() || name.chars().count() > 200 {
-            return Err(HostError::invalid("invalid companion name"));
-        }
-        changed |= record.name != name;
-        record.name = name;
-    }
-    if let Some(mind) = request.mind {
-        if mind.chars().count() > 16_000 {
-            return Err(HostError::invalid("companion mind is too long"));
-        }
-        changed |= record.mind != mind;
-        record.mind = mind;
-    }
-    if let Some(body) = request.body {
-        let value = wire::parse(&body)?;
-        changed |= record.body != value;
-        record.body = value;
-    }
-    if let Some(voice) = request.voice {
-        let value = wire::parse(&voice)?;
-        changed |= record.voice != value;
-        record.voice = value;
-    }
-    if let Some(patch) = request.companion_assignment.as_option() {
-        let value = assignment_patch(patch)?;
-        changed |= record.assignments.companion != value;
-        record.assignments.companion = value;
-    }
-    if let Some(patch) = request.task_assignment.as_option() {
-        let value = assignment_patch(patch)?;
-        changed |= record.assignments.task != value;
-        record.assignments.task = value;
-    }
-    if let Some(patch) = request.perception_assignment.as_option() {
-        let value = assignment_patch(patch)?;
-        changed |= record.assignments.perception != value;
-        record.assignments.perception = value;
-    }
-    if let Some(patch) = request.compaction_assignment.as_option() {
-        let value = assignment_patch(patch)?;
-        changed |= record.assignments.compaction != value;
-        record.assignments.compaction = value;
-    }
-    if let Some(patch) = request.consolidation_assignment.as_option() {
-        let value = assignment_patch(patch)?;
-        changed |= record.assignments.consolidation != value;
-        record.assignments.consolidation = value;
-    }
-    if let Some(patch) = request.decision_assignment.as_option() {
-        let value = assignment_patch(patch)?;
-        changed |= record.assignments.decision != value;
-        record.assignments.decision = value;
-    }
-    if let Some(patch) = request.embedding_assignment.as_option() {
-        let value = assignment_patch(patch)?;
-        changed |= record.assignments.embedding != value;
-        record.assignments.embedding = value;
-    }
-    if let Some(persona) = request.persona {
-        changed |= record.persona != Some(persona.clone());
-        record.persona = Some(persona);
-    }
-    if let Some(voice) = request.voice_identifier {
-        changed |= record.voice_identifier != Some(voice.clone());
-        record.voice_identifier = Some(voice);
-    }
-    if changed {
-        record.revision = next_revision(record.revision)?;
-        record.updated_at = now();
-        store.save_companion(&record)?;
-        chat::refresh_prompt(world, &record.id);
-        notify_companion(world, &record);
-    }
-    Ok(wire::companion(&record))
-}
-
-fn assignments_from(value: Option<&w::ModelAssignments>) -> self::companion::Assignments {
-    let Some(value) = value else {
-        return Default::default();
-    };
-    self::companion::Assignments {
-        companion: value
-            .companion
-            .as_option()
-            .map(|assignment| self::companion::ModelAssignment {
-                connection: assignment.connection_id.clone(),
-                model: assignment.model_id.clone(),
-            }),
-        task: value.task.as_option().map(assignment),
-        perception: value.perception.as_option().map(assignment),
-        compaction: value.compaction.as_option().map(assignment),
-        consolidation: value.consolidation.as_option().map(assignment),
-        decision: value.decision.as_option().map(assignment),
-        embedding: value.embedding.as_option().map(assignment),
-    }
-}
-
-fn assignment_patch(
-    patch: &w::AssignmentPatch,
-) -> Result<Option<self::companion::ModelAssignment>> {
-    match patch.change.as_ref() {
-        Some(w::assignment_patch::Change::Set(assignment)) => {
-            Ok(Some(self::companion::ModelAssignment {
-                connection: assignment.connection_id.clone(),
-                model: assignment.model_id.clone(),
-            }))
-        }
-        Some(w::assignment_patch::Change::Clear(_)) => Ok(None),
-        None => Err(HostError::invalid("empty assignment patch")),
-    }
-}
-
-pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
-    let record = companion(store, id)?;
-    let cursor = store.consolidation(id)?.unwrap_or_default();
-    Ok(w::MindView {
-        companion_id: id.into(),
-        profile: wire::mind_profile(&record).into(),
-        state: wire::mind_state(&record).into(),
-        index: Some(w::MindIndexStatus {
-            pending_fts_count: 0,
-            pending_vector_count: 0,
-            embedding_model: String::new(),
-            model_calls: 0,
-            total_tokens: 0,
-            ..Default::default()
-        })
-        .into(),
-        consolidation: Some(w::MindConsolidationStatus {
-            last_processed_turn_id: cursor.last_sequence.to_string(),
-            jobs_completed: cursor.jobs,
-            model_calls: cursor.model_calls,
-            input_chars: cursor.input_chars,
-            last_error: cursor.reason,
-            ..Default::default()
-        })
-        .into(),
-        ..Default::default()
-    })
-}
-
-pub(crate) fn update_mind_profile(
-    world: &mut World,
-    request: w::UpdateMindProfileRequest,
-) -> Result<w::MindView> {
-    let store = world.resource::<Store>().clone();
-    let mut record = companion(&store, &request.companion_id)?;
-    if record.profile_revision != request.expected_revision {
-        return Err(HostError::conflict("profile revision changed"));
     }
     let profile = request
         .profile
         .as_option()
-        .ok_or_else(|| HostError::invalid("profile is required"))?;
-    let sections = [
-        &profile.facets,
-        &profile.examples,
-        &profile.background,
-        &profile.expression,
-    ];
-    if sections.iter().any(|list| list.len() > MAX_ITEMS) {
-        return Err(HostError::invalid("too many profile items"));
-    }
-    if sections
-        .into_iter()
-        .flatten()
-        .any(|item| item.chars().count() > 2000)
-    {
-        return Err(HostError::invalid("profile item is too long"));
-    }
-    record.profile = Profile {
-        facets: profile.facets.clone(),
-        examples: profile.examples.clone(),
-        background: profile.background.clone(),
-        expression: profile.expression.clone(),
+        .map(wire::profile_from)
+        .unwrap_or_default();
+    let assignments = request
+        .assignments
+        .as_option()
+        .map(wire::assignments_from)
+        .unwrap_or_default();
+    let companion = Companion {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: request.name.clone(),
+        mind: request.mind.clone(),
+        profile,
+        profile_revision: 1,
+        state: State::default(),
+        state_revision: 1,
+        body: document_field(request.body.as_option()),
+        voice: document_field(request.voice.as_option()),
+        assignments,
+        persona: request.persona.clone(),
+        voice_identifier: request.voice_identifier.clone(),
+        revision: 1,
+        created_at: now(),
+        updated_at: now(),
     };
-    record.profile_revision = next_revision(record.profile_revision)?;
-    record.updated_at = now();
-    store.save_companion(&record)?;
-    chat::refresh_prompt(world, &record.id);
-    let view = mind_view(&store, &record.id)?;
-    notify_mind(world, &record.id, &view);
-    Ok(view)
+    companion.validate()?;
+    store.insert_companion(&companion)?;
+    agent::spawn_companion(world, &companion);
+    agent::sync_companion(world, &companion.id)?;
+    notify(world, &companion);
+    Ok(wire::companion(&companion))
 }
 
-pub(crate) fn notify_companion(world: &mut World, companion: &Companion) {
+fn set_assignment(target: &mut Option<Assignment>, patch: Option<&w::AssignmentPatch>) {
+    match patch.and_then(|patch| patch.change.as_ref()) {
+        Some(w::assignment_patch::Change::Set(set)) => {
+            *target = Some(Assignment {
+                connection_id: set.connection_id.clone(),
+                model_id: set.model_id.clone(),
+            });
+        }
+        Some(w::assignment_patch::Change::Clear(_)) => *target = None,
+        None => {}
+    }
+}
+
+fn required_assignment(patch: Option<&w::AssignmentPatch>) -> Option<Assignment> {
+    match patch.and_then(|patch| patch.change.as_ref()) {
+        Some(w::assignment_patch::Change::Set(set)) => Some(Assignment {
+            connection_id: set.connection_id.clone(),
+            model_id: set.model_id.clone(),
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn update(
+    world: &mut World,
+    request: w::UpdateCompanionRequest,
+) -> Result<w::Companion> {
+    let store = world.resource::<Store>().clone();
+    let mut companion = store
+        .companion(&request.id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    if let Some(name) = request.name {
+        companion.name = name;
+    }
+    if let Some(mind) = request.mind {
+        companion.mind = mind;
+    }
+    if let Some(body) = request.body.as_option() {
+        companion.body = wire::document_from(body);
+    }
+    if let Some(voice) = request.voice.as_option() {
+        companion.voice = wire::document_from(voice);
+    }
+    if let Some(persona) = request.persona {
+        companion.persona = Some(persona);
+    }
+    if let Some(voice) = request.voice_identifier {
+        companion.voice_identifier = Some(voice);
+    }
+    if let Some(assignment) = required_assignment(request.companion_assignment.as_option()) {
+        companion.assignments.companion = assignment;
+    }
+    if let Some(assignment) = required_assignment(request.task_assignment.as_option()) {
+        companion.assignments.task = assignment;
+    }
+    set_assignment(
+        &mut companion.assignments.perception,
+        request.perception_assignment.as_option(),
+    );
+    set_assignment(
+        &mut companion.assignments.compaction,
+        request.compaction_assignment.as_option(),
+    );
+    set_assignment(
+        &mut companion.assignments.consolidation,
+        request.consolidation_assignment.as_option(),
+    );
+    set_assignment(
+        &mut companion.assignments.decision,
+        request.decision_assignment.as_option(),
+    );
+    set_assignment(
+        &mut companion.assignments.embedding,
+        request.embedding_assignment.as_option(),
+    );
+    companion.revision += 1;
+    companion.updated_at = now();
+    companion.validate()?;
+    store.update_companion(&companion, request.revision)?;
+    agent::sync_companion(world, &companion.id)?;
+    notify(world, &companion);
+    Ok(wire::companion(&companion))
+}
+
+pub(crate) fn delete(world: &mut World, id: &str) -> Result<()> {
+    let store = world.resource::<Store>().clone();
+    if !store.delete_companion(id)? {
+        return Err(HostError::not_found("companion not found"));
+    }
+    if let Some(entity) = agent::agent_of(world, id) {
+        world.trigger(Retire { entity });
+    }
+    Ok(())
+}
+
+fn notify(world: &mut World, companion: &Companion) {
     let view = wire::companion(companion);
-    world.resource_mut::<Notifier>().push(
-        Some(companion.id.clone()),
+    let mut notifier = world.resource_mut::<Notifier>();
+    notifier.push(
+        Some(&companion.id),
         None,
         w::notification::Event::Companion(Box::new(view)),
     );
 }
 
-pub(crate) fn notify_mind(world: &mut World, companion: &str, view: &w::MindView) {
-    world.resource_mut::<Notifier>().push(
-        Some(companion.into()),
+pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
+    let companion = store
+        .companion(id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let cursor = store.consolidation_cursor(id)?;
+    Ok(w::MindView {
+        companion_id: id.to_owned(),
+        profile: Some(wire::mind_profile(&companion)).into(),
+        state: Some(wire::mind_state(&companion)).into(),
+        index: None.into(),
+        consolidation: cursor
+            .map(|cursor| w::MindConsolidationStatus {
+                last_processed_turn_id: cursor,
+                ..Default::default()
+            })
+            .into(),
+        ..Default::default()
+    })
+}
+
+pub(crate) fn update_profile(
+    world: &mut World,
+    request: w::UpdateMindProfileRequest,
+) -> Result<w::MindView> {
+    let store = world.resource::<Store>().clone();
+    store
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let profile = request
+        .profile
+        .as_option()
+        .map(wire::profile_from)
+        .unwrap_or_default();
+    store.update_mind_profile(&request.companion_id, request.expected_revision, &profile)?;
+    notify_mind(world, &request.companion_id);
+    mind_view(&store, &request.companion_id)
+}
+
+pub(crate) fn control_memory(
+    world: &mut World,
+    request: w::MemoryControlRequest,
+) -> Result<w::MemoryControlResult> {
+    let store = world.resource::<Store>().clone();
+    let action = match request.action.to_i32() {
+        1 => super::db::memories::MemoryActionKind::Forget,
+        2 => super::db::memories::MemoryActionKind::Remember,
+        3 => super::db::memories::MemoryActionKind::Share,
+        4 => super::db::memories::MemoryActionKind::Unshare,
+        _ => return Err(HostError::invalid("a memory action is required")),
+    };
+    let memory = store
+        .memory(&request.memory_id)?
+        .ok_or_else(|| HostError::not_found("memory not found"))?;
+    if memory.owner != request.companion_id {
+        return Err(HostError::permission(
+            "only the owner may change a memory's importance or audience",
+        ));
+    }
+    let memory = store.control_memory(&request.memory_id, action, None)?;
+    notify_mind(world, &request.companion_id);
+    Ok(w::MemoryControlResult {
+        memory_id: memory.id,
+        importance: u32::from(memory.importance),
+        audiences: memory.audiences,
+        revision: memory.memory_revision,
+        ..Default::default()
+    })
+}
+
+pub(crate) fn list_memories(
+    world: &mut World,
+    request: w::ListMemoriesRequest,
+) -> Result<w::Memories> {
+    let store = world.resource::<Store>().clone();
+    store
+        .companion(&request.companion_id)?
+        .ok_or_else(|| HostError::not_found("companion not found"))?;
+    let limit = request.limit.unwrap_or(50).clamp(1, 200) as usize;
+    let cursor = request
+        .cursor
+        .as_deref()
+        .and_then(|cursor| cursor.parse::<i64>().ok());
+    let (items, next) = store.list_memories(&request.companion_id, cursor, limit)?;
+    let _ = world;
+    Ok(w::Memories {
+        items: items.iter().map(wire::memory).collect(),
+        next_cursor: next.map(|next| next.to_string()),
+        ..Default::default()
+    })
+}
+
+fn notify_mind(world: &mut World, companion: &str) {
+    let store = world.resource::<Store>().clone();
+    let Ok(view) = mind_view(&store, companion) else {
+        return;
+    };
+    let profile = view
+        .profile
+        .as_option()
+        .map(|profile| profile.revision)
+        .unwrap_or_default();
+    let state = view
+        .state
+        .as_option()
+        .map(|state| state.revision)
+        .unwrap_or_default();
+    let mut notifier = world.resource_mut::<Notifier>();
+    notifier.push(
+        Some(companion),
         None,
         w::notification::Event::MindUpdated(Box::new(w::MindUpdated {
-            companion_id: companion.into(),
-            profile_revision: view
-                .profile
-                .as_option()
-                .map_or(0, |profile| profile.revision),
-            state_revision: view.state.as_option().map_or(0, |state| state.revision),
-            updated_at: view
-                .state
-                .as_option()
-                .map_or_else(String::new, |state| state.updated_at.clone()),
+            companion_id: companion.to_owned(),
+            profile_revision: profile,
+            state_revision: state,
+            updated_at: now(),
             ..Default::default()
         })),
     );
-}
-
-pub(crate) fn restore(world: &mut World) -> Result<()> {
-    let store = world.resource::<Store>().clone();
-    let mut queue = world.resource_mut::<ConsolidationQueue>();
-    for companion in store.companions()? {
-        queue.0.insert(companion.id);
-    }
-    Ok(())
-}
-
-fn assignment(value: &w::ModelAssignment) -> self::companion::ModelAssignment {
-    self::companion::ModelAssignment {
-        connection: value.connection_id.clone(),
-        model: value.model_id.clone(),
-    }
-}
-
-pub(crate) fn delete_companion(world: &mut World, id: &str) -> Result<()> {
-    let agent = chat::find_agent(world, &AgentKey::parent(id));
-    let store = world.resource::<Store>().clone();
-    store
-        .companion(id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
-    store.remove_companion(id)?;
-    if let Some(agent) = agent {
-        world.trigger(rig_ecs::session_log::Retire { entity: agent });
-    }
-    Ok(())
 }

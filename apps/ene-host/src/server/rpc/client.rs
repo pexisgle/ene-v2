@@ -1,6 +1,6 @@
 //! Client registration, device streams and perception.
 use super::Services;
-use crate::host::{self, client};
+use crate::host::{Runtime, client, db::Store, error::HostError, resources::DeviceHub};
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
@@ -15,7 +15,8 @@ impl w::ClientService for Services {
         request: ServiceRequest<'_, w::RegisterClientRequest>,
     ) -> ServiceResult<w::Client> {
         let request = request.to_owned_message();
-        self.call(move |app| client::register(app, request)).await
+        self.call(move |app| client::register(app.world_mut(), request))
+            .await
     }
 
     async fn list(
@@ -24,11 +25,10 @@ impl w::ClientService for Services {
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::Clients> {
         self.read(|app| {
+            let store = app.world().resource::<Store>().clone();
+            let hub = app.world().resource::<DeviceHub>().clone();
             Ok(w::Clients {
-                items: client::list(
-                    app.world().resource::<host::db::Store>(),
-                    app.world().resource::<host::resources::DeviceStreams>(),
-                )?,
+                items: client::clients(&store, &hub)?,
                 ..Default::default()
             })
         })
@@ -41,7 +41,8 @@ impl w::ClientService for Services {
         request: ServiceRequest<'_, w::ActivationRequest>,
     ) -> ServiceResult<w::Activation> {
         let request = request.to_owned_message();
-        self.call(move |app| client::activate(app, request)).await
+        self.call(move |app| client::activate(app.world_mut(), request))
+            .await
     }
 
     async fn set_capabilities(
@@ -50,8 +51,67 @@ impl w::ClientService for Services {
         request: ServiceRequest<'_, w::SetCapabilitiesRequest>,
     ) -> ServiceResult<w::Client> {
         let request = request.to_owned_message();
-        self.call(move |app| client::set_capabilities(app, request))
+        self.call(move |app| client::set_capabilities(app.world_mut(), request))
             .await
+    }
+
+    async fn device_stream(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::Id>,
+    ) -> ServiceResult<ServiceStream<w::DeviceEvent>> {
+        let client_id = request.id.to_owned();
+        self.read({
+            let client_id = client_id.clone();
+            move |app| {
+                let store = app.world().resource::<Store>().clone();
+                store
+                    .client(&client_id)?
+                    .ok_or_else(|| HostError::not_found("client not found"))?;
+                Ok(())
+            }
+        })
+        .await?;
+
+        let hub = self.runtime.hub();
+        let (subscription, mut receiver) = hub.register(&client_id);
+        // Replay operations the client has not received yet.
+        if let Err(error) = self
+            .runtime
+            .call({
+                let client_id = client_id.clone();
+                move |app| {
+                    client::device::resend(app.world_mut(), &client_id);
+                    Ok(())
+                }
+            })
+            .await
+        {
+            hub.unregister(&client_id, &subscription);
+            return Err(ConnectError::from(error));
+        }
+
+        let guard = StreamGuard {
+            runtime: self.runtime.clone(),
+            hub,
+            client_id: client_id.clone(),
+            subscription: subscription.clone(),
+        };
+        let stream = async_stream::stream! {
+            yield Ok(w::DeviceEvent {
+                event: Some(w::device_event::Event::Ready(Box::new(w::DeviceReady {
+                    subscription_id: subscription,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            });
+            while let Some(event) = receiver.recv().await {
+                yield Ok(event);
+            }
+            drop(guard);
+        }
+        .take_until(self.shutdown.clone().cancelled_owned());
+        Response::stream_ok(stream)
     }
 
     async fn report_perception(
@@ -67,51 +127,13 @@ impl w::ClientService for Services {
         .await
     }
 
-    async fn device_stream(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::Id>,
-    ) -> ServiceResult<ServiceStream<w::DeviceEvent>> {
-        let client_id = request.id.to_owned();
-        let subscription = self
-            .runtime
-            .call(move |app| client::subscribe(app.world_mut(), &client_id))
-            .await
-            .map_err(ConnectError::from)?;
-        let (id, mut receiver, pending) =
-            (subscription.id, subscription.receiver, subscription.pending);
-        let stream = async_stream::stream! {
-            yield Ok(w::DeviceEvent {
-                event: Some(w::device_event::Event::Ready(Box::new(w::DeviceReady {
-                    subscription_id: id,
-                    ..Default::default()
-                }))),
-                ..Default::default()
-            });
-            for operation in pending {
-                yield Ok(w::DeviceEvent {
-                    event: Some(w::device_event::Event::Operation(Box::new(operation))),
-                    ..Default::default()
-                });
-            }
-            while let Some(operation) = receiver.recv().await {
-                yield Ok(w::DeviceEvent {
-                    event: Some(w::device_event::Event::Operation(Box::new(operation))),
-                    ..Default::default()
-                });
-            }
-        }
-        .take_until(self.shutdown.clone().cancelled_owned());
-        Response::stream_ok(stream)
-    }
-
     async fn complete_operation(
         &self,
         _: RequestContext,
         request: ServiceRequest<'_, w::DeviceOperationResult>,
     ) -> ServiceResult<w::DeviceOperationState> {
         let request = request.to_owned_message();
-        self.call(move |app| client::complete(app.world_mut(), request))
+        self.call(move |app| client::device::complete(app.world_mut(), request))
             .await
     }
 
@@ -120,8 +142,41 @@ impl w::ClientService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<w::DeviceOperationState> {
-        let id = request.id.to_owned();
-        self.read(move |app| client::get_operation(app.world_mut(), &id))
+        let request = request.to_owned_message();
+        self.read(move |app| client::device::get(app.world_mut(), request))
             .await
+    }
+}
+
+/// Closes a device stream when the response stream is dropped, including a
+/// client disconnect. Operations that can no longer be answered become
+/// uncertain; a stream superseded by a newer one leaves them alone.
+struct StreamGuard {
+    runtime: Runtime,
+    hub: DeviceHub,
+    client_id: String,
+    subscription: String,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        let current =
+            self.hub.subscription(&self.client_id).as_deref() == Some(self.subscription.as_str());
+        self.hub.unregister(&self.client_id, &self.subscription);
+        if !current {
+            return;
+        }
+        let runtime = self.runtime.clone();
+        let client_id = self.client_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = runtime
+                    .call(move |app| {
+                        client::device::disconnected(app.world_mut(), &client_id);
+                        Ok(())
+                    })
+                    .await;
+            });
+        }
     }
 }

@@ -1,6 +1,6 @@
 //! Host snapshot, subscription and companion/mind services.
 use super::Services;
-use crate::host::{self, mind, wire};
+use crate::host::{self, db::Store, mind};
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
@@ -69,7 +69,7 @@ impl w::HostService for Services {
     ) -> ServiceResult<w::Companions> {
         self.read(|app| {
             Ok(w::Companions {
-                items: mind::companions(app.world().resource::<host::db::Store>())?,
+                items: mind::list(app.world().resource::<Store>())?,
                 ..Default::default()
             })
         })
@@ -82,11 +82,8 @@ impl w::HostService for Services {
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<w::Companion> {
         let id = request.id.to_owned();
-        self.read(move |app| {
-            let store = app.world().resource::<host::db::Store>();
-            Ok(wire::companion(&mind::companion(store, &id)?))
-        })
-        .await
+        self.read(move |app| mind::get(app.world().resource::<Store>(), &id))
+            .await
     }
 
     async fn create_companion(
@@ -95,7 +92,7 @@ impl w::HostService for Services {
         request: ServiceRequest<'_, w::CreateCompanionRequest>,
     ) -> ServiceResult<w::Companion> {
         let request = request.to_owned_message();
-        self.call(move |app| mind::create_companion(app.world_mut(), request))
+        self.call(move |app| mind::create(app.world_mut(), request))
             .await
     }
 
@@ -105,7 +102,7 @@ impl w::HostService for Services {
         request: ServiceRequest<'_, w::UpdateCompanionRequest>,
     ) -> ServiceResult<w::Companion> {
         let request = request.to_owned_message();
-        self.call(move |app| mind::update_companion(app.world_mut(), request))
+        self.call(move |app| mind::update(app.world_mut(), request))
             .await
     }
 
@@ -116,7 +113,7 @@ impl w::HostService for Services {
     ) -> ServiceResult<w::Empty> {
         let id = request.id.to_owned();
         self.call(move |app| {
-            mind::delete_companion(app.world_mut(), &id)?;
+            mind::delete(app.world_mut(), &id)?;
             Ok(w::Empty::default())
         })
         .await
@@ -128,7 +125,7 @@ impl w::HostService for Services {
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<w::MindView> {
         let id = request.id.to_owned();
-        self.read(move |app| mind::mind_view(app.world().resource::<host::db::Store>(), &id))
+        self.read(move |app| mind::mind_view(app.world().resource::<Store>(), &id))
             .await
     }
 
@@ -138,7 +135,7 @@ impl w::HostService for Services {
         request: ServiceRequest<'_, w::UpdateMindProfileRequest>,
     ) -> ServiceResult<w::MindView> {
         let request = request.to_owned_message();
-        self.call(move |app| mind::update_mind_profile(app.world_mut(), request))
+        self.call(move |app| mind::update_profile(app.world_mut(), request))
             .await
     }
 
@@ -157,22 +154,9 @@ impl w::HostService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::ListMemoriesRequest>,
     ) -> ServiceResult<w::Memories> {
-        let companion = request.companion_id.to_owned();
-        let limit = request.limit.unwrap_or(50).clamp(1, 200) as usize;
-        self.read(move |app| {
-            let store = app.world().resource::<host::db::Store>();
-            let items = store
-                .memories_for(&companion)?
-                .into_iter()
-                .take(limit)
-                .map(|memory| wire::memory_item(&memory))
-                .collect();
-            Ok(w::Memories {
-                items,
-                ..Default::default()
-            })
-        })
-        .await
+        let request = request.to_owned_message();
+        self.read(move |app| mind::list_memories(app.world_mut(), request))
+            .await
     }
 }
 
