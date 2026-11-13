@@ -52,6 +52,8 @@ pub(crate) struct Published {
 #[derive(Resource, Default)]
 pub(crate) struct WorkReports {
     pub(crate) completed: HashMap<String, String>,
+    /// A failure the hand reported explicitly; the settle then records Failed.
+    pub(crate) failed: HashMap<String, String>,
 }
 
 pub(crate) fn companion_agent_id(companion: &str) -> String {
@@ -502,12 +504,12 @@ fn turn_started(
 /// Publishes the final turn event once a turn settles.
 fn turn_settled(
     mut commands: Commands,
-    settled: Query<(&TurnOutcome, &ForAgent), Added<Settled>>,
+    settled: Query<(Entity, &TurnOutcome, &ForAgent), Added<Settled>>,
     turns: Query<&Turn>,
     agents: Query<(&AgentId, Option<&CompanionAgent>, Option<&WorkAgent>)>,
     mut notifier: ResMut<Notifier>,
 ) {
-    for (outcome, of) in &settled {
+    for (turn_entity, outcome, of) in &settled {
         let Ok((id, companion, work)) = agents.get(of.0) else {
             continue;
         };
@@ -516,7 +518,7 @@ fn turn_settled(
             .or_else(|| work.map(|agent| agent.companion_id.clone()))
             .unwrap_or_default();
         let turn_id = turns
-            .get(of.0)
+            .get(turn_entity)
             .map(|turn| turn.start.get().to_string())
             .unwrap_or_else(|_| id.0.clone());
         let (status, failure) = match outcome {
@@ -567,11 +569,15 @@ fn stream_deltas(
         let StreamEvent::Text { text, .. } = &delta.event else {
             continue;
         };
-        let companion = delta
+        // Only a companion speaks to the user; a work agent's text is a report
+        // to the head, never a transcript delta of its own.
+        let Some(companion) = delta
             .agent
             .and_then(|agent| agents.get(agent).ok())
             .and_then(|(_, companion)| companion.map(|agent| agent.companion_id.clone()))
-            .unwrap_or_default();
+        else {
+            continue;
+        };
         notifier.push(
             Some(companion.as_str()),
             None,

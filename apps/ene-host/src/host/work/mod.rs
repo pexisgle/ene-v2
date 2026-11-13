@@ -281,25 +281,27 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
 }
 
 fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<(Option<String>, u64)> {
+    let activation = store.activation(&request.companion_id)?;
     if !request.client_id.is_empty() {
         super::db::validate_id(&request.client_id)?;
-        let client = store
+        store
             .client(&request.client_id)?
             .ok_or_else(|| HostError::not_found("client not found"))?;
-        let revisions = store.activations()?;
-        let revision = revisions
-            .iter()
-            .find(|activation| activation.client_id.as_deref() == Some(client.id.as_str()))
-            .map(|activation| activation.revision)
-            .unwrap_or(0);
-        return Ok((Some(client.id), revision));
-    }
-    for activation in store.activations()? {
-        if let Some(client) = activation.client_id {
-            return Ok((Some(client), activation.revision));
+        let Some(activation) = activation else {
+            return Err(HostError::conflict(
+                "the companion has no active client to bind the session to",
+            ));
+        };
+        if activation.client_id.as_deref() != Some(request.client_id.as_str()) {
+            return Err(HostError::conflict(
+                "the requested client is not the active client of this companion",
+            ));
         }
+        return Ok((activation.client_id, activation.revision));
     }
-    Ok((None, 0))
+    Ok(activation
+        .map(|activation| (activation.client_id, activation.revision))
+        .unwrap_or((None, 0)))
 }
 
 /// Adds text to the current run. `request_id` binds the text to a pending
@@ -494,13 +496,6 @@ pub(crate) fn stop(world: &mut World, work_id: &str) -> Result<()> {
                 reason: Some("the user stopped the work".into()),
             });
         }
-        notify_run(
-            world,
-            &session,
-            &run,
-            w::WorkEventKind::RunFinished,
-            w::work_event::Detail::RunFinished(Box::new(wire::work_run_finished(&run))),
-        );
     }
     Ok(())
 }
@@ -536,6 +531,7 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
     if run.state.is_terminal() {
         return;
     }
+    let reported_failure = world.resource::<WorkReports>().failed.get(&run_id).cloned();
     let (state, text) = match &outcome {
         TurnOutcome::Answered(message) => {
             let report = world
@@ -553,6 +549,10 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
             RunState::Failed,
             Some(format!("作業を続けられませんでした: {why}")),
         ),
+    };
+    let (state, text) = match reported_failure {
+        Some(reason) => (RunState::Failed, Some(reason)),
+        None => (state, text),
     };
     run.state = state;
     run.pending_request_id = None;
@@ -603,6 +603,7 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
         .resource_mut::<WorkReports>()
         .completed
         .remove(&run_id);
+    world.resource_mut::<WorkReports>().failed.remove(&run_id);
 }
 
 fn parent_of(world: &mut World, work_id: &str) -> Option<Entity> {

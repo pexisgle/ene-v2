@@ -39,7 +39,7 @@ pub(crate) struct ClientDeclaration<'a> {
     pub(crate) name: &'a str,
     pub(crate) platform: &'a str,
     pub(crate) capabilities: &'a [String],
-    pub(crate) granted_capabilities: &'a [String],
+
     pub(crate) specs: &'a [CapabilitySpec],
     pub(crate) expected_revision: u64,
 }
@@ -75,7 +75,6 @@ impl Store {
             name,
             platform,
             capabilities,
-            granted_capabilities,
             specs,
             expected_revision,
         } = *declaration;
@@ -88,27 +87,26 @@ impl Store {
             ));
         }
         let revision = current + 1;
-        // The host grants what it has verified; the declaration itself never
-        // grants anything and a client cannot extend its own grants.
+        // Alpha policy: the host grants the capabilities it validated. A
+        // declaration never carries a grant, and the operation-level gate remains
+        // authoritative. Grants for capabilities no longer declared are dropped.
         let mut granted: Vec<String> = existing
             .as_ref()
             .map(|client| client.granted_capabilities.clone())
             .unwrap_or_default();
         granted.retain(|capability| capabilities.iter().any(|name| name == capability));
-        if granted_capabilities.is_empty() {
-            for capability in capabilities {
-                if !granted.iter().any(|name| name == capability) {
-                    granted.push(capability.clone());
-                }
+        for capability in capabilities {
+            if !granted.iter().any(|name| name == capability) {
+                granted.push(capability.clone());
             }
         }
-        self.conn()?.execute(
+        let changed = self.conn()?.execute(
             "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
              capability_specs, revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform, \
              capabilities = excluded.capabilities, granted_capabilities = excluded.granted_capabilities, \
              capability_specs = excluded.capability_specs, revision = excluded.revision, \
-             last_seen = excluded.last_seen",
+             last_seen = excluded.last_seen WHERE clients.revision = ?9",
             params![
                 id,
                 name,
@@ -118,8 +116,14 @@ impl Store {
                 to_json(&specs.to_vec())?,
                 revision,
                 now(),
+                current,
             ],
         )?;
+        if changed == 0 {
+            return Err(HostError::conflict(
+                "client changed since it was registered",
+            ));
+        }
         self.client(id)?
             .ok_or_else(|| HostError::storage("client registration did not persist"))
     }
@@ -152,9 +156,10 @@ impl Store {
             }
         }
         let next = existing.revision + 1;
-        self.conn()?.execute(
+        let changed = self.conn()?.execute(
             "UPDATE clients SET capabilities = ?2, granted_capabilities = ?3, \
-             capability_specs = ?4, revision = ?5, last_seen = ?6 WHERE id = ?1",
+             capability_specs = ?4, revision = ?5, last_seen = ?6 \
+             WHERE id = ?1 AND revision = ?7",
             params![
                 id,
                 to_json(&capabilities.to_vec())?,
@@ -162,8 +167,12 @@ impl Store {
                 to_json(&specs.to_vec())?,
                 next,
                 now(),
+                existing.revision,
             ],
         )?;
+        if changed == 0 {
+            return Err(HostError::conflict("client changed since it was read"));
+        }
         self.client(id)?
             .ok_or_else(|| HostError::storage("capability update did not persist"))
     }
@@ -217,13 +226,17 @@ impl Store {
             return Err(HostError::conflict("activation changed since it was read"));
         }
         let next = revision + 1;
-        self.conn()?.execute(
+        let changed = self.conn()?.execute(
             "INSERT INTO activations (companion_id, client_id, revision, updated_at) \
              VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT(companion_id) DO UPDATE SET client_id = excluded.client_id, \
-             revision = excluded.revision, updated_at = excluded.updated_at",
-            params![companion, client, next, now()],
+             revision = excluded.revision, updated_at = excluded.updated_at \
+             WHERE activations.revision = ?5",
+            params![companion, client, next, now(), expected],
         )?;
+        if changed == 0 {
+            return Err(HostError::conflict("activation changed since it was read"));
+        }
         Ok(Activation {
             companion_id: companion.to_owned(),
             client_id: client.map(ToOwned::to_owned),
@@ -430,7 +443,6 @@ mod tests {
                 name: "desk",
                 platform: "linux",
                 capabilities: &["body.motion".into()],
-                granted_capabilities: &[],
                 specs: &[spec("body.motion", "body_motion")],
                 expected_revision: 0,
             })
@@ -445,7 +457,6 @@ mod tests {
                     name: "desk",
                     platform: "linux",
                     capabilities: &[],
-                    granted_capabilities: &[],
                     specs: &[],
                     expected_revision: 0,
                 })

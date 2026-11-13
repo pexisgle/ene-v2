@@ -5,6 +5,7 @@
 //! world and the conversation log never race. Reads do not advance the agent
 //! loop; mutations do, and the frame's notifications are flushed after it.
 pub(crate) mod agent;
+pub(crate) mod autonomy;
 pub(crate) mod chat;
 pub(crate) mod client;
 pub(crate) mod compaction;
@@ -103,14 +104,13 @@ impl Runtime {
         let hub = DeviceHub::default();
         let device_timeout = options.device_timeout;
         let wake = wake_tx.clone();
-        let state = state.to_path_buf();
         let thread_hub = hub.clone();
+        let thread_store = store.clone();
+        let thread_credentials = credentials.clone();
         let thread = std::thread::Builder::new()
             .name("ene-host-rig".into())
             .spawn(move || {
                 let mut app = App::new();
-                let store = Store::open(&state.join("host.sqlite3"))?;
-                let credentials = Credentials::load(&store, session_only);
                 app.set_error_handler(bevy_ecs::error::warn)
                     .add_plugins(TaskPoolPlugin {
                         task_pool_options: TaskPoolOptions {
@@ -118,8 +118,8 @@ impl Runtime {
                             ..Default::default()
                         },
                     })
-                    .insert_resource(store)
-                    .insert_resource(credentials)
+                    .insert_resource(thread_store)
+                    .insert_resource(thread_credentials)
                     .insert_resource(thread_hub.clone())
                     .insert_resource(HostState::default())
                     .insert_resource(Notifier::new())
@@ -139,6 +139,7 @@ impl Runtime {
                         client::ClientPlugin,
                         work::WorkPlugin,
                         mind::MindPlugin,
+                        autonomy::AutonomyPlugin,
                         compaction::CompactionPlugin,
                     ));
                 app.finish();
@@ -374,17 +375,10 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
         .iter()
         .find(|activation| activation.client_id.is_some())
         .map(|activation| activation.companion_id.clone());
-    let work_sessions: Vec<w::WorkSession> = store
-        .activations()?
+    let work_sessions: Vec<w::WorkSession> = companions
         .iter()
-        .filter_map(|activation| store.work_sessions(&activation.companion_id).ok())
+        .filter_map(|companion| store.work_sessions(&companion.id).ok())
         .flatten()
-        .chain(
-            companions
-                .iter()
-                .filter_map(|companion| store.work_sessions(&companion.id).ok())
-                .flatten(),
-        )
         .map(|session| wire::work_session(&session))
         .collect();
     let mut seen = std::collections::HashSet::new();

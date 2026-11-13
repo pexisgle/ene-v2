@@ -1,4 +1,4 @@
-//! Owner Bearer authentication and loopback Host/Origin checks.
+//! Owner Bearer authentication and strict loopback Host/Origin checks.
 use axum::{
     extract::{Request, State},
     middleware::Next,
@@ -6,6 +6,7 @@ use axum::{
 };
 use connectrpc::ConnectError;
 use subtle::ConstantTimeEq;
+use url::Host;
 
 pub(super) async fn authenticate(
     State(token): State<String>,
@@ -18,6 +19,9 @@ pub(super) async fn authenticate(
         .and_then(|header| header.to_str().ok())
         .and_then(|header| header.strip_prefix("Bearer "))
         .is_some_and(|value| bool::from(value.as_bytes().ct_eq(token.as_bytes())));
+    // A browser Origin must be the host itself; an absent Host is left to the
+    // transport (HTTP/2 carries it as :authority), but anything present must
+    // be a literal loopback authority.
     let host_ok = request
         .headers()
         .get(http::header::HOST)
@@ -36,31 +40,63 @@ pub(super) async fn authenticate(
     next.run(request).await
 }
 
+/// A `Host` authority: `localhost`, `127.0.0.1` or `[::1]`, with a numeric
+/// port. Userinfo, paths and whitespace are never accepted.
 fn loopback_host(value: &str) -> bool {
-    if let Some(rest) = value.strip_prefix('[') {
-        return rest.split_once(']').is_some_and(|(host, tail)| {
-            host == "::1" && (tail.is_empty() || tail.starts_with(':'))
-        });
+    if value.is_empty()
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'@' | b'/' | b'?' | b'#'))
+    {
+        return false;
     }
-    let host = value.split(':').next().unwrap_or(value);
-    matches!(host, "localhost" | "127.0.0.1")
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        let host = &value[..end + 2];
+        let tail = &rest[end + 1..];
+        let port = if tail.is_empty() {
+            None
+        } else {
+            Some(tail.strip_prefix(':').unwrap_or(""))
+        };
+        (host, port)
+    } else {
+        match value.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (value, None),
+        }
+    };
+    if let Some(port) = port
+        && (port.is_empty() || port.parse::<u16>().is_err())
+    {
+        return false;
+    }
+    host == "[::1]" || matches!(host, "localhost" | "127.0.0.1")
 }
 
+/// An `Origin` header: an http(s) URL whose authority is a literal loopback
+/// address, with no userinfo, path, query or fragment.
 fn loopback_origin(value: &str) -> bool {
-    let Some(rest) = value
-        .strip_prefix("http://")
-        .or_else(|| value.strip_prefix("https://"))
-    else {
+    let Ok(url) = url::Url::parse(value) else {
         return false;
     };
-    let host = rest.split('/').next().unwrap_or(rest);
-    if let Some(rest) = host.strip_prefix('[') {
-        return rest.split_once(']').is_some_and(|(host, tail)| {
-            host == "::1" && (tail.is_empty() || tail.starts_with(':'))
-        });
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return false;
     }
-    let host = host.split(':').next().unwrap_or(host);
-    matches!(host, "localhost" | "127.0.0.1")
+    match url.host() {
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -84,6 +120,11 @@ mod tests {
             "example.com:80",
             "0.0.0.0:80",
             "[2001:db8::1]",
+            "localhost@evil.com",
+            "127.0.0.1@evil.com",
+            "localhost:notaport",
+            "localhost/evil",
+            "127.0.0.1.evil.com",
         ] {
             assert!(!loopback_host(host), "{host}");
         }
@@ -94,7 +135,18 @@ mod tests {
         ] {
             assert!(loopback_origin(origin), "{origin}");
         }
-        for origin in ["https://example.com", "null", "http://0.0.0.0:80"] {
+        for origin in [
+            "https://example.com",
+            "null",
+            "http://0.0.0.0:80",
+            "http://localhost@evil.com",
+            "http://localhost:@evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1/path",
+            "http://127.0.0.1?x=1",
+            "http://user:pass@127.0.0.1",
+            "ftp://127.0.0.1",
+        ] {
             assert!(!loopback_origin(origin), "{origin}");
         }
     }

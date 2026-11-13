@@ -9,7 +9,7 @@ use super::super::db::epoch;
 pub(crate) const SHARED_AUDIENCE: &str = "*";
 pub(crate) const MAX_IMPORTANCE: u8 = 10;
 /// Pinned memories (`importance == 10`) are injected within this budget.
-pub(crate) const PINNED_BUDGET_CHARS: usize = 4_000;
+pub(crate) const PINNED_BUDGET_CHARS: usize = 3_000;
 
 /// Why a recall runs. Automatic recall skips what the user asked to forget;
 /// an explicit question about the past may reach everything.

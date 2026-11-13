@@ -72,7 +72,7 @@ cargo run --locked -p ene-host
 ## 現時点で実装していないもの
 
 - `VoiceService`（STT/TTS/再生進捗）は接続エンジン未実装のため、すべて明示的な `unimplemented` を返します。音声の世代管理・Flush・フロア制御は未着手です。
-- 自動整理（Consolidation）のバックグラウンドLLMジョブ、Compaction要約の生成、埋め込み検索、MCP/ACPバックエンド、sandbox実行、自律Tick/スケジュール発火、スキルファイルは未実装です。`schedules` テーブルは将来のためにあります。
+- 自動整理（Consolidation）のバックグラウンドLLMジョブ、Compaction要約の生成、埋め込み検索、MCP/ACPバックエンド、sandbox実行、自律Tick/スケジュール発火、スキルファイルは未実装です。`schedule_create` / `list` / `cancel` は保存のみで、発火機構は未実装です。
 - 知覚の優先割り込みによる親ターンの自動起床、音声承認、マルチコンパニオンの音声調停は未実装です。
 
 ## 検証

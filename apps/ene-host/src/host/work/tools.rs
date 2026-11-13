@@ -318,13 +318,18 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             Ok(json!({"accepted": true}).to_string())
         }
         "failed" => {
-            let mut failed = run.clone();
-            failed.state = RunState::Failed;
-            failed.failure = Some(crate::host::error::Failure::new(
-                "work_failed",
-                args.content.clone(),
-            ));
-            store.update_run(&failed)?;
+            // Record the reason and stop the turn; the settle path owns the
+            // run's terminal state so the session and agent are cleaned up.
+            world
+                .resource_mut::<WorkReports>()
+                .failed
+                .insert(work.run_id.clone(), args.content.clone());
+            if let Some(entity) = agent::work_agent_of(world, &work.run_id) {
+                world.trigger(StopTurn {
+                    entity,
+                    reason: Some("the hand reported a failure".into()),
+                });
+            }
             if let Some(parent) = agent::agent_of(world, &work.companion_id) {
                 let author = Author::agent(agent::work_agent_id(&work.run_id), None);
                 world.trigger(

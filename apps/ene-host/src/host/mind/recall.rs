@@ -19,7 +19,8 @@ use std::collections::HashMap;
 /// bytes.
 #[derive(Resource, Default)]
 pub(crate) struct TailCache {
-    by_turn: HashMap<u64, String>,
+    /// The agent is part of the key: turn numbers restart per agent.
+    by_turn: HashMap<(Entity, u64), String>,
 }
 
 /// The request calls the host prepared in this pass.
@@ -47,11 +48,17 @@ fn inject_tail(
             continue;
         };
         let turn_id = turn.start.get();
-        let tail = match cache.by_turn.get(&turn_id) {
+        let key = (agent, turn_id);
+        let tail = match cache.by_turn.get(&key) {
             Some(tail) => tail.clone(),
             None => {
+                // A cache that outlives its turns would grow without bound; the
+                // settle hook prunes it, and this bound is the last resort.
+                if cache.by_turn.len() > 256 {
+                    cache.by_turn.clear();
+                }
                 let tail = render_tail(&store, &agents, &conversations, &perception, agent);
-                cache.by_turn.insert(turn_id, tail.clone());
+                cache.by_turn.insert(key, tail.clone());
                 tail
             }
         };
@@ -87,6 +94,11 @@ fn render_tail(
     let Some((companion, conversation)) = agent_view(agents, conversations, agent) else {
         return tail;
     };
+    // Perception and the clock lead the tail so truncation cannot drop them:
+    // the model must always know the current environment.
+    if let Some(event) = perception.events.get(&companion) {
+        tail.push_str(&format!("知覚: {}\n", event.summary));
+    }
     if let Ok(Some(state)) = store.companion(&companion) {
         tail.push_str(&format!(
             "現在の心: 感情={} 関係={} 傾向={} 懸念={}\n",
@@ -118,11 +130,8 @@ fn render_tail(
             }
         }
     }
-    if let Some(event) = perception.events.get(&companion) {
-        tail.push_str(&format!("知覚: {}\n", event.summary));
-    }
     tail.push_str("---");
-    crate::host::db::truncate(&tail, 4_000)
+    crate::host::db::truncate(&tail, 6_000)
 }
 
 fn agent_view<'a>(
@@ -220,6 +229,19 @@ impl Plugin for RecallPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TailCache>()
             .add_systems(AgentPass, inject_tail.in_set(PrepareSystems::Edit))
-            .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit));
+            .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit))
+            .add_systems(Update, prune_tail.after(AgentLoop));
+    }
+}
+
+/// Drops a turn's cached tail when the turn settles.
+fn prune_tail(
+    mut settled: Query<(Option<&Turn>, Option<&ForAgent>), Added<Settled>>,
+    mut cache: ResMut<TailCache>,
+) {
+    for (turn, agent) in &mut settled {
+        if let (Some(turn), Some(agent)) = (turn, agent) {
+            cache.by_turn.remove(&(agent.0, turn.start.get()));
+        }
     }
 }

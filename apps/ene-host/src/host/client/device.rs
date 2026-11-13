@@ -399,3 +399,38 @@ pub(crate) fn wait(world: &mut World, call: Entity, operation: &str, deadline: I
 pub(crate) fn deadline(world: &World) -> Instant {
     Instant::now() + world.resource::<DeviceTimeout>().0
 }
+
+/// A move invalidates the calls that were waiting for the old generation's
+/// operation results.
+pub(crate) fn invalidate(world: &mut World, client: &str, revision: u64) {
+    let store = world.resource::<Store>().clone();
+    let waiting: Vec<String> = world
+        .resource::<Waiting>()
+        .by_operation
+        .keys()
+        .cloned()
+        .collect();
+    for operation in waiting {
+        let moved = store
+            .operation(&operation)
+            .ok()
+            .flatten()
+            .is_some_and(|operation| {
+                operation.client_id == client && operation.activation_revision == revision
+            });
+        if !moved {
+            continue;
+        }
+        let waiter = world
+            .resource_mut::<Waiting>()
+            .by_operation
+            .remove(&operation);
+        if let Some(waiter) = waiter {
+            permission::refuse(
+                world,
+                waiter.call,
+                "client_moved: the active client moved before the result arrived",
+            );
+        }
+    }
+}

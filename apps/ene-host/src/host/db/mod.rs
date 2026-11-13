@@ -4,6 +4,7 @@ pub(crate) mod clients;
 pub(crate) mod companions;
 pub(crate) mod memories;
 pub(crate) mod policies;
+pub(crate) mod schedules;
 pub(crate) mod settings;
 pub(crate) mod work;
 

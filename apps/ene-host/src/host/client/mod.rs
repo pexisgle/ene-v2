@@ -279,17 +279,18 @@ pub(crate) fn approval_target(spec: &CapabilitySpec, input: &serde_json::Value) 
     let mut rest = spec.approval_target.as_str();
     while let Some(start) = rest.find('{') {
         rendered.push_str(&rest[..start]);
-        let Some(end) = rest[start + 1..].find('}') else {
+        let inner = &rest[start + 1..];
+        let Some(end) = inner.find('}') else {
             rendered.push_str(&rest[start..]);
             return rendered;
         };
-        let key = &rest[start + 1..start + end];
+        let key = &inner[..end];
         let value = input
             .get(key)
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         rendered.push_str(value);
-        rest = &rest[start + end + 1..];
+        rest = &inner[end + 1..];
     }
     rendered.push_str(rest);
     rendered
@@ -383,8 +384,9 @@ pub(crate) fn clients(store: &Store, hub: &DeviceHub) -> Result<Vec<w::Client>> 
     Ok(clients)
 }
 
-/// Registers or refreshes a client declaration. `granted_capabilities` from
-/// the client is ignored: the host decides what is granted.
+/// Registers or refreshes a client declaration. A client never sends grants:
+/// the host grants the capabilities it validated (alpha policy), and the
+/// operation-level gate still decides every call.
 pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let capabilities = request.capabilities;
@@ -399,7 +401,6 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
         name: &request.name,
         platform: &request.platform,
         capabilities: &capabilities,
-        granted_capabilities: &[],
         specs: &specs,
         expected_revision: request.expected_revision,
     })?;
@@ -475,6 +476,15 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     {
         store.fail_operations_of(&old_client, previous.revision)?;
         store.expire_approvals_for(&request.companion_id)?;
+        // The ECS holds and waiting calls of the old generation must be
+        // released too, or their turns would wait forever.
+        super::permission::invalidate_generation(
+            world,
+            &request.companion_id,
+            &old_client,
+            previous.revision,
+        );
+        device::invalidate(world, &old_client, previous.revision);
         world
             .resource_mut::<Perception>()
             .events
@@ -598,4 +608,55 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn motion() -> CapabilitySpec {
+        CapabilitySpec {
+            name: "body.motion".into(),
+            tool_name: "body_motion".into(),
+            description: String::new(),
+            input_schema: "{}".into(),
+            presets: Vec::new(),
+            approval: CapabilityApproval::Auto,
+            approval_target: String::new(),
+            output_schema: String::new(),
+        }
+    }
+
+    #[test]
+    fn approval_targets_expand_verified_input_without_a_stray_brace() {
+        let spec = CapabilitySpec {
+            approval_target: "write {path} as {mode}".into(),
+            approval: CapabilityApproval::Confirm,
+            ..motion()
+        };
+        assert_eq!(
+            approval_target(&spec, &json!({"path": "/tmp/a", "mode": "text"})),
+            "write /tmp/a as text"
+        );
+        assert_eq!(
+            approval_target(&spec, &json!({"path": "/tmp/a"})),
+            "write /tmp/a as "
+        );
+        let spec = CapabilitySpec {
+            approval_target: "{path}".into(),
+            ..motion()
+        };
+        assert_eq!(approval_target(&spec, &json!({"path": "/tmp/a"})), "/tmp/a");
+    }
+
+    #[test]
+    fn a_spec_must_name_a_declared_capability_and_cannot_shadow_a_host_tool() {
+        assert!(validate_declarations(&["body.motion".into()], &[motion()]).is_ok());
+        let shadow = CapabilitySpec {
+            tool_name: "mind_recall".into(),
+            ..motion()
+        };
+        assert!(validate_declarations(&["body.motion".into()], &[shadow]).is_err());
+    }
 }

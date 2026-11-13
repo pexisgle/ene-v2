@@ -460,3 +460,46 @@ fn a_work_run_reports_back_to_the_parent() {
     assert!(reported, "the hand reports to the head");
     let _ = Message::assistant("x");
 }
+
+#[test]
+fn a_failed_report_ends_the_run_and_releases_the_session() {
+    let mut harness = Harness::new([vec![
+        MockStreamEvent::tool_call(
+            "call-1",
+            "report",
+            serde_json::json!({"kind": "failed", "content": "cannot reach the network"}),
+        ),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]);
+    harness.app.update();
+    let session = work::start(
+        harness.app.world_mut(),
+        w::StartWorkRequest {
+            companion_id: harness.companion.clone(),
+            title: "task".into(),
+            instruction: "try it".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    harness.run_until(|world| {
+        world
+            .resource::<Store>()
+            .runs(&session.id)
+            .unwrap()
+            .iter()
+            .any(|run| run.state.is_terminal())
+    });
+    let run = harness.store().runs(&session.id).unwrap().pop().unwrap();
+    assert_eq!(run.state, super::work::RunState::Failed);
+    assert_eq!(
+        harness
+            .store()
+            .work_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        super::work::WorkStatus::Idle
+    );
+    assert!(super::agent::work_agent_of(harness.app.world_mut(), &run.run_id).is_none());
+}

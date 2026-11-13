@@ -219,7 +219,7 @@ impl Store {
         let connection = self.conn()?;
         let mut statement = connection.prepare(&format!(
             "SELECT {COLUMNS} FROM memories WHERE owner = ?1 AND importance = 10 \
-             AND embedding_content_revision IS NULL \
+             \
              ORDER BY COALESCE(last_accessed_at, recorded_at) DESC, rowid DESC"
         ))?;
         let rows = statement.query_map([companion], row_to_memory)?;
@@ -505,5 +505,38 @@ mod tests {
         assert_eq!(store.mind_operation("op1").unwrap(), Some(result));
         assert_eq!(store.mind_operation_hash("op1").unwrap(), Some(hash));
         assert!(store.mind_operation("missing").unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_memories_survive_embedding_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let memory = store
+            .insert_memory(NewMemory {
+                id: "pinned-1".into(),
+                owner: "ene".into(),
+                audiences: Vec::new(),
+                content: "the user's name is A".into(),
+                importance: 10,
+                occurred_at: None,
+                source_context: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET embedding_content_revision = 1 WHERE id = ?1",
+                [&memory.id],
+            )
+            .unwrap();
+        let pinned = store.pinned("ene").unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].content, "the user's name is A");
     }
 }

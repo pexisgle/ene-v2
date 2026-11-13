@@ -154,12 +154,12 @@ impl Store {
                     1
                 }
             };
-            transaction.execute(
+            let changed = transaction.execute(
                 "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
                  last_check, revision, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
                  kind = excluded.kind, config = excluded.config, revision = excluded.revision, \
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at WHERE connections.revision = excluded.revision - 1",
                 params![
                     input.id,
                     input.name,
@@ -171,15 +171,25 @@ impl Store {
                     stamp,
                 ],
             )?;
+            if changed == 0 {
+                return Err(HostError::conflict(format!(
+                    "connection `{}` changed since it was read",
+                    input.id
+                )));
+            }
         }
         for id in remove_ids {
             super::validate_id(id)?;
             transaction.execute("DELETE FROM connections WHERE id = ?1", [id])?;
         }
-        transaction.execute(
-            "UPDATE settings_state SET revision = ?2, updated_at = ?3 WHERE id = 1",
-            params![1, next, stamp],
+        let changed = transaction.execute(
+            "UPDATE settings_state SET revision = ?2, updated_at = ?3 \
+             WHERE id = 1 AND revision = ?4",
+            params![1, next, stamp, expected_revision],
         )?;
+        if changed == 0 {
+            return Err(HostError::conflict("settings changed since they were read"));
+        }
         transaction.commit()?;
         drop(connection);
         self.settings()

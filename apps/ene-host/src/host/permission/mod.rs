@@ -160,41 +160,45 @@ pub(crate) fn decide_capability(
         };
     }
     let (normalized, _) = canonicalise(tool_name, arguments);
+    let mut denied: Option<&PolicyRule> = None;
+    let mut confirm = false;
     let mut allowed = false;
     for rule in rules
         .iter()
         .filter(|rule| matches(rule, tool_name, &normalized, arguments))
     {
         match rule.effect {
-            // An explicit every-time-confirm rule outranks a saved allow.
-            PolicyEffect::Confirm => {
-                return Verdict::Confirm {
-                    target: target(spec, capability, arguments),
-                };
-            }
             PolicyEffect::Deny => {
-                return Verdict::Deny {
-                    reason: format!("saved rule `{}` denies this operation", rule.id),
-                };
+                denied = Some(rule);
+                break;
             }
+            PolicyEffect::Confirm => confirm = true,
             PolicyEffect::Allow => allowed = true,
         }
     }
+    // A saved deny always wins. An explicit every-time-confirm rule outranks a
+    // saved allow, and an allow bypasses only the capability's default need
+    // for confirmation (not a hard block or a confirm rule).
+    if let Some(rule) = denied {
+        return Verdict::Deny {
+            reason: format!("saved rule `{}` denies this operation", rule.id),
+        };
+    }
+    if confirm {
+        return Verdict::Confirm {
+            target: target(spec, capability, arguments),
+        };
+    }
+    if allowed {
+        return Verdict::Allow;
+    }
     match spec {
         Some(spec) if spec.approval == CapabilityApproval::Auto => Verdict::Allow,
-        Some(spec) if spec.approval == CapabilityApproval::Confirm => Verdict::Confirm {
-            target: target(Some(spec), capability, arguments),
+        // A declared capability that expects confirmation, an undeclared one
+        // and an unknown approval all fail safe to the card.
+        _ => Verdict::Confirm {
+            target: target(spec, capability, arguments),
         },
-        // Undeclared capability or no negotiated approval: fail safe and ask.
-        _ => {
-            if allowed {
-                Verdict::Allow
-            } else {
-                Verdict::Confirm {
-                    target: format!("{capability} {}", truncate(&normalized, 200)),
-                }
-            }
-        }
     }
 }
 
@@ -327,6 +331,31 @@ mod tests {
     }
 
     #[test]
+    fn a_deny_rule_beats_a_confirm_rule_and_an_allow_bypasses_a_default_confirm() {
+        let confirm = rule(PolicyEffect::Confirm, "device_request", "*");
+        let mut deny = rule(PolicyEffect::Deny, "device_request", "*");
+        deny.id = "r2".into();
+        let verdict = decide_capability(
+            &[confirm, deny],
+            Some(&spec(CapabilityApproval::Auto)),
+            "device.files",
+            "device_request",
+            &json!({"path": "/tmp/x"}),
+        );
+        assert!(matches!(verdict, Verdict::Deny { .. }));
+
+        let allow = rule(PolicyEffect::Allow, "device_request", "*");
+        let verdict = decide_capability(
+            &[allow],
+            Some(&spec(CapabilityApproval::Confirm)),
+            "device.files",
+            "device_request",
+            &json!({"path": "/tmp/x"}),
+        );
+        assert_eq!(verdict, Verdict::Allow);
+    }
+
+    #[test]
     fn arguments_are_canonical_and_hashes_are_stable() {
         let (first, hash) = canonicalise("device_request", &json!({"b": 1, "a": 2}));
         let (second, other) = canonicalise("device_request", &json!({"a": 2, "b": 1}));
@@ -363,6 +392,8 @@ pub(crate) struct CallBinding {
 pub(crate) struct Hold {
     pub(crate) call: Entity,
     pub(crate) hold: Entity,
+    /// The approval the hold released, kept for generation checks.
+    pub(crate) approval: Approval,
 }
 
 /// The approvals that are currently attached to a live tool call.
@@ -411,11 +442,6 @@ fn gate(world: &mut World) {
             continue;
         }
         let (companion_id, work_id, run_id, bound) = binding_of(world, agent);
-        let Some((capability, input, spec)) =
-            resolve_capability(world, &store, &tool_name, &arguments, &companion_id, &bound)
-        else {
-            continue;
-        };
         let Some((client_id, activation_revision)) =
             target_client(&companion_id, &store, &bound, &work_id)
         else {
@@ -431,6 +457,18 @@ fn gate(world: &mut World) {
                 world,
                 call,
                 Outcome::refused("the bound client is not registered"),
+            );
+            continue;
+        };
+        // A tool that is neither a host tool nor a declared capability is
+        // refused: a future tool must opt into one of the two paths.
+        let Some((capability, input, spec)) =
+            resolve_capability(world, &client, &tool_name, &arguments)
+        else {
+            decide(
+                world,
+                call,
+                Outcome::refused(format!("unknown device tool `{tool_name}`")),
             );
             continue;
         };
@@ -474,10 +512,14 @@ fn gate(world: &mut World) {
                     super::fail(world, error.to_string());
                     return;
                 }
-                world
-                    .resource_mut::<Approvals>()
-                    .by_request
-                    .insert(request_id, Hold { call, hold });
+                world.resource_mut::<Approvals>().by_request.insert(
+                    request_id,
+                    Hold {
+                        call,
+                        hold,
+                        approval: approval.clone(),
+                    },
+                );
                 let mut notifier = world.resource_mut::<Notifier>();
                 notifier.push(
                     Some(&companion_id),
@@ -531,45 +573,34 @@ enum AgentRole {
 }
 
 /// The capability a device tool call names, with its input and declaration.
+/// The client is already resolved, so the hand resolves against the client it
+/// is bound to, not against the companion's current activation.
 fn resolve_capability(
     world: &mut World,
-    store: &Store,
+    client: &Client,
     tool_name: &str,
     arguments: &Value,
-    companion_id: &str,
-    bound: &AgentRole,
 ) -> Option<(String, Value, Option<CapabilitySpec>)> {
     if tool_name == "device_request" {
         let capability = arguments.get("capability")?.as_str()?.to_owned();
+        if !client.capabilities.iter().any(|name| name == &capability) {
+            return None;
+        }
         let input = arguments
             .get("input")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
-        let spec = active_client(world, store, companion_id, bound)
-            .and_then(|client| client.spec(&capability).cloned());
-        return Some((capability, input, spec));
+        return Some((capability.clone(), input, client.spec(&capability).cloned()));
     }
     let mut query = world.query::<(&ToolDef, &super::client::CapabilityTool)>();
     let spec = query
         .iter(world)
         .find(|(def, _)| def.0.name.as_str() == tool_name)
         .map(|(_, tool)| tool.spec.clone())?;
-    Some((spec.name.clone(), arguments.clone(), Some(spec)))
-}
-
-fn active_client(
-    _world: &mut World,
-    store: &Store,
-    companion_id: &str,
-    bound: &AgentRole,
-) -> Option<Client> {
-    let activation = store.activation(companion_id).ok().flatten()?;
-    if *bound == AgentRole::Work {
+    if !client.capabilities.iter().any(|name| name == &spec.name) {
         return None;
     }
-    activation
-        .client_id
-        .and_then(|client| store.client(&client).ok().flatten())
+    Some((spec.name.clone(), arguments.clone(), Some(spec)))
 }
 
 /// The client and generation the call must be sent to.
@@ -629,6 +660,31 @@ pub(crate) fn submit(
         return Err(crate::host::error::HostError::conflict(
             "approval is no longer pending",
         ));
+    }
+    // A device approval is bound to the client generation it was issued for:
+    // a move voids it instead of applying it to the new client.
+    if let (Some(client), Some(revision)) =
+        (approval.client_id.as_deref(), approval.activation_revision)
+    {
+        let current = store
+            .activation(&approval.session_id)?
+            .and_then(|activation| activation.client_id.map(|id| (id, activation.revision)));
+        if current.as_ref() != Some(&(client.to_owned(), revision)) {
+            store.resolve_approval(request_id, ApprovalStatus::Expired)?;
+            if let Some(hold) = world
+                .resource_mut::<Approvals>()
+                .by_request
+                .remove(request_id)
+            {
+                if world.get_entity(hold.hold).is_ok() {
+                    world.entity_mut(hold.hold).despawn();
+                }
+                refuse(world, hold.call, "client_moved: the active client moved");
+            }
+            return Err(crate::host::error::HostError::conflict(
+                "client_moved: the approval is bound to an old client generation",
+            ));
+        }
     }
     let hold = world
         .resource_mut::<Approvals>()
@@ -725,6 +781,54 @@ fn expire_orphaned_approvals(world: &mut World) {
             && store.is_some_and(|approval| approval.status == ApprovalStatus::Pending)
         {
             let store = world.resource::<Store>().clone();
+            let _ = store.resolve_approval(&request, ApprovalStatus::Expired);
+        }
+    }
+}
+
+/// A move invalidates approvals bound to the old client generation: the held
+/// calls are refused with `client_moved` instead of waiting forever.
+pub(crate) fn invalidate_generation(
+    world: &mut World,
+    companion: &str,
+    client: &str,
+    revision: u64,
+) {
+    let requests: Vec<String> = {
+        let approvals = world.resource::<Approvals>();
+        approvals
+            .by_request
+            .iter()
+            .filter(|(_, hold)| {
+                hold.approval.session_id == companion
+                    && hold.approval.client_id.as_deref() == Some(client)
+                    && hold.approval.activation_revision == Some(revision)
+            })
+            .map(|(request, _)| request.clone())
+            .collect()
+    };
+    for request in requests {
+        let hold = world
+            .resource_mut::<Approvals>()
+            .by_request
+            .remove(&request);
+        if let Some(hold) = hold {
+            if world.get_entity(hold.hold).is_ok() {
+                world.entity_mut(hold.hold).despawn();
+            }
+            refuse(
+                world,
+                hold.call,
+                "client_moved: the active client moved before the approval was answered",
+            );
+        }
+        let store = world.resource::<Store>().clone();
+        if store
+            .approval(&request)
+            .ok()
+            .flatten()
+            .is_some_and(|approval| approval.status == ApprovalStatus::Pending)
+        {
             let _ = store.resolve_approval(&request, ApprovalStatus::Expired);
         }
     }

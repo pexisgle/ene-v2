@@ -150,21 +150,27 @@ fn secret_for(
     }
     // A loopback endpoint is a local server; it may accept any key and the
     // host never sends a real secret to a non-loopback endpoint without one.
-    if connection.endpoint().endpoint.starts_with("http://")
-        || connection
-            .endpoint()
-            .endpoint
-            .starts_with("https://127.0.0.1")
-        || connection
-            .endpoint()
-            .endpoint
-            .starts_with("https://localhost")
-    {
+    if loopback_endpoint(&connection.endpoint().endpoint) {
         return Ok("ene-local".into());
     }
     Err(HostError::unavailable(
         "no credential is registered for this connection",
     ))
+}
+
+fn loopback_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
 }
 
 /// The model an agent runs on.

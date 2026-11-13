@@ -131,9 +131,21 @@ fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
             "this memory belongs to another companion",
         ));
     }
-    let relations = store.memory_edges(&args.id)?;
     // Reading with the tool is an explicit use, so the recall recency moves.
     store.cite_memory(&args.id, &format!("{companion}:{}", now()), false)?;
+    if memory.owner != companion {
+        // A shared memory exposes the facts only: its private origin, emotion
+        // and relations stay with the owner (docs/design/mind.md §3.3).
+        return Ok(json!({
+            "id": memory.id,
+            "content": memory.content,
+            "importance": memory.importance,
+            "occurred_at": memory.occurred_at,
+            "shared": true,
+        })
+        .to_string());
+    }
+    let relations = store.memory_edges(&args.id)?;
     Ok(crate::host::db::memories::detail(&memory, &relations).to_string())
 }
 
