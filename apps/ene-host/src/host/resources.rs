@@ -49,10 +49,7 @@ impl DeviceHub {
     ) -> (String, tokio::sync::mpsc::Receiver<w::DeviceEvent>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         let subscription = uuid::Uuid::new_v4().to_string();
-        let mut streams = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let mut streams = super::lock(&self.inner);
         streams.insert(
             client.to_owned(),
             Stream {
@@ -64,10 +61,7 @@ impl DeviceHub {
     }
 
     pub(crate) fn unregister(&self, client: &str, subscription: &str) {
-        let mut streams = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let mut streams = super::lock(&self.inner);
         if streams
             .get(client)
             .is_some_and(|stream| stream.subscription == subscription)
@@ -77,27 +71,19 @@ impl DeviceHub {
     }
 
     pub(crate) fn connected(&self, client: &str) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .contains_key(client)
+        super::lock(&self.inner).contains_key(client)
     }
 
     /// The subscription id of the live stream for `client`.
     pub(crate) fn subscription(&self, client: &str) -> Option<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        super::lock(&self.inner)
             .get(client)
             .map(|stream| stream.subscription.clone())
     }
 
     /// Sends `event` to `client`. `false` means no live stream has it.
     pub(crate) fn send(&self, client: &str, event: w::DeviceEvent) -> bool {
-        let sender = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        let sender = super::lock(&self.inner)
             .get(client)
             .map(|stream| stream.sender.clone());
         sender.is_some_and(|sender| sender.try_send(event).is_ok())

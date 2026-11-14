@@ -551,31 +551,27 @@ struct RunSlot {
 
 impl SharedRun {
     fn begin(&self, run_id: &str) {
-        let mut slot = lock(&self.state);
+        let mut slot = crate::host::lock(&self.state);
         slot.run_id = Some(run_id.to_owned());
         slot.summary.clear();
     }
 
     fn run_id(&self) -> Option<String> {
-        lock(&self.state).run_id.clone()
+        crate::host::lock(&self.state).run_id.clone()
     }
 
     fn append(&self, text: &str) {
-        let mut slot = lock(&self.state);
+        let mut slot = crate::host::lock(&self.state);
         if slot.summary.chars().count() < 8_000 {
             slot.summary.push_str(text);
         }
     }
 
     fn finish(&self) -> String {
-        let mut slot = lock(&self.state);
+        let mut slot = crate::host::lock(&self.state);
         slot.run_id = None;
         std::mem::take(&mut slot.summary).trim().to_owned()
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 fn update_text(update: &SessionUpdate) -> Option<(String, bool)> {

@@ -2,6 +2,7 @@
 //! how user activity cancels it.
 use super::*;
 use crate::host::{
+    agent::TestModel,
     autonomy::testing::{Harness, bound},
     compaction::Summary,
     db::memories::MemoryRecord,
@@ -24,7 +25,7 @@ fn harness(tick: MockCompletionModel) -> (Harness, tokio::runtime::Runtime) {
     harness
         .app
         .insert_resource(HostRuntime(runtime.handle().clone()));
-    harness.app.insert_resource(TickModel(Arc::new({
+    harness.app.insert_resource(TestModel(Arc::new({
         let model = tick.clone();
         move || bound(&model)
     })));

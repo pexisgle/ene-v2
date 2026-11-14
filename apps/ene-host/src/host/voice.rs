@@ -191,8 +191,16 @@ impl HttpEngine {
         self.client.as_ref().map_err(Clone::clone)
     }
 
+    /// Runs one request against the engine: the shared endpoint guard, the
+    /// bearer token, the status check and a bounded body read, in the order
+    /// every call needs them.
+    async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
+        net::guard_endpoint(&self.base, what).await?;
+        let response = post(call, self.secret.as_deref(), what).await?;
+        net::read_body(response, MAX_BODY_BYTES, what).await
+    }
+
     async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
-        net::guard_endpoint(&self.base, "TTS").await?;
         let mut body = serde_json::json!({
             "model": self.model, "voice": if voice.is_empty() { &self.voice } else { &voice },
             "input": text, "response_format": "pcm",
@@ -205,24 +213,18 @@ impl HttpEngine {
             .post(format!("{}{}", self.base, self.path))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
-        let response = post(call, self.secret.as_deref(), "TTS").await?;
-        Ok((
-            net::read_body(response, MAX_BODY_BYTES, "TTS").await?,
-            SAMPLE_RATE,
-        ))
+        Ok((self.exchange(call, "TTS").await?, SAMPLE_RATE))
     }
 
     async fn voicevox(&self, text: String) -> HttpResult<(Vec<u8>, u32)> {
-        net::guard_endpoint(&self.base, "TTS").await?;
         let encoded: String = url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
         let call = self.client()?.post(format!(
             "{}{}?text={encoded}&speaker={}",
             self.base, self.query_path, self.speaker
         ));
-        let query = post(call, self.secret.as_deref(), "TTS").await?;
-        let query = net::read_body(query, MAX_BODY_BYTES, "TTS").await?;
-        let mut body: serde_json::Value = serde_json::from_slice(&query)
-            .map_err(|_| "the TTS endpoint answered a non-JSON audio query".to_owned())?;
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&self.exchange(call, "TTS").await?)
+                .map_err(|_| "the TTS endpoint answered a non-JSON audio query".to_owned())?;
         if let Some(speed) = self.speed {
             body["speedScale"] = serde_json::json!(speed);
         }
@@ -234,13 +236,11 @@ impl HttpEngine {
             ))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
-        let response = post(call, self.secret.as_deref(), "TTS").await?;
-        parse_wav(&net::read_body(response, MAX_BODY_BYTES, "TTS").await?)
+        parse_wav(&self.exchange(call, "TTS").await?)
     }
 
     async fn openai_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        net::guard_endpoint(&self.base, "STT").await?;
-        let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm, sample_rate))
+        let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm, sample_rate)?)
             .file_name("audio.wav")
             .mime_str("audio/wav")
             .map_err(|error| format!("the STT multipart body: {error}"))?;
@@ -254,23 +254,19 @@ impl HttpEngine {
             .client()?
             .post(format!("{}{}", self.base, self.path))
             .multipart(form.text("response_format", "json"));
-        let response = post(call, self.secret.as_deref(), "STT").await?;
-        let body = net::read_body(response, MAX_BODY_BYTES, "STT").await?;
+        let body = self.exchange(call, "STT").await?;
         let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|_| "the STT endpoint answered a non-JSON transcript".to_owned())?;
         Ok(value["text"].as_str().unwrap_or_default().trim().to_owned())
     }
 
     async fn raw_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        net::guard_endpoint(&self.base, "STT").await?;
         let call = self
             .client()?
             .post(format!("{}{}", self.base, self.path))
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(wav_wrap(&pcm, sample_rate));
-        let response = post(call, self.secret.as_deref(), "STT").await?;
-        let body = net::read_body(response, MAX_BODY_BYTES, "STT").await?;
-        String::from_utf8(body)
+            .body(wav_wrap(&pcm, sample_rate)?);
+        String::from_utf8(self.exchange(call, "STT").await?)
             .map(|text| text.trim().to_owned())
             .map_err(|_| "the STT endpoint answered a non-UTF-8 transcript".to_owned())
     }
@@ -512,7 +508,10 @@ fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
     Ok(pcm)
 }
 
-fn wav_wrap(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
+fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
+    if !pcm.len().is_multiple_of(2) {
+        return Err("the audio has an odd number of PCM bytes".to_owned());
+    }
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
@@ -530,7 +529,7 @@ fn wav_wrap(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     writer
         .finalize()
         .expect("an in-memory WAV header cannot fail");
-    wav.into_inner()
+    Ok(wav.into_inner())
 }
 
 fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
@@ -547,7 +546,7 @@ fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
         return Err("the TTS endpoint returned a WAV without channels".into());
     }
     let channels = usize::from(spec.channels);
-    let mut pcm = Vec::new();
+    let mut pcm = Vec::with_capacity(usize::try_from(reader.len()).unwrap_or(0) / channels * 2);
     let mut frame = 0i32;
     for (index, sample) in reader.samples::<i16>().enumerate() {
         let sample = sample.map_err(|_| "the TTS endpoint returned a truncated WAV")?;
@@ -653,7 +652,7 @@ impl Voice {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        lock(&self.inner)
+        super::lock(&self.inner)
     }
 
     fn register(&self, client: &str) -> AudioSubscription {
@@ -996,10 +995,6 @@ impl Voice {
     fn note_user_input(&self) {
         self.lock().relay = 0;
     }
-}
-
-fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
-    shared.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 fn finish(state: &mut State, companion: &str, reason: Option<w::FlushReason>) {

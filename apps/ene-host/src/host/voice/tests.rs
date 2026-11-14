@@ -653,7 +653,7 @@ fn stereo_wav(frames: &[(i16, i16)]) -> Vec<u8> {
         pcm.extend_from_slice(&left.to_le_bytes());
         pcm.extend_from_slice(&right.to_le_bytes());
     }
-    let mut wav = wav_wrap(&pcm, SAMPLE_RATE);
+    let mut wav = wav_wrap(&pcm, SAMPLE_RATE).unwrap();
     wav[22..24].copy_from_slice(&2u16.to_le_bytes());
     wav[28..32].copy_from_slice(&(SAMPLE_RATE * 4).to_le_bytes());
     wav[32..34].copy_from_slice(&4u16.to_le_bytes());

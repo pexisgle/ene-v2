@@ -4,10 +4,12 @@
 //! `private-fs`; the host only supplies the paths and token.
 use io_lifetimes::AsFilelike;
 use private_fs::{Durability, FileAccess, FileCreation, OpenOptions, PrivateDir, PrivateFile};
+#[cfg(test)]
+use std::path::PathBuf;
 use std::{
     fs::{self, File},
     io,
-    path::{Path, PathBuf},
+    path::Path,
 };
 use uuid::Uuid;
 
@@ -17,7 +19,9 @@ pub(super) struct Access {
     _locks: [PrivateFile; 2],
     directory: PrivateDir,
     pub token: String,
-    #[allow(dead_code)]
+    /// The discovery file the tests read back; production code reaches the
+    /// same path through `directory` and `publish`.
+    #[cfg(test)]
     pub connection: PathBuf,
 }
 
@@ -48,6 +52,7 @@ impl Access {
             _locks: locks,
             directory,
             token: format!("{}{}", Uuid::new_v4(), Uuid::new_v4()),
+            #[cfg(test)]
             connection: runtime.join("connection.json"),
         })
     }

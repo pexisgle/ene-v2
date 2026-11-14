@@ -108,7 +108,7 @@ fn begin_tick(
     tools: Query<&ToolDef>,
     agents: Query<(&CompanionAgent, &Conversation, Has<ActiveTurn>)>,
     wake: Option<Res<Wake>>,
-    #[cfg(test)] tick_model: Option<Res<TickModel>>,
+    #[cfg(test)] tick_model: Option<Res<agent::TestModel>>,
 ) {
     if ticks.in_flight.is_some()
         || ticks.last_started.is_some_and(|last| last.elapsed() < IDLE)
@@ -393,10 +393,5 @@ impl Plugin for StagedPlugin {
 }
 
 /// Test seam: the handler a tick calls, so no test builds a provider
-/// connection.
-#[cfg(test)]
-#[derive(Resource, Clone)]
-pub(crate) struct TickModel(pub(crate) Arc<dyn Fn() -> Bound + Send + Sync>);
-
 #[cfg(test)]
 mod tests;
