@@ -1248,3 +1248,83 @@ async fn a_stored_companion_without_a_model_does_not_block_startup() {
         .expect("a companion without a model must not stop the host from starting");
     runtime.shutdown().await.unwrap();
 }
+
+#[test]
+fn a_delivery_without_a_bound_model_starts_no_turn() {
+    let mut unbound = Harness::unbound();
+    let agent = agent::agent_of(unbound.app.world_mut(), &unbound.companion).expect("an agent");
+    let before = unbound
+        .app
+        .world()
+        .resource::<super::notify::Notifier>()
+        .cursor();
+    // The delivery voice and the schedule loop make: no `chat` call first.
+    let delivered = agent::deliver(
+        unbound.app.world_mut(),
+        agent,
+        &unbound.companion,
+        "reminder".into(),
+        DeliveryMode::Queue,
+        Author::plugin("ene-host"),
+    );
+    super::tick(&mut unbound.app);
+    assert!(!delivered, "a turn does not start without a bound model");
+    let history = history_texts(&mut unbound);
+    assert!(
+        !history.iter().any(|text| text.contains("reminder")),
+        "the turn never reaches the conversation: {history:?}"
+    );
+    let replay = unbound
+        .app
+        .world()
+        .resource::<super::notify::Notifier>()
+        .replay(&before)
+        .expect("the notice is in the replay ring");
+    assert!(
+        replay
+            .iter()
+            .any(|event| notice_code(event).as_deref() == Some("model_unavailable")),
+        "the client is told why the turn did not start"
+    );
+
+    // The same delivery to a bound agent runs a turn, so this test can see one
+    // when it happens.
+    let mut bound = Harness::new([text_turn("ok")]);
+    let agent = agent::agent_of(bound.app.world_mut(), &bound.companion).expect("an agent");
+    let delivered = agent::deliver(
+        bound.app.world_mut(),
+        agent,
+        &bound.companion,
+        "reminder".into(),
+        DeliveryMode::Queue,
+        Author::plugin("ene-host"),
+    );
+    assert!(delivered, "a bound agent takes the turn");
+    let mut history = Vec::new();
+    for _ in 0..40 {
+        super::tick(&mut bound.app);
+        history = history_texts(&mut bound);
+        if history.iter().any(|text| text == "ok") {
+            break;
+        }
+    }
+    assert!(
+        history.iter().any(|text| text == "ok"),
+        "the delivered message runs a turn: {history:?}"
+    );
+}
+
+fn history_texts(harness: &mut Harness) -> Vec<String> {
+    chat::history(
+        harness.app.world_mut(),
+        w::HistoryRequest {
+            companion_id: harness.companion.clone(),
+            ..Default::default()
+        },
+    )
+    .expect("the history of a companion")
+    .items
+    .iter()
+    .map(|item| item.text.clone())
+    .collect()
+}

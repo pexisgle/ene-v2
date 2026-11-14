@@ -1646,8 +1646,13 @@ pub(crate) fn accept_transcription(
                 }),
             ));
         }
-        world.trigger(
-            Deliver::new(agent, text.to_owned(), DeliveryMode::Steer).with_author(author.clone()),
+        agent::deliver(
+            world,
+            agent,
+            &companion,
+            text.to_owned(),
+            DeliveryMode::Steer,
+            author.clone(),
         );
     }
     // The transcript is recorded above whatever the approval outcome is: an

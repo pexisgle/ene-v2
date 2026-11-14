@@ -14,7 +14,7 @@ use super::{
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use rig_core::completion::{AssistantContent, Message as CompletionMessage};
-use rig_core::conversation::{AuthorKind, EntryRef};
+use rig_core::conversation::{Author, AuthorKind, EntryRef};
 use rig_core::message::UserContent;
 use rig_ecs::model::{Connection as ModelConnection, Models};
 use rig_ecs::prelude::*;
@@ -246,6 +246,26 @@ pub(crate) fn notice_model_unavailable(world: &mut World, companion_id: &str, er
         "model_unavailable",
         &crate::host::db::truncate(&error.to_string(), 300),
     );
+}
+
+/// Hands a turn to one agent, but only when its model is bound. Voice and the
+/// schedule loop deliver turns without going through `chat`, which is where a
+/// typed message asks for a model; without this a turn can run on the model the
+/// agent was bound to before its assignment or settings changed.
+pub(crate) fn deliver(
+    world: &mut World,
+    entity: Entity,
+    companion_id: &str,
+    text: String,
+    mode: DeliveryMode,
+    author: Author,
+) -> bool {
+    if let Err(error) = ensure_model(world, entity) {
+        notice_model_unavailable(world, companion_id, &error);
+        return false;
+    }
+    world.trigger(Deliver::new(entity, text, mode).with_author(author));
+    true
 }
 
 /// Rebuilds the system prompt after a companion edit, and drops the agent when
