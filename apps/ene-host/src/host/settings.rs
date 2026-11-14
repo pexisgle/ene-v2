@@ -331,6 +331,18 @@ pub(crate) fn provider(adapter: &str) -> Option<Provider> {
         .find(|provider| provider.adapter == adapter)
 }
 
+/// The endpoint a connection calls: its configured one without a trailing
+/// slash, or the provider's default when the configuration leaves it empty.
+pub(crate) fn endpoint_of(connection: &Connection) -> Option<String> {
+    let configured = connection.endpoint().endpoint.trim().trim_end_matches('/');
+    if !configured.is_empty() {
+        return Some(configured.to_owned());
+    }
+    provider(&connection.endpoint().adapter)
+        .map(|provider| provider.endpoint)
+        .filter(|endpoint| !endpoint.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

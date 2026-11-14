@@ -7,7 +7,7 @@ use super::{
     db::{self, Result, Store},
     delegation,
     error::HostError,
-    model::Credentials,
+    model::{self, Credentials},
     net,
     notify::Notifier,
     permission::{self, ApprovalDecision, ApprovalStatus},
@@ -434,17 +434,11 @@ fn voice_connection(
 
 fn base_url(endpoint: &Endpoint, label: &str) -> std::result::Result<String, SetupError> {
     let base = endpoint.endpoint.trim().trim_end_matches('/');
-    let url = url::Url::parse(base)
+    url::Url::parse(base)
         .map_err(|_| SetupError::Broken(format!("the {label} connection endpoint is not a URL")))?;
-    let scheme = url.scheme();
-    if scheme != "https" && !(scheme == "http" && net::loopback_endpoint(base)) {
-        let requirement = if scheme == "http" {
-            "must use https outside loopback"
-        } else {
-            "must be http(s)"
-        };
+    if !net::secure_endpoint(base) {
         return Err(SetupError::Broken(format!(
-            "the {label} connection endpoint {requirement}"
+            "the {label} connection endpoint must use https outside loopback"
         )));
     }
     Ok(base.to_owned())
@@ -456,26 +450,15 @@ fn credential(
     base: &str,
     label: &str,
 ) -> std::result::Result<Option<String>, SetupError> {
-    let secret = credentials.and_then(|credentials| secret_for(connection, credentials));
+    let secret = credentials
+        .and_then(|credentials| model::connection_secret(connection, Some(credentials)))
+        .map(|secret| secret.value().to_owned());
     if secret.is_none() && !net::loopback_endpoint(base) {
         return Err(SetupError::Broken(format!(
             "no credential is registered for the {label} connection"
         )));
     }
     Ok(secret)
-}
-
-fn secret_for(connection: &Connection, credentials: &Credentials) -> Option<String> {
-    if let Some(secret) = credentials.secret(&connection.id) {
-        return Some(secret);
-    }
-    if let Some(name) = connection.environment_variable()
-        && let Ok(secret) = std::env::var(name)
-        && !secret.is_empty()
-    {
-        return Some(secret);
-    }
-    net::loopback_endpoint(&connection.endpoint().endpoint).then(|| "ene-local".into())
 }
 
 fn wire_pcm(pcm: Vec<u8>, sample_rate: u32) -> HttpResult<Vec<u8>> {

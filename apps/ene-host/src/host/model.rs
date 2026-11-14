@@ -8,10 +8,12 @@ use super::settings::{Check, Connection, ConnectionConfig, ConnectionKind, Crede
 use bytes::Bytes;
 use futures_util::StreamExt;
 use rig_core::catalog::{Catalog, ModelSpec};
+use rig_core::completion::{CompletionRequest, CompletionResponse};
+use rig_core::effect::{Answered, EffectId, EffectKind};
 use rig_core::operation::Completion;
 use rig_core::providers::registry::{ConnectOptions, ProviderId};
-use rig_core::serve::ErasedHandler;
 use rig_core::serve::adapters::ModelAdapter;
+use rig_core::serve::{Dispatch, ErasedHandler};
 use rig_ecs::effects::Handler;
 use rig_ecs::model::Connection as ModelConnection;
 use rig_http::http_client::{self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse};
@@ -143,45 +145,68 @@ pub(crate) fn credential_state(
     CredentialState::Absent
 }
 
+/// What authenticates a connection: a credential the user or the environment
+/// supplied, or the placeholder a loopback endpoint accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Secret {
+    Registered(String),
+    Loopback,
+}
+
+impl Secret {
+    pub(crate) fn value(&self) -> &str {
+        match self {
+            Self::Registered(secret) => secret,
+            Self::Loopback => LOOPBACK_SECRET,
+        }
+    }
+}
+
+/// The placeholder a loopback endpoint accepts. It is never a real credential,
+/// so it may travel over plain HTTP to the local server only.
+const LOOPBACK_SECRET: &str = "ene-local";
+
+/// The secret a connection authenticates with: the keyring cache first, then
+/// the provider's environment variable, then the loopback placeholder. `None`
+/// means the host holds no credential for it.
+pub(crate) fn connection_secret(
+    connection: &Connection,
+    credentials: Option<&Credentials>,
+) -> Option<Secret> {
+    if let Some(secret) = credentials.and_then(|credentials| credentials.secret(&connection.id)) {
+        return Some(Secret::Registered(secret));
+    }
+    if let Some(name) = connection.environment_variable()
+        && let Ok(secret) = std::env::var(name)
+        && !secret.is_empty()
+    {
+        return Some(Secret::Registered(secret));
+    }
+    net::loopback_endpoint(&connection.endpoint().endpoint).then_some(Secret::Loopback)
+}
+
 fn secret_for(
     connection: &Connection,
     credentials: &Credentials,
 ) -> std::result::Result<String, HostError> {
-    let environment = connection
-        .environment_variable()
-        .and_then(|name| std::env::var(name).ok())
-        .filter(|secret| !secret.is_empty());
-    if let Some(secret) = credentials.secret(&connection.id).or(environment) {
+    match connection_secret(connection, Some(credentials)) {
         // A real credential only ever travels over TLS, or to a loopback
         // endpoint when the user deliberately points the connection at a
         // local server.
-        if !credential_endpoint(&connection.endpoint().endpoint) {
-            return Err(HostError::unavailable(
-                "a credential is only sent to an https or loopback endpoint",
-            ));
+        Some(Secret::Registered(secret)) => {
+            if net::secure_endpoint(&connection.endpoint().endpoint) {
+                Ok(secret)
+            } else {
+                Err(HostError::unavailable(
+                    "a credential is only sent to an https or loopback endpoint",
+                ))
+            }
         }
-        return Ok(secret);
+        Some(Secret::Loopback) => Ok(LOOPBACK_SECRET.to_owned()),
+        None => Err(HostError::unavailable(
+            "no credential is registered for this connection",
+        )),
     }
-    // A loopback endpoint is a local server; it may accept any key and the
-    // host never sends a real secret to a non-loopback endpoint without one.
-    if net::loopback_endpoint(&connection.endpoint().endpoint) {
-        return Ok("ene-local".into());
-    }
-    Err(HostError::unavailable(
-        "no credential is registered for this connection",
-    ))
-}
-
-/// Whether a real secret may be sent to `endpoint`. An empty endpoint uses
-/// the provider's HTTPS default; a non-empty one must be HTTPS or loopback,
-/// so a plain `http://` remote URL never receives a credential.
-fn credential_endpoint(endpoint: &str) -> bool {
-    let endpoint = endpoint.trim();
-    if endpoint.is_empty() {
-        return true;
-    }
-    url::Url::parse(endpoint).is_ok_and(|url| url.scheme() == "https")
-        || net::loopback_endpoint(endpoint)
 }
 
 /// The model an agent runs on.
@@ -406,6 +431,28 @@ impl HttpClientExt for Transport {
     }
 }
 
+/// Asks a bound connection one unary completion.
+///
+/// The call runs outside the `AgentPass` lifecycle: no turn scheduled it, so
+/// the effect id is synthetic and the caller bounds it with its own task
+/// handle. Summaries, consolidation and the heartbeat tick all read one reply
+/// and stop, which is why they cannot wait for a pass to settle.
+pub(crate) async fn unary(
+    handler: &ErasedHandler,
+    request: CompletionRequest,
+) -> std::result::Result<std::sync::Arc<CompletionResponse>, String> {
+    let kind = EffectKind::Completion {
+        request: Arc::new(request),
+        stream: false,
+    };
+    let dispatch = Dispatch::new(EffectId::from_raw(0), false);
+    match handler.handle(kind, dispatch).await.into_outcome().await {
+        Ok(Answered::Completion(response)) => Ok(response),
+        Ok(_) => Err("the connection answered something other than a completion".to_owned()),
+        Err(report) => Err(report.to_string()),
+    }
+}
+
 /// Lists the models a connection declares, with whatever the catalog knows.
 pub(crate) fn models(connection: &Connection) -> Vec<(String, ModelSpec)> {
     let ConnectionConfig::Llm(config) = &connection.config else {
@@ -472,6 +519,9 @@ pub(crate) async fn probe(
         return failure("the connection has no endpoint to probe".into());
     }
     let url = format!("{base}/models");
+    if let Err(error) = net::guard_endpoint(&url, "connection").await {
+        return failure(error);
+    }
     let client = match net::client(std::time::Duration::from_secs(15)) {
         Ok(client) => client,
         Err(error) => return failure(error),

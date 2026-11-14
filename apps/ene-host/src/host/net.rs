@@ -78,6 +78,17 @@ fn loopback(host: &url::Host<&str>) -> bool {
     }
 }
 
+/// Whether `endpoint` may carry a credential: HTTPS, or plain HTTP on loopback.
+/// An empty endpoint means the provider's own HTTPS default, so it passes.
+pub(crate) fn secure_endpoint(endpoint: &str) -> bool {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return true;
+    }
+    url::Url::parse(endpoint).is_ok_and(|url| url.scheme() == "https")
+        || loopback_endpoint(endpoint)
+}
+
 /// The endpoint guard shared by every host HTTP call. Loopback may use plain
 /// HTTP; any other plain-HTTP host is refused even without a credential, and a
 /// non-public resolved address is refused. Errors never carry URL or secret.

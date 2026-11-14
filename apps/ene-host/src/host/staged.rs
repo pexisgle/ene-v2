@@ -34,8 +34,7 @@ use rig_core::completion::{
     ToolDefinition,
 };
 use rig_core::conversation::{Author, Conversation as History, Entry};
-use rig_core::effect::{Answered, EffectId, EffectKind};
-use rig_core::serve::{Dispatch, ErasedHandler};
+use rig_core::serve::ErasedHandler;
 use rig_ecs::prelude::*;
 use std::{
     sync::{Arc, Mutex},
@@ -274,16 +273,9 @@ fn request(
 /// Asks the head once, outside the kernel: the reply is read, not continued,
 /// so a tool call has run nothing.
 async fn ask(request: CompletionRequest, handler: ErasedHandler) -> Outcome {
-    let kind = EffectKind::Completion {
-        request: Arc::new(request),
-        stream: false,
-    };
-    let dispatch = Dispatch::new(EffectId::from_raw(0), false);
-    match handler.handle(kind, dispatch).await.into_outcome().await {
-        Ok(Answered::Completion(response)) => Ok(acting_reply(&response)),
-        Ok(_) => Err("the heartbeat tick answered something other than a completion".to_owned()),
-        Err(report) => Err(report.to_string()),
-    }
+    model::unary(&handler, request)
+        .await
+        .map(|response| acting_reply(&response))
 }
 
 /// The reply a promotion writes: the text blocks, when the head spoke. A reply

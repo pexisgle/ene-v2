@@ -20,8 +20,7 @@ use bevy_ecs::prelude::*;
 use rig_core::catalog::ModelSpec;
 use rig_core::completion::{CompletionRequest, Message};
 use rig_core::conversation::{Conversation as CoreConversation, TurnEnd};
-use rig_core::effect::{Answered, EffectId, EffectKind};
-use rig_core::serve::{Dispatch, ErasedHandler};
+use rig_core::serve::ErasedHandler;
 use rig_ecs::model::Models;
 use rig_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -359,26 +358,10 @@ fn request(target: &Target, prompt: String) -> Result<CompletionRequest> {
 /// other than OpenAI-compatible ones is answered in its own dialect.
 async fn extract(target: &Target, prompt: String) -> Result<Vec<Fact>> {
     let request = request(target, prompt)?;
-    let kind = EffectKind::Completion {
-        request: Arc::new(request),
-        stream: false,
-    };
-    let dispatch = Dispatch::new(EffectId::from_raw(0), false);
-    match target
-        .handler
-        .handle(kind, dispatch)
+    let response = model::unary(&target.handler, request)
         .await
-        .into_outcome()
-        .await
-    {
-        Ok(Answered::Completion(response)) => parse_extraction(&response.text()),
-        Ok(_) => Err(HostError::unavailable(
-            "the consolidation model answered something other than a completion",
-        )),
-        Err(report) => Err(HostError::unavailable(format!(
-            "consolidation request: {report}"
-        ))),
-    }
+        .map_err(HostError::unavailable)?;
+    parse_extraction(&response.text())
 }
 
 /// The retrieval query for a job's merge candidates: the newest turns' text,

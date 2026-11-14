@@ -13,8 +13,7 @@ use rig_core::completion::{Message, ToolDefinition};
 use rig_core::conversation::{
     Aside, Author, AuthorKind, Conversation as History, Entry, EntryRef, MessageId, pairing,
 };
-use rig_core::effect::{Answered, EffectId, EffectKind};
-use rig_core::serve::{Dispatch, ErasedHandler};
+use rig_core::serve::ErasedHandler;
 use rig_ecs::prelude::*;
 use rig_memory::recent::{TokenBudget, view};
 use rig_memory::{
@@ -512,18 +511,8 @@ async fn completion(
     request: rig_core::completion::CompletionRequest,
     handler: ErasedHandler,
 ) -> std::result::Result<String, String> {
-    let kind = EffectKind::Completion {
-        request: Arc::new(request),
-        stream: false,
-    };
-    let dispatch = Dispatch::new(EffectId::from_raw(0), false);
-    match handler.handle(kind, dispatch).await.into_outcome().await {
-        Ok(Answered::Completion(response)) => {
-            Summarizer::summary_text(&response).map_err(|error| error.to_string())
-        }
-        Ok(_) => Err("the summarizer answered something other than a completion".to_owned()),
-        Err(report) => Err(report.to_string()),
-    }
+    let response = model::unary(&handler, request).await?;
+    Summarizer::summary_text(&response).map_err(|error| error.to_string())
 }
 
 /// The id of the newest message a summary ending before `keep_from` stands for.

@@ -26,7 +26,7 @@ use crate::host::{
     error::HostError,
     model::Credentials,
     net,
-    settings::{Connection, ConnectionConfig, ConnectionKind},
+    settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;
@@ -219,8 +219,9 @@ fn target(
         return Ok(None);
     }
     let (Some(endpoint), Some(secret)) = (
-        connection_endpoint(&connection),
-        connection_secret(&connection, credentials),
+        crate::host::settings::endpoint_of(&connection),
+        crate::host::model::connection_secret(&connection, credentials)
+            .map(|secret| secret.value().to_owned()),
     ) else {
         return Ok(None);
     };
@@ -231,38 +232,6 @@ fn target(
         secret,
         space: space_id(model_id, dimensions),
     }))
-}
-
-/// The endpoint a connection calls, with the built-in provider's default when
-/// the config leaves it empty.
-pub(crate) fn connection_endpoint(connection: &Connection) -> Option<String> {
-    let endpoint = connection.endpoint().endpoint.trim().trim_end_matches('/');
-    if !endpoint.is_empty() {
-        return Some(endpoint.to_owned());
-    }
-    crate::host::settings::provider(&connection.endpoint().adapter)
-        .map(|provider| provider.endpoint)
-        .filter(|endpoint| !endpoint.is_empty())
-}
-
-/// Resolves a connection's secret: the host cache first, then the provider's
-/// environment variable, then the loopback placeholder.
-pub(crate) fn connection_secret(
-    connection: &Connection,
-    credentials: Option<&Credentials>,
-) -> Option<String> {
-    if let Some(credentials) = credentials
-        && let Some(secret) = credentials.secret(&connection.id)
-    {
-        return Some(secret);
-    }
-    if let Some(name) = connection.environment_variable()
-        && let Ok(secret) = std::env::var(name)
-        && !secret.is_empty()
-    {
-        return Some(secret);
-    }
-    net::loopback_endpoint(&connection.endpoint().endpoint).then(|| "ene-local".to_owned())
 }
 
 /// The semantic candidates for one query, or none when no embedding space is
