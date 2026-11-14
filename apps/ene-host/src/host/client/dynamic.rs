@@ -45,6 +45,9 @@ use tokio::sync::{mpsc, oneshot};
 
 /// The tools a hand may call. A capability tool is offered to the parent
 /// only, so a work agent never sees another companion's tools.
+/// How many capability calls may queue before a handler waits.
+const QUEUE: usize = 64;
+
 const WORK_AGENT_TOOLS: &[&str] = &["device_request", "report"];
 
 /// One active companion/client generation a shared tool dispatches for.
@@ -89,14 +92,14 @@ pub(crate) struct CapabilityCall {
 /// thread, which drains it once a frame.
 #[derive(Resource)]
 pub(crate) struct CapabilityCalls {
-    sender: mpsc::UnboundedSender<CapabilityCall>,
-    receiver: mpsc::UnboundedReceiver<CapabilityCall>,
+    sender: mpsc::Sender<CapabilityCall>,
+    receiver: mpsc::Receiver<CapabilityCall>,
     wake: Wake,
 }
 
 impl CapabilityCalls {
     pub(crate) fn new(wake: Wake) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(QUEUE);
         Self {
             sender,
             receiver,
@@ -112,7 +115,7 @@ struct CapabilityHandler {
     name: String,
     description: String,
     parameters: Value,
-    calls: mpsc::UnboundedSender<CapabilityCall>,
+    calls: mpsc::Sender<CapabilityCall>,
     wake: Wake,
 }
 
@@ -144,12 +147,15 @@ impl Serve for CapabilityHandler {
             }
         };
         let (reply, answer) = oneshot::channel();
-        let dispatched = self.calls.send(CapabilityCall {
-            effect: dispatch.id(),
-            tool_name: self.name.clone(),
-            input,
-            reply,
-        });
+        let dispatched = self
+            .calls
+            .send(CapabilityCall {
+                effect: dispatch.id(),
+                tool_name: self.name.clone(),
+                input,
+                reply,
+            })
+            .await;
         if dispatched.is_err() {
             return Reply::Outcome(Err(ErrorReport::new(
                 ErrorKind::HandlerUnavailable,
