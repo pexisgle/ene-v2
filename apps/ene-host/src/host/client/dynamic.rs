@@ -350,6 +350,23 @@ fn granted_names(
     granted
 }
 
+/// The tools a parent agent is offered: the host's built-ins (without
+/// `report`, which belongs to the hand), the capability tools its active client
+/// granted, and every tool the host serves itself such as an MCP server's.
+fn parent_names(granted: &[String], host: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut names: Vec<String> = BUILTIN_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| *name != "report")
+        .map(str::to_owned)
+        .collect();
+    names.extend(granted.iter().cloned());
+    names.extend(host.iter().cloned());
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Limits what each parent agent is offered: the host's built-in parent tools
 /// plus only the capability tools granted to that companion's active client.
 /// A hand keeps `report` and `device_request`; it never sees a capability
@@ -365,19 +382,11 @@ fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {
             .collect()
     };
     for (entity, companion) in parents {
-        let mut names: Vec<String> = BUILTIN_TOOLS
-            .iter()
-            .copied()
-            // `report` belongs to the hand: the parent reports through the
-            // work tools instead.
-            .filter(|name| *name != "report")
-            .map(str::to_owned)
-            .collect();
-        if let Some(tools) = granted.get(&companion) {
-            names.extend(tools.iter().cloned());
-        }
-        names.sort();
-        names.dedup();
+        let granted: &[String] = granted.get(&companion).map_or(&[], Vec::as_slice);
+        let host: std::collections::HashSet<String> = world
+            .get_resource::<crate::host::resources::HostToolNames>()
+            .map_or_else(Default::default, |names| names.0.clone());
+        let names = parent_names(granted, &host);
         set_access(world, entity, &names);
     }
     let hands: Vec<Entity> = {
@@ -556,4 +565,23 @@ fn effect_entity(world: &mut World, id: EffectId) -> Option<Entity> {
         .iter(world)
         .find(|(_, effect)| effect.id() == id)
         .map(|(entity, _)| entity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A parent is offered every tool the host serves itself, so a tool an MCP
+    /// server contributed reaches the model instead of staying invisible.
+    #[test]
+    fn a_parent_is_offered_the_tools_the_host_serves_itself() {
+        let granted = vec!["device.files".to_owned()];
+        let mut host = std::collections::HashSet::new();
+        host.insert("mcp_notes_read".to_owned());
+        let names = parent_names(&granted, &host);
+        assert!(names.iter().any(|name| name == "mcp_notes_read"));
+        assert!(names.iter().any(|name| name == "device.files"));
+        assert!(names.iter().any(|name| name == "mind_recall"));
+        assert!(!names.iter().any(|name| name == "report"));
+    }
 }

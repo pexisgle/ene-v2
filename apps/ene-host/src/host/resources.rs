@@ -154,3 +154,9 @@ mod tests {
 /// without creating a runtime or thread of their own.
 #[derive(Resource, Clone)]
 pub(crate) struct HostRuntime(pub(crate) tokio::runtime::Handle);
+
+/// Tool names the host serves on its own behalf beyond the built-in ones: the
+/// tools an MCP server contributed. The gate passes them, and a parent agent is
+/// offered them.
+#[derive(Resource, Default)]
+pub(crate) struct HostToolNames(pub(crate) std::collections::HashSet<String>);

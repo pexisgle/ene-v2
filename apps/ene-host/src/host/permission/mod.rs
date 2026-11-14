@@ -110,6 +110,13 @@ pub(crate) fn is_host_tool(tool_name: &str) -> bool {
     tool_name != "device_request" && BUILTIN_TOOLS.contains(&tool_name)
 }
 
+/// Whether a call skips the capability pipeline: a built-in host tool, or a
+/// tool the host serves itself, such as one an MCP server contributed (the
+/// operator configured it, so no client approval applies).
+fn host_owned(tool_name: &str, host_tools: &std::collections::HashSet<String>) -> bool {
+    is_host_tool(tool_name) || host_tools.contains(tool_name)
+}
+
 pub(crate) fn hard_denied(capability: &str) -> Option<&'static str> {
     HARD_DENIED
         .iter()
@@ -227,6 +234,18 @@ impl From<Failure> for Verdict {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A tool an MCP server contributed belongs to the host, so the capability
+    /// pipeline must not refuse it for having no client binding.
+    #[test]
+    fn a_host_served_tool_passes_the_capability_pipeline() {
+        let mut host = std::collections::HashSet::new();
+        host.insert("mcp_notes_read".to_owned());
+        assert!(host_owned("mcp_notes_read", &host));
+        assert!(host_owned("mind_recall", &host));
+        assert!(!host_owned("device.files", &host));
+        assert!(!host_owned("device_request", &host));
+    }
 
     fn rule(effect: PolicyEffect, tool: &str, pattern: &str) -> PolicyRule {
         PolicyRule {
@@ -393,8 +412,13 @@ fn gate(world: &mut World) {
     }
     let store = world.resource::<Store>().clone();
     let rules = store.policy_rules().unwrap_or_default();
+    let host_tools: std::collections::HashSet<String> = world
+        .get_resource::<crate::host::resources::HostToolNames>()
+        .map_or_else(Default::default, |names| names.0.clone());
     for (call, tool_name, arguments, agent) in calls {
-        if is_host_tool(&tool_name) {
+        // Built-in host tools and the tools an MCP server contributed belong to
+        // the host process; the operator configured them.
+        if host_owned(&tool_name, &host_tools) {
             continue;
         }
         let (companion_id, work_id, run_id) = binding_of(world, agent);

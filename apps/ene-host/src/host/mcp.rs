@@ -6,14 +6,15 @@
 //! a client or served by an MCP process.
 //!
 //! The tools belong to the operator's own configuration rather than to a
-//! client's declaration, so they run without an approval card. The gate stays
-//! in charge of what a *client* may ask the host to do; it never sees these.
+//! client's declaration, so they run without an approval card: the gate passes
+//! them the same way it passes the built-in host tools, and stays in charge of
+//! what a *client* may ask the host to do.
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
 use crate::host::{
     db::Store,
-    resources::HostRuntime,
+    resources::{HostRuntime, HostToolNames},
     settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
@@ -29,7 +30,7 @@ use rig_rmcp::{
     McpConnection,
     rmcp::{
         ServiceExt,
-        model::{CallToolRequestParams, CallToolResult, ClientConfig, Tool as McpTool},
+        model::{CallToolRequestParams, CallToolResult, ClientConfig},
         service::ServerSink,
         transport::{
             child_process::TokioChildProcess,
@@ -53,6 +54,8 @@ struct Server {
     connection: McpConnection,
     /// The connection revision these tools were built from.
     revision: u64,
+    /// The model-facing names these tools hold, so a retire can drop them.
+    names: Vec<String>,
     tools: Vec<Entity>,
 }
 
@@ -69,7 +72,7 @@ enum Event {
         id: String,
         revision: u64,
         connection: McpConnection,
-        tools: Vec<McpTool>,
+        tools: Vec<rig_rmcp::McpTool>,
     },
     Failed {
         id: String,
@@ -92,6 +95,7 @@ impl Default for McpEvents {
 
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<McpServers>()
+        .init_resource::<HostToolNames>()
         .init_resource::<Connecting>()
         .init_resource::<McpEvents>()
         .add_systems(Update, sync.after(AgentLoop));
@@ -100,6 +104,7 @@ pub(crate) fn register(app: &mut App) {
 /// What one settings row asks the host to connect to.
 struct Desired {
     revision: u64,
+    name: String,
     command: String,
     args: Vec<String>,
     endpoint: String,
@@ -122,6 +127,7 @@ fn desired(store: &Store) -> Vec<(String, Desired)> {
                 connection.id.clone(),
                 Desired {
                     revision: connection.revision,
+                    name: connection.name.clone(),
                     command: config.command.trim().to_owned(),
                     args: config.args.clone(),
                     endpoint: config.endpoint.endpoint.trim().to_owned(),
@@ -135,6 +141,17 @@ fn desired(store: &Store) -> Vec<(String, Desired)> {
 /// Connects what the settings ask for, retires what they no longer do, and
 /// attaches the tools a connect task listed.
 fn sync(world: &mut World) {
+    let closing = world
+        .get_resource::<crate::host::resources::HostState>()
+        .is_some_and(|state| state.closing || state.failed.is_some());
+    if closing {
+        // The host is going away: close every server so no child outlives it.
+        let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
+        for id in ids {
+            retire_one(world, &id);
+        }
+        return;
+    }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
         return;
     };
@@ -156,7 +173,15 @@ fn sync(world: &mut World) {
                     runtime.spawn(async move { connection.close().await });
                     continue;
                 };
-                attach(world, &id, revision, connection, tools, &want.allowed);
+                attach(
+                    world,
+                    &id,
+                    revision,
+                    &want.name,
+                    connection,
+                    tools,
+                    &want.allowed,
+                );
             }
             Event::Failed { id, reason } => {
                 world.resource_mut::<Connecting>().0.remove(&id);
@@ -217,15 +242,23 @@ fn drain(world: &mut World) -> Vec<Event> {
 }
 
 /// Opens one server and lists its tools.
-async fn open(want: &Desired) -> Result<(McpConnection, Vec<McpTool>), String> {
+async fn open(want: &Desired) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>), String> {
     let service = if !want.command.is_empty() {
         // A stdio server is a child process the host owns.
         let args = want.args.clone();
-        let wrap = process_wrap::tokio::CommandWrap::with_new(Path::new(&want.command), |cmd| {
-            cmd.args(&args)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped());
-        });
+        let mut wrap =
+            process_wrap::tokio::CommandWrap::with_new(Path::new(&want.command), |cmd| {
+                cmd.args(&args)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped());
+            });
+        // The same lifecycle the ACP child gets: one process group, killed on
+        // drop, so a host that exits does not orphan the server.
+        #[cfg(unix)]
+        wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        wrap.wrap(process_wrap::tokio::JobObject);
+        wrap.wrap(process_wrap::tokio::KillOnDrop);
         let transport = TokioChildProcess::new(wrap).map_err(|error| error.to_string())?;
         ClientConfig::default()
             .serve(transport)
@@ -243,12 +276,13 @@ async fn open(want: &Desired) -> Result<(McpConnection, Vec<McpTool>), String> {
         return Err("the MCP connection names neither a command nor an endpoint".to_owned());
     };
     let connection = McpConnection::new(service);
-    let listed = connection
-        .peer()
-        .list_tools(None)
+    // rig-rmcp binds each listed tool to this connection, which is what keeps
+    // the server alive as long as its tools are registered.
+    let tools = connection
+        .tools()
         .await
         .map_err(|error| error.to_string())?;
-    Ok((connection, listed.tools))
+    Ok((connection, tools))
 }
 
 /// Registers the tools `allowed` names, or every tool it lists when the
@@ -257,25 +291,28 @@ fn attach(
     world: &mut World,
     id: &str,
     revision: u64,
+    label: &str,
     connection: McpConnection,
-    tools: Vec<McpTool>,
+    tools: Vec<rig_rmcp::McpTool>,
     allowed: &[String],
 ) {
     let peer = connection.peer().clone();
     let mut entities = Vec::new();
+    let mut names = Vec::new();
     for tool in tools {
-        let name = tool.name.to_string();
+        let definition = tool.definition();
+        let name = definition.name.to_string();
         if !allowed.is_empty() && !allowed.contains(&name) {
             continue;
         }
-        let Some(exposed) = exposed_name(id, &name) else {
+        let Some(exposed) = exposed_name(label, id, &name) else {
             continue;
         };
-        let description = tool
+        let description = definition
             .description
             .as_ref()
             .map_or_else(|| format!("MCP tool `{name}`"), ToString::to_string);
-        let parameters = Value::Object((*tool.input_schema).clone());
+        let parameters = Value::Object((*definition.input_schema).clone());
         let handler = McpToolHandler {
             peer: peer.clone(),
             mcp_name: name,
@@ -283,23 +320,34 @@ fn attach(
             description: description.clone(),
             parameters: parameters.clone(),
         };
-        let Some(name) = rig_core::message::ToolName::new(exposed).ok() else {
+        let Some(tool_name) = rig_core::message::ToolName::new(exposed.clone()).ok() else {
             continue;
         };
-        let definition = ToolDefinition::new(name, description, parameters);
+        let definition = ToolDefinition::new(tool_name, description, parameters);
         if let Some(entity) = world.spawn_tool(
             definition,
             ErasedHandler::new(handler),
             ToolOptions::default(),
         ) {
             entities.push(entity);
+            names.push(exposed);
         }
+    }
+    // The gate passes these and a parent is offered them, so both lists have
+    // to learn the names before the next turn.
+    {
+        let mut host = world.resource_mut::<HostToolNames>();
+        host.0.extend(names.iter().cloned());
+    }
+    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
+        tracing::warn!(connection = %id, "the MCP tools are not offered: {error}");
     }
     world.resource_mut::<McpServers>().0.insert(
         id.to_owned(),
         Server {
             connection,
             revision,
+            names,
             tools: entities,
         },
     );
@@ -315,6 +363,15 @@ fn retire_one(world: &mut World, id: &str) {
             entity.despawn();
         }
     }
+    {
+        let mut host = world.resource_mut::<HostToolNames>();
+        for name in &server.names {
+            host.0.remove(name);
+        }
+    }
+    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
+        tracing::warn!(connection = %id, "the retired MCP tools may still be offered: {error}");
+    }
     // Closing waits for the transport, so it runs off the host thread.
     if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
         let connection = server.connection;
@@ -322,24 +379,35 @@ fn retire_one(world: &mut World, id: &str) {
     }
 }
 
-/// The model-facing name for a server's tool. A name the provider grammar
-/// cannot carry, or one the host already reserves, is refused rather than
-/// silently renamed onto another tool.
-fn exposed_name(connection: &str, tool: &str) -> Option<String> {
-    let mut name = String::with_capacity(tool.len() + 4);
-    name.push_str("mcp_");
-    for character in tool.chars() {
-        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
-            name.push(character);
-        } else {
+/// The model-facing name for one server's tool: `mcp_<server>_<tool>`. The
+/// server part keeps two servers that offer the same tool name apart. A part
+/// the provider grammar cannot carry is refused rather than rewritten onto
+/// another tool.
+fn exposed_name(label: &str, id: &str, tool: &str) -> Option<String> {
+    let mut name = String::from("mcp_");
+    if !push_allowed(&mut name, label) {
+        let short: String = id.chars().take(8).collect();
+        if !push_allowed(&mut name, &short) {
             return None;
         }
     }
-    if name.len() > 64 || name.starts_with("mcp_") && name.len() <= 4 {
-        tracing::warn!(connection = %connection, tool = %tool, "the MCP tool name is not usable");
+    name.push('_');
+    if !push_allowed(&mut name, tool) || name.len() > 64 {
         return None;
     }
     Some(name)
+}
+
+fn push_allowed(out: &mut String, text: &str) -> bool {
+    if text.is_empty()
+        || !text.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+    {
+        return false;
+    }
+    out.push_str(text);
+    true
 }
 
 /// One MCP tool as the host serves it.
@@ -433,22 +501,32 @@ impl Plugin for McpPlugin {
 mod tests {
     use super::*;
 
-    /// The model-facing name is namespaced, and a name the provider grammar
-    /// cannot carry is refused rather than rewritten onto another tool.
+    /// The model-facing name carries the server, so two servers that offer the
+    /// same tool keep two tools. A part the provider grammar cannot carry is
+    /// refused rather than rewritten onto another tool.
     #[test]
-    fn a_tool_name_is_namespaced_and_refused_when_it_cannot_be_carried() {
+    fn a_tool_name_carries_the_server_and_is_refused_when_it_cannot_be_spelled() {
         assert_eq!(
-            exposed_name("c1", "read_file").as_deref(),
-            Some("mcp_read_file")
+            exposed_name("notes", "c1", "read_file").as_deref(),
+            Some("mcp_notes_read_file")
         );
         assert_eq!(
-            exposed_name("c1", "read-file").as_deref(),
-            Some("mcp_read-file")
+            exposed_name("notes", "c1", "read-file").as_deref(),
+            Some("mcp_notes_read-file")
         );
-        assert_eq!(exposed_name("c1", "read.file"), None);
-        assert_eq!(exposed_name("c1", "read file"), None);
+        assert_ne!(
+            exposed_name("notes", "c1", "read"),
+            exposed_name("work", "c2", "read")
+        );
+        // A server name the grammar cannot carry falls back to its id.
+        assert_eq!(
+            exposed_name("my server", "abcdef012345", "read").as_deref(),
+            Some("mcp_abcdef01_read")
+        );
+        assert_eq!(exposed_name("notes", "c1", "read.file"), None);
+        assert_eq!(exposed_name("notes", "c1", "read file"), None);
         let long = "x".repeat(70);
-        assert_eq!(exposed_name("c1", &long), None);
+        assert_eq!(exposed_name("notes", "c1", &long), None);
     }
 
     /// A setting that names neither a command nor an endpoint cannot be
@@ -457,6 +535,7 @@ mod tests {
     async fn a_server_without_a_transport_is_refused() {
         let want = Desired {
             revision: 1,
+            name: "notes".into(),
             command: String::new(),
             args: Vec::new(),
             endpoint: String::new(),
