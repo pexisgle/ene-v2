@@ -238,6 +238,16 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
     Ok(())
 }
 
+/// Tells the clients that a saved companion has no usable model yet.
+pub(crate) fn notice_model_unavailable(world: &mut World, companion_id: &str, error: &HostError) {
+    let mut notifier = world.resource_mut::<Notifier>();
+    notifier.notice(
+        Some(companion_id),
+        "model_unavailable",
+        &crate::host::db::truncate(&error.to_string(), 300),
+    );
+}
+
 /// Rebuilds the system prompt after a companion edit, and drops the agent when
 /// the companion is gone.
 pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()> {
@@ -250,7 +260,17 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
                 .entity_mut(entity)
                 .insert(SystemPrompt(system_prompt(&companion)));
             world.entity_mut(entity).remove::<Binding>();
-            ensure_model(world, entity)
+            // The store is the source of truth and the binding is derived, so a
+            // model the host cannot bind yet is a notice: a turn, an edit or the
+            // next start retries it. A storage failure still fails.
+            match ensure_model(world, entity) {
+                Ok(()) => Ok(()),
+                Err(error) if error.is_storage() => Err(error),
+                Err(error) => {
+                    notice_model_unavailable(world, companion_id, &error);
+                    Ok(())
+                }
+            }
         }
         None => {
             if let Some(entity) = entity {
@@ -323,12 +343,7 @@ pub(crate) fn reconcile(world: &mut World) {
     };
     for (entity, companion) in agents {
         if let Err(error) = ensure_model(world, entity) {
-            let mut notifier = world.resource_mut::<Notifier>();
-            notifier.notice(
-                Some(&companion),
-                "model_unavailable",
-                &crate::host::db::truncate(&error.to_string(), 300),
-            );
+            notice_model_unavailable(world, &companion, &error);
         }
     }
     let mut notifier = world.resource_mut::<Notifier>();
