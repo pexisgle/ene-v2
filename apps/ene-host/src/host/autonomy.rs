@@ -199,8 +199,15 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
             "[スケジュール実行: {}] {}",
             schedule.title, schedule.instruction
         );
-        world.trigger(
-            Deliver::new(agent, text, DeliveryMode::Queue).with_author(Author::plugin("ene-host")),
+        // The row records its firing either way; the notice says when the
+        // companion's model is not bound and the turn does not start.
+        agent::deliver(
+            world,
+            agent,
+            &schedule.companion_id,
+            text,
+            DeliveryMode::Queue,
+            Author::plugin("ene-host"),
         );
         fired += 1;
     }
