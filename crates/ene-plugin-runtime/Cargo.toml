@@ -1,0 +1,31 @@
+[package]
+name = "ene-plugin-runtime"
+description = "Verified WebAssembly plugins embedded through the Extism Host SDK"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+ene-plugin.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-util.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+serde_json = "1"
+sha2.workspace = true
+# The host SDK embeds the Extism runtime and pins the wasmtime 49 line that
+# this crate configures below, so it stays exact.
+extism = { version = "=1.41.0", default-features = false }
+wasmtime = { version = "49", default-features = false, features = ["pooling-allocator"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+wat = "1"

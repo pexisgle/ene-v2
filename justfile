@@ -16,7 +16,7 @@ check:
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-test:
+test: build-test-plugins
     cargo test --workspace --all-features --locked
 
 build:
@@ -33,11 +33,11 @@ fetch-assets asset="all":
 # Re-run tests only when the behavior under test changes.
 verify: fmt-check clippy
 
+build-test-plugins:
+    cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
+
 run-host:
     cargo run --locked -p ene-host
-
-run-desktop:
-    cargo run --locked -p ene-desktop
 
 # Control the transparent renderer using JSON Lines on stdin.
 run-avatar:

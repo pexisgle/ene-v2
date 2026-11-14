@@ -1,0 +1,31 @@
+{
+  "contract_version": 4,
+  "id": "reference",
+  "name": "ene reference extensions",
+  "version": "1.0.0",
+  "entrypoints": [
+    {
+      "id": "behavior",
+      "target": "host",
+      "file": "reference.wasm",
+      "provides": [
+        "character"
+      ],
+      "uses": [
+        "state"
+      ]
+    },
+    {
+      "id": "harness",
+      "target": "host",
+      "file": "reference.wasm",
+      "provides": [
+        "harness"
+      ],
+      "uses": [
+        "models",
+        "tools"
+      ]
+    }
+  ]
+}

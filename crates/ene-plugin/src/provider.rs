@@ -1,4 +1,4 @@
-//! Shared LLM configuration and message types for Luau and Wasm plugins.
+//! Shared LLM configuration and message types for Wasm plugins.
 //! The host owns credentials and authorizes every HTTP exchange. Plugins receive
 //! no credential values and cannot choose the grant/purpose attached to a job.
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ pub enum AuthProfile {
 }
 
 // Reuse the shared data schema; plugin transport belongs to the runtime.
-pub use ene_rpc::{Model, ModelMetadata, ProviderCapabilities, SettingField};
+pub use ene_rpc::{LlmProviderCapabilities, Model, ModelMetadata, SettingField};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {

@@ -1,268 +1,894 @@
 syntax = "proto3";
 package ene.host.v1;
 
-// Provider and plugin-specific extension objects use JSON; API operations and events
-// have concrete protobuf types. JSON text preserves arbitrary integer precision.
-message JsonDocument { string json = 1; }
 message Empty {}
 message Id { string id = 1; }
-message Cursor { string epoch = 1; uint64 seq = 2; }
-message Failure { string code = 1; string message = 2; JsonDocument details = 3; }
-message ApiFailure { Failure error = 1; string request_id = 2; uint32 http_status = 3; }
-message ModelAssignment { string connection_id = 1; string model_id = 2; }
-message ModelAssignments { ModelAssignment companion = 1; ModelAssignment task = 2; }
-message Message {
-  string id = 1; string companion_id = 2; string role = 3; string text = 4;
-  string status = 5; string created_at = 6; uint64 sequence = 7;
-  repeated JsonDocument resources = 8; optional string in_reply_to = 9;
-  optional string task_id = 10; optional string question_id = 11; Failure failure = 12;
-}
-message Companion {
-  string id = 1; string name = 2; JsonDocument body = 3; JsonDocument voice = 4;
-  string mind = 5; ModelAssignments model_assignments = 6;
-  JsonDocument availability = 7; uint64 revision = 8;
-}
-message Connection {
-  string id = 1; string kind = 2; string adapter = 3; string endpoint = 4;
-  JsonDocument options = 5; string credential_state = 6;
-  JsonDocument capabilities = 7; JsonDocument last_check = 8;
-}
-message Settings { uint64 revision = 1; repeated Connection connections = 2; }
-message Grant {
-  string id = 1; string companion_id = 2; string kind = 3; string connection_id = 4;
-  repeated string destinations = 5; repeated string data_kinds = 6;
-  string purpose = 7; string status = 8; uint64 revision = 9;
-  optional string invalidation_reason = 10; JsonDocument connection_fingerprint = 11;
-}
-message HostHealth {
-  bool ready = 1; bool recovery_required = 2; bool stopping = 3;
-  uint64 credential_cleanup_pending = 4;
-}
-message HistoryCursor { optional string value = 1; }
-message Snapshot {
-  string host_id = 1; string environment_id = 2; JsonDocument capabilities = 3;
-  Cursor cursor = 4; repeated Companion companions = 5; repeated Message messages = 6;
-  map<string, HistoryCursor> message_cursors = 7; Settings settings = 8;
-  repeated Grant grants = 9; HostHealth health = 10;
-}
-message SnapshotRequest { optional string subscription_id = 1; }
-message Companions { repeated Companion items = 1; }
-message ConnectionInput {
-  optional string id = 1; bool create = 2; string kind = 3; string adapter = 4;
-  string endpoint = 5; JsonDocument options = 6;
-}
-message ConnectionInputs { repeated ConnectionInput items = 1; }
-message UpdateSettingsRequest {
-  uint64 revision = 1;
-  // The former repeated field cannot represent omission; never reuse its tag.
-  reserved 2;
-  // Absent keeps the list; a present empty message removes all unreferenced connections.
-  ConnectionInputs connections = 3;
-}
-// Absent fields keep their value. Assignment changes explicitly set or clear a slot.
-message AssignmentPatch { oneof change { ModelAssignment set = 1; Empty clear = 2; } }
-// An absent patch keeps the document. A present patch must select set or clear.
-// JSON null is omission, not clear; set requires a non-null JSON object.
-message JsonDocumentPatch { oneof change { JsonDocument set = 1; Empty clear = 2; } }
-message UpdateCompanionRequest {
-  string id = 1; uint64 revision = 2; optional string name = 3; optional string mind = 4;
-  AssignmentPatch companion_assignment = 5; AssignmentPatch task_assignment = 6;
-  JsonDocumentPatch body = 7; JsonDocumentPatch voice = 8;
-}
-message HistoryRequest {
-  string companion_id = 1; optional string cursor = 2; optional uint32 limit = 3;
-}
-message History { repeated Message items = 1; optional string next_cursor = 2; }
-message MessageRequest { string companion_id = 1; string message_id = 2; }
-message SendMessageRequest {
-  string companion_id = 1; string text = 2; string request_key = 3;
-  repeated JsonDocument resources = 4; optional string question_id = 5; optional string decision = 6;
-}
-message MessageAcceptance { string request_id = 1; string message_id = 2; string response_message_id = 3; }
-message GrantsRequest { optional string companion_id = 1; }
-message Grants { repeated Grant items = 1; }
-message Consent { uint64 settings_revision = 1; string provider_revision = 2; }
-message CreateGrantRequest {
-  string request_key = 1; string companion_id = 2; string kind = 3; string connection_id = 4;
-  repeated string destinations = 5; repeated string data_kinds = 6;
-  string purpose = 7; Consent consent = 8;
-}
-message UpdateGrantRequest {
-  string id = 1; uint64 revision = 2; StringList destinations = 3;
-  StringList data_kinds = 4;
-}
-message GrantResult { Grant grant = 1; }
-message CredentialRequest { string id = 1; optional string secret = 2; optional string source = 3; }
-message CredentialResult { string credential_state = 1; }
-message CheckRequest {
-  string id = 1; string request_key = 2; string companion_id = 3;
-  string purpose = 4; optional string model_id = 5;
-}
-message CheckResult {
-  string request_id = 1; JsonDocument capabilities = 2; bool success = 3;
-  string model_id = 4; uint64 content_chunks = 5; uint64 unicode_scalars = 6;
-}
 message StringList { repeated string values = 1; }
-message ModelMetadata {
-  string source = 1; string scope = 2; optional uint64 context_window = 3;
-  optional uint64 max_input_tokens = 4; optional uint64 max_output_tokens = 5;
-  StringList input_modalities = 6; StringList output_modalities = 7;
-  StringList supported_parameters = 8; map<string, string> field_sources = 9;
+// スキーマ識別子付きの自由形式JSON。スキーマはクライアントまたはプラグインが提供する。
+message JsonDocument {
+  string schema = 1; // 例: "ene.body.v1", "ene.mind_state.v1"
+  string json = 2;   // schema に適合する JSON text
 }
-message Model { string id = 1; string name = 2; ModelMetadata metadata = 3; }
-message Models { repeated Model items = 1; }
-message ModelsRequest { string id = 1; optional string companion_id = 2; }
-message SettingField {
-  string key = 1; string label = 2; string kind = 3;
-  bool required = 4; repeated string choices = 5;
+message Cursor { string epoch = 1; uint64 seq = 2; }
+message Failure {
+  string code = 1;
+  string message = 2;
+  reserved 3;
+  reserved "details";
 }
-message ProviderCapabilities { bool streaming_text = 1; bool model_list = 2; }
-message Provider {
-  string id = 1; string name = 2; string kind = 3; string endpoint = 4;
-  JsonDocument options = 5; repeated SettingField settings = 6;
-  bool requires_credentials = 7; optional string environment_variable = 8;
-  repeated string destinations = 9; string state = 10; optional string error = 11;
-  string revision = 12; ProviderCapabilities capabilities = 13; repeated Model models = 14;
+
+message HostHealth {
+  bool ready = 1;
+  bool recovery_required = 2;
+  bool stopping = 3;
+  reserved 4;
+  reserved "credential_cleanup_pending";
 }
-message Providers { repeated Provider items = 1; }
-message PluginEntry {
-  string id = 1; string target = 2; string runtime = 3;
-  repeated string provides = 4; repeated string uses = 5;
+
+message HostCapabilities {
+  JsonDocument limits = 1;
+  repeated string features = 2;
+  repeated string adapters = 3;
+  string transport = 4;
 }
-message Plugin {
-  string id = 1; string name = 2; string version = 3; string revision = 4;
-  string state = 5; optional string error = 6; repeated PluginEntry entrypoints = 7;
+
+message Snapshot {
+  string server_version = 1;
+  HostHealth health = 2;
+  HostCapabilities capabilities = 3;
+  Settings settings = 4;
+  repeated Companion companions = 5;
+  repeated WorkSession work_sessions = 6;
+  optional string active_companion_id = 7;
+  repeated ApprovalRequest pending_approvals = 8;
+  repeated Client clients = 9;
+  Cursor cursor = 10;
+  repeated PolicyRule policy_rules = 11;
+  repeated Activation activations = 12;  // companion_id ごとの現在のアクティブクライアントとrevision
 }
-message Plugins { repeated Plugin items = 1; }
-message EnablePluginRequest { string id = 1; bool enabled = 2; string revision = 3; }
-message PluginBinding {
-  string id = 1; string plugin_id = 2; string entrypoint = 3; string revision = 4;
-  string companion_id = 5; repeated string services = 6; JsonDocument configuration = 7;
+
+message SubscribeRequest {
+  string client_id = 1;
+  optional Cursor cursor = 2;
 }
-message PluginBindings { repeated PluginBinding items = 1; }
-message PluginInvocation { string binding_id = 1; JsonDocument operation = 2; }
-message PluginResult { uint64 generation = 1; repeated JsonDocument events = 2; JsonDocument result = 3; }
-message CharacterActionNotification {
-  string binding_id = 1; string revision = 2; uint64 generation = 3;
-  uint64 expires_at_ms = 4; JsonDocument event = 5;
-}
-message EnableProviderRequest { string id = 1; bool enabled = 2; }
-message AvailabilityRequest { string connection_id = 1; string companion_id = 2; }
-message OperationAvailability {
-  string operation = 1; string purpose = 2; repeated string data_kinds = 3;
-  string authorization = 4; string dependency = 5; bool busy = 6; bool runnable = 7;
-}
-message Availability {
-  string companion_id = 1; string connection_id = 2; uint64 settings_revision = 3;
-  optional string provider_revision = 4; repeated string destinations = 5;
-  JsonDocument connection_fingerprint = 6; repeated OperationAvailability operations = 7;
-}
-message MessageDelta { string message_id = 1; uint64 offset = 2; string delta = 3; }
-message PersistenceFailure { optional string message_id = 1; string code = 2; }
+
 message Notification {
-  Cursor cursor = 1; optional string companion_id = 2;
+  Cursor cursor = 1;
+  string kind = 2;
+  optional string client_id = 17;     // 特定クライアント宛て通知の場合（省略時は全端末同報）
+  optional string companion_id = 18;  // コンパニオン関連通知の場合
   oneof event {
-    Message message_created = 3; Message message_started = 4; Message message_updated = 5;
-    MessageDelta message_delta = 6; Companion companion_updated = 7;
-    Settings settings_updated = 8; Grants grants_updated = 9;
-    PersistenceFailure host_storage_failed = 10;
-    PersistenceFailure generation_persistence_failed = 11;
-    CharacterActionNotification plugin_character_action = 12;
+    HostHealth health = 3;
+    Companion companion = 4;
+    MindUpdated mind_updated = 5;
+    MessageCreated message_created = 6;
+    MessageDelta message_delta = 7;
+    TurnEvent turn_event = 8;
+    WorkEvent work_event = 9;
+    ApprovalRequested approval_requested = 10;
+    PolicyRulesUpdated policy_rules_updated = 11;
+    SettingsUpdated settings_updated = 12;
+    ClientUpdated client_updated = 13;
+    // デバイス操作の状態観測用。実行指示の配送は ClientService.DeviceStream。
+    DeviceOperation device_operation = 14;
+    DeviceOperationResult device_operation_result = 15;
+    HostEvent generic = 16;
+    Snapshot initial_state = 19;
+    ResyncRequired resync_required = 20;
+    Activation activation_updated = 21;  // Activate によるアクティブクライアント/revisionの変更
   }
 }
-message InitialState { string subscription_id = 1; Snapshot snapshot = 2; }
-message ResyncRequired {}
-message HostEvent {
-  oneof event { InitialState initial = 1; Notification notification = 2; ResyncRequired resync_required = 3; }
+
+message ResyncRequired {
+  string reason = 1;
+  Cursor target_cursor = 2;
 }
 
-// Device operations travel over a client-originated subscription. IDs identify
-// one operation; reconnecting never implicitly executes an uncertain command.
-message Device {
-  string id = 1; repeated string capabilities = 2; bool approved = 3;
-  string name = 4; repeated string permissions = 5; bool revoked = 6;
+// Model Assignments --------------------------------------------------------
+
+message ModelAssignment { string connection_id = 1; string model_id = 2; }
+message ModelAssignments {
+  ModelAssignment companion = 1;              // 頭（対話・ロールプレイ）: 必須
+  ModelAssignment task = 2;                   // 手（実務タスク）: 必須
+  optional ModelAssignment perception = 3;     // 目（知覚要約、未指定時は companion フォールバック）
+  optional ModelAssignment compaction = 4;     // Compaction要約（未指定時は companion フォールバック）
+  optional ModelAssignment consolidation = 5;  // 記憶整理（未指定時は companion フォールバック）
+  optional ModelAssignment decision = 6;       // 権限判定（未指定時は task フォールバック）
+  optional ModelAssignment embedding = 7;      // 埋め込みモデル
 }
-message DeviceRegistration { Device device = 1; string token = 2; }
-message RegisterDeviceRequest { string name = 1; repeated string capabilities = 2; }
-message Devices { repeated Device items = 1; }
-message DevicePermissionRequest { string device_id = 1; string capability = 2; bool allowed = 3; }
-message DeviceOperationRequest {
-  string device_id = 1; string operation_id = 2; string capability = 3; JsonDocument input = 4;
+
+message Companion {
+  string id = 1;
+  string name = 2;
+  string mind = 3;
+  JsonDocument body = 4;
+  JsonDocument voice = 5;
+  ModelAssignments assignments = 6;
+  uint64 revision = 7;
+  string created_at = 8;
+  string updated_at = 9;
+  optional string persona = 10;
+  optional string voice_identifier = 11;
 }
-message DeviceOperation { string operation_id = 1; string capability = 2; JsonDocument input = 3; string subscription_id = 4; }
-message DeviceSubscription { string subscription_id = 1; }
-message DeviceEvent { oneof event { DeviceSubscription ready = 1; DeviceOperation operation = 2; } }
-message DeviceOperationResult {
-  string device_id = 1; string operation_id = 2; bool success = 3; JsonDocument output = 4; string subscription_id = 5;
+message Companions { repeated Companion items = 1; }
+message AssignmentPatch {
+  oneof change {
+    ModelAssignment set = 1;
+    Empty clear = 2;
+  }
 }
-enum OperationStatus { OPERATION_STATUS_UNSPECIFIED = 0; OPERATION_STATUS_DISPATCHED = 1; OPERATION_STATUS_COMPLETED = 2; OPERATION_STATUS_UNCERTAIN = 3; OPERATION_STATUS_REVOKED = 4; }
-message DeviceOperationState { string operation_id = 1; OperationStatus status = 2; DeviceOperationResult result = 3; }
-// Host-private durable records use the same generated messages, never JSON DTO copies.
-message DeviceRecord { Device device = 1; bytes token_hash = 2; }
-message OperationRecord { DeviceOperationRequest request = 1; DeviceOperationState state = 2; string subscription_id = 3; }
-message DeviceJournal { repeated DeviceRecord devices = 1; repeated OperationRecord operations = 2; uint64 activation_revision = 3; }
-message ActivationRequest { string companion_id = 1; string device_id = 2; optional uint64 expected_revision = 3; bool release = 4; }
-message Activation { string companion_id = 1; string device_id = 2; uint64 revision = 3; uint32 lease_ms = 4; }
+message CreateCompanionRequest {
+  string name = 1;
+  string mind = 2;
+  JsonDocument body = 3;
+  JsonDocument voice = 4;
+  ModelAssignments assignments = 5;
+  MindProfile profile = 6;
+  optional string persona = 7;
+  optional string voice_identifier = 8;
+}
+message UpdateCompanionRequest {
+  string id = 1;
+  uint64 revision = 2;
+  optional string name = 3;
+  optional string mind = 4;
+  optional JsonDocument body = 5;
+  optional JsonDocument voice = 6;
+  AssignmentPatch companion_assignment = 7;
+  AssignmentPatch task_assignment = 8;
+  AssignmentPatch perception_assignment = 9;
+  AssignmentPatch compaction_assignment = 10;
+  AssignmentPatch consolidation_assignment = 11;
+  AssignmentPatch decision_assignment = 12;
+  AssignmentPatch embedding_assignment = 13;
+  optional string persona = 14;
+  optional string voice_identifier = 15;
+}
+
+// Mind and Memories --------------------------------------------------------
+
+message MindProfile {
+  string core = 1;
+  uint64 revision = 2;
+  repeated string facets = 3;
+  repeated string examples = 4;
+  repeated string background = 5;
+  repeated string expression = 6;
+}
+message MindState {
+  uint64 revision = 1;
+  JsonDocument emotion = 2;
+  JsonDocument relationships = 3;
+  JsonDocument tendencies = 4;
+  JsonDocument concerns = 5;
+  string updated_at = 6;
+}
+message MindIndexStatus {
+  uint32 pending_fts_count = 1;
+  uint32 pending_vector_count = 2;
+  string embedding_model = 3;
+  uint64 model_calls = 4;
+  uint64 total_tokens = 5;
+}
+
+message MindConsolidationStatus {
+  string last_processed_turn_id = 1;
+  uint64 jobs_completed = 2;
+  uint64 model_calls = 3;
+  uint64 input_chars = 4;
+  optional string last_error = 5;
+}
+
+message MindView {
+  string companion_id = 1;
+  MindProfile profile = 2;
+  MindState state = 3;
+  optional MindIndexStatus index = 4;
+  optional MindConsolidationStatus consolidation = 5;
+}
+message MindUpdated {
+  string companion_id = 1;
+  uint64 profile_revision = 2;
+  uint64 state_revision = 3;
+  string updated_at = 4;
+}
+message UpdateMindProfileRequest {
+  string companion_id = 1;
+  uint64 expected_revision = 2;
+  MindProfile profile = 3;
+}
+enum MemoryAction {
+  MEMORY_ACTION_UNSPECIFIED = 0;
+  MEMORY_ACTION_FORGET = 1;
+  MEMORY_ACTION_REMEMBER = 2;
+  MEMORY_ACTION_SHARE = 3;
+  MEMORY_ACTION_UNSHARE = 4;
+}
+message MemoryControlRequest {
+  string companion_id = 1;
+  string memory_id = 2;
+  MemoryAction action = 3;
+}
+message MemoryControlResult {
+  string memory_id = 1;
+  uint32 importance = 2;
+  repeated string audiences = 3;
+  uint64 revision = 4;
+}
+
+message ListMemoriesRequest {
+  string companion_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+}
+message MemoryItem {
+  string id = 1;
+  string owner = 2;
+  repeated string audiences = 3;
+  string content = 4;
+  uint32 importance = 5;
+  optional string occurred_at = 6;
+  string recorded_at = 7;
+  optional string last_accessed_at = 8;
+  uint64 revision = 9;
+}
+message Memories {
+  repeated MemoryItem items = 1;
+  optional string next_cursor = 2;
+}
+
+// Chat ---------------------------------------------------------------------
+
+message SendMessageRequest {
+  string companion_id = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+}
+message Acceptance { string request_id = 1; }
 message StopRequest { string companion_id = 1; }
+enum MessageRole {
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  MESSAGE_ROLE_USER = 1;
+  MESSAGE_ROLE_ASSISTANT = 2;
+  MESSAGE_ROLE_AGENT = 3;
+  MESSAGE_ROLE_CONTEXT = 4;
+}
+enum TurnStatus {
+  TURN_STATUS_UNSPECIFIED = 0;
+  TURN_STATUS_STREAMING = 1;
+  TURN_STATUS_ANSWERED = 2;
+  TURN_STATUS_STOPPED = 3;
+  TURN_STATUS_FAILED = 4;
+}
+message Message {
+  string id = 1;
+  string companion_id = 2;
+  string work_id = 3;
+  MessageRole role = 4;
+  string text = 5;
+  string created_at = 7;
+  uint64 sequence = 8;
+  optional string request_id = 9;
+  string author = 12;
+}
+message MessageCreated { Message message = 1; }
+message MessageDelta {
+  string companion_id = 1;
+  string stream_id = 2;
+  string delta = 3;
+}
+message TurnEvent {
+  string companion_id = 1;
+  string turn_id = 2;
+  TurnStatus status = 3;
+  optional Failure failure = 4;
+}
+message HistoryRequest {
+  string companion_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+  optional bool include_context = 4;
+}
+message History { repeated Message items = 1; }
+message MessageRequest { string companion_id = 1; string message_id = 2; }
 
-// A protobuf message occupies exactly one binary WebSocket message. Audio
-// codecs are negotiated by Start; no bespoke binary header is used.
-message PrepareAudioRequest { string companion_id = 1; string device_id = 2; string codec = 3; uint32 sample_rate = 4; uint32 channels = 5; }
-message AudioStart {
-  string session_id = 1; string companion_id = 2; string device_id = 3;
-  string codec = 4; uint32 sample_rate = 5; uint32 channels = 6; uint64 generation = 7;
+// Work ---------------------------------------------------------------------
+
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_STARTING = 1;
+  RUN_STATUS_RUNNING = 2;
+  RUN_STATUS_WAITING_INPUT = 3;              // WorkInquiry または ApprovalRequest 待ち
+  RUN_STATUS_CANCELLING = 4;
+  RUN_STATUS_COMPLETED = 5;
+  RUN_STATUS_CANCELLED = 6;
+  RUN_STATUS_CANCELLATION_UNCONFIRMED = 7;   // 停止未確認・結果不明
+  RUN_STATUS_FAILED = 8;
 }
-message AudioChunk { string session_id = 1; uint64 sequence = 2; bytes data = 3; }
-message AudioEnd { string session_id = 1; }
-message AudioFailure { string session_id = 1; string code = 2; }
-message AudioFrame {
-  oneof frame { AudioStart start = 1; AudioChunk chunk = 2; AudioEnd end = 3; AudioFailure failure = 4; }
+enum WorkStatus {
+  WORK_STATUS_UNSPECIFIED = 0;
+  WORK_STATUS_IDLE = 1;
+  WORK_STATUS_ACTIVE = 2;
+  WORK_STATUS_CLOSED = 3;
 }
+enum WorkEventKind {
+  WORK_EVENT_KIND_UNSPECIFIED = 0;
+  WORK_EVENT_KIND_STATUS_CHANGED = 1;
+  WORK_EVENT_KIND_RUN_STARTED = 2;
+  WORK_EVENT_KIND_RUN_FINISHED = 3;
+  WORK_EVENT_KIND_INQUIRY_CREATED = 4;
+}
+message WorkSession {
+  string id = 1;
+  string companion_id = 2;
+  string title = 3;
+  WorkStatus status = 4;
+  string created_at = 5;
+  string updated_at = 6;
+  string client_id = 7;             // 発注元クライアント
+  uint64 activation_revision = 8;   // 発注時の有効化revision
+}
+message RunInfo {
+  string run_id = 1;
+  string work_id = 2;
+  RunStatus state = 3;
+  Failure failure = 4;
+  optional string pending_request_id = 5;        // WAITING_INPUT の質問・承認要求
+  optional string cancellation_requested_at = 6; // CANCELLING の開始時刻
+  optional string cancellation_reason = 7;       // CANCELLATION_UNCONFIRMED の理由
+  repeated uint32 unverified_pids = 8;           // CANCELLATION_UNCONFIRMED の残存プロセス
+}
+message WorkInquiry {
+  string request_id = 1;
+  string prompt = 2;
+  repeated string choices = 3;
+}
+message WorkView {
+  WorkSession session = 1;
+  repeated RunInfo runs = 2;
+  repeated WorkInquiry pending_inquiries = 3;
+}
+message WorkViews { repeated WorkView items = 1; }
+message ListWorksRequest { string companion_id = 1; }
+message WorkRequest { string work_id = 1; }
+message StartWorkRequest {
+  string companion_id = 1;
+  string title = 2;
+  string instruction = 3;
+  string client_id = 4;
+}
+message SendWorkRequest {
+  string work_id = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+  optional string request_id = 5; // 質問への回答束縛用 (会話ツール経由等)
+}
+message AnswerInquiryRequest {
+  string work_id = 1;
+  string request_id = 2; // WorkInquiry.request_id
+  string answer = 3;     // ユーザーの回答テキスト
+  string client_id = 4;
+}
+message WorkAcceptance { string request_id = 1; }
+message StopWorkRequest { string work_id = 1; }
+message WorkEvent {
+  string work_id = 1;
+  string run_id = 2;
+  WorkEventKind kind = 3;  // oneof detail の種別と一致すること
+  oneof detail {
+    WorkStatusChanged status_changed = 4;
+    WorkRunStarted run_started = 5;
+    WorkRunFinished run_finished = 6;
+    WorkInquiryCreated inquiry_created = 7;
+  }
+}
+message WorkStatusChanged { WorkStatus status = 1; }
+message WorkRunStarted {}
+message WorkRunFinished {
+  RunStatus state = 1;
+  optional Failure failure = 2;
+  optional string pending_request_id = 3;
+  optional string cancellation_requested_at = 4;
+  optional string cancellation_reason = 5;
+  repeated uint32 unverified_pids = 6;
+}
+message WorkInquiryCreated { WorkInquiry inquiry = 1; }
+
+// Permissions and Approvals ------------------------------------------------
+
+enum ApprovalStatus {
+  APPROVAL_STATUS_UNSPECIFIED = 0;
+  APPROVAL_STATUS_PENDING = 1;
+  APPROVAL_STATUS_APPROVED = 2;
+  APPROVAL_STATUS_DENIED = 3;
+  APPROVAL_STATUS_EXPIRED = 4;
+}
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVAL_DECISION_APPROVE = 1;
+  APPROVAL_DECISION_ALWAYS_APPROVE = 2;
+  APPROVAL_DECISION_DENY = 3;
+}
+enum PolicyEffect {
+  POLICY_EFFECT_UNSPECIFIED = 0;
+  POLICY_EFFECT_ALLOW = 1;
+  POLICY_EFFECT_DENY = 2;
+  POLICY_EFFECT_CONFIRM = 3;
+}
+message ApprovalRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string run_id = 3;
+  bytes action_payload_hash = 4;
+  string tool_name = 5;
+  string normalized_arguments = 6;  // 正規化済みJSON object text。action_payload_hashの対象
+  ApprovalStatus status = 7;
+  string created_at = 8;
+  optional string client_id = 9;             // 承認を束縛したクライアント（音声・端末能力）
+  optional uint64 activation_revision = 10;  // 束縛時の有効化revision
+  optional string capability = 11;           // device_request の場合の能力名
+}
+message PendingApprovals { repeated ApprovalRequest items = 1; }
+message SubmitApprovalRequest {
+  string request_id = 1;
+  ApprovalDecision decision = 2;
+  optional string reason = 3;
+}
+message SubmitApprovalResponse {
+  bool acknowledged = 1;
+  ApprovalStatus status = 2;
+}
+message ApprovalRequested { ApprovalRequest request = 1; }
+
+message PolicyRule {
+  string id = 1;
+  string tool_name = 2;
+  string pattern = 3;
+  PolicyEffect effect = 4;
+  string created_at = 5;
+}
+message PolicyRules { repeated PolicyRule items = 1; }
+message UpdatePolicyRulesRequest {
+  repeated PolicyRule add_or_update = 1;
+  repeated string remove_ids = 2;
+}
+message PolicyRulesUpdated { repeated PolicyRule rules = 1; }
+
+// Settings & Connections ---------------------------------------------------
+
+enum ConnectionKind {
+  CONNECTION_KIND_UNSPECIFIED = 0;
+  CONNECTION_KIND_LLM = 1;
+  CONNECTION_KIND_TTS = 2;
+  CONNECTION_KIND_STT = 3;
+  CONNECTION_KIND_EMBEDDING = 4;
+  CONNECTION_KIND_MCP = 5;
+  CONNECTION_KIND_ACP = 6;
+}
+
+// 全接続種別に共通のヘッダー。種別固有の設定は ConnectionConfig の oneof で表す。
+message Connection {
+  string id = 1;
+  string name = 2;
+  bool enabled = 3;
+  string credential_state = 4;
+  uint64 revision = 5;
+  ConnectionKind kind = 6;  // 有効な config と一致すること
+  ConnectionCheck last_check = 7;
+  ConnectionConfig config = 8;
+}
+message ConnectionConfig {
+  oneof config {
+    LlmConnection llm = 1;
+    TtsConnection tts = 2;
+    SttConnection stt = 3;
+    EmbeddingConnection embedding = 4;
+    McpConnection mcp = 5;
+    AcpConnection acp = 6;
+  }
+}
+message ConnectionEndpoint {
+  string adapter = 1;
+  string endpoint = 2;
+  string options_schema = 3; // JSON Schema object text
+  string options = 4;        // options_schema に適合する JSON object text
+}
+message LlmConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string model_ids = 2;
+}
+message TtsConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string voice_ids = 2;
+}
+message SttConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string language_hints = 2;
+}
+message EmbeddingConnection {
+  ConnectionEndpoint endpoint = 1;
+  string model_id = 2;
+  uint32 dimensions = 3;
+}
+message McpConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string allowed_tools = 2;
+  string command = 3;        // stdio transport: the program to run
+  repeated string args = 4;  // stdio transport: its arguments
+}
+message AcpConnection {
+  ConnectionEndpoint endpoint = 1;
+  string command = 2;
+  repeated string args = 3;
+}
+message ConnectionCheck {
+  bool healthy = 1;
+  string checked_at = 2;
+  optional Failure failure = 3;
+  repeated string capabilities = 4;
+  repeated string resources = 5;
+}
+message Settings {
+  uint64 revision = 1;
+  repeated Connection connections = 2;
+  string updated_at = 3;
+}
+message ConnectionInput {
+  string id = 1;
+  string name = 2;
+  bool enabled = 3;
+  uint64 expected_revision = 4;
+  ConnectionKind kind = 5;  // config の oneof と一致すること
+  ConnectionConfig config = 6;
+}
+message UpdateSettingsRequest {
+  uint64 expected_revision = 1;
+  repeated ConnectionInput connections = 2;
+}
+message SettingsUpdated { Settings settings = 1; }
+
+message CredentialRequest {
+  string id = 1;
+  optional string secret = 2;
+  optional string source = 3;
+}
+message CredentialResult { string credential_state = 1; }
+message CheckRequest {
+  string id = 1;                    // Connection.id
+  string request_key = 2;
+  optional string companion_id = 3;
+  optional string resource_id = 4;  // モデル・音声・ツール等の種別固有ID
+}
+message CheckResult {
+  string request_id = 1;
+  bool success = 2;
+  optional string resource_id = 3;
+  ConnectionCheck check = 4;
+}
+message FieldSource {
+  string key = 1;
+  string value = 2;
+}
+// LLMモデルのメタデータ。
+message ModelMetadata {
+  string source = 1;
+  string scope = 2;
+  optional uint64 context_window = 3;
+  optional uint64 max_input_tokens = 4;
+  optional uint64 max_output_tokens = 5;
+  StringList input_modalities = 6;
+  StringList output_modalities = 7;
+  StringList supported_parameters = 8;
+  repeated FieldSource field_sources = 9;
+}
+message Model {
+  string id = 1;
+  string name = 2;
+  ModelMetadata metadata = 3;
+}
+message Models { repeated Model items = 1; }
+message ModelsRequest {
+  string id = 1;
+  optional string companion_id = 2;
+}
+message SettingField {
+  string key = 1;
+  string label = 2;
+  string kind = 3;
+  bool required = 4;
+  repeated string choices = 5;
+}
+// LLM接続のプロバイダカタログ。TTS/STT/MCP/ACPはConnection.configのoneofを使う。
+message LlmProviderCapabilities {
+  bool streaming_text = 1;
+  bool model_list = 2;
+}
+message LlmProvider {
+  string id = 1;
+  string name = 2;
+  string adapter = 3;
+  string endpoint = 4;
+  repeated SettingField settings = 5;
+  bool requires_credentials = 6;
+  optional string environment_variable = 7;
+}
+message LlmProviders { repeated LlmProvider items = 1; }
+
+// Voice Service ------------------------------------------------------------
+
+message AudioInputChunk {
+  string client_id = 1;
+  bytes pcm_data = 2; // 24kHz / 16kHz 16-bit mono PCM
+  uint32 sample_rate = 3;
+  bool is_companion_speaking = 4;
+  uint64 activation_revision = 5; // 送信時の有効化revision
+}
+message TranscriptionEvent {
+  string transcription_id = 1;
+  string text = 2;
+  bool is_final = 3;
+  bool is_speaking = 4;
+}
+message SubscribeAudioRequest {
+  string client_id = 1;
+  uint64 activation_revision = 2; // 購読時の有効化revision
+}
+message AudioOutputEvent {
+  oneof event {
+    AudioChunkEnvelope chunk = 1;
+    FlushControl flush = 2;
+    SentenceSkipped skipped = 3;
+    UtteranceFinished finished = 4;
+  }
+}
+message AudioChunkEnvelope {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 sequence_no = 3;
+  bytes pcm_data = 4;
+  uint32 sample_rate = 5;
+  bool is_final_chunk = 6;
+}
+enum FlushReason {
+  FLUSH_REASON_UNSPECIFIED = 0;
+  FLUSH_REASON_BARGE_IN = 1;
+  FLUSH_REASON_CANCELLED = 2;
+  FLUSH_REASON_CLIENT_MOVED = 3;
+}
+message FlushControl {
+  string utterance_id = 1;
+  uint64 flush_generation_id = 2;
+  FlushReason reason = 3;
+}
+message SentenceSkipped {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 sequence_no = 3;
+  string reason = 4;
+}
+message UtteranceFinished {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 total_sentences = 3;
+}
+message PlaybackStatusReport {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    PLAYBACK_COMPLETED = 1;
+    PLAYBACK_INTERRUPTED = 2;
+    PLAYBACK_FAILED = 3;
+  }
+  Status status = 3;
+  uint32 completed_sentence_count = 4;
+  repeated uint32 played_sequence_nos = 5;
+  repeated uint32 skipped_sequence_nos = 6;
+  uint64 completed_pcm_bytes = 7;
+  string client_id = 8;
+  uint64 activation_revision = 9; // 報告対象の発話を所有した有効化revision
+}
+message ReportPlaybackStatusResponse { bool acknowledged = 1; }
+
+// Client Service -----------------------------------------------------------
+
+enum CapabilityApproval {
+  CAPABILITY_APPROVAL_UNSPECIFIED = 0; // ホストの既定ポリシーに従う。未知の能力はCONFIRM相当
+  CAPABILITY_APPROVAL_AUTO = 1;     // ポリシーで許可されていれば自動実行
+  CAPABILITY_APPROVAL_CONFIRM = 2;  // 操作ごとに Stage::Gate と承認を必須にする
+}
+message ClientCapabilitySpec {
+  string name = 1;              // 能力名（例: "body.motion"）
+  string tool_name = 2;         // 親エージェントへ公開するツール名。空なら device_request のみ
+  string description = 3;       // モデル向けの説明
+  string input_schema = 4;      // JSON Schema object text
+  repeated string presets = 5;  // 利用可能なプリセット名（モーション・表情等）
+  CapabilityApproval approval = 6;
+  string approval_target = 7;   // 承認カードに表示する対象説明のテンプレート
+  string output_schema = 8;     // JSON Schema object text（結果がJSONの場合）
+}
+message Client {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;          // 宣言する能力名の一覧
+  repeated string granted_capabilities = 5;  // ホストが許可した能力名。操作単位の承認を意味しない
+  uint64 revision = 6;
+  string last_seen = 7;
+  bool connected = 8;
+  repeated string active_companions = 9;
+  repeated ClientCapabilitySpec capability_specs = 10;
+}
+message Clients { repeated Client items = 1; }
+message RegisterClientRequest {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;  // 能力名の一覧
+  uint64 expected_revision = 5;
+  repeated ClientCapabilitySpec capability_specs = 6;  // capabilities の各能力の仕様
+}
+message SetCapabilitiesRequest {
+  string client_id = 1;
+  repeated string capabilities = 2;
+  repeated string granted_capabilities = 3;  // ホストの許可判断の結果。クライアントからの自己付与は受け付けない
+  uint64 revision = 4;
+  repeated ClientCapabilitySpec capability_specs = 5;
+}
+message ActivationRequest {
+  string companion_id = 1;
+  string client_id = 2;
+  uint64 expected_revision = 3;
+  bool release = 4;
+}
+message Activation {
+  string companion_id = 1;
+  optional string client_id = 2;
+  uint64 revision = 3; // 新しいactivation_revision
+}
+message ClientUpdated { Client client = 1; }
+enum DeviceOperationStatus {
+  DEVICE_OPERATION_STATUS_UNSPECIFIED = 0;
+  DEVICE_OPERATION_STATUS_PENDING = 1;
+  DEVICE_OPERATION_STATUS_DISPATCHED = 2;
+  DEVICE_OPERATION_STATUS_COMPLETED = 3;
+  DEVICE_OPERATION_STATUS_FAILED = 4;
+  DEVICE_OPERATION_STATUS_UNCERTAIN = 5;
+}
+message DeviceOperation {
+  string operation_id = 1;  // 再送・重複排除に使う冪等キー
+  string capability = 2;    // ClientCapabilitySpec.name
+  string input = 3;         // input_schema に適合する JSON object text
+  string subscription_id = 4;
+  string client_id = 5;             // 受付時に束縛した対象クライアント
+  uint64 activation_revision = 6;   // 受付時の有効化revision
+  optional string work_id = 7;      // 手からの操作の場合のWorkSession
+}
+message DeviceReady { string subscription_id = 1; }
+message DeviceEvent {
+  oneof event {
+    DeviceReady ready = 1;
+    DeviceOperation operation = 2;
+  }
+}
+message DeviceOperationResult {
+  string client_id = 1;
+  string operation_id = 2;
+  bool success = 3;
+  string output = 4; // output_schema に適合する JSON object text
+  optional Failure failure = 5;
+  uint64 activation_revision = 6; // 結果を返すクライアントの有効化revision
+}
+message DeviceOperationState {
+  string operation_id = 1;
+  string client_id = 2;
+  DeviceOperationStatus status = 3;
+  optional DeviceOperationResult result = 4;
+}
+message HostEvent {
+  string kind = 1;
+  JsonDocument payload = 2;
+}
+
+// Perception (Eyes) --------------------------------------------------------
+
+message PerceptionEvent {
+  string client_id = 1;
+  string timestamp = 2;
+  uint64 activation_revision = 6; // 送信時の有効化revision
+  oneof event {
+    ActiveWindowChanged active_window = 3;
+    UserActivityState user_activity = 4;
+    PerceptionSummary perception_summary = 5;
+  }
+}
+
+message ActiveWindowChanged {
+  string title = 1;
+  string app_id = 2;
+  optional string url = 3;
+}
+
+message UserActivityState {
+  bool is_active = 1;
+  uint64 idle_seconds = 2;
+}
+
+message PerceptionSummary {
+  string summary = 1;
+  repeated string tags = 2;
+}
+
+// Service RPCs -------------------------------------------------------------
 
 service HostService {
-  rpc GetSnapshot(SnapshotRequest) returns (Snapshot);
-  rpc Subscribe(Empty) returns (stream HostEvent);
+  rpc GetSnapshot(Empty) returns (Snapshot);
+  rpc Subscribe(SubscribeRequest) returns (stream Notification);
   rpc ListCompanions(Empty) returns (Companions);
   rpc GetCompanion(Id) returns (Companion);
+  rpc CreateCompanion(CreateCompanionRequest) returns (Companion);
   rpc UpdateCompanion(UpdateCompanionRequest) returns (Companion);
+  rpc DeleteCompanion(Id) returns (Empty);
+  rpc GetMind(Id) returns (MindView);
+  rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
+  rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
+  rpc ListMemories(ListMemoriesRequest) returns (Memories);
+}
+
+service ChatService {
+  rpc SendMessage(SendMessageRequest) returns (Acceptance);
+  rpc Stop(StopRequest) returns (Empty);
   rpc GetHistory(HistoryRequest) returns (History);
   rpc GetMessage(MessageRequest) returns (Message);
-  rpc SendMessage(SendMessageRequest) returns (MessageAcceptance);
-  rpc Stop(StopRequest) returns (Empty);
-  rpc PrepareAudio(PrepareAudioRequest) returns (AudioStart);
+}
+
+service SettingsService {
   rpc GetSettings(Empty) returns (Settings);
   rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
-  rpc ListGrants(GrantsRequest) returns (Grants);
-  rpc CreateGrant(CreateGrantRequest) returns (GrantResult);
-  rpc UpdateGrant(UpdateGrantRequest) returns (GrantResult);
-  rpc RevokeGrant(Id) returns (Empty);
+  rpc ListPendingApprovals(Empty) returns (PendingApprovals);
+  rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
+  rpc ListPolicyRules(Empty) returns (PolicyRules);
+  rpc UpdatePolicyRules(UpdatePolicyRulesRequest) returns (PolicyRules);
+  // LLM接続のプロバイダカタログ。TTS/STT/MCP/ACPはConnectionのoneofで扱う。
+  rpc ListProviders(Empty) returns (LlmProviders);
+  // LLM接続のモデル一覧。
+  rpc ListModels(ModelsRequest) returns (Models);
   rpc RegisterCredentials(CredentialRequest) returns (CredentialResult);
   rpc RevokeCredentials(Id) returns (Empty);
+  // 接続種別（LLM/TTS/STT/Embedding/MCP/ACP）に共通の接続チェック。
   rpc CheckConnection(CheckRequest) returns (CheckResult);
-  rpc ListModels(ModelsRequest) returns (Models);
-  rpc ListProviders(Empty) returns (Providers);
-  rpc ReloadProviders(Empty) returns (Providers);
-  rpc EnableProvider(EnableProviderRequest) returns (Providers);
-  rpc GetAvailability(AvailabilityRequest) returns (Availability);
 }
-service PluginService {
-  rpc List(Empty) returns (Plugins);
-  rpc Get(Id) returns (Plugin);
-  rpc Reload(Empty) returns (Plugins);
-  rpc Enable(EnablePluginRequest) returns (Plugins);
-  rpc ListBindings(Empty) returns (PluginBindings);
-  rpc Bind(PluginBinding) returns (PluginBindings);
-  rpc Invoke(PluginInvocation) returns (PluginResult);
+
+service WorkService {
+  rpc ListWorks(ListWorksRequest) returns (WorkViews);
+  rpc GetWork(WorkRequest) returns (WorkView);
+  // StartWork時のclient_idとactivation_revisionをWorkSessionへ束縛する。
+  rpc StartWork(StartWorkRequest) returns (WorkSession);
+  rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
+  rpc AnswerInquiry(AnswerInquiryRequest) returns (WorkAcceptance);
+  rpc StopWork(StopWorkRequest) returns (Empty);
+  rpc CloseWork(WorkRequest) returns (Empty);
 }
-service DeviceService {
-  rpc RegisterDevice(RegisterDeviceRequest) returns (DeviceRegistration);
-  rpc List(Empty) returns (Devices);
-  rpc Approve(Id) returns (Device);
-  rpc Revoke(Id) returns (Empty);
-  rpc SetPermission(DevicePermissionRequest) returns (Empty);
-  rpc Subscribe(Id) returns (stream DeviceEvent);
-  rpc RequestOperation(DeviceOperationRequest) returns (DeviceOperationState);
-  rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
-  rpc GetOperation(DeviceOperationRequest) returns (DeviceOperationState);
+
+service VoiceService {
+  rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent); // HTTP/2
+  rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
+  rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
+}
+
+service ClientService {
+  // クライアントは能力名と ClientCapabilitySpec を宣言して登録する。
+  rpc RegisterClient(RegisterClientRequest) returns (Client);
+  rpc List(Empty) returns (Clients);
+  // アクティブクライアントを切り替える。成功時はNotification.activation_updatedを配信し、旧クライアントの進行中処理を失効させる。
   rpc Activate(ActivationRequest) returns (Activation);
+  rpc SetCapabilities(SetCapabilitiesRequest) returns (Client);
+  // ホスト -> クライアントの操作ストリーム。未配送の操作は再接続時に再送される。
+  rpc DeviceStream(Id) returns (stream DeviceEvent);
+  rpc ReportPerception(PerceptionEvent) returns (Empty);
+  // クライアントは操作結果を返す。完了済み操作の再送は同じ状態を返す。
+  rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
+  rpc GetOperation(Id) returns (DeviceOperationState);
 }

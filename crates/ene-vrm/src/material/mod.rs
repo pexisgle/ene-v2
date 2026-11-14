@@ -1,7 +1,7 @@
 use crate::schema::{OutlineMode, Toon, ToonParams, UvTransform};
 use bevy::{
     asset::embedded_asset,
-    camera::visibility::{NoFrustumCulling, RenderLayers},
+    camera::visibility::NoFrustumCulling,
     mesh::{MeshVertexBufferLayoutRef, morph::MeshMorphWeights, skinning::SkinnedMesh},
     pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     platform::collections::HashMap,
@@ -42,11 +42,6 @@ pub(crate) fn texture_space(slot: usize) -> TextureSpace {
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct MaterialSlot(pub usize);
-
-/// Marks an entity spawned as the outline pass of another mesh entity.
-#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
-#[reflect(Component, Clone)]
-pub(crate) struct Outline;
 
 /// Authored `KHR_texture_transform` of the material's base color texture.
 ///
@@ -143,6 +138,9 @@ impl MaterialExtension for MToonExtension {
         _: &MeshVertexBufferLayoutRef,
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // VRMC_materials_mtoon-1.0 "Vertex Colors": MToon ignores vertex
+        // colors, so drop the def Bevy's standard material pipeline adds for
+        // the glTF COLOR_0 attribute instead of multiplying base color by it.
         descriptor
             .vertex
             .shader_defs
@@ -234,28 +232,12 @@ impl MToonExtension {
 pub(crate) fn setup(app: &mut App) {
     embedded_asset!(app, "shaders/mtoon.wesl");
     embedded_asset!(app, "shaders/outline.wesl");
-    bevy::shader::load_shader_library!(app, "shaders/toon.wesl");
+    bevy::shader::load_shader_library!(app, "shaders/mtoon_common.wesl");
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()
         .register_type::<BaseUv>()
         .register_type::<EmissiveStrength>()
-        .register_type::<UvTransform>()
-        .register_type::<Outline>()
-        .add_systems(PostUpdate, sync_outline_layers);
-}
-
-/// `RenderLayers` is per-entity, not inherited through `ChildOf`. Copy it from
-/// the body so an outline follows the same camera as the primitive at runtime.
-fn sync_outline_layers(
-    mut outlines: Query<(&ChildOf, &mut RenderLayers), With<Outline>>,
-    sources: Query<&RenderLayers, Without<Outline>>,
-) {
-    for (parent, mut layers) in &mut outlines {
-        let next = sources.get(parent.parent()).cloned().unwrap_or_default();
-        if *layers != next {
-            *layers = next;
-        }
-    }
+        .register_type::<UvTransform>();
 }
 
 pub(crate) fn add_outlines(
@@ -269,13 +251,11 @@ pub(crate) fn add_outlines(
         .collect();
     for (entity, material) in meshes {
         // A child (identity transform) inherits the primitive's visibility and
-        // is despawned with it. `RenderLayers` is copied by `sync_outline_layers`.
+        // is despawned with it.
         let outline = world
             .spawn((
                 MeshMaterial3d(material),
                 NoFrustumCulling,
-                Outline,
-                RenderLayers::default(),
                 Transform::IDENTITY,
                 ChildOf(entity),
             ))
@@ -336,9 +316,11 @@ mod tests {
     /// update so the synthetic GPU tests are deterministic.
     fn gpu_app(clear: ClearColor) -> App {
         use bevy::render::RenderPlugin;
-        let plugins = DefaultPlugins
-            .build()
-            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+        let mut plugins = DefaultPlugins.build();
+        if plugins.contains::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>() {
+            plugins =
+                plugins.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+        }
         #[cfg(windows)]
         let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
         let mut app = App::new();

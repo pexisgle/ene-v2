@@ -1,19 +1,10 @@
 use crate::{
     VrmSystems,
-    animation::{self, RestPose},
+    animation::RestPose,
     expressions::{self, ExpressionName},
     schema,
 };
-use bevy::{
-    ecs::system::SystemChangeTick, math::Affine3A, prelude::*, transform::helper::TransformHelper,
-};
-
-/// Optional world-space target. `None` allows VRMA gaze animation.
-#[derive(Component, Clone, Default, Reflect)]
-#[reflect(Component, Clone)]
-pub struct LookAt {
-    pub target: Option<Vec3>,
-}
+use bevy::{ecs::system::SystemChangeTick, prelude::*};
 
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone, opaque)]
@@ -25,8 +16,7 @@ pub(crate) struct Gaze {
 }
 
 pub(crate) fn setup(app: &mut App) {
-    app.register_type::<LookAt>()
-        .register_type::<Gaze>()
+    app.register_type::<Gaze>()
         .add_systems(PostUpdate, reset_gaze.before(bevy::app::AnimationSystems))
         .add_systems(PostUpdate, look_at.in_set(VrmSystems::LookAt));
 }
@@ -74,65 +64,15 @@ pub(crate) fn remap(
     (angle.abs() / (input_max as f32).max(f32::EPSILON)).min(1.) * output_scale as f32
 }
 
-pub(crate) fn head_offset(definition: &schema::LookAt) -> Vec3 {
-    definition
-        .offset_from_head_bone
-        .as_deref()
-        .and_then(|offset| <[f64; 3]>::try_from(offset).ok())
-        .map_or(Vec3::new(0., 0.06, 0.), |[x, y, z]| {
-            Vec3::new(x as f32, y as f32, z as f32)
-        })
-}
-
-/// Returns yaw and pitch in the rest-pose head frame.
-///
-/// The LookAt target lives in world space, while `offsetFromHeadBone` and the
-/// rest pose are defined under the head. Invert the head's full affine
-/// transform, not just its rotation, so a non-uniform scale does not distort
-/// the direction.
-fn gaze_angles(head: Affine3A, rest_rotation: Quat, target: Vec3, offset: Vec3) -> Vec2 {
-    let dir = rest_rotation * (head.inverse().transform_point3(target) - offset);
-    Vec2::new(
-        dir.x.atan2(dir.z).to_degrees(),
-        dir.y.atan2(dir.xz().length()).to_degrees(),
-    )
-}
-
 #[allow(clippy::type_complexity)]
 fn look_at(
-    mut roots: Query<(
-        &super::Vrm,
-        &LookAt,
-        &mut Gaze,
-        Option<&crate::ExpressionWeights>,
-        Option<&crate::expressions::Binds>,
-    )>,
+    mut roots: Query<(&super::Vrm, &mut Gaze, Option<&expressions::Binds>)>,
     rests: Query<&RestPose>,
-    mut transforms: ParamSet<(
-        TransformHelper,
-        Query<&mut Transform>,
-        Query<Ref<Transform>>,
-    )>,
+    mut transforms: ParamSet<(Query<&mut Transform>, Query<Ref<Transform>>)>,
     ticks: SystemChangeTick,
 ) {
-    for (vrm, look, mut gaze, manual, binds) in &mut roots {
-        let Some(head) = vrm.bone(schema::HumanBoneName::Head) else {
-            continue;
-        };
-        let angles = if let Some(target) = look.target {
-            let (Ok(rest), Ok(head)) = (
-                rests.get(head),
-                transforms.p0().compute_global_transform(head),
-            ) else {
-                continue;
-            };
-            gaze_angles(
-                head.affine(),
-                rest.global_rotation,
-                target,
-                head_offset(&gaze.definition),
-            )
-        } else if let Ok(input) = transforms.p2().get(gaze.input)
+    for (vrm, mut gaze, binds) in &mut roots {
+        let angles = if let Ok(input) = transforms.p1().get(gaze.input)
             && input
                 .last_changed()
                 .is_newer_than(gaze.last_changed(), ticks.this_run())
@@ -155,10 +95,13 @@ fn look_at(
             -remap(definition.range_map_vertical_down.as_ref(), kind, angles.y)
         };
         if bone {
-            let p2 = transforms.p2();
+            let input = transforms.p1();
             let scale = binds.map_or(1., |binds| {
-                let weights = expressions::weight(manual, |entity| {
-                    p2.get(entity).ok().map(|transform| transform.translation.x)
+                let weights = expressions::weight(|entity| {
+                    input
+                        .get(entity)
+                        .ok()
+                        .map(|transform| transform.translation.x)
                 });
                 expressions::look_at_scale(binds, &weights)
             });
@@ -175,13 +118,14 @@ fn look_at(
                 let yaw = remap(map, kind, angles.x) * angles.x.signum() * scale;
                 if let Some(eye) = vrm.bone(name)
                     && let Ok(rest) = rests.get(eye)
-                    && let Ok(mut t) = transforms.p1().get_mut(eye)
+                    && let Ok(mut t) = transforms.p0().get_mut(eye)
                 {
-                    t.rotation = animation::denormalize_rotation(
-                        rest.local.rotation,
-                        rest.global_rotation,
-                        Quat::from_euler(EulerRot::YXZ, yaw.to_radians(), -pitch.to_radians(), 0.),
-                    );
+                    t.rotation = rest.frame.localize(Quat::from_euler(
+                        EulerRot::YXZ,
+                        yaw.to_radians(),
+                        -pitch.to_radians(),
+                        0.,
+                    ));
                 }
             }
         } else {
@@ -213,7 +157,7 @@ fn look_at(
             ] {
                 if let Some(channel) =
                     binds.and_then(|binds| binds.target(&ExpressionName::Preset(name)))
-                    && let Ok(mut transform) = transforms.p1().get_mut(channel)
+                    && let Ok(mut transform) = transforms.p0().get_mut(channel)
                 {
                     transform.translation.x = w;
                 }

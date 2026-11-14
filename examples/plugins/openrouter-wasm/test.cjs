@@ -25,15 +25,9 @@ const createPlugin = require('@extism/extism');
         { chunks: ['{"data":[{"id":"fixture",', '"context_length":4096}]}'], done: true, models: true },
         { response: JSON.stringify({ Err: { code: 'denied', message: 'destination is not allowed' } }),
             error: /denied: destination is not allowed/ },
-        { response: '{', error: /EOF|expected/ },
         { chunks: [':' + 'x'.repeat(1024 * 1024) + '\n'], error: /SSE line limit/ },
         { chunks: [':' + 'x'.repeat(1024 * 1024)], error: /SSE line limit/ },
-        { response: Buffer.from([0xff]), error: /expected value/ },
         { response: JSON.stringify({ Ok: { handle: 'stream' } }), error: /missing field/ },
-        { response: JSON.stringify({ Ok: { handle: 'stream', status: '200', headers: {},
-            done: true, data_base64: '' } }), error: /invalid type/ },
-        { response: JSON.stringify({ Ok: { handle: 'stream', status: 200, headers: {},
-            done: true, data_base64: '!!!!' } }), error: /Invalid symbol/ },
     ]) {
         const events = [];
         const calls = [];

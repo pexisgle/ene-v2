@@ -133,23 +133,28 @@ impl Client {
     }
 }
 
+/// Waits for the renderer to exit, then kills it. Returns its exit status
+/// when it stopped by itself before the deadline.
+fn reap(child: &mut Child, deadline: Instant) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 // Closing stdin asks the renderer to exit. Keep its stdout reader alive while
 // waiting, and reap even a renderer that stopped responding.
 impl Drop for Client {
     fn drop(&mut self) {
         self.input.take();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-                _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    return;
-                }
-            }
-        }
+        let _ = reap(&mut self.child, Instant::now() + Duration::from_secs(5));
     }
 }
 
@@ -331,20 +336,10 @@ fn run() -> Result<(), String> {
     }
     client.request(json!({"op":"quit"}))?;
     client.input.take();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = client.child.try_wait().map_err(|e| e.to_string())? {
-            return if status.success() {
-                Ok(())
-            } else {
-                Err(format!("renderer exited: {status}"))
-            };
-        }
-        if Instant::now() >= deadline {
-            let _ = client.child.kill();
-            return Err("renderer did not exit after quit".into());
-        }
-        thread::sleep(Duration::from_millis(20));
+    match reap(&mut client.child, Instant::now() + Duration::from_secs(5)) {
+        Some(status) if status.success() => Ok(()),
+        Some(status) => Err(format!("renderer exited: {status}")),
+        None => Err("renderer did not exit after quit".into()),
     }
 }
 

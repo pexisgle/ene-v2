@@ -10,10 +10,8 @@ mod runtime;
 mod schema;
 
 use bevy::{app::AnimationSystems, prelude::*, transform::TransformSystems};
-pub use expressions::{ExpressionName, ExpressionWeights};
-pub use material::{MToonExtension, MToonMaterial};
-pub use runtime::{LookAt, SpringJointProps, SpringRig, Vrm};
-pub use schema::{ExpressionPresetName, HumanBoneName, VrmMeta};
+pub use runtime::{SpringJointProps, SpringRig, Vrm};
+pub use vrm_spec::vrmc_vrm_1_0::{HumanBoneName, Meta};
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VrmSystems {
@@ -386,6 +384,11 @@ mod tests {
             })
             .collect();
         assert_eq!(rigs.len(), 2);
+        assert_eq!(
+            app.world().get::<Vrm>(rigs[0].0).unwrap().meta.name,
+            "Test",
+            "Vrm must expose the parsed VRM meta"
+        );
         let bone_count: usize = app
             .world_mut()
             .query::<&Vrm>()
@@ -458,42 +461,33 @@ mod tests {
             "VRMA gaze did not rotate the eye bone"
         );
 
-        // LookAt target and overrideLookAt suppression on first instance
-        let (root, _, _, head, eye) = rigs[0];
-        let eye_rest = app
-            .world()
-            .get::<animation::RestPose>(eye)
-            .unwrap()
-            .local
-            .rotation;
+        // A stopped animation leaves every humanoid bone at rest.
+        let (root, hips, spine, _, eye) = rigs[0];
+        let rest = [("hips", hips), ("spine", spine), ("eye", eye)].map(|(name, entity)| {
+            (
+                name,
+                entity,
+                app.world()
+                    .get::<animation::RestPose>(entity)
+                    .unwrap()
+                    .local,
+            )
+        });
+        let eye_rest = rest[2].2.rotation;
         app.world_mut()
             .get_mut::<AnimationPlayer>(root)
             .unwrap()
             .stop_all();
         app.update();
         assert!(!gaze_input_active(&app, root));
-        assert!(
-            app.world()
-                .get::<Transform>(eye)
-                .unwrap()
-                .rotation
-                .abs_diff_eq(eye_rest, 1e-5)
-        );
-
-        let head_tf = *app.world().get::<GlobalTransform>(head).unwrap();
-        let head_rest = app
-            .world()
-            .get::<animation::RestPose>(head)
-            .unwrap()
-            .global_rotation;
-        let side_target = head_tf.transform_point(Vec3::new(0.02, 0.03, 0.04))
-            + head_tf.rotation().normalize() * head_rest.inverse() * Vec3::new(1., 0., 1.);
-        app.world_mut().get_mut::<LookAt>(root).unwrap().target = Some(side_target);
-        app.world_mut()
-            .get_mut::<ExpressionWeights>(root)
-            .unwrap()
-            .insert(ExpressionName::Preset(ExpressionPresetName::Blink), 1.);
-        app.update();
+        for (name, entity, expected) in rest {
+            let actual = *app.world().get::<Transform>(entity).unwrap();
+            assert!(
+                actual.rotation.abs_diff_eq(expected.rotation, 1e-5)
+                    && actual.translation.abs_diff_eq(expected.translation, 1e-5),
+                "{name} did not return to rest: {actual:?} != {expected:?}"
+            );
+        }
         assert!(
             app.world()
                 .get::<Transform>(eye)
@@ -568,7 +562,13 @@ mod tests {
             assert_eq!(rig.chains.len(), 2);
             for chain in &rig.chains {
                 assert_eq!(chain.colliders, vec![0]);
-                assert!(chain.joints[0].state.unwrap().iter().all(|p| p.is_finite()));
+                assert!(
+                    chain.joints[0]
+                        .motion
+                        .unwrap()
+                        .iter()
+                        .all(|p| p.is_finite())
+                );
                 assert!(
                     app.world()
                         .get::<SpringJointProps>(chain.joints[0].entity)
@@ -586,7 +586,7 @@ mod tests {
         }
         let mut q = app.world_mut().query::<&SpringRig>();
         let rig = q.single(app.world()).unwrap();
-        assert!(rig.chains[0].joints[0].state.is_some());
+        assert!(rig.chains[0].joints[0].motion.is_some());
     }
 
     #[test]

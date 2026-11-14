@@ -1,6 +1,6 @@
 [package]
 name = "ene-host"
-description = "ene host process"
+description = "Host application, agent execution and authenticated provider communication"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,3 +8,55 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+agent-client-protocol.workspace = true
+async-stream.workspace = true
+axum.workspace = true
+# rig-ecs 0.46.0 pins `bevy_ecs =0.20.0` and hands its `App`/`World` to the
+# host, so this exact version is what keeps both sides on one type set.
+bevy_ecs = "=0.20.0"
+bytes.workspace = true
+connectrpc = { workspace = true, features = ["axum"] }
+croner.workspace = true
+crossbeam-channel = "0.5"
+directories = "6"
+ene-rpc.workspace = true
+futures-util.workspace = true
+hound.workspace = true
+rubato.workspace = true
+jsonschema.workspace = true
+serde_json_canonicalizer.workspace = true
+http.workspace = true
+io-lifetimes = "3"
+jiff.workspace = true
+keyring = { version = "4", default-features = false, features = ["v1"] }
+private-fs = "0.2.1"
+process-wrap.workspace = true
+reqwest.workspace = true
+rig-core.workspace = true
+rig-ecs.workspace = true
+rig-http.workspace = true
+rig-memory.workspace = true
+rig-rmcp.workspace = true
+rmcp.workspace = true
+rig-reqwest.workspace = true
+rusqlite = { version = "0.42", features = ["bundled", "fallible_uint"] }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle = "2"
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
+tokio-util = { workspace = true, features = ["rt", "compat"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url.workspace = true
+uuid.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+ene-rpc = { workspace = true, features = ["client"] }
+rig-core = { workspace = true, features = ["test-utils"] }
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }

@@ -31,7 +31,9 @@ fn main() -> bevy::app::AppExit {
             })
             .set(AssetPlugin {
                 file_path: ".".into(),
-                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                // The client explicitly selects the avatar files; only those
+                // loads are approved, in `character::reload`.
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Deny,
                 ..default()
             })
             .set(RenderPlugin {

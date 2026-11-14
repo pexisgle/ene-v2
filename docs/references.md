@@ -1,5 +1,66 @@
 # 参考元
 
+<a id="alpha-design-sources"></a>
+## Alphaホスト設計の調査・採否（2026-11-03）
+
+現在の技術判断はこの節と[採用設計](architecture.md)を参照する。以前のMVP選定や製品比較は末尾に履歴として保持し、最新実装・完成機能と混同しない。一次資料67件のIDと確認範囲を[調査索引](research/mind-sources.md)に収録した。全文精読・実機検証を一律に実施したという意味ではない。
+
+<a id="alpha-rig"></a>
+### Rigへの委譲
+
+[S01](research/mind-sources.md#s01)〜[S05](research/mind-sources.md#s05)を基に、調査基準版v0.46.0のrig-ecs、会話保存、ツール、モデル、拡張点を優先する。独自の第二カーネル・受信箱・履歴の複製を作らない。ステップ1の実装でv0.46.0を採用し`Cargo.lock`へ固定した。接続、途中状態の記録、停止、待機時負荷は[全体アーキテクチャ](architecture.md)および[技術スタック](design/tech-stack.md)を基準とする。
+
+<a id="alpha-mind"></a>
+### 人格・心
+
+| 参照 | 取り入れるもの | そのまま採らないもの |
+| --- | --- | --- |
+| [AIRIのカード](research/mind-sources.md#p02)、[SillyTavern](research/mind-sources.md#p11)、[MRPrompt](research/mind-sources.md#r03) | 小さな人格の核、関連する側面・例・背景の利用 | 全設定の常時投入、固定台詞表、カードの指示を権限へ昇格させること |
+| [AIRIのADR・実装](research/mind-sources.md#p03)・[記憶ツール](research/mind-sources.md#p04) | 人格別の記憶、詳細の必要時参照、子の出所付き通知 | 親の保存ツールだけへの依存、eneと異なる削除・共有・履歴保持数 |
+| [SocioMind](research/mind-sources.md#r04)・[実装](research/mind-sources.md#r05) | 人格・感情・関係・経験の結合 | 心理尺度の固定採用、全社会シミュレーター、多数のモデル呼び出し |
+| [DualMem](research/mind-sources.md#r06) | 出来事と人格に沿う解釈を区別し、根拠で結ぶ | 学習手順・実験成績がeneでも成立するという推定 |
+| [AITuberKit](research/mind-sources.md#p07)、[OnAir](research/mind-sources.md#p09)、[表情分類](research/mind-sources.md#p14) | 応答と声・表情をつなぐ表現情報 | 表情タグを持続する感情・関係性そのものにすること |
+
+作者が作った会話例・架空の背景は実体験ではない。共有された話を自分の直接経験にせず、想起・再整理を新しい経験として強化しない。これらはene側の設計判断であり、研究の心理モデルを科学的に確定した人間の心として実装するものではない。
+
+<a id="alpha-memory"></a>
+### 自動記憶と検索
+
+[Letta](research/mind-sources.md#m01)、[LangMemの遅延処理](research/mind-sources.md#m04)から、会話中の更新と後続の増分整理を分ける。[Mem0](research/mind-sources.md#m06)の既存記憶との照合、[Nemori](research/mind-sources.md#m11)の経験をまとまりとして扱う考え方を参照する。これらの実行基盤を丸ごと重ねず、Rig上の有限の内部処理へ接続する。自動処理の起動機会と、正確な記憶を形成する品質は別に検証する。
+
+[RisuAI](research/mind-sources.md#p17)の由来と複数の想起手掛かりを参考に、全文・意味・時間・関連を利用する。[Graphiti](research/mind-sources.md#m08)や[A-Mem](research/mind-sources.md#m10)は比較対象だが、初版で全記憶をグラフDBへ入れない。[MemoryBank](research/mind-sources.md#m12)等の時間・忘却の考え方を、固定の消去式へ変換しない。
+
+検索接続は[SQLite FTS5](https://www.sqlite.org/fts5.html)のtrigram全文検索と、SQLite BLOBに保存した埋め込みベクトルのRust内コサイン類似度計算によるハイブリッド検索を採用し、Rust側でRRF（Reciprocal Rank Fusion）統合する。日本語分割、索引更新、資源使用量を実測し、外部C拡張や重厚なベクトルDBを抱え込まず、最小・堅牢な構成とする。
+
+<a id="alpha-permissions"></a>
+### 権限・隔離
+
+[Rigのガイド](research/mind-sources.md#s05)と[承認実装](research/mind-sources.md#s06)のGate・Hold・Ask・理由集約を再利用する。回答者不在で即拒否する既定動作は、eneの離席時保留へ接続を要する。[sandbox corpus](research/mind-sources.md#s07)は例であり汎用の安全性保証ではない。
+
+[Sandbox Runtime](research/mind-sources.md#s08)等の既存隔離を比較する。既定の広い読取、配布依存、実行中に変更できる規則の制約を検証する。[Codex](research/mind-sources.md#s11)・[OpenCode](research/mind-sources.md#s13)からも、確認頻度と実効アクセス範囲を別軸として扱う。[MCPの注釈](research/mind-sources.md#s14)を未信頼ツールへの認可根拠にしない。[Cedar](research/mind-sources.md#s15)等のDSLは必要性のない段階では採用しない。
+
+<a id="alpha-work"></a>
+### 作業相手とACP・MCP
+
+[ACPセッション](https://agentclientprotocol.com/protocol/session-setup)、[prompt turn](https://agentclientprotocol.com/protocol/prompt-turn)、[公式Rust SDK](https://agentclientprotocol.com/libraries/rust)を基準に、eneのsession・入力・更新・停止をアダプターへ写像する。ACP全機能をプラグインへ強制しないが、対応して公開する部分では要求ID・エラー・取消・完了の意味を守る。
+
+2026-11-14時点の採用版は `agent-client-protocol 5.2.0`（ACP v1。型・スキーマは公式安定性規約に基づき `agent_client_protocol::v1::schema` 経由で使用）。JSON-RPCのフレーミング・要求ID・応答対応付け・既知メソッドへの型付けはSDKへ委譲し、ene側は子プロセスの起動、環境変数許可リスト、workspace境界、terminal権限・上限、ターン状態と停止だけを持つ。公式SDKの`AcpAgent`にはプロセス起動を委譲しない（`env_clear`と許可環境変数を表現できないため）。子プロセスのグループ終了とkill-on-dropは `process-wrap 10.0.1` に委譲し、cancel/timeout時に孫プロセスを残さない。未知の`stopReason`やRPCエラーは`end_turn`へ丸めない。
+
+共通ツールの外部公開は[MCP公式Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)を優先する。ACPのモデルや認証は接続先の能力に従う。独自機能は能力と名前空間で表し、未対応を成功や自動的な別動作へ変換しない。実際のアダプター版で双方向の最小互換性を検証する。
+
+<a id="alpha-evaluation"></a>
+### 評価の採り方
+
+[InCharacter](research/mind-sources.md#r10)、[REMP](research/mind-sources.md#r12)、[LongMemEval](research/mind-sources.md#m15)、[LoCoMo](research/mind-sources.md#m17)を評価観点の資料とする。要旨のみの研究から個別の実装方式や数値保証を導かない。形成・検索・利用、人格・関係・感情・記憶、実務の正確さと資源を分ける。
+
+[Persistent Personas?](research/mind-sources.md#r13)を踏まえ雑談以外の実務も長期に評価し、[匿名評価](research/mind-sources.md#r14)を踏まえ独自キャラクターも使う。評価シナリオは実行時の分岐表ではない。論文の条件・モデル・言語・採点法をeneの性能保証へ置き換えない。
+
+---
+
+## 旧MVPおよび初期構想の調査記録
+
+以下は以前の選定・比較の記録。本文中の「今回」「MVP」は当時の範囲を指す。現在の規範と矛盾する場合は上記Alpha節と各設計文書を優先する。
+
 ## 設計における参照プロダクト
 
 キャラクターとしての臨場感や存在感の設計には AIRI や Desktop Mate、タスクの依頼から成果物の受け取りに至る体験設計には Grok Bot・Claude Cowork・ChatGPT Work を参考にします。また、nanobot・OpenClaw・OpenCode・Hermes Agent は、外部連携、アクセス権限、記憶保持、自律実行アーキテクチャを検討するための技術的材料とします。
@@ -249,6 +310,30 @@ OpenClawの記憶システムでは、日々の会話ログを蓄積する記録
 | [Letta](#letta) | メモリブロックの構造化、アタッチ制御、権限設定 | 必要な情報ブロックのみをサブエージェントへ渡す最小権限の原則 | 全サブエージェントに個人的記憶や人格の改変を無制限に許す構成 |
 
 これらを踏まえた[eneの記憶機能](features/memory/README.md)は、コンパニオンごとの自動記憶形成と、対話を通じた直感的な確認・訂正・忘却を基本とします。共有の要否、内容、相手は文脈やユーザーの意向に応じて自律的に判断し、古い記憶や忘れるよう求められた記憶は、想起優先度を下げて思い出しにくくします。訂正の即時反映、端末やモデルを切り替えても失われない永続性、配布パッケージからの個人的記憶の完全除外は、eneが堅持する中核仕様です。
+
+## Shizuku-Duplex
+
+Shizuku-Duplex は、日本語に対応したフル二重（全二重）音声対話モデルです。従来のターン制（ASR ➔ LLM ➔ TTS）ではなく、80ms tick単位で音声を双方向にストリーミング処理し、自然な相槌や発話中の割り込み（バージイン）を実現します。また、即時応答を司るInteraction Modelと非同期でツール実行や思考を担うBackground Modelを分離するアーキテクチャを持ちます。eneにおける音声対話の低遅延化、バージイン挙動、および「頭」と「手」の役割分離の重要な参考とします。
+
+## Neuro-sama
+
+Neuro-sama は、Vedal氏が開発する自律型AITuberです。定期Tickループと優先度キューによる入力調停、無言（Idle）時間の検知に基づく自発的な独り言生成、ゲーム状態や外部イベントの非同期センシングを備えています。eneにおける自発性ループおよび「目」からの知覚情報に基づく行動選択（Speak / Work / NOOP）の設計の参考とします。
+
+## AITuberKit
+
+[AITuberKit](https://github.com/tegnike/aituber-kit) は、AIキャラクターやバーチャル配信者を構築するためのオープンソースツールキットです。カメラ等のセンサーによる知覚、コメントストリームの処理、音声再生終了イベントに連動した独り言ハンドラを持ちます。eneの見守り知覚および自発的発話トリガーの参考とします。
+
+## Generative Agents
+
+[Generative Agents](https://arxiv.org/abs/2304.03442)（Park et al., スタンフォード大学 / Google）は、自律AIキャラクターの記憶と行動シミュレーションに関する研究です。記憶ストリームから想起する際、LLMが評価した重要度（Importance: 1〜10）、経過時間による指数減衰（Recency）、ベクトル類似度（Relevance）を合算する数理モデルを提案しました。eneにおけるエピソード記憶の想起および自然な忘却メカニズムの基礎数理として採用します。
+
+## Mem0
+
+[Mem0](https://mem0.ai) は、パーソナライズAIコンパニオン・エージェント向けの記憶管理基盤です。会話から事実や嗜好をLLMが自律抽出し、競合解決（ADD / UPDATE / DELETE / NOOP）を行うパイプライン、およびアクセス頻度と経過時間に応じたソフト減衰リランキングを備えています。eneにおける記憶抽出・整理のライフサイクルおよびアクセス日時の更新ガードの参考とします。
+
+## deepseek-harness
+
+deepseek-harness は、高度にモジュール化されたエージェント実行ハーネスです。「Everything is a plugin」の設計思想に基づき、ツールや推論エンジンだけでなく、各種コンポーネントをプラグインとして追加・差し替え・フックできる柔軟性を備えています。eneにおける将来的な全方位の拡張機能アーキテクチャの指針とします。
 
 ## 今後先行して検証すべき論点
 

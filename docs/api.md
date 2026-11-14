@@ -1,401 +1,1037 @@
-# MVPホストAPI設計案
+# ホストAPI設計
 
-本書は、[MVP](mvp.md)と[アーキテクチャ](architecture.md)に沿って、クライアントとホストの通信契約を定めます。APIの実装、Rustの型、DBスキーマ、OpenAPI仕様を提供するものではなく、以下の動作は未検証です。
+状態：採用設計。本仕様書（§7 カノニカル Protobuf 定義）および [全体アーキテクチャ](architecture.md) を正本（Canonical Source of Truth）とします。既存クレート（`crates/ene-rpc/proto/host.proto`）は本設計に基づくクリーンルーム実装によって更新されます。Bearer認証付きConnect RPCと購読（`Subscribe`）・状態再取得を基本とします。将来の接続アクセス制御の委譲については [ホスト接続の設計](design/host-access.md) を参照します。
 
-Linuxの単一PC上で、コンパニオン1体、Task同時1件、テキスト入力と音声読み上げを対象とします。設定UIまでAPIで完結させ、バックアップからの復旧は開発者がホスト上で手動で行います。マイク入力、複数端末、複数Taskの並行実行、長期記憶、スケジュール、拡張機能は今回追加しません。
+## 1. 共通の意味
 
-`features/`は将来の完成像、本書はMVPで提供する契約です。機能を利用できるかはホストの対応能力と現在の設定・許可から判断し、将来の機能を利用できるように見せません。既存UXとの対応と拡張時の制約は[将来拡張・検証項目](#将来拡張検証項目)にまとめます。
+IDはホスト内で安定した不透明な値とする。親、バックエンド設定、作業session、run、入力、質問、操作受付、通知カーソルを混同しない。ホスト／端末／外部サービスの所在を明示し、ある環境のパスが別端末でも開けると仮定しない。
 
-実装するRPCの正本は[`host.proto`](../crates/ene-rpc/proto/host.proto)です。
-`UpdateSettingsRequest.connections`は省略で維持、`{"items":[...]}`で一覧置換、
-`{}`で空一覧への置換を表します。省略だけの要求はrevisionを検証して現在値を返し、保存・revision加算・通知を行いません。
-`UpdateCompanionRequest.body`・`voice`は省略で維持、`{"set":{"json":"..."}}`で設定、
-`{"clear":{}}`で解除します。protobuf JSONの`null`は省略と同じです。
-空パッチと不正な参照は拒否し、複数項目の変更は同じ保存処理で確定します。
-体の設定は`format: "vrm1"`・ホストの`environment_id`・`model`参照を持つJSONオブジェクト、
-声の設定は`connection_id`・`voice_id`を持つJSONオブジェクトです。描画と音声合成の成功は設定保存から推測しません。
+現行実装の状態変更は、認証主体・操作・対象・要求キー・内容を束縛する。将来の外部アクセス制御への移行では、端末IDが当然に得られるとは仮定せず、要求キーの重複排除・操作対象の検証を接続方式に依存せず保持する。同じ要求の再送は元の受付結果を返し、同じキーで異なる内容なら競合とする。更新はrevisionを検証する。秘密情報を再送比較用の本文やログへ複製しない。
 
-## 目的と責務
+受付は完了ではない。長時間処理の受付には追跡IDと対象IDを返し、配送・実行・終了は取得と通知で確認できる。停止も受付と停止完了・不明を分ける。APIの接続が切れても、受理済みの保存や作業を無言に取り消さない。
 
-### コンパニオンとTask
+会話の受理は`request_id`を返し、Rigが入力を受け付け、そのフレームのセッションログ書込みが成功した後に返す。保存できない入力は受理として返さない。同じ`request_key`の再送は同じ`request_id`を返し、配送を確認できなかった受理は成功として返さない。再起動後に未確定の会話レシートが残った場合は、同じ`request_key`の再送時にRigの保存済み会話・受信箱・ターン記録を`request_id`で照合する。対応する入力またはターン記録を持つ有効なレシートがあれば元の`request_id`を返して再配送せず、同じキーで内容が異なれば競合とする。`ene.accepted` Asideだけが残り、対応する入力・ターン記録を確認できない孤立レシートは未確定として除外し、新しい受理を試みる。孤立レシートのハッシュは内容束縛に使わない。新しい受理の保存に失敗した場合は成功として返さない。ユーザー発言と返答は`MessageCreated`、実行の開始と終了は`TurnEvent`（`streaming` / `answered` / `stopped` / `failed`）、文字片は`MessageDelta`（`stream_id`）で届く。確定本文は`MessageCreated`と`GetHistory`/`GetMessage`で取得し、文字片を確定内容として扱わない。停止は要求の受付を返し、停止完了は`TurnEvent`で確認する。失敗したターンが入力を会話から取り出した場合は`RecalledInput`で本文を返し、クライアントは入力欄へ戻せる。会話メッセージとしては保存しない。
 
-**Taskは、各コンパニオンに属し、その指示で作業する独立したLLMセッション・サブエージェントです。** [用語集](terms.md)のエージェントに対応し、単なる作業記録を指すものではありません。APIで取得するTaskは、そのサブエージェントの公開状態と実行履歴です。終了後も履歴と結果を保持します。
+知らない状態、壊れた応答、未知の終了理由は正常完了にしない。未対応、許可不足、競合、通信失敗、保存失敗、結果不明を区別する。エラーの詳細に資格情報・非公開記憶を含めない。
 
-```mermaid
-flowchart LR
-    User[ユーザー] <--> Client[クライアント]
-    subgraph Host[ホスト]
-        Companion[コンパニオン] <--> Task["Task：所属するサブエージェント"]
-        Task --> Executor[権限・停止を強制する実行基盤]
-    end
-    Client <-->|対話・相談・報告| Companion
-    Client -->|推論を待たない停止| Executor
-```
+## 2. クライアントから操作できる範囲
 
-| 主体 | 責務 |
+| 領域 | 操作の意味 |
 | --- | --- |
-| コンパニオン | 依頼の整理、Taskへの指示、相談の仲介、進捗説明、最終報告。Task実行中も独立して対話する |
-| Task | 親コンパニオンから受けた指示と必要な文脈で作業し、進捗・質問・結果を親へ返す |
-| ホスト | 両者の稼働、権限検証、停止制御、会話・状態・結果の保存、外部接続、音声合成の調整 |
-| クライアント | 対話・進捗・相談の表示、入力、停止、音声再生。外観・位置・読み上げオン・オフを端末内に保持する |
+| 会話 | 発言の受付、追加入力、履歴・メッセージ取得、実行イベントと文字片の購読、生成の停止 |
+| キャラクター | 初期プロファイルの取得・編集と現在の心の取得（`GetMind` / `UpdateMindProfile`）。作者設定と交流で育った状態を分ける |
+| 記憶 | 親の`mind_recall` / `mind_read` / `mind_update`、ホストの自動整理・自動想起、`ControlMemory`（forget/remember/share/unshare）。クライアント向けの記憶一覧UIは未実装 |
+| 作業 | WorkSession一覧・状態取得（`ListWorks`）、未決質問への回答（`AnswerInquiry`）、進捗イベント購読（`HostService.Subscribe` の `WorkEvent`）、UIからの緊急直接停止（`StopWork`）。通常の作業指示は親の会話を通じて行われる |
+| 音声・身体 | マイク入力ストリーム（`StreamAudioInput`）、合成音声出力ストリーム（`SubscribeAudioOutput`）、クライアント再生進捗報告（`ReportPlaybackStatus`）。音声再生デバイスは、音声出力を担当するアクティブクライアントが単一所有する |
+| 接続・ツール | LLM/TTS/STT/Embedding/MCP/ACPの接続設定、LLMプロバイダ・モデル・ツール一覧、クライアント能力とスキーマ、認証の開始・状態・解除 |
+| 権限・承認 | ツール利用許可ルール（パス・コマンド等）やセキュリティ設定の取得・更新、未決の承認要求（`ApprovalRequest`）の取得とユーザー回答（承認/拒否） |
+| 通知 | 会話・心・作業・許可・ホスト状態の変更と再同期 |
 
-[作業の依頼](features/task/request.md)に従い、ユーザーの窓口はコンパニオンに統一します。クライアントはTaskを直接起動したり、その内部会話へ発言したりしません。相談への回答もコンパニオンのメッセージAPIから渡します。Taskの停止と権限解除は、モデルの判断や応答待ちを経由しない制御経路です。
+日常の記憶訂正・忘却は対話で行える。調査用の一覧を編集しなければ記憶が育たない構成にしない。開発者向けの読取操作と、他のコンパニオンや外部プラグインに許す能力は別にする。
 
-### 主要な通信型
+クライアントに親のオーケストレーションを実装しない。通常の作業依頼・追加指示・相談回答は親へ出所付き入力として届く。特定の作業へ向けたユーザーの入力も、親が文脈と対象を理解できる形にする。作業バックエンドの検証用直接呼び出し（`WorkService.StartWork` / `SendWork` 等）は別能力（開発・自動化用）として扱い、通常の会話と混ぜない。
 
-識別子はホスト内で一意な不透明な文字列です。API利用者はIDから内部実装や所在を推測せず、明示された参照を使います。
+## 3. 公開状態
 
-| 型 | 主な項目と意味 |
-| --- | --- |
-| Companion | `id`、`name`、`body`（モデル形式・所在環境・モデル参照）、`voice`（接続ID・声ID）、`mind`（口調・人格の初期設定）、`model_assignments`（`companion`・`task`それぞれの接続ID・モデルID）、`availability`、`revision` |
-| Message | `id`、`companion_id`、`role`（`user` / `companion`）、`text`、`status`、`created_at`、会話内で不変の`sequence`、`resources`、任意の`in_reply_to`・`task_id`・`question_id`・`failure` |
-| Task | `id`、`companion_id`、`origin`（MVPでは`{kind: "message", message_id}`）、`status`、`progress`（工程・説明）、`questions`、`report`、`failure` |
-| Question | `id`、`companion_id`、`task_id`、`message_id`、`kind`（`clarification` / `permission`）、`text`、`status`（`open` / `resolved` / `cancelled`）、任意の`answer_message_id`・`resolution`・`grant_proposal`・`missing_permissions` |
-| Grant | `id`、`companion_id`、`kind`（`folder` / `data_transfer`）、許可対象と範囲、`status`（`active` / `invalidated`）、無効化理由、`revision`。フォルダは`environment_id`・`root_path`・`access`（`read` / `edit`）、送信は`connection_id`・`destinations`・`data_kinds`・`purpose`を持つ |
-| Connection | `id`、`kind`（`llm` / `tts`）、`adapter`、`endpoint`、`options`（アダプター固有の非秘密設定）、`credential_state`、`capabilities`、`last_check`。秘密情報の値は含めない |
-| Speech | `speech_id`、`request_id`、`companion_id`、`message_id`、`state`、`format`、`sample_rate`、`channels`。音声接続内だけで有効な発話ストリーム |
+### 心
 
-日時はUTCのRFC 3339文字列で返し、表示するタイムゾーンはクライアントが扱います。Messageの状態は`queued`、`streaming`、`completed`、`failed`、`cancelled`です。受信したユーザーメッセージは保存時に`completed`になり、コンパニオンの返答は別のMessageとして生成します。`in_reply_to`は元のユーザーMessageを指し、受付済みの返答を追跡するために使います。Taskからの相談・報告は`task_id`で関連づけ、存在しないユーザー発言を作りません。`failure`は`code`・`message`・`details`を持ち、HTTP受付後の失敗も取得できます。
+`GetMind`は`MindView`を返し、`UpdateMindProfile`は著者プロファイルの追加材料を版検証付きで更新する。核は既存の`UpdateCompanion.mind`で編集する。MindViewはcompanion_id、核と側面・会話例・背景・表現語彙、profile revision、現在の心のrevisionと更新時刻、現在感情（短い説明・対象・理由・表現信号）、関係の理解、経験してきた傾向、気にかけていることを返す。感情・関係・傾向・懸念はキャラクター固有のJSONで、全員共通の数値尺度を強制しない。全私的記憶や内部推論全文を、アバター表示のためだけに送らない。現在状態と特定発話の表現指示を区別する。
 
-フォルダを操作する際の参照は`environment_id`、`grant_id`、許可ルート内の相対パスで表します。MVPでは所在環境はホストのPCだけです。モデルや作業ファイルの参照を受け取っても、別環境のクライアントから同じパスを開けることは保証しません。
+MindViewは索引状態（FTS/vectorの処理待ち、埋め込みmodel・呼び出し数・トークン数）と整理状態（last_sequence、next_offset、skipped、jobs、model_calls、input_chars、error/unconfigured）も返す。索引・整理が未完了なことと、該当記憶がないことを混同しない。
 
-メッセージの`resources`には、UIで選択した作業対象を`{kind: "folder_path", environment_id, grant_id, relative_path}`の配列で渡せます。許可ルート自体は`relative_path: "."`です。ホストは所属・許可・範囲逸脱を検証し、本文でいう「このフォルダ」と対象の対応をコンパニオンへ伝えます。参照を送るだけで編集や外部送信を許可したことにはならず、各操作時にも権限を検証します。未許可のフォルダは選択UIから許可登録を先に行い、自然言語だけの依頼で対象が曖昧ならコンパニオンが確認します。
+`ControlMemory`は所有者だけが記憶の`importance`（想起優先度: 0〜10、忘却時は重要度引き下げ）と`audience`（share/unshare）を変更できる。忘却は物理削除や二値の除外フラグではなく、想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（二値の`include_forgotten`フラグは設けない）。共有記憶は他コンパニオンの想起対象になるが、所有者の私的な入力出所は共有先へ渡さない。共有解除後はcanonicalのaudience再検証で、古い索引から返さない。同じ値への操作はrevisionを増やさない。
 
-## 共通規約
+変更はSQLiteコミット後にだけ`MindUpdated`で通知し、revisionを含める。クライアントは古いrevisionの通知で現在状態を戻さない。`mind_update`は親のRig実行内のツールであり、クライアントRPCではない。所有者・操作ID・入力出所はホストが束縛し、著者設定・権限・他コンパニオンの記憶は変更できない。同じ操作ID・同じ内容の再試行は元の結果、異なる内容は競合、古いrevisionは競合とする。変更なしも成功である。
 
-### 認証・設定・許可
+MemoryViewは本文、短い説明、出所・取得方法、時刻、共有範囲、訂正関係、想起の扱い、revisionを返す。取得側の権限に応じて情報を制限する。「忘れて」に対して物理削除済みのフラグや成功文を返さない。検索の能力不足・索引更新待ち・外部検索の失敗も、該当なしと区別できる。
 
-HTTPの基点は`/v1`とし、要求・応答はJSONです。ホストはループバックだけで待ち受け、HTTPと両WebSocketの接続時に`Authorization: Bearer <token>`を検証します。認証なしのローカル要求も拒否します。接続トークンは起動ごとに発行し、同一OSユーザーだけが読める一時領域で受け渡します。URL、通常の設定、ログにトークンや外部サービスの秘密情報を含めません。
+### 作業
 
-認証主体はトークンの値やWebSocket接続IDと分離し、同じホストを使うOSユーザーに対して再起動後も同じ主体を識別します。トークン更新によって再送の重複判定を失いません。通知接続の`connection_id`と外部サービスのConnection IDは別の名前空間であり、相互に代用できません。
+WorkViewは親、WorkSession、進行中RunInfo、未決質問（`pending_inquiries`）を持つ。runには配送状態、実行状態、終了理由と失敗・不明の情報がある。
+未決質問（`WorkInquiry`）への回答経路は2通り存在する：
+1. **対話仲介経路（通常）**: 子エージェントからの質問を親エージェントがユーザーに相談し、ユーザーの返答を受けた親が `send_work` ツール（`request_id` に質問IDを束縛）で回答する。
+2. **UI直接回答経路（クライアントUI）**: クライアントが `WorkView.pending_inquiries` から質問カードを表示し、ユーザーの選択・入力を `WorkService.AnswerInquiry(work_id, request_id, answer)` RPCで直接回答する。
 
-設定・秘密情報の登録と、アクセス・送信の許可は独立しています。接続先を登録しても会話や資料を送信できるようにはなりません。[権限とデータの管理](features/settings/permissions.md)に従い、送信先、データの種類、用途を許可に結びつけます。送信先には仲介サービスと実際の処理先の双方を含め、許可がなければ別の接続先へ切り替えません。
+権限承認要求（`ApprovalRequest`）は `SettingsService.SubmitApproval` で回答し、通常の質問（`WorkInquiry`）と明確に区別する。
 
-設定やGrantの更新には取得済みの`revision`を要求し、古ければ`409 revision_conflict`を返します。接続先や送信条件を変更した場合は、従来の許可を新しい範囲へ流用しません。許可を縮小・解除する応答は、保存と実行側の制限反映が済んでから返します。以後の関連操作・送信を禁止し、実行中の処理は成否を確認して記録します。完了済みの変更や送信済みデータの取り消しを意味しません。
+### クライアント能力とデバイス操作
 
-外部サービスの秘密情報はOSの資格情報ストアに保存します。利用できない場合はセッション中だけ保持し、`credential_state`を`session_only`として返します。他の値は`missing`、`stored`です。取得APIで秘密情報自体を返すことはありません。
+クライアントは`RegisterClient`で、自身が提供できる能力を`capabilities`（能力名の一覧）と`capability_specs`（説明・入力スキーマ・プリセット・ツール名・承認要否）で宣言する。ホストは宣言を検証し、ユーザーの許可に基づいて`granted_capabilities`を決める。クライアントは自分自身へ権限を付与できない。`SetCapabilities`でクライアントが更新できるのは宣言であり、`granted_capabilities`はホストの許可判断の結果としてのみ変化する。
 
-### 受付・再送・履歴
+能力の許可は、操作ごとの承認を省略する包括許可ではない。`device_request`および`tool_name`経由の端末操作も、ホストの`Stage::Gate`でハード禁止、明示的毎回確認、保存ルール、入力スキーマを検証し、必要な場合は`ApprovalRequest`を発行する。`ClientCapabilitySpec.approval`が`CONFIRM`の能力は操作ごとに承認を要求し、`AUTO`でもハード禁止や「毎回確認」ポリシーを迂回できない。未指定はホストの既定ポリシーに従い、未知の能力は`CONFIRM`相当として扱う。`approval`はクライアントの申告であり、ホストのポリシーが常に優先する。`approval_target`は承認カードの対象説明テンプレートであり、ホストが検証済み入力で埋める。クライアントが自己申告する説明だけを承認の根拠にしない。
 
-処理の受付と作業の完了を区別します。メッセージ送信とTask停止は`202`で受付情報を返し、その後の状態は取得APIと通知で確認します。設定・許可の作成は`201`、取得・更新は`200`、解除は`204`です。
+操作の対象クライアントはモデルが指定しない。ホストは`device_request`の受付時に、親からの呼び出しなら現在のアクティブクライアント、手からの呼び出しなら`WorkSession`に束縛された`client_id`と`activation_revision`を確定し、`DeviceOperation`に含める。受付後にアクティブクライアントが切り替わった場合、その操作は新しい端末へ追従せず、`client_moved`として失敗させる。再開が必要な場合は、新しい端末の有効化後にモデルが操作を再発行する。古い`activation_revision`の`DeviceOperationResult`、音声入力、再生完了報告は、現在の有効化と照合して破棄する。
 
-HTTPのPOSTには`Idempotency-Key`を必須にします。ホストは認証主体、キー、操作対象、要求内容と受付結果を永続化します。同一要求の再送には元の受付結果を返し、同じキーで内容・HTTPメソッド・操作対象が異なる場合は`409 idempotency_conflict`とします。同時再送とホスト再起動をまたぐ再送でも再実行しません。受付記録と対象状態を同じ保存処理で確定し、Taskの内部起動も元の依頼に結びつけて重複を防ぎます。受付後にホストが停止しても、その要求を新たに実行し直しません。`request_id`はホストが発行する追跡IDで、クライアントの`Idempotency-Key`とは別です。同一要求の再送では元の`request_id`を返します。
+呼び出し主体ごとの用途を分ける。親（頭）は会話中の軽量な端末参照（現在の画面、ウィンドウ情報など）に`device_request`を使い、受付時点のアクティブクライアントへ束縛する。手（WorkSession）は実務上の端末操作に使い、`StartWork`時に保存した`client_id`と`activation_revision`へ束縛する。`StartWorkRequest.client_id`が空の場合は、その時点のアクティブクライアントを解決して保存する。どちらも得られない場合、手の`device_request`は`no_active_client`で失敗する。同じコンパニオン内で複数のWorkSessionが存在しても、各操作は自分のWorkSessionの束縛先にだけ配送する。
 
-メッセージ受付では、ユーザーMessage、本文が空で`queued`の返答Message、両者の対応、再送用の受付結果を同じ保存処理で確定してから`202`を返します。応答は`message_id`と`response_message_id`の両方を含みます。推論は保存後に開始し、返答は`queued`から`streaming`を経て終了状態へ、生成前の障害なら直接`failed`へ移します。UIはユーザーMessageの`completed`を返答完了とは扱わず、返答IDの取得APIまたは通知で状態を確認します。
+`ClientCapabilitySpec.name`は`capabilities`に含まれる名前に一致しなければならない。仕様を持たない能力名は、汎用の`device_request`から不透明な入力としてのみ呼べる。`tool_name`を持つ能力は、ホストが宣言と許可を確認したうえで親エージェント向けのツールとして動的に登録する。ツール名はホストの組み込みツールと衝突してはならず、登録・解除はアクティブクライアントの接続、能力変更、切断に追随する。能力の宣言は能力の存在を示すだけで、実行の可否は許可と操作単位の承認で別に判定する。
 
-外部要求を伴う同期POSTの疎通確認では、外部送信前に要求を処理中として永続化し、結果を保存してから応答します。処理中の同一キー再送は`409 request_in_progress`とし、外部要求を重複させません。外部送信後、結果保存前にホストが停止した場合は、再起動時に`503 unavailable`、`details.reason: host_interrupted`の結果を確定します。同じキーではその結果を返し、新たな確認はユーザー操作による別キーで行います。
+ホストからクライアントへの実行指示は、`ClientService.DeviceStream`上の`DeviceOperation`で配送する。`capability`は宣言済みの能力名、`input`は`ClientCapabilitySpec.input_schema`に適合するJSONとする。ホストは能力名・スキーマ・プリセットを保持して配送するだけで、描画・OSフック・ギミックの実装詳細を解釈しない。
 
-PATCHの`revision`は更新の二重適用を防ぎ、DELETEは解除済み対象への再送でも`204`とします。秘密情報のPUTは同じ値の再登録で追加の処理を起動せず、その値を再送記録へ保存しません。
+- `device_request(capability, input)`は結果を待つ要求であり、`DeviceOperationResult`を後続のモデル呼び出しで受け取る。高リスク操作では、ホストが`Stage::Gate`と`ApprovalRequest`を経てから配送する。
+- `body_motion`や`set_eye_watch`のような即時系のツールは、結果を待たず`operation_id`だけを返す。失敗や未配送は`GetOperation`または状態通知で確認する。これらも能力ごとの承認設定に従う。
+- 接続断で配送済み操作の結果が得られない場合は`uncertain`として扱い、成功とみなさない。再接続時は未配送の操作を再送し、クライアントは`operation_id`で重複を排除する。
+- アクティブクライアントがない、能力が宣言されていない、または許可されていない場合、対応するツールは登録されないか、明示的なエラーを返す。
 
-メッセージ、Task履歴、モデル・声一覧は`cursor`と`limit`でページ分割し、`items`と`next_cursor`を返します。既定は50件、上限は200件です。メッセージはカーソルなしなら最新のページを返し、`next_cursor`でそれ以前を遡ります。ページ内は`sequence`の昇順に表示し、日時が同じでも順序を変えません。Taskは新しい実行順とし、カーソルは取得対象と順序に結びつけます。通知の`{epoch, seq}`、履歴のページカーソル、Messageの`sequence`はそれぞれ独立しています。
+### 知覚（目）と動的Watcher
 
-応答への項目追加は`/v1`内で行い、クライアントは未知の応答項目を無視できます。要求の未知の項目は拒否します。PATCHでは項目の省略は変更なし、明示的な`null`は解除可能な設定だけを解除するものとします。`model_assignments`は用途ごとに同じ規則で更新し、他の用途を暗黙に解除しません。未知の状態・種類は未対応として表示し、成功・終了・許可済みと推測しません。新機能を必要とする要求は対応能力を確認してから送り、既存項目の意味や必須条件を変える変更は新バージョンで扱います。
+クライアント側知覚センサー（OSウィンドウフック、アプリ連携、定期サンプリング等）は`ClientService.ReportPerception` RPCを通じてホストへ知覚イベント（`PerceptionEvent`）を送信する。ホストはこれを受信して簡潔な要約（`PerceptionSummary`）を生成し、親エージェントの動的文脈（Dynamic Tail）へインメモリ注入する。
 
-### エラー
+`eye.watch` capabilityを宣言し、許可されたアクティブクライアントがある場合に限り、ホストは親エージェントへ`set_eye_watch`ツールを公開する。ツールの引数仕様はクライアントが`ClientCapabilitySpec.input_schema`で宣言する。ホストは入力を解釈せず、`DeviceOperation { capability: "eye.watch", input: <ルールJSON> }`として配送する。クライアントは自身のセンサー実装のフィルタ条件を更新し、合致時に優先割り込みを`ReportPerception`で返す。能力を宣言しない、または許可されないクライアントでは、ホストは`set_eye_watch`を公開せず、受動的な知覚イベントのみを利用する。
 
-エラーは`{"error":{"code":"...","message":"...","details":{}},"request_id":"..."}`で返します。`request_id`は要求の追跡用IDで、秘密情報を含みません。
+デスクトップクライアントが宣言するスキーマの例:
 
-| HTTP状態 | 主なコード・状況 |
-| --- | --- |
-| `400` | `invalid_request`：形式、不足項目、不正なカーソル |
-| `401` | `unauthorized`：接続認証なし・無効 |
-| `403` | `permission_required`：アクセス・送信の許可不足 |
-| `404` | `not_found`：不存在、または指定コンパニオンに属さない対象 |
-| `409` | `revision_conflict`、`idempotency_conflict`、`request_in_progress`、`state_conflict`、`question_closed`、`task_busy`、`resync_required`：状態の競合 |
-| `422` | `unsupported_capability`：未対応の接続種別・機能・音声形式 |
-| `502` / `503` | `upstream_error` / `unavailable`：外部接続やホストの障害 |
+- `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)`:
+  - `target_pattern`: 監視対象のウィンドウタイトルまたはアプリ識別子の部分一致・正規表現パターン（例: `"GitHub"`, `".*\\.rs"`）
+  - `match_kind`: `"title"`（ウィンドウタイトル）または `"app_id"`（プロセス/アプリケーション名）
+  - `notify_on`: 発火契機（`"focus"`: アクティブ化時、`"blur"`: 非アクティブ化時、`"title_change"`: タイトル変更時）
+  - `enabled`: ルールの有効化（`true`）または解除（`false`）
+  合致時は定期サンプリングを待たずに即時優先割り込み（Priority Interrupt）が親エージェントへ通知される。
+- **ホスト ➔ クライアントへの監視ルール伝達経路**:
+  親エージェントが`set_eye_watch`を実行した際、ホストはアクティブクライアントに対し、`ClientService.DeviceStream`上の`DeviceOperation`を送出して監視条件を設定・解除する。クライアントはこれを受けて自身のセンサー（例: OSネイティブウィンドウフック）のフィルタ条件を動的更新する。
 
-保存前の拒否はHTTPエラー、`202`で受け付けた後の失敗はMessageやTaskの状態・通知として伝えます。エラー理由と適用済み範囲を保持し、成否不明の処理を成功としません。
+### 身体表現（体）
 
-## HTTP API
+クライアントは`body.motion`等の表現能力を`capability_specs`で宣言する。利用可能なモーション名や表情プリセットは`presets`に含める。ホストは、`body.motion`を宣言し許可されたアクティブクライアントがある間だけ`body_motion`ツールを親エージェントへ公開する。ツール名と引数スキーマはクライアントが宣言し、ホストはモーション名や表情名の意味を解釈しない。
 
-表のパスはすべて`/v1`以下です。POSTの共通ヘッダーと一覧のページ分割項目は省略します。
+親エージェントが`body_motion`を実行した際、ホストは`DeviceOperation { capability: "body.motion", input: <モーション・表情JSON> }`を送出する。クライアントは自身の表現エンジンでモーション・表情を再生し、結果を返す必要はない。ホストは描画エンジン、VRM/VRMA、ウィンドウ制御などの実装を持たない。
 
-### 初回起動と利用可能な機能
+### 端末間移動（Activate）と進行中処理
 
-新規DBの初期化時に、ホストは`host_id`、ホストPCの`environment_id`、空の接続設定とその`revision`、コンパニオン1体を同じ保存処理で作成します。初期Companionはホスト発行のID、`revision`、既定の表示名と口調を持ち、`body`、`voice`、`model_assignments.companion`、`model_assignments.task`は`null`です。初期化済みの記録も保存し、再起動や複数クライアントの接続で作成し直しません。初期化に失敗した状態では受付を開始しません。クライアントは`snapshot`からIDとrevisionを取得して設定を更新でき、固定IDや手動DB編集を必要としません。複数体の作成・削除APIはMVPに含めません。
+コンパニオンのアクティブクライアントは`Activate`の`revision`で世代管理する。新しいクライアントへ移動してrevisionが進んだ時点で、ホストは旧クライアントの進行中処理を次のように失効させる。
 
-`snapshot.capabilities`はホストの実装能力を示し、`limits`（`max_companions: 1`、`max_concurrent_tasks: 1`）、対応する機能名の`features`、設定可能な`adapters`、モデル参照の対応形式を返します。各アダプターにはID、種類、設定項目・選択肢、必要な資格情報の有無を含め、秘密情報の値は含めません。`options`はそのアダプターが定義した項目だけを受け付けます。機能名の不在は未対応、外部接続の能力が`null`なら未確認です。UIはライブラリ名やプロバイダー名から能力を推測しません。
+1. 旧クライアントが接続中なら、音声出力へ`FlushControl { reason: FLUSH_REASON_CLIENT_MOVED }`を送り、旧発話の再生バッファと再生所有権を失効させる。発話権も解放し、会話リレーを継続しない。
+2. 旧クライアントに束縛された未完了の`DeviceOperation`を`client_moved`として失敗させる。新しいクライアントへ再配送しない。
+3. 旧クライアントの`client_id`と`activation_revision`に束縛された音声入力、再生完了報告、知覚イベント、音声承認を破棄する。遅延して届いても新しいクライアントの発話・承認・操作に適用しない。
+4. 新クライアントは、旧クライアントの再生キュー、未決操作、承認バインドを引き継がない。移動後の最初の操作は新しい`activation_revision`で束縛する。
 
-Companionの`availability`は、`chat`・`task`・`speech`ごとに`ready`と`reasons`を返す読み取り専用の状態です。理由には`model_unset`、`voice_unset`、`credential_missing`、`permission_required`、`unsupported_capability`などのコードと説明・対象参照を含めます。これは現在の設定で開始できるかの事前案内であり、外部接続の成功や任意の資料への権限を保証しません。実行時にも必ず検証します。設定・資格情報・許可の変更で再計算し、`companion.updated`で通知します。
+`Activate`の応答は新しいrevisionを返し、旧クライアントには`ClientUpdated`で非アクティブ化を通知する。再接続したクライアントは`GetSnapshot.activations`または`Subscribe`の`activation_updated`で現在の`activation_revision`を取得し、音声・知覚の送信前に反映する。切断と移動は区別し、単なる一時切断では進行中の操作を即座に失敗させず`uncertain`として再接続を待つ。移動は明示的な失効として扱う。
 
-`body`未設定や描画失敗でも設定・テキスト対話を利用でき、`voice`未設定なら読み上げだけを利用不可にします。モデルや送信許可がなくても設定・許可の変更と履歴閲覧は利用できます。`body`の参照はクライアントが対応形式・ファイルの存在・描画可否を検証し、ホストの参照保存を描画成功とは扱いません。未設定によるAPI拒否はモデル・声に対して`409 state_conflict`、資格情報不足は`503 unavailable`、許可不足は`403 permission_required`とし、`details.reason`と対象参照を返します。
+### ホスト機能の可用性
 
-### コンパニオン・対話・Task
+ここではホストが提供する機能の可用性を扱う。クライアント能力は前述の`capability_specs`で宣言する。機能の存在と、設定・認証・許可が整って実行可能かを区別する。入力形式、途中介入、再開、モデル設定、MCP、停止の実効範囲などを実装ごとに返す。利用できない機能の理由がクライアントと親の双方に分かるようにする。
 
-| 操作 | 用途・主な要求 | 主な応答 | 固有の拒否条件 |
-| --- | --- | --- | --- |
-| `GET /snapshot` | 初回・再接続時の状態取得。任意の`connection_id` | `host_id`、`environment_id`、`capabilities`、`cursor`、Companion一覧、最近のMessage、非終了Task、未解決Question、設定、Grant。会話の続きの取得用カーソルもコンパニオンごとに含む | 指定した通知接続が無効なら`resync_required` |
-| `GET /companions` | コンパニオン一覧 | Companionの一覧 | 共通エラー |
-| `GET /companions/{companion_id}` | 対象の設定取得 | Companion | `not_found` |
-| `PATCH /companions/{companion_id}` | `revision`と変更する`name`・`body`・`voice`・`mind`・`model_assignments` | 更新したCompanion | `revision_conflict`、参照不整合は`state_conflict`、未対応のモデル参照・声は`unsupported_capability` |
-| `GET /companions/{companion_id}/messages` | 会話履歴取得 | Messageの一覧 | `not_found` |
-| `GET /companions/{companion_id}/messages/{message_id}` | 受付済み返答の状態・失敗理由や過去の発言を取得 | Message | 所有関係が異なる場合も`not_found` |
-| `POST /companions/{companion_id}/messages` | `text`、任意の`resources`、相談回答時の`question_id`、権限拒否時の`decision: "decline"` | `202`：`request_id`、ユーザー側の`message_id`、`queued`の`response_message_id` | 未解決でない相談は`question_closed`、他のコンパニオンの相談は`not_found`、対話の設定不足は上記のエラー |
-| `GET /companions/{companion_id}/tasks` | 所属Taskの実行履歴 | Taskの公開状態の一覧 | `not_found` |
-| `GET /companions/{companion_id}/tasks/{task_id}` | 進捗・相談・報告・変更記録の確認 | Taskの公開状態と結果 | 所有関係が異なる場合も`not_found` |
-| `POST /companions/{companion_id}/tasks/{task_id}/cancel` | 推論を待たない停止。任意の`reason` | `202`：`request_id`、`task_id`、現在の`status`。終了済みならその状態を返す | `not_found` |
+## 4. 通知と再接続
 
-`snapshot.cursor`は状態全体と同じ時点を表し、生成中Messageの現在の本文も含めます。会話の通常ページは各コンパニオンの最近50件までとし、その範囲外にある`queued`・`streaming`のMessageと未解決Questionの対応Messageも追加します。IDで重複を除き、実行中・回答待ち・停止処理中のTaskと未解決Questionは取りこぼさず含めます。履歴の続き用カーソルは通常ページの最古のMessageを基点にします。終了Taskの報告は履歴APIで取得します。
+通知にはホストの起動epochと順序を持たせ、対象IDとrevisionを含める。保存済み状態を正本とし、通知から取りこぼした結果も再取得できる。会話の文字片、意味のある子の説明、心の変更、runの終端は区別する。
 
-通常メッセージはコンパニオンの対話へ渡します。コンパニオンが依頼を整理してTaskを起動し、以後の質問・結果も同じコンパニオンのMessageとして表示します。Taskの内部プロンプト、内部会話、ツール要求を通常の対話履歴へ流しません。Task実行中に受け付けた新しい作業依頼は自動で予約せず、コンパニオンが受付時の実行枠の使用中を説明します。返答の順番待ち中に枠が空いても、その依頼を自動起動へ切り替えません。開始直前にもホストが枠を検証し、内部起動の競合は`task_busy`として扱います。
+購読開始と状態スナップショットの境界を定め、取得中の変更を取りこぼさない。遅延・溢れ・不明なカーソルでは再同期を要求し、重い通知送信が停止制御や保存を塞がない。成功だけでなく失敗・取消・不明も反映する。
 
-対話の生成はコンパニオンごとに受付順で扱い、Taskの実行ループから独立させます。相談・報告のMessageも同じ対話の列に入り、別のTask用チャットをユーザーに操作させません。会話文脈はホストが保持する当該コンパニオンの履歴から組み立て、表示用のページ境界を文脈の切れ目にしません。Taskの起動後に返答生成が失敗しても、Taskの状態は独立して取得・停止でき、再生成を理由にTaskを起動し直しません。
+文字片の再送と確定本文の取得、進捗の間引きと質問・終了の保持を分ける。クライアントは古いrevisionの通知で現在状態を戻さない。別端末へのファイル同期やプッシュ通知の完成を、この通知契約だけで保証しない。
 
-`question_id`付きの回答は保存時に対象の未解決Questionへ結びつけ、コンパニオンを通じて所属Taskへ伝えます。本文の意味だけで通常の雑談を相談回答にしません。権限に関する「はい」という文章だけではGrantを作成しません。UIに対象・範囲を提示し、許可APIに同意した内容を渡します。拒否は上記の`decision`を使い、許可不足の工程を実行しません。
-
-判断相談への回答は、ユーザーMessage・返答Messageの保存とともに`answer_message_id`を記録し、`resolved`、`resolution: "answered"`へ移します。同時に異なる回答が届いた場合は先に確定した1件だけを採用します。同一キーの再送には元の受付を返し、新しいキーで閉じた相談へ回答すれば`question_closed`です。権限相談への通常の文章は補足として保持して相談を閉じず、`decision: "decline"`を明示した場合だけ`resolution: "declined"`で解決します。拒否自体はLLM接続が利用不可でも受け付けます。
-
-回答・許可成立・拒否を親コンパニオン経由でTaskへ届けるための処理も、相談の状態変更と同時に永続化します。伝達前は依存工程を待機させ、伝達に失敗したTaskは`failed`、`failure.code: input_delivery_failed`として報告します。明示的な拒否で残りの依頼を達成できない場合は`failed`、`failure.code: permission_declined`とし、適用済み・未達範囲を残します。ホスト再起動時は後述の`host_interrupted`を優先します。閉じた相談を回答待ちのまま放置しません。
-
-### 接続・秘密情報・許可
-
-| 操作 | 用途・主な要求 | 主な応答 | 固有の拒否条件 |
-| --- | --- | --- | --- |
-| `GET /settings` | ホスト共通の接続設定の取得 | `revision`、Connection一覧。モデル割当はCompanionに保持 | 共通エラー |
-| `PATCH /settings` | `revision`と変更する接続設定 | 更新した設定 | `revision_conflict`、参照の不整合は`state_conflict`、未対応アダプターは`unsupported_capability` |
-| `PUT /credentials/{connection_id}` | `secret`を登録 | `credential_state` | 不明な接続は`not_found` |
-| `DELETE /credentials/{connection_id}` | 秘密情報を解除 | `204`。以後の認証付き外部要求も禁止 | 共通エラー |
-| `GET /connections/{connection_id}/models` | `companion_id`を指定し、LLM接続先のモデル一覧を取得 | モデルID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
-| `GET /connections/{connection_id}/voices` | `companion_id`を指定し、音声接続先の声一覧を取得 | 声ID・表示名・対応能力の一覧 | `unsupported_capability`、`permission_required`、外部障害 |
-| `POST /connections/{connection_id}/check` | `companion_id`、`purpose`（`companion` / `task` / `speech`）、必要なモデルID・声IDで疎通確認 | 対応能力・確認結果。成功なら`last_check`を更新 | `permission_required`、`unsupported_capability`、外部障害 |
-| `GET /grants` | 現在の許可一覧。任意の`companion_id`で絞り込み | Grantの一覧 | 共通エラー |
-| `POST /grants` | `companion_id`、Grantの対象・範囲、相談に対応する場合の`question_id` | `{grant, questions}`：作成したGrantと影響したQuestionの最新状態 | 未対応環境は`unsupported_capability`、解決済み相談は`question_closed`、所属不一致は`not_found` |
-| `PATCH /grants/{grant_id}` | `revision`とユーザーが同意した変更範囲、任意の`question_id` | `{grant, questions}`：更新したGrantと影響したQuestionの最新状態 | `revision_conflict`、`question_closed`、所属不一致は`not_found` |
-| `DELETE /grants/{grant_id}` | 許可解除 | `204`。解除した許可に依存するTaskは停止処理へ移す | 共通エラー |
-
-接続設定の保存は疎通成功を意味しません。モデル・声一覧の取得では登録した送信先への認証・メタデータ要求だけを行い、事前に提示した送信範囲を守ります。疎通確認は会話・資料を使わず固定の検証入力を使い、必要な送信許可がなければ実行しません。Taskの実行や資料変更は行いません。
-
-送信Grantの`purpose`は`conversation`・`task`・`speech`・`connection_check`を区別します。モデル・声一覧は指定コンパニオンの`connection_check`とメタデータ送信範囲で検証し、モデル・声の割当前にも利用できます。疎通確認要求の`purpose`は検証する機能を選ぶもので、通常の会話・資料送信の許可を代用しません。仲介先の一覧取得と実処理先への試験入力で送信先が異なる場合も、それぞれの範囲を明示します。
-
-`PATCH /settings`で`connections`を指定した場合は、その一覧で接続設定を置き換えます。既存接続は`id`を指定して更新し、IDのない新規接続にはホストがIDを発行して応答に含めます。モデル・声の割当は返されたIDを使って`PATCH /companions/{companion_id}`で設定します。参照中の接続を削除する場合は先にCompanionの割当を解除・変更し、削除時にも参照を検証します。Grantが参照する接続の削除も、そのGrantの解除後に限ります。対応能力・確認結果・資格情報の状態はホストが管理し、設定要求から上書きできません。
-
-モデル割当・口調の変更は次に開始する生成、声の変更は次のSpeechに適用し、実行中のTask・生成・発話へ途中から混ぜません。Taskには起動時のモデル割当を記録します。外部接続の`adapter`・`endpoint`・送信条件を変えると、旧条件の許可と疎通結果を無効にして、新条件の確認・許可を必要とします。実行中処理が参照する接続を変更・削除する要求は`state_conflict`で拒否し、UIは終了を待つかTask停止・許可解除へ誘導します。実行中でも許可と資格情報の解除は受け付け、各送信・操作時に現在の制限を適用します。
-
-送信Grantは登録時の接続先・送信条件に結びつけます。接続変更による無効化は設定保存と同時に確定し、`status: invalidated`と理由を取得API・通知へ反映します。新しい条件への同意は新規Grantで登録し、無効な許可を自動復活させません。`status`はホストが管理し、要求から上書きできません。
-
-送信許可は、会話、作業資料、返答の読み上げ、接続確認の各用途について、送るデータと送信先を説明して登録します。Grantは`companion_id`のコンパニオンと所属Taskに適用し、別のコンパニオンへ流用しません。Taskから親への資料・結果の引き渡しにも、親の接続先・用途に必要な送信許可を検証します。既存の許可範囲では操作ごとの承認を求めません。複数の許可登録が必要でもUIでは機能単位でまとめて説明し、保存に失敗した範囲だけを案内します。
-
-権限Questionの`grant_proposal.requirements`は、対象・操作・送信先・データ種別・用途を機械的に照合できる必須条件の配列です。同じQuestion IDでは条件を変更せず、変更が必要なら元の相談を`cancelled`にして新しいIDで提示します。GrantのPOST/PATCHに`question_id`がある場合、ホストは同じコンパニオンの未解決な権限相談であることを保存前に検証します。
-
-ホストは変更後の有効なGrant全体と必須条件を照合し、すべて満たす場合だけ`resolved`、`resolution: "granted"`へ移します。フォルダの`edit`は`read`を含み、逆は成立しません。この判定、許可の保存、相談の状態変更、親への伝達の登録は同じ保存処理で確定します。例えば編集が必要な相談に読み取り許可だけを登録した場合、Grantは保存しますが相談は`open`のままとし、`missing_permissions`で不足範囲を返します。Grant応答には関連するQuestionの最新状態を`questions`として付け、`question.updated`でも通知します。UIはGrant保存の成功だけを作業再開と表示しません。
-
-設定画面から`question_id`なしで許可を変更した場合も、影響する未解決相談を同じ規則で再評価します。コンパニオンはホストが確定した許可成立を所属Taskへ伝えます。モデルの文章判断で相談を解決せず、クライアントからTaskへ再開命令を送りません。再開時にも現在の許可・Task状態を検証し、停止と競合した許可操作でTaskを再開しません。
-
-Grantの`companion_id`・操作対象・所在環境は変更せず、別の対象への許可は新規登録します。古い許可を別の対象へ読み替えません。許可を縮小した場合も、禁止された操作に依存するTaskは停止処理へ移します。参照できる部分だけを根拠に、許可不足の変更を続けません。
-
-## リアルタイム通信
-
-### テキスト・進捗通知
-
-`GET /v1/events`で通知用WebSocketへ接続します。ホスト全体の通知を配信し、MVPではコンパニオンによるフィルターを設けません。購読を登録してから、接続固有の`ready`として`connection_id`と現在の`cursor: {epoch, seq}`を返します。通常の通知は`{epoch, seq, type, companion_id?, data}`です。`epoch`はホスト起動ごとに変わり、`seq`はその起動中に1ずつ増えます。
-
-| 通知 | 内容 |
-| --- | --- |
-| `message.created` | 保存したユーザーMessageまたは`queued`のコンパニオンMessage。IDによる追加・重複排除に使う |
-| `message.started` | `queued`から`streaming`へ移ったコンパニオン側のMessage。受付時の`response_message_id`と同じID |
-| `message.delta` | `message_id`、`offset`、追加する`delta`。`offset`は追加前の本文のUnicodeスカラー値数 |
-| `message.updated` | 保存された本文・状態・失敗理由。生成前の失敗も含む終了時の正本 |
-| `task.updated` | 親コンパニオンに属するTaskの公開状態・進捗・結果 |
-| `question.updated` | Questionの作成・解決・取り消し。対話に表示する本文は対応するMessageにも保持 |
-| `companion.updated` / `settings.updated` / `grants.updated` | 設定・許可の変更。秘密情報を含めない |
-
-保存を要する状態は保存後に通知します。テキスト差分は生成中の本文に反映してから配信し、スナップショットにもその時点の本文を含めます。生成が中断された場合も部分本文と失敗理由を保持します。
-
-通知の送信待ちでTaskやHTTP制御を止めません。有限の通知バッファがあふれた接続は、接続固有の`resync_required`を通知して閉じます。配送自体ができない場合も閉じ、クライアントが切断として再同期します。接続固有の`ready`・`resync_required`は通常通知の連番に含めません。遅い受信側とWebSocket処理の一次資料は[ホストと接続の設計](references.md#mvp-host)にまとめています。
-
-再同期は次の順序で行います。
-
-1. 通知接続を開き、`ready`を受けて以後の通常通知を一時保存します。
-2. `GET /v1/snapshot?connection_id=...`で、その購読が有効な間の状態とカーソルを取得します。
-3. 同じ`epoch`でスナップショットの`seq`以下の通知を捨て、続く連番だけを適用します。
-4. 欠番、`epoch`変更、接続終了、本文の`offset`不一致があれば適用を止め、購読からやり直します。未知の通知種別は読み飛ばして連番を進めます。
-
-スナップショットとカーソルは同じ状態更新の境界で取得します。取得中に購読が無効化された場合は`409 resync_required`とし、古い状態から差分を適用させません。無接続で取得したスナップショットは状態閲覧には使えますが、その後の通知との連続性を保証しません。永続イベントログの再配信はMVPでは提供しません。
-
-### 音声ストリーム
-
-音声は`GET /v1/companions/{companion_id}/speech`の専用WebSocketで扱います。通知用接続と待ち行列を分け、JSONで要求・状態を、バイナリで音声チャンクを送ります。音声接続から任意テキストの合成は要求せず、親コンパニオンのMessageを指定します。クライアントの読み上げ設定はローカルに保存し、音声要求は接続中だけ有効です。
-
-読み上げ対象は`role: companion`かつ`streaming`または`completed`のMessageです。他のコンパニオンのMessageは`not_found`、対象外の状態・役割は`state_conflict`で拒否し、`speech.failed`で通知します。
-
-| 方向・種別 | 主な項目と意味 |
-| --- | --- |
-| クライアント → `speech.start` | `request_id`、`message_id`、`accepted_formats`。`streaming`状態のMessageも指定できる |
-| クライアント → `speech.cancel` | `request_id`。合成待ち・配信の取り消し。開始応答前にも指定できる |
-| ホスト → `speech.started` | `request_id`、`speech_id`、`companion_id`、`message_id`、`format`、`sample_rate`、`channels` |
-| ホスト → 音声チャンク | `speech_id`、0から始まる`chunk_seq`、音声開始位置`start_sample`、バイナリ音声データ |
-| ホスト → `speech.finished` | `request_id`、`speech_id`、`last_chunk_seq`。全チャンクの配送終了。端末での再生完了は意味しない |
-| ホスト → `speech.cancelled` | `request_id`、発行済みなら`speech_id`、`reason`。以後のチャンクを使わない |
-| ホスト → `speech.failed` | `request_id`、発行済みなら`speech_id`、共通形式の`error`。発話または要求の失敗 |
-
-音声チャンクの項目は論理的な構造です。バイナリヘッダーの配置、コーデック、チャンク長は実機検証後に確定します。`start_sample`は発話先頭からのサンプルフレーム数です。クライアントが提示した形式とホストの対応形式の共通部分を選び、共通形式がなければ`unsupported_capability`で拒否します。発話中に形式・サンプルレート・チャンネル数を変えません。無音声で終わる場合の`last_chunk_seq`は`null`です。
-
-チャンクは同じ発話の`chunk_seq`順に配送・再生し、`start_sample`は直前のチャンクの終了位置に続けます。欠番・重複・順序逆転を検出した場合は再生を止め、バッファを破棄して要求を取り消します。無効化した発話IDのチャンクは、他の発話へ混ぜずに捨てます。
-
-Speechの状態は`started`から`finished`、`cancelled`、`failed`のいずれかへ遷移し、終了後は再開しません。1接続で有効な発話は1件とし、別の発話を始める場合は現在の発話の終了を待つか取り消してから要求します。同じ`request_id`の再送は接続内で再合成せず、現在の状態を返し、終了済みなら元の終了通知を返します。内容が違えば`idempotency_conflict`です。取り消したIDも接続終了まで保持し、開始要求の遅着で再生成しません。終了済み要求の取消には元の終了状態を返し、端末に残った音声の停止はクライアントが行います。音声要求と音声データは永続化・再配信しません。Speechの`request_id`はクライアントが接続内で発行し、HTTPの追跡IDとは別です。
-
-生成中の本文から、読み上げ可能な文・句を確定して合成・配信し、全文や音声全体の完成を待たず再生を開始します。要求が少し遅れて届いた場合も、その生成中Messageの先頭から順に読み上げます。語単位に細分化して不自然な発話を作らず、入力分割と先読み量を検証します。完了済みMessageの読み上げは明示的な要求で可能ですが、再接続で取得した履歴から自動要求しません。
-
-Connectionの音声対応能力として、`incremental_text_input`、`streaming_audio_output`、`synthesis_cancellation`、`audio_formats`を公開します。未確認の能力は`null`として扱い、対応済みとは表示しません。アダプターが認証、声の指定、テキスト入力、合成結果を共通契約へ変換します。特定エンジンやWAVに固定せず、合成中の音声出力に対応する接続先をMVPの優先候補にします。送信の細分化だけでエンジンの逐次合成や低遅延が実現したとはみなしません。候補の一次資料は[音声と認証情報](references.md#mvp-audio)を参照してください。
-
-読み上げオフ、中断、切断、許可解除時は、クライアントが再生バッファを直ちに破棄し、ホストは新しい関連合成・送信を始めません。取消済み発話IDの遅着チャンクは再生しません。エンジン側の処理を停止できるかは対応能力として区別し、取消不能な計算まで停止済みとは報告しません。待ち行列は有限にし、受信側の遅延で音声の送信待ちが上限を超えた場合は当該発話を`failed`、理由を`slow_consumer`として終了します。
-
-**読み上げの中断は、コンパニオンのテキスト生成やTaskの停止を意味しません。** 音声接続の終了や合成・再生の失敗でも対話とTaskは継続します。生成元Messageが失敗・キャンセルした場合は、対応する未終了Speechも終了させ、本文にない続きを生成しません。
-
-## 利用フローと異常系
-
-### 初回設定
-
-1. ホストの初期化後、クライアントは認証・通知購読・`snapshot`取得を行い、初期CompanionのID、各revision、設定可能なアダプター、機能別の未設定理由を取得します。
-2. 設定画面から接続先を登録し、返されたConnection IDに資格情報を登録します。接続確認用の送信範囲を説明して許可し、モデル・声の一覧を取得します。
-3. Companionに会話用・作業用モデル、声、VRM参照、口調を設定します。会話・作業資料・読み上げの送信先と用途を説明してGrantを登録し、必要な接続確認を行います。
-4. 作業フォルダを選択して閲覧・編集の範囲を登録し、そのGrantを`resources`で依頼へ添えます。UIはIDや用途コードの手入力を要求せず、機能名と対象・範囲を示します。音声・描画が未設定でもテキスト対話の準備が整えば開始できます。
-
-### 対話・作業の開始
-
-以下は項目を抜粋した通信例です。`c1`などは説明用IDで、共通の認証・再送ヘッダーは省略しています。
-
-```http
-POST /v1/companions/c1/messages
-Idempotency-Key: req-chat-1
-Content-Type: application/json
-
-{"text":"このフォルダのメモを分類して","resources":[{"kind":"folder_path","environment_id":"env1","grant_id":"g-folder-1","relative_path":"."}]}
+## 5. 停止・取消
+
+会話の生成停止、指定runの停止、コンパニオン配下の実行停止、ホスト終了を明確な対象で区別する。自然言語の「それを止めて」は親が対象を理解するが、UIの明示的停止はモデルを待たない制御経路を使う。
+
+権限解除は許可のrevisionと実行側の適用状態を返す。ホスト管理下の新しい操作を禁止し、外部ハーネスの取消不能な処理や送信済みデータの扱いを隠さない。クライアント切断は停止要求ではない。
+
+## 6. wire契約とサービス構成
+
+wire契約は以下の6つのConnect-RPCサービスで構成される：
+- **`HostService`**: システム状態スナップショット（アクティブ端末の`Activation`を含む）、単一イベントストリーム（`Subscribe`）、コンパニオン・心・記憶の取得・操作（`ListMemories` 含む）。
+- **`ChatService`**: 会話メッセージの送信（`SendMessage`）、停止（`Stop`）、会話履歴取得（`GetHistory`, `GetMessage`）。
+- **`SettingsService`**: 設定、接続（`Connection`の種別oneof: LLM / TTS / STT / Embedding / MCP / ACP）、LLMプロバイダ・モデル一覧、ポリシー・承認ルール（`PolicyRule`）、未決承認要求の確認と回答（`SubmitApproval`）。
+- **`WorkService`**: 作業セッションの一覧（`ListWorks`）、詳細取得（`GetWork`）、直接指示（`SendWork`）、緊急停止（`StopWork`）、クローズ（`CloseWork`）。
+- **`VoiceService`**: 双方向マイク音声入力ストリーム（`StreamAudioInput` / 要HTTP/2）、音声ストリーム購読（`SubscribeAudioOutput`）、再生完了・進捗報告（`ReportPlaybackStatus`）。音声出力の再生担当はアクティブクライアント1台とし、複数クライアントでの同時再生を前提にしない。音声入出力は`client_id`と`activation_revision`で束縛し、端末移動後の旧クライアント由来データを破棄する。ブラウザのConnect-Web等、HTTP/2双方向ストリーミングを利用できない環境向けには、チャンク分割アップロード等の代替経路を将来許容する（AlphaではHTTP/2を必須とする）。
+- **`ClientService`**: クライアント端末の登録（能力・スキーマの宣言）、有効化revisionの管理、端末操作ストリーム（`DeviceStream`）。有効化の変更時は旧クライアントの進行中処理を失効させる。
+
+---
+
+## 7. カノニカル Protobuf 定義 (`host.proto`)
+
+過剰なマトリクス型 Grant（purpose/destination/data_kind/Consent/Availability）を全廃し、純粋な `ApprovalRequest` / `PolicyRule`、7つの役割モデル割当、および音声サービスを統合した正本スキーマ。有限の状態・種別はenum、イベント詳細はoneof、自由形式のデータは`JsonDocument`またはスキーマ付きJSONに限定する。
+
+```protobuf
+syntax = "proto3";
+package ene.host.v1;
+
+message Empty {}
+message Id { string id = 1; }
+message StringList { repeated string values = 1; }
+// スキーマ識別子付きの自由形式JSON。スキーマはクライアントまたはプラグインが提供する。
+message JsonDocument {
+  string schema = 1; // 例: "ene.body.v1", "ene.mind_state.v1"
+  string json = 2;   // schema に適合する JSON text
+}
+message Cursor { string epoch = 1; uint64 seq = 2; }
+message Failure {
+  string code = 1;
+  string message = 2;
+  reserved 3;
+  reserved "details";
+}
+
+message HostHealth {
+  bool ready = 1;
+  bool recovery_required = 2;
+  bool stopping = 3;
+  reserved 4;
+  reserved "credential_cleanup_pending";
+}
+
+message HostCapabilities {
+  JsonDocument limits = 1;
+  repeated string features = 2;
+  repeated string adapters = 3;
+  string transport = 4;
+}
+
+message Snapshot {
+  string server_version = 1;
+  HostHealth health = 2;
+  HostCapabilities capabilities = 3;
+  Settings settings = 4;
+  repeated Companion companions = 5;
+  repeated WorkSession work_sessions = 6;
+  optional string active_companion_id = 7;
+  repeated ApprovalRequest pending_approvals = 8;
+  repeated Client clients = 9;
+  Cursor cursor = 10;
+  repeated PolicyRule policy_rules = 11;
+  repeated Activation activations = 12;  // companion_id ごとの現在のアクティブクライアントとrevision
+}
+
+message SubscribeRequest {
+  string client_id = 1;
+  optional Cursor cursor = 2;
+}
+
+message Notification {
+  Cursor cursor = 1;
+  string kind = 2;
+  optional string client_id = 17;     // 特定クライアント宛て通知の場合（省略時は全端末同報）
+  optional string companion_id = 18;  // コンパニオン関連通知の場合
+  oneof event {
+    HostHealth health = 3;
+    Companion companion = 4;
+    MindUpdated mind_updated = 5;
+    MessageCreated message_created = 6;
+    MessageDelta message_delta = 7;
+    TurnEvent turn_event = 8;
+    WorkEvent work_event = 9;
+    ApprovalRequested approval_requested = 10;
+    PolicyRulesUpdated policy_rules_updated = 11;
+    SettingsUpdated settings_updated = 12;
+    ClientUpdated client_updated = 13;
+    // デバイス操作の状態観測用。実行指示の配送は ClientService.DeviceStream。
+    DeviceOperation device_operation = 14;
+    DeviceOperationResult device_operation_result = 15;
+    HostEvent generic = 16;
+    Snapshot initial_state = 19;
+    ResyncRequired resync_required = 20;
+    Activation activation_updated = 21;  // Activate によるアクティブクライアント/revisionの変更
+  }
+}
+
+message ResyncRequired {
+  string reason = 1;
+  Cursor target_cursor = 2;
+}
+
+// Model Assignments --------------------------------------------------------
+
+message ModelAssignment { string connection_id = 1; string model_id = 2; }
+message ModelAssignments {
+  ModelAssignment companion = 1;              // 頭（対話・ロールプレイ）: 必須
+  ModelAssignment task = 2;                   // 手（実務タスク）: 必須
+  optional ModelAssignment perception = 3;     // 目（知覚要約、未指定時は companion フォールバック）
+  optional ModelAssignment compaction = 4;     // Compaction要約（未指定時は companion フォールバック）
+  optional ModelAssignment consolidation = 5;  // 記憶整理（未指定時は companion フォールバック）
+  optional ModelAssignment decision = 6;       // 権限判定（未指定時は task フォールバック）
+  optional ModelAssignment embedding = 7;      // 埋め込みモデル
+}
+
+message Companion {
+  string id = 1;
+  string name = 2;
+  string mind = 3;
+  JsonDocument body = 4;
+  JsonDocument voice = 5;
+  ModelAssignments assignments = 6;
+  uint64 revision = 7;
+  string created_at = 8;
+  string updated_at = 9;
+  optional string persona = 10;
+  optional string voice_identifier = 11;
+}
+message Companions { repeated Companion items = 1; }
+message AssignmentPatch {
+  oneof change {
+    ModelAssignment set = 1;
+    Empty clear = 2;
+  }
+}
+message CreateCompanionRequest {
+  string name = 1;
+  string mind = 2;
+  JsonDocument body = 3;
+  JsonDocument voice = 4;
+  ModelAssignments assignments = 5;
+  MindProfile profile = 6;
+  optional string persona = 7;
+  optional string voice_identifier = 8;
+}
+message UpdateCompanionRequest {
+  string id = 1;
+  uint64 revision = 2;
+  optional string name = 3;
+  optional string mind = 4;
+  optional JsonDocument body = 5;
+  optional JsonDocument voice = 6;
+  AssignmentPatch companion_assignment = 7;
+  AssignmentPatch task_assignment = 8;
+  AssignmentPatch perception_assignment = 9;
+  AssignmentPatch compaction_assignment = 10;
+  AssignmentPatch consolidation_assignment = 11;
+  AssignmentPatch decision_assignment = 12;
+  AssignmentPatch embedding_assignment = 13;
+  optional string persona = 14;
+  optional string voice_identifier = 15;
+}
+
+// Mind and Memories --------------------------------------------------------
+
+message MindProfile {
+  string core = 1;
+  uint64 revision = 2;
+  repeated string facets = 3;
+  repeated string examples = 4;
+  repeated string background = 5;
+  repeated string expression = 6;
+}
+message MindState {
+  uint64 revision = 1;
+  JsonDocument emotion = 2;
+  JsonDocument relationships = 3;
+  JsonDocument tendencies = 4;
+  JsonDocument concerns = 5;
+  string updated_at = 6;
+}
+message MindIndexStatus {
+  uint32 pending_fts_count = 1;
+  uint32 pending_vector_count = 2;
+  string embedding_model = 3;
+  uint64 model_calls = 4;
+  uint64 total_tokens = 5;
+}
+
+message MindConsolidationStatus {
+  string last_processed_turn_id = 1;
+  uint64 jobs_completed = 2;
+  uint64 model_calls = 3;
+  uint64 input_chars = 4;
+  optional string last_error = 5;
+}
+
+message MindView {
+  string companion_id = 1;
+  MindProfile profile = 2;
+  MindState state = 3;
+  optional MindIndexStatus index = 4;
+  optional MindConsolidationStatus consolidation = 5;
+}
+message MindUpdated {
+  string companion_id = 1;
+  uint64 profile_revision = 2;
+  uint64 state_revision = 3;
+  string updated_at = 4;
+}
+message UpdateMindProfileRequest {
+  string companion_id = 1;
+  uint64 expected_revision = 2;
+  MindProfile profile = 3;
+}
+enum MemoryAction {
+  MEMORY_ACTION_UNSPECIFIED = 0;
+  MEMORY_ACTION_FORGET = 1;
+  MEMORY_ACTION_REMEMBER = 2;
+  MEMORY_ACTION_SHARE = 3;
+  MEMORY_ACTION_UNSHARE = 4;
+}
+message MemoryControlRequest {
+  string companion_id = 1;
+  string memory_id = 2;
+  MemoryAction action = 3;
+}
+message MemoryControlResult {
+  string memory_id = 1;
+  uint32 importance = 2;
+  repeated string audiences = 3;
+  uint64 revision = 4;
+}
+
+message ListMemoriesRequest {
+  string companion_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+}
+message MemoryItem {
+  string id = 1;
+  string owner = 2;
+  repeated string audiences = 3;
+  string content = 4;
+  uint32 importance = 5;
+  optional string occurred_at = 6;
+  string recorded_at = 7;
+  optional string last_accessed_at = 8;
+  uint64 revision = 9;
+}
+message Memories {
+  repeated MemoryItem items = 1;
+  optional string next_cursor = 2;
+}
+
+// Chat ---------------------------------------------------------------------
+
+message SendMessageRequest {
+  string companion_id = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+}
+message Acceptance { string request_id = 1; }
+message StopRequest { string companion_id = 1; }
+enum MessageRole {
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  MESSAGE_ROLE_USER = 1;
+  MESSAGE_ROLE_ASSISTANT = 2;
+  MESSAGE_ROLE_AGENT = 3;
+  MESSAGE_ROLE_CONTEXT = 4;
+}
+enum TurnStatus {
+  TURN_STATUS_UNSPECIFIED = 0;
+  TURN_STATUS_STREAMING = 1;
+  TURN_STATUS_ANSWERED = 2;
+  TURN_STATUS_STOPPED = 3;
+  TURN_STATUS_FAILED = 4;
+}
+message Message {
+  string id = 1;
+  string companion_id = 2;
+  string work_id = 3;
+  MessageRole role = 4;
+  string text = 5;
+  string created_at = 7;
+  uint64 sequence = 8;
+  optional string request_id = 9;
+  string author = 12;
+}
+message MessageCreated { Message message = 1; }
+message MessageDelta {
+  string companion_id = 1;
+  string stream_id = 2;
+  string delta = 3;
+}
+message TurnEvent {
+  string companion_id = 1;
+  string turn_id = 2;
+  TurnStatus status = 3;
+  optional Failure failure = 4;
+}
+message HistoryRequest {
+  string companion_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+  optional bool include_context = 4;
+}
+message History { repeated Message items = 1; }
+message MessageRequest { string companion_id = 1; string message_id = 2; }
+
+// Work ---------------------------------------------------------------------
+
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_STARTING = 1;
+  RUN_STATUS_RUNNING = 2;
+  RUN_STATUS_WAITING_INPUT = 3;              // WorkInquiry または ApprovalRequest 待ち
+  RUN_STATUS_CANCELLING = 4;
+  RUN_STATUS_COMPLETED = 5;
+  RUN_STATUS_CANCELLED = 6;
+  RUN_STATUS_CANCELLATION_UNCONFIRMED = 7;   // 停止未確認・結果不明
+  RUN_STATUS_FAILED = 8;
+}
+enum WorkStatus {
+  WORK_STATUS_UNSPECIFIED = 0;
+  WORK_STATUS_IDLE = 1;
+  WORK_STATUS_ACTIVE = 2;
+  WORK_STATUS_CLOSED = 3;
+}
+enum WorkEventKind {
+  WORK_EVENT_KIND_UNSPECIFIED = 0;
+  WORK_EVENT_KIND_STATUS_CHANGED = 1;
+  WORK_EVENT_KIND_RUN_STARTED = 2;
+  WORK_EVENT_KIND_RUN_FINISHED = 3;
+  WORK_EVENT_KIND_INQUIRY_CREATED = 4;
+}
+message WorkSession {
+  string id = 1;
+  string companion_id = 2;
+  string title = 3;
+  WorkStatus status = 4;
+  string created_at = 5;
+  string updated_at = 6;
+  string client_id = 7;             // 発注元クライアント
+  uint64 activation_revision = 8;   // 発注時の有効化revision
+}
+message RunInfo {
+  string run_id = 1;
+  string work_id = 2;
+  RunStatus state = 3;
+  Failure failure = 4;
+  optional string pending_request_id = 5;        // WAITING_INPUT の質問・承認要求
+  optional string cancellation_requested_at = 6; // CANCELLING の開始時刻
+  optional string cancellation_reason = 7;       // CANCELLATION_UNCONFIRMED の理由
+  repeated uint32 unverified_pids = 8;           // CANCELLATION_UNCONFIRMED の残存プロセス
+}
+message WorkInquiry {
+  string request_id = 1;
+  string prompt = 2;
+  repeated string choices = 3;
+}
+message WorkView {
+  WorkSession session = 1;
+  repeated RunInfo runs = 2;
+  repeated WorkInquiry pending_inquiries = 3;
+}
+message WorkViews { repeated WorkView items = 1; }
+message ListWorksRequest { string companion_id = 1; }
+message WorkRequest { string work_id = 1; }
+message StartWorkRequest {
+  string companion_id = 1;
+  string title = 2;
+  string instruction = 3;
+  string client_id = 4;
+}
+message SendWorkRequest {
+  string work_id = 1;
+  string request_key = 2;
+  string text = 3;
+  string client_id = 4;
+  optional string request_id = 5; // 質問への回答束縛用 (会話ツール経由等)
+}
+message AnswerInquiryRequest {
+  string work_id = 1;
+  string request_id = 2; // WorkInquiry.request_id
+  string answer = 3;     // ユーザーの回答テキスト
+  string client_id = 4;
+}
+message WorkAcceptance { string request_id = 1; }
+message StopWorkRequest { string work_id = 1; }
+message WorkEvent {
+  string work_id = 1;
+  string run_id = 2;
+  WorkEventKind kind = 3;  // oneof detail の種別と一致すること
+  oneof detail {
+    WorkStatusChanged status_changed = 4;
+    WorkRunStarted run_started = 5;
+    WorkRunFinished run_finished = 6;
+    WorkInquiryCreated inquiry_created = 7;
+  }
+}
+message WorkStatusChanged { WorkStatus status = 1; }
+message WorkRunStarted {}
+message WorkRunFinished {
+  RunStatus state = 1;
+  optional Failure failure = 2;
+  optional string pending_request_id = 3;
+  optional string cancellation_requested_at = 4;
+  optional string cancellation_reason = 5;
+  repeated uint32 unverified_pids = 6;
+}
+message WorkInquiryCreated { WorkInquiry inquiry = 1; }
+
+// Permissions and Approvals ------------------------------------------------
+
+enum ApprovalStatus {
+  APPROVAL_STATUS_UNSPECIFIED = 0;
+  APPROVAL_STATUS_PENDING = 1;
+  APPROVAL_STATUS_APPROVED = 2;
+  APPROVAL_STATUS_DENIED = 3;
+  APPROVAL_STATUS_EXPIRED = 4;
+}
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVAL_DECISION_APPROVE = 1;
+  APPROVAL_DECISION_ALWAYS_APPROVE = 2;
+  APPROVAL_DECISION_DENY = 3;
+}
+enum PolicyEffect {
+  POLICY_EFFECT_UNSPECIFIED = 0;
+  POLICY_EFFECT_ALLOW = 1;
+  POLICY_EFFECT_DENY = 2;
+  POLICY_EFFECT_CONFIRM = 3;
+}
+message ApprovalRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string run_id = 3;
+  bytes action_payload_hash = 4;
+  string tool_name = 5;
+  string normalized_arguments = 6;  // 正規化済みJSON object text。action_payload_hashの対象
+  ApprovalStatus status = 7;
+  string created_at = 8;
+  optional string client_id = 9;             // 承認を束縛したクライアント（音声・端末能力）
+  optional uint64 activation_revision = 10;  // 束縛時の有効化revision
+  optional string capability = 11;           // device_request の場合の能力名
+}
+message PendingApprovals { repeated ApprovalRequest items = 1; }
+message SubmitApprovalRequest {
+  string request_id = 1;
+  ApprovalDecision decision = 2;
+  optional string reason = 3;
+}
+message SubmitApprovalResponse {
+  bool acknowledged = 1;
+  ApprovalStatus status = 2;
+}
+message ApprovalRequested { ApprovalRequest request = 1; }
+
+message PolicyRule {
+  string id = 1;
+  string tool_name = 2;
+  string pattern = 3;
+  PolicyEffect effect = 4;
+  string created_at = 5;
+}
+message PolicyRules { repeated PolicyRule items = 1; }
+message UpdatePolicyRulesRequest {
+  repeated PolicyRule add_or_update = 1;
+  repeated string remove_ids = 2;
+}
+message PolicyRulesUpdated { repeated PolicyRule rules = 1; }
+
+// Settings & Connections ---------------------------------------------------
+
+enum ConnectionKind {
+  CONNECTION_KIND_UNSPECIFIED = 0;
+  CONNECTION_KIND_LLM = 1;
+  CONNECTION_KIND_TTS = 2;
+  CONNECTION_KIND_STT = 3;
+  CONNECTION_KIND_EMBEDDING = 4;
+  CONNECTION_KIND_MCP = 5;
+  CONNECTION_KIND_ACP = 6;
+}
+
+// 全接続種別に共通のヘッダー。種別固有の設定は ConnectionConfig の oneof で表す。
+message Connection {
+  string id = 1;
+  string name = 2;
+  bool enabled = 3;
+  string credential_state = 4;
+  uint64 revision = 5;
+  ConnectionKind kind = 6;  // 有効な config と一致すること
+  ConnectionCheck last_check = 7;
+  ConnectionConfig config = 8;
+}
+message ConnectionConfig {
+  oneof config {
+    LlmConnection llm = 1;
+    TtsConnection tts = 2;
+    SttConnection stt = 3;
+    EmbeddingConnection embedding = 4;
+    McpConnection mcp = 5;
+    AcpConnection acp = 6;
+  }
+}
+message ConnectionEndpoint {
+  string adapter = 1;
+  string endpoint = 2;
+  string options_schema = 3; // JSON Schema object text
+  string options = 4;        // options_schema に適合する JSON object text
+}
+message LlmConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string model_ids = 2;
+}
+message TtsConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string voice_ids = 2;
+}
+message SttConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string language_hints = 2;
+}
+message EmbeddingConnection {
+  ConnectionEndpoint endpoint = 1;
+  string model_id = 2;
+  uint32 dimensions = 3;
+}
+message McpConnection {
+  ConnectionEndpoint endpoint = 1;
+  repeated string allowed_tools = 2;
+}
+message AcpConnection {
+  ConnectionEndpoint endpoint = 1;
+  string command = 2;
+  repeated string args = 3;
+}
+message ConnectionCheck {
+  bool healthy = 1;
+  string checked_at = 2;
+  optional Failure failure = 3;
+  repeated string capabilities = 4;
+  repeated string resources = 5;
+}
+message Settings {
+  uint64 revision = 1;
+  repeated Connection connections = 2;
+  string updated_at = 3;
+}
+message ConnectionInput {
+  string id = 1;
+  string name = 2;
+  bool enabled = 3;
+  uint64 expected_revision = 4;
+  ConnectionKind kind = 5;  // config の oneof と一致すること
+  ConnectionConfig config = 6;
+}
+message UpdateSettingsRequest {
+  uint64 expected_revision = 1;
+  repeated ConnectionInput connections = 2;
+}
+message SettingsUpdated { Settings settings = 1; }
+
+message CredentialRequest {
+  string id = 1;
+  optional string secret = 2;
+  optional string source = 3;
+}
+message CredentialResult { string credential_state = 1; }
+message CheckRequest {
+  string id = 1;                    // Connection.id
+  string request_key = 2;
+  optional string companion_id = 3;
+  optional string resource_id = 4;  // モデル・音声・ツール等の種別固有ID
+}
+message CheckResult {
+  string request_id = 1;
+  bool success = 2;
+  optional string resource_id = 3;
+  ConnectionCheck check = 4;
+}
+message FieldSource {
+  string key = 1;
+  string value = 2;
+}
+// LLMモデルのメタデータ。
+message ModelMetadata {
+  string source = 1;
+  string scope = 2;
+  optional uint64 context_window = 3;
+  optional uint64 max_input_tokens = 4;
+  optional uint64 max_output_tokens = 5;
+  StringList input_modalities = 6;
+  StringList output_modalities = 7;
+  StringList supported_parameters = 8;
+  repeated FieldSource field_sources = 9;
+}
+message Model {
+  string id = 1;
+  string name = 2;
+  ModelMetadata metadata = 3;
+}
+message Models { repeated Model items = 1; }
+message ModelsRequest {
+  string id = 1;
+  optional string companion_id = 2;
+}
+message SettingField {
+  string key = 1;
+  string label = 2;
+  string kind = 3;
+  bool required = 4;
+  repeated string choices = 5;
+}
+// LLM接続のプロバイダカタログ。TTS/STT/MCP/ACPはConnection.configのoneofを使う。
+message LlmProviderCapabilities {
+  bool streaming_text = 1;
+  bool model_list = 2;
+}
+message LlmProvider {
+  string id = 1;
+  string name = 2;
+  string adapter = 3;
+  string endpoint = 4;
+  repeated SettingField settings = 5;
+  bool requires_credentials = 6;
+  optional string environment_variable = 7;
+}
+message LlmProviders { repeated LlmProvider items = 1; }
+
+// Voice Service ------------------------------------------------------------
+
+message AudioInputChunk {
+  string client_id = 1;
+  bytes pcm_data = 2; // 24kHz / 16kHz 16-bit mono PCM
+  uint32 sample_rate = 3;
+  bool is_companion_speaking = 4;
+  uint64 activation_revision = 5; // 送信時の有効化revision
+}
+message TranscriptionEvent {
+  string transcription_id = 1;
+  string text = 2;
+  bool is_final = 3;
+  bool is_speaking = 4;
+}
+message SubscribeAudioRequest {
+  string client_id = 1;
+  uint64 activation_revision = 2; // 購読時の有効化revision
+}
+message AudioOutputEvent {
+  oneof event {
+    AudioChunkEnvelope chunk = 1;
+    FlushControl flush = 2;
+    SentenceSkipped skipped = 3;
+    UtteranceFinished finished = 4;
+  }
+}
+message AudioChunkEnvelope {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 sequence_no = 3;
+  bytes pcm_data = 4;
+  uint32 sample_rate = 5;
+  bool is_final_chunk = 6;
+}
+enum FlushReason {
+  FLUSH_REASON_UNSPECIFIED = 0;
+  FLUSH_REASON_BARGE_IN = 1;
+  FLUSH_REASON_CANCELLED = 2;
+  FLUSH_REASON_CLIENT_MOVED = 3;
+}
+message FlushControl {
+  string utterance_id = 1;
+  uint64 flush_generation_id = 2;
+  FlushReason reason = 3;
+}
+message SentenceSkipped {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 sequence_no = 3;
+  string reason = 4;
+}
+message UtteranceFinished {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  uint32 total_sentences = 3;
+}
+message PlaybackStatusReport {
+  string utterance_id = 1;
+  uint64 generation_id = 2;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    PLAYBACK_COMPLETED = 1;
+    PLAYBACK_INTERRUPTED = 2;
+    PLAYBACK_FAILED = 3;
+  }
+  Status status = 3;
+  uint32 completed_sentence_count = 4;
+  repeated uint32 played_sequence_nos = 5;
+  repeated uint32 skipped_sequence_nos = 6;
+  uint64 completed_pcm_bytes = 7;
+  string client_id = 8;
+  uint64 activation_revision = 9; // 報告対象の発話を所有した有効化revision
+}
+message ReportPlaybackStatusResponse { bool acknowledged = 1; }
+
+// Client Service -----------------------------------------------------------
+
+enum CapabilityApproval {
+  CAPABILITY_APPROVAL_UNSPECIFIED = 0; // ホストの既定ポリシーに従う。未知の能力はCONFIRM相当
+  CAPABILITY_APPROVAL_AUTO = 1;     // ポリシーで許可されていれば自動実行
+  CAPABILITY_APPROVAL_CONFIRM = 2;  // 操作ごとに Stage::Gate と承認を必須にする
+}
+message ClientCapabilitySpec {
+  string name = 1;              // 能力名（例: "body.motion"）
+  string tool_name = 2;         // 親エージェントへ公開するツール名。空なら device_request のみ
+  string description = 3;       // モデル向けの説明
+  string input_schema = 4;      // JSON Schema object text
+  repeated string presets = 5;  // 利用可能なプリセット名（モーション・表情等）
+  CapabilityApproval approval = 6;
+  string approval_target = 7;   // 承認カードに表示する対象説明のテンプレート
+  string output_schema = 8;     // JSON Schema object text（結果がJSONの場合）
+}
+message Client {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;          // 宣言する能力名の一覧
+  repeated string granted_capabilities = 5;  // ホストが許可した能力名。操作単位の承認を意味しない
+  uint64 revision = 6;
+  string last_seen = 7;
+  bool connected = 8;
+  repeated string active_companions = 9;
+  repeated ClientCapabilitySpec capability_specs = 10;
+}
+message Clients { repeated Client items = 1; }
+message RegisterClientRequest {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;  // 能力名の一覧
+  uint64 expected_revision = 5;
+  repeated ClientCapabilitySpec capability_specs = 6;  // capabilities の各能力の仕様
+}
+message SetCapabilitiesRequest {
+  string client_id = 1;
+  repeated string capabilities = 2;
+  repeated string granted_capabilities = 3;  // ホストの許可判断の結果。クライアントからの自己付与は受け付けない
+  uint64 revision = 4;
+  repeated ClientCapabilitySpec capability_specs = 5;
+}
+message ActivationRequest {
+  string companion_id = 1;
+  string client_id = 2;
+  uint64 expected_revision = 3;
+  bool release = 4;
+}
+message Activation {
+  string companion_id = 1;
+  optional string client_id = 2;
+  uint64 revision = 3; // 新しいactivation_revision
+}
+message ClientUpdated { Client client = 1; }
+enum DeviceOperationStatus {
+  DEVICE_OPERATION_STATUS_UNSPECIFIED = 0;
+  DEVICE_OPERATION_STATUS_PENDING = 1;
+  DEVICE_OPERATION_STATUS_DISPATCHED = 2;
+  DEVICE_OPERATION_STATUS_COMPLETED = 3;
+  DEVICE_OPERATION_STATUS_FAILED = 4;
+  DEVICE_OPERATION_STATUS_UNCERTAIN = 5;
+}
+message DeviceOperation {
+  string operation_id = 1;  // 再送・重複排除に使う冪等キー
+  string capability = 2;    // ClientCapabilitySpec.name
+  string input = 3;         // input_schema に適合する JSON object text
+  string subscription_id = 4;
+  string client_id = 5;             // 受付時に束縛した対象クライアント
+  uint64 activation_revision = 6;   // 受付時の有効化revision
+  optional string work_id = 7;      // 手からの操作の場合のWorkSession
+}
+message DeviceReady { string subscription_id = 1; }
+message DeviceEvent {
+  oneof event {
+    DeviceReady ready = 1;
+    DeviceOperation operation = 2;
+  }
+}
+message DeviceOperationResult {
+  string client_id = 1;
+  string operation_id = 2;
+  bool success = 3;
+  string output = 4; // output_schema に適合する JSON object text
+  optional Failure failure = 5;
+  uint64 activation_revision = 6; // 結果を返すクライアントの有効化revision
+}
+message DeviceOperationState {
+  string operation_id = 1;
+  string client_id = 2;
+  DeviceOperationStatus status = 3;
+  optional DeviceOperationResult result = 4;
+}
+message HostEvent {
+  string kind = 1;
+  JsonDocument payload = 2;
+}
+
+// Perception (Eyes) --------------------------------------------------------
+
+message PerceptionEvent {
+  string client_id = 1;
+  string timestamp = 2;
+  uint64 activation_revision = 6; // 送信時の有効化revision
+  oneof event {
+    ActiveWindowChanged active_window = 3;
+    UserActivityState user_activity = 4;
+    PerceptionSummary perception_summary = 5;
+  }
+}
+
+message ActiveWindowChanged {
+  string title = 1;
+  string app_id = 2;
+  optional string url = 3;
+}
+
+message UserActivityState {
+  bool is_active = 1;
+  uint64 idle_seconds = 2;
+}
+
+message PerceptionSummary {
+  string summary = 1;
+  repeated string tags = 2;
+}
+
+// Service RPCs -------------------------------------------------------------
+
+service HostService {
+  rpc GetSnapshot(Empty) returns (Snapshot);
+  rpc Subscribe(SubscribeRequest) returns (stream Notification);
+  rpc ListCompanions(Empty) returns (Companions);
+  rpc GetCompanion(Id) returns (Companion);
+  rpc CreateCompanion(CreateCompanionRequest) returns (Companion);
+  rpc UpdateCompanion(UpdateCompanionRequest) returns (Companion);
+  rpc DeleteCompanion(Id) returns (Empty);
+  rpc GetMind(Id) returns (MindView);
+  rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
+  rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
+  rpc ListMemories(ListMemoriesRequest) returns (Memories);
+}
+
+service ChatService {
+  rpc SendMessage(SendMessageRequest) returns (Acceptance);
+  rpc Stop(StopRequest) returns (Empty);
+  rpc GetHistory(HistoryRequest) returns (History);
+  rpc GetMessage(MessageRequest) returns (Message);
+}
+
+service SettingsService {
+  rpc GetSettings(Empty) returns (Settings);
+  rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
+  rpc ListPendingApprovals(Empty) returns (PendingApprovals);
+  rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
+  rpc ListPolicyRules(Empty) returns (PolicyRules);
+  rpc UpdatePolicyRules(UpdatePolicyRulesRequest) returns (PolicyRules);
+  // LLM接続のプロバイダカタログ。TTS/STT/MCP/ACPはConnectionのoneofで扱う。
+  rpc ListProviders(Empty) returns (LlmProviders);
+  // LLM接続のモデル一覧。
+  rpc ListModels(ModelsRequest) returns (Models);
+  rpc RegisterCredentials(CredentialRequest) returns (CredentialResult);
+  rpc RevokeCredentials(Id) returns (Empty);
+  // 接続種別（LLM/TTS/STT/Embedding/MCP/ACP）に共通の接続チェック。
+  rpc CheckConnection(CheckRequest) returns (CheckResult);
+}
+
+service WorkService {
+  rpc ListWorks(ListWorksRequest) returns (WorkViews);
+  rpc GetWork(WorkRequest) returns (WorkView);
+  // StartWork時のclient_idとactivation_revisionをWorkSessionへ束縛する。
+  rpc StartWork(StartWorkRequest) returns (WorkSession);
+  rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
+  rpc AnswerInquiry(AnswerInquiryRequest) returns (WorkAcceptance);
+  rpc StopWork(StopWorkRequest) returns (Empty);
+  rpc CloseWork(WorkRequest) returns (Empty);
+}
+
+service VoiceService {
+  rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent); // HTTP/2
+  rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
+  rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
+}
+
+service ClientService {
+  // クライアントは能力名と ClientCapabilitySpec を宣言して登録する。
+  rpc RegisterClient(RegisterClientRequest) returns (Client);
+  rpc List(Empty) returns (Clients);
+  // アクティブクライアントを切り替える。成功時はNotification.activation_updatedを配信し、旧クライアントの進行中処理を失効させる。
+  rpc Activate(ActivationRequest) returns (Activation);
+  rpc SetCapabilities(SetCapabilitiesRequest) returns (Client);
+  // ホスト -> クライアントの操作ストリーム。未配送の操作は再接続時に再送される。
+  rpc DeviceStream(Id) returns (stream DeviceEvent);
+  rpc ReportPerception(PerceptionEvent) returns (Empty);
+  // クライアントは操作結果を返す。完了済み操作の再送は同じ状態を返す。
+  rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
+  rpc GetOperation(Id) returns (DeviceOperationState);
+}
 ```
-
-```json
-{"request_id":"r-chat-1","message_id":"m-user-1","response_message_id":"m-companion-1"}
-```
-
-上記の応答は`202`です。コンパニオンが依頼を整理し、必要なら通常の対話で質問します。確定した指示で所属Taskを起動した後、`task.updated`の`data`にTaskの`id: t1`、`companion_id: c1`、`status: running`を含めて通知します。Task実行中の雑談も同じメッセージAPIで受け付けます。
-
-この直後、生成開始前にホストが停止した場合も、再起動後の`GET /v1/companions/c1/messages/m-companion-1`で`status: failed`、`failure.code: host_interrupted`を確認できます。同じ`Idempotency-Key`で再送すると同じ2つのMessage IDが返り、返答やTaskを追加生成しません。ユーザーが改めて依頼する場合は新しいキーを使います。
-
-### Taskからの相談
-
-Taskが判断を求めると、親コンパニオンが相談Messageを作り、`question.updated`と`task.updated`で`q1`の作成と`waiting_for_input`を伝えます。ユーザーは同じ対話画面から回答します。
-
-```http
-POST /v1/companions/c1/messages
-Idempotency-Key: req-answer-1
-Content-Type: application/json
-
-{"text":"分類名は日本語でお願いします","question_id":"q1"}
-```
-
-回答はコンパニオンが扱い、対象Taskへ伝えます。通常の会話にはこの`question_id`を付けません。権限相談ではUIに`grant_proposal`を表示し、同意した対象・範囲と`question_id`を`POST /v1/grants`または`PATCH /v1/grants/{grant_id}`で送ります。停止受付時またはTask終了時に未解決の相談を取り消し、遅れて届いた回答・許可操作は`question_closed`で拒否します。
-
-編集を必要とする`q-permission-1`に読み取りのみのGrantを登録した場合、応答の`questions`は`status: open`と編集許可の不足を示します。同じ相談IDを添えてそのGrantを`access: edit`へ更新すると、ホストが残る条件も確認して`resolved`へ移します。設定画面から同じ許可を追加した場合も同じ結果になり、ユーザーに対話画面で再承認させません。
-
-### 停止・失敗・復旧
-
-```http
-POST /v1/companions/c1/tasks/t1/cancel
-Idempotency-Key: req-cancel-1
-Content-Type: application/json
-
-{"reason":"ユーザーによる停止"}
-```
-
-```json
-{"request_id":"r-cancel-1","task_id":"t1","status":"stopping"}
-```
-
-`202`を返す前に、新しい操作の開始を実行側で禁止します。実行中操作の成否と適用済み範囲を確認して報告を保存し、`cancelled`を通知します。停止と完了が競合してすでに終了していた場合は、その終了状態を保持します。
-
-| Taskの状態 | 意味・遷移 |
-| --- | --- |
-| `running` | 所属サブエージェントが実行中。相談で`waiting_for_input`、停止で`stopping`、結果確定で`completed`または`failed`へ |
-| `waiting_for_input` | 判断・許可・回答伝達待ち。依存しない許可済み工程は進行可能。回答条件の充足と伝達で`running`、停止で`stopping`、拒否・伝達失敗などで`failed`へ |
-| `stopping` | 新しい操作を開始せず、実行中操作と変更範囲を確認。確認後に`cancelled`、成否確認を妨げる障害は`failed`へ |
-| `completed` | 結果を検証し、依頼の完了と報告を保存済み |
-| `failed` | 接続・操作・検証の失敗で終了。理由と適用済み・未達・成否不明の範囲を保持 |
-| `cancelled` | 停止制御を終えて終了。適用済み変更は残り、一時停止・再開は提供しない |
-
-一般的な方針変更は、必要な相談への補足を除き、停止して新しい依頼として扱います。終了状態からの再開はありません。ホスト再起動時の未終了Taskは`failed`、`failure.code: host_interrupted`とし、未確定操作を自動再試行しません。未完了のMessageは、本文が空の`queued`も含めて`failed`、`failure.code: host_interrupted`とし、部分本文と元の依頼との対応を残します。所属Taskの未解決Questionも`cancelled`へ移します。これらの復旧処理をAPIの受付開始前に確定し、コンパニオンの応答生成や相談回答の伝達を自動でやり直しません。
-
-最終報告は同じコンパニオンから伝え、Task詳細にも保持します。`report`には`summary`、`completed`（達成内容）、`unfinished`（未達内容）、`changes`を含めます。各変更は`operation_id`、`environment_id`、`grant_id`、変更前後の相対パス、`outcome`（`applied` / `not_applied` / `unknown`）、存在する場合の`backup_ref`を持ちます。
-
-変更記録には操作時点の許可ルートとGrantのrevisionも保持し、許可解除後でも相対パスの基点と変更対象を特定できます。この履歴情報は新しい操作の許可には使いません。最終報告Messageの生成に失敗してもTaskの検証済み結果を失わず、UIはTask詳細の保存済み報告を同じ対話画面から確認できるようにします。
-
-手動復旧では、ホスト上の専用復旧領域で`backup_ref`に対応する変更前コピーと配置記録を確認し、現在の内容・配置が記録された変更後の状態と一致するか照合します。外部編集や名前の衝突があれば黙って上書きしません。APIは復旧領域の所在環境・ホスト上の位置とバックアップの対応情報をTask詳細に返しますが、自動復旧や作業ファイルの他端末への同期を提供しません。
-
-### 再接続
-
-```text
-通知接続を登録 → ready(connection_id=evt1, cursor={epoch: ep1, seq: 100})
-GET /v1/snapshot?connection_id=evt1 → cursor={epoch: ep1, seq: 104} と状態
-一時保存したseq=101〜104を破棄 → seq=105から順に適用
-```
-
-初回接続も同じ手順です。取得後にTaskが終了しても、終了通知と保存された報告を確認できます。ホストの再起動で`epoch`が変われば、旧カーソルを使わず再取得します。QuestionはIDで同じ相談を更新し、再接続のたびに新しい相談として重複通知しません。
-
-### 生成途中からの読み上げ
-
-通知接続の`message.started`を受け、読み上げがオンなら音声接続へ要求します。下記の`pcm_s16le`・24kHzは通信例の値で、採用コーデックやサンプルレートの決定を意味しません。
-
-前の返答を再生中なら次のMessage IDを端末内で待機させ、再生完了後に要求します。新しい通知だけを理由に前の発話を中断しません。読み上げオフ・切断でこの待機列も破棄し、再接続時に復元しません。`speech.finished`は配送完了なので、次の音声との再生順は端末側でも管理します。
-
-```json
-{"type":"speech.start","request_id":"req-speech-1","message_id":"m-companion-1","accepted_formats":["pcm_s16le"]}
-```
-
-```json
-{"type":"speech.started","request_id":"req-speech-1","speech_id":"s1","companion_id":"c1","message_id":"m-companion-1","format":"pcm_s16le","sample_rate":24000,"channels":1}
-```
-
-```text
-message.deltaで本文が増える間に、文・句ごとの合成を開始
-音声接続：バイナリ(speech_id=s1, chunk_seq=0, start_sample=0, 音声データ) → 順次再生
-音声接続：バイナリ(speech_id=s1, chunk_seq=1, start_sample=前チャンクの終了位置, 音声データ)
-通知接続：message.updated(status=completed) → テキストを確定
-音声接続：speech.finished(speech_id=s1, last_chunk_seq=1) → 残りの再生を終える
-```
-
-配信中の中断ではクライアントが`s1`を無効化して再生バッファを破棄し、音声接続に`{"type":"speech.cancel","request_id":"req-speech-1"}`を送ります。ホストは`speech.cancelled`を返し、クライアントは遅着チャンクを再生しません。配送終了後の中断も端末の再生バッファを破棄します。Taskを止める場合は別途HTTPのTask停止を使います。音声の連番は発話内だけの値であり、通知用の`{epoch, seq}`と混同しません。
-
-## 将来拡張・検証項目
-
-### docsの想定・UXとの対応
-
-| 想定する体験・根拠 | MVPのAPIで守ること | 将来へ残す範囲 |
-| --- | --- | --- |
-| [体・声・心を設定](features/character/create.md)し、[口調を反映して対話](features/chat/character.md)する | 初期Companionを取得して段階的に設定できる。モデル・音声・描画の失敗を分離する | キャラクターパッケージ、感情・成長は別の状態・機能として追加 |
-| [用途に応じてAIを選ぶ](features/settings/models.md) | 接続はホスト共通、会話用・作業用モデル割当はCompanionごと。設定変更でも会話とTask履歴を保持 | 用途やアダプターを対応能力として追加し、既存用途の意味を変更しない |
-| [作業中も同じ相手と話し、必要な相談だけに答える](features/task/request.md) | 単一の対話窓口、独立したTask、明示的な相談ID、構造化した対象参照。停止は推論を待たない | 任意の方針変更・一時停止・再開はMVPでは提供せず、停止後の新規依頼へ案内 |
-| [権限をまとめて確認し、いつでも変更する](features/settings/permissions.md) | 機能単位の説明、既存許可の再利用、部分許可でも相談を保持、設定画面の変更も相談へ反映 | 新しい操作対象・送信用途にも同じ実行時検証を適用 |
-| [切断しても作業を続け、結果を引き継ぐ](features/hosting/README.md) | Taskと音声接続の寿命を分離し、相談・結果を保存する。再接続で重複実行・自動読み上げをしない | 複数端末の認証、コンパニオンの明示的な移動、端末不在時の制御 |
-| [声を使えないときもテキストで対話](features/voice/README.md)する | 読み上げは端末設定。音声失敗が対話を止めず、返答順に再生する | マイク入力、複数コンパニオンの発話調停 |
-| [記憶](features/memory/README.md)・[スケジュール](features/autonomy/schedule.md)・[拡張機能](features/extensions/README.md)を育てる | 履歴・初期人格・Taskの起点・権限を別の概念として保持し、内部ライブラリ型を露出しない | 専用リソースと能力を追加する。履歴保存を長期記憶、接続設定を拡張導入と扱わない |
-
-### 将来のために維持する境界
-
-- コンパニオンごとの会話・モデル割当・許可、Taskの所有関係、所在環境を識別します。MVPの1体・1件という制限はホストの対応能力として返し、型やパスに単一状態として埋め込みません。上限を増やす際には作業対象の競合制御を追加し、数値の変更だけで並行実行を有効にしません。
-- リモート運用時のTLS・端末認証、Web向けの認証経路、端末内操作の提供は別途設計します。接続許可と操作権限を分離し、認証方式を変えても対話・Task・発話の意味を維持します。
-- 複数端末へ拡張するときは、認証主体、永続的な端末ID、接続セッション、コンパニオンのアクティブな表示先を分離します。履歴閲覧や通知購読だけで表示先を移さず、ユーザーの明示的な呼び出しで移動させます。音声接続ごとに1発話という制約だけでは画面全体の同時発話を防げないため、[既存の調停ルール](features/hosting/README.md#複数コンパニオンの常駐と調停ルール)に従う表示先・発話の調停を追加してから有効化します。
-- Taskの`origin.kind`、資料参照の`kind`、接続アダプターとその対応能力を拡張点にします。スケジュール等の起点は架空のユーザーMessageへ変換せず、実際に実装する段階で追加します。未知の種類を理解できないクライアントは閲覧可能な共通情報だけを表示し、対応する制御は行いません。新しい必須動作は能力の確認やAPIバージョンで区別します。
-- Rig、SQLite、音声エンジン、描画プロセスの内部型・制御を通信型へ直接露出させません。記憶、スケジュール、拡張機能のAPIは実際に対象へ加える段階で定義します。
-- `mind`は配布可能な初期人格の設定です。将来の個別記憶・成長・関係状態・資格情報は別リソースとして保持し、パッケージへの書き出しやモデル交換で混入・消去しません。外部ハーネスを追加する場合も権限・停止・結果記録の強制をホストの責務として維持します。
-
-### 実装後の受け入れ項目
-
-| 領域 | 検証するシナリオ・期待結果 |
-| --- | --- |
-| 初回設定 | 空のDBからAPIだけで接続・モデル・体・声・心・許可を設定できる。初期化途中の停止や再接続でCompanionを重複作成しない。音声・描画が未設定でもテキスト対話を開始できる |
-| 所属・対話 | Taskの開始・相談・報告が親コンパニオンを通る。Task実行中も雑談でき、通常の発言を作業指示や相談回答に混入しない |
-| 受付直後の停止 | 保存前・保存後202返却前・202返却後生成前・生成中でホストを停止する。保存済みなら同じキーで同じMessage IDを返し、返答がhost_interruptedになり、推論・Taskを再実行しない。保存前なら再送で初めて受け付ける |
-| 再送 | 同時再送と再起動後の再送で、Message、Task起動、許可、疎通確認を重複実行しない。異なる内容のキー再利用を拒否する |
-| 相談・部分許可 | 編集が必要な相談への読み取り許可、複数条件の一部だけの許可では相談がopenのままになる。残りの許可を対話・設定画面のどちらから登録しても1回だけ解決する。拒否・回答の競合、親への伝達失敗、停止との競合でも待ち状態を残さない |
-| 設定・対象参照 | モデル変更でも履歴を失わず、実行中Taskへ新設定を混ぜない。複数の許可フォルダから選んだ対象が正しく渡り、別コンパニオンのGrantや無効化済みの送信許可を利用できない |
-| 停止・許可 | AI応答中や音声配信中のHTTP停止・権限解除について、要求から受付応答までと実行停止までの時間を測る。受付後に新しい関連操作・送信が始まらない |
-| 異常・復旧 | 外部編集、名前の衝突、保存・バックアップ失敗、成否不明の操作を完了扱いにせず、実際の変更と報告が一致し、変更前の内容・配置を手動復旧できる |
-| 再接続 | スナップショット取得中の更新、欠番、遅い受信側、ホスト再起動から再同期できる。未解決の相談と報告を失わず、Taskを自動再開しない |
-| 履歴・結果 | 最新ページから過去へ欠落なく遡り、50件より前の未終了Messageも同期できる。Grant解除後も結果の場所を特定でき、最終報告の生成失敗でも保存済み結果を確認できる |
-| 音声の開始 | メッセージ受付から最初の実再生まで、テキスト区切り確定から最初の音声チャンクまでの時間を測る。初回と準備済み状態、短文と長文を区別する |
-| 音声の連続性 | 合成と配信・再生を並行させ、途切れの回数・時間、文・句の境界の自然さ、バッファ量を測る。全文完成待ちになっていないことを確認する |
-| 音声の中断 | 操作から無音になるまでの時間を測り、開始前取消、遅着音声、形式不一致、合成失敗、切断・再接続でも旧発話を再生しない |
-| 認証・秘密情報 | 認証なしのHTTP・WebSocketを拒否し、秘密情報を応答・URL・ログへ露出させず、未許可の接続先へフォールバックしない |
-| 互換性 | 未知の応答項目・通知・状態・種類を受けても正常な既知機能を維持し、未知の権限を許可済みと扱わない。ホスト未対応機能やクライアント未対応の制御をUIで有効化しない |
-
-音声エンジン、アダプター、コーデック、バイナリヘッダー、チャンク長、バッファ上限、遅延の数値基準は、上記の測定と接続検証で確定します。対応能力の記載や公式APIの存在を、eneでの合成・配信・再生の動作確認と同一視しません。MVPの[機能完成条件と実利用による検証](mvp.md#6-完了条件)は別に満たす必要があります。

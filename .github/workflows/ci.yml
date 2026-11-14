@@ -5,65 +5,68 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+defaults:
+  run:
+    shell: bash
 
 jobs:
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: "1.73.0"
+          github_token: ${{ github.token }}
+
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          targets: wasm32-unknown-unknown
-      - name: Install Linux dependencies
+          cache-on-failure: true
+          cache-key: v2
+
+      - name: Linux checks
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Build Wasm plugin
-        run: cargo build --release --locked -p ene-openrouter-wasm -p ene-window-reaction-wasm --target wasm32-unknown-unknown
-      - uses: actions/setup-node@v4
+          # clang and lld are required by .cargo/config.toml's Linux linker.
+          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libvulkan-dev mesa-vulkan-drivers libvulkan1
+          cargo fmt --all -- --check
+          cargo clippy --profile ci --locked -p ene-plugin -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown -- -D warnings
+          cargo check --profile ci --locked -p ene-rpc --target wasm32-unknown-unknown --all-features
+
+      - name: Build test Wasm plugin
+        run: |
+          cargo build --release --locked -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown
+
+      - name: Clippy and tests
+        run: |
+          cargo clippy --profile ci --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --profile ci --workspace --all-features --locked
+
+      - uses: actions/setup-node@v7
+        if: runner.os == 'Linux'
         with:
           node-version: 24
-      - name: Test Wasm plugins
+          package-manager-cache: false
+
+      - name: Wasm and GPU tests
+        if: runner.os == 'Linux'
         run: |
           npm install --no-save --package-lock=false @extism/extism@2.0.0-rc13
           node examples/plugins/openrouter-wasm/test.cjs target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm
-          node examples/plugins/window-reaction-wasm/test.cjs target/wasm32-unknown-unknown/release/ene_window_reaction_wasm.wasm
-      - name: Tests
-        run: cargo test --workspace --all-features --locked
-      - name: Check Wasm RPC messages
-        if: runner.os == 'Linux'
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo check -p ene-rpc --target wasm32-unknown-unknown --all-features --locked
-
-  gpu-smoke:
-    name: GPU smoke (lavapipe)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - name: Install software Vulkan
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libfontconfig1-dev libvulkan1 mesa-vulkan-drivers
-      - name: MToon GPU smoke
-        env:
-          WGPU_BACKEND: vulkan
-        run: |
-          cargo test -p ene-vrm material::tests --locked -- --ignored --nocapture --test-threads=1
+          WGPU_BACKEND=vulkan cargo test --profile ci -p ene-vrm --locked --lib material::tests -- --ignored --nocapture --test-threads=1

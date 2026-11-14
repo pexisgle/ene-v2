@@ -1,6 +1,6 @@
 //! Connect RPC messages and services generated from `proto/host.proto`.
 //! Consumers use these types directly; transport limits belong to Connect RPC.
-//! Enable `client` for native TLS/Bearer transport setup with `connect`.
+//! Enable `client` for loopback HTTP/Bearer transport setup with `connect`.
 
 /// Generated v1 contract, available in every build.
 pub mod rpc {

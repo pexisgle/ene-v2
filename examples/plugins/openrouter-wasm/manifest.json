@@ -1,16 +1,12 @@
 {
-  "contract_version": 2,
+  "contract_version": 4,
   "id": "openrouter-wasm",
   "name": "OpenRouter Wasm",
   "version": "1.0.0",
-  "code_files": [
-    "provider.wasm"
-  ],
   "entrypoints": [
     {
       "id": "llm",
       "target": "host",
-      "runtime": "extism",
       "file": "provider.wasm",
       "provides": [
         "llm"
