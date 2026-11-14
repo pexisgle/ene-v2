@@ -16,10 +16,13 @@ axum.workspace = true
 bevy_ecs = "=0.20.0"
 bytes.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
+croner.workspace = true
 crossbeam-channel = "0.5"
 directories = "6"
 ene-rpc.workspace = true
 futures-util.workspace = true
+hound.workspace = true
+chrono.workspace = true
 http.workspace = true
 io-lifetimes = "3"
 jiff.workspace = true

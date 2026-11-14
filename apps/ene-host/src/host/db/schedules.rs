@@ -5,239 +5,114 @@
 //! (docs/features/autonomy/schedule.md).
 use super::{Result, Store};
 use crate::host::error::HostError;
-use jiff::{Timestamp, ToSpan, civil::Date, tz::TimeZone};
+use chrono::{Datelike, Timelike};
+use jiff::{
+    Timestamp, ToSpan,
+    civil::{Date, DateTime},
+    tz::{AmbiguousOffset, TimeZone},
+};
 use rusqlite::params;
-
-/// The inclusive bounds of a five-field cron expression, field by field:
-/// minute, hour, day of month, month, day of week (0 and 7 are Sunday).
-const CRON_LIMITS: [(u32, u32); 5] = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)];
 
 /// How far ahead a repeating expression is searched, in days. A leap day can
 /// be eight years away (2100 is not a leap year), so this is the smallest
 /// bound that still finds every yearly date an expression can name.
-const SEARCH_DAYS: u64 = 366 * 9;
-
-/// Validates one field of a cron expression: `*`, a value, a `first-last`
-/// range, a comma-separated list of them, and an optional `/step` on any of
-/// them. Names and 6-field (seconds) expressions are refused.
-fn check_cron_field(field: &str, min: u32, max: u32) -> Result<()> {
-    if field.is_empty() {
-        return Err(HostError::invalid("cron_expr has an empty field"));
-    }
-    for item in field.split(',') {
-        let (range, step) = match item.split_once('/') {
-            Some((range, step)) => (range, Some(step)),
-            None => (item, None),
-        };
-        if let Some(step) = step {
-            let step = step
-                .parse::<u32>()
-                .map_err(|_| HostError::invalid("cron_expr has a non-numeric step"))?;
-            if step == 0 || step > max.saturating_sub(min).saturating_add(1) {
-                return Err(HostError::invalid("cron_expr has an out-of-range step"));
-            }
-        }
-        if range == "*" {
-            continue;
-        }
-        let parse = |value: &str| {
-            value
-                .parse::<u32>()
-                .map_err(|_| HostError::invalid("cron_expr has a non-numeric value"))
-        };
-        let (first, last) = match range.split_once('-') {
-            Some((first, last)) => (parse(first)?, parse(last)?),
-            None => {
-                let value = parse(range)?;
-                (value, value)
-            }
-        };
-        if first < min || last > max || first > last {
-            return Err(HostError::invalid(
-                "cron_expr has a value outside its field's range",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Validates a five-field cron expression with valid ranges.
-fn check_cron(expression: &str) -> Result<()> {
-    if expression.chars().count() > 256 {
-        return Err(HostError::invalid("cron_expr is too long"));
-    }
-    let fields: Vec<&str> = expression.split_whitespace().collect();
-    if fields.len() != 5 {
-        return Err(HostError::invalid(
-            "cron_expr must have exactly 5 fields (minute hour day-of-month month day-of-week)",
-        ));
-    }
-    for (field, (min, max)) in fields.iter().zip(CRON_LIMITS) {
-        check_cron_field(field, min, max)?;
-    }
-    Ok(())
-}
-
-/// A validated five-field cron expression, resolved into the values each
-/// field matches.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// seconds and a seven-field one names years, so both are refused before
+/// croner can read them.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Cron {
-    minute: [bool; 60],
-    hour: [bool; 24],
-    /// Indexed by day of month, 1..=31.
-    day: [bool; 32],
-    /// Indexed by month, 1..=12.
-    month: [bool; 13],
-    /// Indexed by day of week, 0 (Sunday)..=7 (Sunday again).
-    weekday: [bool; 8],
-    /// Whether the field was written `*`: cron's day-of-month/day-of-week
-    /// rule matches either field when both are restricted and both when one
-    /// is not.
-    day_any: bool,
-    weekday_any: bool,
+    parsed: croner::Cron,
 }
 
-/// Fills `bits` with the values one comma-separated item of a field names.
-fn parse_cron_item<const N: usize>(
-    item: &str,
-    min: u32,
-    max: u32,
-    bits: &mut [bool; N],
-) -> Option<()> {
-    let (range, step) = match item.split_once('/') {
-        Some((range, step)) => (range, Some(step.parse::<u32>().ok()?)),
-        None => (item, None),
-    };
-    if step == Some(0) {
-        return None;
-    }
-    let parse = |value: &str| value.parse::<u32>().ok();
-    let (first, last) = if range == "*" {
-        (min, max)
-    } else if let Some((first, last)) = range.split_once('-') {
-        (parse(first)?, parse(last)?)
-    } else {
-        let value = parse(range)?;
-        // `a/step` runs from `a` to the field's end, as cron does.
-        (value, if step.is_some() { max } else { value })
-    };
-    if first < min || last > max || first > last {
-        return None;
-    }
-    let step = step.unwrap_or(1);
-    let mut value = first;
-    while value <= last {
-        *bits.get_mut(value as usize)? = true;
-        value = value.checked_add(step)?;
-    }
-    Some(())
-}
+impl Eq for Cron {}
 
 impl Cron {
-    /// Parses a validated expression. An invalid expression is a request
+    /// Parses a five-field expression. An invalid expression is a request
     /// error, not an empty schedule.
     pub(crate) fn parse(expression: &str) -> Result<Self> {
-        check_cron(expression)?;
-        let fields: Vec<&str> = expression.split_whitespace().collect();
-        let [minute, hour, day, month, weekday] = <[&str; 5]>::try_from(fields)
-            .map_err(|_| HostError::invalid("cron_expr must have exactly 5 fields"))?;
-        let mut cron = Self {
-            minute: [false; 60],
-            hour: [false; 24],
-            day: [false; 32],
-            month: [false; 13],
-            weekday: [false; 8],
-            day_any: day.contains('*'),
-            weekday_any: weekday.contains('*'),
-        };
-        for (index, field) in [minute, hour, day, month, weekday].into_iter().enumerate() {
-            let (min, max) = CRON_LIMITS[index];
-            for item in field.split(',') {
-                let parsed = match index {
-                    0 => parse_cron_item(item, min, max, &mut cron.minute),
-                    1 => parse_cron_item(item, min, max, &mut cron.hour),
-                    2 => parse_cron_item(item, min, max, &mut cron.day),
-                    3 => parse_cron_item(item, min, max, &mut cron.month),
-                    _ => parse_cron_item(item, min, max, &mut cron.weekday),
-                };
-                parsed.ok_or_else(|| HostError::invalid("cron_expr is invalid"))?;
-            }
+        if expression.chars().count() > 256 {
+            return Err(HostError::invalid("cron_expr is too long"));
         }
-        // 7 is Sunday exactly as 0 is.
-        if cron.weekday[7] {
-            cron.weekday[0] = true;
+        let fields = expression.split_whitespace().count();
+        if fields != 5 {
+            return Err(HostError::invalid(format!(
+                "cron_expr must have exactly 5 fields \
+                 (minute hour day-of-month month day-of-week), got {fields}"
+            )));
         }
-        Ok(cron)
-    }
-
-    /// Whether the fields name a civil `date`, by cron's day-of-month/
-    /// day-of-week rule: when both are restricted, either may match.
-    fn matches_date(&self, date: Date) -> bool {
-        let month = date.month() as usize;
-        if !self.month[month] {
-            return false;
-        }
-        let day = date.day() as usize;
-        let weekday = date.weekday().to_sunday_zero_offset() as usize;
-        let day_match = self.day[day];
-        let weekday_match = self.weekday[weekday];
-        if self.day_any || self.weekday_any {
-            day_match && weekday_match
-        } else {
-            day_match || weekday_match
-        }
+        let parsed = expression
+            .parse::<croner::Cron>()
+            .map_err(|error| HostError::invalid(format!("cron_expr is invalid: {error}")))?;
+        Ok(Self { parsed })
     }
 
     /// The first matching instant strictly after `after`, read on the civil
-    /// clock of `zone`, or `None` when no matching time is within
-    /// [`SEARCH_DAYS`].
+    /// clock of `zone`, or `None` when croner cannot find a matching time.
+    ///
+    /// Croner's occurrence search is typed in `chrono`, so the wall clock is
+    /// encoded as UTC, searched there, and mapped back to an instant in
+    /// `zone`. A wall time inside a daylight-saving gap never happens; it is
+    /// skipped and the search resumes after it.
     fn next_after(&self, after: Timestamp, zone: &TimeZone) -> Option<Timestamp> {
-        // Cron has minute granularity, so no minute at or before `after` can
-        // be the next firing; start at the following whole local minute.
-        let local = after.to_zoned(zone.clone()).datetime();
-        let start = local
-            .date()
-            .at(local.hour(), local.minute(), 0, 0)
-            .checked_add(1.minute())
-            .ok()?;
-        let mut date = start.date();
-        for day in 0..SEARCH_DAYS {
-            if day > 0 {
-                date = date.tomorrow().ok()?;
-            }
-            if !self.matches_date(date) {
+        let mut civil = after.to_zoned(zone.clone()).datetime();
+        for _ in 0..8 {
+            let naive = chrono::NaiveDate::from_ymd_opt(
+                i32::from(civil.year()),
+                u32::try_from(civil.month()).ok()?,
+                u32::try_from(civil.day()).ok()?,
+            )?
+            .and_hms_opt(
+                u32::try_from(civil.hour()).ok()?,
+                u32::try_from(civil.minute()).ok()?,
+                u32::try_from(civil.second()).ok()?,
+            )?;
+            let start: chrono::DateTime<chrono::Utc> =
+                chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc);
+            let next = self.parsed.find_next_occurrence(&start, false).ok()?;
+            civil = Date::new(
+                i16::try_from(next.year()).ok()?,
+                i8::try_from(next.month()).ok()?,
+                i8::try_from(next.day()).ok()?,
+            )
+            .ok()?
+            .at(
+                i8::try_from(next.hour()).ok()?,
+                i8::try_from(next.minute()).ok()?,
+                0,
+                0,
+            );
+            if matches!(
+                zone.to_ambiguous_zoned(civil).offset(),
+                AmbiguousOffset::Gap { .. }
+            ) {
+                civil = civil.checked_add(1.minute()).ok()?;
                 continue;
             }
-            for hour in 0..24u8 {
-                if !self.hour[usize::from(hour)] {
-                    continue;
-                }
-                for minute in 0..60u8 {
-                    if !self.minute[usize::from(minute)] {
-                        continue;
-                    }
-                    let candidate =
-                        date.at(i8::try_from(hour).ok()?, i8::try_from(minute).ok()?, 0, 0);
-                    if day == 0 && candidate < start {
-                        continue;
-                    }
-                    // A civil time can fall in a daylight-saving gap; the
-                    // compatible resolution moves it forward, so the firing
-                    // is delayed instead of lost.
-                    let at = zone.to_zoned(candidate).ok()?.timestamp();
-                    if at > after {
-                        return Some(at);
-                    }
-                }
+            let Some(at) = zoned_timestamp(zone, civil) else {
+                continue;
+            };
+            if at > after {
+                return Some(at);
             }
+            civil = civil.checked_add(1.minute()).ok()?;
         }
         None
     }
 }
 
+/// The instant `civil` names in `zone`. A wall-clock time inside a
+/// daylight-saving gap does not exist and yields `None`; a repeated time
+/// (a fold) resolves to its earlier occurrence.
+fn zoned_timestamp(zone: &TimeZone, civil: DateTime) -> Option<Timestamp> {
+    let ambiguous = zone.to_ambiguous_zoned(civil);
+    if matches!(ambiguous.offset(), AmbiguousOffset::Gap { .. }) {
+        return None;
+    }
+    ambiguous.earlier().ok().map(|zoned| zoned.timestamp())
+}
+
 /// The first time the five-field `expression` matches after `after`, read on
 /// the wall clock of `zone`. An invalid expression, or one that names no time
-/// within [`SEARCH_DAYS`], is an invalid request.
+/// with no next occurrence, is an invalid request.
 pub(crate) fn next_occurrence(
     expression: &str,
     after: Timestamp,
@@ -518,15 +393,93 @@ mod tests {
         Store::open(&temp.path().join("host.sqlite3")).unwrap()
     }
 
-    /// Whether `expression` names the local civil time of `at` in `zone`.
-    fn cron_matches(expression: &str, at: Timestamp, zone: &TimeZone) -> bool {
-        let Ok(cron) = Cron::parse(expression) else {
-            return false;
-        };
-        let local = at.to_zoned(zone.clone()).datetime();
-        cron.matches_date(local.date())
-            && cron.hour[usize::try_from(local.hour()).unwrap()]
-            && cron.minute[usize::try_from(local.minute()).unwrap()]
+    #[test]
+    fn cron_expressions_need_exactly_five_fields_and_valid_values() {
+        for expression in [
+            "* * * * *",
+            "0 9 * * 1-5",
+            "*/15 8-18 * * *",
+            "0 0 1,15 * *",
+            "5/10 * * * 0",
+            "0 0 * * 7",
+        ] {
+            assert!(Cron::parse(expression).is_ok(), "{expression}");
+        }
+        for expression in [
+            "",
+            "* * * *",
+            "* * * * * *",
+            "* * * * * * *",
+            "60 * * * *",
+            "* 24 * * *",
+            "* * 0 * *",
+            "* * * 13 *",
+            "* * * * 8",
+            "*/0 * * * *",
+            "1-0 * * * *",
+            "a * * * *",
+            "-1 * * * *",
+            "not a cron",
+        ] {
+            assert!(Cron::parse(expression).is_err(), "{expression}");
+        }
+        let store = store();
+        let clock = utc_clock();
+        assert!(matches!(
+            store.insert_schedule("ene", "t", "i", None, Some("0 9 * *"), &clock),
+            Err(HostError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn cron_weekdays_and_days_of_month_follow_croner_or_semantics() {
+        // 2026-11-13 is a Friday.
+        let after = utc(2026, 11, 12, 0, 0);
+        assert_eq!(
+            next_occurrence("0 0 13 * 5", after, &TimeZone::UTC).unwrap(),
+            utc(2026, 11, 13, 0, 0)
+        );
+        // Both day fields restricted: either may match, so the Friday after
+        // the 13th matches even though its day of month is not 13.
+        assert_eq!(
+            next_occurrence("0 0 13 * 5", utc(2026, 11, 13, 0, 0), &TimeZone::UTC).unwrap(),
+            utc(2026, 11, 20, 0, 0)
+        );
+        // Day of month restricted, weekday `*`: only the day matters.
+        assert_eq!(
+            next_occurrence("0 0 13 * *", utc(2026, 11, 13, 0, 0), &TimeZone::UTC).unwrap(),
+            utc(2026, 12, 13, 0, 0)
+        );
+        // Weekday restricted, day `*`: only the weekday matters.
+        assert_eq!(
+            next_occurrence("0 0 * * 5", utc(2026, 11, 13, 0, 0), &TimeZone::UTC).unwrap(),
+            utc(2026, 11, 20, 0, 0)
+        );
+        // 7 is Sunday exactly as 0 is.
+        for weekday in ["7", "0"] {
+            assert_eq!(
+                next_occurrence(
+                    &format!("0 9 * * {weekday}"),
+                    utc(2026, 11, 14, 0, 0),
+                    &TimeZone::UTC
+                )
+                .unwrap(),
+                utc(2026, 11, 15, 9, 0)
+            );
+        }
+        // Steps and comma lists are resolved by croner.
+        assert_eq!(
+            next_occurrence("*/15 * * * *", utc(2026, 11, 14, 9, 18), &TimeZone::UTC).unwrap(),
+            utc(2026, 11, 14, 9, 30)
+        );
+        assert_eq!(
+            next_occurrence("5/10 * * * *", utc(2026, 11, 14, 9, 26), &TimeZone::UTC).unwrap(),
+            utc(2026, 11, 14, 9, 35)
+        );
+        assert_eq!(
+            next_occurrence("0 0 1,15 * *", utc(2026, 11, 15, 0, 0), &TimeZone::UTC).unwrap(),
+            utc(2026, 12, 1, 0, 0)
+        );
     }
 
     #[test]
@@ -610,97 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn cron_expressions_need_five_fields_with_valid_ranges() {
-        for expression in [
-            "* * * * *",
-            "0 9 * * 1-5",
-            "*/15 8-18 * * *",
-            "0 0 1,15 * *",
-            "5/10 * * * 0",
-            "0 0 * * 7",
-        ] {
-            assert!(check_cron(expression).is_ok(), "{expression}");
-        }
-        for expression in [
-            "",
-            "* * * *",
-            "* * * * * *",
-            "60 * * * *",
-            "* 24 * * *",
-            "* * 0 * *",
-            "* * * 13 *",
-            "* * * * 8",
-            "*/0 * * * *",
-            "1-0 * * * *",
-            "a * * * *",
-            "-1 * * * *",
-            "1,,2 * * * *",
-        ] {
-            assert!(check_cron(expression).is_err(), "{expression}");
-        }
-        let store = store();
-        let clock = utc_clock();
-        assert!(matches!(
-            store.insert_schedule("ene", "t", "i", None, Some("0 9 * *"), &clock),
-            Err(HostError::Invalid(_))
-        ));
-    }
-
-    #[test]
-    fn cron_values_resolve_and_weekday_seven_is_sunday() {
-        // 2026-11-15 is a Sunday, 2026-11-16 a Monday.
-        let sunday = utc(2026, 11, 15, 9, 0);
-        let monday = utc(2026, 11, 16, 9, 0);
-        assert!(cron_matches("0 9 * * 7", sunday, &TimeZone::UTC));
-        assert!(cron_matches("0 9 * * 0", sunday, &TimeZone::UTC));
-        assert!(cron_matches("0 9 * * 1-5", monday, &TimeZone::UTC));
-        assert!(!cron_matches("0 9 * * 1-5", sunday, &TimeZone::UTC));
-        assert!(cron_matches(
-            "*/15 * * * *",
-            utc(2026, 11, 15, 9, 45),
-            &TimeZone::UTC
-        ));
-        assert!(!cron_matches(
-            "*/15 * * * *",
-            utc(2026, 11, 15, 9, 46),
-            &TimeZone::UTC
-        ));
-        assert!(cron_matches(
-            "5/10 * * * *",
-            utc(2026, 11, 15, 9, 25),
-            &TimeZone::UTC
-        ));
-        assert!(!cron_matches(
-            "5/10 * * * *",
-            utc(2026, 11, 15, 9, 26),
-            &TimeZone::UTC
-        ));
-        assert!(cron_matches(
-            "0 0 1,15 * *",
-            utc(2026, 11, 15, 0, 0),
-            &TimeZone::UTC
-        ));
-        // Both day fields restricted: either may match (13th or Friday).
-        let friday_the_13th = utc(2026, 11, 13, 0, 0);
-        assert!(cron_matches("0 0 13 * 5", friday_the_13th, &TimeZone::UTC));
-        let ordinary_day = utc(2026, 11, 12, 0, 0);
-        assert!(!cron_matches("0 0 13 * 5", ordinary_day, &TimeZone::UTC));
-        // Day of month restricted, weekday `*`: only the day matters.
-        assert!(cron_matches("0 0 12 * *", ordinary_day, &TimeZone::UTC));
-        assert!(!cron_matches("0 0 13 * *", ordinary_day, &TimeZone::UTC));
-        // Weekday restricted, day `*`: only the weekday matters.
-        assert!(cron_matches("0 0 * * 4", ordinary_day, &TimeZone::UTC));
-        assert!(!cron_matches("0 0 * * 5", ordinary_day, &TimeZone::UTC));
-        // A day field written with a leading `*` is unrestricted for cron's
-        // rule, so the other day field still has to match.
-        let friday = utc(2026, 11, 13, 0, 0);
-        assert!(cron_matches("0 0 */1 * 5", friday, &TimeZone::UTC));
-        assert!(!cron_matches("0 0 */1 * 5", ordinary_day, &TimeZone::UTC));
-        assert!(cron_matches("0 0 13 * */1", friday, &TimeZone::UTC));
-        assert!(!cron_matches("0 0 12 * */1", friday, &TimeZone::UTC));
-    }
-
-    #[test]
     fn the_next_occurrence_is_strictly_after_the_given_time() {
         let after = utc(2026, 11, 14, 9, 18);
         assert_eq!(
@@ -740,15 +602,52 @@ mod tests {
         let tokyo = TimeZone::get("Asia/Tokyo").unwrap();
         // 2026-11-13T23:30Z is already 08:30 on the 14th in Tokyo.
         let after = utc(2026, 11, 13, 23, 30);
+        let at = next_occurrence("0 9 * * *", after, &tokyo).unwrap();
+        assert_eq!(at, utc(2026, 11, 14, 0, 0), "Tokyo 09:00 is 00:00 UTC");
+        let local = at.to_zoned(tokyo).datetime();
         assert_eq!(
-            next_occurrence("0 9 * * *", after, &tokyo).unwrap(),
-            utc(2026, 11, 14, 0, 0),
-            "Tokyo 09:00 is 00:00 UTC"
+            (local.hour(), local.minute()),
+            (9, 0),
+            "the firing is local 09:00"
         );
         assert_eq!(
             next_occurrence("0 9 * * *", after, &TimeZone::UTC).unwrap(),
             utc(2026, 11, 14, 9, 0),
             "the same expression read in UTC is a different instant"
+        );
+    }
+
+    #[test]
+    fn a_daylight_saving_gap_skips_the_missing_local_time() {
+        let new_york = TimeZone::get("America/New_York").unwrap();
+        // 2026-03-08 02:00 EST springs forward to 03:00 EDT, so local 02:30
+        // does not exist. The firing is skipped instead of moving to 03:30,
+        // and the next day's 02:30 is the next occurrence.
+        let after = utc(2026, 3, 8, 5, 0); // 00:00 EST
+        let fired = next_occurrence("30 2 * * *", after, &new_york).unwrap();
+        assert_eq!(fired, utc(2026, 3, 9, 6, 30));
+        let local = fired.to_zoned(new_york.clone()).datetime();
+        assert_eq!((local.day(), local.hour(), local.minute()), (9, 2, 30));
+        assert_eq!(
+            next_occurrence("30 2 * * *", fired, &new_york).unwrap(),
+            utc(2026, 3, 10, 6, 30),
+            "the gap does not fire a second time at the shifted time"
+        );
+    }
+
+    #[test]
+    fn a_repeated_local_time_fires_once_at_its_earliest_occurrence() {
+        let new_york = TimeZone::get("America/New_York").unwrap();
+        // 2026-11-01 02:00 EDT falls back to 01:00 EST, so local 01:30
+        // occurs twice: 05:30Z and 06:30Z. The first is the firing; the
+        // repeated second occurrence is not a second firing.
+        let after = utc(2026, 11, 1, 4, 0); // 00:00 EDT
+        let fired = next_occurrence("30 1 * * *", after, &new_york).unwrap();
+        assert_eq!(fired, utc(2026, 11, 1, 5, 30));
+        assert_eq!(
+            next_occurrence("30 1 * * *", fired, &new_york).unwrap(),
+            utc(2026, 11, 2, 6, 30),
+            "the repeated wall-clock time does not fire twice"
         );
     }
 

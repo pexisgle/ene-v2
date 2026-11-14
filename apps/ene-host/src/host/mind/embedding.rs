@@ -25,6 +25,7 @@ use crate::host::{
     db::{Result, Store},
     error::HostError,
     model::Credentials,
+    net,
     settings::{Connection, ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
@@ -80,20 +81,6 @@ pub(crate) struct PendingEmbedding {
     pub(crate) content_revision: u64,
 }
 
-/// The one HTTP client the host's background requests share: its connection
-/// pool is reused across embedding calls instead of built per request.
-fn http_client() -> Result<&'static reqwest::Client> {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    if let Some(client) = CLIENT.get() {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| HostError::unavailable(format!("http client: {error}")))?;
-    Ok(CLIENT.get_or_init(|| client))
-}
-
 /// POSTs a JSON body to an OpenAI-compatible endpoint and returns its JSON
 /// answer. The one wire shape the host reads; another format is not guessed.
 pub(crate) async fn post_json(
@@ -104,10 +91,12 @@ pub(crate) async fn post_json(
     max_bytes: usize,
     what: &str,
 ) -> Result<serde_json::Value> {
-    guard_endpoint(url, what)?;
-    let mut response = http_client()?
+    net::guard_endpoint(url, what)
+        .await
+        .map_err(HostError::invalid)?;
+    let response = net::client(timeout)
+        .map_err(HostError::unavailable)?
         .post(url)
-        .timeout(timeout)
         .header(reqwest::header::ACCEPT, "application/json")
         .bearer_auth(secret)
         .json(body)
@@ -120,37 +109,11 @@ pub(crate) async fn post_json(
             response.status()
         )));
     }
-    // Refuse a declared oversize before reading it, then keep the cap while
-    // streaming: a chunked answer must not be buffered whole first.
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(too_much(what));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    let bytes = net::read_body(response, max_bytes, what)
         .await
-        .map_err(|error| HostError::unavailable(format!("{what} body: {error}")))?
-    {
-        let total = bytes
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| too_much(what))?;
-        if total > max_bytes {
-            return Err(too_much(what));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+        .map_err(HostError::unavailable)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| HostError::unavailable(format!("{what} body: {error}")))
-}
-
-fn too_much(what: &str) -> HostError {
-    HostError::unavailable(format!(
-        "{what} endpoint answered more data than the host reads"
-    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -340,22 +303,7 @@ pub(crate) fn connection_secret(
     {
         return Some(secret);
     }
-    loopback_endpoint(&connection.endpoint().endpoint).then(|| "ene-local".to_owned())
-}
-
-fn loopback_endpoint(endpoint: &str) -> bool {
-    let Ok(url) = url::Url::parse(endpoint) else {
-        return false;
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return false;
-    }
-    match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
+    net::loopback_endpoint(&connection.endpoint().endpoint).then(|| "ene-local".to_owned())
 }
 
 /// The semantic candidates for one query, or none when no embedding space is
@@ -928,97 +876,5 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("more data"), "{error}");
         server.await.unwrap();
-    }
-}
-
-/// Refuses an endpoint that would send a credential to a non-loopback plain
-/// HTTP host or to a private/link-local address (SSRF). The same guard as the
-/// voice engines; a local engine on loopback stays allowed.
-fn guard_endpoint(url: &str, what: &str) -> Result<()> {
-    let parsed = url::Url::parse(url)
-        .map_err(|_| HostError::invalid(format!("{what} endpoint is not a URL")))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(HostError::invalid(format!(
-            "{what} endpoint must be http(s)"
-        )));
-    }
-    let Some(host) = parsed.host() else {
-        return Err(HostError::invalid(format!("{what} endpoint has no host")));
-    };
-    let loopback = match &host {
-        url::Host::Ipv4(address) => address.is_loopback(),
-        url::Host::Ipv6(address) => address.is_loopback(),
-        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
-    };
-    if loopback {
-        return Ok(());
-    }
-    if parsed.scheme() == "http" {
-        return Err(HostError::invalid(format!(
-            "{what} endpoint must use https outside loopback"
-        )));
-    }
-    // Resolve once and refuse private, link-local and otherwise local targets.
-    // DNS can still change after this check; the guard removes the obvious
-    // internal-service reachability, not every rebinding window.
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let addresses = std::net::ToSocketAddrs::to_socket_addrs(&(
-        host.to_string().trim_matches(['[', ']']).to_owned(),
-        port,
-    ))
-    .map_err(|error| HostError::unavailable(format!("{what} endpoint: {error}")))?;
-    let mut any = false;
-    for address in addresses {
-        any = true;
-        if blocked_ip(address.ip()) {
-            return Err(HostError::invalid(format!(
-                "{what} endpoint resolves to a private address"
-            )));
-        }
-    }
-    if !any {
-        return Err(HostError::unavailable(format!(
-            "{what} endpoint did not resolve"
-        )));
-    }
-    Ok(())
-}
-
-fn blocked_ip(address: std::net::IpAddr) -> bool {
-    match address {
-        std::net::IpAddr::V4(address) => {
-            address.is_private()
-                || address.is_loopback()
-                || address.is_link_local()
-                || address.is_unspecified()
-                || address.is_multicast()
-                || address.is_broadcast()
-        }
-        std::net::IpAddr::V6(address) => {
-            if address
-                .to_ipv4_mapped()
-                .is_some_and(|mapped| blocked_ip(std::net::IpAddr::V4(mapped)))
-            {
-                return true;
-            }
-            let segments = address.segments();
-            address.is_loopback()
-                || address.is_unspecified()
-                || address.is_multicast()
-                || (segments[0] & 0xfe00) == 0xfc00 // unique-local
-                || (segments[0] & 0xffc0) == 0xfe80 // link-local
-        }
-    }
-}
-
-#[cfg(test)]
-mod embedded_guard_tests {
-    use super::*;
-
-    #[test]
-    fn embedding_endpoints_refuse_plain_remote_and_metadata_addresses() {
-        assert!(guard_endpoint("http://169.254.169.254/v1/embeddings", "embedding").is_err());
-        assert!(guard_endpoint("http://example.com/v1/embeddings", "embedding").is_err());
-        assert!(guard_endpoint("http://127.0.0.1:8080/v1/embeddings", "embedding").is_ok());
     }
 }

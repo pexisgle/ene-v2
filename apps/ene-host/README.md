@@ -55,14 +55,15 @@ cargo run --locked -p ene-host
 | `src/host/chat.rs` | 受理レシート、停止、履歴、メッセージ |
 | `src/host/mind/` | コンパニオンCRUD、記憶、想起スコア、埋め込み索引、自動整理、動的文脈とFit、`mind_*` ツール |
 | `src/host/compaction.rs` | アイドル要約（`ene.summary`）と、単一パスの要求フィット（`fit`） |
-| `src/host/autonomy.rs` | `noop`、スケジュール登録ツール、発火ループ（cron/run_at） |
-| `src/host/staged.rs` | Staged Promotion（一時エージェントの`SideCall`）とハートビートTick |
+| `src/host/autonomy.rs` | `noop`、スケジュール登録ツール、発火ループ（croner/run_at） |
+| `src/host/staged.rs` | Staged Promotion（保存済み会話＋要約＋動的文脈への直接1回呼び出し）とハートビートTick |
 | `src/host/delegation.rs` | 音声`transcription_id`単位の作業委譲調停 |
 | `src/host/voice.rs` | TTS/STTエンジン境界、文分割・世代管理・再生完了・フロア制御 |
 | `src/host/permission/` | `Stage::Gate`、承認保留と解決、ポリシー判定 |
 | `src/host/client/` | クライアント登録、能力ツールの公開、有効化世代、知覚、`DeviceStream` と操作台帳 |
 | `src/host/work/` | WorkSession/Run、セッション継続、ACPバックエンド、sandbox、`start_work` などのツール、`report`、質問・停止・途絶検知 |
 | `src/host/model.rs` | 資格情報、LLM接続、モデル一覧、接続チェック |
+| `src/host/net.rs` | HTTPクライアントの共有、ループバック/SSRF検証、サイズ上限付きボディ読み取り |
 | `src/host/db/` | typed SQLite store とbaseline schema |
 | `src/host/tests.rs` | ECSループを含む挙動テスト（受理、ゲート、端末束縛、作業報告） |
 

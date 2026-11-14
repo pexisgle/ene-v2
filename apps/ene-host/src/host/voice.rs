@@ -8,6 +8,7 @@ use super::{
     delegation,
     error::HostError,
     model::Credentials,
+    net,
     notify::Notifier,
     permission::{self, ApprovalDecision, ApprovalStatus},
     resources::HostRuntime,
@@ -15,14 +16,13 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use futures_util::StreamExt;
 use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
 use serde::{Deserialize, de::DeserializeOwned};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
-    net::{IpAddr, ToSocketAddrs},
+    io::Cursor,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
@@ -158,7 +158,11 @@ impl HttpEngine {
             _ => &[],
         };
         Ok(Self {
-            client: http_client(options.timeout_ms, if tts { 20_000 } else { 30_000 }),
+            client: net::client(Duration::from_millis(
+                options
+                    .timeout_ms
+                    .unwrap_or(if tts { 20_000 } else { 30_000 }),
+            )),
             base,
             protocol,
             model: nonempty(options.model)
@@ -188,7 +192,7 @@ impl HttpEngine {
     }
 
     async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
-        ensure_target(&self.base, "TTS").await?;
+        net::guard_endpoint(&self.base, "TTS").await?;
         let mut body = serde_json::json!({
             "model": self.model, "voice": if voice.is_empty() { &self.voice } else { &voice },
             "input": text, "response_format": "pcm",
@@ -202,18 +206,21 @@ impl HttpEngine {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
         let response = post(call, self.secret.as_deref(), "TTS").await?;
-        Ok((read_body(response, "TTS").await?, SAMPLE_RATE))
+        Ok((
+            net::read_body(response, MAX_BODY_BYTES, "TTS").await?,
+            SAMPLE_RATE,
+        ))
     }
 
     async fn voicevox(&self, text: String) -> HttpResult<(Vec<u8>, u32)> {
-        ensure_target(&self.base, "TTS").await?;
+        net::guard_endpoint(&self.base, "TTS").await?;
         let encoded: String = url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
         let call = self.client()?.post(format!(
             "{}{}?text={encoded}&speaker={}",
             self.base, self.query_path, self.speaker
         ));
         let query = post(call, self.secret.as_deref(), "TTS").await?;
-        let query = read_body(query, "TTS").await?;
+        let query = net::read_body(query, MAX_BODY_BYTES, "TTS").await?;
         let mut body: serde_json::Value = serde_json::from_slice(&query)
             .map_err(|_| "the TTS endpoint answered a non-JSON audio query".to_owned())?;
         if let Some(speed) = self.speed {
@@ -228,11 +235,11 @@ impl HttpEngine {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
         let response = post(call, self.secret.as_deref(), "TTS").await?;
-        parse_wav(&read_body(response, "TTS").await?)
+        parse_wav(&net::read_body(response, MAX_BODY_BYTES, "TTS").await?)
     }
 
     async fn openai_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        ensure_target(&self.base, "STT").await?;
+        net::guard_endpoint(&self.base, "STT").await?;
         let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm, sample_rate))
             .file_name("audio.wav")
             .mime_str("audio/wav")
@@ -248,21 +255,21 @@ impl HttpEngine {
             .post(format!("{}{}", self.base, self.path))
             .multipart(form.text("response_format", "json"));
         let response = post(call, self.secret.as_deref(), "STT").await?;
-        let body = read_body(response, "STT").await?;
+        let body = net::read_body(response, MAX_BODY_BYTES, "STT").await?;
         let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|_| "the STT endpoint answered a non-JSON transcript".to_owned())?;
         Ok(value["text"].as_str().unwrap_or_default().trim().to_owned())
     }
 
     async fn raw_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        ensure_target(&self.base, "STT").await?;
+        net::guard_endpoint(&self.base, "STT").await?;
         let call = self
             .client()?
             .post(format!("{}{}", self.base, self.path))
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(wav_wrap(&pcm, sample_rate));
         let response = post(call, self.secret.as_deref(), "STT").await?;
-        let body = read_body(response, "STT").await?;
+        let body = net::read_body(response, MAX_BODY_BYTES, "STT").await?;
         String::from_utf8(body)
             .map(|text| text.trim().to_owned())
             .map_err(|_| "the STT endpoint answered a non-UTF-8 transcript".to_owned())
@@ -326,52 +333,6 @@ async fn post(
             response.status().as_u16()
         ))
     }
-}
-
-async fn read_body(response: reqwest::Response, label: &str) -> HttpResult<Vec<u8>> {
-    let too_large = || format!("the {label} endpoint body exceeds {MAX_BODY_BYTES} bytes");
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_BODY_BYTES as u64)
-    {
-        return Err(too_large());
-    }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("the {label} endpoint body: {error}"))?;
-        if body.len() + chunk.len() > MAX_BODY_BYTES {
-            return Err(too_large());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn http_client(timeout_ms: Option<u64>, default_timeout_ms: u64) -> HttpResult<reqwest::Client> {
-    let millis = timeout_ms
-        .unwrap_or(default_timeout_ms)
-        .clamp(1_000, 300_000);
-    static CLIENTS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u64, reqwest::Client>>,
-    > = std::sync::OnceLock::new();
-    let clients = CLIENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    if let Some(client) = clients
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&millis).cloned())
-    {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_millis(millis))
-        .build()
-        .map_err(|error| format!("http client: {error}"))?;
-    if let Ok(mut map) = clients.lock() {
-        map.entry(millis).or_insert_with(|| client.clone());
-    }
-    Ok(client)
 }
 
 fn options<T: DeserializeOwned + Default>(
@@ -476,7 +437,7 @@ fn base_url(endpoint: &Endpoint, label: &str) -> std::result::Result<String, Set
     let url = url::Url::parse(base)
         .map_err(|_| SetupError::Broken(format!("the {label} connection endpoint is not a URL")))?;
     let scheme = url.scheme();
-    if scheme != "https" && !(scheme == "http" && is_loopback(&url)) {
+    if scheme != "https" && !(scheme == "http" && net::loopback_endpoint(base)) {
         let requirement = if scheme == "http" {
             "must use https outside loopback"
         } else {
@@ -486,110 +447,7 @@ fn base_url(endpoint: &Endpoint, label: &str) -> std::result::Result<String, Set
             "the {label} connection endpoint {requirement}"
         )));
     }
-    if let Some(ip) = literal_ip(&url)
-        && !is_loopback(&url)
-        && blocked(ip)
-    {
-        return Err(SetupError::Broken(format!(
-            "the {label} connection endpoint is not a public address"
-        )));
-    }
     Ok(base.to_owned())
-}
-
-async fn ensure_target(base: &str, label: &str) -> HttpResult<()> {
-    let url = url::Url::parse(base)
-        .map_err(|_| format!("the {label} connection endpoint is not a URL"))?;
-    let loopback = is_loopback(&url);
-    match url.scheme() {
-        "https" => {}
-        "http" if loopback => return Ok(()),
-        "http" => {
-            return Err(format!(
-                "the {label} connection endpoint must use https outside loopback"
-            ));
-        }
-        _ => return Err(format!("the {label} connection endpoint must be http(s)")),
-    }
-    if loopback {
-        return Ok(());
-    }
-    if let Some(ip) = literal_ip(&url) {
-        return if blocked(ip) {
-            Err(format!("the {label} endpoint is not a public address"))
-        } else {
-            Ok(())
-        };
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| format!("the {label} connection endpoint has no host"))?
-        .to_owned();
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| format!("the {label} connection endpoint has no port"))?;
-    let addresses = tokio::task::spawn_blocking(move || {
-        (host.as_str(), port)
-            .to_socket_addrs()
-            .map(|addresses| addresses.collect::<Vec<_>>())
-    })
-    .await
-    .map_err(|error| format!("the {label} endpoint address lookup: {error}"))?
-    .map_err(|error| format!("the {label} endpoint address lookup: {error}"))?;
-    if addresses.is_empty() {
-        return Err(format!("the {label} endpoint did not resolve"));
-    }
-    if addresses.iter().any(|address| blocked(address.ip())) {
-        return Err(format!(
-            "the {label} endpoint resolves to a non-public address"
-        ));
-    }
-    Ok(())
-}
-
-fn literal_ip(url: &url::Url) -> Option<IpAddr> {
-    match url.host()? {
-        url::Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
-        url::Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
-        url::Host::Domain(_) => None,
-    }
-}
-
-fn is_loopback(url: &url::Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => {
-            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback())
-        }
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
-}
-
-fn blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => blocked_v4(ip),
-        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-            Some(ip) => blocked_v4(ip),
-            None => {
-                ip.is_loopback()
-                    || ip.is_unspecified()
-                    || ip.is_unique_local()
-                    || ip.is_unicast_link_local()
-                    || ip.is_multicast()
-            }
-        },
-    }
-}
-
-fn blocked_v4(ip: std::net::Ipv4Addr) -> bool {
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || ip.is_documentation()
 }
 
 fn credential(
@@ -599,7 +457,7 @@ fn credential(
     label: &str,
 ) -> std::result::Result<Option<String>, SetupError> {
     let secret = credentials.and_then(|credentials| secret_for(connection, credentials));
-    if secret.is_none() && !loopback_endpoint(base) {
+    if secret.is_none() && !net::loopback_endpoint(base) {
         return Err(SetupError::Broken(format!(
             "no credential is registered for the {label} connection"
         )));
@@ -617,11 +475,7 @@ fn secret_for(connection: &Connection, credentials: &Credentials) -> Option<Stri
     {
         return Some(secret);
     }
-    loopback_endpoint(&connection.endpoint().endpoint).then(|| "ene-local".into())
-}
-
-fn loopback_endpoint(endpoint: &str) -> bool {
-    url::Url::parse(endpoint).is_ok_and(|url| is_loopback(&url))
+    net::loopback_endpoint(&connection.endpoint().endpoint).then(|| "ene-local".into())
 }
 
 fn wire_pcm(pcm: Vec<u8>, sample_rate: u32) -> HttpResult<Vec<u8>> {
@@ -665,96 +519,53 @@ fn resample_mono(pcm: &[u8], from: u32, to: u32) -> Vec<u8> {
 }
 
 fn wav_wrap(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
-    let data = pcm.len() as u32;
-    let mut wav = Vec::with_capacity(44 + pcm.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data.to_le_bytes());
-    wav.extend_from_slice(pcm);
-    wav
-}
-
-fn le16(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
-}
-
-fn le32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut wav = Cursor::new(Vec::with_capacity(44 + pcm.len()));
+    let mut writer =
+        hound::WavWriter::new(&mut wav, spec).expect("an in-memory WAV header cannot fail");
+    for sample in pcm.as_chunks::<2>().0 {
+        writer
+            .write_sample(i16::from_le_bytes(*sample))
+            .expect("an in-memory WAV sample cannot fail");
+    }
+    writer
+        .finalize()
+        .expect("an in-memory WAV header cannot fail");
+    wav.into_inner()
 }
 
 fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("the TTS endpoint did not return a WAV file".into());
-    }
-    let (mut format, mut data) = (None, None);
-    let mut offset = 12usize;
-    while let Some(header_end) = offset.checked_add(8) {
-        let Some(header) = bytes.get(offset..header_end) else {
-            break;
-        };
-        let size = le32(header, 4) as usize;
-        let start = header_end;
-        let end = start
-            .checked_add(size)
-            .ok_or_else(|| "the TTS endpoint returned a malformed WAV chunk".to_owned())?;
-        if end > bytes.len() {
-            return Err("the TTS endpoint returned a truncated WAV chunk".into());
-        }
-        match &header[..4] {
-            b"fmt " => {
-                if size < 16 {
-                    return Err("the TTS endpoint returned a malformed WAV format".into());
-                }
-                format = Some((
-                    le16(bytes, start),
-                    le16(bytes, start + 2),
-                    le32(bytes, start + 4),
-                    le16(bytes, start + 14),
-                ));
-            }
-            b"data" => data = Some(&bytes[start..end]),
-            _ => {}
-        }
-        offset = end + (size & 1);
-    }
-    let (audio_format, channels, rate, bits) =
-        format.ok_or_else(|| "the TTS endpoint returned a WAV without a format".to_owned())?;
-    if audio_format != 1 {
+    let mut reader = hound::WavReader::new(Cursor::new(bytes))
+        .map_err(|_| "the TTS endpoint did not return a valid 16-bit PCM WAV".to_owned())?;
+    let spec = reader.spec();
+    if spec.sample_format != hound::SampleFormat::Int {
         return Err("the TTS endpoint returned a WAV that is not PCM".into());
     }
-    let data = data.ok_or_else(|| "the TTS endpoint returned a WAV without audio".to_owned())?;
-    if bits != 16 {
+    if spec.bits_per_sample != 16 {
         return Err("the TTS endpoint returned audio that is not 16-bit PCM".into());
     }
-    let channels = channels as usize;
-    match channels {
-        0 => Err("the TTS endpoint returned a WAV without channels".into()),
-        1 => Ok((data.to_vec(), rate)),
-        channels => {
-            let mut mono = Vec::with_capacity(data.len() / channels);
-            for frame in data.chunks_exact(2 * channels) {
-                let sum: i32 = (0..channels)
-                    .map(|channel| {
-                        let at = channel * 2;
-                        i32::from(i16::from_le_bytes([frame[at], frame[at + 1]]))
-                    })
-                    .sum();
-                let sample =
-                    (sum / channels as i32).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-                mono.extend_from_slice(&(sample as i16).to_le_bytes());
-            }
-            Ok((mono, rate))
+    if spec.channels == 0 {
+        return Err("the TTS endpoint returned a WAV without channels".into());
+    }
+    let channels = usize::from(spec.channels);
+    let mut pcm = Vec::new();
+    let mut frame = 0i32;
+    for (index, sample) in reader.samples::<i16>().enumerate() {
+        let sample = sample.map_err(|_| "the TTS endpoint returned a truncated WAV")?;
+        frame += i32::from(sample);
+        if index % channels == channels - 1 {
+            let mixed =
+                (frame / channels as i32).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            pcm.extend_from_slice(&mixed.to_le_bytes());
+            frame = 0;
         }
     }
+    Ok((pcm, spec.sample_rate))
 }
 
 #[derive(Clone)]

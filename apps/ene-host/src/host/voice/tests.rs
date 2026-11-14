@@ -1,5 +1,6 @@
 use super::*;
 use crate::host::db::clients::ClientDeclaration;
+use crate::host::net;
 use crate::host::permission::{self, Approval, ApprovalDecision, ApprovalStatus, Approved};
 use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
 use rig_ecs::tools::ToolRequest;
@@ -651,9 +652,11 @@ fn the_stt_wav_header_names_the_wire_format() {
     let wav = wav_wrap(&[0u8; 8], 16_000);
     assert_eq!(&wav[0..4], b"RIFF");
     assert_eq!(&wav[8..12], b"WAVE");
-    assert_eq!(le16(&wav, 20), 1);
-    assert_eq!(le16(&wav, 22), 1);
-    assert_eq!(le32(&wav, 24), 16_000);
+    assert_eq!(&wav[12..16], b"fmt ");
+    assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1);
+    assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
+    assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
+    assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
     assert_eq!(wav.len(), 52);
 }
 
@@ -714,7 +717,10 @@ async fn plain_http_and_private_targets_are_rejected() {
         "http://localhost:5002",
         "https://127.0.0.1",
     ] {
-        assert!(ensure_target(allowed, "TTS").await.is_ok(), "{allowed}");
+        assert!(
+            net::guard_endpoint(allowed, "TTS").await.is_ok(),
+            "{allowed}"
+        );
     }
     for rejected in [
         "http://example.com",
@@ -725,7 +731,10 @@ async fn plain_http_and_private_targets_are_rejected() {
         "https://[::ffff:10.0.0.1]",
         "ftp://127.0.0.1",
     ] {
-        assert!(ensure_target(rejected, "TTS").await.is_err(), "{rejected}");
+        assert!(
+            net::guard_endpoint(rejected, "TTS").await.is_err(),
+            "{rejected}"
+        );
     }
     let endpoint = |endpoint: &str| Endpoint {
         adapter: "openai".into(),
@@ -734,7 +743,11 @@ async fn plain_http_and_private_targets_are_rejected() {
         options: String::new(),
     };
     assert!(base_url(&endpoint("http://example.com"), "TTS").is_err());
-    assert!(base_url(&endpoint("https://10.0.0.1"), "TTS").is_err());
+    // The setup only validates the scheme; the request guard owns the address.
+    assert_eq!(
+        base_url(&endpoint("https://10.0.0.1"), "TTS").unwrap(),
+        "https://10.0.0.1"
+    );
     assert_eq!(
         base_url(&endpoint("http://127.0.0.1:5002/"), "TTS").unwrap(),
         "http://127.0.0.1:5002"
@@ -855,5 +868,21 @@ mod wave_format {
         // The fmt chunk payload starts at offset 20; AudioFormat is first.
         wav[20..22].copy_from_slice(&3u16.to_le_bytes());
         assert!(parse_wav(&wav).is_err());
+    }
+
+    #[test]
+    fn a_float_wav_is_rejected_as_non_pcm() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 24_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut wav = std::io::Cursor::new(Vec::new());
+        let mut writer = hound::WavWriter::new(&mut wav, spec).unwrap();
+        writer.write_sample(0.0f32).unwrap();
+        writer.finalize().unwrap();
+        let error = parse_wav(&wav.into_inner()).unwrap_err();
+        assert!(error.contains("not PCM"), "{error}");
     }
 }

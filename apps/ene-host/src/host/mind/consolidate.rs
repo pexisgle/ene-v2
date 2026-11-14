@@ -82,21 +82,46 @@ pub(crate) struct Batch {
 
 /// One extracted fact. `audience` is `""` (private), `"*"` (every
 /// companion) or another companion id.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The schema is inlined into the request's output schema, and its fields are
+/// listed as required even though serde defaults keep parsing tolerant of a
+/// model that omits one: the model is told what a complete fact looks like.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(
+    inline,
+    deny_unknown_fields,
+    extend(
+        "required" = [
+            "content",
+            "importance",
+            "audience",
+            "supersedes",
+            "cited_memory_ids"
+        ]
+    )
+)]
 pub(crate) struct Fact {
     #[serde(default)]
+    #[schemars(length(max = 4000))]
     pub(crate) content: String,
     #[serde(default)]
+    #[schemars(required, range(min = 0, max = 10))]
     pub(crate) importance: Option<u8>,
     #[serde(default)]
+    #[schemars(length(max = 128))]
     pub(crate) audience: Option<String>,
     #[serde(default)]
+    #[schemars(length(max = 128))]
     pub(crate) supersedes: Option<String>,
     #[serde(default)]
+    #[schemars(inner(length(max = 128)))]
     pub(crate) cited_memory_ids: Vec<String>,
 }
 
-#[derive(Deserialize)]
+/// The extraction response: `facts` is required by the schema while serde
+/// still defaults an omitted array to empty.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields, extend("required" = ["facts"]))]
 struct Extraction {
     #[serde(default)]
     facts: Vec<Fact>,
@@ -233,22 +258,8 @@ cited_memory_ids には、提示された「注入済み記憶ID」に含まれ�
 出力は指定されたJSONスキーマのみです。";
 
 fn schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object", "additionalProperties": false, "required": ["facts"],
-        "properties": {"facts": {"type": "array", "items": {
-            "type": "object", "additionalProperties": false,
-            "required": ["content", "importance", "audience", "supersedes", "cited_memory_ids"],
-            "properties": {
-                "content": {"type": "string", "maxLength": 4000},
-                "importance": {"type": "integer", "minimum": 0, "maximum": 10},
-                "audience": {"type": ["string", "null"], "maxLength": 128},
-                "supersedes": {"type": ["string", "null"], "maxLength": 128},
-                "cited_memory_ids": {
-                    "type": "array", "items": {"type": "string", "maxLength": 128}
-                }
-            }
-        }}}
-    })
+    serde_json::to_value(schemars::schema_for!(Extraction))
+        .expect("a generated JSON schema is always a JSON value")
 }
 
 /// Renders the extraction prompt. It carries the transcript, the candidate
@@ -705,6 +716,78 @@ mod tests {
             importance: memory.importance,
             content: memory.content.clone(),
         }
+    }
+
+    #[test]
+    fn the_generated_schema_keeps_the_extraction_constraints() {
+        let schema = schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("the schema lists required fields")
+            .iter()
+            .map(|name| name.as_str().expect("required names are strings"))
+            .collect();
+        assert_eq!(required, ["facts"]);
+
+        assert!(
+            schema.get("$defs").is_none(),
+            "the fact schema is inlined, not referenced"
+        );
+        let facts = &schema["properties"]["facts"];
+        assert_eq!(facts["type"], "array");
+        let fact = &facts["items"];
+        assert_eq!(fact["type"], "object");
+        assert_eq!(fact["additionalProperties"], false);
+        let fact_required: Vec<&str> = fact["required"]
+            .as_array()
+            .expect("the fact schema lists required fields")
+            .iter()
+            .map(|name| name.as_str().expect("required names are strings"))
+            .collect();
+        assert_eq!(
+            fact_required,
+            [
+                "content",
+                "importance",
+                "audience",
+                "supersedes",
+                "cited_memory_ids"
+            ]
+        );
+
+        let properties = &fact["properties"];
+        assert_eq!(properties["content"]["type"], "string");
+        assert_eq!(properties["content"]["maxLength"], 4_000);
+        assert_eq!(properties["importance"]["type"], "integer");
+        assert_eq!(properties["importance"]["minimum"], 0);
+        assert_eq!(properties["importance"]["maximum"], 10);
+        for field in ["audience", "supersedes"] {
+            assert_eq!(
+                properties[field]["type"],
+                serde_json::json!(["string", "null"])
+            );
+            assert_eq!(properties[field]["maxLength"], 128);
+        }
+        assert_eq!(properties["cited_memory_ids"]["type"], "array");
+        assert_eq!(properties["cited_memory_ids"]["items"]["type"], "string");
+        assert_eq!(properties["cited_memory_ids"]["items"]["maxLength"], 128);
+    }
+
+    #[test]
+    fn a_complete_extraction_still_deserializes() {
+        let facts = parse_extraction(
+            r#"{"facts":[{"content":"A prefers green tea","importance":7,
+                "audience":"*","supersedes":"m1","cited_memory_ids":["m2"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].content, "A prefers green tea");
+        assert_eq!(facts[0].importance, Some(7));
+        assert_eq!(facts[0].audience.as_deref(), Some("*"));
+        assert_eq!(facts[0].supersedes.as_deref(), Some("m1"));
+        assert_eq!(facts[0].cited_memory_ids, ["m2"]);
     }
 
     #[test]

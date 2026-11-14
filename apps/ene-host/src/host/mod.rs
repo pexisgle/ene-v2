@@ -15,6 +15,7 @@ pub(crate) mod error;
 pub(crate) mod json;
 pub(crate) mod mind;
 pub(crate) mod model;
+pub(crate) mod net;
 pub(crate) mod notify;
 pub(crate) mod permission;
 pub(crate) mod resources;

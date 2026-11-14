@@ -3,6 +3,7 @@
 use super::db::{Result, Store};
 use super::error::HostError;
 use super::mind::{Companion, Role};
+use super::net;
 use super::settings::{Check, Connection, ConnectionConfig, ConnectionKind, CredentialState};
 use rig_core::catalog::{Catalog, ModelSpec};
 use rig_core::operation::Completion;
@@ -152,7 +153,7 @@ fn secret_for(
     }
     // A loopback endpoint is a local server; it may accept any key and the
     // host never sends a real secret to a non-loopback endpoint without one.
-    if loopback_endpoint(&connection.endpoint().endpoint) {
+    if net::loopback_endpoint(&connection.endpoint().endpoint) {
         return Ok("ene-local".into());
     }
     Err(HostError::unavailable(
@@ -164,33 +165,12 @@ fn secret_for(
 /// the provider's HTTPS default; a non-empty one must be HTTPS or loopback,
 /// so a plain `http://` remote URL never receives a credential.
 fn credential_endpoint(endpoint: &str) -> bool {
-    if endpoint.trim().is_empty() {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
         return true;
     }
-    let Ok(url) = url::Url::parse(endpoint) else {
-        return false;
-    };
-    match url.scheme() {
-        "https" => true,
-        "http" => loopback_host(&url),
-        _ => false,
-    }
-}
-
-fn loopback_endpoint(endpoint: &str) -> bool {
-    let Ok(url) = url::Url::parse(endpoint) else {
-        return false;
-    };
-    matches!(url.scheme(), "http" | "https") && loopback_host(&url)
-}
-
-fn loopback_host(url: &url::Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
+    url::Url::parse(endpoint).is_ok_and(|url| url.scheme() == "https")
+        || net::loopback_endpoint(endpoint)
 }
 
 /// The model an agent runs on.
@@ -327,13 +307,9 @@ pub(crate) async fn probe(
         return failure("the connection has no endpoint to probe".into());
     }
     let url = format!("{base}/models");
-    let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
+    let client = match net::client(std::time::Duration::from_secs(15)) {
         Ok(client) => client,
-        Err(error) => return failure(format!("http client: {error}")),
+        Err(error) => return failure(error),
     };
     let bytes = match client
         .get(&url)
@@ -342,16 +318,15 @@ pub(crate) async fn probe(
         .send()
         .await
     {
-        Ok(response) if response.status().is_success() => match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(error) => return failure(format!("endpoint body: {error}")),
-        },
+        Ok(response) if response.status().is_success() => {
+            match net::read_body(response, MAX_PROBE_BYTES, "connection").await {
+                Ok(bytes) => bytes,
+                Err(error) => return failure(error),
+            }
+        }
         Ok(response) => return failure(format!("endpoint answered {}", response.status())),
         Err(error) => return failure(format!("endpoint unreachable: {error}")),
     };
-    if bytes.len() > MAX_PROBE_BYTES {
-        return failure("endpoint answered more data than the host reads".into());
-    }
     let mut resources: Vec<String> = config.model_ids.clone();
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
         && let Some(data) = value.get("data").and_then(serde_json::Value::as_array)
