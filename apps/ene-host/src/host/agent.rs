@@ -248,16 +248,22 @@ pub(crate) fn notice_model_unavailable(world: &mut World, companion_id: &str, er
     );
 }
 
-/// Hands a turn to one agent. Voice and the schedule loop deliver turns without
-/// going through `chat`, so they share this entry point.
+/// Hands a turn to one agent, but only when its model is bound. Voice and the
+/// schedule loop deliver turns without going through `chat`, which is where a
+/// typed message asks for a model; without this a turn can run on the model the
+/// agent was bound to before its assignment or settings changed.
 pub(crate) fn deliver(
     world: &mut World,
     entity: Entity,
-    _companion_id: &str,
+    companion_id: &str,
     text: String,
     mode: DeliveryMode,
     author: Author,
 ) -> bool {
+    if let Err(error) = ensure_model(world, entity) {
+        notice_model_unavailable(world, companion_id, &error);
+        return false;
+    }
     world.trigger(Deliver::new(entity, text, mode).with_author(author));
     true
 }
