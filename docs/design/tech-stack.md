@@ -368,3 +368,4 @@ pub trait TtsEngine: Send + Sync {
 > [!NOTE]
 > **Extism (Wasm) プラグインのフェーズ位置づけ**:
 > Extism (Wasm) によるサードパーティプラグイン実行環境は、後続の拡張フェーズ（Phase 2）へ延期する。Alpha/Minimal構成では、内蔵Rigツール、外部MCPサーバー（JSON-RPC）、および外部ACPコーディングエージェント（stdio）の3系統に集中し、過剰な抽象化層を排して堅牢な動作を担保する。
+> 型定義SDK（`crates/ene-plugin`）とExtism組み込みランタイム（`crates/ene-plugin-runtime`）はPhase 2に備えて先行実装済みで、ワークスペースのビルド・テスト対象に含まれる。Alphaの `ene-host` はこれらをリンクせず、プラグインツールも公開しない。

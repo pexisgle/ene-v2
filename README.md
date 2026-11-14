@@ -14,10 +14,10 @@
 | --- | --- |
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
 | [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
-| [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK |
-| [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | Extismの組み込み実行、検証、実行制限 |
+| [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK（Phase 2。Alphaのホストは未接続） |
+| [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | Extismの組み込み実行、検証、実行制限（Phase 2。Alphaのホストは未接続） |
 
-ホストのアプリケーション処理、許可付きHTTP通信、Connect API、SQLite保存は `ene-host` にまとめています。起動・接続方法と内部構成は [ene-host のREADME](apps/ene-host/README.md) を参照してください。Wasmプラグインは `ene-plugin-runtime` からExtismを直接呼び出します。専用runner・自己再起動・Luau実行はありません。
+ホストのアプリケーション処理、許可付きHTTP通信、Connect API、SQLite保存は `ene-host` にまとめています。起動・接続方法と内部構成は [ene-host のREADME](apps/ene-host/README.md) を参照してください。WasmプラグインはPhase 2の実装で、`ene-plugin-runtime` がExtismを直接呼び出します（専用runner・自己再起動・Luau実行はありません）。型・SDKと実行基盤は後続フェーズに備えて先行して置いてあり、`just test` のビルド対象には含まれますが、Alphaの `ene-host` はこれらをリンクしません。
 
 ## Nixで開発する
 
