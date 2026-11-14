@@ -136,6 +136,23 @@ impl Harness {
         self.app.world().resource::<Store>().clone()
     }
 
+    /// Advances the loop until a message with exactly `text` is in the log.
+    /// `answered` only says that *some* reply landed, so a turn that answers
+    /// twice needs this instead of a second bare `update`.
+    fn run_until_text(&mut self, text: &str) {
+        let companion = self.companion.clone();
+        self.run_until(move |world| {
+            chat::history(
+                world,
+                w::HistoryRequest {
+                    companion_id: companion.clone(),
+                    ..Default::default()
+                },
+            )
+            .is_ok_and(|history| history.items.iter().any(|item| item.text == text))
+        });
+    }
+
     fn history(&mut self) -> w::History {
         chat::history(
             self.app.world_mut(),
@@ -415,15 +432,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     )
     .unwrap();
     assert_eq!(complete.status, w::DeviceOperationStatus::Completed);
-    harness.run_until(answered);
-    harness.app.update();
-    assert!(
-        harness
-            .history()
-            .items
-            .iter()
-            .any(|item| item.text == "書いたよ")
-    );
+    harness.run_until_text("書いたよ");
 }
 
 #[test]
