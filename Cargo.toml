@@ -16,14 +16,18 @@ ene-rpc = { path = "crates/ene-rpc" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 agent-client-protocol = { version = "=5.0.0", default-features = false }
-agent-client-protocol-schema = { version = "=1.15.1", default-features = false }
+# The guest SDK and the host must agree on one ACP type set. The host reaches it
+# through `agent_client_protocol::v1::schema` (tech-stack §G); a Wasm guest
+# cannot, because the SDK pulls `uuid` without a randomness source for
+# `wasm32-unknown-unknown`. `crates/ene-plugin` therefore depends on the
+# types-only crate directly, with a caret requirement so an SDK bump that moves
+# the schema to a new 1.x does not fail to resolve.
+agent-client-protocol-schema = { version = "1.15.1", default-features = false }
 process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 which = "=8.0.6"
-unicode-segmentation = "1"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 tempfile = "3"
-xdg = "3"
 async-stream = "0.3"
 axum = "0.8"
 base64 = "0.23"
@@ -40,6 +44,11 @@ jsonschema = "0.33"
 serde_json_canonicalizer = "0.4"
 jiff = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart"] }
+rig-core = { version = "=0.46.0", default-features = false }
+rig-ecs = "=0.46.0"
+rig-http = "=0.46.0"
+rig-memory = { version = "=0.46.0", features = ["fs"] }
+rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

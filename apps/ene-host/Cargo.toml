@@ -33,11 +33,11 @@ keyring = { version = "4", default-features = false, features = ["v1"] }
 private-fs = "0.2.1"
 process-wrap.workspace = true
 reqwest.workspace = true
-rig-core = { version = "=0.46.0", default-features = false }
-rig-ecs = "=0.46.0"
-rig-http = "=0.46.0"
-rig-memory = { version = "=0.46.0", features = ["fs"] }
-rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
+rig-core.workspace = true
+rig-ecs.workspace = true
+rig-http.workspace = true
+rig-memory.workspace = true
+rig-reqwest.workspace = true
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 schemars = "1"
 serde.workspace = true
@@ -55,6 +55,6 @@ which.workspace = true
 
 [dev-dependencies]
 ene-rpc = { workspace = true, features = ["client"] }
-rig-core = { version = "=0.46.0", default-features = false, features = ["test-utils"] }
+rig-core = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

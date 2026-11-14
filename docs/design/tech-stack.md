@@ -330,6 +330,7 @@ pub trait TtsEngine: Send + Sync {
 
 - **ACP外部ハーネス接続の最小イディオム**:
   - `agent-client-protocol = "5.0.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
+    - 例外は Wasm ゲストSDK（`crates/ene-plugin`）のみ。ACP SDK は `wasm32-unknown-unknown` 向けにビルドできない（`uuid` の乱数源が未指定になる）ため、型定義だけを提供する `agent-client-protocol-schema` に直接依存する。その際もバージョンはキャレット要件（`"1.15.1"`）とし、SDK 側のピンが 1.x 内で動いても解決が壊れないようにする。ホスト側はこの例外を使わない。
   - `process-wrap` の `TokioCommandWrap` で起動した子プロセスの標準入出力を `Client::v1()` トランスポートへ接続する最小構成：
     ```rust
     use agent_client_protocol::{ByteStreams, Client, schema::ProtocolVersion, v1::schema::InitializeRequest};
