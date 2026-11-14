@@ -41,7 +41,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 /// Longest a forced kill may take to be reaped; `work::FORCE_GRACE` is the
@@ -49,6 +49,10 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 /// How many ACP events may queue before a backend waits. A child that
 /// floods notifications is slowed instead of grown.
 const QUEUE: usize = 256;
+
+/// How many commands may wait for the backend before a control call reports
+/// that it could not be delivered.
+const COMMANDS: usize = 64;
 
 pub(super) const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -82,7 +86,7 @@ enum Command {
 
 pub(crate) struct AcpHandle {
     pid: Arc<AtomicU32>,
-    commands: UnboundedSender<Command>,
+    commands: mpsc::Sender<Command>,
 }
 
 impl AcpHandle {
@@ -93,7 +97,7 @@ impl AcpHandle {
 
     pub(crate) fn prompt(&self, run_id: &str, text: &str) -> bool {
         self.commands
-            .send(Command::Prompt {
+            .try_send(Command::Prompt {
                 run_id: run_id.to_owned(),
                 text: text.to_owned(),
             })
@@ -102,14 +106,14 @@ impl AcpHandle {
 
     pub(crate) fn cancel(&self, run_id: &str) -> bool {
         self.commands
-            .send(Command::Cancel {
+            .try_send(Command::Cancel {
                 run_id: run_id.to_owned(),
             })
             .is_ok()
     }
 
     pub(crate) fn end(&self) -> bool {
-        self.commands.send(Command::End).is_ok()
+        self.commands.try_send(Command::End).is_ok()
     }
 }
 
@@ -180,7 +184,7 @@ pub(crate) fn spawn(
     }
     let events = world.resource::<AcpEvents>().sender();
     let pid = Arc::new(AtomicU32::new(0));
-    let (commands, receiver) = unbounded_channel();
+    let (commands, receiver) = mpsc::channel(COMMANDS);
     let handle = AcpHandle {
         pid: Arc::clone(&pid),
         commands,
@@ -288,7 +292,7 @@ async fn run_backend(
     cwd: PathBuf,
     events: mpsc::Sender<AcpEvent>,
     pid: Arc<AtomicU32>,
-    commands: UnboundedReceiver<Command>,
+    commands: mpsc::Receiver<Command>,
 ) {
     let mut child = match wrap.spawn() {
         Ok(child) => child,
@@ -385,7 +389,7 @@ async fn session_loop(
     cwd: PathBuf,
     events: mpsc::Sender<AcpEvent>,
     shared: Arc<SharedRun>,
-    mut commands: UnboundedReceiver<Command>,
+    mut commands: mpsc::Receiver<Command>,
 ) -> Result<(), agent_client_protocol::Error> {
     let Some((session_id, first)) = open(&cx, &cwd, &shared, &mut commands).await? else {
         return Ok(());
@@ -434,7 +438,7 @@ async fn open(
     cx: &ConnectionTo<Agent>,
     cwd: &Path,
     shared: &SharedRun,
-    commands: &mut UnboundedReceiver<Command>,
+    commands: &mut mpsc::Receiver<Command>,
 ) -> Result<Option<(SessionId, Option<(String, String)>)>, agent_client_protocol::Error> {
     let initialize = cx
         .send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -503,7 +507,7 @@ async fn serve(
     text: String,
     events: &mpsc::Sender<AcpEvent>,
     shared: &SharedRun,
-    commands: &mut UnboundedReceiver<Command>,
+    commands: &mut mpsc::Receiver<Command>,
 ) -> Result<(), agent_client_protocol::Error> {
     shared.begin(&run_id);
     let request = PromptRequest::new(
