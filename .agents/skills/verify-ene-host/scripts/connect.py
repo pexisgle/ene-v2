@@ -251,7 +251,6 @@ def stream(args, target):
     decoder = ChunkDecoder()
     envelopes = EnvelopeDecoder()
     received = 0
-    frames = []
     error_seen = False
     deadline = time.monotonic() + args.timeout
     try:
@@ -265,17 +264,18 @@ def stream(args, target):
                 continue
             for chunk in decoder.feed(data):
                 for flags, payload in envelopes.feed(chunk):
-                    frames.append((flags, payload))
+                    # Each frame is written as it arrives, so this can run in the
+                    # background while another call answers it.
+                    sys.stdout.write(payload.decode("utf-8", "replace") + "\n")
+                    sys.stdout.flush()
                     received += 1
+                    if flags & 0x02 and b'"error"' in payload:
+                        error_seen = True
     except EOFError:
         pass
     finally:
         sock.close()
 
-    for flags, payload in frames:
-        sys.stdout.write(payload.decode("utf-8", "replace") + "\n")
-        if flags & 0x02:
-            error_seen = b'"error"' in payload
     if received < args.count and not error_seen:
         return 3
     return 1 if error_seen else 0

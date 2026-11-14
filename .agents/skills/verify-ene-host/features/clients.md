@@ -93,3 +93,11 @@ empty means nothing is granted (operations still need per-operation approval).
   handler validates. `connect.py` exits 1 when it sees the error frame.
 - `PerceptionEvent` for a client that is not the active one is silently
   discarded by design (returns 200); that is not evidence the event was applied.
+- `CompleteOperation` must arrive while the device stream is open. Closing the
+  stream first makes the host mark the pending operation `uncertain`, and the
+  late result is refused. Start the stream with `--count` large enough to stay
+  open, read the operation frame, report the result, then stop the reader.
+- `connect.py stream` prints each frame as it arrives, so a background stream
+  can be polled while a unary call answers it. The exit status still means
+  "all `--count` frames arrived" (0), "timed out first" (3), or "error frame"
+  (1).
