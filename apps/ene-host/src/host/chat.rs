@@ -137,10 +137,13 @@ fn receipts(world: &World, agent: Entity) -> Vec<(String, String, Vec<u8>)> {
         .collect()
 }
 
-/// A conservative character-based token estimate; the provider counts tokens
-/// itself and the host only needs a safe margin.
+/// The estimate the compaction budget uses too, so the ingress guard and the
+/// summary budget cannot disagree about how large a message is.
 fn estimate_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(3)
+    usize::try_from(rig_memory::estimate_tokens(&[
+        rig_core::completion::Message::user(text),
+    ]))
+    .unwrap_or(usize::MAX)
 }
 
 fn has_input(world: &World, agent: Entity, request_id: &str) -> bool {
@@ -240,7 +243,7 @@ fn message(
         id: entry.id.get().to_string(),
         companion_id: companion.to_owned(),
         work_id: work.to_owned(),
-        role: role(entry).into(),
+        role: agent::role_of(entry).into(),
         text: text.to_owned(),
         created_at: entry.made.to_string(),
         sequence: entry.id.get(),
@@ -253,16 +256,5 @@ fn message(
             .map(|author| author.label())
             .unwrap_or_default(),
         ..Default::default()
-    }
-}
-
-fn role(entry: &rig_core::conversation::EntryRef<'_>) -> w::MessageRole {
-    use rig_core::conversation::AuthorKind;
-    match (entry.author.map(|author| &author.kind), &entry.message) {
-        (None, rig_core::completion::Message::User { .. }) => w::MessageRole::User,
-        (None, _) => w::MessageRole::Assistant,
-        (Some(AuthorKind::User), _) => w::MessageRole::User,
-        (Some(AuthorKind::Agent), _) => w::MessageRole::Agent,
-        _ => w::MessageRole::Context,
     }
 }

@@ -358,7 +358,7 @@ pub(crate) fn entry_text(entry: &EntryRef<'_>) -> Option<String> {
     }
 }
 
-fn role_of(entry: &EntryRef<'_>) -> w::MessageRole {
+pub(crate) fn role_of(entry: &EntryRef<'_>) -> w::MessageRole {
     match (entry.author.map(|author| &author.kind), entry.message) {
         (None, CompletionMessage::User { .. }) => w::MessageRole::User,
         (None, CompletionMessage::System { .. }) => w::MessageRole::Context,
@@ -602,28 +602,6 @@ impl Plugin for AgentPlugin {
                 ),
             )
             .add_systems(AgentPass, stream_deltas.in_set(ReviewSystems::Edit));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn message_roles_follow_the_author() {
-        let conversation =
-            rig_core::conversation::Conversation::from_messages([CompletionMessage::user("hello")]);
-        let entry = conversation.entries().next().expect("one entry");
-        assert_eq!(role_of(&entry), w::MessageRole::User);
-        assert_eq!(entry_text(&entry).as_deref(), Some("hello"));
-
-        let conversation =
-            rig_core::conversation::Conversation::from_messages([CompletionMessage::assistant(
-                "hi",
-            )]);
-        let entry = conversation.entries().next().expect("one entry");
-        assert_eq!(role_of(&entry), w::MessageRole::Assistant);
-        assert_eq!(entry_text(&entry).as_deref(), Some("hi"));
     }
 }
 

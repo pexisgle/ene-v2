@@ -19,30 +19,20 @@ pub(crate) enum PolicyEffect {
 }
 
 /// An enum stored and sent as a snake_case name, with its two conversions.
-macro_rules! string_enum {
-    ($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
-        impl $name {
-            pub(crate) fn as_str(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $text),+
-                }
-            }
-
-            pub(crate) fn parse(text: &str) -> Option<Self> {
-                $(if text == $text {
-                    return Some(Self::$variant);
-                })+
-                None
-            }
+impl PolicyEffect {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Confirm => "confirm",
         }
-    };
-}
+    }
 
-string_enum!(PolicyEffect {
-    Allow => "allow",
-    Deny => "deny",
-    Confirm => "confirm",
-});
+    /// Reads a stored name back through the same serde spelling the wire uses.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        serde_json::from_value(text.into()).ok()
+    }
+}
 
 /// A saved rule ("always approve" is one-shot in the alpha and saves no rule).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,12 +54,21 @@ pub(crate) enum ApprovalStatus {
     Expired,
 }
 
-string_enum!(ApprovalStatus {
-    Pending => "pending",
-    Approved => "approved",
-    Denied => "denied",
-    Expired => "expired",
-});
+impl ApprovalStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Reads a stored name back through the same serde spelling the wire uses.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        serde_json::from_value(text.into()).ok()
+    }
+}
 
 /// An approval request, immutable in the parts that identify the operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
