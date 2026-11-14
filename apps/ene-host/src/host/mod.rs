@@ -53,6 +53,13 @@ use tokio::sync::{broadcast, oneshot};
 const QUEUE: usize = 256;
 const MAX_COMPANIONS: usize = 16;
 
+/// Locks `mutex` and takes the guard back from a poisoned one. A panic that
+/// unwound while a lock was held leaves the guarded value whole, so the host
+/// recovers the lock instead of failing every later access to it.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 type StartError = Box<dyn Error + Send + Sync>;
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 

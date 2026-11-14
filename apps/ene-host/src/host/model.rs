@@ -68,9 +68,7 @@ impl Credentials {
     }
 
     fn cache(&self) -> MutexGuard<'_, HashMap<String, String>> {
-        self.cache
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        super::lock(&self.cache)
     }
 
     pub(crate) fn remember(&self, connection: &str, secret: String) {
@@ -254,18 +252,17 @@ pub(crate) fn connect(
         }
     };
     let secret = secret_for(&connection, credentials)?;
-    let default = connection_provider_endpoint(&endpoint.adapter);
-    let configured = endpoint.endpoint.trim();
-    let mut options =
-        ConnectOptions::new()
-            .api_key(secret)
-            .http(Transport::new(if configured.is_empty() {
-                &default
-            } else {
-                configured
-            })?);
-    if !configured.is_empty() && endpoint.endpoint != default {
-        options = options.base_url(endpoint.endpoint.clone());
+    let default =
+        super::settings::provider(&endpoint.adapter).map_or_else(String::new, |p| p.endpoint);
+    let base = super::settings::endpoint_of(&connection)
+        .ok_or_else(|| HostError::unavailable("the connection has no endpoint to call"))?;
+    let mut options = ConnectOptions::new()
+        .api_key(secret)
+        .http(Transport::new(&base)?);
+    // rig is handed the base URL only when it is not the provider's own, so a
+    // connection that leaves the field empty keeps the provider default.
+    if base != default {
+        options = options.base_url(base.clone());
     }
     let model = catalog
         .connect_with(spec.as_ref(), options)
@@ -276,10 +273,6 @@ pub(crate) fn connect(
         handler: Handler(handler),
     };
     Ok(Bound { connection })
-}
-
-fn connection_provider_endpoint(adapter: &str) -> String {
-    super::settings::provider(adapter).map_or_else(String::new, |provider| provider.endpoint)
 }
 
 /// The one transport every model call goes through. `rig-core` hands it each
@@ -354,6 +347,15 @@ fn within_cap(size: usize) -> bool {
     size <= MAX_MODEL_BYTES
 }
 
+/// A declared length over the cap is refused before the body is read at all.
+fn declared_too_large(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_MODEL_BYTES as u64)
+}
+
 impl HttpClientExt for Transport {
     fn send<T, U>(
         &self,
@@ -371,12 +373,18 @@ impl HttpClientExt for Transport {
                 .map_err(|reason| refused(&reason))?;
             let response = this.client.send_streaming(request).await?;
             let (parts, mut body) = response.into_parts();
+            if declared_too_large(&parts.headers) {
+                return Err(refused(TOO_LARGE));
+            }
             let mut collected = Vec::new();
             while let Some(chunk) = body.next().await {
-                collected.extend_from_slice(&chunk?);
-                if !within_cap(collected.len()) {
+                let bytes = chunk?;
+                // Refuse before the copy, so a hostile chunk never lands in
+                // the buffer the cap is there to bound.
+                if !within_cap(collected.len().saturating_add(bytes.len())) {
                     return Err(refused(TOO_LARGE));
                 }
+                collected.extend_from_slice(&bytes);
             }
             let value = U::from(Bytes::from(collected));
             let lazy: LazyBody<U> = Box::pin(async move { Ok(value) });
@@ -412,6 +420,9 @@ impl HttpClientExt for Transport {
                 .map_err(|reason| refused(&reason))?;
             let response = this.client.send_streaming(request).await?;
             let (parts, mut body) = response.into_parts();
+            if declared_too_large(&parts.headers) {
+                return Err(refused(TOO_LARGE));
+            }
             let bounded = async_stream::try_stream! {
                 let mut size = 0usize;
                 while let Some(chunk) = body.next().await {
@@ -508,16 +519,14 @@ pub(crate) async fn probe(
             ..Default::default()
         };
     };
-    if config.model_ids.is_empty() && connection.endpoint().endpoint.is_empty() {
-        return failure("the connection has no models and no endpoint".into());
-    }
     let Ok(secret) = secret_for(connection, credentials) else {
         return failure("no credential is registered for this connection".into());
     };
-    let base = connection.endpoint().endpoint.trim_end_matches('/');
-    if base.is_empty() {
+    // A connection that leaves its endpoint empty calls the provider's own
+    // default, which is exactly what the probe has to ask.
+    let Some(base) = super::settings::endpoint_of(connection) else {
         return failure("the connection has no endpoint to probe".into());
-    }
+    };
     let url = format!("{base}/models");
     if let Err(error) = net::guard_endpoint(&url, "connection").await {
         return failure(error);

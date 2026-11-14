@@ -89,7 +89,9 @@ impl Store {
 
 /// The current time in UTC, RFC 3339.
 pub(crate) fn now() -> String {
-    Timestamp::now().to_string()
+    // The stored columns are compared as text, so every stamp keeps the same
+    // second precision the schedule rows are written with.
+    format!("{:.0}", Timestamp::now())
 }
 
 /// Parses RFC 3339 into seconds since the Unix epoch.
@@ -179,7 +181,7 @@ pub(crate) fn enum_column<T>(
 }
 
 pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(value).map_err(Into::into)
+    serde_json::to_string(value).map_err(|error| HostError::storage(error.to_string()))
 }
 
 /// The caller's stamp, or `fallback` (one `now()` shared by a row) when the
@@ -216,6 +218,19 @@ pub(crate) fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stored stamps are ordered as text, so every one of them has to keep the
+    /// same precision; a fraction on some rows would sort before `Z` of the
+    /// same second and put a later instant first.
+    #[test]
+    fn a_stamp_keeps_the_second_precision_the_columns_are_ordered_by() {
+        let now = now();
+        assert!(now.ends_with('Z'), "{now}");
+        assert!(!now.contains('.'), "the stamp carries no fraction: {now}");
+        assert!(epoch(&now).is_some(), "{now}");
+        assert_eq!(epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch("not a time"), None);
+    }
 
     #[test]
     fn a_database_round_trips_and_refuses_a_newer_version() {

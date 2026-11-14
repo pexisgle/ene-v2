@@ -388,4 +388,42 @@ mod tests {
         });
         assert!(bad_options.validate().is_err());
     }
+
+    /// A connection that leaves its endpoint empty calls the provider's own,
+    /// which is what the probe and the model binding both resolve.
+    #[test]
+    fn an_empty_endpoint_resolves_to_the_provider_default() {
+        let connection = Connection {
+            id: "c1".into(),
+            name: "main".into(),
+            enabled: true,
+            kind: ConnectionKind::Llm,
+            config: ConnectionConfig::Llm(LlmConnection {
+                endpoint: Endpoint {
+                    endpoint: "  ".into(),
+                    ..endpoint()
+                },
+                model_ids: vec!["gpt-5".into()],
+            }),
+            credential_state: CredentialState::Absent,
+            revision: 1,
+            last_check: None,
+        };
+        assert_eq!(
+            endpoint_of(&connection).as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        let mut configured = connection;
+        configured.config = ConnectionConfig::Llm(LlmConnection {
+            endpoint: Endpoint {
+                endpoint: "https://proxy.example/v1/".into(),
+                ..endpoint()
+            },
+            model_ids: vec!["gpt-5".into()],
+        });
+        assert_eq!(
+            endpoint_of(&configured).as_deref(),
+            Some("https://proxy.example/v1")
+        );
+    }
 }

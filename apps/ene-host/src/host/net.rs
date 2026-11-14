@@ -19,8 +19,8 @@ pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client, String> {
         .unwrap_or(u64::MAX)
         .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
     let clients = CLIENTS.get_or_init(Default::default);
-    let lock = || clients.lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some(client) = lock().get(&millis).cloned() {
+    let guard = || crate::host::lock(clients);
+    if let Some(client) = guard().get(&millis).cloned() {
         return Ok(client);
     }
     let client = reqwest::Client::builder()
@@ -28,7 +28,7 @@ pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client, String> {
         .timeout(Duration::from_millis(millis))
         .build()
         .map_err(|error| format!("http client: {error}"))?;
-    lock().entry(millis).or_insert(client.clone());
+    guard().entry(millis).or_insert(client.clone());
     Ok(client)
 }
 
@@ -85,8 +85,19 @@ pub(crate) fn secure_endpoint(endpoint: &str) -> bool {
     if endpoint.is_empty() {
         return true;
     }
-    url::Url::parse(endpoint).is_ok_and(|url| url.scheme() == "https")
-        || loopback_endpoint(endpoint)
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    // A URL that carries its own userinfo would leak the credential into a
+    // stored, logged value; it belongs in the Authorization header instead.
+    if url.host().is_none() || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => true,
+        "http" => loopback_endpoint(endpoint),
+        _ => false,
+    }
 }
 
 /// The endpoint guard shared by every host HTTP call. Loopback may use plain
@@ -173,6 +184,32 @@ fn too_large(what: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// The setup-time rule and the request-time guard have to agree: a
+    /// credential may cross HTTPS or a loopback socket, and never a URL that
+    /// already carries its own userinfo.
+    #[test]
+    fn only_https_and_loopback_may_carry_a_credential() {
+        for allowed in [
+            "",
+            "https://api.example.com/v1",
+            "https://127.0.0.1/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:5002",
+        ] {
+            assert!(secure_endpoint(allowed), "{allowed}");
+        }
+        for refused in [
+            "http://api.example.com/v1",
+            "https://user:secret@api.example.com/v1",
+            "http://user:secret@127.0.0.1:11434/v1",
+            "https://",
+            "ftp://127.0.0.1/v1",
+            "not a url",
+        ] {
+            assert!(!secure_endpoint(refused), "{refused}");
+        }
+    }
 
     #[tokio::test]
     async fn the_guard_allows_loopback_and_rejects_plain_remote_http() {

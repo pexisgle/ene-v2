@@ -176,7 +176,8 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
             patch.apply(&mut next);
             Some(MindStateChange {
                 expected_revision: current.state_revision,
-                state: serde_json::to_string(&next)?,
+                state: serde_json::to_string(&next)
+                    .map_err(|error| HostError::internal(format!("companion state: {error}")))?,
             })
         }
         None => None,

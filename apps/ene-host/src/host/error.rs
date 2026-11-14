@@ -128,12 +128,6 @@ impl From<rusqlite::Error> for HostError {
     }
 }
 
-impl From<serde_json::Error> for HostError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Storage(error.to_string())
-    }
-}
-
 impl From<std::io::Error> for HostError {
     fn from(error: std::io::Error) -> Self {
         Self::Storage(error.to_string())
