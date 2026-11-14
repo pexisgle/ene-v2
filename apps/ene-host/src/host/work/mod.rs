@@ -1375,9 +1375,25 @@ mod tests {
         store.insert_run(&run).unwrap();
     }
 
+    /// One multi-thread runtime for the whole test module: the ACP spawn runs
+    /// its backend on the host runtime, so a bare `World` needs one too.
+    fn runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("a runtime for the ACP tests")
+        })
+    }
+
     fn world(store: Store) -> World {
         let mut world = World::new();
         world.insert_resource(store);
+        world.insert_resource(crate::host::resources::HostRuntime(
+            runtime().handle().clone(),
+        ));
         world.insert_resource(Notifier::new());
         world.insert_resource(WorkReports::default());
         world.insert_resource(Runs::default());

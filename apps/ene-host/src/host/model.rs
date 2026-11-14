@@ -5,6 +5,8 @@ use super::error::HostError;
 use super::mind::{Companion, Role};
 use super::net;
 use super::settings::{Check, Connection, ConnectionConfig, ConnectionKind, CredentialState};
+use bytes::Bytes;
+use futures_util::StreamExt;
 use rig_core::catalog::{Catalog, ModelSpec};
 use rig_core::operation::Completion;
 use rig_core::providers::registry::{ConnectOptions, ProviderId};
@@ -12,14 +14,23 @@ use rig_core::serve::ErasedHandler;
 use rig_core::serve::adapters::ModelAdapter;
 use rig_ecs::effects::Handler;
 use rig_ecs::model::Connection as ModelConnection;
+use rig_http::http_client::{self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse};
+use rig_http::wasm_compat::WasmCompatSend;
+use rig_reqwest::ReqwestClient;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
 };
 
 const KEYRING_SERVICE: &str = "ene-host";
 const MAX_MODELS: usize = 4_096;
 const MAX_PROBE_BYTES: usize = 2 * 1024 * 1024;
+
+/// How long a model request may take end to end, and how much of a streamed
+/// answer the host reads before treating it as hostile.
+const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_MODEL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Secrets stay out of the state database: the OS keyring holds them and this
 /// cache only mirrors what the host thread needs synchronously.
@@ -218,12 +229,17 @@ pub(crate) fn connect(
         }
     };
     let secret = secret_for(&connection, credentials)?;
-    let mut options = ConnectOptions::new()
-        .api_key(secret)
-        .http(rig_reqwest::ReqwestClient::default());
-    if !endpoint.endpoint.trim().is_empty()
-        && endpoint.endpoint != connection_provider_endpoint(&endpoint.adapter)
-    {
+    let default = connection_provider_endpoint(&endpoint.adapter);
+    let configured = endpoint.endpoint.trim();
+    let mut options =
+        ConnectOptions::new()
+            .api_key(secret)
+            .http(Transport::new(if configured.is_empty() {
+                &default
+            } else {
+                configured
+            })?);
+    if !configured.is_empty() && endpoint.endpoint != default {
         options = options.base_url(endpoint.endpoint.clone());
     }
     let model = catalog
@@ -239,6 +255,150 @@ pub(crate) fn connect(
 
 fn connection_provider_endpoint(adapter: &str) -> String {
     super::settings::provider(adapter).map_or_else(String::new, |provider| provider.endpoint)
+}
+
+/// The one transport every model call goes through. `rig-core` hands it each
+/// request, so this is where a redirect is refused, the request is pinned to
+/// the origin the connection was configured with, and a streamed answer is cut
+/// at the cap. The default `ReqwestClient` follows redirects and reads an
+/// unbounded body, so neither check would hold there.
+#[derive(Clone)]
+struct Transport {
+    client: ReqwestClient,
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+}
+
+impl Transport {
+    /// Builds the transport for `base`. Plain `http` is only accepted on
+    /// loopback and a literal non-public address is refused here, before any
+    /// credential can travel to it.
+    fn new(base: &str) -> Result<Self> {
+        let url = url::Url::parse(base)
+            .map_err(|_| HostError::unavailable("the model endpoint is not a URL"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(HostError::unavailable("the model endpoint must be http(s)"));
+        }
+        let Some(host) = url.host_str() else {
+            return Err(HostError::unavailable("the model endpoint has no host"));
+        };
+        let literal = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .ok();
+        let local = net::loopback_endpoint(base);
+        if url.scheme() == "http" && !local {
+            return Err(HostError::unavailable(
+                "the model endpoint must use https outside loopback",
+            ));
+        }
+        if let Some(address) = literal
+            && !local
+            && net::blocked_ip(address)
+        {
+            return Err(HostError::unavailable(
+                "the model endpoint is not a public address",
+            ));
+        }
+        let client = net::client(MODEL_TIMEOUT)
+            .map_err(|error| HostError::unavailable(format!("the model transport: {error}")))?;
+        Ok(Self {
+            client: ReqwestClient::from(client),
+            scheme: url.scheme().to_owned(),
+            host: host.to_owned(),
+            port: url.port_or_known_default(),
+        })
+    }
+
+    /// Whether `uri` still addresses the configured origin without embedding
+    /// credentials in it. A redirect or an adapter change cannot move it.
+    fn permits(&self, uri: &http::Uri) -> bool {
+        let Ok(url) = url::Url::parse(&uri.to_string()) else {
+            return false;
+        };
+        url.scheme() == self.scheme
+            && url.host_str() == Some(self.host.as_str())
+            && url.port_or_known_default() == self.port
+            && url.username().is_empty()
+            && url.password().is_none()
+    }
+}
+
+/// A refusal that never carries the URL, the secret, or the upstream reason.
+fn denied() -> http_client::Error {
+    http_client::Error::instance(std::io::Error::other(
+        "the model request left its configured destination",
+    ))
+}
+
+impl HttpClientExt for Transport {
+    fn send<T, U>(
+        &self,
+        request: http::Request<T>,
+    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody<U>>>> + Send + 'static
+    where
+        T: Into<Bytes> + WasmCompatSend,
+        U: From<Bytes> + WasmCompatSend + 'static,
+    {
+        let this = self.clone();
+        let request = request.map(Into::into);
+        async move {
+            if !this.permits(request.uri()) {
+                return Err(denied());
+            }
+            this.client.send(request).await.map_err(|_| denied())
+        }
+    }
+
+    #[allow(clippy::manual_async_fn)]
+    fn send_multipart<U>(
+        &self,
+        _: http::Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody<U>>>> + Send + 'static
+    where
+        U: From<Bytes> + WasmCompatSend + 'static,
+    {
+        async { Err(denied()) }
+    }
+
+    fn send_streaming<T>(
+        &self,
+        request: http::Request<T>,
+    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + Send
+    where
+        T: Into<Bytes> + WasmCompatSend,
+    {
+        let this = self.clone();
+        let request = request.map(Into::into);
+        async move {
+            if !this.permits(request.uri()) {
+                return Err(denied());
+            }
+            let response = this
+                .client
+                .send_streaming(request)
+                .await
+                .map_err(|_| denied())?;
+            let (parts, mut body) = response.into_parts();
+            let bounded = async_stream::try_stream! {
+                let mut size = 0usize;
+                while let Some(chunk) = body.next().await {
+                    let bytes = chunk.map_err(|_| denied())?;
+                    size = size.saturating_add(bytes.len());
+                    if size > MAX_MODEL_BYTES {
+                        Err(denied())?;
+                    }
+                    yield bytes;
+                }
+            };
+            Ok(http::Response::from_parts(
+                parts,
+                Box::pin(bounded) as http_client::BoxedStream,
+            ))
+        }
+    }
 }
 
 /// Lists the models a connection declares, with whatever the catalog knows.
@@ -427,5 +587,25 @@ mod tests {
             "ene-local"
         );
         assert!(secret_for(&connection_at("http://api.example.com/v1"), &anonymous).is_err());
+    }
+
+    /// The transport is the only place a model request can be redirected or
+    /// pointed at a private address, so both refusals have to hold here.
+    #[test]
+    fn the_model_transport_stays_on_its_origin_and_off_private_addresses() {
+        let transport = Transport::new("https://api.openai.com/v1").unwrap();
+        assert!(transport.permits(&"https://api.openai.com/v1/responses".parse().unwrap()));
+        for refused in [
+            "https://api.example.com/v1/responses",
+            "http://api.openai.com/v1/responses",
+            "https://api.openai.com:8443/v1/responses",
+        ] {
+            assert!(!transport.permits(&refused.parse().unwrap()), "{refused}");
+        }
+        assert!(Transport::new("http://api.example.com/v1").is_err());
+        assert!(Transport::new("https://169.254.169.254/v1").is_err());
+        assert!(Transport::new("https://[fe80::1]/v1").is_err());
+        assert!(Transport::new("ftp://127.0.0.1/v1").is_err());
+        assert!(Transport::new("http://127.0.0.1:11434/v1").is_ok());
     }
 }

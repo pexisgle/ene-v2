@@ -5,6 +5,7 @@ use crate::host::{
     db::{Store, truncate},
     error::HostError,
     notify::Notifier,
+    resources::HostRuntime,
     settings::AcpConnection,
 };
 use agent_client_protocol::{
@@ -34,7 +35,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
     time::Duration,
@@ -179,7 +180,10 @@ pub(crate) fn spawn(
     let env = child_env(&connection.endpoint.options, |name: &str| {
         std::env::var_os(name)
     });
-    runtime()?.spawn(run_backend(
+    let Some(runtime) = world.get_resource::<HostRuntime>().map(|rt| rt.0.clone()) else {
+        return Err(HostError::unavailable("the host runtime is unavailable"));
+    };
+    runtime.spawn(run_backend(
         work_id.to_owned(),
         command_wrap(&program, &args, &cwd, env),
         cwd,
@@ -234,23 +238,6 @@ pub(crate) fn pump(world: &mut World) {
                 pids,
             } => super::acp_closed(world, &work_id, run_id, error, confirmed, pids),
         }
-    }
-}
-
-fn runtime() -> Result<&'static tokio::runtime::Runtime, HostError> {
-    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
-    match RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("ene-acp")
-            .build()
-            .map_err(|error| error.to_string())
-    }) {
-        Ok(runtime) => Ok(runtime),
-        Err(error) => Err(HostError::unavailable(format!(
-            "the ACP runtime could not start: {error}"
-        ))),
     }
 }
 

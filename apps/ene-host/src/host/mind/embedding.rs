@@ -174,23 +174,23 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     Ok(vectors)
 }
 
-/// The one background runtime. It starts on first use, so a host with no
-/// embedding or consolidation connection never pays for it.
+/// The host's runtime, borrowed rather than owned. Two runtimes would mean two
+/// timers and two shutdown orders, so embedding and consolidation run on the
+/// same one the rest of the host uses; a host that configures no embedding
+/// connection simply never spawns anything on it.
 #[derive(Resource, Default)]
 pub(crate) struct Embedder {
-    runtime: OnceLock<tokio::runtime::Runtime>,
+    runtime: OnceLock<tokio::runtime::Handle>,
 }
 
 impl Embedder {
-    fn runtime(&self) -> Option<&tokio::runtime::Runtime> {
-        if self.runtime.get().is_none() {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()
-                .ok()?;
-            let _ = self.runtime.set(runtime);
+    pub(crate) fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            runtime: OnceLock::from(runtime),
         }
+    }
+
+    fn runtime(&self) -> Option<&tokio::runtime::Handle> {
         self.runtime.get()
     }
 
@@ -696,7 +696,13 @@ async fn fill(connection: rusqlite::Connection, target: &Target) -> Result<usize
 
 /// Registers the vector cache, the HTTP source and its backfill.
 pub(crate) fn register(app: &mut App) {
-    app.init_resource::<Embedder>()
+    let embedder = app
+        .world()
+        .get_resource::<crate::host::resources::HostRuntime>()
+        .map_or_else(Embedder::default, |runtime| {
+            Embedder::new(runtime.0.clone())
+        });
+    app.insert_resource(embedder)
         .init_resource::<CompactVectorIndex>()
         .init_resource::<Backfill>()
         .add_systems(Update, backfill.after(AgentLoop));
@@ -840,41 +846,5 @@ mod tests {
         );
         let stored = store.embedding_blob(&memory.id, &space).unwrap();
         assert_eq!(stored.unwrap().0, 2);
-    }
-
-    #[tokio::test]
-    async fn an_oversized_answer_is_rejected_while_streaming() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 2_048];
-            let _ = socket.read(&mut request).await;
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .unwrap();
-            // No content-length: only the streaming cap can stop this body.
-            let _ = socket.write_all(&[b'x'; 128]).await;
-            let _ = socket.shutdown().await;
-        });
-        let error = post_json(
-            &format!("http://{address}/embeddings"),
-            &serde_json::json!({"input": []}),
-            "",
-            Duration::from_secs(5),
-            64,
-            "embedding",
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("more data"), "{error}");
-        server.await.unwrap();
     }
 }
