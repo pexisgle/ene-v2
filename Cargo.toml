@@ -35,6 +35,9 @@ http = "1"
 hound = "3"
 chrono = "0.4"
 croner = "3"
+rubato = "0.16"
+jsonschema = "0.33"
+serde_json_canonicalizer = "0.4"
 jiff = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart"] }
 rustix = { version = "1", features = ["fs", "process"] }

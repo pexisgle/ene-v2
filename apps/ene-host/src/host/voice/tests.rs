@@ -886,3 +886,26 @@ mod wave_format {
         assert!(error.contains("not PCM"), "{error}");
     }
 }
+
+mod resampling {
+    use super::super::*;
+
+    #[test]
+    fn a_48k_tone_is_converted_to_the_24k_wire_rate() {
+        let samples: Vec<i16> = (0..4_800)
+            .map(|index| ((index as f32 * 0.1).sin() * 10_000.0) as i16)
+            .collect();
+        let pcm: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let out = resample_mono(&pcm, 48_000, 24_000).unwrap();
+        assert_eq!(out.len() / 2, 2_400);
+        assert!(
+            out.as_chunks::<2>()
+                .0
+                .iter()
+                .any(|pair| i16::from_le_bytes(*pair) != 0)
+        );
+    }
+}

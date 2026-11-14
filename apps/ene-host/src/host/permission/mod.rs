@@ -802,29 +802,10 @@ pub(crate) fn invalidate_generation(
     }
 }
 
-/// JSON with object keys sorted: the hash must not depend on the map order
-/// enabled by the `preserve_order` feature of serde_json.
+/// RFC 8785 (JCS) canonical JSON: the approval hash must not depend on
+/// object key order. serde_json_canonicalizer sorts keys by UTF-16 code
+/// units and uses the standard number form, so the host does not carry a
+/// sorting serializer of its own.
 fn canonical_json(value: &Value) -> String {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let entries: Vec<String> = keys
-                .into_iter()
-                .map(|key| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(key).unwrap_or_default(),
-                        canonical_json(&map[key])
-                    )
-                })
-                .collect();
-            format!("{{{}}}", entries.join(","))
-        }
-        Value::Array(items) => {
-            let items: Vec<String> = items.iter().map(canonical_json).collect();
-            format!("[{}]", items.join(","))
-        }
-        other => other.to_string(),
-    }
+    serde_json_canonicalizer::to_string(value).unwrap_or_else(|_| value.to_string())
 }

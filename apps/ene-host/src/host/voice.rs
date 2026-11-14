@@ -488,34 +488,48 @@ fn wire_pcm(pcm: Vec<u8>, sample_rate: u32) -> HttpResult<Vec<u8>> {
     if sample_rate == SAMPLE_RATE {
         return Ok(pcm);
     }
-    Ok(resample_mono(&pcm, sample_rate, SAMPLE_RATE))
+    resample_mono(&pcm, sample_rate, SAMPLE_RATE)
 }
 
-fn resample_mono(pcm: &[u8], from: u32, to: u32) -> Vec<u8> {
-    if from == to || from == 0 {
-        return pcm.to_vec();
+fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
+    use rubato::Resampler;
+    if from == 0 {
+        return Err("the TTS engine returned audio without a sample rate".into());
     }
-    let samples: Vec<i16> = pcm
+    if from == to {
+        return Ok(pcm.to_vec());
+    }
+    let samples: Vec<f32> = pcm
         .as_chunks::<2>()
         .0
         .iter()
-        .map(|pair| i16::from_le_bytes(*pair))
+        .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32_768.0)
         .collect();
-    let ratio = f64::from(to) / f64::from(from);
-    let length = ((samples.len() as f64) * ratio).round() as usize;
-    let mut out = Vec::with_capacity(length * 2);
-    for index in 0..length {
-        let position = index as f64 / ratio;
-        let left = position.floor() as usize;
-        let first = f64::from(samples.get(left).copied().unwrap_or(0));
-        let second = f64::from(samples.get(left + 1).copied().unwrap_or(first as i16));
-        let value = first + (second - first) * (position - left as f64);
-        let sample = value
-            .round()
-            .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
-        out.extend_from_slice(&sample.to_le_bytes());
+    let mut resampler = rubato::FftFixedInOut::<f32>::new(from as usize, to as usize, 1_024, 1)
+        .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
+    let expected = ((samples.len() as f64) * f64::from(to) / f64::from(from)).round() as usize;
+    let mut resampled: Vec<f32> = Vec::with_capacity(expected + 1_024);
+    let mut position = 0;
+    while position < samples.len() {
+        let frames = resampler.input_frames_next();
+        let end = (position + frames).min(samples.len());
+        let mut block = samples[position..end].to_vec();
+        block.resize(frames, 0.0);
+        let output = resampler
+            .process(&[block], None)
+            .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
+        if let Some(channel) = output.first() {
+            resampled.extend_from_slice(channel);
+        }
+        position = end;
     }
-    out
+    resampled.truncate(expected);
+    let mut pcm = Vec::with_capacity(resampled.len() * 2);
+    for sample in resampled {
+        let value = (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16;
+        pcm.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(pcm)
 }
 
 fn wav_wrap(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
