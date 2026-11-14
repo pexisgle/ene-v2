@@ -13,6 +13,7 @@ pub(crate) mod db;
 pub(crate) mod delegation;
 pub(crate) mod error;
 pub(crate) mod json;
+pub(crate) mod mcp;
 pub(crate) mod mind;
 pub(crate) mod model;
 pub(crate) mod net;
@@ -152,6 +153,7 @@ impl Runtime {
                         client::ClientPlugin,
                         work::WorkPlugin,
                         mind::MindPlugin,
+                        mcp::McpPlugin,
                         autonomy::AutonomyPlugin,
                         staged::StagedPlugin,
                         compaction::CompactionPlugin,

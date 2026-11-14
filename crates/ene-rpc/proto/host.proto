@@ -515,6 +515,8 @@ message EmbeddingConnection {
 message McpConnection {
   ConnectionEndpoint endpoint = 1;
   repeated string allowed_tools = 2;
+  string command = 3;        // stdio transport: the program to run
+  repeated string args = 4;  // stdio transport: its arguments
 }
 message AcpConnection {
   ConnectionEndpoint endpoint = 1;

@@ -67,7 +67,7 @@ connection_configs! {
     Tts(TtsConnection) { voice_ids },
     Stt(SttConnection) { language_hints },
     Embedding(EmbeddingConnection) { model_id, dimensions },
-    Mcp(McpConnection) { allowed_tools },
+    Mcp(McpConnection) { allowed_tools, command, args },
     Acp(AcpConnection) { command, args },
 }
 

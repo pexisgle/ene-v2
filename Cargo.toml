@@ -49,6 +49,9 @@ rig-core = { version = "=0.46.0", default-features = false }
 rig-ecs = "=0.46.0"
 rig-http = "=0.46.0"
 rig-memory = { version = "=0.46.0", features = ["fs"] }
+rig-rmcp = "=0.46.0"
+# The transports rig-rmcp re-exports are behind rmcp features it does not turn on.
+rmcp = { version = "3.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }

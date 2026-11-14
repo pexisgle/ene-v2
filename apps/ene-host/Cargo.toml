@@ -38,6 +38,8 @@ rig-core.workspace = true
 rig-ecs.workspace = true
 rig-http.workspace = true
 rig-memory.workspace = true
+rig-rmcp.workspace = true
+rmcp.workspace = true
 rig-reqwest.workspace = true
 rusqlite = { version = "0.42", features = ["bundled", "fallible_uint"] }
 schemars = "1"

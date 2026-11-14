@@ -116,7 +116,7 @@ connection_bodies! {
     Tts(TtsConnection) { voice_ids: Vec<String> },
     Stt(SttConnection) { language_hints: Vec<String> },
     Embedding(EmbeddingConnection) { model_id: String, dimensions: u32 },
-    Mcp(McpConnection) { allowed_tools: Vec<String> },
+    Mcp(McpConnection) { allowed_tools: Vec<String>, command: String, args: Vec<String> },
     Acp(AcpConnection) { command: String, args: Vec<String> },
 }
 
@@ -141,6 +141,16 @@ impl ConnectionConfig {
             }
             Self::Acp(config) if config.command.trim().is_empty() => {
                 return Err(HostError::invalid("ACP connections need a command"));
+            }
+            Self::Mcp(config)
+                if config.command.trim().is_empty()
+                    && config.endpoint.endpoint.trim().is_empty() =>
+            {
+                // A connection the host cannot open would be a setting that
+                // saves and then silently contributes no tools.
+                return Err(HostError::invalid(
+                    "MCP connections need a command or an endpoint",
+                ));
             }
             _ => {}
         }
