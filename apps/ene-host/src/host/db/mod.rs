@@ -28,7 +28,8 @@ pub(crate) struct Store(Arc<Mutex<Connection>>);
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| HostError::storage(format!("state directory: {error}")))?;
         }
         let connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
