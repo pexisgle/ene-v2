@@ -901,11 +901,22 @@ mod resampling {
             .collect();
         let out = resample_mono(&pcm, 48_000, 24_000).unwrap();
         assert_eq!(out.len() / 2, 2_400);
+        let samples: Vec<i16> = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| i16::from_le_bytes(pair))
+            .collect();
+        let first = samples
+            .iter()
+            .position(|sample| sample.abs() > 100)
+            .expect("the tone is audible");
+        assert!(first < 480, "the output starts with {first} silent samples");
         assert!(
-            out.as_chunks::<2>()
-                .0
+            samples[samples.len() * 9 / 10..]
                 .iter()
-                .any(|pair| i16::from_le_bytes(*pair) != 0)
+                .any(|sample| sample.abs() > 100),
+            "the tail was flushed away"
         );
     }
 }

@@ -507,6 +507,9 @@ fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
         .collect();
     let mut resampler = rubato::FftFixedInOut::<f32>::new(from as usize, to as usize, 1_024, 1)
         .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
     let expected = ((samples.len() as f64) * f64::from(to) / f64::from(from)).round() as usize;
     let mut resampled: Vec<f32> = Vec::with_capacity(expected + 1_024);
     let mut position = 0;
@@ -522,6 +525,25 @@ fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
             resampled.extend_from_slice(channel);
         }
         position = end;
+    }
+    // `FftFixedInOut` delays its output by `output_delay()` frames. Flush
+    // the filter with silent input, then drop that leading delay so the tone
+    // starts where it should and the tail is not truncated.
+    let delay = resampler.output_delay();
+    let target = delay + expected;
+    let mut flush = 0;
+    while resampled.len() < target && flush < 64 {
+        let frames = resampler.input_frames_next();
+        let output = resampler
+            .process(&[vec![0.0; frames]], None)
+            .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
+        if let Some(channel) = output.first() {
+            resampled.extend_from_slice(channel);
+        }
+        flush += 1;
+    }
+    if delay > 0 {
+        resampled.drain(..delay.min(resampled.len()));
     }
     resampled.truncate(expected);
     let mut pcm = Vec::with_capacity(resampled.len() * 2);

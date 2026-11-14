@@ -6,6 +6,8 @@
 //! as specified instead of a hand-written subset.
 use super::error::{HostError, Result};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A schema-tagged JSON document, the `JsonDocument` wire type.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -68,12 +70,31 @@ pub(crate) fn parse_schema(text: &str) -> Result<Value> {
     Ok(value)
 }
 
+/// Compiles `schema` once and reuses the validator. Client schemas are
+/// stable between declarations, so validation does not recompile them on
+/// every capability call.
+fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<jsonschema::Validator>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = serde_json::to_string(schema)
+        .map_err(|error| format!("input: schema is not serializable: {error}"))?;
+    if let Some(validator) = cache.lock().ok().and_then(|map| map.get(&key).cloned()) {
+        return Ok(validator);
+    }
+    let validator = Arc::new(
+        jsonschema::validator_for(schema)
+            .map_err(|error| format!("input: schema is not valid: {error}"))?,
+    );
+    if let Ok(mut map) = cache.lock() {
+        map.insert(key, Arc::clone(&validator));
+    }
+    Ok(validator)
+}
+
 /// Validates `instance` against `schema` with the standard JSON Schema
 /// validator. An error is a client-visible explanation without a path dump.
 pub(crate) fn validate(schema: &Value, instance: &Value) -> std::result::Result<(), String> {
-    let validator = jsonschema::validator_for(schema)
-        .map_err(|error| format!("input: schema is not valid: {error}"))?;
-    validator
+    validator(schema)?
         .validate(instance)
         .map_err(|error| format!("input: {error}"))
 }
@@ -111,11 +132,6 @@ mod tests {
         assert!(parse_object("[]").is_err());
         assert_eq!(parse_object("").unwrap(), json!({}));
     }
-}
-
-#[cfg(test)]
-mod standard_validator_tests {
-    use super::*;
 
     #[test]
     fn standard_keywords_are_validated() {
