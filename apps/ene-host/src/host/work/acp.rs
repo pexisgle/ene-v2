@@ -1,6 +1,7 @@
 //! The external ACP backend (tech-stack.md §G): one process per WorkSession,
 //! one `session/prompt` turn per Run. Commands go to [`AcpHandle`]; [`AcpEvents`]
 //! carries results back to [`pump`], which settles them like the rig backend.
+use super::acp_bridge::{self, Bridge};
 use crate::host::{
     db::{Store, truncate},
     error::HostError,
@@ -87,6 +88,8 @@ enum Command {
 pub(crate) struct AcpHandle {
     pid: Arc<AtomicU32>,
     commands: mpsc::Sender<Command>,
+    /// The HTTP proxy of a network-isolated launch; aborted with the session.
+    proxy: Option<tokio::task::AbortHandle>,
 }
 
 impl AcpHandle {
@@ -113,6 +116,9 @@ impl AcpHandle {
     }
 
     pub(crate) fn end(&self) -> bool {
+        if let Some(proxy) = &self.proxy {
+            proxy.abort();
+        }
         self.commands.try_send(Command::End).is_ok()
     }
 }
@@ -161,6 +167,7 @@ pub(crate) fn spawn(
     // Resolve against the PATH the child will actually receive, not the
     // host's: a configured `env.PATH` replaces the inherited one.
     let program = resolve_program(command, &connection.endpoint.options, &cwd)?;
+    let (bridge, proxy) = bridge(world, &connection.endpoint.options);
     let Launch {
         program,
         args,
@@ -170,6 +177,7 @@ pub(crate) fn spawn(
         &connection.args,
         &cwd,
         &connection.endpoint.options,
+        bridge.as_ref(),
     )
     .map_err(HostError::Unavailable)?;
     if let Some((code, notice)) = isolation.notice() {
@@ -188,10 +196,18 @@ pub(crate) fn spawn(
     let handle = AcpHandle {
         pid: Arc::clone(&pid),
         commands,
+        proxy,
     };
-    let env = child_env(&connection.endpoint.options, |name: &str| {
+    let mut env = child_env(&connection.endpoint.options, |name: &str| {
         std::env::var_os(name)
     });
+    // A sandboxed child reaches its model only through the proxy.
+    if let Some(bridge) = &bridge {
+        for name in acp_bridge::PROXY_VARS {
+            env.retain(|(key, _)| key != name);
+            env.push((OsString::from(name), OsString::from(bridge.url())));
+        }
+    }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|rt| rt.0.clone()) else {
         return Err(HostError::unavailable("the host runtime is unavailable"));
     };
@@ -738,15 +754,44 @@ impl Isolation {
             Self::Partial => Some((
                 "acp_sandbox_partial",
                 "ACP子プロセスは読み取り専用ルート・専用の /tmp・PID名前空間で起動しますが、\
-                 プロキシブリッジが未実装のためネットワークはホストと共有されます。\
-                 ネットワーク分離が必要な場合は接続オプションに `network: isolated` を設定してください。",
+                 ネットワークはホストと共有されます。分離する場合は接続オプションに\
+                 `network: isolated` を設定してください。",
             )),
             Self::Full => None,
         }
     }
 }
 
-fn launch(program: &Path, args: &[String], cwd: &Path, options: &str) -> Result<Launch, String> {
+/// The proxy a network-isolated launch needs. Only asked for when the user
+/// requested isolation and bwrap is present: an unisolated child has the host
+/// network and needs no bridge.
+fn bridge(world: &World, options: &str) -> (Option<Bridge>, Option<tokio::task::AbortHandle>) {
+    if !network_isolated(options).unwrap_or(false) || which::which("bwrap").is_err() {
+        return (None, None);
+    }
+    let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
+        return (None, None);
+    };
+    let Ok((_, runtime_dir)) = crate::paths() else {
+        return (None, None);
+    };
+    let socket = runtime_dir.join(format!("acp-{}.sock", uuid::Uuid::new_v4()));
+    match acp_bridge::open(&runtime, socket) {
+        Ok((bridge, task)) => (Some(bridge), Some(task)),
+        Err(error) => {
+            tracing::warn!(%error, "the ACP proxy did not start");
+            (None, None)
+        }
+    }
+}
+
+fn launch(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    options: &str,
+    bridge: Option<&Bridge>,
+) -> Result<Launch, String> {
     let requested = sandbox_mode(options);
     if requested.as_deref() == Some("none") {
         return Ok(Launch {
@@ -761,6 +806,7 @@ fn launch(program: &Path, args: &[String], cwd: &Path, options: &str) -> Result<
         cwd,
         which::which("bwrap").ok().as_deref(),
         network_isolated(options)?,
+        bridge,
     )
 }
 
@@ -780,6 +826,7 @@ fn plan(
     cwd: &Path,
     bwrap: Option<&Path>,
     network_isolated: bool,
+    bridge: Option<&Bridge>,
 ) -> Result<Launch, String> {
     let Some(bwrap) = bwrap else {
         // A missing sandbox is a written warning, not a refusal: the user asked
@@ -799,8 +846,27 @@ fn plan(
     let mut wrapped: Vec<String> = ["--die-with-parent", "--unshare-pid"]
         .map(str::to_owned)
         .to_vec();
+    if network_isolated && bridge.is_none() {
+        return Err(
+            "ネットワーク分離にはプロキシブリッジが必要ですが、起動できませんでした".to_owned(),
+        );
+    }
     if network_isolated {
         wrapped.push("--unshare-net".to_owned());
+    }
+    let socket = bridge
+        .map(|bridge| {
+            bridge
+                .socket
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "プロキシのソケットパスをUTF-8で表せません".to_owned())
+        })
+        .transpose()?;
+    if let Some(socket) = &socket {
+        // The socket is the child's only route out; mount it writable so a
+        // connect through it is allowed.
+        wrapped.extend(["--bind", socket, socket].map(str::to_owned));
     }
     wrapped.extend(["--ro-bind", "/", "/"].map(str::to_owned));
     // Mount the private /tmp and the kernel filesystems before the work
@@ -810,6 +876,17 @@ fn plan(
     wrapped.extend(["--bind", cwd_text, cwd_text].map(str::to_owned));
     wrapped.extend(["--chdir", cwd_text].map(str::to_owned));
     wrapped.push("--".to_owned());
+    if let (Some(bridge), Some(socket)) = (bridge, &socket) {
+        // Inside the namespace the relay is the only listener: it forwards to
+        // the host's proxy and runs the agent with this process's stdio.
+        let relay = std::env::current_exe()
+            .map_err(|error| format!("ACPリレーの実体を解決できません: {error}"))?;
+        let listen = format!("127.0.0.1:{}", bridge.port);
+        wrapped.push(relay.to_string_lossy().into_owned());
+        wrapped.extend(
+            ["acp-relay", "--socket", socket, "--listen", &listen, "--"].map(str::to_owned),
+        );
+    }
     wrapped.push(program_text.to_owned());
     wrapped.extend(args.iter().cloned());
     Ok(Launch {
@@ -852,6 +929,65 @@ fn network_isolated(options: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_isolated_launch_runs_the_relay_and_mounts_the_socket() {
+        let bridge = Bridge {
+            socket: std::path::PathBuf::from("/run/ene/proxy.sock"),
+            port: acp_bridge::RELAY_PORT,
+        };
+        let launch = plan(
+            Path::new("agent"),
+            &["--stdio".to_owned()],
+            Path::new("/work"),
+            Some(Path::new("bwrap")),
+            true,
+            Some(&bridge),
+        )
+        .expect("an isolated launch with a bridge");
+        assert_eq!(launch.isolation, Isolation::Full);
+        let line = launch.args.join(" ");
+        assert!(line.contains("--unshare-net"), "{line}");
+        assert!(
+            line.contains("--bind /run/ene/proxy.sock /run/ene/proxy.sock"),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                "acp-relay --socket /run/ene/proxy.sock --listen 127.0.0.1:3128 -- agent --stdio"
+            ),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn an_isolated_launch_without_a_bridge_is_refused() {
+        let error = plan(
+            Path::new("agent"),
+            &[],
+            Path::new("/work"),
+            Some(Path::new("bwrap")),
+            true,
+            None,
+        )
+        .expect_err("isolation without a bridge would leave the child no route");
+        assert!(error.contains("ブリッジ"), "{error}");
+    }
+
+    #[test]
+    fn a_shared_network_launch_needs_no_relay() {
+        let launch = plan(
+            Path::new("agent"),
+            &[],
+            Path::new("/work"),
+            Some(Path::new("bwrap")),
+            false,
+            None,
+        )
+        .expect("a partial sandbox");
+        assert_eq!(launch.isolation, Isolation::Partial);
+        assert!(!launch.args.join(" ").contains("acp-relay"));
+    }
 
     #[cfg(unix)]
     #[test]

@@ -5,6 +5,18 @@ pub(crate) mod server;
 
 pub use server::run;
 
+/// Runs the sandbox relay when this process was started for one, so the same
+/// binary can live inside a network-isolated ACP sandbox.
+pub fn relay() -> Option<i32> {
+    let mut arguments = std::env::args_os();
+    arguments.next()?;
+    if arguments.next()? != "acp-relay" {
+        return None;
+    }
+    let rest: Vec<std::ffi::OsString> = arguments.collect();
+    Some(host::work::acp_bridge::relay(&rest))
+}
+
 /// State and runtime directories, with explicit environment overrides.
 pub fn paths() -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
     use std::{env, io, path::PathBuf};

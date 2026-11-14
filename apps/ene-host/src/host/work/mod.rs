@@ -5,6 +5,7 @@
 //! rebinds the session agent to its run id. Only a closed session, a failed
 //! start, or a restart retires the agent, never an ordinary run end.
 mod acp;
+pub(crate) mod acp_bridge;
 mod tools;
 
 use self::acp::{AcpBackends, AcpEvents};
