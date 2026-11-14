@@ -67,7 +67,7 @@ struct Target {
     model_id: String,
     dimensions: usize,
     endpoint: String,
-    secret: String,
+    secret: Option<String>,
     space: String,
 }
 
@@ -84,19 +84,20 @@ pub(crate) struct PendingEmbedding {
 pub(crate) async fn post_json(
     url: &str,
     body: &serde_json::Value,
-    secret: &str,
+    secret: Option<&str>,
     timeout: Duration,
     max_bytes: usize,
     what: &str,
 ) -> Result<serde_json::Value> {
-    net::guard_endpoint(url, what)
-        .await
-        .map_err(HostError::invalid)?;
-    let response = net::client(timeout)
+    let call = net::client(timeout)
         .map_err(HostError::unavailable)?
         .post(url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .bearer_auth(secret)
+        .header(reqwest::header::ACCEPT, "application/json");
+    let call = match secret {
+        Some(secret) => call.bearer_auth(secret),
+        None => call,
+    };
+    let response = call
         .json(body)
         .send()
         .await
@@ -135,7 +136,7 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let value = post_json(
         &format!("{}/embeddings", target.endpoint.trim_end_matches('/')),
         &body,
-        &target.secret,
+        target.secret.as_deref(),
         EMBED_TIMEOUT,
         MAX_RESPONSE_BYTES,
         "embedding",
@@ -218,13 +219,10 @@ fn target(
     if model_id.is_empty() || dimensions == 0 || dimensions > MAX_DIMENSIONS {
         return Ok(None);
     }
-    let (Some(endpoint), Some(secret)) = (
-        crate::host::settings::endpoint_of(&connection),
-        crate::host::model::connection_secret(&connection, credentials)
-            .map(|secret| secret.value().to_owned()),
-    ) else {
+    let Some(endpoint) = crate::host::settings::endpoint_of(&connection) else {
         return Ok(None);
     };
+    let secret = crate::host::model::connection_secret(&connection, credentials);
     Ok(Some(Target {
         model_id: model_id.to_owned(),
         dimensions,

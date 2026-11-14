@@ -195,7 +195,6 @@ impl HttpEngine {
     /// bearer token, the status check and a bounded body read, in the order
     /// every call needs them.
     async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
-        net::guard_endpoint(&self.base, what).await?;
         let response = post(call, self.secret.as_deref(), what).await?;
         net::read_body(response, MAX_BODY_BYTES, what).await
     }
@@ -432,29 +431,19 @@ fn base_url(endpoint: &Endpoint, label: &str) -> std::result::Result<String, Set
     let base = endpoint.endpoint.trim().trim_end_matches('/');
     url::Url::parse(base)
         .map_err(|_| SetupError::Broken(format!("the {label} connection endpoint is not a URL")))?;
-    if !net::secure_endpoint(base) {
-        return Err(SetupError::Broken(format!(
-            "the {label} connection endpoint must use https outside loopback"
-        )));
-    }
     Ok(base.to_owned())
 }
 
+/// The secret to send, if the operator registered one. A local engine that
+/// takes any key is the operator's own choice, so a missing one is not an
+/// error here.
 fn credential(
     connection: &Connection,
     credentials: Option<&Credentials>,
-    base: &str,
-    label: &str,
+    _base: &str,
+    _label: &str,
 ) -> std::result::Result<Option<String>, SetupError> {
-    let secret = credentials
-        .and_then(|credentials| model::connection_secret(connection, Some(credentials)))
-        .map(|secret| secret.value().to_owned());
-    if secret.is_none() && !net::loopback_endpoint(base) {
-        return Err(SetupError::Broken(format!(
-            "no credential is registered for the {label} connection"
-        )));
-    }
-    Ok(secret)
+    Ok(credentials.and_then(|credentials| model::connection_secret(connection, Some(credentials))))
 }
 
 fn wire_pcm(pcm: Vec<u8>, sample_rate: u32) -> HttpResult<Vec<u8>> {

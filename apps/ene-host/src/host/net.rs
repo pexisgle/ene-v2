@@ -1,9 +1,8 @@
-//! The shared HTTP shape: pooled client, SSRF endpoint guard and bounded body
-//! read for the voice engines, embeddings and the model probe.
+//! The shared HTTP shape: one pooled client per timeout, and the bounded body
+//! read the voice engines, embeddings and the model probe share.
 use futures_util::StreamExt;
 use std::{
     collections::HashMap,
-    net::IpAddr,
     sync::{Mutex, OnceLock},
     time::Duration,
 };
@@ -31,128 +30,6 @@ pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     guard().entry(millis).or_insert(client.clone());
     Ok(client)
 }
-
-/// Private, loopback, link-local, unspecified, multicast or broadcast address;
-/// IPv4-mapped IPv6 is judged as the IPv4 address it carries.
-pub(crate) fn blocked_ip(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            address.is_private()
-                || address.is_loopback()
-                || address.is_link_local()
-                || address.is_unspecified()
-                || address.is_broadcast()
-                || address.is_multicast()
-                || address.is_documentation()
-        }
-        IpAddr::V6(address) => {
-            if let Some(mapped) = address.to_ipv4_mapped() {
-                return blocked_ip(IpAddr::V4(mapped));
-            }
-            address.is_loopback()
-                || address.is_unspecified()
-                || address.is_multicast()
-                || address.is_unique_local()
-                || address.is_unicast_link_local()
-        }
-    }
-}
-
-/// Whether `endpoint` is an http(s) URL on the loopback interface.
-pub(crate) fn loopback_endpoint(endpoint: &str) -> bool {
-    url::Url::parse(endpoint).is_ok_and(|url| {
-        matches!(url.scheme(), "http" | "https") && url.host().is_some_and(|host| loopback(&host))
-    })
-}
-
-fn loopback(host: &url::Host<&str>) -> bool {
-    match host {
-        url::Host::Ipv4(address) => address.is_loopback(),
-        url::Host::Ipv6(address) => {
-            address.is_loopback()
-                || address
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| mapped.is_loopback())
-        }
-        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
-    }
-}
-
-/// Whether `endpoint` may carry a credential: HTTPS, or plain HTTP on loopback.
-/// An empty endpoint means the provider's own HTTPS default, so it passes.
-pub(crate) fn secure_endpoint(endpoint: &str) -> bool {
-    let endpoint = endpoint.trim();
-    if endpoint.is_empty() {
-        return true;
-    }
-    let Ok(url) = url::Url::parse(endpoint) else {
-        return false;
-    };
-    // A URL that carries its own userinfo would leak the credential into a
-    // stored, logged value; it belongs in the Authorization header instead.
-    if url.host().is_none() || !url.username().is_empty() || url.password().is_some() {
-        return false;
-    }
-    match url.scheme() {
-        "https" => true,
-        "http" => loopback_endpoint(endpoint),
-        _ => false,
-    }
-}
-
-/// The endpoint guard shared by every host HTTP call. Loopback may use plain
-/// HTTP; any other plain-HTTP host is refused even without a credential, and a
-/// non-public resolved address is refused. Errors never carry URL or secret.
-pub(crate) async fn guard_endpoint(url: &str, what: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|_| format!("the {what} endpoint is not a URL"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!("the {what} endpoint must be http(s)"));
-    }
-    let Some(host) = parsed.host() else {
-        return Err(format!("the {what} endpoint has no host"));
-    };
-    if loopback(&host) {
-        return Ok(());
-    }
-    if parsed.scheme() == "http" {
-        return Err(format!(
-            "the {what} endpoint must use https outside loopback"
-        ));
-    }
-    match host {
-        url::Host::Ipv4(address) => {
-            if blocked_ip(IpAddr::V4(address)) {
-                return Err(format!("the {what} endpoint is not a public address"));
-            }
-        }
-        url::Host::Ipv6(address) => {
-            if blocked_ip(IpAddr::V6(address)) {
-                return Err(format!("the {what} endpoint is not a public address"));
-            }
-        }
-        url::Host::Domain(domain) => {
-            let port = parsed
-                .port_or_known_default()
-                .ok_or_else(|| format!("the {what} endpoint has no port"))?;
-            let addresses: Vec<_> = tokio::net::lookup_host((domain, port))
-                .await
-                .map_err(|error| format!("the {what} endpoint address lookup: {error}"))?
-                .collect();
-            if addresses.is_empty() {
-                return Err(format!("the {what} endpoint did not resolve"));
-            }
-            if addresses.iter().any(|address| blocked_ip(address.ip())) {
-                return Err(format!(
-                    "the {what} endpoint resolves to a non-public address"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Reads at most `max` bytes: a declared oversize is refused before the body,
-/// and a chunked answer is cut at the cap while it streams.
 pub(crate) async fn read_body(
     response: reqwest::Response,
     max: usize,
@@ -185,60 +62,7 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// The setup-time rule and the request-time guard have to agree: a
-    /// credential may cross HTTPS or a loopback socket, and never a URL that
-    /// already carries its own userinfo.
-    #[test]
-    fn only_https_and_loopback_may_carry_a_credential() {
-        for allowed in [
-            "",
-            "https://api.example.com/v1",
-            "https://127.0.0.1/v1",
-            "http://127.0.0.1:11434/v1",
-            "http://localhost:5002",
-        ] {
-            assert!(secure_endpoint(allowed), "{allowed}");
-        }
-        for refused in [
-            "http://api.example.com/v1",
-            "https://user:secret@api.example.com/v1",
-            "http://user:secret@127.0.0.1:11434/v1",
-            "https://",
-            "ftp://127.0.0.1/v1",
-            "not a url",
-        ] {
-            assert!(!secure_endpoint(refused), "{refused}");
-        }
-    }
-
-    #[tokio::test]
-    async fn the_guard_allows_loopback_and_rejects_plain_remote_http() {
-        for allowed in [
-            "http://127.0.0.1:5002",
-            "http://[::1]:5002",
-            "http://localhost:5002",
-            "https://127.0.0.1",
-            "https://[::ffff:127.0.0.1]",
-        ] {
-            assert!(guard_endpoint(allowed, "test").await.is_ok(), "{allowed}");
-            assert!(loopback_endpoint(allowed), "{allowed}");
-        }
-        for rejected in [
-            "http://example.com/v1",
-            "http://10.0.0.1/v1",
-            "https://10.0.0.1",
-            "https://169.254.169.254",
-            "https://[fe80::1]",
-            "https://[::ffff:10.0.0.1]",
-            "ftp://127.0.0.1",
-        ] {
-            assert!(
-                guard_endpoint(rejected, "test").await.is_err(),
-                "{rejected}"
-            );
-        }
-    }
-
+    /// Serves one fixed HTTP response and returns its address.
     async fn serve(response: Vec<u8>) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await

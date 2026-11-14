@@ -675,18 +675,19 @@ fn a_negative_second_stereo_channel_is_averaged_not_clamped_positive() {
 }
 
 #[test]
-fn a_base_url_is_validated_and_trimmed() {
+fn a_base_url_must_be_a_url_and_is_trimmed() {
     let endpoint = |endpoint: &str| Endpoint {
         adapter: "openai".into(),
         endpoint: endpoint.into(),
         options_schema: String::new(),
         options: String::new(),
     };
-    assert!(base_url(&endpoint("http://example.com"), "TTS").is_err());
-    // The setup only validates the scheme; the request guard owns the address.
+    assert!(base_url(&endpoint("not a url"), "TTS").is_err());
+    // The engine is the operator's own endpoint; any scheme a URL can carry is
+    // theirs to choose, so only the shape is checked.
     assert_eq!(
-        base_url(&endpoint("https://10.0.0.1"), "TTS").unwrap(),
-        "https://10.0.0.1"
+        base_url(&endpoint("http://example.com"), "TTS").unwrap(),
+        "http://example.com"
     );
     assert_eq!(
         base_url(&endpoint("http://127.0.0.1:5002/"), "TTS").unwrap(),

@@ -11,7 +11,7 @@
 | **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイル（`host.sqlite3`）で完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。記憶整理や埋め込み生成等の重い非同期処理のみバックグラウンドタスクへ分離 |
 | **会話ログ・要約正本** | **`rig_memory::DirStore` (`rig-memory` feature `fs`)** | 公式の `rig-ecs` がネイティブに要求する同期ファイルストア。プロセス間ファイルロック、破損末尾行の自動退避、画像Blob管理を公式実装に委譲し、アダプタ実装ゼロ行で完結。受理レシート（`request_key`）も `Conversation::add_aside` でセッションログ内に記録するため、SQLiteとの2相不整合は原理的に発生しない |
 | **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ `rig-rmcp` ＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と `rig-rmcp` による公式MCPブリッジ動的登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
-| **OSサンドボックス** | **OSネイティブ隔離 (`cap-std`, `process-wrap`, `landlock`, `bwrap`)** | Linux（Landlock ＋ bwrap netns分離 ＋ UNIXソケットプロキシ）、Windows（AppContainer / Job Objects）、macOS（Seatbelt）を統一制御。非対応環境では明示的警告・承認で縮退 |
+| **OSサンドボックス** | **`process-wrap` ＋ `bwrap`（任意）＋ `cap-std`** | 全OSでプロセスツリーを管理し、Linuxでは `bwrap` があれば読み取り専用ルート・専用 `/tmp`・名前空間で隔離。`bwrap` が無ければ通知付きで非隔離実行（`landlock` / `AppContainer` / `Seatbelt` / 代理プロキシは後続フェーズ） |
 | **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` + `rubato` (音声I/O・リサンプリング) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlint（Royalty-free規約遵守）による軽快な設定・承認UI、cpal＋rubatoによる低遅延・高精度リサンプリング音声キャプチャ・再生、OSフックによる知覚センシング（目） |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産をそのまま活用。透過デスクトップウィンドウ（Wayland layer-shell / Windows Win32 layered）、VRM 1.0モデルロード・アニメーション（`ene-vrm`）、RMS音量によるローカル即時口パク、標準入出力JSON Lines IPC制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
@@ -163,7 +163,10 @@
 
 エージェント状態や実行ループをTokio側で自作せず、公式の `rig-ecs` にエージェント実行・状態管理・会話ログ正本（`DirStore`）を一本化する。TokioはConnect-RPCサーバーと外部非同期I/O（ストリーミング通信・子プロセス監視）の非同期ランタイムに専念する。
 
-CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` 等）や `rig-mcp-client` は採用せず、純粋な `rig-ecs` プリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と動的ツール登録で最小構成を実現する。
+CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` 等）や `rig-mcp-client` は採用せず、純粋な `rig-ecs` プリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と動的ツール登録で最小構成を実現する。MCPサーバーは `rig-rmcp` の `McpConnection` で開き、得たツールを同じ動的ツール登録に載せる。
+
+> [!NOTE]
+> **単発サイドコールの位置づけ**: 要約（compaction）、記憶統合（consolidation）、ハートビート（staged）のモデル呼び出しは、ターンを持たない単発の問い合わせであり、`AgentPass` のライフサイクルには載せない。ECSスレッドを塞がないよう `HostRuntime` 上で実行し、`rig-core` のエフェクトを直接ハンドラへ渡す（`model::unary`）ことで完結させる。これらをターンとして扱う必要が生じた時点で、`Effect` へ移行する。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
@@ -243,26 +246,22 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
 
 ---
 
-### C. OSサンドボックス：ネイティブ抽象化
+### C. OSサンドボックス：Alpha最小構成
 
-主要3OS（Linux / Windows / macOS）に対して、共通の抽象インターフェースを提供し、各OSの最適なセキュリティ機構を駆動する（ライセンスの制約がある外部ラッパーは排し、公式・パーミッシブなクレートに一本化）。
+Alphaは、全OSで確実に効く境界だけを持ち、後続フェーズで強化する。
 
 | クレート / 機構 | 担当責務 | 適用対象 |
 | :--- | :--- | :--- |
 | **`process-wrap`** | 子プロセスの生成、プロセスツリー/Job Object管理、kill-on-drop | 全OS共通（プロセスライフサイクルとタイムアウト強制終了） |
-| **`landlock` ＋ `bwrap`** | ファイルシステムパス制限、UNIXソケットプロキシ経由の通信制御 | Linux（公式landlockクレート MIT/Apache-2.0 ＋ bwrap コマンドラッパー） |
-| **`AppContainer`** | 専用SIDによるACLファイル隔離、ネットワークCapability制限 | Windows（Job Object / AppContainer による資源制限と隔離） |
-| **`Seatbelt` (`sandbox-exec`)** | SBPLプロファイルによるファイル・プロセス制限 | macOS（システム標準のサンドボックス機構） |
+| **`bwrap`** | 読み取り専用ルート、専用 `/tmp`、PID名前空間、`network: isolated` 時のネットワーク名前空間 | Linux（`bwrap` がある場合のみ） |
 | **`cap-std`** | ホスト（Rust）コード自身のファイル操作におけるパストラバーサル（`../`）防止 | 全OS共通（ホスト自身の安全なファイルI/O） |
+
+`bwrap` が無い環境でもACPは起動し、`acp_sandbox_unavailable` の通知とともに非隔離で実行する。`landlock`、Windows `AppContainer`、macOS `Seatbelt`、およびホスト名単位の通信制限を担う代理プロキシは後続フェーズの分離強化であり、Alphaの構成には含めない（[権限・Sandbox](permissions.md) §2）。
 
 #### 実装例・一次情報
 - [`cap-std` Docs.rs](https://docs.rs/cap-std/latest/cap_std/)（オープンディレクトリをルートとする安全なファイル操作）
 - [`process-wrap` Docs.rs](https://docs.rs/process-wrap/latest/process_wrap/)（Unix process-group、Windows Job Object、kill-on-dropのマルチプラットフォーム対応）
-- [`landlock` Docs.rs](https://docs.rs/landlock)（Linux公式LandlockセキュリティモジュールのRustバインディング）
-- [Microsoft Learn: AppContainer for Windows Developers](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation)
-
----
-
+- [bubblewrap](https://github.com/containers/bubblewrap)（非特権ユーザー名前空間によるサンドボックス）
 ### D. 音声パイプライン（STT / TTS）：プラガブル設計
 
 エンジンの通信仕様（文単位REST API / ストリーミング / 双方向Live API）に合わせて柔軟に動作する抽象インターフェース。
