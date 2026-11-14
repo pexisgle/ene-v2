@@ -46,23 +46,13 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
 
     // A receipt is only trusted when the input it names is actually in the
     // conversation; an orphan receipt is ignored and a new accept proceeds.
-    if !request.request_key.is_empty() {
-        for (key, request_id, recorded) in receipts(world, agent) {
-            if key != request.request_key {
-                continue;
-            }
-            if recorded != hash {
-                return Err(HostError::already_exists(
-                    "this request key already accepted different content",
-                ));
-            }
-            if has_input(world, agent, &request_id) {
-                return Ok(w::Acceptance {
-                    request_id,
-                    ..Default::default()
-                });
-            }
-        }
+    if !request.request_key.is_empty()
+        && let Some(request_id) = accepted(world, agent, &request.request_key, &hash)?
+    {
+        return Ok(w::Acceptance {
+            request_id,
+            ..Default::default()
+        });
     }
 
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -106,6 +96,27 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
         request_id,
         ..Default::default()
     })
+}
+
+/// The request id a retried `key` names, when a confirmed receipt binds it.
+///
+/// A receipt whose input is not in the conversation is an orphan: it was
+/// written by an accept that did not save its message, so it binds no content
+/// and is skipped, even when the retry carries a different message. `Err` means
+/// a confirmed receipt accepted different content.
+fn accepted(world: &World, agent: Entity, key: &str, hash: &[u8]) -> Result<Option<String>> {
+    for (recorded_key, request_id, recorded) in receipts(world, agent) {
+        if recorded_key != key || !has_input(world, agent, &request_id) {
+            continue;
+        }
+        if recorded != hash {
+            return Err(HostError::already_exists(
+                "this request key already accepted different content",
+            ));
+        }
+        return Ok(Some(request_id));
+    }
+    Ok(None)
 }
 
 fn receipts(world: &World, agent: Entity) -> Vec<(String, String, Vec<u8>)> {
@@ -244,5 +255,57 @@ fn message(
             .map(|author| author.label())
             .unwrap_or_default(),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig_core::completion::Message;
+    use rig_core::conversation::Entry;
+
+    /// A conversation with an `ene.accepted` receipt, and the input it names
+    /// when `input` gives the request id.
+    fn world_with(receipt: serde_json::Value, input: Option<&str>) -> (World, Entity) {
+        let mut conversation = Conversation::from(rig_core::conversation::Conversation::new());
+        conversation.add_aside(Aside::new(
+            "ene.accepted",
+            Author::plugin("ene-host"),
+            receipt,
+        ));
+        if let Some(request_id) = input {
+            conversation.push(Entry::new(Message::user("hello")).by(Author {
+                request: Some(RequestId(request_id.to_owned())),
+                ..Author::user()
+            }));
+        }
+        let mut world = World::new();
+        let agent = world.spawn(conversation).id();
+        (world, agent)
+    }
+
+    #[test]
+    fn an_orphan_receipt_binds_no_content() {
+        let receipt = json!({
+            "request_key": "k1",
+            "request_id": "r1",
+            "hash": [1u8, 2, 3],
+            "accepted_at": "2026-01-01T00:00:00Z",
+        });
+        // The input never reached the conversation, so the receipt is an
+        // orphan: a retry with another message is not a conflict.
+        let (world, agent) = world_with(receipt.clone(), None);
+        assert_eq!(accepted(&world, agent, "k1", &[9, 9]).unwrap(), None);
+
+        // Once the input is in the conversation the receipt binds its content.
+        let (world, agent) = world_with(receipt, Some("r1"));
+        assert!(accepted(&world, agent, "k1", &[9, 9]).is_err());
+        assert_eq!(
+            accepted(&world, agent, "k1", &[1, 2, 3])
+                .unwrap()
+                .as_deref(),
+            Some("r1")
+        );
+        assert_eq!(accepted(&world, agent, "k2", &[1, 2, 3]).unwrap(), None);
     }
 }
