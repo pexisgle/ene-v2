@@ -275,9 +275,20 @@ async fn open(want: &Desired) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>),
     } else {
         return Err("the MCP connection names neither a command nor an endpoint".to_owned());
     };
+    bind(service).await
+}
+
+/// Binds one connected client and lists what it serves.
+async fn bind<S>(
+    service: rig_rmcp::rmcp::service::RunningService<rig_rmcp::rmcp::RoleClient, S>,
+) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>), String>
+where
+    S: rig_rmcp::rmcp::Service<rig_rmcp::rmcp::RoleClient>,
+    S: Send + Sync + 'static,
+{
     let connection = McpConnection::new(service);
-    // rig-rmcp binds each listed tool to this connection, which is what keeps
-    // the server alive as long as its tools are registered.
+    // rig-rmcp binds each listed tool to this connection, which keeps the
+    // server alive for as long as its tools are registered.
     let tools = connection
         .tools()
         .await
@@ -363,11 +374,16 @@ fn retire_one(world: &mut World, id: &str) {
             entity.despawn();
         }
     }
+    // Rebuild from what is still connected: two servers may have contributed
+    // the same tool name, and only the ones still registered belong.
     {
-        let mut host = world.resource_mut::<HostToolNames>();
-        for name in &server.names {
-            host.0.remove(name);
-        }
+        let live: std::collections::HashSet<String> = world
+            .resource::<McpServers>()
+            .0
+            .values()
+            .flat_map(|server| server.names.iter().cloned())
+            .collect();
+        world.resource_mut::<HostToolNames>().0 = live;
     }
     if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
         tracing::warn!(connection = %id, "the retired MCP tools may still be offered: {error}");
@@ -548,5 +564,102 @@ mod tests {
                 "{error}"
             ),
         }
+    }
+
+    /// A server that serves one text tool over an in-process duplex pair, so
+    /// the whole client path runs without a child process or a network.
+    struct Echo(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl rig_rmcp::rmcp::ServerHandler for Echo {
+        fn get_info(&self) -> rig_rmcp::rmcp::model::ServerConfig {
+            rig_rmcp::rmcp::model::ServerConfig::default()
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<rig_rmcp::rmcp::model::PaginatedRequestParams>,
+            _context: rig_rmcp::rmcp::service::RequestContext<rig_rmcp::rmcp::RoleServer>,
+        ) -> Result<rig_rmcp::rmcp::model::ListToolsResult, rig_rmcp::rmcp::ErrorData> {
+            Ok(rig_rmcp::rmcp::model::ListToolsResult::with_all_items(
+                vec![rig_rmcp::rmcp::model::Tool::new(
+                    "echo",
+                    "Echo the input back",
+                    serde_json::Map::new(),
+                )],
+            ))
+        }
+
+        async fn call_tool(
+            &self,
+            request: rig_rmcp::rmcp::model::CallToolRequestParams,
+            _context: rig_rmcp::rmcp::service::RequestContext<rig_rmcp::rmcp::RoleServer>,
+        ) -> Result<rig_rmcp::rmcp::model::CallToolResponse, rig_rmcp::rmcp::ErrorData> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(rig_rmcp::rmcp::model::CallToolResponse::Complete(
+                rig_rmcp::rmcp::model::CallToolResult::success(vec![
+                    rig_rmcp::rmcp::model::ContentBlock::text(format!("called {}", request.name)),
+                ]),
+            ))
+        }
+    }
+
+    /// The path the review found broken twice: connect, list, register, and
+    /// call. It runs over a duplex pair so it needs no server binary.
+    #[tokio::test]
+    async fn a_duplex_server_is_listed_and_called() {
+        use rig_core::effect::{EffectId, EffectKind};
+        use rig_core::serve::Dispatch;
+        use rig_rmcp::rmcp::{
+            RoleClient, RoleServer, ServiceExt, service::serve_directly,
+            transport::async_rw::AsyncRwTransport,
+        };
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
+        let (server_read, client_write) = tokio::io::duplex(64 * 1024);
+        let server_calls = calls.clone();
+        let server = tokio::spawn(async move {
+            let transport = AsyncRwTransport::<RoleServer, _, _>::new(server_read, server_write);
+            let running = serve_directly(Echo(server_calls), transport, None);
+            let _ = running.waiting().await;
+        });
+
+        let transport = AsyncRwTransport::<RoleClient, _, _>::new(client_read, client_write);
+        let service = rig_rmcp::rmcp::model::ClientConfig::default()
+            .serve(transport)
+            .await
+            .expect("the client connects to the duplex server");
+        let (connection, tools) = bind(service).await.expect("the server lists its tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "echo");
+
+        let handler = McpToolHandler {
+            peer: connection.peer().clone(),
+            mcp_name: "echo".to_owned(),
+            exposed: "mcp_notes_echo".to_owned(),
+            description: "Echo the input back".to_owned(),
+            parameters: Value::Object(serde_json::Map::new()),
+        };
+        let reply = handler
+            .serve(
+                EffectKind::ToolCall {
+                    name: "mcp_notes_echo".to_owned(),
+                    args: "{}".to_owned(),
+                },
+                Dispatch::new(EffectId::from_raw(0), false),
+            )
+            .await;
+        let Reply::Outcome(Ok(Answered::ToolResult { result })) = reply else {
+            panic!("the MCP tool did not answer");
+        };
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the call reached the server"
+        );
+        let _ = result;
+
+        connection.close().await;
+        server.abort();
     }
 }
