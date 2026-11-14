@@ -5,19 +5,11 @@
 //! (docs/features/autonomy/schedule.md).
 use super::{Result, Store};
 use crate::host::error::HostError;
-use chrono::{Datelike, Timelike};
-use jiff::{
-    Timestamp, ToSpan,
-    civil::{Date, DateTime},
-    tz::{AmbiguousOffset, TimeZone},
-};
+use jiff::{Timestamp, tz::TimeZone};
 use rusqlite::params;
 
-/// How far ahead a repeating expression is searched, in days. A leap day can
-/// be eight years away (2100 is not a leap year), so this is the smallest
-/// bound that still finds every yearly date an expression can name.
-/// seconds and a seven-field one names years, so both are refused before
-/// croner can read them.
+/// A five-field cron expression. A six-field one counts seconds and a
+/// seven-field one names years, so both are refused before croner reads them.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Cron {
     parsed: croner::Cron,
@@ -48,66 +40,16 @@ impl Cron {
     /// The first matching instant strictly after `after`, read on the civil
     /// clock of `zone`, or `None` when croner cannot find a matching time.
     ///
-    /// Croner's occurrence search is typed in `chrono`, so the wall clock is
-    /// encoded as UTC, searched there, and mapped back to an instant in
-    /// `zone`. A wall time inside a daylight-saving gap never happens; it is
-    /// skipped and the search resumes after it.
+    /// Croner searches the wall clock natively. A time inside a daylight-saving
+    /// gap never happens, so the firing lands on the instant the clock jumps;
+    /// a repeated time resolves to its earlier occurrence. The host does no
+    /// conversion, retry or gap loop of its own.
     fn next_after(&self, after: Timestamp, zone: &TimeZone) -> Option<Timestamp> {
-        let mut civil = after.to_zoned(zone.clone()).datetime();
-        for _ in 0..8 {
-            let naive = chrono::NaiveDate::from_ymd_opt(
-                i32::from(civil.year()),
-                u32::try_from(civil.month()).ok()?,
-                u32::try_from(civil.day()).ok()?,
-            )?
-            .and_hms_opt(
-                u32::try_from(civil.hour()).ok()?,
-                u32::try_from(civil.minute()).ok()?,
-                u32::try_from(civil.second()).ok()?,
-            )?;
-            let start: chrono::DateTime<chrono::Utc> =
-                chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc);
-            let next = self.parsed.find_next_occurrence(&start, false).ok()?;
-            civil = Date::new(
-                i16::try_from(next.year()).ok()?,
-                i8::try_from(next.month()).ok()?,
-                i8::try_from(next.day()).ok()?,
-            )
-            .ok()?
-            .at(
-                i8::try_from(next.hour()).ok()?,
-                i8::try_from(next.minute()).ok()?,
-                0,
-                0,
-            );
-            if matches!(
-                zone.to_ambiguous_zoned(civil).offset(),
-                AmbiguousOffset::Gap { .. }
-            ) {
-                civil = civil.checked_add(1.minute()).ok()?;
-                continue;
-            }
-            let Some(at) = zoned_timestamp(zone, civil) else {
-                continue;
-            };
-            if at > after {
-                return Some(at);
-            }
-            civil = civil.checked_add(1.minute()).ok()?;
-        }
-        None
+        self.parsed
+            .find_next_occurrence(&after.to_zoned(zone.clone()), false)
+            .ok()
+            .map(|next| next.timestamp())
     }
-}
-
-/// The instant `civil` names in `zone`. A wall-clock time inside a
-/// daylight-saving gap does not exist and yields `None`; a repeated time
-/// (a fold) resolves to its earlier occurrence.
-fn zoned_timestamp(zone: &TimeZone, civil: DateTime) -> Option<Timestamp> {
-    let ambiguous = zone.to_ambiguous_zoned(civil);
-    if matches!(ambiguous.offset(), AmbiguousOffset::Gap { .. }) {
-        return None;
-    }
-    ambiguous.earlier().ok().map(|zoned| zoned.timestamp())
 }
 
 /// The first time the five-field `expression` matches after `after`, read on
@@ -533,20 +475,20 @@ mod tests {
     }
 
     #[test]
-    fn a_daylight_saving_gap_skips_the_missing_local_time() {
+    fn a_daylight_saving_gap_fires_when_the_clock_jumps() {
         let new_york = TimeZone::get("America/New_York").unwrap();
         // 2026-03-08 02:00 EST springs forward to 03:00 EDT, so local 02:30
-        // does not exist. The firing is skipped instead of moving to 03:30,
-        // and the next day's 02:30 is the next occurrence.
+        // never happens. As a classic cron daemon does, the firing lands on
+        // the instant the clock jumps instead of being dropped for the day.
         let after = utc(2026, 3, 8, 5, 0); // 00:00 EST
         let fired = next_occurrence("30 2 * * *", after, &new_york).unwrap();
-        assert_eq!(fired, utc(2026, 3, 9, 6, 30));
+        assert_eq!(fired, utc(2026, 3, 8, 7, 0));
         let local = fired.to_zoned(new_york.clone()).datetime();
-        assert_eq!((local.day(), local.hour(), local.minute()), (9, 2, 30));
+        assert_eq!((local.day(), local.hour(), local.minute()), (8, 3, 0));
         assert_eq!(
             next_occurrence("30 2 * * *", fired, &new_york).unwrap(),
-            utc(2026, 3, 10, 6, 30),
-            "the gap does not fire a second time at the shifted time"
+            utc(2026, 3, 9, 6, 30),
+            "the next day is read at its own local 02:30"
         );
     }
 

@@ -22,7 +22,6 @@ directories = "6"
 ene-rpc.workspace = true
 futures-util.workspace = true
 hound.workspace = true
-chrono.workspace = true
 rubato.workspace = true
 jsonschema.workspace = true
 serde_json_canonicalizer.workspace = true

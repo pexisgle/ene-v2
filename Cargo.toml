@@ -37,8 +37,7 @@ connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 http = "1"
 hound = "3"
-chrono = "0.4"
-croner = "3"
+croner = { version = "4", default-features = false, features = ["jiff"] }
 rubato = "0.16"
 jsonschema = "0.33"
 serde_json_canonicalizer = "0.4"
