@@ -158,12 +158,43 @@ fn an_acting_tick_promotes_exactly_its_input_and_reply() {
     assert!(entries[1].author.is_none(), "the reply is the assistant's");
 
     // The promotion is written once, under the companion's own log.
+    //
+    // The session log queues the frame's changes in `Last` and flushes them in
+    // the same schedule, so a frame usually delivers it; the order between the
+    // queueing and the flush is the kernel's, not the host's, so drive until
+    // the write lands rather than assuming one frame is enough.
+    let text = "おはよう。そろそろ休憩しない？";
+    let saved = |harness: &mut Harness| {
+        names.iter().any(|name| {
+            std::fs::read(harness.root.path().join("rig").join("logs").join(name))
+                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(text))
+        })
+    };
+    let started = Instant::now();
+    while !saved(&mut harness) && started.elapsed() < Duration::from_secs(5) {
+        harness.tick();
+    }
     assert_eq!(harness.log_names(), names, "no temporary agent log appears");
-    let bytes =
-        std::fs::read(harness.root.path().join("rig").join("logs").join(&names[0])).unwrap();
     assert!(
-        String::from_utf8_lossy(&bytes).contains("おはよう。そろそろ休憩しない？"),
-        "the promotion is on disk"
+        saved(&mut harness),
+        "the promotion is on disk (logs: {:?}, session failure: {:?}, host failure: {:?})",
+        names
+            .iter()
+            .map(|name| {
+                let path = harness.root.path().join("rig").join("logs").join(name);
+                (name.clone(), std::fs::metadata(path).map(|meta| meta.len()))
+            })
+            .collect::<Vec<_>>(),
+        harness
+            .app
+            .world()
+            .resource::<rig_ecs::session_log::SessionLog>()
+            .failure(),
+        harness
+            .app
+            .world()
+            .resource::<crate::host::HostState>()
+            .failed,
     );
 }
 
