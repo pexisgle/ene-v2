@@ -419,7 +419,7 @@ impl Store {
     pub(crate) fn restore_activation(&self, activation: &Activation) -> Result<()> {
         self.conn()?.execute(
             "INSERT OR REPLACE INTO activations (companion_id, client_id, revision, updated_at) \
-             VALUES (?1, ?2, ?3)",
+             VALUES (?1, ?2, ?3, ?4)",
             params![
                 activation.companion_id,
                 activation.client_id,

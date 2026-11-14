@@ -104,7 +104,7 @@ pub(crate) async fn post_json(
     max_bytes: usize,
     what: &str,
 ) -> Result<serde_json::Value> {
-    guard_endpoint(url, secret, what)?;
+    guard_endpoint(url, what)?;
     let mut response = http_client()?
         .post(url)
         .timeout(timeout)
@@ -934,7 +934,7 @@ mod tests {
 /// Refuses an endpoint that would send a credential to a non-loopback plain
 /// HTTP host or to a private/link-local address (SSRF). The same guard as the
 /// voice engines; a local engine on loopback stays allowed.
-fn guard_endpoint(url: &str, secret: &str, what: &str) -> Result<()> {
+fn guard_endpoint(url: &str, what: &str) -> Result<()> {
     let parsed = url::Url::parse(url)
         .map_err(|_| HostError::invalid(format!("{what} endpoint is not a URL")))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -953,7 +953,7 @@ fn guard_endpoint(url: &str, secret: &str, what: &str) -> Result<()> {
     if loopback {
         return Ok(());
     }
-    if parsed.scheme() == "http" && !secret.is_empty() {
+    if parsed.scheme() == "http" {
         return Err(HostError::invalid(format!(
             "{what} endpoint must use https outside loopback"
         )));
@@ -995,6 +995,12 @@ fn blocked_ip(address: std::net::IpAddr) -> bool {
                 || address.is_broadcast()
         }
         std::net::IpAddr::V6(address) => {
+            if address
+                .to_ipv4_mapped()
+                .is_some_and(|mapped| blocked_ip(std::net::IpAddr::V4(mapped)))
+            {
+                return true;
+            }
             let segments = address.segments();
             address.is_loopback()
                 || address.is_unspecified()
@@ -1011,15 +1017,8 @@ mod embedded_guard_tests {
 
     #[test]
     fn embedding_endpoints_refuse_plain_remote_and_metadata_addresses() {
-        assert!(
-            guard_endpoint(
-                "http://169.254.169.254/v1/embeddings",
-                "secret",
-                "embedding"
-            )
-            .is_err()
-        );
-        assert!(guard_endpoint("http://example.com/v1/embeddings", "secret", "embedding").is_err());
-        assert!(guard_endpoint("http://127.0.0.1:8080/v1/embeddings", "", "embedding").is_ok());
+        assert!(guard_endpoint("http://169.254.169.254/v1/embeddings", "embedding").is_err());
+        assert!(guard_endpoint("http://example.com/v1/embeddings", "embedding").is_err());
+        assert!(guard_endpoint("http://127.0.0.1:8080/v1/embeddings", "embedding").is_ok());
     }
 }

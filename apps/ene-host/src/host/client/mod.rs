@@ -561,6 +561,17 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     let previous = store.activation(&request.companion_id)?;
     let client = (!request.release).then_some(request.client_id.as_str());
     let activation = store.activate(&request.companion_id, client, request.expected_revision)?;
+    // Publish the new generation first: a conflicting tool declaration must
+    // roll the move back before any invalidation or notification is visible.
+    if let Err(error) = dynamic::sync_tools(world) {
+        if let Some(previous) = previous.as_ref() {
+            let _ = store.restore_activation(previous);
+        } else {
+            let _ = store.delete_activation(&request.companion_id);
+        }
+        let _ = dynamic::sync_tools(world);
+        return Err(error);
+    }
     if let Some(previous) = previous.clone()
         && let Some(old_client) = previous.client_id
         && (client != Some(old_client.as_str()) || previous.revision != activation.revision)
@@ -595,17 +606,6 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         None,
         w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
     );
-    if let Err(error) = dynamic::sync_tools(world) {
-        // The declaration is consistent only if its tools are; restore the
-        // previous generation instead of leaving a state that fails at boot.
-        if let Some(previous) = previous.as_ref() {
-            let _ = store.restore_activation(previous);
-        } else {
-            let _ = store.delete_activation(&request.companion_id);
-        }
-        let _ = dynamic::sync_tools(world);
-        return Err(error);
-    }
     Ok(wire::activation(&activation))
 }
 

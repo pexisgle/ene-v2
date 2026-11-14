@@ -1070,3 +1070,68 @@ fn a_work_run_reports_back_to_the_parent() {
         });
     assert!(reported, "the hand reports to the head");
 }
+
+#[test]
+fn a_conflicting_activation_is_rolled_back_before_side_effects() {
+    let mut harness = Harness::with_policy([], "*");
+    let second = super::mind::create(
+        harness.app.world_mut(),
+        w::CreateCompanionRequest {
+            name: "kai".into(),
+            mind: "calm".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .id;
+    let declaration = |id: &str, description: &str| w::RegisterClientRequest {
+        id: id.into(),
+        name: id.into(),
+        platform: "linux".into(),
+        capabilities: vec!["body.motion".into()],
+        capability_specs: vec![w::ClientCapabilitySpec {
+            name: "body.motion".into(),
+            tool_name: "body_motion".into(),
+            description: description.into(),
+            input_schema: "{}".into(),
+            approval: w::CapabilityApproval::Auto.into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    super::client::register(harness.app.world_mut(), declaration("c1", "ene moves")).unwrap();
+    super::client::register(harness.app.world_mut(), declaration("c2", "kai moves")).unwrap();
+    super::client::activate(
+        harness.app.world_mut(),
+        w::ActivationRequest {
+            companion_id: harness.companion.clone(),
+            client_id: "c1".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // The second activation would publish the same tool name with a different
+    // declaration: the move is refused and its row must be gone.
+    assert!(
+        super::client::activate(
+            harness.app.world_mut(),
+            w::ActivationRequest {
+                companion_id: second.clone(),
+                client_id: "c2".into(),
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+    let store = harness.store();
+    assert!(store.activation(&second).unwrap().is_none());
+    assert_eq!(
+        store
+            .activation(&harness.companion)
+            .unwrap()
+            .unwrap()
+            .client_id
+            .as_deref(),
+        Some("c1")
+    );
+}

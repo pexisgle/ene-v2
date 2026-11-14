@@ -127,6 +127,9 @@ pub(crate) fn accept(
     {
         return Err(HostError::conflict("the capability is no longer declared"));
     }
+    if !client.is_granted(&binding.capability) {
+        return Err(HostError::conflict("the capability is no longer granted"));
+    }
     if let Some(spec) = spec {
         if spec.name != binding.capability {
             return Err(HostError::conflict(
@@ -245,7 +248,16 @@ pub(crate) fn complete(
     if operation.status.is_terminal() {
         return Ok(wire::device_state(&operation));
     }
-    let output = super::super::json::parse_object(&result.output).ok();
+    // A capability without an output schema may answer with anything, even
+    // an empty body; with a schema, validation happens below.
+    let output = if result.output.trim().is_empty() {
+        Some(Value::Null)
+    } else {
+        Some(
+            serde_json::from_str::<Value>(&result.output)
+                .unwrap_or_else(|_| Value::String(result.output.clone())),
+        )
+    };
     let failure = result
         .failure
         .as_option()

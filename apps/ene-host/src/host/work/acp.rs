@@ -819,13 +819,17 @@ fn sandbox_mode(options: &str) -> Option<String> {
 }
 
 fn network_isolated(options: &str) -> Result<bool, String> {
+    // An empty options document means the defaults: the host network.
+    if options.trim().is_empty() {
+        return Ok(false);
+    }
     let value: serde_json::Value = serde_json::from_str(options)
         .map_err(|_| "connection options are not a JSON object".to_owned())?;
     match value.get("network") {
         None => Ok(false),
         Some(serde_json::Value::String(mode)) => match mode.trim().to_ascii_lowercase().as_str() {
-            "isolated" | "private" | "none" => Ok(true),
-            "host" | "shared" | "default" => Ok(false),
+            "isolated" => Ok(true),
+            "host" => Ok(false),
             other => Err(format!(
                 "unknown network mode `{other}`; use host or isolated"
             )),
@@ -930,7 +934,8 @@ mod tests {
     #[test]
     fn explicit_network_isolation_adds_the_private_network_namespace() {
         let args = ["--stdio".to_owned()];
-        for options in [r#"{"network":"isolated"}"#, r#"{"network":"none"}"#] {
+        let options = r#"{"network":"isolated"}"#;
+        {
             assert!(network_isolated(options).unwrap(), "{options}");
             let Launch {
                 args: wrapped,
@@ -955,10 +960,11 @@ mod tests {
                 "{options}"
             );
         }
-        for options in ["{}", r#"{"network":"host"}"#] {
+        for options in ["{}", "", r#"{"network":"host"}"#] {
             assert!(!network_isolated(options).unwrap(), "{options}");
         }
         assert!(network_isolated("not json").is_err());
+        assert!(network_isolated(r#"{"network":"none"}"#).is_err());
     }
 
     #[test]
