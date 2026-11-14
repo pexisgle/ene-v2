@@ -88,8 +88,8 @@ enum Command {
 pub(crate) struct AcpHandle {
     pid: Arc<AtomicU32>,
     commands: mpsc::Sender<Command>,
-    /// The HTTP proxy of a network-isolated launch; aborted with the session.
-    proxy: Option<tokio::task::AbortHandle>,
+    /// The HTTP proxy of a network-isolated launch, closed with the session.
+    proxy: Option<acp_bridge::Proxy>,
 }
 
 impl AcpHandle {
@@ -117,7 +117,7 @@ impl AcpHandle {
 
     pub(crate) fn end(&self) -> bool {
         if let Some(proxy) = &self.proxy {
-            proxy.abort();
+            proxy.close();
         }
         self.commands.try_send(Command::End).is_ok()
     }
@@ -765,19 +765,21 @@ impl Isolation {
 /// The proxy a network-isolated launch needs. Only asked for when the user
 /// requested isolation and bwrap is present: an unisolated child has the host
 /// network and needs no bridge.
-fn bridge(world: &World, options: &str) -> (Option<Bridge>, Option<tokio::task::AbortHandle>) {
+fn bridge(world: &World, options: &str) -> (Option<Bridge>, Option<acp_bridge::Proxy>) {
     if !network_isolated(options).unwrap_or(false) || which::which("bwrap").is_err() {
         return (None, None);
     }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
         return (None, None);
     };
-    let Ok((_, runtime_dir)) = crate::paths() else {
-        return (None, None);
-    };
-    let socket = runtime_dir.join(format!("acp-{}.sock", uuid::Uuid::new_v4()));
+    // Under the system temp directory: a unix socket path has to stay short
+    // enough to bind, and the runtime directory can be deep.
+    let socket = std::env::temp_dir().join(format!(
+        "ene-acp-{}.sock",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ));
     match acp_bridge::open(&runtime, socket) {
-        Ok((bridge, task)) => (Some(bridge), Some(task)),
+        Ok(proxy) => (Some(proxy.bridge.clone()), Some(proxy)),
         Err(error) => {
             tracing::warn!(%error, "the ACP proxy did not start");
             (None, None)
@@ -863,16 +865,16 @@ fn plan(
                 .ok_or_else(|| "プロキシのソケットパスをUTF-8で表せません".to_owned())
         })
         .transpose()?;
-    if let Some(socket) = &socket {
-        // The socket is the child's only route out; mount it writable so a
-        // connect through it is allowed.
-        wrapped.extend(["--bind", socket, socket].map(str::to_owned));
-    }
     wrapped.extend(["--ro-bind", "/", "/"].map(str::to_owned));
     // Mount the private /tmp and the kernel filesystems before the work
     // directory bind: a work directory under /tmp (or /proc, /dev) must still
     // be the program's writable cwd, not be shadowed by the later mount.
     wrapped.extend(["--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev"].map(str::to_owned));
+    if let Some(socket) = &socket {
+        // The socket is the child's only route out, and the private /tmp hides
+        // a socket that lives there, so this bind comes after that mount.
+        wrapped.extend(["--bind", socket, socket].map(str::to_owned));
+    }
     wrapped.extend(["--bind", cwd_text, cwd_text].map(str::to_owned));
     wrapped.extend(["--chdir", cwd_text].map(str::to_owned));
     wrapped.push("--".to_owned());
@@ -952,6 +954,13 @@ mod tests {
             line.contains("--bind /run/ene/proxy.sock /run/ene/proxy.sock"),
             "{line}"
         );
+        // The private /tmp shadows a socket that lives there, so this bind
+        // comes after that mount.
+        let tmpfs = line.find("--tmpfs /tmp").expect("a private /tmp");
+        let bind = line
+            .find("--bind /run/ene/proxy.sock")
+            .expect("the socket bind");
+        assert!(tmpfs < bind, "the socket is bound after /tmp: {line}");
         assert!(
             line.contains(
                 "acp-relay --socket /run/ene/proxy.sock --listen 127.0.0.1:3128 -- agent --stdio"

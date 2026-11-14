@@ -139,7 +139,8 @@ fn authority(value: &str) -> Option<(&str, Option<&str>)> {
 /// A `Host` authority: `localhost`, `127.0.0.1` or `[::1]`, with a numeric
 /// port. Userinfo, paths and whitespace are never accepted.
 fn loopback_host(value: &str) -> bool {
-    authority(value).is_some_and(|(host, _)| host == "[::1]" || matches!(host, "localhost" | "127.0.0.1"))
+    authority(value)
+        .is_some_and(|(host, _)| host == "[::1]" || matches!(host, "localhost" | "127.0.0.1"))
 }
 
 /// An `Origin` header: an http(s) URL whose authority is a literal loopback
@@ -196,18 +197,34 @@ mod tests {
     #[test]
     fn http_1_1_requires_a_host_and_http_2_carries_the_authority_itself() {
         use http::Version;
-        assert!(host_allowed(Version::HTTP_11, &hosts(&["127.0.0.1:1234"]), &[]));
+        assert!(host_allowed(
+            Version::HTTP_11,
+            &hosts(&["127.0.0.1:1234"]),
+            &[]
+        ));
         assert!(host_allowed(Version::HTTP_11, &hosts(&["[::1]"]), &[]));
         assert!(!host_allowed(Version::HTTP_11, &hosts(&[]), &[]));
-        assert!(!host_allowed(Version::HTTP_11, &hosts(&["example.com"]), &[]));
+        assert!(!host_allowed(
+            Version::HTTP_11,
+            &hosts(&["example.com"]),
+            &[]
+        ));
         assert!(!host_allowed(
             Version::HTTP_11,
             &hosts(&["localhost", "localhost"]),
             &[]
         ));
         assert!(host_allowed(Version::HTTP_2, &hosts(&[]), &[]));
-        assert!(host_allowed(Version::HTTP_2, &hosts(&["localhost:1234"]), &[]));
-        assert!(!host_allowed(Version::HTTP_2, &hosts(&["example.com"]), &[]));
+        assert!(host_allowed(
+            Version::HTTP_2,
+            &hosts(&["localhost:1234"]),
+            &[]
+        ));
+        assert!(!host_allowed(
+            Version::HTTP_2,
+            &hosts(&["example.com"]),
+            &[]
+        ));
         assert!(host_allowed(Version::HTTP_3, &hosts(&[]), &[]));
         let mut unreadable = http::HeaderMap::new();
         unreadable.insert(

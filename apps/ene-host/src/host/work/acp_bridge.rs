@@ -30,12 +30,35 @@ impl Bridge {
     }
 }
 
-/// Serves HTTP CONNECT on `socket` until the returned handle is aborted.
+/// One launch's proxy: its address and the task that serves it.
+#[derive(Debug)]
+pub(crate) struct Proxy {
+    pub(crate) bridge: Bridge,
+    handle: tokio::task::AbortHandle,
+}
+
+impl Proxy {
+    /// Stops the proxy and removes its socket.
+    pub(crate) fn close(&self) {
+        self.handle.abort();
+        let _ = std::fs::remove_file(&self.bridge.socket);
+    }
+}
+
+/// Serves HTTP CONNECT on `socket` until [`Proxy::close`].
 #[cfg(unix)]
-pub(crate) fn open(
-    runtime: &tokio::runtime::Handle,
-    socket: PathBuf,
-) -> io::Result<(Bridge, tokio::task::AbortHandle)> {
+pub(crate) fn open(runtime: &tokio::runtime::Handle, socket: PathBuf) -> io::Result<Proxy> {
+    // A unix socket path is limited to SUN_LEN (about 108 bytes); a longer one
+    // cannot be bound or mounted into the sandbox.
+    if socket.as_os_str().len() > 100 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the ACP proxy socket path is too long: {} (set TMPDIR to a shorter directory)",
+                socket.display()
+            ),
+        ));
+    }
     let _ = std::fs::remove_file(&socket);
     let listener = std::os::unix::net::UnixListener::bind(&socket)?;
     listener.set_nonblocking(true)?;
@@ -52,22 +75,19 @@ pub(crate) fn open(
             });
         }
     });
-    Ok((
-        Bridge {
+    Ok(Proxy {
+        bridge: Bridge {
             socket,
             port: RELAY_PORT,
         },
-        task.abort_handle(),
-    ))
+        handle: task.abort_handle(),
+    })
 }
 
 /// Only a unix host can serve the socket, and only bwrap produces the sandbox
 /// that needs it; elsewhere the launch stays unisolated.
 #[cfg(not(unix))]
-pub(crate) fn open(
-    _runtime: &tokio::runtime::Handle,
-    _socket: PathBuf,
-) -> io::Result<(Bridge, tokio::task::AbortHandle)> {
+pub(crate) fn open(_runtime: &tokio::runtime::Handle, _socket: PathBuf) -> io::Result<Proxy> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "the ACP proxy needs unix sockets",
@@ -249,7 +269,8 @@ mod tests {
         // The host's proxy on its socket.
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("proxy.sock");
-        let (bridge, proxy) = open(&tokio::runtime::Handle::current(), socket.clone()).unwrap();
+        let proxy = open(&tokio::runtime::Handle::current(), socket.clone()).unwrap();
+        let bridge = proxy.bridge.clone();
 
         // The relay, and a client that speaks to it the way the agent would.
         let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -280,7 +301,7 @@ mod tests {
         client.read_exact(&mut body).await.unwrap();
         assert_eq!(&body, b"pong", "the tunnel carries the target's bytes");
         assert_eq!(bridge.port, RELAY_PORT);
-        proxy.abort();
+        proxy.close();
     }
 
     #[test]
