@@ -29,7 +29,6 @@ fn harness(tick: MockCompletionModel) -> (Harness, tokio::runtime::Runtime) {
         move || bound(&model)
     })));
     harness.app.init_resource::<CompactVectorIndex>();
-    harness.app.init_resource::<Embedder>();
     (harness, runtime)
 }
 

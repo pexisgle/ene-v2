@@ -8,10 +8,11 @@ use crate::host::{
     },
     error::HostError,
     mind::{
-        embedding::{self, CompactVectorIndex, Embedder},
+        embedding::{self, CompactVectorIndex},
         memory::RecallMode,
     },
     model::Credentials,
+    resources::HostRuntime,
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
@@ -86,20 +87,24 @@ fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<String> 
     }
     let limit = args.limit.unwrap_or(8).clamp(1, 16) as usize;
     let store = world.resource::<Store>().clone();
-    // The semantic half is optional: without a usable embedding connection
-    // there is no query vector and recall stays lexical (semantic: false).
-    let semantic = world.resource_scope(|world, embedder: Mut<Embedder>| {
+    // The semantic half is optional: without a usable embedding connection,
+    // or a runtime to embed on, there is no query vector and recall stays
+    // lexical (semantic: false).
+    let semantic = {
+        let runtime = world
+            .get_resource::<HostRuntime>()
+            .map(|runtime| runtime.0.clone());
         let credentials = world.get_resource::<Credentials>().cloned();
         let mut index = world.resource_mut::<CompactVectorIndex>();
         embedding::semantic_ids(
             &store,
-            &embedder,
+            runtime.as_ref(),
             &mut index,
             credentials.as_ref(),
             &companion,
             &args.query,
         )
-    });
+    };
     let outcome = store.recall_hybrid(
         &companion,
         &args.query,

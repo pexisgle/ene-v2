@@ -4,7 +4,7 @@
 //! (time, mind, recalled memory, perception) is appended to the turn's own
 //! request message, so the saved conversation is never polluted and the prefix
 //! stays stable across the ReAct steps of one turn.
-use super::embedding::{self, CompactVectorIndex, Embedder};
+use super::embedding::{self, CompactVectorIndex};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent},
     compaction::{self, Weigher},
@@ -59,7 +59,7 @@ fn inject_tail(
     perception: Res<crate::host::resources::Perception>,
     mut cache: ResMut<TailCache>,
     mut index: ResMut<CompactVectorIndex>,
-    embedder: Res<Embedder>,
+    runtime: Option<Res<crate::host::resources::HostRuntime>>,
     credentials: Option<Res<Credentials>>,
 ) {
     for (mut call, of, agent) in &mut calls {
@@ -87,7 +87,7 @@ fn inject_tail(
                     agent,
                     turn_id,
                     &mut index,
-                    &embedder,
+                    runtime.as_deref().map(|rt| &rt.0),
                     credentials.as_deref(),
                 );
                 cache.by_turn.insert(key, tail.clone());
@@ -124,7 +124,7 @@ pub(crate) fn with_tail(message: &Message, tail: &str) -> Message {
 /// embedding connection and the in-memory index it ranks.
 pub(crate) struct Recall<'a> {
     pub(crate) index: &'a mut CompactVectorIndex,
-    pub(crate) embedder: &'a Embedder,
+    pub(crate) runtime: Option<&'a tokio::runtime::Handle>,
     pub(crate) credentials: Option<&'a Credentials>,
 }
 
@@ -152,7 +152,7 @@ pub(crate) fn dynamic_tail(
 ) -> String {
     let Recall {
         index,
-        embedder,
+        runtime,
         credentials,
     } = recall;
     let mut tail = opening();
@@ -190,7 +190,7 @@ pub(crate) fn dynamic_tail(
         }
         if let Some(query) = query {
             let semantic =
-                embedding::semantic_ids(store, embedder, index, credentials, companion, query);
+                embedding::semantic_ids(store, runtime, index, credentials, companion, query);
             if let Ok(recalled) = store.recall_hybrid(
                 companion,
                 query,
@@ -234,7 +234,7 @@ fn render_tail(
     agent: Entity,
     turn_id: u64,
     index: &mut CompactVectorIndex,
-    embedder: &Embedder,
+    runtime: Option<&tokio::runtime::Handle>,
     credentials: Option<&Credentials>,
 ) -> String {
     let Some((companion, conversation)) = agent_view(agents, conversations, agent) else {
@@ -248,7 +248,7 @@ fn render_tail(
         query.as_deref(),
         Recall {
             index,
-            embedder,
+            runtime,
             credentials,
         },
         Some(turn_id),

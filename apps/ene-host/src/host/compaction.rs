@@ -3,9 +3,9 @@
 use super::{
     agent::CompanionAgent,
     db::Store,
-    mind::{Role, embedding::Embedder},
+    mind::Role,
     model::{self, Credentials},
-    resources::HostState,
+    resources::{HostRuntime, HostState},
 };
 use bevy_ecs::prelude::*;
 use rig_core::catalog::ModelSpec;
@@ -380,15 +380,15 @@ fn summarize_when_idle(
     credentials: Option<Res<Credentials>>,
     models: Option<Res<Models>>,
     host: Option<Res<HostState>>,
-    embedder: Option<Res<Embedder>>,
+    runtime: Option<Res<HostRuntime>>,
     wake: Option<Res<Wake>>,
 ) {
     if state.is_running() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
         return;
     }
     let now = Instant::now();
-    let (Some(store), Some(credentials), Some(models), Some(embedder)) =
-        (store, credentials, models, embedder)
+    let (Some(store), Some(credentials), Some(models), Some(runtime)) =
+        (store, credentials, models, runtime)
     else {
         return;
     };
@@ -431,7 +431,7 @@ fn summarize_when_idle(
         let result = Arc::new(Mutex::new(None));
         let task_result = Arc::clone(&result);
         let task_wake = wake.as_deref().cloned();
-        let Some(task) = embedder.spawn_handle(async move {
+        let task = runtime.0.spawn(async move {
             let outcome = generate(history, previous, spec, handler).await;
             if let Ok(mut slot) = task_result.lock() {
                 *slot = Some(outcome);
@@ -439,11 +439,7 @@ fn summarize_when_idle(
             if let Some(wake) = task_wake {
                 wake.wake();
             }
-        }) else {
-            tracing::warn!("the background runtime is unavailable; the summary was not started");
-            state.defer(&agent.companion_id, now + RETRY);
-            continue;
-        };
+        });
         state.start(&agent.companion_id, RunningSummary { task, result });
         return;
     }

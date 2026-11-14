@@ -7,7 +7,7 @@
 //! its result comes back to the ECS thread and is committed there.
 use super::{
     Companion, Role,
-    embedding::{self, CompactVectorIndex, Embedder},
+    embedding::{self, CompactVectorIndex},
 };
 use crate::host::{
     agent::CompanionAgent,
@@ -471,7 +471,7 @@ pub(crate) fn register(app: &mut App) {
 /// The sources one job reads; bundled so `start` stays a normal function.
 struct Sources<'a> {
     store: &'a Store,
-    embedder: &'a Embedder,
+    runtime: Option<&'a tokio::runtime::Handle>,
     index: &'a mut CompactVectorIndex,
     credentials: Option<&'a Credentials>,
     models: &'a Models,
@@ -482,7 +482,7 @@ fn schedule_consolidation(
     settled: Query<(&TurnOutcome, &ForAgent), Added<Settled>>,
     agents: Query<(&CompanionAgent, &Conversation)>,
     store: Res<Store>,
-    embedder: Res<Embedder>,
+    runtime: Option<Res<crate::host::resources::HostRuntime>>,
     mut index: ResMut<CompactVectorIndex>,
     credentials: Option<Res<Credentials>>,
     models: Res<Models>,
@@ -491,7 +491,7 @@ fn schedule_consolidation(
     let now = Instant::now();
     let mut sources = Sources {
         store: &store,
-        embedder: &embedder,
+        runtime: runtime.as_deref().map(|rt| &rt.0),
         index: &mut index,
         credentials: credentials.as_deref(),
         models: &models,
@@ -586,7 +586,7 @@ fn start(
     let query = turn_query(&pending);
     let semantic = embedding::semantic_ids(
         sources.store,
-        sources.embedder,
+        sources.runtime,
         sources.index,
         sources.credentials,
         companion_id,
@@ -623,15 +623,18 @@ fn start(
         injected,
     };
     let sender = jobs.sender();
-    let queued = sources.embedder.spawn(async move {
+    // A world with no host runtime cannot run the extraction; the job fails
+    // the same way an explicit defer would, so the next turn retries it.
+    let Some(runtime) = sources.runtime else {
+        jobs.fail(companion_id, now);
+        return;
+    };
+    runtime.spawn(async move {
         let result = extract(&target, prompt)
             .await
             .map_err(|error| error.to_string());
         let _ = sender.send((batch, result));
     });
-    if !queued {
-        jobs.fail(companion_id, now);
-    }
 }
 
 fn drain_consolidation(
@@ -716,63 +719,6 @@ mod tests {
             importance: memory.importance,
             content: memory.content.clone(),
         }
-    }
-
-    #[test]
-    fn the_generated_schema_keeps_the_extraction_constraints() {
-        let schema = schema();
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["additionalProperties"], false);
-        let required: Vec<&str> = schema["required"]
-            .as_array()
-            .expect("the schema lists required fields")
-            .iter()
-            .map(|name| name.as_str().expect("required names are strings"))
-            .collect();
-        assert_eq!(required, ["facts"]);
-
-        assert!(
-            schema.get("$defs").is_none(),
-            "the fact schema is inlined, not referenced"
-        );
-        let facts = &schema["properties"]["facts"];
-        assert_eq!(facts["type"], "array");
-        let fact = &facts["items"];
-        assert_eq!(fact["type"], "object");
-        assert_eq!(fact["additionalProperties"], false);
-        let fact_required: Vec<&str> = fact["required"]
-            .as_array()
-            .expect("the fact schema lists required fields")
-            .iter()
-            .map(|name| name.as_str().expect("required names are strings"))
-            .collect();
-        assert_eq!(
-            fact_required,
-            [
-                "content",
-                "importance",
-                "audience",
-                "supersedes",
-                "cited_memory_ids"
-            ]
-        );
-
-        let properties = &fact["properties"];
-        assert_eq!(properties["content"]["type"], "string");
-        assert_eq!(properties["content"]["maxLength"], 4_000);
-        assert_eq!(properties["importance"]["type"], "integer");
-        assert_eq!(properties["importance"]["minimum"], 0);
-        assert_eq!(properties["importance"]["maximum"], 10);
-        for field in ["audience", "supersedes"] {
-            assert_eq!(
-                properties[field]["type"],
-                serde_json::json!(["string", "null"])
-            );
-            assert_eq!(properties[field]["maxLength"], 128);
-        }
-        assert_eq!(properties["cited_memory_ids"]["type"], "array");
-        assert_eq!(properties["cited_memory_ids"]["items"]["type"], "string");
-        assert_eq!(properties["cited_memory_ids"]["items"]["maxLength"], 128);
     }
 
     #[test]

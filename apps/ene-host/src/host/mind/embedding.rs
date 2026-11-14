@@ -32,8 +32,6 @@ use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
-    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -174,59 +172,20 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     Ok(vectors)
 }
 
-/// The host's runtime, borrowed rather than owned. Two runtimes would mean two
-/// timers and two shutdown orders, so embedding and consolidation run on the
-/// same one the rest of the host uses; a host that configures no embedding
-/// connection simply never spawns anything on it.
-#[derive(Resource, Default)]
-pub(crate) struct Embedder {
-    runtime: OnceLock<tokio::runtime::Handle>,
-}
-
-impl Embedder {
-    pub(crate) fn new(runtime: tokio::runtime::Handle) -> Self {
-        Self {
-            runtime: OnceLock::from(runtime),
-        }
+/// Embeds one query on the host runtime for the recall path. The caller blocks
+/// the ECS thread, so it passes the handle it already has instead of an
+/// second copy of the handle on a resource of its own.
+fn embed(runtime: &tokio::runtime::Handle, target: &Target, text: &str) -> Result<Vec<f32>> {
+    let vector = runtime
+        .block_on(request(target, &[text.to_owned()]))?
+        .pop()
+        .ok_or_else(|| HostError::unavailable("embedding endpoint returned no vector"))?;
+    if vector.len() != target.dimensions {
+        return Err(HostError::unavailable(
+            "embedding dimensions do not match the connection",
+        ));
     }
-
-    fn runtime(&self) -> Option<&tokio::runtime::Handle> {
-        self.runtime.get()
-    }
-
-    /// Embeds one query synchronously for the recall path.
-    fn embed(&self, target: &Target, text: &str) -> Result<Vec<f32>> {
-        let runtime = self
-            .runtime()
-            .ok_or_else(|| HostError::unavailable("the background runtime is unavailable"))?;
-        let vector = runtime
-            .block_on(request(target, &[text.to_owned()]))?
-            .pop()
-            .ok_or_else(|| HostError::unavailable("embedding endpoint returned no vector"))?;
-        if vector.len() != target.dimensions {
-            return Err(HostError::unavailable(
-                "embedding dimensions do not match the connection",
-            ));
-        }
-        Ok(vector)
-    }
-
-    /// Spawns one background task and keeps its handle, so a caller can abort
-    /// it and drop the request in flight.
-    pub(crate) fn spawn_handle<F>(&self, future: F) -> Option<tokio::task::JoinHandle<()>>
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        self.runtime().map(|runtime| runtime.spawn(future))
-    }
-
-    /// Spawns one background task. `false` means this host cannot run it.
-    pub(crate) fn spawn<F>(&self, future: F) -> bool
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        self.spawn_handle(future).is_some()
-    }
+    Ok(vector)
 }
 
 /// Resolves the companion's `Embedding` assignment to a callable target.
@@ -307,22 +266,26 @@ pub(crate) fn connection_secret(
 }
 
 /// The semantic candidates for one query, or none when no embedding space is
-/// configured. A failure degrades to lexical recall; it never fails the turn.
+/// configured or the caller has no runtime to embed on. A failure degrades to
+/// lexical recall; it never fails the turn.
 pub(crate) fn semantic_ids(
     store: &Store,
-    embedder: &Embedder,
+    runtime: Option<&tokio::runtime::Handle>,
     index: &mut CompactVectorIndex,
     credentials: Option<&Credentials>,
     companion: &str,
     query: &str,
 ) -> Vec<String> {
+    let Some(runtime) = runtime else {
+        return Vec::new();
+    };
     let Ok(Some(record)) = store.companion(companion) else {
         return Vec::new();
     };
     let Ok(Some(target)) = target(store, credentials, &record) else {
         return Vec::new();
     };
-    let Ok(vector) = embedder.embed(&target, query) else {
+    let Ok(vector) = embed(runtime, &target, query) else {
         return Vec::new();
     };
     if index.sync(store, companion, &target.space).is_err() {
@@ -587,7 +550,7 @@ impl Default for Backfill {
 /// reports.
 fn backfill(
     store: Res<Store>,
-    embedder: Res<Embedder>,
+    runtime: Option<Res<crate::host::resources::HostRuntime>>,
     credentials: Option<Res<Credentials>>,
     mut state: ResMut<Backfill>,
     mut notifier: Option<ResMut<crate::host::notify::Notifier>>,
@@ -637,7 +600,13 @@ fn backfill(
         state.running.insert(companion_id.clone());
         let sender = state.sender.clone();
         let store = store.clone();
-        let queued = embedder.spawn(async move {
+        // A world without the host runtime has nothing to embed on; the
+        // running marker is cleared so the next tick retries.
+        let Some(runtime) = runtime.as_deref().map(|runtime| runtime.0.clone()) else {
+            state.running.remove(&companion.id);
+            continue;
+        };
+        runtime.spawn(async move {
             // The ECS connection is not moved: the task opens its own
             // connection to the same database, with the same WAL pragmas, so
             // the store's lock is never held while it writes.
@@ -647,9 +616,6 @@ fn backfill(
             };
             let _ = sender.send((companion_id, result));
         });
-        if !queued {
-            state.running.remove(&companion.id);
-        }
     }
 }
 
@@ -694,16 +660,9 @@ async fn fill(connection: rusqlite::Connection, target: &Target) -> Result<usize
     Ok(written)
 }
 
-/// Registers the vector cache, the HTTP source and its backfill.
+/// Registers the vector cache and its backfill.
 pub(crate) fn register(app: &mut App) {
-    let embedder = app
-        .world()
-        .get_resource::<crate::host::resources::HostRuntime>()
-        .map_or_else(Embedder::default, |runtime| {
-            Embedder::new(runtime.0.clone())
-        });
-    app.insert_resource(embedder)
-        .init_resource::<CompactVectorIndex>()
+    app.init_resource::<CompactVectorIndex>()
         .init_resource::<Backfill>()
         .add_systems(Update, backfill.after(AgentLoop));
 }

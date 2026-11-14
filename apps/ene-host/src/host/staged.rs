@@ -22,7 +22,7 @@ use super::{
     error::HostError,
     mind::{
         Companion, Role,
-        embedding::{CompactVectorIndex, Embedder},
+        embedding::CompactVectorIndex,
         recall::{self, Recall},
     },
     model::{self, Bound, Credentials},
@@ -106,7 +106,6 @@ fn begin_tick(
     runtime: Option<Res<HostRuntime>>,
     perception: Option<Res<Perception>>,
     index: Option<ResMut<CompactVectorIndex>>,
-    embedder: Option<Res<Embedder>>,
     tools: Query<&ToolDef>,
     agents: Query<(&CompanionAgent, &Conversation, Has<ActiveTurn>)>,
     wake: Option<Res<Wake>>,
@@ -126,8 +125,8 @@ fn begin_tick(
     if tracker.idle_duration() < IDLE {
         return;
     }
-    let (Some(store), Some(perception), Some(runtime), Some(mut index), Some(embedder)) =
-        (store, perception, runtime, index, embedder)
+    let (Some(store), Some(perception), Some(runtime), Some(mut index)) =
+        (store, perception, runtime, index)
     else {
         return;
     };
@@ -173,7 +172,7 @@ fn begin_tick(
             query.as_deref(),
             Recall {
                 index: &mut index,
-                embedder: &embedder,
+                runtime: Some(&runtime.0),
                 credentials: credentials.as_deref(),
             },
             None,

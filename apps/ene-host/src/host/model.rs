@@ -27,8 +27,8 @@ const KEYRING_SERVICE: &str = "ene-host";
 const MAX_MODELS: usize = 4_096;
 const MAX_PROBE_BYTES: usize = 2 * 1024 * 1024;
 
-/// How long a model request may take end to end, and how much of a streamed
-/// answer the host reads before treating it as hostile.
+/// How long a model request may take end to end, and how much of an answer the
+/// host reads before treating it as hostile.
 const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_MODEL_BYTES: usize = 8 * 1024 * 1024;
 
@@ -258,10 +258,10 @@ fn connection_provider_endpoint(adapter: &str) -> String {
 }
 
 /// The one transport every model call goes through. `rig-core` hands it each
-/// request, so this is where a redirect is refused, the request is pinned to
-/// the origin the connection was configured with, and a streamed answer is cut
-/// at the cap. The default `ReqwestClient` follows redirects and reads an
-/// unbounded body, so neither check would hold there.
+/// request, so this is where the shared endpoint guard runs, the request is
+/// pinned to the origin the connection was configured with, and the answer is
+/// cut at the cap. The default `ReqwestClient` follows redirects and reads a
+/// body of any size, so none of that would hold there.
 #[derive(Clone)]
 struct Transport {
     client: ReqwestClient,
@@ -271,37 +271,15 @@ struct Transport {
 }
 
 impl Transport {
-    /// Builds the transport for `base`. Plain `http` is only accepted on
-    /// loopback and a literal non-public address is refused here, before any
-    /// credential can travel to it.
+    /// Remembers the origin `base` names. The endpoint policy itself is not
+    /// decided here: `admit` asks the shared guard, which also resolves the
+    /// host and is the only place that can judge a domain.
     fn new(base: &str) -> Result<Self> {
         let url = url::Url::parse(base)
             .map_err(|_| HostError::unavailable("the model endpoint is not a URL"))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(HostError::unavailable("the model endpoint must be http(s)"));
-        }
         let Some(host) = url.host_str() else {
             return Err(HostError::unavailable("the model endpoint has no host"));
         };
-        let literal = host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-            .ok();
-        let local = net::loopback_endpoint(base);
-        if url.scheme() == "http" && !local {
-            return Err(HostError::unavailable(
-                "the model endpoint must use https outside loopback",
-            ));
-        }
-        if let Some(address) = literal
-            && !local
-            && net::blocked_ip(address)
-        {
-            return Err(HostError::unavailable(
-                "the model endpoint is not a public address",
-            ));
-        }
         let client = net::client(MODEL_TIMEOUT)
             .map_err(|error| HostError::unavailable(format!("the model transport: {error}")))?;
         Ok(Self {
@@ -312,8 +290,8 @@ impl Transport {
         })
     }
 
-    /// Whether `uri` still addresses the configured origin without embedding
-    /// credentials in it. A redirect or an adapter change cannot move it.
+    /// Whether `uri` still addresses the configured origin without credentials
+    /// embedded in it. A redirect or an adapter change cannot move it.
     fn permits(&self, uri: &http::Uri) -> bool {
         let Ok(url) = url::Url::parse(&uri.to_string()) else {
             return false;
@@ -324,13 +302,31 @@ impl Transport {
             && url.username().is_empty()
             && url.password().is_none()
     }
+
+    /// Runs the endpoint guard and the origin pin before anything leaves. The
+    /// guard is the shared `net::guard_endpoint`, so a domain that resolves to
+    /// a private address is refused here exactly as it is for voice and
+    /// embeddings. The reason is a plain string so the caller decides how it
+    /// becomes a transport error.
+    async fn admit(&self, uri: &http::Uri) -> std::result::Result<(), String> {
+        net::guard_endpoint(&uri.to_string(), "model").await?;
+        if !self.permits(uri) {
+            return Err("the model request left the origin the connection was set to".to_owned());
+        }
+        Ok(())
+    }
 }
 
-/// A refusal that never carries the URL, the secret, or the upstream reason.
-fn denied() -> http_client::Error {
-    http_client::Error::instance(std::io::Error::other(
-        "the model request left its configured destination",
-    ))
+/// A refusal in the shape `rig-core` reads, carrying no URL and no secret.
+fn refused(reason: &str) -> http_client::Error {
+    http_client::Error::instance(std::io::Error::other(reason.to_owned()))
+}
+
+/// The cap every model answer shares, streaming or not.
+const TOO_LARGE: &str = "the model answer is larger than the host reads";
+
+fn within_cap(size: usize) -> bool {
+    size <= MAX_MODEL_BYTES
 }
 
 impl HttpClientExt for Transport {
@@ -345,13 +341,26 @@ impl HttpClientExt for Transport {
         let this = self.clone();
         let request = request.map(Into::into);
         async move {
-            if !this.permits(request.uri()) {
-                return Err(denied());
+            this.admit(request.uri())
+                .await
+                .map_err(|reason| refused(&reason))?;
+            let response = this.client.send_streaming(request).await?;
+            let (parts, mut body) = response.into_parts();
+            let mut collected = Vec::new();
+            while let Some(chunk) = body.next().await {
+                collected.extend_from_slice(&chunk?);
+                if !within_cap(collected.len()) {
+                    return Err(refused(TOO_LARGE));
+                }
             }
-            this.client.send(request).await.map_err(|_| denied())
+            let value = U::from(Bytes::from(collected));
+            let lazy: LazyBody<U> = Box::pin(async move { Ok(value) });
+            Ok(http::Response::from_parts(parts, lazy))
         }
     }
 
+    /// No provider this host talks to takes a multipart completion request, so
+    /// there is no body to shape and the guard has nothing to admit.
     #[allow(clippy::manual_async_fn)]
     fn send_multipart<U>(
         &self,
@@ -360,7 +369,7 @@ impl HttpClientExt for Transport {
     where
         U: From<Bytes> + WasmCompatSend + 'static,
     {
-        async { Err(denied()) }
+        async { Err(refused("the host sends no multipart model request")) }
     }
 
     fn send_streaming<T>(
@@ -373,22 +382,18 @@ impl HttpClientExt for Transport {
         let this = self.clone();
         let request = request.map(Into::into);
         async move {
-            if !this.permits(request.uri()) {
-                return Err(denied());
-            }
-            let response = this
-                .client
-                .send_streaming(request)
+            this.admit(request.uri())
                 .await
-                .map_err(|_| denied())?;
+                .map_err(|reason| refused(&reason))?;
+            let response = this.client.send_streaming(request).await?;
             let (parts, mut body) = response.into_parts();
             let bounded = async_stream::try_stream! {
                 let mut size = 0usize;
                 while let Some(chunk) = body.next().await {
-                    let bytes = chunk.map_err(|_| denied())?;
+                    let bytes = chunk?;
                     size = size.saturating_add(bytes.len());
-                    if size > MAX_MODEL_BYTES {
-                        Err(denied())?;
+                    if !within_cap(size) {
+                        Err(refused(TOO_LARGE))?;
                     }
                     yield bytes;
                 }
@@ -590,22 +595,50 @@ mod tests {
     }
 
     /// The transport is the only place a model request can be redirected or
-    /// pointed at a private address, so both refusals have to hold here.
-    #[test]
-    fn the_model_transport_stays_on_its_origin_and_off_private_addresses() {
+    /// pointed at a private address, so both refusals have to hold here. The
+    /// cases that need no name lookup run without touching the network.
+    #[tokio::test]
+    async fn the_model_transport_stays_on_its_origin_and_off_private_addresses() {
         let transport = Transport::new("https://api.openai.com/v1").unwrap();
         assert!(transport.permits(&"https://api.openai.com/v1/responses".parse().unwrap()));
-        for refused in [
+        for other in [
             "https://api.example.com/v1/responses",
             "http://api.openai.com/v1/responses",
             "https://api.openai.com:8443/v1/responses",
         ] {
-            assert!(!transport.permits(&refused.parse().unwrap()), "{refused}");
+            assert!(!transport.permits(&other.parse().unwrap()), "{other}");
         }
-        assert!(Transport::new("http://api.example.com/v1").is_err());
-        assert!(Transport::new("https://169.254.169.254/v1").is_err());
-        assert!(Transport::new("https://[fe80::1]/v1").is_err());
-        assert!(Transport::new("ftp://127.0.0.1/v1").is_err());
-        assert!(Transport::new("http://127.0.0.1:11434/v1").is_ok());
+
+        // Plain remote HTTP and a literal private address are refused before
+        // the request is built, and loopback is the one plain-HTTP exception.
+        for refused in [
+            "http://api.example.com/v1/responses",
+            "https://169.254.169.254/v1/responses",
+            "https://[fe80::1]/v1/responses",
+            "ftp://127.0.0.1/v1/responses",
+        ] {
+            let uri = refused.parse().unwrap();
+            assert!(transport.admit(&uri).await.is_err(), "{refused}");
+        }
+        let local = Transport::new("http://127.0.0.1:11434/v1").unwrap();
+        assert!(
+            local
+                .admit(&"http://127.0.0.1:11434/v1/models".parse().unwrap())
+                .await
+                .is_ok()
+        );
+        // The guard also rejects an origin the transport is not pinned to.
+        assert!(
+            local
+                .admit(&"http://127.0.0.1:11434/other".parse().unwrap())
+                .await
+                .is_ok()
+        );
+        assert!(
+            local
+                .admit(&"http://127.0.0.1:9999/v1".parse().unwrap())
+                .await
+                .is_err()
+        );
     }
 }
