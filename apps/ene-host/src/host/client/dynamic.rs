@@ -1,16 +1,29 @@
 //! Dynamic capability tools.
 //!
 //! A granted capability of an active client that declares a `tool_name` is an
-//! ordinary tool registered with [`World::spawn_tool`]. Its handler runs off
-//! the host thread and has no access to the ECS world, so it captures the
-//! companion and capability it was published for and sends every call through
-//! a channel. The host thread drains those calls in `Update`: it finds the
-//! call's gate binding, revalidates the client generation, and answers the
-//! handler through a oneshot. A call whose binding is missing or stale is
-//! refused instead of dispatched.
-use super::CapabilitySpec;
+//! ordinary tool registered with [`World::spawn_tool`]. Several companions can
+//! share one tool definition: the definition is published once when every
+//! declaration of the name agrees on the model-facing description and input
+//! schema, and each active companion keeps its own binding (its client
+//! generation and capability) behind that name. A declaration that disagrees
+//! is an explicit conflict, never a silently chosen winner.
+//!
+//! The handler runs off the host thread and has no access to the ECS world, so
+//! it forwards only the effect id, the tool name and the input. The host thread
+//! drains those calls in `Update`: it finds the call's gate binding, resolves
+//! the calling companion from the call entity (`ForAgent` plus
+//! `CompanionAgent`), revalidates the client generation, and answers the
+//! handler through a oneshot. A call whose binding is missing, whose agent is a
+//! hand, or whose client generation moved is refused instead of dispatched.
+//!
+//! Waiting follows the documented distinction (`docs/api.md` §クライアント能力):
+//! `device_request` is result-waiting and keeps its [`Waiting`] entry until the
+//! client answers; a named capability tool is immediate and answers at once
+//! with the operation id and dispatch status. Its failure or non-delivery is
+//! observed through `GetOperation` or the device notification.
+use super::{BUILTIN_TOOLS, CapabilitySpec, Client};
 use crate::host::{
-    agent::CompanionAgent,
+    agent::{CompanionAgent, WorkAgent},
     client::device,
     db::{Result, Store},
     error::HostError,
@@ -30,18 +43,30 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
-/// How many capability tools the host publishes at once. The limit bounds the
-/// tool list offered to the model; exceeding it is reported, never truncated.
-pub(crate) const MAX_CAPABILITY_TOOLS: usize = 64;
+/// The tools a hand may call. A capability tool is offered to the parent
+/// only, so a work agent never sees another companion's tools.
+const WORK_AGENT_TOOLS: &[&str] = &["device_request", "report"];
 
-/// A capability tool published for one active client generation. The captured
-/// generation lets the gate and the dispatcher refuse a stale tool.
-#[derive(Component, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CapabilityTool {
-    pub(crate) spec: CapabilitySpec,
+/// One active companion/client generation a shared tool dispatches for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapabilityBinding {
     pub(crate) companion_id: String,
     pub(crate) client_id: String,
     pub(crate) activation_revision: u64,
+    /// The capability this client declares for the shared tool name.
+    pub(crate) capability: String,
+}
+
+/// A capability tool published once for every active companion whose client
+/// declares the same name, description and input schema. The model-facing
+/// definition is shared; the dispatcher resolves the calling companion from
+/// the call, never from this record.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapabilityTool {
+    /// The declaration the definition was built from.
+    pub(crate) spec: CapabilitySpec,
+    /// Every active companion/client generation this definition serves.
+    pub(crate) bindings: Vec<CapabilityBinding>,
 }
 
 /// The capability tool entities currently published, by tool name.
@@ -55,8 +80,6 @@ pub(crate) struct CapabilityCall {
     /// The effect the call runs as; the host reads its gate binding from it.
     pub(crate) effect: EffectId,
     pub(crate) tool_name: String,
-    pub(crate) companion_id: String,
-    pub(crate) capability: String,
     pub(crate) input: Value,
     /// Sent back to the handler when the host accepted or refused the call.
     pub(crate) reply: oneshot::Sender<std::result::Result<String, String>>,
@@ -83,13 +106,12 @@ impl CapabilityCalls {
 }
 
 /// A spawned capability tool's handler. It never touches the world: the call
-/// it forwards names the effect, and the host thread supplies the binding.
+/// it forwards names the effect and the tool, and the host thread supplies the
+/// binding and the calling companion.
 struct CapabilityHandler {
     name: String,
     description: String,
     parameters: Value,
-    companion_id: String,
-    capability: String,
     calls: mpsc::UnboundedSender<CapabilityCall>,
     wake: Wake,
 }
@@ -125,8 +147,6 @@ impl Serve for CapabilityHandler {
         let dispatched = self.calls.send(CapabilityCall {
             effect: dispatch.id(),
             tool_name: self.name.clone(),
-            companion_id: self.companion_id.clone(),
-            capability: self.capability.clone(),
             input,
             reply,
         });
@@ -154,11 +174,12 @@ impl Serve for CapabilityHandler {
     }
 }
 
-/// The capability tools every active client grants, in activation order.
-/// Duplicate tool names and exhaustion are refused explicitly.
+/// The capability tools every active client grants, one definition per tool
+/// name. Declarations of a name with a different description or input schema
+/// are an explicit conflict.
 fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
-    let mut desired = Vec::new();
-    let mut names = std::collections::HashSet::new();
+    let mut desired: Vec<(String, CapabilityTool)> = Vec::new();
+    let mut by_name: HashMap<String, usize> = HashMap::new();
     for activation in store.activations()? {
         let Some(client_id) = activation.client_id else {
             continue;
@@ -167,27 +188,41 @@ fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
             continue;
         };
         for spec in client.tool_specs() {
-            if !names.insert(spec.tool_name.clone()) {
-                return Err(HostError::conflict(format!(
-                    "tool name `{}` is declared by more than one active client",
-                    spec.tool_name
-                )));
+            let name = spec.tool_name.clone();
+            let parameters = json::parse_schema(&spec.input_schema)?;
+            let binding = CapabilityBinding {
+                companion_id: activation.companion_id.clone(),
+                client_id: client_id.clone(),
+                activation_revision: activation.revision,
+                capability: spec.name.clone(),
+            };
+            match by_name.get(&name) {
+                Some(&index) => {
+                    let tool = &mut desired[index].1;
+                    let first = &tool.spec;
+                    if first.tool_description() != spec.tool_description()
+                        || json::parse_schema(&first.input_schema)? != parameters
+                    {
+                        return Err(HostError::conflict(format!(
+                            "tool name `{name}` is declared with a different description or \
+                             input schema by companions `{}` and `{}`",
+                            tool.bindings[0].companion_id, activation.companion_id
+                        )));
+                    }
+                    tool.bindings.push(binding);
+                }
+                None => {
+                    by_name.insert(name.clone(), desired.len());
+                    desired.push((
+                        name,
+                        CapabilityTool {
+                            spec: spec.clone(),
+                            bindings: vec![binding],
+                        },
+                    ));
+                }
             }
-            desired.push((
-                spec.tool_name.clone(),
-                CapabilityTool {
-                    spec: spec.clone(),
-                    companion_id: activation.companion_id.clone(),
-                    client_id: client_id.clone(),
-                    activation_revision: activation.revision,
-                },
-            ));
         }
-    }
-    if desired.len() > MAX_CAPABILITY_TOOLS {
-        return Err(HostError::exhausted(format!(
-            "at most {MAX_CAPABILITY_TOOLS} capability tools can be published"
-        )));
     }
     Ok(desired)
 }
@@ -243,8 +278,6 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
                     name: name.clone(),
                     description: tool.spec.tool_description(),
                     parameters,
-                    companion_id: tool.companion_id.clone(),
-                    capability: tool.spec.name.clone(),
                     calls: calls.clone(),
                     wake: wake.clone(),
                 });
@@ -267,7 +300,8 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
             entity.despawn();
         }
     }
-    world.resource_mut::<CapabilityTools>().entities = entities;
+    world.resource_mut::<CapabilityTools>().entities = entities.clone();
+    sync_access(world, &entities);
     Ok(())
 }
 
@@ -286,9 +320,100 @@ fn rollback(world: &mut World, spawned: &[Entity], stale: &[Entity]) {
     }
 }
 
+/// The capability tool names each companion's active client grants.
+fn granted_names(
+    world: &World,
+    entities: &HashMap<String, Entity>,
+) -> HashMap<String, Vec<String>> {
+    let mut granted: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, entity) in entities {
+        let Some(tool) = world.get::<CapabilityTool>(*entity) else {
+            continue;
+        };
+        for binding in &tool.bindings {
+            granted
+                .entry(binding.companion_id.clone())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    for names in granted.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    granted
+}
+
+/// Limits what each parent agent is offered: the host's built-in parent tools
+/// plus only the capability tools granted to that companion's active client.
+/// A hand keeps `report` and `device_request`; it never sees a capability
+/// tool. This corrects the `ToolAccess::All` that a freshly spawned or
+/// restored parent starts with.
+fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {
+    let granted = granted_names(world, entities);
+    let parents: Vec<(Entity, String)> = {
+        let mut query = world.query::<(Entity, &CompanionAgent)>();
+        query
+            .iter(world)
+            .map(|(entity, agent)| (entity, agent.companion_id.clone()))
+            .collect()
+    };
+    for (entity, companion) in parents {
+        let mut names: Vec<String> = BUILTIN_TOOLS
+            .iter()
+            .copied()
+            // `report` belongs to the hand: the parent reports through the
+            // work tools instead.
+            .filter(|name| *name != "report")
+            .map(str::to_owned)
+            .collect();
+        if let Some(tools) = granted.get(&companion) {
+            names.extend(tools.iter().cloned());
+        }
+        names.sort();
+        names.dedup();
+        set_access(world, entity, &names);
+    }
+    let hands: Vec<Entity> = {
+        let mut query = world.query_filtered::<Entity, With<WorkAgent>>();
+        query.iter(world).collect()
+    };
+    let hand_tools: Vec<String> = WORK_AGENT_TOOLS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    for entity in hands {
+        set_access(world, entity, &hand_tools);
+    }
+}
+
+fn set_access(world: &mut World, entity: Entity, names: &[String]) {
+    let current = world.get::<ToolAccess>(entity);
+    if matches!(current, Some(ToolAccess::Only(current)) if current.as_slice() == names) {
+        return;
+    }
+    world
+        .entity_mut(entity)
+        .insert(ToolAccess::Only(names.to_vec()));
+}
+
 /// Startup: publishes the tools of the clients restored as active.
 pub(crate) fn init(world: &mut World) {
     if let Err(error) = sync_tools(world) {
+        crate::host::fail(world, error.to_string());
+    }
+}
+
+/// Corrects the tools a newly spawned agent may use before its first turn.
+/// `agent.rs` spawns the parent with `ToolAccess::All`; this narrows it as
+/// soon as the companion or hand exists, without editing the spawn site.
+pub(crate) fn refresh(world: &mut World) {
+    let added = {
+        let mut query =
+            world.query_filtered::<Entity, Or<(Added<CompanionAgent>, Added<WorkAgent>)>>();
+        query.iter(world).next().is_some()
+    };
+    if added && let Err(error) = sync_tools(world) {
         crate::host::fail(world, error.to_string());
     }
 }
@@ -311,6 +436,49 @@ pub(crate) fn drain(world: &mut World) {
     }
 }
 
+/// The declaration a calling parent's bound client carries for `tool_name`,
+/// when the tool is published for that exact client generation. The gate uses
+/// this before it binds a capability tool call; the dispatcher uses it again
+/// before accepting the operation.
+pub(crate) fn tool_spec_for(
+    world: &mut World,
+    client: &Client,
+    activation_revision: u64,
+    tool_name: &str,
+) -> Result<Option<CapabilitySpec>> {
+    let published = {
+        let mut query = world.query::<(&ToolDef, &CapabilityTool)>();
+        query
+            .iter(world)
+            .find(|(definition, _)| definition.0.name.as_str() == tool_name)
+            .map(|(definition, tool)| (definition.0.clone(), tool.clone()))
+    };
+    let Some((definition, tool)) = published else {
+        return Ok(None);
+    };
+    if !tool.bindings.iter().any(|binding| {
+        binding.client_id == client.id && binding.activation_revision == activation_revision
+    }) {
+        return Err(HostError::conflict(
+            "client_moved: the capability tool is not published for the bound generation",
+        ));
+    }
+    let Some(spec) = client
+        .tool_specs()
+        .find(|spec| spec.tool_name == tool_name)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let parameters = json::parse_schema(&spec.input_schema)?;
+    if definition.description != spec.tool_description() || definition.parameters != parameters {
+        return Err(HostError::conflict(
+            "the capability tool changed after it was published",
+        ));
+    }
+    Ok(Some(spec))
+}
+
 fn forward(world: &mut World, request: &CapabilityCall) -> std::result::Result<String, String> {
     let Some(call) = effect_entity(world, request.effect) else {
         return Err("the capability call is no longer live".into());
@@ -326,34 +494,50 @@ fn forward(world: &mut World, request: &CapabilityCall) -> std::result::Result<S
     if sent.call.function.name.as_str() != request.tool_name {
         return Err("the capability call names another tool".into());
     }
-    if binding.capability != request.capability {
-        return Err("the capability no longer matches the accepted operation".into());
-    }
     let Some(agent) = world.get::<ForAgent>(call).map(|agent| agent.0) else {
         return Err("the capability call has no agent".into());
     };
     // A capability tool is offered to the parent; a hand can only use the
-    // generic `device_request` dispatcher.
-    match world.get::<CompanionAgent>(agent) {
-        Some(companion) if companion.companion_id == request.companion_id => {}
-        _ => return Err("capability tools are offered to the parent only".into()),
-    }
+    // generic `device_request` dispatcher. The calling companion comes from
+    // the call's agent, not from the publication that served several
+    // companions; its bound client must still be the one the gate bound.
+    let Some(companion) = world.get::<CompanionAgent>(agent) else {
+        return Err("capability tools are offered to the parent only".into());
+    };
+    let companion_id = companion.companion_id.clone();
     let store = world.resource::<Store>().clone();
+    let current = store
+        .target(&companion_id, None)
+        .map_err(|error| error.to_string())?;
+    if current.as_ref() != Some(&(binding.client_id.clone(), binding.activation_revision)) {
+        return Err(
+            "client_moved: the active client changed before the operation was dispatched".into(),
+        );
+    }
     let Some(client) = store
         .client(&binding.client_id)
         .map_err(|error| error.to_string())?
     else {
         return Err("the bound client is not registered".into());
     };
-    let Some(spec) = client.spec(&request.capability).cloned() else {
+    let Some(spec) = tool_spec_for(
+        world,
+        &client,
+        binding.activation_revision,
+        &request.tool_name,
+    )
+    .map_err(|error| error.to_string())?
+    else {
         return Err(format!(
             "capability `{}` is no longer declared",
-            request.capability
+            binding.capability
         ));
     };
-    if spec.tool_name != request.tool_name {
-        return Err("the capability no longer declares this tool".into());
+    if spec.name != binding.capability {
+        return Err("the capability no longer matches the accepted operation".into());
     }
+    // Revalidates the calling companion's generation against the binding
+    // right before dispatch: a moved client never receives this operation.
     device::accept(world, call, agent, &spec, request.input.clone())
         .map(|(_, answer)| answer)
         .map_err(|error| error.to_string())

@@ -328,17 +328,16 @@ fn a_stale_playback_report_is_ignored() {
         activation_revision: 1,
         ..Default::default()
     };
+    // A stale generation is refused and leaves the utterance owning the floor.
     assert!(
         !report_playback(&mut world, report(owner.generation_id + 1))
             .unwrap()
             .acknowledged
     );
     assert!(current_owner(&world, "ene").utterance.is_some());
-    assert!(
-        store.playback_reports(&utterance.id).unwrap().is_empty(),
-        "a stale report is not stored"
-    );
 
+    // The current generation is acknowledged and releases the floor; the host
+    // keeps no separate report row, only the RPC-visible acknowledgement.
     let mut events = world.resource::<Notifier>().subscribe();
     assert!(
         report_playback(&mut world, report(owner.generation_id))
@@ -347,12 +346,6 @@ fn a_stale_playback_report_is_ignored() {
     );
     assert!(current_owner(&world, "ene").utterance.is_none());
     assert!(world.resource::<Voice>().floor_holder().is_none());
-    let stored = store.playback_reports(&utterance.id).unwrap();
-    assert_eq!(stored.len(), 1);
-    assert_eq!(
-        stored[0].status,
-        crate::host::db::playback::PlaybackStatus::Completed
-    );
     world.resource_mut::<Notifier>().flush();
     assert!(matches!(
         events.try_recv().expect("speech_completed is broadcast").event,
@@ -662,6 +655,34 @@ fn the_stt_wav_header_names_the_wire_format() {
     assert_eq!(le16(&wav, 22), 1);
     assert_eq!(le32(&wav, 24), 16_000);
     assert_eq!(wav.len(), 52);
+}
+
+/// A stereo WAV in the 16-bit shape the TTS endpoints return.
+fn stereo_wav(frames: &[(i16, i16)]) -> Vec<u8> {
+    let mut pcm = Vec::with_capacity(frames.len() * 4);
+    for (left, right) in frames {
+        pcm.extend_from_slice(&left.to_le_bytes());
+        pcm.extend_from_slice(&right.to_le_bytes());
+    }
+    let mut wav = wav_wrap(&pcm, SAMPLE_RATE);
+    wav[22..24].copy_from_slice(&2u16.to_le_bytes());
+    wav[28..32].copy_from_slice(&(SAMPLE_RATE * 4).to_le_bytes());
+    wav[32..34].copy_from_slice(&4u16.to_le_bytes());
+    wav
+}
+
+#[test]
+fn a_negative_second_stereo_channel_is_averaged_not_clamped_positive() {
+    let wav = stereo_wav(&[(0, -1_000), (-32_768, -32_768), (3_000, -1_000)]);
+    let (pcm, rate) = parse_wav(&wav).unwrap();
+    assert_eq!(rate, SAMPLE_RATE);
+    let samples: Vec<i16> = pcm
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
+        .collect();
+    assert_eq!(samples, [-500, -32_768, 1_000]);
 }
 
 #[test]

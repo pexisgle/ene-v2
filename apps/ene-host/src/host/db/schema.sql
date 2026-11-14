@@ -121,6 +121,10 @@ CREATE TABLE IF NOT EXISTS schedules (
     title TEXT NOT NULL,
     instruction TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
+    -- The next firing, UTC RFC 3339 at whole seconds. Resolved against the
+    -- host's wall clock when the row is created and after every firing; NULL
+    -- once a one-shot has fired.
+    next_run_at TEXT,
     created_at TEXT NOT NULL,
     last_triggered_at TEXT
 );
@@ -252,25 +256,6 @@ CREATE TABLE IF NOT EXISTS device_operations (
 
 CREATE INDEX IF NOT EXISTS idx_operations_client ON device_operations(client_id, status);
 
--- Playback progress: one row per accepted ReportPlaybackStatus, so an
--- interrupted or failed position records how much was actually heard instead
--- of implying the whole utterance was delivered (voice-avatar.md §5.3).
-CREATE TABLE IF NOT EXISTS playback_reports (
-    utterance_id TEXT NOT NULL,
-    generation_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    completed_sentence_count INTEGER NOT NULL,
-    played_sequence_nos TEXT NOT NULL DEFAULT '[]',
-    skipped_sequence_nos TEXT NOT NULL DEFAULT '[]',
-    completed_pcm_bytes INTEGER NOT NULL,
-    client_id TEXT NOT NULL,
-    activation_revision INTEGER NOT NULL,
-    received_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_playback_reports_utterance
-    ON playback_reports(utterance_id, received_at);
-
 CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
 -- Recall lists one owner's recent page.
 CREATE INDEX IF NOT EXISTS idx_memories_owner_rowid ON memories(owner, rowid);
@@ -288,4 +273,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_edges_to ON memory_edges(to_id, relation);
 -- Consolidation context and receipts are read per companion.
 CREATE INDEX IF NOT EXISTS idx_mind_operations_companion
     ON mind_operations(companion_id, created_at);
+-- `schedule_list` reads one companion's enabled rows.
 CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companion_id, enabled);
+-- The firing loop reads only due rows: equality on `enabled` first, then the
+-- ordered range on `next_run_at`.
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);

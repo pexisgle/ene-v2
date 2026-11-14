@@ -1,102 +1,118 @@
-//! Staged Promotion for autonomous heartbeat ticks
+//! Heartbeat ticks: one direct model call, promoted only when it speaks
 //! (docs/features/autonomy/schedule.md §4, docs/design/tech-stack.md §B).
 //!
-//! A tick must never leave a no-op turn in the companion's append-only session
-//! log, so it runs on a temporary agent instead of in the main conversation.
-//! The temporary agent clones the companion's conversation, system prompt and
-//! model connection; the tick is a *side call*, not a turn, so the kernel
-//! never writes the reply into any conversation. Only a reply that says
-//! something is spliced into the companion's `Conversation`, where the normal
-//! projection and session log take it from there.
+//! A tick must never leave a silent turn in the companion's append-only session
+//! log, so it is not a kernel turn. The request is built from the companion's
+//! saved `Conversation` the same way compaction builds its summary request: the
+//! `ene.summary` snapshot is injected as the head block, the heartbeat prompt is
+//! the last user message, and the dynamic tail an ordinary turn carries (clock,
+//! mind, pinned memories, automatic recall, perception) is attached to it. The
+//! reply is read, never continued, so nothing is executed; only text that says
+//! something is spliced into the main `Conversation` as the tick's input and the
+//! assistant's answer. A silent, `noop` or tool-calling reply writes nothing, so
+//! the DirStore never sees a heartbeat that decided to stay quiet.
 //!
-//! The temporary agent stays out of the session log by construction. In
-//! rig-ecs `session_log.rs`, conversations are saved by a query that needs
-//! `&AgentId`, and saved components by a query that needs `With<Agent>`. The
-//! temporary agent has no `Agent` marker, and it gets its `AgentId` only after
-//! the last save point that saw its conversation as added; its conversation is
-//! never changed afterwards, so nothing is ever queued for it. It is despawned
-//! (never retired) when the tick settles.
+//! The call runs on the host's Tokio runtime, one tick at a time; a user message
+//! or the timeout aborts the task and drops the request with it, so no interrupt
+//! leaves a tick running.
 use super::{
-    agent,
+    agent::{self, CompanionAgent},
     compaction::{self, InactivityTracker, Weigher},
-    db::{Store, now},
-    resources::HostState,
+    db::{Result, Store},
+    error::HostError,
+    mind::{
+        Companion, Role,
+        embedding::{CompactVectorIndex, Embedder},
+        recall::{self, Recall},
+    },
+    model::{self, Bound, Credentials},
+    resources::{HostRuntime, HostState, Perception},
 };
 use bevy_ecs::prelude::*;
-use rig_core::completion::{AssistantContent, AssistantMessage, CompletionResponse, Message};
-use rig_core::conversation::{Author, Entry};
+use rig_core::completion::{
+    AssistantContent, AssistantMessage, CompletionRequest, CompletionResponse, Message,
+    ToolDefinition,
+};
+use rig_core::conversation::{Author, Conversation as History, Entry};
+use rig_core::effect::{Answered, EffectId, EffectKind};
+use rig_core::serve::{Dispatch, ErasedHandler};
 use rig_ecs::prelude::*;
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 /// Ticks need this much user idle time, like the compaction soft condition.
 pub(crate) const IDLE: Duration = Duration::from_secs(60);
-/// A tick that has not settled by then is discarded, and its running call
-/// cancelled.
+/// A tick that has not settled by then is discarded and its call cancelled.
 const TIMEOUT: Duration = Duration::from_secs(120);
 /// The instruction the head gets for a heartbeat tick. It decides between
 /// speaking and `noop`, exactly as for a schedule firing.
 const TICK: &str =
     "定期Tick: ユーザーはしばらく無操作です。今話しかけるべきか、noop か判断してください";
 
-/// The companion a staged tick belongs to, on the temporary agent. It is not a
-/// `CompanionAgent`: everything that projects or notifies companions must skip
-/// it.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Staged {
-    pub(crate) parent: Entity,
-}
-
-/// The temporary agent's side call, the effect the tick's model call runs on.
-#[derive(Component, Clone, Copy, Debug)]
-struct StagedTick {
-    temp: Entity,
-}
-
-/// The one staged tick in flight, if any.
+/// The one tick in flight, and when the last one started so ticks keep the
+/// idle cadence instead of running on every frame an idle user leaves.
 #[derive(Resource, Default)]
-struct StagedTicks {
+pub(crate) struct StagedTick {
     in_flight: Option<InFlight>,
-    /// When the last tick started, so heartbeat ticks keep the idle cadence
-    /// instead of running on every frame an idle user leaves.
     last_started: Option<Instant>,
 }
 
 struct InFlight {
-    temp: Entity,
-    effect: Entity,
-    /// The tick instruction as the model got it, promoted with the reply.
+    companion: String,
+    /// The heartbeat prompt, exactly the user entry a promotion writes.
     prompt: String,
     started: Instant,
+    /// The running call; aborting it drops the request in flight.
+    task: tokio::task::JoinHandle<()>,
+    result: Arc<Mutex<Option<Outcome>>>,
 }
 
-/// A companion as the tick reads it: its conversation clone, prompt, model
-/// and whether it is busy.
-type Candidate<'a> = (
-    Entity,
-    &'a agent::CompanionAgent,
-    &'a Conversation,
-    &'a SystemPrompt,
-    Option<&'a Connection>,
-    Has<ActiveTurn>,
-);
+/// What the tick's call produced: an answer to promote, silence, or a failure
+/// that is only logged.
+type Outcome = std::result::Result<Option<AssistantMessage>, String>;
 
-/// Spawns the temporary agent and its side call once the user is idle and the
-/// companion has no turn running.
+impl StagedTick {
+    /// Aborts the tick in flight, if any.
+    fn cancel(&mut self) {
+        if let Some(in_flight) = self.in_flight.take() {
+            in_flight.task.abort();
+        }
+    }
+}
+
+impl Drop for StagedTick {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+/// Starts a tick when the user is idle and the companion can answer right now:
+/// the request is built here, the call runs on the host runtime.
+#[allow(clippy::too_many_arguments)]
 fn begin_tick(
-    mut commands: Commands,
-    mut ticks: ResMut<StagedTicks>,
-    store: Option<Res<Store>>,
+    mut ticks: ResMut<StagedTick>,
     tracker: Option<Res<InactivityTracker>>,
     host: Option<Res<HostState>>,
-    agents: Query<Candidate<'static>, Without<Staged>>,
+    store: Option<Res<Store>>,
+    credentials: Option<Res<Credentials>>,
+    models: Option<Res<Models>>,
+    runtime: Option<Res<HostRuntime>>,
+    perception: Option<Res<Perception>>,
+    index: Option<ResMut<CompactVectorIndex>>,
+    embedder: Option<Res<Embedder>>,
+    tools: Query<&ToolDef>,
+    agents: Query<(&CompanionAgent, &Conversation, Has<ActiveTurn>)>,
+    wake: Option<Res<Wake>>,
+    #[cfg(test)] tick_model: Option<Res<TickModel>>,
 ) {
-    if ticks.in_flight.is_some() {
-        return;
-    }
-    if ticks.last_started.is_some_and(|last| last.elapsed() < IDLE) {
-        return;
-    }
-    if host.is_some_and(|host| host.failed.is_some() || host.closing) {
+    if ticks.in_flight.is_some()
+        || ticks.last_started.is_some_and(|last| last.elapsed() < IDLE)
+        || host
+            .as_ref()
+            .is_some_and(|host| host.failed.is_some() || host.closing)
+    {
         return;
     }
     let Some(tracker) = tracker else {
@@ -105,133 +121,181 @@ fn begin_tick(
     if tracker.idle_duration() < IDLE {
         return;
     }
-    let Some(store) = store else {
+    let (Some(store), Some(perception), Some(runtime), Some(mut index), Some(embedder)) =
+        (store, perception, runtime, index, embedder)
+    else {
         return;
     };
-    // The first companion (in creation order) that can run a turn right now.
     for companion in store.companions().unwrap_or_default() {
-        let Some((parent, _, conversation, prompt, connection, busy)) = agents
+        let Some((conversation, busy)) = agents
             .iter()
-            .find(|(_, agent, ..)| agent.companion_id == companion.id)
+            .find(|(agent, ..)| agent.companion_id == companion.id)
+            .map(|(_, conversation, busy)| (conversation, busy))
         else {
             continue;
         };
         if busy {
             continue;
         }
-        let Some(connection) = connection else {
-            continue;
+        // In a test, an injected mock handler answers instead of a provider.
+        #[cfg(test)]
+        let bound = tick_model.as_deref().map_or_else(
+            || {
+                connect(
+                    &store,
+                    credentials.as_deref(),
+                    models.as_deref(),
+                    &companion,
+                )
+            },
+            |model| Ok((model.0)()),
+        );
+        #[cfg(not(test))]
+        let bound = connect(
+            &store,
+            credentials.as_deref(),
+            models.as_deref(),
+            &companion,
+        );
+        let Ok(bound) = bound else {
+            ticks.last_started = Some(Instant::now());
+            return;
         };
-        // The clone must not carry the companion's unsaved edits: a discarded
-        // temporary agent may never queue them for a log.
-        let mut history = conversation.0.clone();
-        let _ = history.take_unsaved();
-        let temp = commands
-            .spawn((
-                Name::new("staged-tick"),
-                Staged { parent },
-                Conversation(history),
-                SystemPrompt(prompt.0.clone()),
-                ToolAccess::Only(vec!["noop".to_owned()]),
-                ReasoningSetting::default(),
-                connection.to_owned(),
-            ))
-            .id();
-        let effect = commands.spawn((StagedTick { temp }, SideCall(temp))).id();
-        ticks.last_started = Some(Instant::now());
+        // The recall query is the saved conversation's newest user text, as
+        // the ordinary turn's tail uses it, before the summary stands in for
+        // the messages it replaces.
+        let query = recall::recall_query(&conversation.0);
+        let mut history = conversation.0.view();
+        if let Some(summary) = compaction::summary_of(&history) {
+            compaction::inject_summary(&mut history, &summary);
+        }
+        let tail = recall::dynamic_tail(
+            &store,
+            &perception,
+            &companion.id,
+            query.as_deref(),
+            Recall {
+                index: &mut index,
+                embedder: &embedder,
+                credentials: credentials.as_deref(),
+            },
+            None,
+        );
+        history.push(recall::with_tail(&Message::user(TICK), &tail));
+        let Some(request) = request(&companion, &mut history, &bound, &tools) else {
+            ticks.last_started = Some(Instant::now());
+            return;
+        };
+        let handler = bound.connection.handler.0.clone();
+        let result = Arc::new(Mutex::new(None));
+        let task_result = Arc::clone(&result);
+        let task_wake = wake.as_deref().cloned();
+        let task = runtime.0.spawn(async move {
+            let outcome = tokio::time::timeout(TIMEOUT, ask(request, handler))
+                .await
+                .unwrap_or_else(|_| Err("the heartbeat tick timed out".to_owned()));
+            if let Ok(mut slot) = task_result.lock() {
+                *slot = Some(outcome);
+            }
+            if let Some(wake) = task_wake {
+                wake.wake();
+            }
+        });
+        let started = Instant::now();
+        ticks.last_started = Some(started);
         ticks.in_flight = Some(InFlight {
-            temp,
-            effect,
-            prompt: format!("{TICK}\n現在日時: {}", now()),
-            started: Instant::now(),
+            companion: companion.id,
+            prompt: TICK.to_owned(),
+            started,
+            task,
+            result,
         });
         return;
     }
 }
 
-/// Gives the temporary agent its `AgentId`, one frame after it was spawned:
-/// the side call needs one to build its request, but the save path must never
-/// see the agent with it while its conversation still counts as added.
-fn arm_tick(world: &mut World) {
-    let Some(temp) = world
-        .get_resource::<StagedTicks>()
-        .and_then(|ticks| ticks.in_flight.as_ref().map(|in_flight| in_flight.temp))
-    else {
-        return;
+/// The companion model a tick calls.
+fn connect(
+    store: &Store,
+    credentials: Option<&Credentials>,
+    models: Option<&Models>,
+    companion: &Companion,
+) -> Result<Bound> {
+    let (Some(credentials), Some(models)) = (credentials, models) else {
+        return Err(HostError::unavailable(
+            "the heartbeat tick has no model connection",
+        ));
     };
-    if world.get::<AgentId>(temp).is_some() || world.get_entity(temp).is_err() {
-        return;
-    }
-    world
-        .entity_mut(temp)
-        .insert(AgentId(format!("staged:{}", uuid::Uuid::new_v4())));
+    model::connect(
+        store,
+        credentials,
+        models.0.catalog(),
+        companion,
+        Role::Companion,
+    )
 }
 
-/// Puts the tick instruction at the end of the request the kernel built from
-/// the temporary agent: a user message the model answers, never saved.
-fn request_tick(
-    ticks: Res<StagedTicks>,
-    mut calls: Query<&mut ModelRequest, (Added<Admitted>, With<StagedTick>)>,
-) {
-    let Some(in_flight) = ticks.in_flight.as_ref() else {
-        return;
+/// The request the tick sends: the built history (summary head, conversation,
+/// the heartbeat prompt with its tail), the companion's system prompt and the
+/// `noop` tool so it can choose silence, fitted to the model's window.
+fn request(
+    companion: &Companion,
+    history: &mut History,
+    bound: &Bound,
+    tools: &Query<&ToolDef>,
+) -> Option<CompletionRequest> {
+    let spec = Arc::clone(&bound.connection.spec);
+    let prompt = agent::system_prompt(companion);
+    let noop: Vec<Arc<ToolDefinition>> = tools
+        .iter()
+        .filter(|tool| tool.0.name.as_str() == "noop")
+        .map(|tool| Arc::clone(&tool.0))
+        .collect();
+    let mut request = CompletionRequest::from(Vec::<Message>::new())
+        .tools(noop)
+        .options(spec.default_options(None));
+    let _ = spec.fit(&mut request);
+    let reference = spec.reference();
+    let limit = spec.input_limit().map(u64::from).unwrap_or(128_000);
+    let reserve = u64::from(spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
+    let weight = Weigher {
+        model: &reference,
+        prompt: Some(&prompt),
+        tools: &request.tools,
+        anchor: None,
+        sent: None,
     };
-    for mut call in &mut calls {
-        call.history
-            .get_or_insert_default()
-            .push(Message::user(in_flight.prompt.clone()));
+    if !compaction::fit(history, &weight, limit, reserve) {
+        tracing::warn!(companion = %companion.id, "the heartbeat tick does not fit the model window");
+        return None;
+    }
+    request.chat_history = history.messages().to_vec();
+    Some(request.preamble(prompt))
+}
+
+/// Asks the head once, outside the kernel: the reply is read, not continued,
+/// so a tool call has run nothing.
+async fn ask(request: CompletionRequest, handler: ErasedHandler) -> Outcome {
+    let kind = EffectKind::Completion {
+        request: Arc::new(request),
+        stream: false,
+    };
+    let dispatch = Dispatch::new(EffectId::from_raw(0), false);
+    match handler.handle(kind, dispatch).await.into_outcome().await {
+        Ok(Answered::Completion(response)) => Ok(acting_reply(&response)),
+        Ok(_) => Err("the heartbeat tick answered something other than a completion".to_owned()),
+        Err(report) => Err(report.to_string()),
     }
 }
 
-/// A staged request as fitting reads it.
-type Fitting<'a> = (&'a mut ModelRequest, &'a Adapted, &'a mut Decision);
-
-/// Keeps the tick request within the model's window, like an ordinary turn.
-fn fit_tick(mut calls: Query<Fitting<'static>, (Added<Admitted>, With<StagedTick>)>) {
-    for (mut call, adapted, mut decision) in &mut calls {
-        let limit = adapted
-            .0
-            .spec
-            .input_limit()
-            .map(u64::from)
-            .unwrap_or(128_000);
-        let reserve = u64::from(adapted.0.spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
-        let ModelRequest {
-            request,
-            history,
-            prompt,
-            ..
-        } = &mut *call;
-        let prompt = prompt
-            .as_ref()
-            .map(rig_core::completion::SystemPrompt::text);
-        let model = adapted.0.spec.reference();
-        let weight = Weigher {
-            model: &model,
-            prompt: prompt.as_deref(),
-            tools: &request.tools,
-            anchor: None,
-            sent: None,
-        };
-        let Some(view) = history.as_mut() else {
-            continue;
-        };
-        if !compaction::fit(view, &weight, limit, reserve) {
-            decision.decide(
-                Decider::plugin("ene-host"),
-                Outcome::refused("context_exceeded: the tick does not fit the model window"),
-            );
-        }
-    }
-}
-
-/// The reply's text blocks, when the tick acted: it wrote something and did
-/// not call `noop`.
+/// The reply a promotion writes: the text blocks, when the head spoke. A reply
+/// that calls a tool is no action — nothing ran, and `noop` is silence.
 fn acting_reply(response: &CompletionResponse) -> Option<AssistantMessage> {
-    let noop = response.choice.iter().any(|content| {
-        matches!(content, AssistantContent::ToolCall(call) if call.function.name == "noop")
-    });
-    if noop {
+    if response
+        .choice
+        .iter()
+        .any(|content| matches!(content, AssistantContent::ToolCall(_)))
+    {
         return None;
     }
     let content: Vec<AssistantContent> = response
@@ -250,334 +314,86 @@ fn acting_reply(response: &CompletionResponse) -> Option<AssistantMessage> {
     (!text.trim().is_empty()).then(|| AssistantMessage::new(content))
 }
 
-/// Promotes an acting tick into the companion's conversation and discards a
-/// silent one. The temporary agent never writes to the session log, so the
-/// promotion is one splice the normal projection sees.
-fn promote_tick(
-    mut commands: Commands,
-    settled: Query<(Entity, &StagedTick, &Outcome), Added<Settled>>,
-    parents: Query<&Staged>,
-    mut ticks: ResMut<StagedTicks>,
-    mut conversations: Query<&mut Conversation>,
+/// Settles the tick in flight: a user message or the timeout aborts it, an
+/// acting reply is promoted, and a silent or failed one is discarded.
+fn settle_tick(
+    mut ticks: ResMut<StagedTick>,
+    tracker: Option<Res<InactivityTracker>>,
+    mut agents: Query<(&CompanionAgent, &mut Conversation)>,
 ) {
-    for (effect, tick, outcome) in &settled {
-        if ticks
-            .in_flight
-            .as_ref()
-            .is_none_or(|in_flight| in_flight.effect != effect)
-        {
-            continue;
-        }
-        let Some(in_flight) = ticks.in_flight.take() else {
-            continue;
-        };
-        if let Ok(staged) = parents.get(tick.temp)
-            && let Some(reply) = outcome.completion().and_then(acting_reply)
-            && let Ok(mut conversation) = conversations.get_mut(staged.parent)
-        {
-            let at = conversation.messages().len();
-            let by = Author::plugin("ene-host");
-            conversation.splice(
-                at..,
-                [
-                    Entry::new(Message::user(in_flight.prompt)).by(by.clone()),
-                    Entry::new(Message::Assistant(reply)),
-                ],
-                by,
-            );
-        }
-        // Not `Retire`: a retire record would be written for the temporary
-        // agent. Without its id the discard hook skips it entirely.
-        commands.entity(tick.temp).remove::<AgentId>();
-        commands.entity(tick.temp).despawn();
-    }
-}
-
-/// Drops a tick that never settled, cancelling its model call.
-fn expire_tick(world: &mut World) {
-    let expired = {
-        let Some(ticks) = world.get_resource::<StagedTicks>() else {
-            return;
-        };
-        ticks
-            .in_flight
-            .as_ref()
-            .filter(|in_flight| in_flight.started.elapsed() > TIMEOUT)
-            .map(|in_flight| (in_flight.temp, in_flight.effect))
-    };
-    let Some((temp, effect)) = expired else {
+    let Some(in_flight) = ticks.in_flight.as_ref() else {
         return;
     };
-    world.resource_mut::<StagedTicks>().in_flight = None;
-    if let Ok(mut entity) = world.get_entity_mut(temp) {
-        entity.remove::<AgentId>();
+    let interrupted = tracker
+        .as_deref()
+        .is_some_and(|tracker| tracker.last_user_interaction_at >= in_flight.started);
+    if interrupted || in_flight.started.elapsed() > TIMEOUT {
+        ticks.cancel();
+        return;
     }
-    world.try_despawn(temp).ok();
-    world.try_despawn(effect).ok();
+    if !in_flight.task.is_finished() {
+        return;
+    }
+    let Some(in_flight) = ticks.in_flight.take() else {
+        return;
+    };
+    let outcome = in_flight
+        .result
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .unwrap_or_else(|| Err("the heartbeat tick was cancelled".to_owned()));
+    match outcome {
+        Ok(Some(reply)) => promote(&mut agents, &in_flight.companion, &in_flight.prompt, reply),
+        Ok(None) => {}
+        Err(why) => {
+            tracing::warn!(%why, companion = %in_flight.companion, "the heartbeat tick failed")
+        }
+    }
 }
 
-/// Registers the staged heartbeat tick.
+/// Writes an acting tick into the companion's conversation as one splice: the
+/// heartbeat input and the reply, in that order.
+fn promote(
+    agents: &mut Query<(&CompanionAgent, &mut Conversation)>,
+    companion: &str,
+    prompt: &str,
+    reply: AssistantMessage,
+) {
+    let Some((_, mut conversation)) = agents
+        .iter_mut()
+        .find(|(agent, _)| agent.companion_id == companion)
+    else {
+        return;
+    };
+    let at = conversation.messages().len();
+    let by = Author::plugin("ene-host");
+    conversation.splice(
+        at..,
+        [
+            Entry::new(Message::user(prompt)).by(by.clone()),
+            Entry::new(Message::Assistant(reply)),
+        ],
+        by,
+    );
+}
+
+/// Registers the heartbeat tick: read the companion, call the model once,
+/// promote a reply that speaks.
 pub(crate) struct StagedPlugin;
 
 impl Plugin for StagedPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<StagedTicks>()
-            .add_systems(AgentPass, request_tick.in_set(PrepareSystems::Edit))
-            .add_systems(AgentPass, fit_tick.in_set(PrepareSystems::Fit))
-            .add_systems(Update, arm_tick.before(AgentLoop))
-            .add_systems(
-                Update,
-                (begin_tick, promote_tick, expire_tick)
-                    .chain()
-                    .after(AgentLoop),
-            );
+        app.init_resource::<StagedTick>()
+            .add_systems(Update, (begin_tick, settle_tick).chain().after(AgentLoop));
     }
 }
+
+/// Test seam: the handler a tick calls, so no test builds a provider
+/// connection.
+#[cfg(test)]
+#[derive(Resource, Clone)]
+pub(crate) struct TickModel(pub(crate) Arc<dyn Fn() -> Bound + Send + Sync>);
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::host::{
-        autonomy::testing::{Harness, text_turn},
-        compaction::InactivityTracker,
-        notify::Notifier,
-    };
-    use rig_core::test_utils::MockStreamEvent;
-    use serde_json::json;
-
-    /// The parent's conversation and the DirStore as they are, for the
-    /// no-change half of the tests.
-    fn snapshot(harness: &mut Harness, agent: Entity) -> (usize, Vec<String>, Option<Vec<u8>>) {
-        let len = harness.conversation(agent).messages().len();
-        let names = harness.log_names();
-        let bytes = names.first().and_then(|name| {
-            std::fs::read(harness.root.path().join("rig").join("logs").join(name)).ok()
-        });
-        (len, names, bytes)
-    }
-
-    fn idle(harness: &mut Harness) {
-        harness
-            .app
-            .world_mut()
-            .resource_mut::<InactivityTracker>()
-            .last_user_interaction_at = Instant::now() - IDLE - Duration::from_secs(1);
-    }
-
-    /// Runs one tick to its end: it is spawned, then settles or expires.
-    fn run_tick(harness: &mut Harness) {
-        harness.run_until(|world| {
-            let mut query = world.query_filtered::<Entity, With<Staged>>();
-            query.iter(world).next().is_some()
-        });
-        harness.run_until(|world| world.resource::<StagedTicks>().in_flight.is_none());
-    }
-
-    fn answer(harness: &mut Harness) -> Vec<u8> {
-        let agent = harness.companion_agent();
-        harness.run_until(move |world| {
-            world
-                .get::<Conversation>(agent)
-                .is_some_and(|conversation| {
-                    conversation
-                        .entries()
-                        .any(|entry| entry_text_is_assistant(&entry))
-                })
-        });
-        harness.tick();
-        harness
-            .log_names()
-            .first()
-            .and_then(|name| {
-                std::fs::read(harness.root.path().join("rig").join("logs").join(name)).ok()
-            })
-            .unwrap_or_default()
-    }
-
-    fn entry_text_is_assistant(entry: &rig_core::conversation::EntryRef<'_>) -> bool {
-        matches!(entry.message, Message::Assistant(_))
-    }
-
-    #[test]
-    fn a_silent_tick_leaves_the_conversation_and_the_log_unchanged() {
-        let mut harness = Harness::new([
-            text_turn("こんにちは"),
-            vec![
-                MockStreamEvent::tool_call("call-1", "noop", json!({})),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let agent = harness.companion_agent();
-        // One ordinary turn first, so the temporary agent's clone holds
-        // entries that a leaking projection would publish.
-        crate::host::chat::accept(
-            &mut harness.app,
-            ene_rpc::SendMessageRequest {
-                companion_id: harness.companion.clone(),
-                request_key: "key-1".into(),
-                text: "ただいま".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let _ = answer(&mut harness);
-        let (len, names, bytes) = snapshot(&mut harness, agent);
-        assert_eq!(names.len(), 1, "the companion's own log only");
-
-        idle(&mut harness);
-        let mut notifications = harness.app.world().resource::<Notifier>().subscribe();
-        run_tick(&mut harness);
-
-        // Nothing reached the companion, and the append-only log did not grow.
-        assert_eq!(harness.conversation(agent).messages().len(), len);
-        assert_eq!(harness.log_names(), names);
-        let after = snapshot(&mut harness, agent).2;
-        assert_eq!(after, bytes, "no no-op tick is written to the DirStore");
-        // The next tick waits for the next idle interval.
-        harness.tick();
-        let mut query = harness
-            .app
-            .world_mut()
-            .query_filtered::<Entity, With<Staged>>();
-        assert!(
-            query.iter(harness.app.world()).next().is_none(),
-            "a silent tick does not start another tick in the same idle window"
-        );
-        // No notification leaked from the temporary agent (an empty companion).
-        while let Ok(notification) = notifications.try_recv() {
-            assert!(
-                notification
-                    .companion_id
-                    .as_deref()
-                    .is_some_and(|id| !id.is_empty()),
-                "a staged tick must never publish a message with an empty companion"
-            );
-        }
-    }
-
-    #[test]
-    fn an_acting_tick_promotes_exactly_its_input_and_reply() {
-        let mut harness = Harness::new([
-            text_turn("こんにちは"),
-            text_turn("おはよう。そろそろ休憩しない？"),
-        ]);
-        let agent = harness.companion_agent();
-        crate::host::chat::accept(
-            &mut harness.app,
-            ene_rpc::SendMessageRequest {
-                companion_id: harness.companion.clone(),
-                request_key: "key-1".into(),
-                text: "ただいま".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let _ = answer(&mut harness);
-        let (len, _, _) = snapshot(&mut harness, agent);
-
-        idle(&mut harness);
-        let mut notifications = harness.app.world().resource::<Notifier>().subscribe();
-        run_tick(&mut harness);
-        harness.tick();
-
-        let conversation = harness.conversation(agent);
-        assert_eq!(conversation.messages().len(), len + 2);
-        let entries: Vec<_> = conversation.entries().skip(len).collect();
-        assert_eq!(entries.len(), 2);
-        let input = agent::entry_text(&entries[0]).expect("the promoted input text");
-        assert!(input.starts_with("定期Tick: "), "{input}");
-        assert_eq!(
-            entries[0].author.map(|author| &author.kind),
-            Some(&rig_core::conversation::AuthorKind::Plugin(
-                "ene-host".into()
-            ))
-        );
-        let reply = agent::entry_text(&entries[1]).expect("the promoted reply text");
-        assert_eq!(reply, "おはよう。そろそろ休憩しない？");
-        assert!(entries[1].author.is_none(), "the reply is the assistant's");
-
-        // The promotion is written once, under the companion's own log: no
-        // `staged:*` log appears.
-        let names = harness.log_names();
-        assert_eq!(
-            names,
-            vec![format!("companion:{}.jsonl", harness.companion)],
-            "the temporary agent has no session log"
-        );
-        while let Ok(notification) = notifications.try_recv() {
-            assert!(
-                notification
-                    .companion_id
-                    .as_deref()
-                    .is_some_and(|id| !id.is_empty()),
-                "a staged tick must never publish a message with an empty companion"
-            );
-        }
-    }
-
-    #[test]
-    fn a_tick_waits_for_the_companion_turn_to_end() {
-        let mut harness = Harness::new([text_turn("こんにちは")]);
-        harness
-            .app
-            .add_systems(AgentPass, hold_turn_calls.in_set(Stage::Gate));
-        let agent = harness.companion_agent();
-        crate::host::chat::accept(
-            &mut harness.app,
-            ene_rpc::SendMessageRequest {
-                companion_id: harness.companion.clone(),
-                request_key: "key-1".into(),
-                text: "ただいま".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(
-            harness.app.world().get::<ActiveTurn>(agent).is_some(),
-            "the held turn stays active"
-        );
-        idle(&mut harness);
-        harness.tick();
-        let mut query = harness
-            .app
-            .world_mut()
-            .query_filtered::<Entity, With<Staged>>();
-        assert!(
-            query.iter(harness.app.world()).next().is_none(),
-            "the tick must not run beside an active turn"
-        );
-
-        // Release the turn; once it ends, the next frame starts a tick.
-        let holds: Vec<Entity> = {
-            let mut query = harness
-                .app
-                .world_mut()
-                .query_filtered::<Entity, With<HoldOf>>();
-            query.iter(harness.app.world()).collect()
-        };
-        for hold in holds {
-            harness.app.world_mut().despawn(hold);
-        }
-        harness.run_until(|world| world.get::<ActiveTurn>(agent).is_none());
-        harness.tick();
-        assert!(
-            harness
-                .app
-                .world()
-                .resource::<StagedTicks>()
-                .last_started
-                .is_some(),
-            "the tick runs once the companion is idle again"
-        );
-    }
-
-    /// Holds every admitted turn call, so a test can keep a turn active.
-    fn hold_turn_calls(
-        mut commands: Commands,
-        calls: Query<Entity, (With<TurnCall>, Added<Admitted>)>,
-    ) {
-        for call in &calls {
-            commands.spawn(HoldOf(call));
-        }
-    }
-}
+mod tests;

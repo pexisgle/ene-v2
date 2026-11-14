@@ -726,7 +726,10 @@ fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
             let mut mono = Vec::with_capacity(data.len() / channels);
             for frame in data.chunks_exact(2 * channels) {
                 let sum: i32 = (0..channels)
-                    .map(|channel| i32::from(le16(frame, channel * 2)))
+                    .map(|channel| {
+                        let at = channel * 2;
+                        i32::from(i16::from_le_bytes([frame[at], frame[at + 1]]))
+                    })
                     .sum();
                 let sample =
                     (sum / channels as i32).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
@@ -1737,12 +1740,8 @@ pub(crate) fn report_playback(
     if !ended {
         return Ok(response(false));
     }
-    // Only a report that passed the generation and client checks is stored;
-    // a stale position must not overwrite the recorded progress.
-    let Some(stored) = db::playback::PlaybackReport::from_wire(&report) else {
-        return Ok(response(false));
-    };
-    store.insert_playback_report(&stored)?;
+    // The report passed the generation, client and activation checks; a stale
+    // position was refused above and never reaches the floor release.
     let total_sentences = owner
         .utterance
         .as_ref()

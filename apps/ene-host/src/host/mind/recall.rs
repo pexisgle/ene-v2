@@ -10,6 +10,7 @@ use crate::host::{
     compaction::{self, Weigher},
     db::{Store, now},
     model::Credentials,
+    resources::Perception,
 };
 use bevy_ecs::prelude::*;
 use rig_core::completion::Message;
@@ -104,12 +105,13 @@ fn inject_tail(
         let at = history.start_of(turn.start);
         let author = Author::plugin("ene-host");
         history.edit_each(author, |entry| {
-            (entry.index == at).then(|| append(entry.message, &tail))
+            (entry.index == at).then(|| with_tail(entry.message, &tail))
         });
     }
 }
 
-fn append(message: &Message, tail: &str) -> Message {
+/// `message` with the dynamic tail appended, as a request view carries it.
+pub(crate) fn with_tail(message: &Message, tail: &str) -> Message {
     let Message::User { content } = message else {
         return message.clone();
     };
@@ -118,23 +120,42 @@ fn append(message: &Message, tail: &str) -> Message {
     Message::User { content }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_tail(
+/// The sources automatic recall needs beyond the store and the perception: the
+/// embedding connection and the in-memory index it ranks.
+pub(crate) struct Recall<'a> {
+    pub(crate) index: &'a mut CompactVectorIndex,
+    pub(crate) embedder: &'a Embedder,
+    pub(crate) credentials: Option<&'a Credentials>,
+}
+
+/// The tail's opening: the clock is part of every request, companion or not.
+fn opening() -> String {
+    format!(
+        "---\n現在の動的コンテキスト（会話ログには保存されません）\n現在日時: {}\n",
+        now()
+    )
+}
+
+/// The dynamic tail a request carries: the clock, the user profile, perception,
+/// the companion's state, pinned memories and automatic recall. It is injected
+/// into the request view only and never saved with the conversation, so a call
+/// that is not a kernel turn (a heartbeat tick) attaches the same tail an
+/// ordinary turn would get. `turn` is the turn the automatic recall is recorded
+/// under; a call that is not a turn passes `None` and records nothing.
+pub(crate) fn dynamic_tail(
     store: &Store,
-    agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
-    conversations: &Query<&Conversation>,
-    perception: &crate::host::resources::Perception,
-    agent: Entity,
-    turn_id: u64,
-    index: &mut CompactVectorIndex,
-    embedder: &Embedder,
-    credentials: Option<&Credentials>,
+    perception: &Perception,
+    companion: &str,
+    query: Option<&str>,
+    recall: Recall<'_>,
+    turn: Option<u64>,
 ) -> String {
-    let mut tail = String::from("---\n現在の動的コンテキスト（会話ログには保存されません）\n");
-    tail.push_str(&format!("現在日時: {}\n", now()));
-    let Some((companion, conversation)) = agent_view(agents, conversations, agent) else {
-        return tail;
-    };
+    let Recall {
+        index,
+        embedder,
+        credentials,
+    } = recall;
+    let mut tail = opening();
     let profile = crate::host::db::memories::profile_lines(store);
     if !profile.is_empty() {
         tail.push_str("ユーザー情報:\n");
@@ -146,10 +167,10 @@ fn render_tail(
     }
     // Perception and the clock lead the tail so truncation cannot drop them:
     // the model must always know the current environment.
-    if let Some(event) = perception.events.get(&companion) {
+    if let Some(event) = perception.events.get(companion) {
         tail.push_str(&format!("知覚: {}\n", event.summary));
     }
-    if let Ok(Some(state)) = store.companion(&companion) {
+    if let Ok(Some(state)) = store.companion(companion) {
         tail.push_str(&format!(
             "現在の心: 感情={} 関係={} 傾向={} 懸念={}\n",
             state.state.emotion.json,
@@ -157,7 +178,7 @@ fn render_tail(
             state.state.tendencies.json,
             state.state.concerns.json
         ));
-        if let Ok(pinned) = store.pinned(&companion)
+        if let Ok(pinned) = store.pinned(companion)
             && !pinned.is_empty()
         {
             tail.push_str("常に覚えていること:\n");
@@ -167,27 +188,29 @@ fn render_tail(
                 tail.push('\n');
             }
         }
-        if let Some(query) = recent_user_text(conversation) {
+        if let Some(query) = query {
             let semantic =
-                embedding::semantic_ids(store, embedder, index, credentials, &companion, &query);
+                embedding::semantic_ids(store, embedder, index, credentials, companion, query);
             if let Ok(recalled) = store.recall_hybrid(
-                &companion,
-                &query,
+                companion,
+                query,
                 super::memory::RecallMode::Auto,
                 &semantic,
                 6,
             ) && !recalled.items.is_empty()
             {
-                let ids: Vec<String> = recalled
-                    .items
-                    .iter()
-                    .map(|item| item.memory.id.clone())
-                    .collect();
-                // Persisted, so the citation guard still knows the verified
-                // injection set after a restart (docs/design/mind.md §4.2).
-                if let Err(error) = store.record_injections(&companion, &turn_id.to_string(), &ids)
-                {
-                    tracing::warn!(%error, companion = %companion, "injected memories were not recorded");
+                if let Some(turn) = turn {
+                    let ids: Vec<String> = recalled
+                        .items
+                        .iter()
+                        .map(|item| item.memory.id.clone())
+                        .collect();
+                    // Persisted, so the citation guard still knows the verified
+                    // injection set after a restart (docs/design/mind.md §4.2).
+                    if let Err(error) = store.record_injections(companion, &turn.to_string(), &ids)
+                    {
+                        tracing::warn!(%error, companion = %companion, "injected memories were not recorded");
+                    }
                 }
                 tail.push_str("今の話に関係する記憶:\n");
                 for memory in recalled.items {
@@ -202,6 +225,36 @@ fn render_tail(
     crate::host::db::truncate(&tail, 6_000)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_tail(
+    store: &Store,
+    agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+    conversations: &Query<&Conversation>,
+    perception: &Perception,
+    agent: Entity,
+    turn_id: u64,
+    index: &mut CompactVectorIndex,
+    embedder: &Embedder,
+    credentials: Option<&Credentials>,
+) -> String {
+    let Some((companion, conversation)) = agent_view(agents, conversations, agent) else {
+        return opening();
+    };
+    let query = conversation.and_then(|conversation| recall_query(conversation));
+    dynamic_tail(
+        store,
+        perception,
+        &companion,
+        query.as_deref(),
+        Recall {
+            index,
+            embedder,
+            credentials,
+        },
+        Some(turn_id),
+    )
+}
+
 fn agent_view<'a>(
     agents: &'a Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversations: &'a Query<&Conversation>,
@@ -214,8 +267,8 @@ fn agent_view<'a>(
     Some((companion, conversations.get(agent).ok()))
 }
 
-fn recent_user_text(conversation: Option<&Conversation>) -> Option<String> {
-    let conversation = conversation?;
+/// The text automatic recall searches with: the newest message the user typed.
+pub(crate) fn recall_query(conversation: &rig_core::conversation::Conversation) -> Option<String> {
     conversation
         .entries()
         .rev()

@@ -381,7 +381,7 @@ impl FromWorld for CapabilityPolicy {
     }
 }
 
-pub(crate) use dynamic::{CapabilityTool, CapabilityTools};
+pub(crate) use dynamic::CapabilityTools;
 
 #[derive(Clone, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DeviceRequestArgs {
@@ -414,8 +414,16 @@ impl Plugin for ClientPlugin {
         .insert_resource(dynamic::CapabilityCalls::new(wake))
         .init_resource::<CapabilityPolicy>()
         .init_resource::<CapabilityTools>()
-        .add_systems(Startup, dynamic::init)
-        .add_systems(Update, dynamic::drain.after(AgentLoop));
+        // The agents spawn in `Startup` too; publish after them so a restored
+        // active client's tools are on every parent from the first turn.
+        .add_systems(Startup, dynamic::init.after(super::agent::reconcile))
+        .add_systems(
+            Update,
+            (
+                dynamic::drain.after(AgentLoop),
+                dynamic::refresh.before(AgentLoop),
+            ),
+        );
     }
 }
 

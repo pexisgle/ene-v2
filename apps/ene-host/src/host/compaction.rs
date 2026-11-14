@@ -23,6 +23,7 @@ use rig_memory::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -67,11 +68,12 @@ pub(crate) fn note_user_activity(world: &mut World) {
     if let Some(mut tracker) = world.get_resource_mut::<InactivityTracker>() {
         tracker.on_user_activity();
     }
-    if let Some(mut state) = world.get_resource_mut::<CompactionState>()
-        && state.running.is_some()
-    {
-        state.cancel_running();
-        state.retry_after = Some(Instant::now() + RETRY);
+    if let Some(mut state) = world.get_resource_mut::<CompactionState>() {
+        let cancelled = state.cancel_running();
+        let at = Instant::now() + RETRY;
+        for companion in cancelled {
+            state.defer(&companion, at);
+        }
     }
 }
 
@@ -254,23 +256,88 @@ type Outcome = std::result::Result<Summary, String>;
 /// A summary task on the host's shared background runtime; cancelling it aborts
 /// the task, so the in-flight request is dropped.
 struct RunningSummary {
-    companion: String,
     task: tokio::task::JoinHandle<()>,
     result: Arc<Mutex<Option<Outcome>>>,
 }
 
-/// At most one summary task at a time, and the time the next dispatch may start.
-#[derive(Resource, Default)]
-pub(crate) struct CompactionState {
+/// One companion's summary slot: the task in flight and its own retry clock.
+#[derive(Default)]
+struct CompanionSummary {
     running: Option<RunningSummary>,
     retry_after: Option<Instant>,
 }
 
+/// Background summary state keyed by companion. A failure or an interruption
+/// only delays the companion it belongs to, and each companion has at most one
+/// summary in flight; the shared runtime still runs one summary at a time.
+#[derive(Resource, Default)]
+pub(crate) struct CompactionState {
+    companions: HashMap<String, CompanionSummary>,
+}
+
 impl CompactionState {
-    fn cancel_running(&mut self) {
-        if let Some(running) = self.running.take() {
-            running.task.abort();
+    /// The runtime-wide slot: at most one summary task runs at a time.
+    fn is_running(&self) -> bool {
+        self.companions
+            .values()
+            .any(|state| state.running.is_some())
+    }
+
+    /// Whether `companion` may start a summary at `now`: it has no task in
+    /// flight and its own cooldown has elapsed.
+    fn may_start(&self, companion: &str, now: Instant) -> bool {
+        self.companions.get(companion).is_none_or(|state| {
+            state.running.is_none() && state.retry_after.is_none_or(|after| now >= after)
+        })
+    }
+
+    fn start(&mut self, companion: &str, running: RunningSummary) {
+        debug_assert!(
+            self.companions
+                .get(companion)
+                .is_none_or(|state| state.running.is_none()),
+            "one summary per companion"
+        );
+        self.companions
+            .entry(companion.to_owned())
+            .or_default()
+            .running = Some(running);
+    }
+
+    /// Delays this companion's next summary without touching any other.
+    fn defer(&mut self, companion: &str, until: Instant) {
+        self.companions
+            .entry(companion.to_owned())
+            .or_default()
+            .retry_after = Some(until);
+    }
+
+    /// Takes the one finished task, with the companion it belongs to.
+    fn take_finished(&mut self) -> Option<(String, RunningSummary)> {
+        let companion = self.companions.iter().find_map(|(companion, state)| {
+            state
+                .running
+                .as_ref()
+                .filter(|running| running.task.is_finished())
+                .map(|_| companion.clone())
+        })?;
+        let running = self
+            .companions
+            .get_mut(&companion)
+            .and_then(|state| state.running.take())?;
+        Some((companion, running))
+    }
+
+    /// Aborts every running summary and returns the companions it aborted.
+    fn cancel_running(&mut self) -> Vec<String> {
+        let mut cancelled = Vec::new();
+        for (companion, state) in &mut self.companions {
+            if let Some(running) = state.running.take() {
+                running.task.abort();
+                cancelled.push(companion.clone());
+            }
         }
+        cancelled
     }
 }
 
@@ -314,13 +381,10 @@ fn summarize_when_idle(
     embedder: Option<Res<Embedder>>,
     wake: Option<Res<Wake>>,
 ) {
-    if state.running.is_some() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
+    if state.is_running() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
         return;
     }
     let now = Instant::now();
-    if state.retry_after.is_some_and(|after| now < after) {
-        return;
-    }
     let (Some(store), Some(credentials), Some(models), Some(embedder)) =
         (store, credentials, models, embedder)
     else {
@@ -341,6 +405,9 @@ fn summarize_when_idle(
         if ratio < HARD_RATIO && !(ratio >= SOFT_RATIO && idle >= IDLE) {
             continue;
         }
+        if !state.may_start(&agent.companion_id, now) {
+            continue;
+        }
         let Ok(Some(companion)) = store.companion(&agent.companion_id) else {
             continue;
         };
@@ -352,8 +419,8 @@ fn summarize_when_idle(
             Role::Compaction,
         ) else {
             tracing::warn!(companion = %agent.companion_id, "no compaction model is assigned");
-            state.retry_after = Some(now + RETRY);
-            return;
+            state.defer(&agent.companion_id, now + RETRY);
+            continue;
         };
         let history = conversation.0.clone();
         let previous = summary_of(&history).map_or_else(String::new, |summary| summary.text);
@@ -372,14 +439,10 @@ fn summarize_when_idle(
             }
         }) else {
             tracing::warn!("the background runtime is unavailable; the summary was not started");
-            state.retry_after = Some(now + RETRY);
-            return;
+            state.defer(&agent.companion_id, now + RETRY);
+            continue;
         };
-        state.running = Some(RunningSummary {
-            companion: agent.companion_id.clone(),
-            task,
-            result,
-        });
+        state.start(&agent.companion_id, RunningSummary { task, result });
         return;
     }
 }
@@ -389,14 +452,10 @@ fn collect_summaries(
     mut state: ResMut<CompactionState>,
     mut agents: Query<(&CompanionAgent, &mut Conversation)>,
 ) {
-    let Some(running) = state.running.take() else {
+    let Some((companion, running)) = state.take_finished() else {
         return;
     };
-    if !running.task.is_finished() {
-        state.running = Some(running);
-        return;
-    }
-    state.retry_after = Some(Instant::now() + RETRY);
+    state.defer(&companion, Instant::now() + RETRY);
     let outcome = running
         .result
         .lock()
@@ -405,7 +464,6 @@ fn collect_summaries(
         .unwrap_or_else(|| Err("the summary task was cancelled".to_owned()));
     match outcome {
         Ok(summary) => {
-            let companion = running.companion;
             let Some(mut conversation) = agents.iter_mut().find_map(|(agent, conversation)| {
                 (agent.companion_id == companion).then_some(conversation)
             }) else {
@@ -420,7 +478,7 @@ fn collect_summaries(
             conversation.add_aside(Aside::new(SUMMARY, Author::plugin("ene-host"), value));
         }
         Err(why) => {
-            tracing::warn!(%why, companion = %running.companion, "the compaction summary failed")
+            tracing::warn!(%why, companion = %companion, "the compaction summary failed")
         }
     }
 }
@@ -697,7 +755,41 @@ mod tests {
     }
 
     #[test]
-    fn user_activity_aborts_a_running_summary() {
+    fn a_failure_delays_only_its_own_companion() {
+        let now = Instant::now();
+        let mut state = CompactionState::default();
+        state.defer("ene", now + RETRY);
+        assert!(!state.may_start("ene", now));
+        assert!(state.may_start("kuro", now));
+        assert!(state.may_start("ene", now + RETRY));
+    }
+
+    #[test]
+    fn a_companion_keeps_at_most_one_summary_in_flight() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let task = runtime.spawn(std::future::pending::<()>());
+        let mut state = CompactionState::default();
+        state.start(
+            "ene",
+            RunningSummary {
+                task,
+                result: Arc::new(Mutex::new(None)),
+            },
+        );
+        let now = Instant::now();
+        assert!(state.is_running(), "the shared runtime has one slot");
+        assert!(!state.may_start("ene", now), "one summary per companion");
+        assert!(
+            state.may_start("kuro", now),
+            "the slot is per companion; dispatch still checks the one runtime slot"
+        );
+    }
+
+    #[test]
+    fn user_activity_aborts_only_the_running_companions_summary() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -708,18 +800,29 @@ mod tests {
             let _guard = guard;
             std::future::pending::<()>().await;
         });
-        let mut world = World::new();
-        world.insert_resource(InactivityTracker::default());
-        world.insert_resource(CompactionState {
-            running: Some(RunningSummary {
-                companion: "ene".to_owned(),
+        let mut state = CompactionState::default();
+        state.start(
+            "ene",
+            RunningSummary {
                 task,
                 result: Arc::new(Mutex::new(None)),
-            }),
-            retry_after: None,
-        });
+            },
+        );
+        let kuro_retry = Instant::now() + RETRY;
+        state.defer("kuro", kuro_retry);
+        let mut world = World::new();
+        world.insert_resource(InactivityTracker::default());
+        world.insert_resource(state);
+
         note_user_activity(&mut world);
-        assert!(world.resource::<CompactionState>().running.is_none());
+        let state = world.resource::<CompactionState>();
+        assert!(state.companions["ene"].running.is_none());
+        assert!(state.companions["ene"].retry_after.is_some());
+        assert_eq!(
+            state.companions["kuro"].retry_after,
+            Some(kuro_retry),
+            "another companion's cooldown is untouched"
+        );
         runtime.block_on(tokio::task::yield_now());
         assert!(
             dropped.load(Ordering::Relaxed),

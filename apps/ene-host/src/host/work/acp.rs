@@ -143,25 +143,29 @@ pub(crate) fn spawn(
     if command.is_empty() {
         return Err(HostError::invalid("the ACP connection has no command"));
     }
-    which::which(command).map_err(|_| {
-        HostError::unavailable(format!("ACP command `{command}` was not found in PATH"))
-    })?;
     let cwd = std::env::current_dir()
         .map_err(|error| HostError::unavailable(format!("ACP working directory: {error}")))?;
-    let (program, args, notice) = launch(
-        command,
+    // Resolve against the PATH the child will actually receive, not the
+    // host's: a configured `env.PATH` replaces the inherited one.
+    let program = resolve_program(command, &connection.endpoint.options, &cwd)?;
+    let Launch {
+        program,
+        args,
+        isolation,
+    } = launch(
+        &program,
         &connection.args,
         &cwd,
         &connection.endpoint.options,
     )
     .map_err(HostError::Unavailable)?;
-    if let Some(notice) = notice {
+    if let Some((code, notice)) = isolation.notice() {
         let store = world.resource::<Store>().clone();
         if let Ok(Some(session)) = store.work_session(work_id) {
             world.resource_mut::<Notifier>().notice(
                 Some(&session.companion_id),
-                "acp_sandbox_unavailable",
-                &truncate(&notice, 500),
+                code,
+                &truncate(notice, 500),
             );
         }
     }
@@ -670,43 +674,101 @@ fn configured_env(options: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Resolves the command with the PATH the child receives: the configured
+/// `env.PATH` when the connection sets one, otherwise the inherited host PATH
+/// that [`child_env`] passes through.
+fn resolve_program(command: &str, options: &str, cwd: &Path) -> Result<PathBuf, HostError> {
+    let configured = configured_env(options)
+        .into_iter()
+        .find_map(|(name, value)| (name == "PATH").then_some(OsString::from(value)));
+    let path = configured.or_else(|| std::env::var_os("PATH"));
+    which::which_in(command, path, cwd).map_err(|_| {
+        HostError::unavailable(format!(
+            "ACP command `{command}` was not found in the PATH the child receives"
+        ))
+    })
+}
+
 // === Process isolation ===================================================
 
-fn launch(
-    command: &str,
-    args: &[String],
-    cwd: &Path,
-    options: &str,
-) -> Result<(PathBuf, Vec<String>, Option<String>), String> {
+#[derive(Debug)]
+struct Launch {
+    program: PathBuf,
+    args: Vec<String>,
+    /// What the launch actually enforces, for the notice the host publishes.
+    isolation: Isolation,
+}
+
+/// How much the launched child is really isolated. A partial launch must never
+/// be reported as full isolation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Isolation {
+    /// `sandbox: none`: no namespace at all.
+    None,
+    /// Read-only root, private `/tmp` and a PID namespace; host network.
+    Partial,
+    /// The above plus a private network namespace.
+    Full,
+}
+
+impl Isolation {
+    /// The notice this launch owes the user, if any: an opt-out or a partial
+    /// sandbox is never silently presented as full isolation.
+    fn notice(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::None => Some((
+                "acp_sandbox_unavailable",
+                "ACP接続の `sandbox: none` オプションにより、子プロセスはファイルシステム・プロセス・ネットワークのいずれも隔離せずに起動します。",
+            )),
+            Self::Partial => Some((
+                "acp_sandbox_partial",
+                "ACP子プロセスは読み取り専用ルート・専用の /tmp・PID名前空間で起動しますが、\
+                 プロキシブリッジが未実装のためネットワークはホストと共有されます。\
+                 ネットワーク分離が必要な場合は接続オプションに `network: isolated` を設定してください。",
+            )),
+            Self::Full => None,
+        }
+    }
+}
+
+fn launch(program: &Path, args: &[String], cwd: &Path, options: &str) -> Result<Launch, String> {
     let requested = sandbox_mode(options);
     if requested.as_deref() == Some("none") {
-        let notice = "ACP接続の `sandbox: none` オプションにより、子プロセスは非隔離で起動します。";
-        return Ok((
-            PathBuf::from(command),
-            args.to_vec(),
-            Some(notice.to_owned()),
-        ));
+        return Ok(Launch {
+            program: program.to_path_buf(),
+            args: args.to_vec(),
+            isolation: Isolation::None,
+        });
     }
     plan(
-        command,
+        program,
         args,
         cwd,
         requested.as_deref(),
         which::which("bwrap").ok().as_deref(),
+        network_isolated(options),
     )
 }
 
-/// Builds the bwrap command line. The system stays read-only (`--ro-bind / /`)
-/// and only the working directory is writable; without bwrap the child cannot
-/// be isolated, so the launch is refused unless the connection already opted
-/// out with `sandbox: none`.
+/// Builds the bwrap command line. The system stays read-only (`--ro-bind / /`),
+/// the working directory is the only writable bind, and `/tmp` is a private
+/// tmpfs so agents can write temporary files without touching the host's.
+///
+/// Network isolation is opt-in: `--unshare-net` is passed only for an explicit
+/// `network: isolated` (or `network: none`), because there is no proxy bridge
+/// that would let a network-isolated child reach its model or tools. Without
+/// it the child shares the host network and the launch is
+/// [`Isolation::Partial`]. Without bwrap the child cannot be isolated at all,
+/// so the launch is refused unless the connection already opted out with
+/// `sandbox: none`.
 fn plan(
-    command: &str,
+    program: &Path,
     args: &[String],
     cwd: &Path,
     requested: Option<&str>,
     bwrap: Option<&Path>,
-) -> Result<(PathBuf, Vec<String>, Option<String>), String> {
+    network_isolated: bool,
+) -> Result<Launch, String> {
     let Some(bwrap) = bwrap else {
         let requested = match requested {
             Some(mode) => format!("接続オプション `sandbox: {mode}` が指定されましたが、"),
@@ -717,24 +779,60 @@ fn plan(
              非隔離での実行を明示的に承認するには、接続オプションに `sandbox: none` を設定してください。"
         ));
     };
-    let cwd = cwd
+    let cwd_text = cwd
         .to_str()
         .ok_or_else(|| "ACPの作業ディレクトリをUTF-8で表せません".to_owned())?;
-    let mut wrapped: Vec<String> = ["--die-with-parent", "--unshare-net", "--unshare-pid"]
+    let program_text = program
+        .to_str()
+        .ok_or_else(|| "ACPコマンドのパスをUTF-8で表せません".to_owned())?;
+    let mut wrapped: Vec<String> = ["--die-with-parent", "--unshare-pid"]
         .map(str::to_owned)
         .to_vec();
-    wrapped.extend(["--ro-bind", "/", "/", "--bind", cwd, cwd].map(str::to_owned));
-    wrapped.extend(["--proc", "/proc", "--dev", "/dev", "--chdir", cwd].map(str::to_owned));
+    if network_isolated {
+        wrapped.push("--unshare-net".to_owned());
+    }
+    wrapped.extend(["--ro-bind", "/", "/"].map(str::to_owned));
+    // Mount the private /tmp and the kernel filesystems before the work
+    // directory bind: a work directory under /tmp (or /proc, /dev) must still
+    // be the program's writable cwd, not be shadowed by the later mount.
+    wrapped.extend(["--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev"].map(str::to_owned));
+    wrapped.extend(["--bind", cwd_text, cwd_text].map(str::to_owned));
+    wrapped.extend(["--chdir", cwd_text].map(str::to_owned));
     wrapped.push("--".to_owned());
-    wrapped.push(command.to_owned());
+    wrapped.push(program_text.to_owned());
     wrapped.extend(args.iter().cloned());
-    Ok((bwrap.to_path_buf(), wrapped, None))
+    Ok(Launch {
+        program: bwrap.to_path_buf(),
+        args: wrapped,
+        isolation: if network_isolated {
+            Isolation::Full
+        } else {
+            Isolation::Partial
+        },
+    })
 }
 
 fn sandbox_mode(options: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(options).ok()?;
     let mode = value.get("sandbox")?.as_str()?.trim().to_ascii_lowercase();
     (!mode.is_empty()).then_some(mode)
+}
+
+/// Whether the connection options explicitly request a private network
+/// namespace. Absent, malformed or any other value means the host network.
+fn network_isolated(options: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(options) else {
+        return false;
+    };
+    value
+        .get("network")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|mode| {
+            matches!(
+                mode.trim().to_ascii_lowercase().as_str(),
+                "isolated" | "none"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -744,8 +842,12 @@ mod tests {
     #[test]
     fn an_explicitly_disabled_sandbox_reports_itself_as_non_isolated() {
         let args = ["--stdio".to_owned()];
-        let (program, args, notice) = launch(
-            "opencode",
+        let Launch {
+            program,
+            args,
+            isolation,
+        } = launch(
+            Path::new("opencode"),
             &args,
             Path::new("/tmp"),
             r#"{"sandbox":"none"}"#,
@@ -753,22 +855,33 @@ mod tests {
         .unwrap();
         assert_eq!(program, PathBuf::from("opencode"));
         assert_eq!(args, ["--stdio".to_owned()]);
-        assert!(notice.is_some_and(|notice| notice.contains("非隔離")));
+        assert_eq!(isolation, Isolation::None);
+        let (code, notice) = isolation.notice().expect("an opt-out is reported");
+        assert_eq!(code, "acp_sandbox_unavailable");
+        assert!(notice.contains("隔離せず"), "{notice}");
     }
 
     #[test]
-    fn a_sandboxed_agent_reads_the_system_and_writes_only_the_work_directory() {
+    fn a_sandboxed_agent_gets_a_read_only_root_a_private_tmp_and_host_network() {
         let args = ["--stdio".to_owned()];
-        let (program, wrapped, notice) = plan(
-            "opencode",
+        let Launch {
+            program,
+            args: wrapped,
+            isolation,
+        } = plan(
+            Path::new("/usr/bin/opencode"),
             &args,
             Path::new("/work/project"),
             None,
             Some(Path::new("/usr/bin/bwrap")),
+            false,
         )
         .unwrap();
         assert_eq!(program, PathBuf::from("/usr/bin/bwrap"));
-        assert!(notice.is_none());
+        assert_eq!(isolation, Isolation::Partial);
+        let (code, notice) = isolation.notice().expect("partial isolation is reported");
+        assert_eq!(code, "acp_sandbox_partial");
+        assert!(notice.contains("ネットワーク"));
         let wrapped: Vec<&str> = wrapped.iter().map(String::as_str).collect();
 
         assert!(
@@ -782,44 +895,122 @@ mod tests {
             .expect("a writable bind");
         assert_eq!(wrapped[bind + 1], "/work/project");
         assert_eq!(wrapped[bind + 2], "/work/project");
-        for flag in [
-            "--unshare-net",
-            "--unshare-pid",
-            "--die-with-parent",
-            "--proc",
-            "--dev",
-        ] {
+        let tmpfs = wrapped
+            .iter()
+            .position(|arg| *arg == "--tmpfs")
+            .expect("a private /tmp");
+        assert_eq!(wrapped[tmpfs + 1], "/tmp");
+        assert!(
+            tmpfs < bind,
+            "the work directory bind must not be shadowed by /tmp: {wrapped:?}"
+        );
+        for flag in ["--unshare-pid", "--die-with-parent", "--proc", "--dev"] {
             assert!(
                 wrapped.contains(&flag),
                 "{flag} is missing from {wrapped:?}"
             );
         }
         assert!(
+            !wrapped.contains(&"--unshare-net"),
+            "network isolation is opt-in until a proxy bridge exists: {wrapped:?}"
+        );
+        assert!(
             !wrapped
                 .windows(3)
                 .any(|bind| bind[0] == "--bind" && bind[1] == "/" && bind[2] == "/"),
             "the root must not be writable: {wrapped:?}"
         );
+        let separator = wrapped
+            .iter()
+            .position(|arg| *arg == "--")
+            .expect("the bwrap command separator");
+        assert_eq!(wrapped[separator + 1], "/usr/bin/opencode");
         assert_eq!(wrapped.last().copied(), Some("--stdio"));
+    }
+
+    #[test]
+    fn explicit_network_isolation_adds_the_private_network_namespace() {
+        let args = ["--stdio".to_owned()];
+        for options in [r#"{"network":"isolated"}"#, r#"{"network":"none"}"#] {
+            assert!(network_isolated(options), "{options}");
+            let Launch {
+                args: wrapped,
+                isolation,
+                ..
+            } = plan(
+                Path::new("/usr/bin/opencode"),
+                &args,
+                Path::new("/work/project"),
+                None,
+                Some(Path::new("/usr/bin/bwrap")),
+                network_isolated(options),
+            )
+            .unwrap();
+            assert_eq!(isolation, Isolation::Full, "{options}");
+            assert!(isolation.notice().is_none(), "{options}");
+            assert!(wrapped.contains(&"--unshare-net".to_owned()), "{options}");
+            assert!(
+                wrapped
+                    .windows(2)
+                    .any(|pair| pair[0] == "--tmpfs" && pair[1] == "/tmp"),
+                "{options}"
+            );
+        }
+        for options in ["{}", r#"{"network":"host"}"#, "not json"] {
+            assert!(!network_isolated(options), "{options}");
+        }
     }
 
     #[test]
     fn an_agent_that_cannot_be_isolated_is_refused_without_the_explicit_opt_out() {
         let args = ["--stdio".to_owned()];
-        let error = plan("opencode", &args, Path::new("/work/project"), None, None).unwrap_err();
+        let error = plan(
+            Path::new("opencode"),
+            &args,
+            Path::new("/work/project"),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
         assert!(error.contains("bwrap"), "{error}");
         assert!(error.contains("隔離"), "{error}");
         assert!(error.contains("sandbox: none"), "{error}");
 
         let explicit = plan(
-            "opencode",
+            Path::new("opencode"),
             &args,
             Path::new("/work/project"),
             Some("bwrap"),
             None,
+            false,
         )
         .unwrap_err();
         assert!(explicit.contains("sandbox: bwrap"), "{explicit}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_child_command_is_resolved_with_the_configured_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let agent = bin.join("agent");
+        std::fs::write(&agent, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let options = serde_json::json!({"env": {"PATH": bin.to_str().unwrap()}}).to_string();
+
+        assert_eq!(
+            resolve_program("agent", &options, root.path()).unwrap(),
+            agent
+        );
+        // The host PATH is not consulted when the connection configures one:
+        // this command exists there, but the child would never find it.
+        assert!(resolve_program("sh", &options, root.path()).is_err());
+        // Without a configured PATH, the inherited host PATH is the one used.
+        assert!(resolve_program("sh", r#"{"env":{}}"#, root.path()).is_ok());
     }
 
     #[test]

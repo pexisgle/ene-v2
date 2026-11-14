@@ -528,8 +528,10 @@ fn binding_of(world: &World, agent: Entity) -> (String, Option<String>, String) 
 /// The capability a device tool call names, with its input and declaration.
 /// The client is already resolved, so the hand resolves against the client it
 /// is bound to, not against the companion's current activation. A capability
-/// tool is parent-only and must have been published for the bound generation;
-/// a call that no longer matches is refused with a reason instead of being
+/// tool is parent-only and must be published for the calling companion's
+/// bound generation; `client::dynamic::tool_spec_for` resolves that binding
+/// per agent, so one published definition can serve several companions. A
+/// call that no longer matches is refused with a reason instead of being
 /// treated as an unknown tool.
 fn resolve_capability(
     world: &mut World,
@@ -563,36 +565,12 @@ fn resolve_capability(
             "capability tools are offered to the parent only",
         ));
     }
-    let published = {
-        let mut query = world.query::<(&ToolDef, &super::client::CapabilityTool)>();
-        query
-            .iter(world)
-            .find(|(definition, _)| definition.0.name.as_str() == tool_name)
-            .map(|(_, tool)| tool.clone())
-    };
-    let Some(tool) = published else {
+    let Some(spec) =
+        super::client::dynamic::tool_spec_for(world, client, activation_revision, tool_name)?
+    else {
         return Ok(None);
     };
-    if tool.client_id != client.id || tool.activation_revision != activation_revision {
-        return Err(HostError::conflict(
-            "client_moved: the capability tool is not published for the bound generation",
-        ));
-    }
-    if !client
-        .capabilities
-        .iter()
-        .any(|name| name == &tool.spec.name)
-    {
-        return Ok(None);
-    }
-    let Some(spec) = client.spec(&tool.spec.name) else {
-        return Ok(None);
-    };
-    Ok(Some((
-        spec.name.clone(),
-        arguments.clone(),
-        Some(spec.clone()),
-    )))
+    Ok(Some((spec.name.clone(), arguments.clone(), Some(spec))))
 }
 
 /// The client and generation the call must be sent to.

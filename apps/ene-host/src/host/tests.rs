@@ -225,13 +225,51 @@ fn capability_tool(capability: &str, tool: &str) -> w::ClientCapabilitySpec {
     }
 }
 
-/// The client and generation a spawned capability tool was published for.
+/// The client and generation a single-companion capability tool serves.
 fn published_tool(world: &mut World, tool: &str) -> Option<(String, u64)> {
-    let mut query = world.query::<(&rig_ecs::tools::ToolDef, &client::CapabilityTool)>();
+    let mut query = world.query::<(&rig_ecs::tools::ToolDef, &client::dynamic::CapabilityTool)>();
     query
         .iter(world)
         .find(|(definition, _)| definition.0.name.as_str() == tool)
-        .map(|(_, published)| (published.client_id.clone(), published.activation_revision))
+        .and_then(|(_, published)| published.bindings.first())
+        .map(|binding| (binding.client_id.clone(), binding.activation_revision))
+}
+
+/// Every active companion/client generation a published tool dispatches for.
+fn published_bindings(world: &mut World, tool: &str) -> Vec<client::dynamic::CapabilityBinding> {
+    let mut query = world.query::<(&rig_ecs::tools::ToolDef, &client::dynamic::CapabilityTool)>();
+    query
+        .iter(world)
+        .find(|(definition, _)| definition.0.name.as_str() == tool)
+        .map(|(_, published)| published.bindings.clone())
+        .unwrap_or_default()
+}
+
+/// A model turn that calls `tool` and ends the model call.
+fn tool_turn(id: &str, tool: &str, input: serde_json::Value) -> Vec<MockStreamEvent> {
+    vec![
+        MockStreamEvent::tool_call(id, tool, input),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]
+}
+
+/// Whether any conversation holds an assistant message with exactly `text`.
+fn said(world: &mut World, text: &str) -> bool {
+    let mut query = world.query::<&Conversation>();
+    query.iter(world).any(|conversation| {
+        conversation
+            .entries()
+            .any(|entry| agent::entry_text(&entry).as_deref() == Some(text))
+    })
+}
+
+/// The tools a companion's parent agent may call.
+fn access_of(world: &mut World, companion: &str) -> ToolAccess {
+    let entity = agent::agent_of(world, companion).expect("the companion has an agent");
+    world
+        .get::<ToolAccess>(entity)
+        .cloned()
+        .expect("a parent has a tool access")
 }
 
 /// Waits for the next pending approval and returns it.
@@ -732,7 +770,149 @@ fn an_auto_capability_tool_becomes_a_device_operation() {
 }
 
 #[test]
-fn duplicate_capability_tool_names_are_refused_explicitly() {
+fn a_shared_capability_tool_serves_each_companion_that_declares_it() {
+    let mut harness = Harness::new([
+        tool_turn(
+            "call-a",
+            "body_motion",
+            serde_json::json!({"motion": "nod"}),
+        ),
+        text_turn("A done"),
+        tool_turn(
+            "call-b",
+            "body_motion",
+            serde_json::json!({"motion": "wave"}),
+        ),
+        text_turn("B done"),
+    ]);
+    let other = super::mind::create(
+        harness.app.world_mut(),
+        w::CreateCompanionRequest {
+            name: "other".into(),
+            mind: "kind".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .id;
+    client::register(
+        harness.app.world_mut(),
+        w::RegisterClientRequest {
+            id: "c1".into(),
+            name: "c1".into(),
+            platform: "linux".into(),
+            capabilities: vec!["body.motion".into(), "eye.watch".into()],
+            capability_specs: vec![
+                capability_tool("body.motion", "body_motion"),
+                capability_tool("eye.watch", "set_eye_watch"),
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    register(
+        harness.app.world_mut(),
+        "c2",
+        capability_tool("body.motion", "body_motion"),
+    );
+    let first = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    let second = activate(harness.app.world_mut(), &other, "c2", 0);
+    // One model-facing definition, one binding per companion generation.
+    let bindings = published_bindings(harness.app.world_mut(), "body_motion");
+    assert_eq!(bindings.len(), 2);
+    for (companion, client, revision) in [
+        (&harness.companion, "c1", first.revision),
+        (&other, "c2", second.revision),
+    ] {
+        assert!(bindings.iter().any(|binding| {
+            binding.companion_id == *companion
+                && binding.client_id == client
+                && binding.activation_revision == revision
+        }));
+    }
+    // Both parents see the shared name; each sees only its own companion's
+    // capability tools.
+    let access_a = access_of(harness.app.world_mut(), &harness.companion);
+    assert!(access_a.allows("body_motion"));
+    assert!(access_a.allows("set_eye_watch"));
+    let access_b = access_of(harness.app.world_mut(), &other);
+    assert!(access_b.allows("body_motion"));
+    assert!(
+        !access_b.allows("set_eye_watch"),
+        "another companion's capability tool must not be offered"
+    );
+    assert_eq!(
+        published_bindings(harness.app.world_mut(), "set_eye_watch").len(),
+        1
+    );
+    // A's call is dispatched to A's active client.
+    harness.accept("key-a", "A please").unwrap();
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .outstanding_operations("c1")
+            .unwrap()
+            .is_empty()
+    });
+    harness.run_until(|world| said(world, "A done"));
+    assert!(
+        harness
+            .store()
+            .outstanding_operations("c2")
+            .unwrap()
+            .is_empty(),
+        "A's call must not reach B's client"
+    );
+    // B's call of the same tool name is dispatched to B's active client.
+    chat::accept(
+        &mut harness.app,
+        w::SendMessageRequest {
+            companion_id: other.clone(),
+            request_key: "key-b".into(),
+            text: "B please".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .outstanding_operations("c2")
+            .unwrap()
+            .is_empty()
+    });
+    harness.run_until(|world| said(world, "B done"));
+    let a_operations = harness.store().outstanding_operations("c1").unwrap();
+    assert_eq!(a_operations.len(), 1);
+    assert_eq!(a_operations[0].capability, "body.motion");
+    assert_eq!(a_operations[0].activation_revision, first.revision);
+    assert_eq!(a_operations[0].input, serde_json::json!({"motion": "nod"}));
+    let b_operations = harness.store().outstanding_operations("c2").unwrap();
+    assert_eq!(b_operations.len(), 1);
+    assert_eq!(b_operations[0].capability, "body.motion");
+    assert_eq!(b_operations[0].activation_revision, second.revision);
+    assert_eq!(b_operations[0].input, serde_json::json!({"motion": "wave"}));
+    // A hand never sees a capability tool.
+    let companion = harness
+        .store()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
+    let hand = agent::spawn_work_agent(
+        harness.app.world_mut(),
+        &companion,
+        "work-1",
+        "run-1",
+        "do the task",
+    );
+    client::dynamic::sync_tools(harness.app.world_mut()).unwrap();
+    let access = harness.app.world().get::<ToolAccess>(hand).unwrap();
+    assert!(!access.allows("body_motion"));
+    assert!(access.allows("report") && access.allows("device_request"));
+}
+
+#[test]
+fn a_shared_tool_name_with_different_declarations_is_a_conflict() {
     let mut harness = Harness::new([]);
     let other = super::mind::create(
         harness.app.world_mut(),
@@ -744,13 +924,23 @@ fn duplicate_capability_tool_names_are_refused_explicitly() {
     )
     .unwrap()
     .id;
-    for id in ["c1", "c2"] {
-        register(
-            harness.app.world_mut(),
-            id,
-            capability_tool("body.motion", "body_motion"),
-        );
-    }
+    register(
+        harness.app.world_mut(),
+        "c1",
+        capability_tool("body.motion", "body_motion"),
+    );
+    register(
+        harness.app.world_mut(),
+        "c2",
+        w::ClientCapabilitySpec {
+            tool_name: "body_motion".into(),
+            input_schema: r#"{"type":"object","required":["motion"],
+                 "properties":{"motion":{"type":"string"}}}"#
+                .into(),
+            approval: w::CapabilityApproval::Auto.into(),
+            ..spec("body.motion")
+        },
+    );
     activate(harness.app.world_mut(), &harness.companion, "c1", 0);
     let error = client::activate(
         harness.app.world_mut(),
@@ -765,49 +955,78 @@ fn duplicate_capability_tool_names_are_refused_explicitly() {
     assert!(matches!(
         error,
         super::error::HostError::Conflict(ref reason)
-            if reason.contains("more than one active client")
+            if reason.contains("different description or input schema")
     ));
 }
 
 #[test]
-fn publishing_capability_tools_has_an_explicit_limit() {
-    let mut harness = Harness::new([]);
-    let count = super::client::dynamic::MAX_CAPABILITY_TOOLS + 1;
-    let capabilities: Vec<String> = (0..count).map(|index| format!("cap.{index}")).collect();
-    let specs: Vec<w::ClientCapabilitySpec> = (0..count)
-        .map(|index| w::ClientCapabilitySpec {
-            name: format!("cap.{index}"),
-            tool_name: format!("cap_{index}"),
-            ..Default::default()
-        })
-        .collect();
-    client::register(
+fn only_device_request_waits_for_the_client_result() {
+    let mut harness = Harness::new([
+        tool_turn(
+            "call-1",
+            "body_motion",
+            serde_json::json!({"motion": "nod"}),
+        ),
+        text_turn("first"),
+        tool_turn(
+            "call-2",
+            "device_request",
+            serde_json::json!({"capability": "body.motion", "input": {"motion": "nod"}}),
+        ),
+        text_turn("second"),
+    ]);
+    register(
         harness.app.world_mut(),
-        w::RegisterClientRequest {
-            id: "c1".into(),
-            name: "c1".into(),
-            platform: "linux".into(),
-            capabilities,
-            capability_specs: specs,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let error = client::activate(
-        harness.app.world_mut(),
-        w::ActivationRequest {
-            companion_id: harness.companion.clone(),
-            client_id: "c1".into(),
-            expected_revision: 0,
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        super::error::HostError::Exhausted(ref reason)
-            if reason.contains("capability tools can be published")
-    ));
+        "c1",
+        capability_tool("body.motion", "body_motion"),
+    );
+    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    // Keep the result-waiting deadline out of the assertion window.
+    harness
+        .app
+        .world_mut()
+        .resource_mut::<super::resources::DeviceTimeout>()
+        .0 = Duration::from_secs(30);
+    // A named capability tool answers immediately: the operation exists but
+    // no tool call waits for its result.
+    harness.accept("key-1", "move").unwrap();
+    harness.run_until(|world| {
+        world
+            .resource::<Store>()
+            .outstanding_operations("c1")
+            .unwrap()
+            .len()
+            == 1
+    });
+    assert!(
+        harness
+            .app
+            .world()
+            .resource::<Waiting>()
+            .by_operation
+            .is_empty(),
+        "a named capability tool must not wait for the device result"
+    );
+    harness.run_until(|world| said(world, "first"));
+    // device_request keeps its Waiting entry until the client answers.
+    harness.accept("key-2", "wait").unwrap();
+    harness.run_until(|world| {
+        world
+            .resource::<Store>()
+            .outstanding_operations("c1")
+            .unwrap()
+            .len()
+            == 2
+    });
+    let operations = harness.store().outstanding_operations("c1").unwrap();
+    let waiting = &harness.app.world().resource::<Waiting>().by_operation;
+    assert_eq!(waiting.len(), 1);
+    assert!(
+        operations
+            .iter()
+            .any(|operation| waiting.contains_key(&operation.id)),
+        "the waiting call belongs to the device_request operation"
+    );
 }
 
 fn start_work(harness: &mut Harness) -> w::WorkSession {

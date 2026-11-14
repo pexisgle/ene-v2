@@ -1,23 +1,26 @@
 //! Small parent tools that the design declares before their engines exist:
-//! `noop` and the schedule registry, and the schedule firing loop. A due
-//! schedule (a one-shot `run_at` or the next occurrence of a five-field cron
-//! expression) is delivered to the companion's head as a queued message with
-//! a short context line; the row records its firing and a one-shot row is
-//! disabled (docs/features/autonomy/schedule.md).
+//! `noop` and the schedule registry, and the schedule firing loop. Every row
+//! is resolved to its next firing at creation and after each firing, on the
+//! host's wall clock; a due schedule is delivered to the companion's head as
+//! a queued message with a short context line, the row records its firing,
+//! and a one-shot row is disabled (docs/features/autonomy/schedule.md).
 use crate::host::{
     agent::{self, CompanionAgent},
-    db::{self, Result, Store},
+    db::{
+        Result, Store,
+        schedules::{ScheduleClock, next_occurrence},
+    },
     error::HostError,
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
+use jiff::Timestamp;
 use rig_core::conversation::Author;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use std::time::{Duration, Instant};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// The firing loop runs at most once per this real-time interval, so a burst
 /// of frames (and the frames a client request adds) never fires twice.
@@ -32,7 +35,8 @@ pub(crate) struct CreateArgs {
     pub(crate) title: String,
     /// What the head should do when the schedule fires.
     pub(crate) instruction: String,
-    /// A one-shot time in RFC 3339.
+    /// A one-shot time: RFC 3339 with an offset, or a local date and time
+    /// read on the host's wall clock.
     #[serde(default)]
     pub(crate) run_at: Option<String>,
     /// A repeating 5-field cron expression.
@@ -95,14 +99,21 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
 fn create(world: &mut World, agent: Entity, args: CreateArgs) -> Result<String> {
     let companion = companion(world, agent)?;
     let store = world.resource::<Store>().clone();
+    let clock = world.resource::<ScheduleClock>().clone();
     let schedule = store.insert_schedule(
         &companion,
         &args.title,
         &args.instruction,
         args.run_at.as_deref(),
         args.cron_expr.as_deref(),
+        &clock,
     )?;
-    Ok(json!({"schedule_id": schedule.id}).to_string())
+    Ok(json!({
+        "schedule_id": schedule.id,
+        "next_run_at": schedule.next_run_at,
+        "time_zone": clock.name(),
+    })
+    .to_string())
 }
 
 fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
@@ -117,6 +128,7 @@ fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
                 "title": schedule.title,
                 "run_at": schedule.run_at,
                 "cron_expr": schedule.cron_expr,
+                "next_run_at": schedule.next_run_at,
             })
         })
         .collect();
@@ -131,30 +143,49 @@ fn cancel(world: &mut World, agent: Entity, args: CancelArgs) -> Result<String> 
 }
 
 /// Delivers every schedule due at `now` and records the firing. Returns how
-/// many fired. The firing is recorded before the message is sent, so a
-/// storage failure delays a schedule instead of repeating it.
-pub(crate) fn poll_schedules(world: &mut World, now: OffsetDateTime) -> usize {
+/// many fired. The stored `next_run_at` is compared in SQL, so a poll does no
+/// per-row parsing; the next time of a repeating row is computed once, after
+/// it fires. The firing is recorded before the message is sent, so a storage
+/// failure delays a schedule instead of repeating it.
+pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return 0;
     };
-    let schedules = match store.enabled_schedules() {
+    let Some(clock) = world.get_resource::<ScheduleClock>().cloned() else {
+        tracing::warn!("schedules cannot fire without the host's wall clock");
+        return 0;
+    };
+    let schedules = match store.due_schedules(now) {
         Ok(schedules) => schedules,
         Err(error) => {
             tracing::warn!(%error, "schedules could not be read");
             return 0;
         }
     };
-    let at = now.format(&Rfc3339).unwrap_or_else(|_| db::now());
-    let now_epoch = now.unix_timestamp();
     let mut fired = 0;
     for schedule in schedules {
-        if !schedule.due(now_epoch) {
-            continue;
-        }
         let Some(agent) = agent::agent_of(world, &schedule.companion_id) else {
             continue;
         };
-        match store.mark_schedule_fired(&schedule.id, &at, schedule.one_shot()) {
+        // A one-shot ends now; a repeating row moves to its first occurrence
+        // after this firing, so missed occurrences are not fired one by one.
+        let next_run_at = if schedule.one_shot() {
+            None
+        } else {
+            match schedule
+                .cron_expr
+                .as_deref()
+                .map(|expression| next_occurrence(expression, now, clock.zone()))
+            {
+                Some(Ok(at)) => Some(at),
+                Some(Err(error)) => {
+                    tracing::warn!(%error, schedule = %schedule.id, "a repeating schedule exhausted its expression");
+                    None
+                }
+                None => None,
+            }
+        };
+        match store.mark_schedule_fired(&schedule.id, now, next_run_at) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
@@ -191,7 +222,10 @@ fn fire_due_schedules(world: &mut World) {
         }
         poll.last = Some(now);
     }
-    let fired = poll_schedules(world, OffsetDateTime::now_utc());
+    let now = world
+        .get_resource::<ScheduleClock>()
+        .map_or_else(Timestamp::now, ScheduleClock::now);
+    let fired = poll_schedules(world, now);
     if fired > 0 {
         tracing::debug!(fired, "schedules fired");
     }
@@ -203,7 +237,8 @@ pub(crate) struct AutonomyPlugin;
 impl Plugin for AutonomyPlugin {
     fn build(&self, app: &mut App) {
         register(app);
-        app.init_resource::<SchedulePoll>()
+        app.init_resource::<ScheduleClock>()
+            .init_resource::<SchedulePoll>()
             .add_systems(Update, fire_due_schedules.after(AgentLoop));
     }
 }
@@ -215,7 +250,7 @@ pub(crate) mod testing {
     use crate::host::{
         self,
         agent::{self, TestModel},
-        db::Store,
+        db::{Store, schedules::ScheduleClock},
         mind, model,
         notify::Notifier,
         permission,
@@ -245,6 +280,14 @@ pub(crate) mod testing {
 
     impl Harness {
         pub(crate) fn new(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>) -> Self {
+            Self::with_clock(turns, ScheduleClock::system())
+        }
+
+        /// A harness whose schedules are read on `clock`'s wall clock.
+        pub(crate) fn with_clock(
+            turns: impl IntoIterator<Item = Vec<MockStreamEvent>>,
+            clock: ScheduleClock,
+        ) -> Self {
             let root = tempfile::tempdir().unwrap();
             let model = MockCompletionModel::from_stream_turns(turns);
             let state = root.path();
@@ -255,6 +298,7 @@ pub(crate) mod testing {
             app.set_error_handler(bevy_ecs::error::warn)
                 .add_plugins(TaskPoolPlugin::default())
                 .insert_resource(store)
+                .insert_resource(clock)
                 .insert_resource(model::Credentials::default())
                 .insert_resource(DeviceHub::default())
                 .insert_resource(HostState::default())
@@ -385,23 +429,33 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{Harness, text_turn};
     use super::*;
-    use time::Duration as TimeDuration;
+    use jiff::civil::date;
 
-    /// A UTC moment.
-    fn at(year: i32, month: u8, day: u8, hour: u8, minute: u8) -> OffsetDateTime {
-        let date = time::Date::from_calendar_date(year, time::Month::try_from(month).unwrap(), day)
-            .unwrap();
-        date.with_hms(hour, minute, 0).unwrap().assume_utc()
+    /// A UTC instant at whole-second precision.
+    fn utc(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> Timestamp {
+        jiff::tz::TimeZone::UTC
+            .to_zoned(date(year, month, day).at(hour, minute, 0, 0))
+            .unwrap()
+            .timestamp()
     }
 
-    fn row(store: &Store, id: &str) -> (bool, Option<String>) {
+    /// The same civil time read in Tokyo.
+    fn tokyo(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> Timestamp {
+        jiff::tz::TimeZone::get("Asia/Tokyo")
+            .unwrap()
+            .to_zoned(date(year, month, day).at(hour, minute, 0, 0))
+            .unwrap()
+            .timestamp()
+    }
+
+    fn row(store: &Store, id: &str) -> (bool, Option<String>, Option<String>) {
         store
             .conn()
             .unwrap()
             .query_row(
-                "SELECT enabled, last_triggered_at FROM schedules WHERE id = ?1",
+                "SELECT enabled, last_triggered_at, next_run_at FROM schedules WHERE id = ?1",
                 [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()
     }
@@ -416,6 +470,7 @@ mod tests {
     #[test]
     fn a_due_one_shot_fires_on_a_real_frame_and_is_then_disabled() {
         let mut harness = Harness::new([text_turn("リマインドの時間だよ")]);
+        let clock = ScheduleClock::fixed(jiff::tz::TimeZone::UTC, utc(2026, 11, 14, 8, 0));
         let schedule = harness
             .store()
             .insert_schedule(
@@ -424,6 +479,7 @@ mod tests {
                 "9時に集合と伝える",
                 Some("2000-01-01T00:00:00Z"),
                 None,
+                &clock,
             )
             .unwrap();
         let agent = harness.companion_agent();
@@ -434,9 +490,10 @@ mod tests {
         harness.app.world_mut().resource_mut::<SchedulePoll>().last = None;
         harness.tick();
         assert_eq!(incoming(harness.app.world_mut()), 1);
-        let (enabled, last) = row(&harness.store(), &schedule.id);
+        let (enabled, last, next) = row(&harness.store(), &schedule.id);
         assert!(!enabled, "a fired one-shot row is disabled");
         assert!(last.is_some(), "the firing time is recorded");
+        assert_eq!(next, None, "a one-shot has no next time");
 
         harness.run_until(|world| {
             let Some(conversation) = world.get::<Conversation>(agent) else {
@@ -465,8 +522,12 @@ mod tests {
     }
 
     #[test]
-    fn a_cron_row_stays_enabled_and_fires_once_per_occurrence() {
-        let mut harness = Harness::new([]);
+    fn a_cron_row_fires_at_nine_on_the_host_wall_clock() {
+        let clock = ScheduleClock::fixed(
+            jiff::tz::TimeZone::get("Asia/Tokyo").unwrap(),
+            tokyo(2026, 11, 14, 8, 0),
+        );
+        let mut harness = Harness::with_clock([], clock.clone());
         let schedule = harness
             .store()
             .insert_schedule(
@@ -475,40 +536,80 @@ mod tests {
                 "声をかける",
                 None,
                 Some("0 9 * * *"),
+                &clock,
             )
             .unwrap();
-        harness
-            .store()
-            .conn()
-            .unwrap()
-            .execute(
-                "UPDATE schedules SET created_at = '2026-11-14T08:00:00Z' WHERE id = ?1",
-                [&schedule.id],
-            )
-            .unwrap();
-        let now = at(2026, 11, 14, 9, 0);
+        // Local 09:00 in Tokyo is 00:00 UTC; reading the expression in UTC
+        // would have picked 09:00 UTC instead.
+        assert_eq!(
+            schedule.next_run_at.as_deref(),
+            Some("2026-11-14T00:00:00Z")
+        );
+        assert_eq!(
+            poll_schedules(harness.app.world_mut(), tokyo(2026, 11, 14, 8, 59)),
+            0
+        );
+        let now = tokyo(2026, 11, 14, 9, 0);
         assert_eq!(poll_schedules(harness.app.world_mut(), now), 1);
         assert_eq!(incoming(harness.app.world_mut()), 1);
         // The same occurrence never fires twice.
         assert_eq!(poll_schedules(harness.app.world_mut(), now), 0);
         assert_eq!(incoming(harness.app.world_mut()), 1);
         assert_eq!(
-            poll_schedules(harness.app.world_mut(), now + TimeDuration::hours(1)),
+            poll_schedules(harness.app.world_mut(), utc(2026, 11, 14, 1, 0)),
             0
         );
         // The next occurrence does, and the repeating row stays enabled.
         assert_eq!(
-            poll_schedules(harness.app.world_mut(), now + TimeDuration::days(1)),
+            poll_schedules(harness.app.world_mut(), tokyo(2026, 11, 15, 9, 0)),
             1
         );
-        let (enabled, last) = row(&harness.store(), &schedule.id);
+        let (enabled, last, next) = row(&harness.store(), &schedule.id);
         assert!(enabled, "a repeating row stays enabled");
-        assert_eq!(last.as_deref(), Some("2026-11-15T09:00:00Z"));
+        assert_eq!(last.as_deref(), Some("2026-11-15T00:00:00Z"));
+        assert_eq!(next.as_deref(), Some("2026-11-16T00:00:00Z"));
+    }
+
+    #[test]
+    fn a_missed_occurrence_fires_once_after_downtime() {
+        let zone = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
+        let created = ScheduleClock::fixed(zone.clone(), tokyo(2026, 11, 14, 8, 0));
+        let now = tokyo(2026, 11, 17, 12, 0);
+        let mut harness = Harness::with_clock([], ScheduleClock::fixed(zone, now));
+        let schedule = harness
+            .store()
+            .insert_schedule(
+                &harness.companion,
+                "定時",
+                "声をかける",
+                None,
+                Some("0 9 * * *"),
+                &created,
+            )
+            .unwrap();
+        assert_eq!(
+            schedule.next_run_at.as_deref(),
+            Some("2026-11-14T00:00:00Z")
+        );
+        // Three missed mornings fire once, at the wake-up, not once per day.
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 1);
+        assert_eq!(incoming(harness.app.world_mut()), 1);
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 0);
+        assert_eq!(
+            poll_schedules(harness.app.world_mut(), tokyo(2026, 11, 17, 23, 0)),
+            0
+        );
+        let (enabled, last, next) = row(&harness.store(), &schedule.id);
+        assert!(enabled);
+        assert_eq!(last.as_deref(), Some("2026-11-17T03:00:00Z"));
+        assert_eq!(next.as_deref(), Some("2026-11-18T00:00:00Z"));
+        assert_eq!(incoming(harness.app.world_mut()), 1);
     }
 
     #[test]
     fn a_schedule_without_an_agent_is_left_for_later() {
         let mut harness = Harness::new([]);
+        let clock = ScheduleClock::fixed(jiff::tz::TimeZone::UTC, utc(2026, 11, 14, 8, 0));
         let schedule = harness
             .store()
             .insert_schedule(
@@ -517,15 +618,17 @@ mod tests {
                 "never delivered",
                 Some("2000-01-01T00:00:00Z"),
                 None,
+                &clock,
             )
             .unwrap();
         assert_eq!(
-            poll_schedules(harness.app.world_mut(), OffsetDateTime::now_utc()),
+            poll_schedules(harness.app.world_mut(), utc(2026, 11, 14, 9, 0)),
             0
         );
-        let (enabled, last) = row(&harness.store(), &schedule.id);
+        let (enabled, last, next) = row(&harness.store(), &schedule.id);
         assert!(enabled, "nothing was fired, so nothing was disabled");
         assert_eq!(last, None);
+        assert_eq!(next.as_deref(), Some("2000-01-01T00:00:00Z"));
         assert_eq!(incoming(harness.app.world_mut()), 0);
     }
 }

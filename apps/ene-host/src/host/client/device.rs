@@ -63,6 +63,13 @@ fn refuse_error(world: &mut World, call: Entity, error: HostError) {
 }
 
 /// Accepts one capability operation against the bound client generation.
+///
+/// `wait_for_result` is the documented split (`docs/api.md` §クライアント能力):
+/// `device_request` passes `true` and the call stays open — a [`Waiting`]
+/// entry, bounded by [`DeviceTimeout`], is answered by [`complete`] or
+/// [`expire`]. A named capability tool passes `false` and answers immediately
+/// with the operation id and the dispatch status; its failure or non-delivery
+/// is observed through `GetOperation` or the device notification.
 pub(crate) fn execute(
     world: &mut World,
     call: Entity,
@@ -80,7 +87,10 @@ pub(crate) fn execute(
     Ok(())
 }
 
-/// Writes and dispatches one operation, returning its id and the tool answer.
+/// Writes and dispatches one operation, returning its id and the immediate
+/// tool answer. The answer reports the status dispatch reached: `dispatched`
+/// when the client stream accepted the operation, `pending` when no live
+/// stream has it yet. It never reports completion.
 /// The generation is revalidated immediately before dispatch: a moved client
 /// never receives an operation accepted for the old one.
 pub(crate) fn accept(
@@ -124,8 +134,8 @@ pub(crate) fn accept(
         updated_at: now(),
     };
     store.insert_operation(&operation)?;
-    dispatch(world, &operation)?;
-    let answer = json!({"operation_id": operation_id, "status": "pending"}).to_string();
+    let status = dispatch(world, &operation)?;
+    let answer = json!({"operation_id": &operation_id, "status": status.as_str()}).to_string();
     Ok((operation_id, answer))
 }
 
@@ -139,13 +149,14 @@ fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>
 }
 
 /// Writes the operation to the client's live stream. A missing stream leaves
-/// the operation pending for the reconnect.
-fn dispatch(world: &mut World, operation: &DeviceOperation) -> Result<()> {
+/// the operation pending for the reconnect and is reported as such; a sent
+/// operation is `dispatched`.
+fn dispatch(world: &mut World, operation: &DeviceOperation) -> Result<DeviceStatus> {
     let hub = world.resource::<DeviceHub>().clone();
     let store = world.resource::<Store>().clone();
     let Some(subscription) = hub.subscription(&operation.client_id) else {
         tracing::debug!(operation = %operation.id, "no device stream; the operation waits");
-        return Ok(());
+        return Ok(DeviceStatus::Pending);
     };
     let event = w::DeviceEvent {
         event: Some(w::device_event::Event::Operation(Box::new(
@@ -164,9 +175,10 @@ fn dispatch(world: &mut World, operation: &DeviceOperation) -> Result<()> {
                 &subscription,
             ))),
         );
+        return Ok(DeviceStatus::Dispatched);
     }
 
-    Ok(())
+    Ok(DeviceStatus::Pending)
 }
 
 /// Replays operations that were never delivered after a client reconnects.

@@ -10,7 +10,6 @@ use super::{
     mind::{Companion, Role},
     model::{self, Credentials},
     notify::Notifier,
-    staged::Staged,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -387,7 +386,7 @@ type TurnAgentRows = (
 
 /// Projects every new conversation entry into `MessageCreated` notifications.
 fn publish_messages(
-    agents: Query<AgentRows, Without<Staged>>,
+    agents: Query<AgentRows>,
     mut notifier: ResMut<Notifier>,
     mut published: ResMut<Published>,
 ) {
@@ -440,7 +439,7 @@ fn publish_messages(
 /// Reports a turn that appeared this frame as streaming.
 fn turn_started(
     turns: Query<(&Turn, &TurnOf, Option<&ForAgent>), Added<TurnOf>>,
-    agents: Query<(&AgentId, Option<&CompanionAgent>), Without<Staged>>,
+    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
     mut notifier: ResMut<Notifier>,
 ) {
     for (turn, of, _) in &turns {
@@ -468,7 +467,7 @@ fn turn_settled(
     mut commands: Commands,
     settled: Query<(Entity, &TurnOutcome, &ForAgent), Added<Settled>>,
     turns: Query<&Turn>,
-    agents: Query<TurnAgentRows, Without<Staged>>,
+    agents: Query<TurnAgentRows>,
     mut notifier: ResMut<Notifier>,
 ) {
     for (turn_entity, outcome, of) in &settled {
@@ -530,7 +529,7 @@ fn turn_settled(
 fn stream_deltas(
     mut deltas: MessageReader<StreamDelta>,
     calls: Query<(), (With<TurnCall>, Without<Settled>)>,
-    agents: Query<(&AgentId, Option<&CompanionAgent>), Without<Staged>>,
+    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
     mut notifier: ResMut<Notifier>,
     mut commands: Commands,
 ) {

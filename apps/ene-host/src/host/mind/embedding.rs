@@ -6,6 +6,20 @@
 //! `embedding_content_revision` still matches their `content_revision`. A
 //! memory whose content changed is re-embedded, never mixed with the stale
 //! vector (docs/design/mind.md §4.1).
+//!
+//! # Why the embedding call is raw HTTP
+//!
+//! rig-core 0.46's provider registry connects completion models only:
+//! `Catalog::connect_with` returns `DynModel<Completion>`, and neither
+//! `Catalog` nor `ConnectOptions` has an embedding connector. Provider clients
+//! do expose `.embedding()` (`providers::openai`, `gemini`, `cohere`, `ollama`
+//! and `voyageai`), but each speaks its own wire and is built from that
+//! provider's concrete client. Using one would either pin embeddings to one
+//! vendor or duplicate the host's provider-neutral "adapter + base URL"
+//! connection configuration per provider. The one cross-provider shape this
+//! host supports is the OpenAI-compatible `POST {base}/embeddings`, so this
+//! module keeps that call generic: one shared client, no per-call client
+//! construction, and a hard bound on the response body.
 use super::{Companion, Role};
 use crate::host::{
     db::{Result, Store},
@@ -90,7 +104,7 @@ pub(crate) async fn post_json(
     max_bytes: usize,
     what: &str,
 ) -> Result<serde_json::Value> {
-    let response = http_client()?
+    let mut response = http_client()?
         .post(url)
         .timeout(timeout)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -105,17 +119,37 @@ pub(crate) async fn post_json(
             response.status()
         )));
     }
-    let bytes = response
-        .bytes()
+    // Refuse a declared oversize before reading it, then keep the cap while
+    // streaming: a chunked answer must not be buffered whole first.
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(too_much(what));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|error| HostError::unavailable(format!("{what} body: {error}")))?;
-    if bytes.len() > max_bytes {
-        return Err(HostError::unavailable(format!(
-            "{what} endpoint answered more data than the host reads"
-        )));
+        .map_err(|error| HostError::unavailable(format!("{what} body: {error}")))?
+    {
+        let total = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| too_much(what))?;
+        if total > max_bytes {
+            return Err(too_much(what));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| HostError::unavailable(format!("{what} body: {error}")))
+}
+
+fn too_much(what: &str) -> HostError {
+    HostError::unavailable(format!(
+        "{what} endpoint answered more data than the host reads"
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -851,5 +885,41 @@ mod tests {
         );
         let stored = store.embedding_blob(&memory.id, &space).unwrap();
         assert_eq!(stored.unwrap().0, 2);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_answer_is_rejected_while_streaming() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2_048];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            // No content-length: only the streaming cap can stop this body.
+            let _ = socket.write_all(&[b'x'; 128]).await;
+            let _ = socket.shutdown().await;
+        });
+        let error = post_json(
+            &format!("http://{address}/embeddings"),
+            &serde_json::json!({"input": []}),
+            "",
+            Duration::from_secs(5),
+            64,
+            "embedding",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("more data"), "{error}");
+        server.await.unwrap();
     }
 }

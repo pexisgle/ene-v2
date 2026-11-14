@@ -22,6 +22,7 @@ ene-rpc.workspace = true
 futures-util.workspace = true
 http.workspace = true
 io-lifetimes = "3"
+jiff.workspace = true
 keyring = { version = "4", default-features = false, features = ["v1"] }
 private-fs = "0.2.1"
 process-wrap.workspace = true
