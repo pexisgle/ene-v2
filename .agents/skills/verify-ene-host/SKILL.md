@@ -140,15 +140,22 @@ reported as failed with the reason, and that reason belongs in the feature's
 `RUN_ID` defaults to a timestamp. Override the run root with `VERIFY_ROOT` or
 the whole directory with `VERIFY_RUN_DIR`.
 
+## Journeys
+
+[journeys/](journeys/README.md) holds end-to-end runs that need a real binary,
+real providers and network: contract coverage, work runs and approvals, a chat
+turn, schedule delivery, the device stream, MCP, TTS, STT, the ACP sandbox and
+restart behaviour. Run `journeys/all.sh` for the whole set, or one file for the
+feature you touched. Each run writes its log to `target/verify-ene-host/`.
+
 ## What this cannot prove
 
-- Anything that needs a real model response: `ChatService/SendMessage`,
-  work-session turns, gate approvals reached through model tool calls, mind
-  consolidation. They need registered LLM credentials; the unit tests drive
-  those paths with rig's mock model instead.
-- Voice (`VoiceService`), ACP children and their `bwrap` sandbox, and the
-  avatar renderer. The audio and ACP suites live elsewhere in the workspace.
-- The non-loopback `ENE_HOST_BIND` warning.
+- Mind consolidation and compaction against a real provider. The unit tests
+  drive them with rig's mock model; the journeys do not.
+- The avatar renderer and the ACP protocol against a real external agent. The
+  journeys use a reporting child for the sandbox and a scripted client for the
+  device stream.
+- Long-run behaviour: leaks, load and multi-day uptime.
 
 ## Feature map
 
