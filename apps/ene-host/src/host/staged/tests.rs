@@ -282,11 +282,13 @@ fn user_activity_aborts_an_in_flight_tick() {
         in_flight: Some(InFlight {
             companion: "ene".to_owned(),
             prompt: TICK.to_owned(),
+            messages: 0,
             started,
             task,
             result: Arc::new(Mutex::new(None)),
         }),
         last_started: Some(started),
+        next: 0,
     });
     let mut schedule = Schedule::default();
     schedule.add_systems(settle_tick);

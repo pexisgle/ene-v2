@@ -150,7 +150,7 @@ pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entit
                 companion_id: companion.id.clone(),
             },
             SystemPrompt(system_prompt(companion)),
-            ToolAccess::All,
+            crate::host::client::parent_tool_access(),
         ))
         .id()
 }

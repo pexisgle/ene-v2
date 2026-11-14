@@ -147,8 +147,8 @@ impl Cron {
             day: [false; 32],
             month: [false; 13],
             weekday: [false; 8],
-            day_any: day.starts_with('*'),
-            weekday_any: weekday.starts_with('*'),
+            day_any: day.contains('*'),
+            weekday_any: weekday.contains('*'),
         };
         for (index, field) in [minute, hour, day, month, weekday].into_iter().enumerate() {
             let (min, max) = CRON_LIMITS[index];

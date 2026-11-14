@@ -104,6 +104,7 @@ pub(crate) async fn post_json(
     max_bytes: usize,
     what: &str,
 ) -> Result<serde_json::Value> {
+    guard_endpoint(url, secret, what)?;
     let mut response = http_client()?
         .post(url)
         .timeout(timeout)
@@ -181,12 +182,18 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     .await?;
     let response: EmbeddingResponse = serde_json::from_value(value)
         .map_err(|error| HostError::unavailable(format!("embedding body: {error}")))?;
-    let mut indexed: Vec<(usize, Vec<f32>)> = response
-        .data
-        .into_iter()
-        .enumerate()
-        .map(|(position, item)| (item.index.unwrap_or(position), item.embedding))
-        .collect();
+    let count = response.data.len();
+    let mut seen = std::collections::HashSet::new();
+    let mut indexed: Vec<(usize, Vec<f32>)> = Vec::with_capacity(count);
+    for (position, item) in response.data.into_iter().enumerate() {
+        let index = item.index.unwrap_or(position);
+        if index >= count || !seen.insert(index) {
+            return Err(HostError::unavailable(
+                "embedding endpoint returned an invalid index",
+            ));
+        }
+        indexed.push((index, item.embedding));
+    }
     indexed.sort_by_key(|(index, _)| *index);
     let vectors: Vec<Vec<f32>> = indexed.into_iter().map(|(_, vector)| vector).collect();
     if vectors.len() != texts.len() {
@@ -921,5 +928,98 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("more data"), "{error}");
         server.await.unwrap();
+    }
+}
+
+/// Refuses an endpoint that would send a credential to a non-loopback plain
+/// HTTP host or to a private/link-local address (SSRF). The same guard as the
+/// voice engines; a local engine on loopback stays allowed.
+fn guard_endpoint(url: &str, secret: &str, what: &str) -> Result<()> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| HostError::invalid(format!("{what} endpoint is not a URL")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(HostError::invalid(format!(
+            "{what} endpoint must be http(s)"
+        )));
+    }
+    let Some(host) = parsed.host() else {
+        return Err(HostError::invalid(format!("{what} endpoint has no host")));
+    };
+    let loopback = match &host {
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+    };
+    if loopback {
+        return Ok(());
+    }
+    if parsed.scheme() == "http" && !secret.is_empty() {
+        return Err(HostError::invalid(format!(
+            "{what} endpoint must use https outside loopback"
+        )));
+    }
+    // Resolve once and refuse private, link-local and otherwise local targets.
+    // DNS can still change after this check; the guard removes the obvious
+    // internal-service reachability, not every rebinding window.
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addresses = std::net::ToSocketAddrs::to_socket_addrs(&(
+        host.to_string().trim_matches(['[', ']']).to_owned(),
+        port,
+    ))
+    .map_err(|error| HostError::unavailable(format!("{what} endpoint: {error}")))?;
+    let mut any = false;
+    for address in addresses {
+        any = true;
+        if blocked_ip(address.ip()) {
+            return Err(HostError::invalid(format!(
+                "{what} endpoint resolves to a private address"
+            )));
+        }
+    }
+    if !any {
+        return Err(HostError::unavailable(format!(
+            "{what} endpoint did not resolve"
+        )));
+    }
+    Ok(())
+}
+
+fn blocked_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_unspecified()
+                || address.is_multicast()
+                || address.is_broadcast()
+        }
+        std::net::IpAddr::V6(address) => {
+            let segments = address.segments();
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00 // unique-local
+                || (segments[0] & 0xffc0) == 0xfe80 // link-local
+        }
+    }
+}
+
+#[cfg(test)]
+mod embedded_guard_tests {
+    use super::*;
+
+    #[test]
+    fn embedding_endpoints_refuse_plain_remote_and_metadata_addresses() {
+        assert!(
+            guard_endpoint(
+                "http://169.254.169.254/v1/embeddings",
+                "secret",
+                "embedding"
+            )
+            .is_err()
+        );
+        assert!(guard_endpoint("http://example.com/v1/embeddings", "secret", "embedding").is_err());
+        assert!(guard_endpoint("http://127.0.0.1:8080/v1/embeddings", "", "embedding").is_ok());
     }
 }

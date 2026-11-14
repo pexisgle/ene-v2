@@ -386,6 +386,59 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Restores a client row exactly as it was, for rolling back a declaration
+    /// whose tool publication failed.
+    pub(crate) fn restore_client(&self, client: &Client) -> Result<()> {
+        self.conn()?.execute(
+            "INSERT OR REPLACE INTO clients (id, name, platform, capabilities, \
+             granted_capabilities, capability_specs, revision, last_seen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                client.id,
+                client.name,
+                client.platform,
+                to_json(&client.capabilities)?,
+                to_json(&client.granted_capabilities)?,
+                to_json(&client.capability_specs)?,
+                client.revision,
+                client.last_seen,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_client(&self, id: &str) -> Result<()> {
+        self.conn()?
+            .execute("DELETE FROM clients WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Restores an activation row exactly, for rolling back a move whose tool
+    /// publication failed.
+    pub(crate) fn restore_activation(&self, activation: &Activation) -> Result<()> {
+        self.conn()?.execute(
+            "INSERT OR REPLACE INTO activations (companion_id, client_id, revision, updated_at) \
+             VALUES (?1, ?2, ?3)",
+            params![
+                activation.companion_id,
+                activation.client_id,
+                activation.revision,
+                super::now(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_activation(&self, companion: &str) -> Result<()> {
+        self.conn()?.execute(
+            "DELETE FROM activations WHERE companion_id = ?1",
+            [companion],
+        )?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

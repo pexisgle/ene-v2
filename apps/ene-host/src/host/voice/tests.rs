@@ -845,3 +845,15 @@ async fn a_stalled_owner_does_not_block_another() {
     ));
     assert!(!voice.lock().owners.contains_key("ene"));
 }
+
+mod wave_format {
+    use super::super::*;
+
+    #[test]
+    fn a_non_pcm_wav_is_rejected() {
+        let mut wav = wav_wrap(&[0u8; 8], 24_000);
+        // The fmt chunk payload starts at offset 20; AudioFormat is first.
+        wav[20..22].copy_from_slice(&3u16.to_le_bytes());
+        assert!(parse_wav(&wav).is_err());
+    }
+}

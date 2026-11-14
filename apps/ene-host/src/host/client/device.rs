@@ -34,21 +34,25 @@ pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut c
             );
             return;
         };
-        if let Err(error) = execute(world, call, agent, &spec, args.input.clone(), true) {
+        if let Err(error) = execute(world, call, agent, spec.as_ref(), args.input.clone(), true) {
             refuse_error(world, call, error);
         }
     });
 }
 
 /// The declaration the bound client currently carries for `capability`.
-fn binding_spec(world: &World, call: Entity, capability: &str) -> Option<CapabilitySpec> {
+fn binding_spec(world: &World, call: Entity, capability: &str) -> Option<Option<CapabilitySpec>> {
     let binding = world.get::<CallBinding>(call)?;
-    world
+    let client = world
         .resource::<Store>()
         .client(&binding.client_id)
         .ok()
-        .flatten()
-        .and_then(|client| client.spec(capability).cloned())
+        .flatten()?;
+    client
+        .capabilities
+        .iter()
+        .any(|name| name == capability)
+        .then(|| client.spec(capability).cloned())
 }
 
 /// A refused device call keeps its specific conflict/permission message and
@@ -74,7 +78,7 @@ pub(crate) fn execute(
     world: &mut World,
     call: Entity,
     agent: Entity,
-    spec: &CapabilitySpec,
+    spec: Option<&CapabilitySpec>,
     input: Value,
     wait_for_result: bool,
 ) -> Result<()> {
@@ -97,7 +101,7 @@ pub(crate) fn accept(
     world: &mut World,
     call: Entity,
     agent: Entity,
-    spec: &CapabilitySpec,
+    spec: Option<&CapabilitySpec>,
     input: Value,
 ) -> Result<(String, String)> {
     let store = world.resource::<Store>().clone();
@@ -113,12 +117,24 @@ pub(crate) fn accept(
             "client_moved: the active client changed before the operation was dispatched",
         ));
     }
-    if spec.name != binding.capability {
-        return Err(HostError::conflict(
-            "the capability no longer matches the accepted operation",
-        ));
+    let client = store
+        .client(&binding.client_id)?
+        .ok_or_else(|| HostError::conflict("the bound client is no longer registered"))?;
+    if !client
+        .capabilities
+        .iter()
+        .any(|name| name == &binding.capability)
+    {
+        return Err(HostError::conflict("the capability is no longer declared"));
     }
-    super::validate_input(spec, &input)?;
+    if let Some(spec) = spec {
+        if spec.name != binding.capability {
+            return Err(HostError::conflict(
+                "the capability no longer matches the accepted operation",
+            ));
+        }
+        super::validate_input(spec, &input)?;
+    }
     let operation_id = uuid::Uuid::new_v4().to_string();
     let operation = DeviceOperation {
         id: operation_id.clone(),
@@ -236,17 +252,20 @@ pub(crate) fn complete(
         .cloned()
         .map(|failure| wire::failure_from(&failure));
     let success = result.success && failure.is_none() && output.is_some();
-    let validated = output.and_then(|output| {
-        store
+    // A capability declared without a spec has no output contract; its
+    // answer is accepted as the client sent it.
+    let validated = output.as_ref().map(|output| {
+        match store
             .client(&operation.client_id)
             .ok()
             .flatten()
             .and_then(|client| client.spec(&operation.capability).cloned())
-            .map(|spec| {
-                super::validate_output(&spec, &output)
-                    .map(|()| output)
-                    .map_err(|error| error.to_string())
-            })
+        {
+            Some(spec) => super::validate_output(&spec, output)
+                .map(|()| output.clone())
+                .map_err(|error| error.to_string()),
+            None => Ok(output.clone()),
+        }
     });
     let (success, output, failure) = match (success, validated) {
         (true, Some(Ok(output))) => (true, Some(output), failure),

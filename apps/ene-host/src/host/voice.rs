@@ -349,16 +349,29 @@ async fn read_body(response: reqwest::Response, label: &str) -> HttpResult<Vec<u
 }
 
 fn http_client(timeout_ms: Option<u64>, default_timeout_ms: u64) -> HttpResult<reqwest::Client> {
-    let timeout = Duration::from_millis(
-        timeout_ms
-            .unwrap_or(default_timeout_ms)
-            .clamp(1_000, 300_000),
-    );
-    reqwest::Client::builder()
+    let millis = timeout_ms
+        .unwrap_or(default_timeout_ms)
+        .clamp(1_000, 300_000);
+    static CLIENTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, reqwest::Client>>,
+    > = std::sync::OnceLock::new();
+    let clients = CLIENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(client) = clients
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&millis).cloned())
+    {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
+        .timeout(Duration::from_millis(millis))
         .build()
-        .map_err(|error| format!("http client: {error}"))
+        .map_err(|error| format!("http client: {error}"))?;
+    if let Ok(mut map) = clients.lock() {
+        map.entry(millis).or_insert_with(|| client.clone());
+    }
+    Ok(client)
 }
 
 fn options<T: DeserializeOwned + Default>(
@@ -702,6 +715,7 @@ fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
                     return Err("the TTS endpoint returned a malformed WAV format".into());
                 }
                 format = Some((
+                    le16(bytes, start),
                     le16(bytes, start + 2),
                     le32(bytes, start + 4),
                     le16(bytes, start + 14),
@@ -712,8 +726,11 @@ fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
         }
         offset = end + (size & 1);
     }
-    let (channels, rate, bits) =
+    let (audio_format, channels, rate, bits) =
         format.ok_or_else(|| "the TTS endpoint returned a WAV without a format".to_owned())?;
+    if audio_format != 1 {
+        return Err("the TTS endpoint returned a WAV that is not PCM".into());
+    }
     let data = data.ok_or_else(|| "the TTS endpoint returned a WAV without audio".to_owned())?;
     if bits != 16 {
         return Err("the TTS endpoint returned audio that is not 16-bit PCM".into());

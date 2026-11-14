@@ -746,7 +746,7 @@ fn launch(program: &Path, args: &[String], cwd: &Path, options: &str) -> Result<
         cwd,
         requested.as_deref(),
         which::which("bwrap").ok().as_deref(),
-        network_isolated(options),
+        network_isolated(options)?,
     )
 }
 
@@ -818,21 +818,20 @@ fn sandbox_mode(options: &str) -> Option<String> {
     (!mode.is_empty()).then_some(mode)
 }
 
-/// Whether the connection options explicitly request a private network
-/// namespace. Absent, malformed or any other value means the host network.
-fn network_isolated(options: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(options) else {
-        return false;
-    };
-    value
-        .get("network")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|mode| {
-            matches!(
-                mode.trim().to_ascii_lowercase().as_str(),
-                "isolated" | "none"
-            )
-        })
+fn network_isolated(options: &str) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_str(options)
+        .map_err(|_| "connection options are not a JSON object".to_owned())?;
+    match value.get("network") {
+        None => Ok(false),
+        Some(serde_json::Value::String(mode)) => match mode.trim().to_ascii_lowercase().as_str() {
+            "isolated" | "private" | "none" => Ok(true),
+            "host" | "shared" | "default" => Ok(false),
+            other => Err(format!(
+                "unknown network mode `{other}`; use host or isolated"
+            )),
+        },
+        Some(_) => Err("network must be a string".to_owned()),
+    }
 }
 
 #[cfg(test)]
@@ -932,7 +931,7 @@ mod tests {
     fn explicit_network_isolation_adds_the_private_network_namespace() {
         let args = ["--stdio".to_owned()];
         for options in [r#"{"network":"isolated"}"#, r#"{"network":"none"}"#] {
-            assert!(network_isolated(options), "{options}");
+            assert!(network_isolated(options).unwrap(), "{options}");
             let Launch {
                 args: wrapped,
                 isolation,
@@ -943,7 +942,7 @@ mod tests {
                 Path::new("/work/project"),
                 None,
                 Some(Path::new("/usr/bin/bwrap")),
-                network_isolated(options),
+                network_isolated(options).unwrap(),
             )
             .unwrap();
             assert_eq!(isolation, Isolation::Full, "{options}");
@@ -956,9 +955,10 @@ mod tests {
                 "{options}"
             );
         }
-        for options in ["{}", r#"{"network":"host"}"#, "not json"] {
-            assert!(!network_isolated(options), "{options}");
+        for options in ["{}", r#"{"network":"host"}"#] {
+            assert!(!network_isolated(options).unwrap(), "{options}");
         }
+        assert!(network_isolated("not json").is_err());
     }
 
     #[test]

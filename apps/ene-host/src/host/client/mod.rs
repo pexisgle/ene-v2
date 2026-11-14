@@ -458,8 +458,8 @@ fn declarations(
 fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
     let connected = world.resource::<DeviceHub>().connected(&client.id);
     let view = wire::client(client, connected, Vec::new());
-    notify_client(world, &view);
     dynamic::sync_tools(world)?;
+    notify_client(world, &view);
     Ok(view)
 }
 
@@ -472,6 +472,7 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
     let granted = world
         .resource::<CapabilityPolicy>()
         .grants(&request.capabilities);
+    let previous = store.client(&request.id)?;
     let client = store.register_client_with_grants(
         &super::db::clients::ClientDeclaration {
             id: &request.id,
@@ -483,7 +484,18 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
         },
         &granted,
     )?;
-    publish(world, &client)
+    match publish(world, &client) {
+        Ok(view) => Ok(view),
+        Err(error) => {
+            if let Some(previous) = previous {
+                let _ = store.restore_client(&previous);
+            } else {
+                let _ = store.delete_client(&request.id);
+            }
+            let _ = dynamic::sync_tools(world);
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn set_capabilities(
@@ -500,6 +512,7 @@ pub(crate) fn set_capabilities(
     let granted = world
         .resource::<CapabilityPolicy>()
         .grants(&request.capabilities);
+    let previous = store.client(&request.client_id)?;
     let client = store.set_capabilities(
         &request.client_id,
         &request.capabilities,
@@ -507,7 +520,16 @@ pub(crate) fn set_capabilities(
         &specs,
         request.revision,
     )?;
-    publish(world, &client)
+    match publish(world, &client) {
+        Ok(view) => Ok(view),
+        Err(error) => {
+            if let Some(previous) = previous {
+                let _ = store.restore_client(&previous);
+            }
+            let _ = dynamic::sync_tools(world);
+            Err(error)
+        }
+    }
 }
 
 fn notify_client(world: &mut World, client: &w::Client) {
@@ -539,7 +561,7 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     let previous = store.activation(&request.companion_id)?;
     let client = (!request.release).then_some(request.client_id.as_str());
     let activation = store.activate(&request.companion_id, client, request.expected_revision)?;
-    if let Some(previous) = previous
+    if let Some(previous) = previous.clone()
         && let Some(old_client) = previous.client_id
         && (client != Some(old_client.as_str()) || previous.revision != activation.revision)
     {
@@ -573,7 +595,17 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         None,
         w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
     );
-    dynamic::sync_tools(world)?;
+    if let Err(error) = dynamic::sync_tools(world) {
+        // The declaration is consistent only if its tools are; restore the
+        // previous generation instead of leaving a state that fails at boot.
+        if let Some(previous) = previous.as_ref() {
+            let _ = store.restore_activation(previous);
+        } else {
+            let _ = store.delete_activation(&request.companion_id);
+        }
+        let _ = dynamic::sync_tools(world);
+        return Err(error);
+    }
     Ok(wire::activation(&activation))
 }
 
@@ -626,6 +658,19 @@ fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
         }
     };
     Some(super::db::truncate(&summary, 1_000))
+}
+
+/// The tools a parent agent can use before any capability tool is published.
+/// Capability tools are added by `dynamic::sync_tools`; a work agent uses its
+/// own `ToolAccess::Only`.
+pub(crate) fn parent_tool_access() -> rig_ecs::prelude::ToolAccess {
+    rig_ecs::prelude::ToolAccess::Only(
+        BUILTIN_TOOLS
+            .iter()
+            .filter(|name| **name != "report")
+            .map(|name| (*name).to_owned())
+            .collect(),
+    )
 }
 
 #[cfg(test)]

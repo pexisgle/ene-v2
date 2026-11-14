@@ -29,6 +29,8 @@ use std::{
 };
 
 const IDLE: Duration = Duration::from_secs(60);
+/// A provider that never answers must not block every companion's summaries.
+const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 const SOFT_RATIO: f64 = 0.70;
 const HARD_RATIO: f64 = 0.85;
 const RETRY: Duration = Duration::from_secs(60);
@@ -501,7 +503,9 @@ async fn generate(
         .ok_or_else(|| "the conversation is too short to summarize".to_owned())?;
     let through = through_message_id(&history, plan.keep_from)
         .ok_or_else(|| "there is nothing new to summarize".to_owned())?;
-    let text = completion(plan.request, handler).await?;
+    let text = tokio::time::timeout(SUMMARY_TIMEOUT, completion(plan.request, handler))
+        .await
+        .map_err(|_| "the summarizer timed out".to_owned())??;
     Ok(Summary {
         text,
         through_message_id: through,

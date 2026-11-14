@@ -538,7 +538,7 @@ fn forward(world: &mut World, request: &CapabilityCall) -> std::result::Result<S
     }
     // Revalidates the calling companion's generation against the binding
     // right before dispatch: a moved client never receives this operation.
-    device::accept(world, call, agent, &spec, request.input.clone())
+    device::accept(world, call, agent, Some(&spec), request.input.clone())
         .map(|(_, answer)| answer)
         .map_err(|error| error.to_string())
 }

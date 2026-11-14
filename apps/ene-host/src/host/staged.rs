@@ -57,6 +57,8 @@ const TICK: &str =
 pub(crate) struct StagedTick {
     in_flight: Option<InFlight>,
     last_started: Option<Instant>,
+    /// The companion to try first next time; failed starts do not starve later ones.
+    next: usize,
 }
 
 struct InFlight {
@@ -64,6 +66,9 @@ struct InFlight {
     /// The heartbeat prompt, exactly the user entry a promotion writes.
     prompt: String,
     started: Instant,
+    /// The main conversation length when the tick started; a later turn
+    /// must not be spliced into.
+    messages: usize,
     /// The running call; aborting it drops the request in flight.
     task: tokio::task::JoinHandle<()>,
     result: Arc<Mutex<Option<Outcome>>>,
@@ -126,7 +131,11 @@ fn begin_tick(
     else {
         return;
     };
-    for companion in store.companions().unwrap_or_default() {
+    let companions = store.companions().unwrap_or_default();
+    let count = companions.len();
+    for attempt in 0..count {
+        let position = (ticks.next + attempt) % count;
+        let companion = &companions[position];
         let Some((conversation, busy)) = agents
             .iter()
             .find(|(agent, ..)| agent.companion_id == companion.id)
@@ -140,30 +149,18 @@ fn begin_tick(
         // In a test, an injected mock handler answers instead of a provider.
         #[cfg(test)]
         let bound = tick_model.as_deref().map_or_else(
-            || {
-                connect(
-                    &store,
-                    credentials.as_deref(),
-                    models.as_deref(),
-                    &companion,
-                )
-            },
+            || connect(&store, credentials.as_deref(), models.as_deref(), companion),
             |model| Ok((model.0)()),
         );
         #[cfg(not(test))]
-        let bound = connect(
-            &store,
-            credentials.as_deref(),
-            models.as_deref(),
-            &companion,
-        );
+        let bound = connect(&store, credentials.as_deref(), models.as_deref(), companion);
         let Ok(bound) = bound else {
-            ticks.last_started = Some(Instant::now());
-            return;
+            continue;
         };
         // The recall query is the saved conversation's newest user text, as
         // the ordinary turn's tail uses it, before the summary stands in for
         // the messages it replaces.
+        let messages = conversation.0.messages().len();
         let query = recall::recall_query(&conversation.0);
         let mut history = conversation.0.view();
         if let Some(summary) = compaction::summary_of(&history) {
@@ -182,9 +179,8 @@ fn begin_tick(
             None,
         );
         history.push(recall::with_tail(&Message::user(TICK), &tail));
-        let Some(request) = request(&companion, &mut history, &bound, &tools) else {
-            ticks.last_started = Some(Instant::now());
-            return;
+        let Some(request) = request(companion, &mut history, &bound, &tools) else {
+            continue;
         };
         let handler = bound.connection.handler.0.clone();
         let result = Arc::new(Mutex::new(None));
@@ -203,15 +199,18 @@ fn begin_tick(
         });
         let started = Instant::now();
         ticks.last_started = Some(started);
+        ticks.next = (position + 1) % count;
         ticks.in_flight = Some(InFlight {
-            companion: companion.id,
+            companion: companion.id.clone(),
             prompt: TICK.to_owned(),
+            messages,
             started,
             task,
             result,
         });
         return;
     }
+    ticks.last_started = Some(Instant::now());
 }
 
 /// The companion model a tick calls.
@@ -319,7 +318,7 @@ fn acting_reply(response: &CompletionResponse) -> Option<AssistantMessage> {
 fn settle_tick(
     mut ticks: ResMut<StagedTick>,
     tracker: Option<Res<InactivityTracker>>,
-    mut agents: Query<(&CompanionAgent, &mut Conversation)>,
+    mut agents: Query<(&CompanionAgent, &mut Conversation, Option<&ActiveTurn>)>,
 ) {
     let Some(in_flight) = ticks.in_flight.as_ref() else {
         return;
@@ -344,7 +343,20 @@ fn settle_tick(
         .and_then(|mut slot| slot.take())
         .unwrap_or_else(|| Err("the heartbeat tick was cancelled".to_owned()));
     match outcome {
-        Ok(Some(reply)) => promote(&mut agents, &in_flight.companion, &in_flight.prompt, reply),
+        Ok(Some(reply)) => {
+            // A turn that began while the tick was in flight owns the tail;
+            // another conversation change also invalidates the splice.
+            let safe = agents
+                .iter_mut()
+                .find(|(agent, ..)| agent.companion_id == in_flight.companion)
+                .map(|(_, conversation, busy)| {
+                    busy.is_none() && conversation.messages().len() == in_flight.messages
+                })
+                .unwrap_or(false);
+            if safe {
+                promote(&mut agents, &in_flight.companion, &in_flight.prompt, reply);
+            }
+        }
         Ok(None) => {}
         Err(why) => {
             tracing::warn!(%why, companion = %in_flight.companion, "the heartbeat tick failed")
@@ -355,14 +367,14 @@ fn settle_tick(
 /// Writes an acting tick into the companion's conversation as one splice: the
 /// heartbeat input and the reply, in that order.
 fn promote(
-    agents: &mut Query<(&CompanionAgent, &mut Conversation)>,
+    agents: &mut Query<(&CompanionAgent, &mut Conversation, Option<&ActiveTurn>)>,
     companion: &str,
     prompt: &str,
     reply: AssistantMessage,
 ) {
-    let Some((_, mut conversation)) = agents
+    let Some((_, mut conversation, _)) = agents
         .iter_mut()
-        .find(|(agent, _)| agent.companion_id == companion)
+        .find(|(agent, ..)| agent.companion_id == companion)
     else {
         return;
     };
