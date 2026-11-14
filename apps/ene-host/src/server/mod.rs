@@ -53,6 +53,11 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let shutdown = CancellationToken::new();
     let app = router(runtime.clone(), access.token.clone(), shutdown.clone());
     let running = runtime.clone();
+    // `axum::serve` drives each connection through `hyper_util`'s
+    // `server::conn::auto::Builder`, so it accepts HTTP/2 prior knowledge on a
+    // plain socket as well as HTTP/1.1 (tech-stack §G, h2c). That is what the
+    // bidirectional VoiceService streams need, and why this does not pin the
+    // listener to HTTP/1.1.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             wait_for_signal().await;
