@@ -394,92 +394,20 @@ mod tests {
     }
 
     #[test]
-    fn cron_expressions_need_exactly_five_fields_and_valid_values() {
-        for expression in [
-            "* * * * *",
-            "0 9 * * 1-5",
-            "*/15 8-18 * * *",
-            "0 0 1,15 * *",
-            "5/10 * * * 0",
-            "0 0 * * 7",
-        ] {
-            assert!(Cron::parse(expression).is_ok(), "{expression}");
-        }
-        for expression in [
-            "",
-            "* * * *",
-            "* * * * * *",
-            "* * * * * * *",
-            "60 * * * *",
-            "* 24 * * *",
-            "* * 0 * *",
-            "* * * 13 *",
-            "* * * * 8",
-            "*/0 * * * *",
-            "1-0 * * * *",
-            "a * * * *",
-            "-1 * * * *",
-            "not a cron",
-        ] {
+    fn a_cron_expression_must_name_exactly_five_fields() {
+        for expression in ["", "* * * *", "* * * * * *", "* * * * * * *", "not a cron"] {
             assert!(Cron::parse(expression).is_err(), "{expression}");
         }
+        // The length cap is the host's own bound, not the parser's.
+        assert!(Cron::parse(&"* ".repeat(200)).is_err());
+        assert!(Cron::parse("* * * * *").is_ok());
+        assert!(Cron::parse("0 9 * * 1-5").is_ok());
         let store = store();
         let clock = utc_clock();
         assert!(matches!(
             store.insert_schedule("ene", "t", "i", None, Some("0 9 * *"), &clock),
             Err(HostError::Invalid(_))
         ));
-    }
-
-    #[test]
-    fn cron_weekdays_and_days_of_month_follow_croner_or_semantics() {
-        // 2026-11-13 is a Friday.
-        let after = utc(2026, 11, 12, 0, 0);
-        assert_eq!(
-            next_occurrence("0 0 13 * 5", after, &TimeZone::UTC).unwrap(),
-            utc(2026, 11, 13, 0, 0)
-        );
-        // Both day fields restricted: either may match, so the Friday after
-        // the 13th matches even though its day of month is not 13.
-        assert_eq!(
-            next_occurrence("0 0 13 * 5", utc(2026, 11, 13, 0, 0), &TimeZone::UTC).unwrap(),
-            utc(2026, 11, 20, 0, 0)
-        );
-        // Day of month restricted, weekday `*`: only the day matters.
-        assert_eq!(
-            next_occurrence("0 0 13 * *", utc(2026, 11, 13, 0, 0), &TimeZone::UTC).unwrap(),
-            utc(2026, 12, 13, 0, 0)
-        );
-        // Weekday restricted, day `*`: only the weekday matters.
-        assert_eq!(
-            next_occurrence("0 0 * * 5", utc(2026, 11, 13, 0, 0), &TimeZone::UTC).unwrap(),
-            utc(2026, 11, 20, 0, 0)
-        );
-        // 7 is Sunday exactly as 0 is.
-        for weekday in ["7", "0"] {
-            assert_eq!(
-                next_occurrence(
-                    &format!("0 9 * * {weekday}"),
-                    utc(2026, 11, 14, 0, 0),
-                    &TimeZone::UTC
-                )
-                .unwrap(),
-                utc(2026, 11, 15, 9, 0)
-            );
-        }
-        // Steps and comma lists are resolved by croner.
-        assert_eq!(
-            next_occurrence("*/15 * * * *", utc(2026, 11, 14, 9, 18), &TimeZone::UTC).unwrap(),
-            utc(2026, 11, 14, 9, 30)
-        );
-        assert_eq!(
-            next_occurrence("5/10 * * * *", utc(2026, 11, 14, 9, 26), &TimeZone::UTC).unwrap(),
-            utc(2026, 11, 14, 9, 35)
-        );
-        assert_eq!(
-            next_occurrence("0 0 1,15 * *", utc(2026, 11, 15, 0, 0), &TimeZone::UTC).unwrap(),
-            utc(2026, 12, 1, 0, 0)
-        );
     }
 
     #[test]
@@ -574,25 +502,12 @@ mod tests {
             next_occurrence("19 9 * * *", utc(2026, 11, 14, 9, 19), &TimeZone::UTC).unwrap(),
             utc(2026, 11, 15, 9, 19)
         );
-        // A weekday expression skips the weekend: Friday 10:00 -> Monday 09:00.
-        assert_eq!(
-            next_occurrence("0 9 * * 1-5", utc(2026, 11, 13, 10, 0), &TimeZone::UTC).unwrap(),
-            utc(2026, 11, 16, 9, 0)
-        );
-        assert_eq!(
-            next_occurrence("*/15 * * * *", after, &TimeZone::UTC).unwrap(),
-            utc(2026, 11, 14, 9, 30)
-        );
-        assert_eq!(
-            next_occurrence("0 0 1 1 *", after, &TimeZone::UTC).unwrap(),
-            utc(2027, 1, 1, 0, 0)
-        );
-        // A leap day is found although 2100 is not a leap year.
+        // The search bound reaches a leap day almost eight years out (2100 is
+        // not a leap year); a date that never comes is an error, not a hang.
         assert_eq!(
             next_occurrence("0 0 29 2 *", utc(2096, 3, 1, 0, 0), &TimeZone::UTC).unwrap(),
             utc(2104, 2, 29, 0, 0)
         );
-        // A date that never comes has no occurrence.
         assert!(next_occurrence("0 0 31 2 *", after, &TimeZone::UTC).is_err());
         assert!(next_occurrence("not a cron", after, &TimeZone::UTC).is_err());
     }

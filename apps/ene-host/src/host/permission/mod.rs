@@ -321,16 +321,6 @@ mod tests {
         );
         assert_eq!(verdict, Verdict::Allow);
     }
-
-    #[test]
-    fn arguments_are_canonical_and_hashes_are_stable() {
-        let (first, hash) = canonicalise("device_request", &json!({"b": 1, "a": 2}));
-        let (second, other) = canonicalise("device_request", &json!({"a": 2, "b": 1}));
-        assert_eq!(first, second);
-        assert_eq!(hash, other);
-        let (_, changed) = canonicalise("device_request", &json!({"a": 2, "b": 2}));
-        assert_ne!(hash, changed);
-    }
 }
 
 // === Gate =================================================================

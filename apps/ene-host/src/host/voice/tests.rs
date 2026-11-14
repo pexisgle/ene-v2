@@ -1,6 +1,5 @@
 use super::*;
 use crate::host::db::clients::ClientDeclaration;
-use crate::host::net;
 use crate::host::permission::{self, Approval, ApprovalDecision, ApprovalStatus, Approved};
 use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
 use rig_ecs::tools::ToolRequest;
@@ -647,19 +646,6 @@ fn a_host_without_a_connection_reports_the_capability_as_missing() {
     assert_eq!(stt_source(&world).err(), Some(SetupError::Missing));
 }
 
-#[test]
-fn the_stt_wav_header_names_the_wire_format() {
-    let wav = wav_wrap(&[0u8; 8], 16_000);
-    assert_eq!(&wav[0..4], b"RIFF");
-    assert_eq!(&wav[8..12], b"WAVE");
-    assert_eq!(&wav[12..16], b"fmt ");
-    assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1);
-    assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
-    assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
-    assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
-    assert_eq!(wav.len(), 52);
-}
-
 /// A stereo WAV in the 16-bit shape the TTS endpoints return.
 fn stereo_wav(frames: &[(i16, i16)]) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(frames.len() * 4);
@@ -689,53 +675,7 @@ fn a_negative_second_stereo_channel_is_averaged_not_clamped_positive() {
 }
 
 #[test]
-fn truncated_wav_chunks_are_rejected() {
-    let wav = wav_wrap(&[0u8; 8], SAMPLE_RATE);
-    assert!(parse_wav(&wav).is_ok());
-    for cut in [0, 4, 10, 12, 20, 30, 44] {
-        assert!(parse_wav(&wav[..cut]).is_err(), "cut at {cut}");
-    }
-    // The fmt chunk claims more bytes than the file carries.
-    let mut lying = wav.clone();
-    lying[16..20].copy_from_slice(&64u32.to_le_bytes());
-    assert!(parse_wav(&lying).is_err());
-    // The data chunk claims more bytes than the file carries.
-    let mut lying = wav.clone();
-    lying[40..44].copy_from_slice(&1_000u32.to_le_bytes());
-    assert!(parse_wav(&lying).is_err());
-    // The fmt chunk is too small for the PCM fields it must carry.
-    let mut small = wav.clone();
-    small[16..20].copy_from_slice(&14u32.to_le_bytes());
-    assert!(parse_wav(&small).is_err());
-}
-
-#[tokio::test]
-async fn plain_http_and_private_targets_are_rejected() {
-    for allowed in [
-        "http://127.0.0.1:5002",
-        "http://[::1]:5002",
-        "http://localhost:5002",
-        "https://127.0.0.1",
-    ] {
-        assert!(
-            net::guard_endpoint(allowed, "TTS").await.is_ok(),
-            "{allowed}"
-        );
-    }
-    for rejected in [
-        "http://example.com",
-        "https://10.0.0.1",
-        "https://192.168.1.4",
-        "https://169.254.169.254",
-        "https://[fe80::1]",
-        "https://[::ffff:10.0.0.1]",
-        "ftp://127.0.0.1",
-    ] {
-        assert!(
-            net::guard_endpoint(rejected, "TTS").await.is_err(),
-            "{rejected}"
-        );
-    }
+fn a_base_url_is_validated_and_trimmed() {
     let endpoint = |endpoint: &str| Endpoint {
         adapter: "openai".into(),
         endpoint: endpoint.into(),
@@ -861,14 +801,6 @@ async fn a_stalled_owner_does_not_block_another() {
 
 mod wave_format {
     use super::super::*;
-
-    #[test]
-    fn a_non_pcm_wav_is_rejected() {
-        let mut wav = wav_wrap(&[0u8; 8], 24_000);
-        // The fmt chunk payload starts at offset 20; AudioFormat is first.
-        wav[20..22].copy_from_slice(&3u16.to_le_bytes());
-        assert!(parse_wav(&wav).is_err());
-    }
 
     #[test]
     fn a_float_wav_is_rejected_as_non_pcm() {

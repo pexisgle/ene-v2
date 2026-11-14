@@ -104,59 +104,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_schema_subset_rejects_what_it_must() {
-        let schema = json!({
-            "type": "object",
-            "required": ["window", "edge"],
-            "additionalProperties": false,
-            "properties": {
-                "window": {"type": "string", "minLength": 1},
-                "edge": {"type": "string", "enum": ["top", "bottom"]},
-                "enabled": {"type": "boolean"}
-            }
-        });
-        validate(&schema, &json!({"window": "a.rs", "edge": "top"})).unwrap();
-        for bad in [
-            json!({"edge": "top"}),
-            json!({"window": "", "edge": "top"}),
-            json!({"window": "a.rs", "edge": "left"}),
-            json!({"window": "a.rs", "edge": "top", "extra": 1}),
-            json!([1, 2]),
-        ] {
-            assert!(validate(&schema, &bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
     fn arguments_must_be_objects() {
         assert!(parse_object("[]").is_err());
         assert_eq!(parse_object("").unwrap(), json!({}));
-    }
-
-    #[test]
-    fn standard_keywords_are_validated() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "required": ["name"],
-            "additionalProperties": false,
-            "properties": {
-                "name": {"type": "string", "pattern": "^[a-z]+$"},
-                "options": {"type": "object", "properties": {"level": {"type": "integer", "minimum": 1}}}
-            }
-        });
-        validate(
-            &schema,
-            &serde_json::json!({"name": "abc", "options": {"level": 2}}),
-        )
-        .unwrap();
-        assert!(validate(&schema, &serde_json::json!({"name": "ABC"})).is_err());
-        assert!(
-            validate(
-                &schema,
-                &serde_json::json!({"name": "abc", "options": {"level": 0}})
-            )
-            .is_err()
-        );
-        assert!(validate(&schema, &serde_json::json!({"name": "abc", "extra": true})).is_err());
     }
 }

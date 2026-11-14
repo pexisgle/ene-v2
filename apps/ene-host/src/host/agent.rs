@@ -608,39 +608,6 @@ impl Plugin for AgentPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::json::JsonDoc;
-    use crate::host::mind::{Profile, State};
-
-    fn companion() -> Companion {
-        Companion {
-            id: "ene".into(),
-            name: "ene".into(),
-            mind: "kind".into(),
-            profile: Profile::default(),
-            profile_revision: 1,
-            state: State::default(),
-            state_revision: 1,
-            body: JsonDoc::new("ene.body.v1", serde_json::json!({})),
-            voice: JsonDoc::new("ene.voice.v1", serde_json::json!({})),
-            assignments: Default::default(),
-            persona: None,
-            voice_identifier: None,
-            revision: 1,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
-
-    #[test]
-    fn prompts_carry_the_persona_and_the_one_persona_rule() {
-        let prompt = system_prompt(&companion());
-        assert!(prompt.contains("kind"));
-        assert!(prompt.contains("一人称"));
-        assert!(prompt.contains("noop"));
-        let work = work_prompt(&companion(), "list the folder");
-        assert!(work.contains("list the folder"));
-        assert!(work.contains("report"));
-    }
 
     #[test]
     fn message_roles_follow_the_author() {

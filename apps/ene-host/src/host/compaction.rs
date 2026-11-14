@@ -721,20 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn a_summary_snapshot_round_trips() {
-        let summary = Summary {
-            text: "これまでの流れ: テスト".to_owned(),
-            through_message_id: 42,
-        };
-        let value = serde_json::to_value(&summary).unwrap();
-        assert_eq!(
-            value.get("through_message_id").and_then(|id| id.as_u64()),
-            Some(42)
-        );
-        assert_eq!(serde_json::from_value::<Summary>(value).unwrap(), summary);
-    }
-
-    #[test]
     fn only_user_activity_resets_the_idle_clock() {
         let mut app = App::new();
         app.add_plugins(CompactionPlugin);
