@@ -9,7 +9,10 @@ use rig_core::catalog::{Catalog, ModelSpec};
 use rig_core::completion::{CompletionRequest, CompletionResponse};
 use rig_core::effect::{Answered, EffectId, EffectKind};
 use rig_core::operation::Completion;
-use rig_core::providers::registry::{ConnectOptions, ProviderConfig, ProviderId};
+use rig_core::providers::{
+    openai::OpenAIConfig,
+    registry::{ConnectOptions, ProviderConfig, ProviderId},
+};
 use rig_core::serve::adapters::ModelAdapter;
 use rig_core::serve::{Dispatch, ErasedHandler};
 use rig_ecs::effects::Handler;
@@ -336,13 +339,18 @@ async fn list_models(
     secret: Option<String>,
 ) -> std::result::Result<Vec<String>, String> {
     let adapter = connection.endpoint().adapter.as_str();
-    let provider =
-        ProviderId::catalog(adapter).ok_or_else(|| format!("unsupported adapter `{adapter}`"))?;
-    let config = provider
-        .config(secret.unwrap_or_default())
-        .ok_or_else(|| format!("`{adapter}` has no configurable provider"))?;
+    let secret = secret.unwrap_or_default();
+    // The host's adapter list is not rig's provider list: `gemini` is
+    // `gcp.gemini` there, and an adapter the registry does not know has no
+    // preset at all. Those keep the OpenAI-compatible `/models` wire the host
+    // has always probed, pinned to the connection's endpoint.
+    let default = super::settings::provider(adapter).map_or_else(String::new, |p| p.endpoint);
+    let config = match ProviderId::catalog(adapter).and_then(|p| p.config(secret.clone())) {
+        Some(config) if base != default => config.with_base_url(base),
+        Some(config) => config,
+        None => ProviderConfig::OpenAi(OpenAIConfig::new(secret).with_base_url(base)),
+    };
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
-    let config = config.with_base_url(base);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
         match &config {
             ProviderConfig::OpenAi(config) => config.clone().connect(http).list_models().await,
@@ -365,8 +373,9 @@ async fn list_models(
 mod tests {
     use super::*;
     use crate::host::settings::{Endpoint, LlmConnection};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn connection_at(endpoint: &str) -> Connection {
+    fn connection_for(adapter: &str, endpoint: &str) -> Connection {
         Connection {
             id: "c1".into(),
             name: "main".into(),
@@ -374,7 +383,7 @@ mod tests {
             kind: ConnectionKind::Llm,
             config: ConnectionConfig::Llm(LlmConnection {
                 endpoint: Endpoint {
-                    adapter: "openai".into(),
+                    adapter: adapter.into(),
                     endpoint: endpoint.into(),
                     options_schema: String::new(),
                     options: "{}".into(),
@@ -387,8 +396,56 @@ mod tests {
         }
     }
 
+    fn connection_at(endpoint: &str) -> Connection {
+        connection_for("openai", endpoint)
+    }
+
     fn connection() -> Connection {
         connection_at("https://api.openai.com/v1")
+    }
+
+    /// Serves one OpenAI-shaped model listing to every request.
+    async fn models_endpoint() -> std::net::SocketAddr {
+        let body = r#"{"data":[{"id":"probe-model"}]}"#;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = [0u8; 4_096];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        address
+    }
+
+    /// The probe lists models through the configured endpoint whichever
+    /// adapter names it: `openai` and `openrouter` have registry presets,
+    /// while `gemini` (spelled `gcp.gemini` in rig) and a custom adapter fall
+    /// back to the OpenAI-shaped wire instead of failing the lookup.
+    #[tokio::test]
+    async fn the_probe_lists_models_for_any_adapter() {
+        let address = models_endpoint().await;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        for adapter in ["openai", "openrouter", "gemini", "custom"] {
+            let endpoint = format!("http://{address}");
+            let connection = connection_for(adapter, &endpoint);
+            let check = probe(&store, &Credentials::default(), &connection).await;
+            assert!(check.healthy, "{adapter}: {:?}", check.failure);
+            assert!(
+                check.resources.iter().any(|model| model == "probe-model"),
+                "{adapter}: {:?}",
+                check.resources
+            );
+        }
     }
 
     #[test]

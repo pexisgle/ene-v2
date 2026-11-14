@@ -82,12 +82,19 @@ pub(crate) struct PendingEmbedding {
 /// Embeds `texts` in the space `target` names.
 async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let secret = target.secret.clone().unwrap_or_default();
-    let config = ProviderId::catalog(&target.adapter)
+    let default =
+        crate::host::settings::provider(&target.adapter).map_or_else(String::new, |p| p.endpoint);
+    let config = match ProviderId::catalog(&target.adapter)
         .and_then(|provider| provider.config(secret.clone()))
+    {
+        Some(config) if target.endpoint != default => config.with_base_url(target.endpoint.clone()),
+        Some(config) => config,
         // An adapter outside rig's registry keeps the OpenAI-compatible wire
         // the host has always spoken for embeddings.
-        .unwrap_or_else(|| ProviderConfig::OpenAi(OpenAIConfig::new(secret)))
-        .with_base_url(target.endpoint.clone());
+        None => {
+            ProviderConfig::OpenAi(OpenAIConfig::new(secret).with_base_url(target.endpoint.clone()))
+        }
+    };
     let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::unavailable)?);
     // `Embedding` is the provider-neutral operation both clients erase into, so
     // the call below is the same whichever adapter answered.
