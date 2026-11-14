@@ -56,12 +56,16 @@ pub(crate) struct WorkReports {
     pub(crate) failed: HashMap<String, String>,
 }
 
+/// The id rig-ecs gives the agent, and the name of its session log. It has to
+/// be a name Windows accepts: a colon there is an alternate data stream, so
+/// `companion:x.jsonl` silently writes to a stream of a file named
+/// `companion` and the log reads back empty.
 pub(crate) fn companion_agent_id(companion: &str) -> String {
-    format!("companion:{companion}")
+    format!("companion-{companion}")
 }
 
 pub(crate) fn work_agent_id(run: &str) -> String {
-    format!("work:{run}")
+    format!("work-{run}")
 }
 
 pub(crate) fn agent_of(world: &mut World, companion: &str) -> Option<Entity> {
