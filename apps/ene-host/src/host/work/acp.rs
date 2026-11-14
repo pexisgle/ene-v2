@@ -21,7 +21,7 @@ use agent_client_protocol::{
     },
 };
 use bevy_ecs::prelude::*;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
 #[cfg(unix)]
@@ -41,11 +41,15 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 /// Longest a forced kill may take to be reaped; `work::FORCE_GRACE` is the
 /// wait that must outlast it before a stop counts as unconfirmed.
+/// How many ACP events may queue before a backend waits. A child that
+/// floods notifications is slowed instead of grown.
+const QUEUE: usize = 256;
+
 pub(super) const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) enum AcpEvent {
@@ -114,24 +118,28 @@ pub(crate) struct AcpBackends(pub(crate) HashMap<String, AcpHandle>);
 
 #[derive(Resource)]
 pub(crate) struct AcpEvents {
-    sender: Sender<AcpEvent>,
-    receiver: Receiver<AcpEvent>,
+    sender: mpsc::Sender<AcpEvent>,
+    receiver: mpsc::Receiver<AcpEvent>,
 }
 
 impl Default for AcpEvents {
     fn default() -> Self {
-        let (sender, receiver) = unbounded();
+        let (sender, receiver) = mpsc::channel(QUEUE);
         Self { sender, receiver }
     }
 }
 
 impl AcpEvents {
-    fn sender(&self) -> Sender<AcpEvent> {
+    fn sender(&self) -> mpsc::Sender<AcpEvent> {
         self.sender.clone()
     }
 
-    fn drain(&self) -> Vec<AcpEvent> {
-        self.receiver.try_iter().collect()
+    fn drain(&mut self) -> Vec<AcpEvent> {
+        let mut out = Vec::new();
+        while let Ok(event) = self.receiver.try_recv() {
+            out.push(event);
+        }
+        out
     }
 }
 
@@ -221,7 +229,7 @@ pub(crate) fn shutdown(world: &mut World, work_id: &str) {
 }
 
 pub(crate) fn pump(world: &mut World) {
-    for event in world.resource::<AcpEvents>().drain() {
+    for event in world.resource_mut::<AcpEvents>().drain() {
         match event {
             AcpEvent::Ready { run_id } => super::mark_run_running(world, &run_id),
             AcpEvent::Update {
@@ -278,17 +286,19 @@ async fn run_backend(
     work_id: String,
     mut wrap: CommandWrap,
     cwd: PathBuf,
-    events: Sender<AcpEvent>,
+    events: mpsc::Sender<AcpEvent>,
     pid: Arc<AtomicU32>,
     commands: UnboundedReceiver<Command>,
 ) {
     let mut child = match wrap.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let _ = events.send(closed(
-                work_id,
-                format!("the ACP agent could not start: {error}"),
-            ));
+            let _ = events
+                .send(closed(
+                    work_id,
+                    format!("the ACP agent could not start: {error}"),
+                ))
+                .await;
             return;
         }
     };
@@ -296,10 +306,12 @@ async fn run_backend(
         pid.store(id, Ordering::SeqCst);
     }
     let (Some(stdin), Some(stdout)) = (child.stdin().take(), child.stdout().take()) else {
-        let _ = events.send(closed(
-            work_id,
-            "the ACP agent has no standard input/output".to_owned(),
-        ));
+        let _ = events
+            .send(closed(
+                work_id,
+                "the ACP agent has no standard input/output".to_owned(),
+            ))
+            .await;
         return;
     };
     if let Some(stderr) = child.stderr().take() {
@@ -326,11 +338,13 @@ async fn run_backend(
                     if is_message {
                         notify_shared.append(&text);
                     }
-                    let _ = notify_events.send(AcpEvent::Update {
-                        work_id: notify_work.clone(),
-                        run_id,
-                        text,
-                    });
+                    let _ = notify_events
+                        .send(AcpEvent::Update {
+                            work_id: notify_work.clone(),
+                            run_id,
+                            text,
+                        })
+                        .await;
                 }
                 Ok(())
             },
@@ -355,19 +369,21 @@ async fn run_backend(
         })
         .await;
     let (confirmed, pids) = terminate(&mut child, KILL_TIMEOUT).await;
-    let _ = events.send(AcpEvent::Closed {
-        work_id,
-        run_id: shared.run_id(),
-        error: result.err().map(|error| error.to_string()),
-        confirmed,
-        pids,
-    });
+    let _ = events
+        .send(AcpEvent::Closed {
+            work_id,
+            run_id: shared.run_id(),
+            error: result.err().map(|error| error.to_string()),
+            confirmed,
+            pids,
+        })
+        .await;
 }
 
 async fn session_loop(
     cx: ConnectionTo<Agent>,
     cwd: PathBuf,
-    events: Sender<AcpEvent>,
+    events: mpsc::Sender<AcpEvent>,
     shared: Arc<SharedRun>,
     mut commands: UnboundedReceiver<Command>,
 ) -> Result<(), agent_client_protocol::Error> {
@@ -376,7 +392,7 @@ async fn session_loop(
     };
     let mut ready = false;
     if let Some((run_id, text)) = first {
-        announce(&mut ready, &events, &run_id);
+        announce(&mut ready, &events, &run_id).await;
         serve(
             &cx,
             &session_id,
@@ -398,7 +414,7 @@ async fn session_loop(
                 };
                 match command {
                     Command::Prompt { run_id, text } => {
-                        announce(&mut ready, &events, &run_id);
+                        announce(&mut ready, &events, &run_id).await;
                         serve(&cx, &session_id, run_id, text, &events, &shared, &mut commands).await?;
                     }
                     Command::Cancel { .. } => {}
@@ -469,12 +485,14 @@ async fn open(
     }
 }
 
-fn announce(ready: &mut bool, events: &Sender<AcpEvent>, run_id: &str) {
+async fn announce(ready: &mut bool, events: &mpsc::Sender<AcpEvent>, run_id: &str) {
     if !*ready {
         *ready = true;
-        let _ = events.send(AcpEvent::Ready {
-            run_id: run_id.to_owned(),
-        });
+        let _ = events
+            .send(AcpEvent::Ready {
+                run_id: run_id.to_owned(),
+            })
+            .await;
     }
 }
 
@@ -483,7 +501,7 @@ async fn serve(
     session_id: &SessionId,
     run_id: String,
     text: String,
-    events: &Sender<AcpEvent>,
+    events: &mpsc::Sender<AcpEvent>,
     shared: &SharedRun,
     commands: &mut UnboundedReceiver<Command>,
 ) -> Result<(), agent_client_protocol::Error> {
@@ -522,7 +540,9 @@ async fn serve(
                     },
                     Err(error) => TurnOutcome::Failed(format!("the ACP prompt failed: {error}")),
                 };
-                let _ = events.send(AcpEvent::Finished { run_id, outcome });
+                let _ = events
+                    .send(AcpEvent::Finished { run_id, outcome })
+                    .await;
                 return Ok(());
             }
             command = commands.recv() => {
@@ -688,6 +708,9 @@ struct Launch {
 enum Isolation {
     /// `sandbox: none`: no namespace at all.
     None,
+    /// The environment has no `bwrap`, so the child ran unisolated and the
+    /// host says so instead of refusing to start it.
+    Missing,
     /// Read-only root, private `/tmp` and a PID namespace; host network.
     Partial,
     /// The above plus a private network namespace.
@@ -702,6 +725,11 @@ impl Isolation {
             Self::None => Some((
                 "acp_sandbox_unavailable",
                 "ACP接続の `sandbox: none` オプションにより、子プロセスはファイルシステム・プロセス・ネットワークのいずれも隔離せずに起動します。",
+            )),
+            Self::Missing => Some((
+                "acp_sandbox_unavailable",
+                "この環境では bwrap が見つからないため、ACP子プロセスを隔離せずに起動します。\
+                 隔離が必要な場合は bwrap を導入し、接続オプションの sandbox を確認してください。",
             )),
             Self::Partial => Some((
                 "acp_sandbox_partial",
@@ -727,7 +755,6 @@ fn launch(program: &Path, args: &[String], cwd: &Path, options: &str) -> Result<
         program,
         args,
         cwd,
-        requested.as_deref(),
         which::which("bwrap").ok().as_deref(),
         network_isolated(options)?,
     )
@@ -742,25 +769,22 @@ fn launch(program: &Path, args: &[String], cwd: &Path, options: &str) -> Result<
 /// that would let a network-isolated child reach its model or tools. Without
 /// it the child shares the host network and the launch is
 /// [`Isolation::Partial`]. Without bwrap the child cannot be isolated at all,
-/// so the launch is refused unless the connection already opted out with
-/// `sandbox: none`.
+/// so it runs unisolated as [`Isolation::Missing`] and the host says so.
 fn plan(
     program: &Path,
     args: &[String],
     cwd: &Path,
-    requested: Option<&str>,
     bwrap: Option<&Path>,
     network_isolated: bool,
 ) -> Result<Launch, String> {
     let Some(bwrap) = bwrap else {
-        let requested = match requested {
-            Some(mode) => format!("接続オプション `sandbox: {mode}` が指定されましたが、"),
-            None => String::new(),
-        };
-        return Err(format!(
-            "{requested}この環境では bwrap が見つからず、ACP子プロセスを隔離できません。\
-             非隔離での実行を明示的に承認するには、接続オプションに `sandbox: none` を設定してください。"
-        ));
+        // A missing sandbox is a written warning, not a refusal: the user asked
+        // for an agent, and the notice says what it ran without.
+        return Ok(Launch {
+            program: program.to_path_buf(),
+            args: args.to_vec(),
+            isolation: Isolation::Missing,
+        });
     };
     let cwd_text = cwd
         .to_str()
@@ -875,14 +899,22 @@ mod tests {
         world.insert_resource(super::super::Runs::default());
         world.resource_mut::<super::super::Runs>().begin("run-a");
         world.resource_mut::<super::super::Runs>().forget("run-a");
-        world
-            .resource::<AcpEvents>()
-            .sender()
-            .send(AcpEvent::Update {
-                work_id: "w1".into(),
-                run_id: "run-a".into(),
-                text: "late progress".into(),
-            })
+        // The queue is bounded now, so a test sender must be driven by a
+        // runtime.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the test sender")
+            .block_on(
+                world
+                    .resource::<AcpEvents>()
+                    .sender()
+                    .send(AcpEvent::Update {
+                        work_id: "w1".into(),
+                        run_id: "run-a".into(),
+                        text: "late progress".into(),
+                    }),
+            )
             .unwrap();
         pump(&mut world);
         assert!(
