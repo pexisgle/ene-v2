@@ -26,7 +26,7 @@ pub(crate) mod tools;
 pub(crate) mod voice;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub(crate) mod wire;
 pub(crate) mod work;
 

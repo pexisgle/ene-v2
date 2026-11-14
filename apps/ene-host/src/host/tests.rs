@@ -28,15 +28,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct Harness {
-    app: App,
+pub(crate) struct Harness {
+    pub(crate) app: App,
     companion: String,
     wakes: mpsc::Receiver<()>,
     _root: tempfile::TempDir,
 }
 
 impl Harness {
-    fn new(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>) -> Self {
+    pub(crate) fn new(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>) -> Self {
         Self::with_policy(turns, "*")
     }
 
@@ -101,7 +101,7 @@ impl Harness {
         }
     }
 
-    fn accept(&mut self, key: &str, text: &str) -> super::error::Result<String> {
+    pub(crate) fn accept(&mut self, key: &str, text: &str) -> super::error::Result<String> {
         Ok(chat::accept(
             &mut self.app,
             w::SendMessageRequest {
@@ -114,7 +114,7 @@ impl Harness {
         .request_id)
     }
 
-    fn run_until(&mut self, done: impl Fn(&mut World) -> bool) {
+    pub(crate) fn run_until(&mut self, done: impl Fn(&mut World) -> bool) {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(5) {
             self.app.update();

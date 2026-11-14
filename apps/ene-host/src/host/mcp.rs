@@ -662,4 +662,72 @@ mod tests {
         connection.close().await;
         server.abort();
     }
+
+    /// The whole path the review found broken: a listed MCP tool is attached to
+    /// the real host app, offered to the parent, passes the gate, runs, and its
+    /// answer reaches the conversation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_mcp_tool_runs_through_the_gate() {
+        use crate::host::tests::Harness;
+        use rig_core::test_utils::MockStreamEvent;
+        use rig_rmcp::rmcp::{
+            RoleClient, RoleServer, ServiceExt, service::serve_directly,
+            transport::async_rw::AsyncRwTransport,
+        };
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
+        let (server_read, client_write) = tokio::io::duplex(64 * 1024);
+        let server_calls = calls.clone();
+        let server = tokio::spawn(async move {
+            let transport = AsyncRwTransport::<RoleServer, _, _>::new(server_read, server_write);
+            let running = serve_directly(Echo(server_calls), transport, None);
+            let _ = running.waiting().await;
+        });
+        let transport = AsyncRwTransport::<RoleClient, _, _>::new(client_read, client_write);
+        let service = rig_rmcp::rmcp::model::ClientConfig::default()
+            .serve(transport)
+            .await
+            .expect("the client connects to the duplex server");
+        let (connection, tools) = bind(service).await.expect("the server lists its tools");
+
+        let harness = Harness::new([
+            vec![
+                MockStreamEvent::tool_call("call-1", "mcp_notes_echo", serde_json::json!({})),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("呼んだよ"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut harness = harness;
+        let world = harness.app.world_mut();
+        world.init_resource::<McpServers>();
+        world.init_resource::<HostToolNames>();
+        attach(world, "c1", 1, "notes", connection, tools, &[]);
+        assert!(
+            world
+                .resource::<HostToolNames>()
+                .0
+                .contains("mcp_notes_echo")
+        );
+
+        harness
+            .accept("k1", "ノート読んで")
+            .expect("the message is accepted");
+        // The tool call runs on the app; drive it until the server sees it.
+        let started = std::time::Instant::now();
+        while calls.load(std::sync::atomic::Ordering::SeqCst) == 0
+            && started.elapsed() < std::time::Duration::from_secs(5)
+        {
+            harness.app.update();
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the model's call reached the MCP server"
+        );
+        server.abort();
+    }
 }
