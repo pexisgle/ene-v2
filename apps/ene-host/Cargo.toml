@@ -45,7 +45,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 subtle = "2"
-time.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
 tokio-util = { workspace = true, features = ["rt", "compat"] }
 tracing = "0.1"

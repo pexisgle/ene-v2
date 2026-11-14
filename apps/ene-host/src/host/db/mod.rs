@@ -9,13 +9,13 @@ pub(crate) mod settings;
 pub(crate) mod work;
 
 pub(crate) use super::error::{HostError, Result};
+use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// A baseline schema version. Databases with another version are refused, as
 /// this alpha has no in-place migration path.
@@ -89,16 +89,12 @@ impl Store {
 
 /// The current time in UTC, RFC 3339.
 pub(crate) fn now() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
+    Timestamp::now().to_string()
 }
 
 /// Parses RFC 3339 into seconds since the Unix epoch.
 pub(crate) fn epoch(text: &str) -> Option<i64> {
-    OffsetDateTime::parse(text, &Rfc3339)
-        .ok()
-        .map(|time| time.unix_timestamp())
+    text.parse::<Timestamp>().ok().map(Timestamp::as_second)
 }
 
 /// The SHA-256 of `bytes`, used for action payloads and idempotency hashes.
