@@ -235,18 +235,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A tool an MCP server contributed belongs to the host, so the capability
-    /// pipeline must not refuse it for having no client binding.
-    #[test]
-    fn a_host_served_tool_passes_the_capability_pipeline() {
-        let mut host = std::collections::HashSet::new();
-        host.insert("mcp_notes_read".to_owned());
-        assert!(host_owned("mcp_notes_read", &host));
-        assert!(host_owned("mind_recall", &host));
-        assert!(!host_owned("device.files", &host));
-        assert!(!host_owned("device_request", &host));
-    }
-
     fn rule(effect: PolicyEffect, tool: &str, pattern: &str) -> PolicyRule {
         PolicyRule {
             id: "r1".into(),

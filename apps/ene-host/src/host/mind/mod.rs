@@ -412,12 +412,14 @@ pub(crate) fn control_memory(
     request: w::MemoryControlRequest,
 ) -> Result<w::MemoryControlResult> {
     let store = world.resource::<Store>().clone();
-    let action = match request.action.to_i32() {
-        1 => super::db::memories::MemoryActionKind::Forget,
-        2 => super::db::memories::MemoryActionKind::Remember,
-        3 => super::db::memories::MemoryActionKind::Share,
-        4 => super::db::memories::MemoryActionKind::Unshare,
-        _ => return Err(HostError::invalid("a memory action is required")),
+    let action = match request.action.as_known() {
+        Some(w::MemoryAction::Forget) => super::db::memories::MemoryActionKind::Forget,
+        Some(w::MemoryAction::Remember) => super::db::memories::MemoryActionKind::Remember,
+        Some(w::MemoryAction::Share) => super::db::memories::MemoryActionKind::Share,
+        Some(w::MemoryAction::Unshare) => super::db::memories::MemoryActionKind::Unshare,
+        Some(w::MemoryAction::Unspecified) | None => {
+            return Err(HostError::invalid("a memory action is required"));
+        }
     };
     let memory = store
         .memory(&request.memory_id)?

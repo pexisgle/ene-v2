@@ -1,35 +1,45 @@
-//! The shared HTTP shape: one pooled client per timeout, and the bounded body
-//! read the voice engines, embeddings and the model probe share.
+//! The host's HTTP clients, and the bounded body read the voice engines,
+//! embeddings, the model probe and the MCP transports share.
+//!
+//! One client per *behaviour*, not per timeout: [`client`] is the pool every
+//! request path shares, with each caller setting its own deadline on the
+//! request (`RequestBuilder::timeout`), and [`model_client`] is the one rig
+//! builds model requests on, where the deadline can only sit on the client.
+//! They stay apart because the same [`client`] also carries an MCP stream,
+//! which is long-lived by design.
 use futures_util::StreamExt;
-use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-    time::Duration,
-};
+use std::{sync::OnceLock, time::Duration};
 
-const MIN_TIMEOUT_MS: u64 = 1_000;
-const MAX_TIMEOUT_MS: u64 = 300_000;
+/// How long one model call may take end to end.
+const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// A client per timeout; clones share the connection pool. Redirects stay off
-/// so a checked endpoint cannot bounce the request elsewhere.
-pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client, String> {
-    static CLIENTS: OnceLock<Mutex<HashMap<u64, reqwest::Client>>> = OnceLock::new();
-    let millis = u64::try_from(timeout.as_millis())
-        .unwrap_or(u64::MAX)
-        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-    let clients = CLIENTS.get_or_init(Default::default);
-    let guard = || crate::host::lock(clients);
-    if let Some(client) = guard().get(&millis).cloned() {
-        return Ok(client);
+fn build(timeout: Option<Duration>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_millis(millis))
+    builder
         .build()
-        .map_err(|error| format!("http client: {error}"))?;
-    guard().entry(millis).or_insert(client.clone());
-    Ok(client)
+        .map_err(|error| format!("http client: {error}"))
 }
+
+/// The process-wide client for every request path but model calls; clones
+/// share the connection pool. Redirects stay off so a checked endpoint cannot
+/// bounce the request elsewhere. It sets no timeout of its own: callers that
+/// know their budget bound the request, and an MCP stream is not bounded.
+pub(crate) fn client() -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT.get_or_init(|| build(None)).clone()
+}
+
+/// The client rig's model transports send through. Rig builds the requests,
+/// so the deadline has to be the client's; keeping it separate leaves
+/// [`client`]'s long-lived MCP stream unbounded.
+pub(crate) fn model_client() -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT.get_or_init(|| build(Some(MODEL_TIMEOUT))).clone()
+}
+
 pub(crate) async fn read_body(
     response: reqwest::Response,
     max: usize,
@@ -85,9 +95,10 @@ mod tests {
         let declared = b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\n\r\n".to_vec();
         for response in [declared, chunked] {
             let address = serve(response).await;
-            let response = client(Duration::from_secs(5))
+            let response = client()
                 .unwrap()
                 .get(format!("http://{address}/"))
+                .timeout(Duration::from_secs(5))
                 .send()
                 .await
                 .unwrap();

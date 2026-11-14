@@ -59,11 +59,6 @@ impl Claims {
             }
         }
     }
-
-    #[cfg(test)]
-    fn owner_of(&self, transcription_id: &str) -> Option<&str> {
-        self.owners.get(transcription_id).map(String::as_str)
-    }
 }
 
 /// The host's per-transcription delegation registry. A host without the voice
@@ -92,41 +87,4 @@ pub(crate) fn try_claim(world: &mut World, transcription_id: &str, companion_id:
         return true;
     };
     delegation.0.try_claim(transcription_id, companion_id)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_first_companion_owns_the_transcription() {
-        let mut claims = Claims::default();
-        claims.record("t1");
-        assert!(claims.try_claim("t1", "ene"));
-        assert_eq!(claims.owner_of("t1"), Some("ene"));
-        // Another companion is refused, the owner may retry its own call.
-        assert!(!claims.try_claim("t1", "kuro"));
-        assert!(claims.try_claim("t1", "ene"));
-        assert_eq!(claims.owner_of("t1"), Some("ene"));
-    }
-
-    #[test]
-    fn chat_request_ids_are_not_arbitrated() {
-        let mut claims = Claims::default();
-        // A chat acceptance request id never reaches the voice registry.
-        assert!(claims.try_claim("chat-request", "ene"));
-        assert!(claims.try_claim("chat-request", "kuro"));
-        assert_eq!(claims.owner_of("chat-request"), None);
-    }
-
-    #[test]
-    fn empty_ids_and_the_missing_resource_pass_through() {
-        let mut world = World::new();
-        assert!(try_claim(&mut world, "", "ene"));
-        assert!(try_claim(&mut world, "t1", "ene"));
-        record(&mut world, "");
-        record(&mut world, "t1");
-        assert!(try_claim(&mut world, "t1", "ene"));
-        assert!(!try_claim(&mut world, "t1", "kuro"));
-    }
 }

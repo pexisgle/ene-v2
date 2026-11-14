@@ -11,7 +11,10 @@ use crate::host::{
 use rig_core::conversation::Aside;
 use rig_core::message::UserContent;
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// A harness with the tick's dependencies: a host runtime, a heartbeat model
 /// and the recall resources an ordinary turn gets from `MindPlugin`.
@@ -315,8 +318,7 @@ fn user_activity_aborts_an_in_flight_tick() {
             prompt: TICK.to_owned(),
             messages: 0,
             started,
-            task,
-            result: Arc::new(Mutex::new(None)),
+            call: Background::new(task, Arc::new(Mutex::new(None))),
         }),
         last_started: Some(started),
         next: 0,

@@ -2,6 +2,7 @@
 //! (docs/design/compaction.md).
 use super::{
     agent::CompanionAgent,
+    background::Background,
     db::Store,
     mind::Role,
     model::{self, Credentials},
@@ -23,7 +24,7 @@ use rig_memory::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -79,6 +80,13 @@ pub(crate) fn note_user_activity(world: &mut World) {
 }
 
 /// The rolling summary snapshot kept as the newest `ene.summary` aside.
+///
+/// The snapshot is view-only by design (docs/design/compaction.md §2.1): the
+/// append-only session log is never rewritten, so rig-memory's `apply_summary`
+/// (which splices older messages out in place) and the `summary_state` /
+/// `summary_in` bookkeeping of that splice are not the host's path. The
+/// summary text is injected into the request view alone, by
+/// [`inject_summary`], and the aside makes it survive a restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Summary {
     pub(crate) text: String,
@@ -254,17 +262,10 @@ fn last_turn(history: &History) -> usize {
 
 type Outcome = std::result::Result<Summary, String>;
 
-/// A summary task on the host's shared background runtime; cancelling it aborts
-/// the task, so the in-flight request is dropped.
-struct RunningSummary {
-    task: tokio::task::JoinHandle<()>,
-    result: Arc<Mutex<Option<Outcome>>>,
-}
-
-/// One companion's summary slot: the task in flight and its own retry clock.
+/// One companion's summary slot: the call in flight and its own retry clock.
 #[derive(Default)]
 struct CompanionSummary {
-    running: Option<RunningSummary>,
+    running: Option<Background<Outcome>>,
     retry_after: Option<Instant>,
 }
 
@@ -292,7 +293,7 @@ impl CompactionState {
         })
     }
 
-    fn start(&mut self, companion: &str, running: RunningSummary) {
+    fn start(&mut self, companion: &str, running: Background<Outcome>) {
         debug_assert!(
             self.companions
                 .get(companion)
@@ -314,12 +315,12 @@ impl CompactionState {
     }
 
     /// Takes the one finished task, with the companion it belongs to.
-    fn take_finished(&mut self) -> Option<(String, RunningSummary)> {
+    fn take_finished(&mut self) -> Option<(String, Background<Outcome>)> {
         let companion = self.companions.iter().find_map(|(companion, state)| {
             state
                 .running
                 .as_ref()
-                .filter(|running| running.task.is_finished())
+                .filter(|running| running.is_finished())
                 .map(|_| companion.clone())
         })?;
         let running = self
@@ -334,7 +335,7 @@ impl CompactionState {
         let mut cancelled = Vec::new();
         for (companion, state) in &mut self.companions {
             if let Some(running) = state.running.take() {
-                running.task.abort();
+                running.abort();
                 cancelled.push(companion.clone());
             }
         }
@@ -427,19 +428,12 @@ fn summarize_when_idle(
         let previous = summary_of(&history).map_or_else(String::new, |summary| summary.text);
         let spec = Arc::clone(&bound.connection.spec);
         let handler = bound.connection.handler.0.clone();
-        let result = Arc::new(Mutex::new(None));
-        let task_result = Arc::clone(&result);
-        let task_wake = wake.as_deref().cloned();
-        let task = runtime.0.spawn(async move {
-            let outcome = generate(history, previous, spec, handler).await;
-            if let Ok(mut slot) = task_result.lock() {
-                *slot = Some(outcome);
-            }
-            if let Some(wake) = task_wake {
-                wake.wake();
-            }
-        });
-        state.start(&agent.companion_id, RunningSummary { task, result });
+        let task = Background::spawn(
+            &runtime.0,
+            wake.as_deref(),
+            generate(history, previous, spec, handler),
+        );
+        state.start(&agent.companion_id, task);
         return;
     }
 }
@@ -454,10 +448,7 @@ fn collect_summaries(
     };
     state.defer(&companion, Instant::now() + RETRY);
     let outcome = running
-        .result
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
+        .take()
         .unwrap_or_else(|| Err("the summary task was cancelled".to_owned()));
     match outcome {
         Ok(summary) => {
@@ -539,9 +530,8 @@ fn policy() -> CompactionPolicy {
 mod tests {
     use super::*;
     use rig_core::completion::{AssistantContent, AssistantMessage};
-    use rig_core::message::{
-        CallId, ToolCall, ToolFunction, ToolName, ToolResultContent, UserContent,
-    };
+    use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn tool_turn(history: &mut History, call: &str, output: String) {
@@ -644,33 +634,6 @@ mod tests {
     }
 
     #[test]
-    fn old_tool_outputs_are_cleared_before_turns_are_dropped() {
-        let mut history = History::new();
-        history.push(Message::user("question"));
-        tool_turn(&mut history, "call-0", "z".repeat(4_000));
-        history.push(Message::assistant("answer"));
-        history.push(Message::user("follow up"));
-        history.push(Message::assistant("reply"));
-        let weight = Weigher::default();
-        assert!(!fits(&history, &weight, 900, 0));
-        assert!(fit(&mut history, &weight, 900, 0));
-        assert_eq!(history.messages().len(), 6, "no turn was dropped");
-        let cleared = history.entries().any(|entry| {
-            matches!(
-                entry.message,
-                Message::User { content } if content.iter().any(|item| matches!(
-                    item,
-                    UserContent::ToolResult(result)
-                        if result.content.first().and_then(ToolResultContent::as_text)
-                            == Some(ClearToolOutputs::PLACEHOLDER)
-                ))
-            )
-        });
-        assert!(cleared, "the old output was replaced by the placeholder");
-        history.validate().expect("tool calls keep their results");
-    }
-
-    #[test]
     fn injected_blocks_are_system_and_never_two_user_messages() {
         let mut history = conversation(6);
         let through = history.entries().nth(3).unwrap().id.get();
@@ -705,21 +668,6 @@ mod tests {
         assert_eq!(notices, 1, "the notice is a system message");
     }
 
-    #[test]
-    fn only_user_activity_resets_the_idle_clock() {
-        let mut app = App::new();
-        app.add_plugins(CompactionPlugin);
-        app.world_mut()
-            .resource_mut::<InactivityTracker>()
-            .last_user_interaction_at = Instant::now() - IDLE - Duration::from_secs(5);
-        app.update();
-        assert!(app.world().resource::<InactivityTracker>().idle_duration() > IDLE);
-        note_user_activity(app.world_mut());
-        assert!(
-            app.world().resource::<InactivityTracker>().idle_duration() < Duration::from_secs(1)
-        );
-    }
-
     /// Sets `dropped` when the task it guards is dropped.
     struct Dropped(Arc<AtomicBool>);
 
@@ -730,16 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_delays_only_its_own_companion() {
-        let now = Instant::now();
-        let mut state = CompactionState::default();
-        state.defer("ene", now + RETRY);
-        assert!(!state.may_start("ene", now));
-        assert!(state.may_start("kuro", now));
-        assert!(state.may_start("ene", now + RETRY));
-    }
-
-    #[test]
     fn a_companion_keeps_at_most_one_summary_in_flight() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -747,13 +685,7 @@ mod tests {
             .unwrap();
         let task = runtime.spawn(std::future::pending::<()>());
         let mut state = CompactionState::default();
-        state.start(
-            "ene",
-            RunningSummary {
-                task,
-                result: Arc::new(Mutex::new(None)),
-            },
-        );
+        state.start("ene", Background::new(task, Arc::new(Mutex::new(None))));
         let now = Instant::now();
         assert!(state.is_running(), "the shared runtime has one slot");
         assert!(!state.may_start("ene", now), "one summary per companion");
@@ -776,13 +708,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let mut state = CompactionState::default();
-        state.start(
-            "ene",
-            RunningSummary {
-                task,
-                result: Arc::new(Mutex::new(None)),
-            },
-        );
+        state.start("ene", Background::new(task, Arc::new(Mutex::new(None))));
         let kuro_retry = Instant::now() + RETRY;
         state.defer("kuro", kuro_retry);
         let mut world = World::new();

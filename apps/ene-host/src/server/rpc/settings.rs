@@ -73,11 +73,13 @@ impl w::SettingsService for Services {
         request: ServiceRequest<'_, w::SubmitApprovalRequest>,
     ) -> ServiceResult<w::SubmitApprovalResponse> {
         let request = request.to_owned_message();
-        let decision = match request.decision.to_i32() {
-            1 => permission::ApprovalDecision::Approve,
-            2 => permission::ApprovalDecision::AlwaysApprove,
-            3 => permission::ApprovalDecision::Deny,
-            _ => permission::ApprovalDecision::Unspecified,
+        let decision = match request.decision.as_known() {
+            Some(w::ApprovalDecision::Approve) => permission::ApprovalDecision::Approve,
+            Some(w::ApprovalDecision::AlwaysApprove) => permission::ApprovalDecision::AlwaysApprove,
+            Some(w::ApprovalDecision::Deny) => permission::ApprovalDecision::Deny,
+            Some(w::ApprovalDecision::Unspecified) | None => {
+                permission::ApprovalDecision::Unspecified
+            }
         };
         let request_id = request.request_id;
         self.call(move |app| {
@@ -294,11 +296,13 @@ async fn connection(runtime: &Runtime, id: &str) -> Result<Connection, ConnectEr
 }
 
 fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {
-    let effect = match rule.effect.to_i32() {
-        1 => permission::PolicyEffect::Allow,
-        2 => permission::PolicyEffect::Deny,
-        3 => permission::PolicyEffect::Confirm,
-        _ => return Err(HostError::invalid("a policy effect is required")),
+    let effect = match rule.effect.as_known() {
+        Some(w::PolicyEffect::Allow) => permission::PolicyEffect::Allow,
+        Some(w::PolicyEffect::Deny) => permission::PolicyEffect::Deny,
+        Some(w::PolicyEffect::Confirm) => permission::PolicyEffect::Confirm,
+        Some(w::PolicyEffect::Unspecified) | None => {
+            return Err(HostError::invalid("a policy effect is required"));
+        }
     };
     Ok(permission::PolicyRule {
         id: rule.id,

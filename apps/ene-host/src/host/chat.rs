@@ -66,11 +66,30 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     }
 
     let request_id = uuid::Uuid::new_v4().to_string();
-    let author = Author {
-        request: Some(RequestId(request_id.clone())),
-        ..Author::user()
-    };
-    world.trigger(Deliver::new(agent, text, DeliveryMode::Steer).with_author(author));
+    // One frame carries the message: the receipt is in the conversation before
+    // the frame saves it, and the input reaches the same conversation in the
+    // frame. A crash between the two saves leaves an orphan receipt, which the
+    // check above ignores.
+    {
+        let world = app.world_mut();
+        if let Some(mut conversation) = world.get_mut::<Conversation>(agent) {
+            conversation.add_aside(Aside::new(
+                "ene.accepted",
+                Author::plugin("ene-host"),
+                json!({
+                    "request_key": request.request_key,
+                    "request_id": request_id,
+                    "hash": hash,
+                    "accepted_at": now(),
+                }),
+            ));
+        }
+        let author = Author {
+            request: Some(RequestId(request_id.clone())),
+            ..Author::user()
+        };
+        world.trigger(Deliver::new(agent, text, DeliveryMode::Steer).with_author(author));
+    }
     super::tick(app);
     if let Some(reason) = app
         .world()
@@ -83,20 +102,6 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     if !has_input(app.world_mut(), agent, &request_id) {
         return Err(HostError::unavailable("the input was not saved"));
     }
-    let world = app.world_mut();
-    if let Some(mut conversation) = world.get_mut::<Conversation>(agent) {
-        conversation.add_aside(Aside::new(
-            "ene.accepted",
-            Author::plugin("ene-host"),
-            json!({
-                "request_key": request.request_key,
-                "request_id": request_id,
-                "hash": hash,
-                "accepted_at": now(),
-            }),
-        ));
-    }
-    super::tick(app);
     Ok(w::Acceptance {
         request_id,
         ..Default::default()
@@ -114,24 +119,7 @@ fn receipts(world: &World, agent: Entity) -> Vec<(String, String, Vec<u8>)> {
             Some((
                 aside.value.get("request_key")?.as_str()?.to_owned(),
                 aside.value.get("request_id")?.as_str()?.to_owned(),
-                aside
-                    .value
-                    .get("hash")?
-                    .as_str()
-                    .map(|hash| hash.as_bytes().to_vec())
-                    .or_else(|| {
-                        aside
-                            .value
-                            .get("hash")
-                            .and_then(|hash| hash.as_array())
-                            .map(|bytes| {
-                                bytes
-                                    .iter()
-                                    .filter_map(serde_json::Value::as_u64)
-                                    .map(|byte| byte as u8)
-                                    .collect()
-                            })
-                    })?,
+                serde_json::from_value(aside.value.get("hash")?.clone()).ok()?,
             ))
         })
         .collect()

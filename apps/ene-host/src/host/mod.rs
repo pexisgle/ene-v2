@@ -6,6 +6,7 @@
 //! loop; mutations do, and the frame's notifications are flushed after it.
 pub(crate) mod agent;
 pub(crate) mod autonomy;
+pub(crate) mod background;
 pub(crate) mod chat;
 pub(crate) mod client;
 pub(crate) mod compaction;

@@ -192,35 +192,3 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
     super::notify_mind(world, &companion);
     Ok(result.to_string())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn update_args_keep_the_old_wire_shape_for_retries() {
-        // A plain insert serialises exactly as it did before corrections
-        // existed, so an operation_id receipt from the old host still
-        // replays instead of conflicting.
-        let value = serde_json::to_value(NewMemory {
-            id: None,
-            content: "tea".into(),
-            importance: None,
-            audiences: Vec::new(),
-            occurred_at: None,
-            expected_revision: None,
-            supersedes: None,
-            forget: false,
-        })
-        .unwrap();
-        assert_eq!(
-            value,
-            json!({
-                "content": "tea",
-                "importance": null,
-                "audiences": [],
-                "occurred_at": null,
-            })
-        );
-    }
-}

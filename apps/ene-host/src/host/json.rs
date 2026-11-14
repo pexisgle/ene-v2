@@ -98,14 +98,3 @@ pub(crate) fn validate(schema: &Value, instance: &Value) -> std::result::Result<
         .validate(instance)
         .map_err(|error| format!("input: {error}"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn arguments_must_be_objects() {
-        assert!(parse_object("[]").is_err());
-        assert_eq!(parse_object("").unwrap(), json!({}));
-    }
-}

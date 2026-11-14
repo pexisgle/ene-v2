@@ -83,14 +83,16 @@ pub(crate) fn endpoint_from(value: Option<&w::ConnectionEndpoint>) -> Endpoint {
 
 /// Rebuilds a connection from a settings write.
 pub(crate) fn connection_from(input: w::ConnectionInput) -> Result<Connection, HostError> {
-    let kind = match input.kind.to_i32() {
-        1 => ConnectionKind::Llm,
-        2 => ConnectionKind::Tts,
-        3 => ConnectionKind::Stt,
-        4 => ConnectionKind::Embedding,
-        5 => ConnectionKind::Mcp,
-        6 => ConnectionKind::Acp,
-        _ => return Err(HostError::invalid("connection kind is required")),
+    let kind = match input.kind.as_known() {
+        Some(w::ConnectionKind::Llm) => ConnectionKind::Llm,
+        Some(w::ConnectionKind::Tts) => ConnectionKind::Tts,
+        Some(w::ConnectionKind::Stt) => ConnectionKind::Stt,
+        Some(w::ConnectionKind::Embedding) => ConnectionKind::Embedding,
+        Some(w::ConnectionKind::Mcp) => ConnectionKind::Mcp,
+        Some(w::ConnectionKind::Acp) => ConnectionKind::Acp,
+        Some(w::ConnectionKind::Unspecified) | None => {
+            return Err(HostError::invalid("connection kind is required"));
+        }
     };
     let config = input
         .config
@@ -376,10 +378,10 @@ pub(crate) fn capability_spec_from(value: &w::ClientCapabilitySpec) -> Capabilit
         description: value.description.clone(),
         input_schema: value.input_schema.clone(),
         presets: value.presets.clone(),
-        approval: match value.approval.to_i32() {
-            1 => CapabilityApproval::Auto,
-            2 => CapabilityApproval::Confirm,
-            _ => CapabilityApproval::Unspecified,
+        approval: match value.approval.as_known() {
+            Some(w::CapabilityApproval::Auto) => CapabilityApproval::Auto,
+            Some(w::CapabilityApproval::Confirm) => CapabilityApproval::Confirm,
+            Some(w::CapabilityApproval::Unspecified) | None => CapabilityApproval::Unspecified,
         },
         approval_target: value.approval_target.clone(),
         output_schema: value.output_schema.clone(),

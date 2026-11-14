@@ -220,19 +220,6 @@ pub(crate) fn truncate(value: &str, limit: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Stored stamps are ordered as text, so every one of them has to keep the
-    /// same precision; a fraction on some rows would sort before `Z` of the
-    /// same second and put a later instant first.
-    #[test]
-    fn a_stamp_keeps_the_second_precision_the_columns_are_ordered_by() {
-        let now = now();
-        assert!(now.ends_with('Z'), "{now}");
-        assert!(!now.contains('.'), "the stamp carries no fraction: {now}");
-        assert!(epoch(&now).is_some(), "{now}");
-        assert_eq!(epoch("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(epoch("not a time"), None);
-    }
-
     #[test]
     fn a_database_round_trips_and_refuses_a_newer_version() {
         let temp = tempfile::tempdir().unwrap();

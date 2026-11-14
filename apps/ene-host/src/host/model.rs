@@ -9,7 +9,7 @@ use rig_core::catalog::{Catalog, ModelSpec};
 use rig_core::completion::{CompletionRequest, CompletionResponse};
 use rig_core::effect::{Answered, EffectId, EffectKind};
 use rig_core::operation::Completion;
-use rig_core::providers::registry::{ConnectOptions, ProviderId};
+use rig_core::providers::registry::{ConnectOptions, ProviderConfig, ProviderId};
 use rig_core::serve::adapters::ModelAdapter;
 use rig_core::serve::{Dispatch, ErasedHandler};
 use rig_ecs::effects::Handler;
@@ -22,10 +22,9 @@ use std::{
 
 const KEYRING_SERVICE: &str = "ene-host";
 const MAX_MODELS: usize = 4_096;
-const MAX_PROBE_BYTES: usize = 2 * 1024 * 1024;
 
-/// How long a model request may take end to end.
-const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the model-list probe may take.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Secrets stay out of the state database: the OS keyring holds them and this
 /// cache only mirrors what the host thread needs synchronously.
@@ -200,11 +199,9 @@ pub(crate) fn connect(
         super::settings::provider(&endpoint.adapter).map_or_else(String::new, |p| p.endpoint);
     let base = super::settings::endpoint_of(&connection)
         .ok_or_else(|| HostError::unavailable("the connection has no endpoint to call"))?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(MODEL_TIMEOUT)
-        .build()
-        .map_err(|error| HostError::unavailable(format!("the model transport: {error}")))?;
+    // Rig builds the model requests, so their deadline sits on the model
+    // client; every other host request shares the unbounded one.
+    let client = net::model_client().map_err(HostError::unavailable)?;
     let mut options = ConnectOptions::new().http(rig_reqwest::ReqwestClient::from(client));
     if let Some(secret) = secret {
         options = options.api_key(secret);
@@ -308,39 +305,17 @@ pub(crate) async fn probe(
     let Some(base) = super::settings::endpoint_of(connection) else {
         return failure("the connection has no endpoint to probe".into());
     };
-    let url = format!("{base}/models");
-    let client = match net::client(std::time::Duration::from_secs(15)) {
-        Ok(client) => client,
+    let listed = match list_models(connection, &base, secret).await {
+        Ok(models) => models,
         Err(error) => return failure(error),
     };
-    let call = client
-        .get(&url)
-        .header(reqwest::header::ACCEPT, "application/json");
-    let call = match secret.as_deref() {
-        Some(secret) => call.bearer_auth(secret),
-        None => call,
-    };
-    let bytes = match call.send().await {
-        Ok(response) if response.status().is_success() => {
-            match net::read_body(response, MAX_PROBE_BYTES, "connection").await {
-                Ok(bytes) => bytes,
-                Err(error) => return failure(error),
-            }
-        }
-        Ok(response) => return failure(format!("endpoint answered {}", response.status())),
-        Err(error) => return failure(format!("endpoint unreachable: {error}")),
-    };
     let mut resources: Vec<String> = config.model_ids.clone();
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        && let Some(data) = value.get("data").and_then(serde_json::Value::as_array)
-    {
-        for model in data.iter().filter_map(|model| model.get("id")?.as_str()) {
-            if resources.len() >= MAX_MODELS {
-                break;
-            }
-            if !resources.iter().any(|known| known == model) {
-                resources.push(model.to_owned());
-            }
+    for model in listed {
+        if resources.len() >= MAX_MODELS {
+            break;
+        }
+        if !resources.iter().any(|known| known == &model) {
+            resources.push(model);
         }
     }
     Check {
@@ -350,6 +325,40 @@ pub(crate) async fn probe(
         capabilities: vec!["streaming_text".into(), "model_list".into()],
         resources,
     }
+}
+
+/// Asks the provider's own model-listing endpoint, through rig's provider
+/// clients, so the probe reads the wire the connection is configured for
+/// instead of assuming an OpenAI-shaped `/models` reply.
+async fn list_models(
+    connection: &Connection,
+    base: &str,
+    secret: Option<String>,
+) -> std::result::Result<Vec<String>, String> {
+    let adapter = connection.endpoint().adapter.as_str();
+    let provider =
+        ProviderId::catalog(adapter).ok_or_else(|| format!("unsupported adapter `{adapter}`"))?;
+    let config = provider
+        .config(secret.unwrap_or_default())
+        .ok_or_else(|| format!("`{adapter}` has no configurable provider"))?;
+    let http = rig_reqwest::ReqwestClient::from(net::client()?);
+    let config = config.with_base_url(base);
+    let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
+        match &config {
+            ProviderConfig::OpenAi(config) => config.clone().connect(http).list_models().await,
+            ProviderConfig::Anthropic(config) => config.clone().connect(http).list_models().await,
+            ProviderConfig::Gemini(config) => config.clone().connect(http).list_models().await,
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "the endpoint did not answer in {}s",
+            PROBE_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|error| format!("the endpoint is unreachable: {error}"))?;
+    Ok(list.data.into_iter().map(|model| model.id).collect())
 }
 
 #[cfg(test)]

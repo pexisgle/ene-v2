@@ -18,27 +18,22 @@ use crate::host::{
     settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
-use rig_core::{
-    completion::ToolDefinition,
-    effect::{Answered, EffectKind, HandlerDescriptor, family},
-    error::{ErrorKind, ErrorReport},
-    serve::{Dispatch, ErasedHandler, Reply, Serve},
-    tool::{ToolErrorKind, ToolOutput, ToolResult},
-};
+use rig_core::{message::ToolName, tool::DynamicTool};
 use rig_ecs::prelude::*;
 use rig_rmcp::{
     McpConnection,
     rmcp::{
         ServiceExt,
-        model::{CallToolRequestParams, CallToolResult, ClientConfig},
-        service::ServerSink,
+        model::ClientConfig,
         transport::{
             child_process::TokioChildProcess,
-            streamable_http_client::{StreamableHttpClientTransport, StreamableHttpClientWorker},
+            streamable_http_client::{
+                StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+                StreamableHttpClientWorker,
+            },
         },
     },
 };
-use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -80,6 +75,12 @@ enum Event {
     },
 }
 
+/// Connect results cross from the host runtime to the ECS thread here.
+///
+/// `rig_rmcp::McpClientHandler` would register the tools itself, but it does so
+/// through a `ManagedToolSink`, and rig-ecs registers tools in the `World`,
+/// which is neither `Send` nor `Sync`. The connection is therefore handed over
+/// and attached on the host thread.
 #[derive(Resource)]
 struct McpEvents {
     sender: mpsc::Sender<Event>,
@@ -265,8 +266,12 @@ async fn open(want: &Desired) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>),
             .await
             .map_err(|error| error.to_string())?
     } else if !want.endpoint.is_empty() {
-        let worker =
-            StreamableHttpClientWorker::<reqwest::Client>::new_simple(want.endpoint.clone());
+        // The host's one HTTP client, so the server shares its connection pool
+        // with every other endpoint the host calls.
+        let client = crate::host::net::client()?;
+        let mut config = StreamableHttpClientTransportConfig::default();
+        config.uri = want.endpoint.clone().into();
+        let worker = StreamableHttpClientWorker::<reqwest::Client>::new(client, config);
         let transport = StreamableHttpClientTransport::<reqwest::Client>::spawn(worker);
         ClientConfig::default()
             .serve(transport)
@@ -298,6 +303,16 @@ where
 
 /// Registers the tools `allowed` names, or every tool it lists when the
 /// filter is empty.
+///
+/// The connection's [`McpTool`] converts to a rig [`DynamicTool`], so the
+/// library owns the call: the per-call deadline, the request `_meta`, the raw
+/// [`McpCallToolResult`] hook and the block-preserving
+/// [`mcp_result_output`]. The host keeps only the lifecycle it must: the
+/// settings decide which servers are up, the ECS world owns the tool entities,
+/// and a retired server's entities are despawned with it.
+///
+/// [`McpCallToolResult`]: rig_rmcp::McpCallToolResult
+/// [`mcp_result_output`]: rig_rmcp::mcp_result_output
 fn attach(
     world: &mut World,
     id: &str,
@@ -307,39 +322,28 @@ fn attach(
     tools: Vec<rig_rmcp::McpTool>,
     allowed: &[String],
 ) {
-    let peer = connection.peer().clone();
     let mut entities = Vec::new();
     let mut names = Vec::new();
     for tool in tools {
-        let definition = tool.definition();
-        let name = definition.name.to_string();
-        if !allowed.is_empty() && !allowed.contains(&name) {
+        let mcp_name = tool.definition().name.to_string();
+        if !allowed.is_empty() && !allowed.contains(&mcp_name) {
             continue;
         }
-        let Some(exposed) = exposed_name(label, id, &name) else {
+        let Some(exposed) = exposed_name(label, id, &mcp_name) else {
             continue;
         };
-        let description = definition
-            .description
-            .as_ref()
-            .map_or_else(|| format!("MCP tool `{name}`"), ToString::to_string);
-        let parameters = Value::Object((*definition.input_schema).clone());
-        let handler = McpToolHandler {
-            peer: peer.clone(),
-            mcp_name: name,
-            exposed: exposed.clone(),
-            description: description.clone(),
-            parameters: parameters.clone(),
-        };
-        let Some(tool_name) = rig_core::message::ToolName::new(exposed.clone()).ok() else {
+        let Ok(tool_name) = ToolName::new(exposed.clone()) else {
             continue;
         };
-        let definition = ToolDefinition::new(tool_name, description, parameters);
-        if let Some(entity) = world.spawn_tool(
-            definition,
-            ErasedHandler::new(handler),
-            ToolOptions::default(),
-        ) {
+        let dynamic = match DynamicTool::try_from(tool.with_name(tool_name)) {
+            Ok(dynamic) => dynamic,
+            Err(error) => {
+                tracing::warn!(connection = %id, tool = %mcp_name, "the MCP tool is not offered: {error}");
+                continue;
+            }
+        };
+        let (definition, handler, _) = dynamic.into_parts();
+        if let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default()) {
             entities.push(entity);
             names.push(exposed);
         }
@@ -424,83 +428,6 @@ fn push_allowed(out: &mut String, text: &str) -> bool {
     }
     out.push_str(text);
     true
-}
-
-/// One MCP tool as the host serves it.
-struct McpToolHandler {
-    peer: ServerSink,
-    mcp_name: String,
-    exposed: String,
-    description: String,
-    parameters: Value,
-}
-
-impl Serve for McpToolHandler {
-    type Family = family::Tool;
-
-    fn descriptor(&self) -> HandlerDescriptor {
-        HandlerDescriptor::tool(
-            &self.exposed,
-            self.description.clone(),
-            self.parameters.clone(),
-        )
-    }
-
-    async fn serve(&self, kind: EffectKind, _dispatch: Dispatch) -> Reply {
-        let EffectKind::ToolCall { args, .. } = kind else {
-            return Reply::Outcome(Err(ErrorReport::new(
-                ErrorKind::HandlerUnavailable,
-                "an MCP tool was dispatched a non-tool effect",
-            )));
-        };
-        let arguments = match serde_json::from_str::<serde_json::Map<String, Value>>(&args) {
-            Ok(arguments) => arguments,
-            Err(error) => {
-                return Reply::Outcome(Err(ErrorReport::new(
-                    ErrorKind::Tool(ToolErrorKind::InvalidArgs),
-                    format!("the MCP tool arguments are not a JSON object: {error}"),
-                )));
-            }
-        };
-        let mut params = CallToolRequestParams::new(self.mcp_name.clone());
-        params.arguments = Some(arguments);
-        match self.peer.call_tool(params).await {
-            Ok(result) => match render(&result) {
-                Ok(text) => Reply::Outcome(Ok(Answered::ToolResult {
-                    result: ToolResult::success(ToolOutput::text(text)),
-                })),
-                Err(reason) => Reply::Outcome(Err(ErrorReport::new(
-                    ErrorKind::Tool(ToolErrorKind::Provider),
-                    reason,
-                ))),
-            },
-            Err(error) => Reply::Outcome(Err(ErrorReport::new(
-                ErrorKind::Tool(ToolErrorKind::Provider),
-                format!("the MCP tool `{}` failed: {error}", self.mcp_name),
-            ))),
-        }
-    }
-}
-
-/// The text one call answered with. A structured answer is passed through as
-/// JSON; otherwise the text blocks are joined.
-fn render(result: &CallToolResult) -> std::result::Result<String, String> {
-    if result.is_error == Some(true) {
-        return Err(text_of(result));
-    }
-    if let Some(structured) = result.structured_content.as_ref() {
-        return Ok(structured.to_string());
-    }
-    Ok(text_of(result))
-}
-
-fn text_of(result: &CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|content| content.as_text().map(|text| text.text.clone()))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// The plugin the host adds once.
@@ -603,12 +530,10 @@ mod tests {
         }
     }
 
-    /// The path the review found broken twice: connect, list, register, and
-    /// call. It runs over a duplex pair so it needs no server binary.
+    /// The client path: connect, list, convert and call. It runs over a duplex
+    /// pair, so it needs no server binary.
     #[tokio::test]
     async fn a_duplex_server_is_listed_and_called() {
-        use rig_core::effect::{EffectId, EffectKind};
-        use rig_core::serve::Dispatch;
         use rig_rmcp::rmcp::{
             RoleClient, RoleServer, ServiceExt, service::serve_directly,
             transport::async_rw::AsyncRwTransport,
@@ -633,39 +558,28 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "echo");
 
-        let handler = McpToolHandler {
-            peer: connection.peer().clone(),
-            mcp_name: "echo".to_owned(),
-            exposed: "mcp_notes_echo".to_owned(),
-            description: "Echo the input back".to_owned(),
-            parameters: Value::Object(serde_json::Map::new()),
-        };
-        let reply = handler
-            .serve(
-                EffectKind::ToolCall {
-                    name: "mcp_notes_echo".to_owned(),
-                    args: "{}".to_owned(),
-                },
-                Dispatch::new(EffectId::from_raw(0), false),
-            )
-            .await;
-        let Reply::Outcome(Ok(Answered::ToolResult { result })) = reply else {
-            panic!("the MCP tool did not answer");
-        };
+        // The library conversion owns the call: arguments, the request and
+        // the answer's content blocks.
+        let name = ToolName::new("mcp_notes_echo").expect("a valid exposed name");
+        let tool =
+            DynamicTool::try_from(tools[0].clone().with_name(name)).expect("the MCP tool converts");
+        let output = tool
+            .run(serde_json::json!({}))
+            .await
+            .expect("the MCP tool answers");
+        assert_eq!(output.as_text(), Some("called echo"));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the call reached the server"
         );
-        let _ = result;
 
         connection.close().await;
         server.abort();
     }
 
-    /// The whole path the review found broken: a listed MCP tool is attached to
-    /// the real host app, offered to the parent, passes the gate, runs, and its
-    /// answer reaches the conversation.
+    /// The whole path: a listed MCP tool is attached to the real host app,
+    /// offered to the parent, passes the gate and runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_mcp_tool_runs_through_the_gate() {
         use crate::host::tests::Harness;

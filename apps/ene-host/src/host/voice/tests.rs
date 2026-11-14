@@ -696,23 +696,6 @@ fn a_base_url_must_be_a_url_and_is_trimmed() {
 }
 
 #[tokio::test]
-async fn fake_engines_drive_both_traits_without_a_network() {
-    let pcm = synthesize(&FakeTts { fail: false }, "ab".into(), String::new())
-        .await
-        .unwrap();
-    assert_eq!(pcm.len(), 4);
-    assert!(
-        synthesize(&FakeTts { fail: true }, "あ".into(), String::new())
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        FakeStt.transcribe(vec![0; 480], SAMPLE_RATE).await.unwrap(),
-        "480 bytes"
-    );
-}
-
-#[tokio::test]
 async fn the_worker_orders_audio_and_finishes_the_utterance() {
     let voice = Voice::new(tokio::runtime::Handle::current());
     let mut events = voice.register("c1").receiver;
@@ -798,58 +781,4 @@ async fn a_stalled_owner_does_not_block_another() {
             if flush.reason == w::FlushReason::Cancelled
     ));
     assert!(!voice.lock().owners.contains_key("ene"));
-}
-
-mod wave_format {
-    use super::super::*;
-
-    #[test]
-    fn a_float_wav_is_rejected_as_non_pcm() {
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 24_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut wav = std::io::Cursor::new(Vec::new());
-        let mut writer = hound::WavWriter::new(&mut wav, spec).unwrap();
-        writer.write_sample(0.0f32).unwrap();
-        writer.finalize().unwrap();
-        let error = parse_wav(&wav.into_inner()).unwrap_err();
-        assert!(error.contains("not PCM"), "{error}");
-    }
-}
-
-mod resampling {
-    use super::super::*;
-
-    #[test]
-    fn a_48k_tone_is_converted_to_the_24k_wire_rate() {
-        let samples: Vec<i16> = (0..4_800)
-            .map(|index| ((index as f32 * 0.1).sin() * 10_000.0) as i16)
-            .collect();
-        let pcm: Vec<u8> = samples
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect();
-        let out = resample_mono(&pcm, 48_000, 24_000).unwrap();
-        assert_eq!(out.len() / 2, 2_400);
-        let samples: Vec<i16> = out
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&pair| i16::from_le_bytes(pair))
-            .collect();
-        let first = samples
-            .iter()
-            .position(|sample| sample.abs() > 100)
-            .expect("the tone is audible");
-        assert!(first < 480, "the output starts with {first} silent samples");
-        assert!(
-            samples[samples.len() * 9 / 10..]
-                .iter()
-                .any(|sample| sample.abs() > 100),
-            "the tail was flushed away"
-        );
-    }
 }

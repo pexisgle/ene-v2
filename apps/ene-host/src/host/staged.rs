@@ -17,6 +17,7 @@
 //! leaves a tick running.
 use super::{
     agent::{self, CompanionAgent},
+    background::Background,
     compaction::{self, InactivityTracker, Weigher},
     db::{Result, Store},
     error::HostError,
@@ -37,7 +38,7 @@ use rig_core::conversation::{Author, Conversation as History, Entry};
 use rig_core::serve::ErasedHandler;
 use rig_ecs::prelude::*;
 use std::{
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -69,8 +70,7 @@ struct InFlight {
     /// must not be spliced into.
     messages: usize,
     /// The running call; aborting it drops the request in flight.
-    task: tokio::task::JoinHandle<()>,
-    result: Arc<Mutex<Option<Outcome>>>,
+    call: Background<Outcome>,
 }
 
 /// What the tick's call produced: an answer to promote, silence, or a failure
@@ -81,7 +81,7 @@ impl StagedTick {
     /// Aborts the tick in flight, if any.
     fn cancel(&mut self) {
         if let Some(in_flight) = self.in_flight.take() {
-            in_flight.task.abort();
+            in_flight.call.abort();
         }
     }
 }
@@ -181,19 +181,10 @@ fn begin_tick(
             continue;
         };
         let handler = bound.connection.handler.0.clone();
-        let result = Arc::new(Mutex::new(None));
-        let task_result = Arc::clone(&result);
-        let task_wake = wake.as_deref().cloned();
-        let task = runtime.0.spawn(async move {
-            let outcome = tokio::time::timeout(TIMEOUT, ask(request, handler))
+        let call = Background::spawn(&runtime.0, wake.as_deref(), async move {
+            tokio::time::timeout(TIMEOUT, ask(request, handler))
                 .await
-                .unwrap_or_else(|_| Err("the heartbeat tick timed out".to_owned()));
-            if let Ok(mut slot) = task_result.lock() {
-                *slot = Some(outcome);
-            }
-            if let Some(wake) = task_wake {
-                wake.wake();
-            }
+                .unwrap_or_else(|_| Err("the heartbeat tick timed out".to_owned()))
         });
         let started = Instant::now();
         ticks.last_started = Some(started);
@@ -203,8 +194,7 @@ fn begin_tick(
             prompt: TICK.to_owned(),
             messages,
             started,
-            task,
-            result,
+            call,
         });
         return;
     }
@@ -321,17 +311,15 @@ fn settle_tick(
         ticks.cancel();
         return;
     }
-    if !in_flight.task.is_finished() {
+    if !in_flight.call.is_finished() {
         return;
     }
     let Some(in_flight) = ticks.in_flight.take() else {
         return;
     };
     let outcome = in_flight
-        .result
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
+        .call
+        .take()
         .unwrap_or_else(|| Err("the heartbeat tick was cancelled".to_owned()));
     match outcome {
         Ok(Some(reply)) => {

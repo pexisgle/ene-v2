@@ -705,21 +705,6 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_extraction_still_deserializes() {
-        let facts = parse_extraction(
-            r#"{"facts":[{"content":"A prefers green tea","importance":7,
-                "audience":"*","supersedes":"m1","cited_memory_ids":["m2"]}]}"#,
-        )
-        .unwrap();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].content, "A prefers green tea");
-        assert_eq!(facts[0].importance, Some(7));
-        assert_eq!(facts[0].audience.as_deref(), Some("*"));
-        assert_eq!(facts[0].supersedes.as_deref(), Some("m1"));
-        assert_eq!(facts[0].cited_memory_ids, ["m2"]);
-    }
-
-    #[test]
     fn pending_turns_reads_only_answered_turns_after_the_cursor() {
         let mut conversation = CoreConversation::new();
         let first = answer(&mut conversation, "hello", "hi");

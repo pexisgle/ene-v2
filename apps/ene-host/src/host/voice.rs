@@ -113,7 +113,6 @@ enum Protocol {
 }
 
 struct HttpEngine {
-    client: HttpResult<reqwest::Client>,
     base: String,
     protocol: Protocol,
     model: String,
@@ -124,6 +123,8 @@ struct HttpEngine {
     synthesis_path: String,
     speaker: u32,
     speed: Option<f32>,
+    /// The engine's own request budget, from the connection options.
+    timeout: Duration,
     secret: Option<String>,
 }
 
@@ -157,12 +158,15 @@ impl HttpEngine {
             ConnectionConfig::Stt(config) if !tts => &config.language_hints,
             _ => &[],
         };
+        // The connection opts into its own deadline; the clamp is the range the
+        // old per-timeout clients enforced.
+        let timeout = Duration::from_millis(
+            options
+                .timeout_ms
+                .unwrap_or(if tts { 20_000 } else { 30_000 })
+                .clamp(1_000, 300_000),
+        );
         Ok(Self {
-            client: net::client(Duration::from_millis(
-                options
-                    .timeout_ms
-                    .unwrap_or(if tts { 20_000 } else { 30_000 }),
-            )),
             base,
             protocol,
             model: nonempty(options.model)
@@ -183,22 +187,26 @@ impl HttpEngine {
             synthesis_path: path(options.synthesis_path, "/synthesis"),
             speaker: options.speaker.unwrap_or(1).min(u64::from(u32::MAX)) as u32,
             speed: options.speed.map(|speed| speed as f32),
+            timeout,
             secret,
         })
     }
 
-    fn client(&self) -> HttpResult<&reqwest::Client> {
-        self.client.as_ref().map_err(Clone::clone)
+    fn client(&self) -> HttpResult<reqwest::Client> {
+        net::client()
     }
 
     /// Runs one request against the engine: the shared endpoint guard, the
-    /// bearer token, the status check and a bounded body read, in the order
-    /// every call needs them.
+    /// engine's own deadline, the bearer token, the status check and a bounded
+    /// body read, in the order every call needs them.
     async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
-        let response = post(call, self.secret.as_deref(), what).await?;
+        let response = post(call.timeout(self.timeout), self.secret.as_deref(), what).await?;
         net::read_body(response, MAX_BODY_BYTES, what).await
     }
 
+    /// The OpenAI-shaped speech wire, written out because the engine also
+    /// serves Voicevox and a raw endpoint, and because the connection's own
+    /// `path` and the PCM response format are part of its configuration.
     async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
         let mut body = serde_json::json!({
             "model": self.model, "voice": if voice.is_empty() { &self.voice } else { &voice },

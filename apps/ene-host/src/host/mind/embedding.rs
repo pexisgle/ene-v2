@@ -7,19 +7,11 @@
 //! memory whose content changed is re-embedded, never mixed with the stale
 //! vector (docs/design/mind.md §4.1).
 //!
-//! # Why the embedding call is raw HTTP
-//!
-//! rig-core 0.46's provider registry connects completion models only:
-//! `Catalog::connect_with` returns `DynModel<Completion>`, and neither
-//! `Catalog` nor `ConnectOptions` has an embedding connector. Provider clients
-//! do expose `.embedding()` (`providers::openai`, `gemini`, `cohere`, `ollama`
-//! and `voyageai`), but each speaks its own wire and is built from that
-//! provider's concrete client. Using one would either pin embeddings to one
-//! vendor or duplicate the host's provider-neutral "adapter + base URL"
-//! connection configuration per provider. The one cross-provider shape this
-//! host supports is the OpenAI-compatible `POST {base}/embeddings`, so this
-//! module keeps that call generic: one shared client, no per-call client
-//! construction, and a hard bound on the response body.
+//! The embedding model is the provider client's own (`OpenAI::embedding` or
+//! `Gemini::embedding`), so the connection's adapter selects the wire and rig
+//! encodes and decodes it. The host still owns what the vectors mean: it
+//! validates the count and width against the connection, and derives the
+//! space id from the model and dimensions the caller configured.
 use super::{Companion, Role};
 use crate::host::{
     db::{Result, Store},
@@ -29,6 +21,14 @@ use crate::host::{
     settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
+use rig_core::{
+    driver::DynModel,
+    operation::Embedding,
+    providers::{
+        openai::OpenAIConfig,
+        registry::{ProviderConfig, ProviderId},
+    },
+};
 use rig_ecs::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -40,7 +40,6 @@ use std::{
 const PREP_VERSION: &str = "v1";
 const MAX_DIMENSIONS: usize = 65_536;
 const EMBED_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const BACKFILL_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_BACKFILL: usize = 256;
 const MAX_EMBED_BATCH: usize = 16;
@@ -64,6 +63,7 @@ pub(crate) fn dimensions_of_space(space: &str) -> Option<usize> {
 
 /// Everything needed to call one embedding endpoint.
 struct Target {
+    adapter: String,
     model_id: String,
     dimensions: usize,
     endpoint: String,
@@ -79,96 +79,57 @@ pub(crate) struct PendingEmbedding {
     pub(crate) content_revision: u64,
 }
 
-/// POSTs a JSON body to an OpenAI-compatible endpoint and returns its JSON
-/// answer. The one wire shape the host reads; another format is not guessed.
-pub(crate) async fn post_json(
-    url: &str,
-    body: &serde_json::Value,
-    secret: Option<&str>,
-    timeout: Duration,
-    max_bytes: usize,
-    what: &str,
-) -> Result<serde_json::Value> {
-    let call = net::client(timeout)
-        .map_err(HostError::unavailable)?
-        .post(url)
-        .header(reqwest::header::ACCEPT, "application/json");
-    let call = match secret {
-        Some(secret) => call.bearer_auth(secret),
-        None => call,
-    };
-    let response = call
-        .json(body)
-        .send()
-        .await
-        .map_err(|error| HostError::unavailable(format!("{what} endpoint: {error}")))?;
-    if !response.status().is_success() {
-        return Err(HostError::unavailable(format!(
-            "{what} endpoint answered {}",
-            response.status()
-        )));
-    }
-    let bytes = net::read_body(response, max_bytes, what)
-        .await
-        .map_err(HostError::unavailable)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| HostError::unavailable(format!("{what} body: {error}")))
-}
-
-#[derive(serde::Deserialize)]
-struct EmbeddingResponse {
-    data: Vec<EmbeddingItem>,
-}
-
-#[derive(serde::Deserialize)]
-struct EmbeddingItem {
-    embedding: Vec<f32>,
-    index: Option<usize>,
-}
-
 /// Embeds `texts` in the space `target` names.
 async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    let body = serde_json::json!({
-        "model": target.model_id,
-        "input": texts,
-        "dimensions": target.dimensions,
-    });
-    let value = post_json(
-        &format!("{}/embeddings", target.endpoint.trim_end_matches('/')),
-        &body,
-        target.secret.as_deref(),
-        EMBED_TIMEOUT,
-        MAX_RESPONSE_BYTES,
-        "embedding",
-    )
-    .await?;
-    let response: EmbeddingResponse = serde_json::from_value(value)
-        .map_err(|error| HostError::unavailable(format!("embedding body: {error}")))?;
-    let count = response.data.len();
-    let mut seen = std::collections::HashSet::new();
-    let mut indexed: Vec<(usize, Vec<f32>)> = Vec::with_capacity(count);
-    for (position, item) in response.data.into_iter().enumerate() {
-        let index = item.index.unwrap_or(position);
-        if index >= count || !seen.insert(index) {
+    let secret = target.secret.clone().unwrap_or_default();
+    let config = ProviderId::catalog(&target.adapter)
+        .and_then(|provider| provider.config(secret.clone()))
+        // An adapter outside rig's registry keeps the OpenAI-compatible wire
+        // the host has always spoken for embeddings.
+        .unwrap_or_else(|| ProviderConfig::OpenAi(OpenAIConfig::new(secret)))
+        .with_base_url(target.endpoint.clone());
+    let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::unavailable)?);
+    // `Embedding` is the provider-neutral operation both clients erase into, so
+    // the call below is the same whichever adapter answered.
+    let model: DynModel<Embedding> = match config {
+        ProviderConfig::OpenAi(config) => config
+            .connect(http)
+            .embedding(target.model_id.clone(), Some(target.dimensions))
+            .erase(),
+        ProviderConfig::Gemini(config) => config
+            .connect(http)
+            .embedding(target.model_id.clone(), Some(target.dimensions))
+            .erase(),
+        ProviderConfig::Anthropic(_) => {
             return Err(HostError::unavailable(
-                "embedding endpoint returned an invalid index",
+                "the Anthropic adapter serves no embeddings",
             ));
         }
-        indexed.push((index, item.embedding));
-    }
-    indexed.sort_by_key(|(index, _)| *index);
-    let vectors: Vec<Vec<f32>> = indexed.into_iter().map(|(_, vector)| vector).collect();
-    if vectors.len() != texts.len() {
+    };
+    let response = tokio::time::timeout(EMBED_TIMEOUT, model.call(texts.to_vec()))
+        .await
+        .map_err(|_| HostError::unavailable("the embedding endpoint did not answer in time"))?
+        .map_err(|error| HostError::unavailable(format!("embedding endpoint: {error}")))?;
+    if response.embeddings.len() != texts.len() {
         return Err(HostError::unavailable(
             "embedding endpoint returned the wrong number of vectors",
         ));
     }
-    for vector in &vectors {
-        if vector.len() != target.dimensions {
+    let mut vectors = Vec::with_capacity(response.embeddings.len());
+    for embedding in response.embeddings {
+        if embedding.vec.len() != target.dimensions {
             return Err(HostError::unavailable(
                 "embedding dimensions do not match the connection",
             ));
         }
+        // The wire carries f64; the database keeps f32.
+        vectors.push(
+            embedding
+                .vec
+                .into_iter()
+                .map(|value| value as f32)
+                .collect(),
+        );
     }
     Ok(vectors)
 }
@@ -224,6 +185,7 @@ fn target(
     };
     let secret = crate::host::model::connection_secret(&connection, credentials);
     Ok(Some(Target {
+        adapter: connection.endpoint().adapter.clone(),
         model_id: model_id.to_owned(),
         dimensions,
         endpoint,
