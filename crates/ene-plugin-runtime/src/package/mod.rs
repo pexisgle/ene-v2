@@ -115,7 +115,11 @@ impl Package {
         Ok(Self {
             root: root.to_path_buf(),
             manifest,
-            revision: format!("{:x}", hash.finalize()),
+            revision: hash
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
             files: Arc::new(files),
             stamps: Arc::new(stamps),
         })

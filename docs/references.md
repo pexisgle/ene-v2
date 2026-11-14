@@ -44,7 +44,7 @@
 
 [ACPセッション](https://agentclientprotocol.com/protocol/session-setup)、[prompt turn](https://agentclientprotocol.com/protocol/prompt-turn)、[公式Rust SDK](https://agentclientprotocol.com/libraries/rust)を基準に、eneのsession・入力・更新・停止をアダプターへ写像する。ACP全機能をプラグインへ強制しないが、対応して公開する部分では要求ID・エラー・取消・完了の意味を守る。
 
-2026-11-05時点の採用版は `agent-client-protocol 5.0.0`（ACP v1。型・スキーマは公式安定性規約に基づき `agent_client_protocol::v1::schema` 経由で使用）。JSON-RPCのフレーミング・要求ID・応答対応付け・既知メソッドへの型付けはSDKへ委譲し、ene側は子プロセスの起動、環境変数許可リスト、workspace境界、terminal権限・上限、ターン状態と停止だけを持つ。公式SDKの`AcpAgent`にはプロセス起動を委譲しない（`env_clear`と許可環境変数を表現できないため）。子プロセスのグループ終了とkill-on-dropは `process-wrap 10.0.1` に委譲し、cancel/timeout時に孫プロセスを残さない。未知の`stopReason`やRPCエラーは`end_turn`へ丸めない。
+2026-11-14時点の採用版は `agent-client-protocol 5.2.0`（ACP v1。型・スキーマは公式安定性規約に基づき `agent_client_protocol::v1::schema` 経由で使用）。JSON-RPCのフレーミング・要求ID・応答対応付け・既知メソッドへの型付けはSDKへ委譲し、ene側は子プロセスの起動、環境変数許可リスト、workspace境界、terminal権限・上限、ターン状態と停止だけを持つ。公式SDKの`AcpAgent`にはプロセス起動を委譲しない（`env_clear`と許可環境変数を表現できないため）。子プロセスのグループ終了とkill-on-dropは `process-wrap 10.0.1` に委譲し、cancel/timeout時に孫プロセスを残さない。未知の`stopReason`やRPCエラーは`end_turn`へ丸めない。
 
 共通ツールの外部公開は[MCP公式Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)を優先する。ACPのモデルや認証は接続先の能力に従う。独自機能は能力と名前空間で表し、未対応を成功や自動的な別動作へ変換しない。実際のアダプター版で双方向の最小互換性を検証する。
 

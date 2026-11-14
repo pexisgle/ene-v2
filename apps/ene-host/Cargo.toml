@@ -13,6 +13,8 @@ workspace = true
 agent-client-protocol.workspace = true
 async-stream.workspace = true
 axum.workspace = true
+# rig-ecs 0.46.0 pins `bevy_ecs =0.20.0` and hands its `App`/`World` to the
+# host, so this exact version is what keeps both sides on one type set.
 bevy_ecs = "=0.20.0"
 bytes.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
@@ -37,7 +39,7 @@ rig-ecs.workspace = true
 rig-http.workspace = true
 rig-memory.workspace = true
 rig-reqwest.workspace = true
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.42", features = ["bundled", "fallible_uint"] }
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true

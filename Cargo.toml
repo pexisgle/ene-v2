@@ -15,7 +15,7 @@ unsafe_op_in_unsafe_fn = "deny"
 ene-rpc = { path = "crates/ene-rpc" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
-agent-client-protocol = { version = "=5.0.0", default-features = false }
+agent-client-protocol = { version = "5.2.0", default-features = false }
 # The guest SDK and the host must agree on one ACP type set. The host reaches it
 # through `agent_client_protocol::v1::schema` (tech-stack §G); a Wasm guest
 # cannot, because the SDK pulls `uuid` without a randomness source for
@@ -23,8 +23,8 @@ agent-client-protocol = { version = "=5.0.0", default-features = false }
 # types-only crate directly, with a caret requirement so an SDK bump that moves
 # the schema to a new 1.x does not fail to resolve.
 agent-client-protocol-schema = { version = "1.15.1", default-features = false }
-process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
-which = "=8.0.6"
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
+which = "8.0.6"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 tempfile = "3"
@@ -38,11 +38,13 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 http = "1"
 hound = "3"
 croner = { version = "4", default-features = false, features = ["jiff"] }
-rubato = "0.16"
-jsonschema = "0.33"
+rubato = "5.1"
+jsonschema = "0.61"
 serde_json_canonicalizer = "0.4"
 jiff = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart"] }
+# The five rig crates share one type set and must move together; v0.46.0 is the
+# surveyed baseline (docs/references.md), so an upgrade bumps all of them at once.
 rig-core = { version = "=0.46.0", default-features = false }
 rig-ecs = "=0.46.0"
 rig-http = "=0.46.0"
@@ -51,7 +53,7 @@ rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", default-features = false, features = ["macros", "sync", "time"] }

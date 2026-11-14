@@ -15,4 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+# The guest side of the Extism ABI: bump together with the host SDK in
+# `ene-plugin-runtime`, never on its own.
 extism-pdk = { version = "=1.4.1", default-features = false }

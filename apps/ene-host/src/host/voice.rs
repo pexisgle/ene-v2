@@ -492,7 +492,7 @@ fn wire_pcm(pcm: Vec<u8>, sample_rate: u32) -> HttpResult<Vec<u8>> {
 }
 
 fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
-    use rubato::Resampler;
+    use rubato::{Fft, FixedSync, Resampler};
     if from == 0 {
         return Err("the TTS engine returned audio without a sample rate".into());
     }
@@ -505,46 +505,21 @@ fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
         .iter()
         .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32_768.0)
         .collect();
-    let mut resampler = rubato::FftFixedInOut::<f32>::new(from as usize, to as usize, 1_024, 1)
-        .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
     if samples.is_empty() {
         return Ok(Vec::new());
     }
     let expected = ((samples.len() as f64) * f64::from(to) / f64::from(from)).round() as usize;
-    let mut resampled: Vec<f32> = Vec::with_capacity(expected + 1_024);
-    let mut position = 0;
-    while position < samples.len() {
-        let frames = resampler.input_frames_next();
-        let end = (position + frames).min(samples.len());
-        let mut block = samples[position..end].to_vec();
-        block.resize(frames, 0.0);
-        let output = resampler
-            .process(&[block], None)
+    let mut resampler = Fft::<f32>::new(from as usize, to as usize, 1_024, 1, FixedSync::Input)
+        .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
+    let input =
+        rubato::audioadapter_buffers::direct::InterleavedSlice::new(&samples, 1, samples.len())
             .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
-        if let Some(channel) = output.first() {
-            resampled.extend_from_slice(channel);
-        }
-        position = end;
-    }
-    // `FftFixedInOut` delays its output by `output_delay()` frames. Flush
-    // the filter with silent input, then drop that leading delay so the tone
-    // starts where it should and the tail is not truncated.
-    let delay = resampler.output_delay();
-    let target = delay + expected;
-    let mut flush = 0;
-    while resampled.len() < target && flush < 64 {
-        let frames = resampler.input_frames_next();
-        let output = resampler
-            .process(&[vec![0.0; frames]], None)
-            .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
-        if let Some(channel) = output.first() {
-            resampled.extend_from_slice(channel);
-        }
-        flush += 1;
-    }
-    if delay > 0 {
-        resampled.drain(..delay.min(resampled.len()));
-    }
+    // `process_all` trims the resampler's startup delay and flushes the tail
+    // with silence, so the clip keeps its length without a manual loop.
+    let mut resampled = resampler
+        .process_all(&input, samples.len(), None)
+        .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?
+        .take_data();
     resampled.truncate(expected);
     let mut pcm = Vec::with_capacity(resampled.len() * 2);
     for sample in resampled {

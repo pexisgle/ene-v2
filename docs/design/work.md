@@ -29,7 +29,7 @@
 
 ### 2.1 バックエンド別の実行モデル（ACPと内蔵Rigの適正化）
 - **外部ACPエージェント（Agent Client Protocol）**:
-  - `agent-client-protocol = "5.0.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
+  - `agent-client-protocol = "5.2.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
   - `WorkSession ≒ ACP Session`: 外部ACPプロセスとの接続はWorkSession単位で維持され、複数Runにわたってエージェントの会話文脈が継続する。
   - `Run ≒ ACP prompt turn`: 1回の指示実行は `session/prompt` に対応する。
   - **中断の扱い**: 通常のRun中断は ACP 標準の `session/cancel` を送信して安全に行う。外部プロセス自体の終了は、WorkSession自体の破棄時、またはセッション全体がハングして応答しない場合のみ実行する。文脈を保持するACPセッションでは、Run終了後もOSプロセスは生存する。

@@ -53,7 +53,7 @@
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
   ```toml
-  rusqlite = { version = "0.40", features = ["bundled"] }
+  rusqlite = { version = "0.42", features = ["bundled"] }
   rig-core = "0.46"
   rig-ecs = "0.46"
   rig-memory = { version = "0.46", features = ["fs"] }
@@ -299,7 +299,7 @@ pub trait TtsEngine: Send + Sync {
 - **既存実装（`apps/ene-avatar`）で実装済みの機能**:
   - `apps/ene-avatar` は `bevy = "=0.20.0"` および `crates/ene-vrm` により、以下のコア基盤を完結して実装している：
     1. **クロスプラットフォーム透過デスクトップウィンドウ**:
-       - Linux: Wayland layer-shell（`exwlshellev = "=0.20.1"` による透過・背後クリック透過）。
+       - Linux: Wayland layer-shell（`exwlshellev = "0.20.1"` による透過・背後クリック透過）。
        - Windows: Win32 API（`windows = "0.62"`）によるレイヤード透過ウィンドウ（Layered Window）。
     2. **VRM 1.0モデルロードと単一VRMAアニメーション再生**:
        - `ene-vrm` によるモデル読み込み、SpringBone（髪・服の揺れもの物理）、VRMAクリップ再生。
@@ -329,7 +329,7 @@ pub trait TtsEngine: Send + Sync {
 ### G. 外部ACPエージェント接続と Connect-RPC サーバー設定
 
 - **ACP外部ハーネス接続の最小イディオム**:
-  - `agent-client-protocol = "5.0.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
+  - `agent-client-protocol = "5.2.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
     - 例外は Wasm ゲストSDK（`crates/ene-plugin`）のみ。ACP SDK は `wasm32-unknown-unknown` 向けにビルドできない（`uuid` の乱数源が未指定になる）ため、型定義だけを提供する `agent-client-protocol-schema` に直接依存する。その際もバージョンはキャレット要件（`"1.15.1"`）とし、SDK 側のピンが 1.x 内で動いても解決が壊れないようにする。ホスト側はこの例外を使わない。
   - `process-wrap` の `TokioCommandWrap` で起動した子プロセスの標準入出力を `Client::v1()` トランスポートへ接続する最小構成：
     ```rust
