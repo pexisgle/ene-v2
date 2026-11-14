@@ -101,6 +101,15 @@ impl Harness {
         }
     }
 
+    /// An app that binds models for real: no `TestModel`, so `ensure_model`
+    /// reads the stored assignments and the host's own environment, as the
+    /// running host does.
+    fn unbound() -> Self {
+        let mut harness = Self::with_policy([], "*");
+        harness.app.world_mut().remove_resource::<TestModel>();
+        harness
+    }
+
     pub(crate) fn accept(&mut self, key: &str, text: &str) -> super::error::Result<String> {
         Ok(chat::accept(
             &mut self.app,
@@ -1143,4 +1152,99 @@ fn a_conflicting_activation_is_rolled_back_before_side_effects() {
             .as_deref(),
         Some("c1")
     );
+}
+
+fn unassigned(id: &str) -> super::mind::Companion {
+    super::mind::Companion {
+        id: id.into(),
+        name: "Mio".into(),
+        mind: "kind".into(),
+        profile: super::mind::Profile::default(),
+        profile_revision: 1,
+        state: super::mind::State::default(),
+        state_revision: 1,
+        body: super::json::JsonDoc::empty(),
+        voice: super::json::JsonDoc::empty(),
+        assignments: super::mind::Assignments::default(),
+        persona: None,
+        voice_identifier: None,
+        revision: 1,
+        created_at: super::db::now(),
+        updated_at: super::db::now(),
+    }
+}
+
+fn notice_code(event: &w::Notification) -> Option<String> {
+    let w::notification::Event::Generic(host) = event.event.as_ref()? else {
+        return None;
+    };
+    if host.kind != "notice" {
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_str(&host.payload.as_option()?.json).ok()?;
+    payload.get("code")?.as_str().map(ToOwned::to_owned)
+}
+
+#[test]
+fn a_companion_survives_a_create_and_an_edit_without_a_bound_model() {
+    let mut harness = Harness::unbound();
+    let before = harness
+        .app
+        .world()
+        .resource::<super::notify::Notifier>()
+        .cursor();
+    let renamed = super::mind::update(
+        harness.app.world_mut(),
+        w::UpdateCompanionRequest {
+            id: harness.companion.clone(),
+            revision: 1,
+            name: Some("Mio II".into()),
+            ..Default::default()
+        },
+    )
+    .expect("an edit to a companion whose model is not bound yet is still saved");
+    assert_eq!(renamed.name, "Mio II");
+    let companion = super::mind::create(
+        harness.app.world_mut(),
+        w::CreateCompanionRequest {
+            name: "Mio".into(),
+            mind: "kind".into(),
+            ..Default::default()
+        },
+    )
+    .expect("a companion whose model is not bound yet is still created")
+    .id;
+    super::tick(&mut harness.app);
+    // The row is the source of truth; the model component is not.
+    let store = harness.store();
+    assert!(store.companion(&companion).unwrap().is_some());
+    let entity = agent::agent_of(harness.app.world_mut(), &companion).expect("an agent");
+    assert!(harness.app.world().get::<agent::Binding>(entity).is_none());
+    // The client learns why the companion cannot reply yet.
+    let replay = harness
+        .app
+        .world()
+        .resource::<super::notify::Notifier>()
+        .replay(&before)
+        .expect("the notice is in the replay ring");
+    assert!(
+        replay
+            .iter()
+            .any(|event| notice_code(event).as_deref() == Some("model_unavailable")),
+        "the client is told the model is unavailable"
+    );
+}
+
+#[tokio::test]
+async fn a_stored_companion_without_a_model_does_not_block_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path();
+    {
+        let store = Store::open(&state.join("host.sqlite3")).unwrap();
+        store.insert_companion(&unassigned("mio")).unwrap();
+    }
+    let runtime = super::Runtime::start_with(state, super::resources::Options::default())
+        .await
+        .expect("a companion without a model must not stop the host from starting");
+    runtime.shutdown().await.unwrap();
 }
