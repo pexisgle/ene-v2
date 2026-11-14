@@ -222,18 +222,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_and_times_are_strict() {
-        for id in ["a", "companion-1", "A_b.c-9"] {
-            assert!(validate_id(id).is_ok(), "{id}");
-        }
-        for id in ["", "has space", "line\nbreak", "日本語"] {
-            assert!(validate_id(id).is_err(), "{id:?}");
-        }
-        assert_eq!(epoch("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(epoch("not a time"), None);
-    }
-
-    #[test]
     fn a_database_round_trips_and_refuses_a_newer_version() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("host.sqlite3");

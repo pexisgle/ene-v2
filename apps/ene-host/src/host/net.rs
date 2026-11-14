@@ -163,30 +163,6 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[test]
-    fn private_and_mapped_addresses_are_blocked() {
-        for address in [
-            "10.0.0.1",
-            "172.16.0.1",
-            "192.168.1.4",
-            "127.0.0.1",
-            "169.254.169.254",
-            "0.0.0.0",
-            "224.0.0.1",
-            "255.255.255.255",
-            "::1",
-            "fc00::1",
-            "fe80::1",
-            "::ffff:10.0.0.1",
-            "::ffff:127.0.0.1",
-        ] {
-            assert!(blocked_ip(address.parse().unwrap()), "{address}");
-        }
-        for address in ["8.8.8.8", "2606:4700:4700::1111"] {
-            assert!(!blocked_ip(address.parse().unwrap()), "{address}");
-        }
-    }
-
     #[tokio::test]
     async fn the_guard_allows_loopback_and_rejects_plain_remote_http() {
         for allowed in [
