@@ -252,6 +252,25 @@ CREATE TABLE IF NOT EXISTS device_operations (
 
 CREATE INDEX IF NOT EXISTS idx_operations_client ON device_operations(client_id, status);
 
+-- Playback progress: one row per accepted ReportPlaybackStatus, so an
+-- interrupted or failed position records how much was actually heard instead
+-- of implying the whole utterance was delivered (voice-avatar.md §5.3).
+CREATE TABLE IF NOT EXISTS playback_reports (
+    utterance_id TEXT NOT NULL,
+    generation_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    completed_sentence_count INTEGER NOT NULL,
+    played_sequence_nos TEXT NOT NULL DEFAULT '[]',
+    skipped_sequence_nos TEXT NOT NULL DEFAULT '[]',
+    completed_pcm_bytes INTEGER NOT NULL,
+    client_id TEXT NOT NULL,
+    activation_revision INTEGER NOT NULL,
+    received_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_playback_reports_utterance
+    ON playback_reports(utterance_id, received_at);
+
 CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
 -- Recall lists one owner's recent page.
 CREATE INDEX IF NOT EXISTS idx_memories_owner_rowid ON memories(owner, rowid);

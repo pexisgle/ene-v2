@@ -3,6 +3,7 @@ pub(crate) mod approvals;
 pub(crate) mod clients;
 pub(crate) mod companions;
 pub(crate) mod memories;
+pub(crate) mod playback;
 pub(crate) mod policies;
 pub(crate) mod schedules;
 pub(crate) mod settings;

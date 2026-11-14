@@ -43,7 +43,7 @@ cargo run --locked -p ene-host
 - **設定と接続**: `Connection` は共通ヘッダー（name / enabled / kind / revision / last_check）と種別ごとの config（LLM / TTS / STT / Embedding / MCP / ACP）を持ちます。LLMはrig-coreのカタログからモデル仕様を引き、`ConnectOptions` で資格情報・base URL・HTTPクライアントを渡してエージェントの `Connection` を組み立てます。資格情報はOSキーリング（`ENE_HOST_SESSION_CREDENTIALS` でメモリのみ）に保存し、読み出しAPIは状態だけを返します。
 - **知覚（目）**: `ClientService.ReportPerception` を受信し、アクティブウィンドウ・活動状態・クライアント要約を短い要約にして動的文脈へ渡します。古い `activation_revision` のイベントは破棄します。`set_eye_watch` は `eye.watch` を宣言・許可されたアクティブクライアントがあるときだけ公開され、ルールは解釈せず `DeviceOperation` として配送します。
 - **通知**: 1つのアウトボックスに溜め、フレームごとに起動epochと連番カーソルを付けて配信します。直近512件はカーソル再開用に保持し、`SubscribeRequest.cursor` が同epochで途切れなく続く場合は差分を再送、それ以外は `initial_state` に戻します。`client_id` 宛ての通知は他の購読者へ流しません。取りこぼしでは `resync_required` を送り、保存済み状態が正本です。
-- **音声**: TTS/STT接続が設定されていれば `VoiceService` を提供します。`Stage::Review` の文字片を文単位（`。！？\n`）で切り出して先行合成し、`generation_id`・`sequence_no`・`SentenceSkipped`・`UtteranceFinished` と `ReportPlaybackStatus` の二段階完了、Flushと端末移動時の失効を実装します。接続がなければ各RPCは明示的な `unimplemented` を返します。
+- **音声**: TTS/STT接続が設定されていれば `VoiceService` を提供します。`Stage::Review` の文字片を文単位（`。！？\n`）で切り出して先行合成し、`generation_id`・`sequence_no`・`SentenceSkipped`・`UtteranceFinished` と `ReportPlaybackStatus` の二段階完了、Flushと端末移動時の失効を実装します。最初のマイクフレームで未決承認を1件だけ`request_id`に束縛し、確定した音声の肯定/否定で回答します（曖昧・失効・世代移動は破棄）。音声認識の`transcription_id`単位で`start_work`を原子的に調停し、再生完了の掛け合いはユーザー入力なしで5回までに制限します。再生報告は`playback_reports`へ保存します。接続がなければ各RPCは明示的な `unimplemented` を返します。
 
 ## 内部構成
 
@@ -55,7 +55,9 @@ cargo run --locked -p ene-host
 | `src/host/chat.rs` | 受理レシート、停止、履歴、メッセージ |
 | `src/host/mind/` | コンパニオンCRUD、記憶、想起スコア、埋め込み索引、自動整理、動的文脈とFit、`mind_*` ツール |
 | `src/host/compaction.rs` | アイドル要約（`ene.summary`）と、単一パスの要求フィット（`fit`） |
-| `src/host/autonomy.rs` | `noop` とスケジュール登録ツール |
+| `src/host/autonomy.rs` | `noop`、スケジュール登録ツール、発火ループ（cron/run_at） |
+| `src/host/staged.rs` | Staged Promotion（一時エージェントの`SideCall`）とハートビートTick |
+| `src/host/delegation.rs` | 音声`transcription_id`単位の作業委譲調停 |
 | `src/host/voice.rs` | TTS/STTエンジン境界、文分割・世代管理・再生完了・フロア制御 |
 | `src/host/permission/` | `Stage::Gate`、承認保留と解決、ポリシー判定 |
 | `src/host/client/` | クライアント登録、能力ツールの公開、有効化世代、知覚、`DeviceStream` と操作台帳 |
@@ -66,7 +68,7 @@ cargo run --locked -p ene-host
 
 ## データベース
 
-`host.sqlite3` は `PRAGMA user_version = 1` の単一baselineです。主なテーブルは `companions` / `connections` / `settings_state` / `policy_rules` / `approval_requests` / `clients` / `activations` / `work_sessions` / `work_runs` / `work_inquiries` / `device_operations` / `memories` / `memories_fts` / `memory_edges` / `consolidation_state` / `mind_operations` / `memory_injections` / `schedules` です。`approval_requests` は端末能力の承認を `client_id` / `activation_revision` / `work_id` に束縛します。未知の新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
+`host.sqlite3` は `PRAGMA user_version = 1` の単一baselineです。主なテーブルは `companions` / `connections` / `settings_state` / `policy_rules` / `approval_requests` / `clients` / `activations` / `work_sessions` / `work_runs` / `work_inquiries` / `device_operations` / `memories` / `memories_fts` / `memory_edges` / `consolidation_state` / `mind_operations` / `memory_injections` / `schedules` / `playback_reports` です。`approval_requests` は端末能力の承認を `client_id` / `activation_revision` / `work_id` に束縛します。未知の新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
 
 - `activations` がコンパニオンごとのアクティブクライアントと世代（`revision`）を持ちます。移動はCASで世代を進め、旧世代の未完了操作を `client_moved` にします。
 - 承認は `approval_requests` に残し、起動時に未解決分を失効させます。端末能力の承認は `client_id` / `activation_revision` / `capability` も保存します。
@@ -79,8 +81,8 @@ cargo run --locked -p ene-host
 ## 現時点で実装していないもの
 
 - MCPサーバーの動的ツール登録（`rig-rmcp`）、Wasmプラグイン（Phase 2）、スキルファイル（`SKILL.md`）は未実装です。
-- 自律Tickとスケジュールの発火機構（Staged Promotionを含む）は未実装です。`schedule_create` / `list` / `cancel` は検証済みの保存のみです。
-- 知覚の優先割り込みによる親ターンの自動起床、音声承認、音声による自動Barge-inは未実装です。
+- ハートビートTickはStaged Promotionで実行し、`noop`・空応答はログへ残しません（Tick中に呼べるツールは`noop`のみ）。スケジュール発火は`Queue`で親へ直接注入します。
+- 知覚の優先割り込みによる親ターンの自動起床と、AEC参照信号を用いる自動Barge-inは未実装です（音声承認はキーワード判定、Barge-inは明示操作のみ）。
 - クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます。公開数には明示的な上限（64）があり、同名ツールの衝突・上限超過は暗黙に切り捨てずエラーにします。
 - ACP子プロセスのOS隔離はLinuxの`bwrap`のみで、macOS/WindowsのSeatbelt/AppContainerは未実装です。ACP接続の作業ディレクトリはホストのcwdで、セッション固有のworkdirは持ちません。
 

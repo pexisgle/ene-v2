@@ -10,6 +10,7 @@ use super::{
     mind::{Companion, Role},
     model::{self, Credentials},
     notify::Notifier,
+    staged::Staged,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -377,9 +378,16 @@ type AgentRows = (
     Option<&'static WorkAgent>,
 );
 
+/// The agent rows a turn projection needs.
+type TurnAgentRows = (
+    &'static AgentId,
+    Option<&'static CompanionAgent>,
+    Option<&'static WorkAgent>,
+);
+
 /// Projects every new conversation entry into `MessageCreated` notifications.
 fn publish_messages(
-    agents: Query<AgentRows>,
+    agents: Query<AgentRows, Without<Staged>>,
     mut notifier: ResMut<Notifier>,
     mut published: ResMut<Published>,
 ) {
@@ -432,7 +440,7 @@ fn publish_messages(
 /// Reports a turn that appeared this frame as streaming.
 fn turn_started(
     turns: Query<(&Turn, &TurnOf, Option<&ForAgent>), Added<TurnOf>>,
-    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
+    agents: Query<(&AgentId, Option<&CompanionAgent>), Without<Staged>>,
     mut notifier: ResMut<Notifier>,
 ) {
     for (turn, of, _) in &turns {
@@ -460,7 +468,7 @@ fn turn_settled(
     mut commands: Commands,
     settled: Query<(Entity, &TurnOutcome, &ForAgent), Added<Settled>>,
     turns: Query<&Turn>,
-    agents: Query<(&AgentId, Option<&CompanionAgent>, Option<&WorkAgent>)>,
+    agents: Query<TurnAgentRows, Without<Staged>>,
     mut notifier: ResMut<Notifier>,
 ) {
     for (turn_entity, outcome, of) in &settled {
@@ -522,7 +530,7 @@ fn turn_settled(
 fn stream_deltas(
     mut deltas: MessageReader<StreamDelta>,
     calls: Query<(), (With<TurnCall>, Without<Settled>)>,
-    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
+    agents: Query<(&AgentId, Option<&CompanionAgent>), Without<Staged>>,
     mut notifier: ResMut<Notifier>,
     mut commands: Commands,
 ) {

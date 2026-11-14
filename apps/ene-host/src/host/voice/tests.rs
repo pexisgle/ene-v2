@@ -1,5 +1,8 @@
 use super::*;
 use crate::host::db::clients::ClientDeclaration;
+use crate::host::permission::{self, Approval, ApprovalDecision, ApprovalStatus, Approved};
+use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
+use rig_ecs::tools::ToolRequest;
 
 /// Deterministic PCM, optionally failing; the tests never touch the network.
 struct FakeTts {
@@ -110,6 +113,79 @@ fn store_with_client() -> (tempfile::TempDir, Store) {
         .unwrap();
     store.activate("ene", Some("c1"), 0).unwrap();
     (root, store)
+}
+
+/// The world an approval-binding test needs: the store, the live call map and
+/// the notification outbox.
+fn voice_world(store: &Store) -> World {
+    let mut world = test_world();
+    world.insert_resource(store.clone());
+    world.insert_resource(permission::Approvals::default());
+    world.insert_resource(Notifier::new());
+    world
+}
+
+fn client_binding(world: &World) -> InputBinding {
+    bind_input(
+        world,
+        &w::AudioInputChunk {
+            client_id: "c1".into(),
+            activation_revision: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+/// A pending device approval, as the gate issues it for `c1`, revision 1.
+fn pending_approval(request_id: &str) -> Approval {
+    let arguments = serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}});
+    Approval {
+        request_id: request_id.into(),
+        session_id: "ene".into(),
+        run_id: String::new(),
+        work_id: None,
+        action_payload_hash: permission::canonicalise("device_request", &arguments).1,
+        tool_name: "device_request".into(),
+        normalized_arguments: arguments.to_string(),
+        status: ApprovalStatus::Pending,
+        created_at: crate::host::db::now(),
+        resolved_at: None,
+        client_id: Some("c1".into()),
+        activation_revision: Some(1),
+        capability: Some("device.files".into()),
+    }
+}
+
+/// Registers the live call that `submit` releases, as the gate would.
+fn hold_approval(world: &mut World, approval: &Approval) -> Entity {
+    let call = world
+        .spawn(ToolRequest {
+            call: ToolCall::new(
+                CallId::from_wire("call-1"),
+                ToolFunction::new(
+                    ToolName::new("device_request").unwrap(),
+                    serde_json::json!({
+                        "capability": "device.files",
+                        "input": {"path": "/tmp/a"},
+                    }),
+                ),
+            ),
+        })
+        .id();
+    let marker = world.spawn(()).id();
+    world
+        .resource_mut::<permission::Approvals>()
+        .by_request
+        .insert(
+            approval.request_id.clone(),
+            permission::Hold {
+                call,
+                hold: marker,
+                approval: approval.clone(),
+            },
+        );
+    call
 }
 
 fn chunks(events: &[w::AudioOutputEvent]) -> Vec<u32> {
@@ -233,7 +309,7 @@ async fn a_flush_invalidates_the_older_generation() {
 fn a_stale_playback_report_is_ignored() {
     let (_root, store) = store_with_client();
     let mut world = test_world();
-    world.insert_resource(store);
+    world.insert_resource(store.clone());
     world.insert_resource(Notifier::new());
     world.resource::<Voice>().publish("ene", "c1", 1);
     on_stream_text(&mut world, "ene", "こんにちは。");
@@ -258,6 +334,10 @@ fn a_stale_playback_report_is_ignored() {
             .acknowledged
     );
     assert!(current_owner(&world, "ene").utterance.is_some());
+    assert!(
+        store.playback_reports(&utterance.id).unwrap().is_empty(),
+        "a stale report is not stored"
+    );
 
     let mut events = world.resource::<Notifier>().subscribe();
     assert!(
@@ -267,11 +347,223 @@ fn a_stale_playback_report_is_ignored() {
     );
     assert!(current_owner(&world, "ene").utterance.is_none());
     assert!(world.resource::<Voice>().floor_holder().is_none());
+    let stored = store.playback_reports(&utterance.id).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].status,
+        crate::host::db::playback::PlaybackStatus::Completed
+    );
     world.resource_mut::<Notifier>().flush();
     assert!(matches!(
         events.try_recv().expect("speech_completed is broadcast").event,
         Some(w::notification::Event::Generic(event)) if event.kind == "speech_completed"
     ));
+}
+
+#[test]
+fn a_voice_affirmative_answers_the_bound_approval() {
+    let (_root, store) = store_with_client();
+    let approval = pending_approval("a1");
+    store.insert_approval(&approval).unwrap();
+    let mut world = voice_world(&store);
+    let call = hold_approval(&mut world, &approval);
+
+    let binding = client_binding(&world);
+    let speech = bind_speech_start(&world, &binding).expect("one pending approval is bound");
+    assert_eq!(speech.speech_start_request_id, "a1");
+    assert_eq!(speech.generation, 1);
+
+    assert!(
+        accept_transcription(
+            &mut world,
+            "t1",
+            "はい、お願いします",
+            &binding,
+            Some(&speech)
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        store.approval("a1").unwrap().unwrap().status,
+        ApprovalStatus::Approved
+    );
+    assert!(world.get::<Approved>(call).is_some());
+    // The transcript is recorded normally, and the delegation claim is keyed
+    // by its id.
+    assert!(
+        world
+            .resource::<Voice>()
+            .lock()
+            .transcriptions
+            .contains(&"t1".to_owned())
+    );
+    assert!(delegation::try_claim(&mut world, "t1", "ene"));
+    assert!(!delegation::try_claim(&mut world, "t1", "kuro"));
+}
+
+#[test]
+fn a_delayed_transcript_does_not_answer_a_later_approval() {
+    let (_root, store) = store_with_client();
+    let first = pending_approval("a1");
+    store.insert_approval(&first).unwrap();
+    let mut world = voice_world(&store);
+    hold_approval(&mut world, &first);
+    let binding = client_binding(&world);
+    let speech = bind_speech_start(&world, &binding).unwrap();
+
+    // The card resolved A while the STT ran, and B was issued afterwards.
+    store
+        .resolve_approval("a1", ApprovalStatus::Denied)
+        .unwrap();
+    let second = pending_approval("a2");
+    store.insert_approval(&second).unwrap();
+    hold_approval(&mut world, &second);
+
+    // The delayed "はい" carries A's binding and must not answer B.
+    assert!(accept_transcription(&mut world, "t1", "はい", &binding, Some(&speech)).unwrap());
+    assert_eq!(
+        store.approval("a1").unwrap().unwrap().status,
+        ApprovalStatus::Denied
+    );
+    assert_eq!(
+        store.approval("a2").unwrap().unwrap().status,
+        ApprovalStatus::Pending
+    );
+}
+
+#[test]
+fn a_moved_generation_discards_the_bound_approval() {
+    let (_root, store) = store_with_client();
+    let approval = pending_approval("a1");
+    store.insert_approval(&approval).unwrap();
+    let mut world = voice_world(&store);
+    hold_approval(&mut world, &approval);
+    let binding = client_binding(&world);
+    let speech = bind_speech_start(&world, &binding).unwrap();
+
+    // The companion moved to a new generation while the STT ran.
+    store.activate("ene", Some("c1"), 1).unwrap();
+    assert!(!accept_transcription(&mut world, "t1", "はい", &binding, Some(&speech)).unwrap());
+    assert_eq!(
+        store.approval("a1").unwrap().unwrap().status,
+        ApprovalStatus::Pending
+    );
+}
+
+#[test]
+fn two_pending_approvals_disarm_voice_approval() {
+    let (_root, store) = store_with_client();
+    store.insert_approval(&pending_approval("a1")).unwrap();
+    store.insert_approval(&pending_approval("a2")).unwrap();
+    let mut world = voice_world(&store);
+    let binding = client_binding(&world);
+
+    // Two pending requests are ambiguous: the screen card must choose.
+    assert!(bind_speech_start(&world, &binding).is_none());
+    assert!(accept_transcription(&mut world, "t1", "はい", &binding, None).unwrap());
+    for request in ["a1", "a2"] {
+        assert_eq!(
+            store.approval(request).unwrap().unwrap().status,
+            ApprovalStatus::Pending
+        );
+    }
+}
+
+#[test]
+fn a_voice_intent_is_conservative() {
+    for text in [
+        "はい",
+        "いいよ",
+        "お願いします",
+        "実行して",
+        "どうぞ",
+        "yes",
+        "OK",
+        "Approve it",
+    ] {
+        assert_eq!(
+            approval_intent(text),
+            Some(ApprovalDecision::Approve),
+            "{text}"
+        );
+    }
+    for text in [
+        "いいえ",
+        "だめ",
+        "やめて",
+        "やらない",
+        "キャンセル",
+        "no",
+        "deny",
+        "cancel",
+    ] {
+        assert_eq!(
+            approval_intent(text),
+            Some(ApprovalDecision::Deny),
+            "{text}"
+        );
+    }
+    // A negative word wins when both kinds appear, and an unknown sentence is
+    // never an approval.
+    assert_eq!(
+        approval_intent("いや、いいえ、いいです"),
+        Some(ApprovalDecision::Deny)
+    );
+    assert_eq!(approval_intent("not now"), None);
+    assert_eq!(approval_intent("そうですね"), None);
+}
+
+fn complete_playback(world: &mut World) -> bool {
+    on_stream_text(world, "ene", "こんにちは。");
+    on_turn_end(world, "ene");
+    let utterance = current_owner(world, "ene").utterance.clone().unwrap();
+    let report = w::PlaybackStatusReport {
+        utterance_id: utterance.id,
+        generation_id: utterance.generation_id,
+        status: w::playback_status_report::Status::PLAYBACK_COMPLETED.into(),
+        completed_sentence_count: utterance.total_sentences,
+        client_id: "c1".into(),
+        activation_revision: 1,
+        ..Default::default()
+    };
+    let acknowledged = report_playback(world, report).unwrap().acknowledged;
+    world.resource_mut::<Notifier>().flush();
+    acknowledged
+}
+
+fn relayed(events: &mut tokio::sync::broadcast::Receiver<w::Notification>) -> usize {
+    let mut count = 0;
+    while let Ok(notification) = events.try_recv() {
+        if matches!(
+            notification.event,
+            Some(w::notification::Event::Generic(event)) if event.kind == "speech_completed"
+        ) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[test]
+fn the_autonomous_relay_stops_after_five_completions() {
+    let (_root, store) = store_with_client();
+    let mut world = voice_world(&store);
+    world.resource::<Voice>().publish("ene", "c1", 1);
+    let mut events = world.resource::<Notifier>().subscribe();
+
+    for _ in 0..MAX_RELAY + 1 {
+        assert!(complete_playback(&mut world));
+    }
+    // Five peer prompts are relayed; the sixth completed utterance releases
+    // the floor but no longer invites a peer to answer.
+    assert_eq!(relayed(&mut events), MAX_RELAY as usize);
+
+    // An explicit user turn opens the budget again.
+    note_user_input(&world);
+    for _ in 0..2 {
+        assert!(complete_playback(&mut world));
+    }
+    assert_eq!(relayed(&mut events), 2);
 }
 
 #[test]
@@ -311,7 +603,7 @@ fn a_moved_activation_discards_the_transcription() {
         ..Default::default()
     };
     let binding = bind_input(&world, &chunk).unwrap();
-    assert!(accept_transcription(&mut world, "t1", "こんにちは", &binding).unwrap());
+    assert!(accept_transcription(&mut world, "t1", "こんにちは", &binding, None).unwrap());
     assert!(
         world
             .resource::<Voice>()
@@ -322,7 +614,7 @@ fn a_moved_activation_discards_the_transcription() {
 
     // The HTTP call happened before the move; acceptance must revalidate.
     store.activate("ene", Some("c1"), 1).unwrap();
-    assert!(!accept_transcription(&mut world, "t2", "さようなら", &binding).unwrap());
+    assert!(!accept_transcription(&mut world, "t2", "さようなら", &binding, None).unwrap());
     assert!(
         !world
             .resource::<Voice>()
@@ -340,7 +632,7 @@ fn a_moved_activation_discards_the_transcription() {
         },
     )
     .unwrap();
-    assert!(accept_transcription(&mut world, "t3", "ただいま", &moved).unwrap());
+    assert!(accept_transcription(&mut world, "t3", "ただいま", &moved, None).unwrap());
     assert!(
         world
             .resource::<Voice>()

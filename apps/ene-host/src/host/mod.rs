@@ -10,6 +10,7 @@ pub(crate) mod chat;
 pub(crate) mod client;
 pub(crate) mod compaction;
 pub(crate) mod db;
+pub(crate) mod delegation;
 pub(crate) mod error;
 pub(crate) mod json;
 pub(crate) mod mind;
@@ -18,6 +19,7 @@ pub(crate) mod notify;
 pub(crate) mod permission;
 pub(crate) mod resources;
 pub(crate) mod settings;
+pub(crate) mod staged;
 pub(crate) mod tools;
 pub(crate) mod voice;
 
@@ -143,6 +145,7 @@ impl Runtime {
                         work::WorkPlugin,
                         mind::MindPlugin,
                         autonomy::AutonomyPlugin,
+                        staged::StagedPlugin,
                         compaction::CompactionPlugin,
                         voice::VoicePlugin,
                     ));

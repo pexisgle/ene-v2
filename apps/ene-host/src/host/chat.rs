@@ -34,6 +34,8 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     let world = app.world_mut();
     // Only an explicit user action resets the compaction idle clock.
     super::compaction::note_user_activity(world);
+    // A typed message opens a new autonomous relay budget (voice-avatar.md §5.3).
+    super::voice::note_user_input(world);
     let store = world.resource::<Store>().clone();
     store
         .companion(&request.companion_id)?

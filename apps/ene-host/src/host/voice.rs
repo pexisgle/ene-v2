@@ -5,9 +5,11 @@
 use super::{
     agent,
     db::{self, Result, Store},
+    delegation,
     error::HostError,
     model::Credentials,
     notify::Notifier,
+    permission::{self, ApprovalDecision, ApprovalStatus},
     resources::HostRuntime,
     settings::{Connection, ConnectionConfig, ConnectionKind, Endpoint},
 };
@@ -43,6 +45,9 @@ const TRANSCRIPTION_MEMORY: usize = 128;
 const MAX_SENTENCES: u32 = 64;
 const AUDIO_QUEUE: usize = 32;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Completed companion utterances the host relays to the peers without a new
+/// user input before it stops the autonomous chain (voice-avatar.md §5.3).
+const MAX_RELAY: u32 = 5;
 
 pub(crate) const VOICE_UNAVAILABLE: &str = "voice requires a configured TTS/STT connection";
 
@@ -793,6 +798,8 @@ struct State {
     owners: HashMap<String, Owner>,
     works: HashMap<String, Work>,
     transcriptions: VecDeque<String>,
+    /// Completed companion utterances broadcast since the last user input.
+    relay: u32,
 }
 
 impl State {
@@ -1144,6 +1151,26 @@ impl Voice {
         }
         true
     }
+
+    /// Counts one more relayed companion utterance. After [`MAX_RELAY`] the
+    /// autonomous chain pauses: the completed speech still releases the floor
+    /// and the head still answers an explicit user turn, but no
+    /// `speech_completed` event is broadcast, so no peer is prompted to answer
+    /// itself again (voice-avatar.md §5.3, the cap is on user-input-free
+    /// relay turns).
+    fn relay_open(&self) -> bool {
+        let mut state = self.lock();
+        if state.relay >= MAX_RELAY {
+            return false;
+        }
+        state.relay += 1;
+        true
+    }
+
+    /// An accepted user input opens a new relay budget.
+    fn note_user_input(&self) {
+        self.lock().relay = 0;
+    }
 }
 
 fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -1492,6 +1519,116 @@ pub(crate) fn is_still_active(world: &World, binding: &InputBinding) -> bool {
     })
 }
 
+/// The approval a speech capture is bound to at its start
+/// (docs/design/permissions.md §4.2). The final transcript may answer only
+/// this request, and only while it is still pending for the same client
+/// generation; a delayed STT result must never apply to a later request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SpeechBinding {
+    /// The `approval_requests.request_id` captured when the capture started.
+    pub(crate) speech_start_request_id: String,
+    pub(crate) client_id: String,
+    /// The activation revision the approval was bound to.
+    pub(crate) generation: u64,
+}
+
+/// Binds the capture to the one pending approval of this client generation.
+/// Two or more pending approvals are ambiguous, so voice stays out and the
+/// screen card decides (permissions.md §4.2 "同時に1件のみ").
+pub(crate) fn bind_speech_start(world: &World, binding: &InputBinding) -> Option<SpeechBinding> {
+    let store = world.get_resource::<Store>()?;
+    let pending = store.approvals(ApprovalStatus::Pending).ok()?;
+    let mut candidates = pending.into_iter().filter(|approval| {
+        approval.client_id.as_deref() == Some(binding.client_id.as_str())
+            && approval.activation_revision == Some(binding.activation_revision)
+    });
+    let approval = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some(SpeechBinding {
+        speech_start_request_id: approval.request_id,
+        client_id: binding.client_id.clone(),
+        generation: binding.activation_revision,
+    })
+}
+
+const AFFIRMATIVE_JAPANESE: [&str; 6] =
+    ["はい", "いいよ", "いいです", "お願い", "実行して", "どうぞ"];
+const NEGATIVE_JAPANESE: [&str; 5] = ["いいえ", "だめ", "やめて", "やらない", "キャンセル"];
+const AFFIRMATIVE_ENGLISH: [&str; 4] = ["yes", "approve", "approved", "ok"];
+const NEGATIVE_ENGLISH: [&str; 4] = ["no", "deny", "denied", "cancel"];
+
+/// A conservative keyword intent for a voice approval (permissions.md §4.2).
+///
+/// This is an approximation, not natural-language understanding: a Japanese
+/// word matches as a substring, an English word must match a whole token (so
+/// "no" does not fire inside "not"), and a negative word wins when both kinds
+/// appear. Anything else is discarded, because an ambiguous utterance must not
+/// approve an irreversible operation.
+fn approval_intent(text: &str) -> Option<ApprovalDecision> {
+    let lower = text.trim().to_lowercase();
+    let negative = NEGATIVE_JAPANESE.iter().any(|word| lower.contains(word))
+        || english_tokens(&lower).any(|word| NEGATIVE_ENGLISH.contains(&word));
+    if negative {
+        return Some(ApprovalDecision::Deny);
+    }
+    let affirmative = AFFIRMATIVE_JAPANESE.iter().any(|word| lower.contains(word))
+        || english_tokens(&lower).any(|word| AFFIRMATIVE_ENGLISH.contains(&word));
+    affirmative.then_some(ApprovalDecision::Approve)
+}
+
+fn english_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+}
+
+/// Answers the approval bound when the capture started, if the final
+/// transcript carries an unambiguous intent and the request survived until
+/// now. A stale request, a moved generation or a non-matching binding is
+/// discarded; the transcript itself was already recorded as an ordinary
+/// utterance.
+fn submit_voice_approval(
+    world: &mut World,
+    text: &str,
+    binding: &InputBinding,
+    speech: &SpeechBinding,
+) {
+    let Some(decision) = approval_intent(text) else {
+        return;
+    };
+    if speech.client_id != binding.client_id || speech.generation != binding.activation_revision {
+        return;
+    }
+    let Some(store) = world.get_resource::<Store>().cloned() else {
+        return;
+    };
+    let Ok(Some(approval)) = store.approval(&speech.speech_start_request_id) else {
+        return;
+    };
+    // A screen click, a stop or a client move may have resolved the request
+    // while the STT ran: the delayed text must not answer anything else.
+    if approval.status != ApprovalStatus::Pending
+        || approval.client_id.as_deref() != Some(binding.client_id.as_str())
+        || approval.activation_revision != Some(binding.activation_revision)
+        || !is_still_active(world, binding)
+    {
+        return;
+    }
+    match permission::submit(world, &speech.speech_start_request_id, decision) {
+        Ok(approval) => tracing::debug!(
+            request = %approval.request_id,
+            status = approval.status.as_str(),
+            "a voice transcript answered an approval"
+        ),
+        Err(error) => tracing::debug!(
+            request = %speech.speech_start_request_id,
+            %error,
+            "a voice approval was discarded"
+        ),
+    }
+}
+
 pub(crate) struct AudioSubscription {
     pub(crate) subscription_id: String,
     pub(crate) receiver: mpsc::Receiver<w::AudioOutputEvent>,
@@ -1600,12 +1737,18 @@ pub(crate) fn report_playback(
     if !ended {
         return Ok(response(false));
     }
+    // Only a report that passed the generation and client checks is stored;
+    // a stale position must not overwrite the recorded progress.
+    let Some(stored) = db::playback::PlaybackReport::from_wire(&report) else {
+        return Ok(response(false));
+    };
+    store.insert_playback_report(&stored)?;
     let total_sentences = owner
         .utterance
         .as_ref()
         .map(|utterance| utterance.total_sentences);
     voice.release(&companion);
-    if completed {
+    if completed && voice.relay_open() {
         broadcast_speech_completed(world, &companion, &report, total_sentences);
     }
     Ok(response(true))
@@ -1648,16 +1791,21 @@ pub(crate) fn accept_transcription(
     transcription_id: &str,
     text: &str,
     binding: &InputBinding,
+    speech: Option<&SpeechBinding>,
 ) -> Result<bool> {
     let text = text.trim();
     if text.is_empty() || !is_still_active(world, binding) {
         return Ok(false);
     }
-    if let Some(voice) = world.get_resource::<Voice>()
-        && !voice.accept_transcription(transcription_id)
-    {
-        return Ok(false);
+    if let Some(voice) = world.get_resource::<Voice>() {
+        if !voice.accept_transcription(transcription_id) {
+            return Ok(false);
+        }
+        // A new user turn ends the autonomous relay chain (§5.3).
+        voice.note_user_input();
     }
+    // The delegation claim of `start_work` is keyed by this transcription id.
+    delegation::record(world, transcription_id);
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return Ok(false);
     };
@@ -1689,7 +1837,21 @@ pub(crate) fn accept_transcription(
             Deliver::new(agent, text.to_owned(), DeliveryMode::Steer).with_author(author.clone()),
         );
     }
+    // The transcript is recorded above whatever the approval outcome is: an
+    // ambiguous or stale voice answer never stops the utterance from reaching
+    // the companions.
+    if let Some(speech) = speech {
+        submit_voice_approval(world, text, binding, speech);
+    }
     Ok(true)
+}
+
+/// An accepted chat message opens a new autonomous relay budget, exactly like
+/// an accepted transcription.
+pub(crate) fn note_user_input(world: &World) {
+    if let Some(voice) = world.get_resource::<Voice>() {
+        voice.note_user_input();
+    }
 }
 
 pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
@@ -1781,7 +1943,8 @@ pub(crate) struct VoicePlugin;
 impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
         let runtime = app.world().resource::<HostRuntime>().0.clone();
-        app.insert_resource(Voice::new(runtime))
+        app.init_resource::<delegation::Delegation>()
+            .insert_resource(Voice::new(runtime))
             .add_systems(Update, expire_playback);
     }
 }

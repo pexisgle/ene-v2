@@ -3,6 +3,7 @@ use super::{Inquiry, RunState, WorkSession, WorkStatus};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent, WorkReports},
     db::{Result, Store},
+    delegation,
     error::HostError,
     tools::run_tool,
 };
@@ -107,6 +108,22 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     if args.instruction.trim().is_empty() {
         return Err(HostError::invalid("an instruction is required"));
     }
+    // Every companion receives the same transcription. The delegation key is
+    // the transcription id the host bound to this turn, never an LLM argument,
+    // so only the first companion starts irreversible work (voice-avatar.md
+    // §5.2). A manual chat message has no recorded transcription id and is
+    // never claimed.
+    if let Some(transcription_id) = transcription_id(world, agent)
+        && !delegation::try_claim(world, &transcription_id, &companion)
+    {
+        // A peer already took the task: this is a normal result, not an error,
+        // so the model can support the peer instead of retrying.
+        return Ok(json!({
+            "claimed": false,
+            "reason": "another companion already took this task; support them or wait instead of starting duplicate work",
+        })
+        .to_string());
+    }
     if let Some(work_id) = args.work_id.as_deref().filter(|id| !id.is_empty()) {
         let session = own_session(world, work_id, &companion)?;
         if session.status == WorkStatus::Closed {
@@ -128,6 +145,23 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
         },
     )?;
     Ok(json!({"work_id": session.id}).to_string())
+}
+
+/// The voice recognition event the current turn answers: the request id the
+/// voice pipeline put on the latest user entry. A chat message carries a
+/// request id there too, but only a transcription recorded by the voice
+/// pipeline can be claimed, so manual chat is never treated as a delegation.
+fn transcription_id(world: &World, agent: Entity) -> Option<String> {
+    let conversation = world.get::<Conversation>(agent)?;
+    conversation
+        .entries()
+        .rev()
+        .find(|entry| entry.is_users_own())?
+        .author?
+        .request
+        .as_ref()
+        .map(|request| request.0.clone())
+        .filter(|id| !id.is_empty())
 }
 
 fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
@@ -310,7 +344,19 @@ fn inform(world: &mut World, companion: &str, run_id: &str, text: String, mode: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::agent::TestModel;
+    use crate::host::delegation::Delegation;
+    use crate::host::mind::{Assignments, Companion, Profile, State};
+    use crate::host::notify::Notifier;
     use crate::host::work::{Runs, new_run};
+    use rig_core::catalog::Catalog;
+    use rig_core::completion::Message;
+    use rig_core::conversation::{Entry, RequestId};
+    use rig_core::operation::Completion;
+    use rig_core::serve::{ErasedHandler, adapters::ModelAdapter};
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+    use rig_ecs::effects::Handler;
+    use std::sync::Arc;
 
     #[test]
     fn report_binds_to_the_active_run_not_the_spawned_one() {
@@ -362,5 +408,118 @@ mod tests {
                 .unwrap()
                 .contains("\"accepted\":true")
         );
+    }
+
+    fn companion(id: &str) -> Companion {
+        Companion {
+            id: id.into(),
+            name: id.into(),
+            mind: "core".into(),
+            profile: Profile::default(),
+            profile_revision: 1,
+            state: State::default(),
+            state_revision: 1,
+            body: crate::host::json::JsonDoc::new("ene.body.v1", serde_json::json!({})),
+            voice: crate::host::json::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
+            assignments: Assignments::default(),
+            persona: None,
+            voice_identifier: None,
+            revision: 1,
+            created_at: crate::host::db::now(),
+            updated_at: crate::host::db::now(),
+        }
+    }
+
+    fn bound(model: &MockCompletionModel) -> crate::host::model::Bound {
+        let spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .unwrap()
+            .shared();
+        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
+            spec.reference(),
+            model.clone(),
+        ));
+        crate::host::model::Bound {
+            connection: rig_ecs::model::Connection {
+                spec: Arc::clone(&spec),
+                handler: Handler(handler),
+            },
+        }
+    }
+
+    /// A world with just enough resources for `start_work` to create a run.
+    fn work_world(store: Store) -> World {
+        let model =
+            MockCompletionModel::from_stream_turns(std::iter::empty::<Vec<MockStreamEvent>>());
+        let mut world = World::new();
+        world.insert_resource(store);
+        world.insert_resource(Delegation::default());
+        world.insert_resource(super::super::acp::AcpBackends::default());
+        world.insert_resource(Runs::default());
+        world.insert_resource(Notifier::new());
+        world.insert_resource(TestModel(Arc::new(move || bound(&model))));
+        world
+    }
+
+    /// A companion agent whose latest user entry answers `request`.
+    fn companion_turn(world: &mut World, companion_id: &str, request: Option<&str>) -> Entity {
+        let mut conversation = Conversation::default();
+        conversation.push(Entry::new(Message::user("フォルダを調べて")).by(Author {
+            request: request.map(|id| RequestId(id.to_owned())),
+            ..Author::user()
+        }));
+        world
+            .spawn((
+                CompanionAgent {
+                    companion_id: companion_id.into(),
+                },
+                conversation,
+            ))
+            .id()
+    }
+
+    #[test]
+    fn only_the_first_companion_claims_a_voice_transcription() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+        for id in ["ene", "kuro"] {
+            store.insert_companion(&companion(id)).unwrap();
+        }
+        let mut world = work_world(store.clone());
+        delegation::record(&mut world, "t1");
+        let ene = companion_turn(&mut world, "ene", Some("t1"));
+        let kuro = companion_turn(&mut world, "kuro", Some("t1"));
+        let args = || StartArgs {
+            instruction: "フォルダを調べて".into(),
+            work_id: None,
+        };
+
+        let first = super::start(&mut world, ene, args()).unwrap();
+        assert!(first.contains("\"work_id\""), "{first}");
+        assert_eq!(store.work_sessions("ene").unwrap().len(), 1);
+
+        // The peer gets an ordinary tool result, not an error, and no session.
+        let second = super::start(&mut world, kuro, args()).unwrap();
+        assert!(second.contains("\"claimed\":false"), "{second}");
+        assert!(second.contains("another companion"), "{second}");
+        assert!(store.work_sessions("kuro").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_manual_chat_turn_is_not_a_delegation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+        let mut world = work_world(store);
+        let manual = companion_turn(&mut world, "ene", None);
+        assert_eq!(transcription_id(&world, manual), None);
+
+        // A chat acceptance request id is present in the conversation, but the
+        // voice pipeline never recorded it, so it is not arbitrated.
+        let chat = companion_turn(&mut world, "ene", Some("chat-request"));
+        assert_eq!(
+            transcription_id(&world, chat).as_deref(),
+            Some("chat-request")
+        );
+        assert!(delegation::try_claim(&mut world, "chat-request", "kuro"));
     }
 }

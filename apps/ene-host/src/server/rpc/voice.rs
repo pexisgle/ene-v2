@@ -74,6 +74,9 @@ impl w::VoiceService for Services {
                                 recognition.pending.clear();
                                 recognition.speaking = false;
                                 recognition.transcription_id.clear();
+                                // Playback echo never binds an approval
+                                // (permissions.md §4.2).
+                                recognition.approval = None;
                                 continue;
                             }
                             if chunk.sample_rate != 0 {
@@ -103,6 +106,19 @@ impl w::VoiceService for Services {
                                     if recognition.transcription_id.is_empty() {
                                         recognition.transcription_id =
                                             uuid::Uuid::new_v4().to_string();
+                                    }
+                                    // Bind the one pending approval of this
+                                    // client generation when the capture
+                                    // starts, not when the transcript lands:
+                                    // a delayed STT result may only answer
+                                    // the request that was pending then.
+                                    if let Some(binding) = recognition.binding.clone() {
+                                        recognition.approval = runtime
+                                            .read(move |app| {
+                                                Ok(voice::bind_speech_start(app.world(), &binding))
+                                            })
+                                            .await
+                                            .map_err(ConnectError::from)?;
                                     }
                                     yield Ok(w::TranscriptionEvent {
                                         transcription_id: recognition.transcription_id.clone(),
@@ -218,6 +234,8 @@ fn setup_error(error: SetupError) -> ConnectError {
 #[derive(Default)]
 struct Recognition {
     binding: Option<InputBinding>,
+    /// The approval bound at this capture's start, if it was unambiguous.
+    approval: Option<voice::SpeechBinding>,
     pending: Vec<u8>,
     sample_rate: u32,
     transcription_id: String,
@@ -233,12 +251,17 @@ impl Recognition {
         self.speaking = false;
         if self.pending.len() < voice::MIN_STT_BYTES {
             self.pending.clear();
+            self.approval = None;
             return Ok(None);
         }
         let pcm = std::mem::take(&mut self.pending);
         let Some(binding) = self.binding.clone() else {
+            self.approval = None;
             return Ok(None);
         };
+        // The binding belongs to this capture only: consume it however the
+        // rest of the flush goes.
+        let speech = self.approval.take();
         let active = runtime
             .read({
                 let binding = binding.clone();
@@ -266,7 +289,15 @@ impl Recognition {
             .call({
                 let id = transcription_id.clone();
                 let text = text.clone();
-                move |app| voice::accept_transcription(app.world_mut(), &id, &text, &binding)
+                move |app| {
+                    voice::accept_transcription(
+                        app.world_mut(),
+                        &id,
+                        &text,
+                        &binding,
+                        speech.as_ref(),
+                    )
+                }
             })
             .await
             .map_err(ConnectError::from)?;
