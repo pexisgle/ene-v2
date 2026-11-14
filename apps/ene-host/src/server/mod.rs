@@ -49,9 +49,16 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
     }
     access.publish(&format!("http://{local}/rpc"))?;
+    let guard = auth::Guard::new(access.token.clone());
+    if !guard.allowed().is_empty() {
+        eprintln!(
+            "ene-host: trusting Host/Origin authorities {} besides loopback; the Owner Bearer is still required",
+            guard.allowed().join(",")
+        );
+    }
     eprintln!("ene-host: authenticated service ready on {local}");
     let shutdown = CancellationToken::new();
-    let app = router(runtime.clone(), access.token.clone(), shutdown.clone());
+    let app = router(runtime.clone(), guard, shutdown.clone());
     let running = runtime.clone();
     // `axum::serve` drives each connection through `hyper_util`'s
     // `server::conn::auto::Builder`, so it accepts HTTP/2 prior knowledge on a

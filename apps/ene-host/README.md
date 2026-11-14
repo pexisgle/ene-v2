@@ -2,7 +2,7 @@
 
 AIとの会話、コンパニオンの心と記憶、作業セッション、接続・設定・承認、クライアント能力と端末操作をまとめる常駐ホストです。会話の正本は rig v0.46.0 のセッションログ（`rig-ecs` + `rig-memory::DirStore`）に任せ、SQLite はコンパニオン・設定・承認・受付・作業・クライアント・記憶だけを持ちます。
 
-> このパッケージは [ホストAPI設計](../../docs/api.md)（§7 のカノニカル Protobuf 定義が正本）と [全体アーキテクチャ](../../docs/architecture.md) に沿って書き直した実装です。製品としての振る舞いは [docs/features](../../docs/features/README.md)、知覚・身体・音声の契約は [共通仕様](../../docs/design/voice-avatar.md) を参照してください。**接続経路の認証はOwner Bearerのみ**です（[ホスト接続の設計](../../docs/design/host-access.md) の移行は未完了）。`client_id` は接続端末の区別であり、認証情報ではありません。
+> このパッケージは [ホストAPI設計](../../docs/api.md)（§7 のカノニカル Protobuf 定義が正本）と [全体アーキテクチャ](../../docs/architecture.md) に沿って書き直した実装です。製品としての振る舞いは [docs/features](../../docs/features/README.md)、知覚・身体・音声の契約は [共通仕様](../../docs/design/voice-avatar.md) を参照してください。**接続経路の認証はOwner Bearerのみ**です（[ホスト接続の設計](../../docs/design/host-access.md) の移行は未完了）。外部入口を経由する場合は、`ENE_HOST_ALLOWED_HOSTS` にその入口の名前を設定します。`client_id` は接続端末の区別であり、認証情報ではありません。
 
 ## 起動
 
@@ -22,6 +22,7 @@ cargo run --locked -p ene-host
 | `ENE_HOST_STATE_DIR` | `host.sqlite3` とRigセッションログ（`<state>/rig/`）の保存先 |
 | `ENE_HOST_RUNTIME_DIR` | `connection.json` とロックの保存先 |
 | `ENE_HOST_BIND` | 待受アドレス（既定 `127.0.0.1:0`）。loopback以外は警告を出し、Owner Bearerは必須のまま |
+| `ENE_HOST_ALLOWED_HOSTS` | loopback以外で`Host`/`Origin`として受け入れるauthority（カンマ区切り、例 `ene.example.com`）。Tailscale ServeやCloudflare Tunnelが公開名をそのまま転送する場合に設定する。未設定はloopbackのみ |
 | `ENE_HOST_ALLOWED_CAPABILITIES` | クライアントに許可する能力名のカンマ区切り。`*`で全宣言を許可。未設定・空は何も許可しない（操作単位の承認は別に必要） |
 | `ENE_HOST_SESSION_CREDENTIALS` | 設定時、登録した資格情報をOSキーリングではなくメモリだけに保持する |
 | `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | 登録済み資格情報がない場合のフォールバック |

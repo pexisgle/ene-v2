@@ -155,7 +155,11 @@ impl From<HostError> for ConnectError {
     }
 }
 
-pub(super) fn router(runtime: Runtime, token: String, shutdown: CancellationToken) -> axum::Router {
+pub(super) fn router(
+    runtime: Runtime,
+    guard: auth::Guard,
+    shutdown: CancellationToken,
+) -> axum::Router {
     let services = Arc::new(Services { runtime, shutdown });
     let connect = w::HostServiceExt::register(services.clone(), Router::new());
     let connect = w::ChatServiceExt::register(services.clone(), connect);
@@ -165,5 +169,5 @@ pub(super) fn router(runtime: Runtime, token: String, shutdown: CancellationToke
     let connect = w::VoiceServiceExt::register(services, connect);
     axum::Router::new()
         .nest_service("/rpc", connect.into_axum_router())
-        .layer(middleware::from_fn_with_state(token, auth::authenticate))
+        .layer(middleware::from_fn_with_state(guard, auth::authenticate))
 }
