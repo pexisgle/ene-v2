@@ -24,10 +24,7 @@ use bevy_ecs::prelude::*;
 use rig_core::{
     driver::DynModel,
     operation::Embedding,
-    providers::{
-        openai::OpenAIConfig,
-        registry::{ProviderConfig, ProviderId},
-    },
+    providers::{openai::OpenAIConfig, registry::ProviderConfig},
 };
 use rig_ecs::prelude::*;
 use std::{
@@ -84,7 +81,7 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let secret = target.secret.clone().unwrap_or_default();
     let default =
         crate::host::settings::provider(&target.adapter).map_or_else(String::new, |p| p.endpoint);
-    let config = match ProviderId::catalog(&target.adapter)
+    let config = match crate::host::model::provider_of(&target.adapter)
         .and_then(|provider| provider.config(secret.clone()))
     {
         Some(config) if target.endpoint != default => config.with_base_url(target.endpoint.clone()),
@@ -608,6 +605,7 @@ mod tests {
     use super::*;
     use crate::host::db::memories::MemoryRecord;
     use crate::host::mind::memory::Memory;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn store() -> Store {
         let temp = tempfile::tempdir().unwrap();
@@ -636,6 +634,59 @@ mod tests {
             &encode(vector),
         )
         .unwrap();
+    }
+
+    /// Serves the reply shape the request path asks for: Gemini's native batch
+    /// reply under `:batchEmbedContents`, the OpenAI-shaped one elsewhere.
+    async fn embedding_endpoint() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = [0u8; 4_096];
+                let Ok(read) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or_default();
+                let body = if path.contains(":batchEmbedContents") {
+                    r#"{"embeddings":[{"values":[1.0,0.0]},{"values":[0.0,1.0]}]}"#
+                } else {
+                    r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[0.0,1.0],"index":1}],
+                        "usage":{"prompt_tokens":2,"total_tokens":2}}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        address
+    }
+
+    /// `gemini` reaches Gemini's native batch endpoint; an adapter rig has no
+    /// preset for keeps the OpenAI-shaped one.
+    #[tokio::test]
+    async fn embedding_wires_follow_the_adapter() {
+        let address = embedding_endpoint().await;
+        for adapter in ["gemini", "custom"] {
+            let target = Target {
+                adapter: adapter.into(),
+                model_id: "gemini-embedding-001".into(),
+                dimensions: 2,
+                endpoint: format!("http://{address}"),
+                secret: None,
+                space: space_id("gemini-embedding-001", 2),
+            };
+            let vectors = request(&target, &["a".to_owned(), "b".to_owned()])
+                .await
+                .unwrap();
+            assert_eq!(vectors, [vec![1.0, 0.0], vec![0.0, 1.0]], "{adapter}");
+        }
     }
 
     #[test]
