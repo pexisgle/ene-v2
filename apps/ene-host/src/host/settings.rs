@@ -26,16 +26,10 @@ impl ConnectionKind {
         }
     }
 
+    /// Reads a stored name back through the same serde spelling `as_str` writes.
     pub(crate) fn parse(text: &str) -> Option<Self> {
-        Some(match text {
-            "llm" => Self::Llm,
-            "tts" => Self::Tts,
-            "stt" => Self::Stt,
-            "embedding" => Self::Embedding,
-            "mcp" => Self::Mcp,
-            "acp" => Self::Acp,
-            _ => return None,
-        })
+        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
+            .ok()
     }
 }
 
@@ -191,11 +185,8 @@ impl CredentialState {
     }
 
     pub(crate) fn parse(text: &str) -> Self {
-        match text {
-            "registered" => Self::Registered,
-            "environment" => Self::Environment,
-            _ => Self::Absent,
-        }
+        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
+            .unwrap_or_default()
     }
 }
 
