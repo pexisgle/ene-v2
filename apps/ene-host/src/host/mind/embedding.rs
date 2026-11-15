@@ -79,6 +79,20 @@ struct Models {
 pub(crate) struct Embeddings {
     models: Arc<Mutex<Models>>,
     index: Arc<Mutex<CompactVectorIndex>>,
+    /// The plugin providers this host loaded. Empty on a host with none, so a
+    /// catalog-only setup behaves exactly as before.
+    providers: crate::host::providers::Providers,
+}
+
+impl Embeddings {
+    /// The vector cache, with the provider registry its connections resolve
+    /// through.
+    pub(crate) fn with_providers(providers: crate::host::providers::Providers) -> Self {
+        Self {
+            providers,
+            ..Self::default()
+        }
+    }
 }
 
 /// A vector row waiting for an embedding.
@@ -125,7 +139,19 @@ fn connect(
     secret: Option<String>,
     model_id: &str,
     dimensions: usize,
+    providers: Option<&crate::host::providers::Providers>,
 ) -> Result<DynModel<Embedding>> {
+    // A plugin provider answers through the host's broker, not through rig's
+    // HTTP client, so it is resolved before the catalog is consulted.
+    if let Some(running) =
+        providers.and_then(|providers| providers.running(adapter, ene_plugin::Extension::Embedding))
+    {
+        return Ok(super::plugin::embedding(
+            running,
+            model_id.to_owned(),
+            dimensions,
+        ));
+    }
     let secret = secret.unwrap_or_default();
     let default = crate::host::settings::provider(adapter).map_or_else(String::new, |p| p.endpoint);
     let config = match crate::host::model::provider_of(adapter)
@@ -213,6 +239,7 @@ fn target(
         secret,
         model_id,
         dimensions,
+        Some(&embeddings.providers),
     )?;
     let target = Target {
         model,
@@ -591,7 +618,14 @@ async fn fill(
 
 /// Registers the vector cache and its backfill.
 pub(crate) fn register(app: &mut App) {
-    app.init_resource::<Embeddings>()
+    // The registry is already a resource by the time plugins register, so the
+    // cache takes the same handle rather than a second copy.
+    let providers = app
+        .world()
+        .get_resource::<crate::host::providers::Providers>()
+        .cloned()
+        .unwrap_or_default();
+    app.insert_resource(Embeddings::with_providers(providers))
         .init_resource::<Backfill>()
         .add_systems(Update, backfill.after(AgentLoop));
 }

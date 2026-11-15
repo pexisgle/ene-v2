@@ -177,6 +177,7 @@ pub(crate) enum Role {
 
 pub(crate) mod consolidate;
 pub(crate) mod embedding;
+pub(crate) mod plugin;
 pub(crate) mod recall;
 pub(crate) mod tools;
 

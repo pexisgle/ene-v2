@@ -3161,6 +3161,8 @@ dependencies = [
  "croner",
  "crossbeam-channel",
  "directories",
+ "ene-plugin",
+ "ene-plugin-runtime",
  "ene-rpc",
  "futures-util",
  "getrandom 0.4.3",

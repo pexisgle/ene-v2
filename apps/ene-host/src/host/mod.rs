@@ -20,6 +20,7 @@ pub(crate) mod model;
 pub(crate) mod net;
 pub(crate) mod notify;
 pub(crate) mod permission;
+pub(crate) mod providers;
 pub(crate) mod resources;
 pub(crate) mod settings;
 pub(crate) mod staged;
@@ -120,6 +121,18 @@ impl Runtime {
         let thread_hub = hub.clone();
         let host_runtime = tokio::runtime::Handle::current();
         let thread_store = store.clone();
+        // Plugin packages are read and verified once, before the kernel runs,
+        // so every path that resolves a connection stays synchronous. The
+        // instances the stored connections reference start here too, for the
+        // same reason: a frame cannot await a load.
+        let providers = providers::Providers::load(state);
+        // An operator who installed a plugin that did not load has no other
+        // way to find out: the connection it named simply resolves to nothing.
+        let installed: Vec<&str> = providers.adapters().collect();
+        if !installed.is_empty() {
+            tracing::info!(plugins = %installed.join(","), "provider plugins loaded");
+        }
+        providers.start_used(&store).await;
         let thread_credentials = credentials.clone();
         let thread = std::thread::Builder::new()
             .name("ene-host-rig".into())
@@ -133,6 +146,7 @@ impl Runtime {
                         },
                     })
                     .insert_resource(thread_store)
+                    .insert_resource(providers)
                     .insert_resource(thread_credentials)
                     .insert_resource(HostRuntime(host_runtime.clone()))
                     .insert_resource(thread_hub.clone())
