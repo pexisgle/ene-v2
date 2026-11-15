@@ -16,7 +16,6 @@ use ene_plugin::{
     ToolSpec, provider::ChatMessage,
 };
 use ene_plugin_runtime::instance::Services;
-use futures_util::stream;
 use rig_core::{
     DynModel,
     completion::{
@@ -68,13 +67,9 @@ pub(crate) fn completion(
 ) -> DynModel<Completion> {
     let wire = PluginCompletion {
         provider: Arc::clone(&provider),
-        model: model.clone(),
-    };
-    let transport = CompletionTransport {
-        provider,
         model,
-        broker,
     };
+    let transport = CompletionTransport { provider, broker };
     rig_core::Model::new(wire, transport).erase()
 }
 
@@ -87,7 +82,9 @@ impl Wire for PluginCompletion {
     type Reassembler = PluginDocument;
 
     fn describe(&self) -> Descriptor<'_> {
-        Descriptor::new(self.provider.provider().id.as_str()).model(self.model.as_str())
+        Descriptor::new(self.provider.provider().id.as_str())
+            .model(self.model.as_str())
+            .replay(self)
     }
 
     fn encode(
@@ -95,6 +92,24 @@ impl Wire for PluginCompletion {
         request: CompletionRequest,
         _mode: Mode,
     ) -> Result<CompletionPayload, EncodeError> {
+        use rig_core::completion::message::ToolChoice;
+        if let Some((field, _)) = [
+            ("temperature", request.temperature.is_some()),
+            (
+                "tool_choice",
+                !matches!(request.tool_choice.as_ref(), None | Some(ToolChoice::Auto)),
+            ),
+            ("output_schema", request.output_schema.is_some()),
+            ("additional_params", request.additional_params.is_some()),
+            ("provider_options", !request.provider_options.is_empty()),
+        ]
+        .into_iter()
+        .find(|(_, set)| *set)
+        {
+            return Err(EncodeError::request(format!(
+                "the plugin generation contract cannot represent `{field}`"
+            )));
+        }
         let mut messages = Vec::new();
         for message in &request.chat_history {
             match message.as_ref() {
@@ -124,7 +139,7 @@ impl Wire for PluginCompletion {
                     }
                 }
                 Message::Assistant(turn) => {
-                    let text = assistant_text(&turn.content);
+                    let text = turn.text();
                     if !text.is_empty() {
                         messages.push(ChatMessage::text("assistant", text));
                     }
@@ -154,7 +169,7 @@ impl Wire for PluginCompletion {
             request: GenerationRequest {
                 endpoint: self.provider.provider().endpoint.clone(),
                 options: self.provider.provider().options.clone(),
-                model: self.model.clone(),
+                model: request.model.unwrap_or_else(|| self.model.clone()),
                 preamble: String::new(),
                 messages,
                 tools: request
@@ -180,6 +195,79 @@ impl Wire for PluginCompletion {
     }
 }
 
+impl std::fmt::Debug for PluginCompletion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginCompletion")
+            .field("provider", &self.provider.provider().id)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl rig_core::completion::ReplayTarget for PluginCompletion {
+    fn api(&self) -> rig_core::message::Api {
+        rig_core::message::Api::from_static("ene.plugin")
+    }
+
+    fn provider(&self) -> &str {
+        &self.provider.provider().id
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn accepts(&self, _model: &str) -> rig_core::completion::history::Accepts {
+        rig_core::completion::history::Accepts::TEXT
+    }
+
+    fn encodes(&self, _model: &str, _media: rig_core::completion::history::Media<'_>) -> bool {
+        false
+    }
+
+    fn catalog_priced(&self) -> bool {
+        false
+    }
+
+    fn map_options(
+        &self,
+        _request: &CompletionRequest,
+        fields: rig_core::completion::options::OptionFields<'_>,
+    ) -> rig_core::completion::options::OptionMap {
+        use rig_core::completion::options::{Mapping, OptionFields, OptionMap};
+        let OptionFields {
+            reasoning,
+            cache,
+            service_tier,
+            verbosity,
+            parallel_tool_calls,
+            top_p,
+            seed,
+            stop,
+            cache_key,
+        } = fields;
+        let unsupported = |set| {
+            if set {
+                Mapping::unsupported("the plugin generation contract has no such option")
+            } else {
+                Mapping::Nothing
+            }
+        };
+        OptionMap {
+            reasoning: unsupported(reasoning.is_some()),
+            cache: unsupported(cache.is_some()),
+            service_tier: unsupported(service_tier.is_some()),
+            verbosity: unsupported(verbosity.is_some()),
+            parallel_tool_calls: unsupported(parallel_tool_calls.is_some()),
+            top_p: unsupported(top_p.is_some()),
+            seed: unsupported(seed.is_some()),
+            stop: unsupported(!stop.is_empty()),
+            cache_key: Mapping::unrouted(cache_key),
+        }
+    }
+}
+
 /// What a tool returned, as the one text a plugin's contract carries. A
 /// structured result is serialized, so the model sees what the tool said
 /// rather than a rendering of it.
@@ -201,18 +289,6 @@ fn result_text(content: &[ToolResultContent]) -> String {
                         })
                 )
             }
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// The text of an assistant turn, joined.
-fn assistant_text(content: &[AssistantContent]) -> String {
-    content
-        .iter()
-        .filter_map(|item| match item {
-            AssistantContent::Text(text) => Some(text.text.clone()),
-            _ => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -365,26 +441,19 @@ impl Serves<Completion> for PluginDocument {}
 #[derive(Clone)]
 pub(crate) struct CompletionTransport {
     provider: Arc<Running>,
-    model: String,
     broker: Arc<ene_plugin_runtime::service::HttpBroker>,
 }
 
 impl Transport<PluginCompletion> for CompletionTransport {
     fn send(&self, payload: CompletionPayload, _exchange: Exchange) -> Opening<PluginFrame> {
         let provider = Arc::clone(&self.provider);
-        let model = self.model.clone();
         let broker = Arc::clone(&self.broker);
         Opening::new(async move {
-            let request = GenerationRequest {
-                endpoint: provider.provider().endpoint.clone(),
-                options: provider.provider().options.clone(),
-                model,
-                ..payload.request
-            };
+            let request = payload.request;
             // The plugin's events arrive on a channel while it runs, so a
             // streamed answer reaches the caller as it is produced rather
             // than after the whole turn.
-            let (sender, events) = tokio::sync::mpsc::channel(64);
+            let (sender, mut events) = tokio::sync::mpsc::channel(64);
             let services: Arc<dyn Services> = super::super::providers::BrokerServices::new(
                 Arc::clone(&broker),
                 provider.provider().id.clone(),
@@ -394,32 +463,30 @@ impl Transport<PluginCompletion> for CompletionTransport {
                     .invoke_streaming(PluginOperation::Generate { request }, services, sender)
                     .await
             });
-            let frames = stream::unfold((events, running), |(mut events, running)| async move {
-                match events.recv().await {
-                    Some(PluginEvent::Delta { text }) => {
-                        Some((Ok(PluginFrame::Text(text)), (events, running)))
+            let frames = async_stream::try_stream! {
+                let mut terminal = None;
+                while let Some(event) = events.recv().await {
+                    match event {
+                        PluginEvent::Delta { text } => yield PluginFrame::Text(text),
+                        PluginEvent::ToolCall { id, name, arguments } => {
+                            yield PluginFrame::ToolCall { id, name, arguments };
+                        }
+                        PluginEvent::Finished { reason } => {
+                            terminal = Some(reason);
+                            break;
+                        }
+                        _ => {}
                     }
-                    Some(PluginEvent::ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    }) => Some((
-                        Ok(PluginFrame::ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        }),
-                        (events, running),
-                    )),
-                    Some(PluginEvent::Finished { reason }) => {
-                        Some((Ok(PluginFrame::Finished(reason)), (events, running)))
-                    }
-                    // A provider's model list is not part of a
-                    // generation; the probe asks for it separately.
-                    Some(_) => Some((Ok(PluginFrame::Text(String::new())), (events, running))),
-                    None => None,
                 }
-            });
+                // Keep the receiver open until the runtime's final checks finish.
+                running.await
+                    .map_err(|error| ProviderError::Response(error.to_string()))?
+                    .map_err(|error| ProviderError::Response(error.to_string()))?;
+                drop(events);
+                if let Some(reason) = terminal {
+                    yield PluginFrame::Finished(reason);
+                }
+            };
             Ok(Opened::new(frames))
         })
     }

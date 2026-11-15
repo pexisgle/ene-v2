@@ -38,20 +38,22 @@ impl PluginSpeech {
         connection: &Connection,
         credentials: Option<&Credentials>,
         kind: ConnectionKind,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, reqwest::Error> {
         let extension = match kind {
             ConnectionKind::Tts => Extension::Tts,
             ConnectionKind::Stt => Extension::Stt,
-            _ => return None,
+            _ => return Ok(None),
         };
         let adapter = connection.endpoint().adapter.clone();
-        let running = providers.running(&adapter, extension)?;
+        let Some(running) = providers.running(&adapter, extension) else {
+            return Ok(None);
+        };
         let grant = Grant::new(running.provider(), connection, credentials);
-        Some(Self {
+        Ok(Some(Self {
             running,
-            broker: Arc::new(HttpBroker::new(Arc::new(grant))),
+            broker: crate::host::providers::http_broker(Arc::new(grant))?,
             connection: connection.clone(),
-        })
+        }))
     }
 
     /// The services a speech call needs: the broker, and nothing else.

@@ -224,9 +224,8 @@ pub(crate) fn connect(
     if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
         let grant =
             super::providers::Grant::new(running.provider(), &connection, Some(credentials));
-        let broker = Arc::new(ene_plugin_runtime::service::HttpBroker::new(Arc::new(
-            grant,
-        )));
+        let broker = super::providers::http_broker(Arc::new(grant))
+            .map_err(|error| HostError::unavailable(format!("plugin HTTP transport: {error}")))?;
         return Ok(plugin_completion(
             running,
             assignment.model_id.clone(),
@@ -403,9 +402,10 @@ async fn plugin_models(
     // reaching the network, so the broker denies any exchange it attempts.
     let services: std::sync::Arc<dyn ene_plugin_runtime::instance::Services> =
         super::providers::BrokerServices::new(
-            std::sync::Arc::new(ene_plugin_runtime::service::HttpBroker::new(
-                std::sync::Arc::new(ene_plugin_runtime::service::DenyHttp),
-            )),
+            super::providers::http_broker(std::sync::Arc::new(
+                ene_plugin_runtime::service::DenyHttp,
+            ))
+            .map_err(|error| format!("plugin HTTP transport: {error}"))?,
             provider,
         );
     let collected = tokio::time::timeout(PROBE_TIMEOUT, async move {

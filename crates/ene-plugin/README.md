@@ -186,7 +186,7 @@ manifestの変更でrevisionも変わるため、更新後は再有効化とバ�
 
 ## サンプルと検証
 
-[OpenRouterサンプル](../../examples/plugins/openrouter-wasm/) はHTTPとストリーミングの例です。
+[OpenRouterサンプル](../../examples/plugins/openrouter-wasm/) はHTTP応答のSSEを解析する例です。現行のHTTP brokerは上限付きで本文全体を受信した後、ABIサイズ内のチャンクに分割します。ネットワークからのライブストリーミングではありません。
 
 ```sh
 cargo check --locked -p ene-plugin --all-targets --all-features

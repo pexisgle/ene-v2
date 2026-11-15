@@ -1,6 +1,8 @@
 //! Host functions and per-invocation budgets shared by all instances.
+use super::json::{self, BoundedJson};
 use crate::{Error, contract::Events, limits::*};
 use ene_plugin::*;
+use extism::convert::FromBytesOwned;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::{
@@ -9,7 +11,6 @@ use std::{
         Arc, LazyLock, Mutex, Weak,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -33,11 +34,8 @@ impl Services for DenyServices {
 pub(super) static SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_INSTANCES)));
 extism::host_fn!(pub(super) ene_service(context: Weak<Invocation>; raw: &[u8]) -> Vec<u8> {
-    if raw.len() > MAX_MESSAGE_BYTES {
-        return Err(Error::Protocol.into());
-    }
     let raw_len = raw.len();
-    let request = serde_json::from_slice::<ServiceRequest>(raw)?;
+    let request = BoundedJson::<ServiceRequest, MAX_MESSAGE_BYTES>::from_bytes_owned(raw)?.0;
     let invocation = context
         .get()?
         .lock()
@@ -47,19 +45,13 @@ extism::host_fn!(pub(super) ene_service(context: Weak<Invocation>; raw: &[u8]) -
     // Charge the bytes actually received and sent, not their re-encoded form.
     invocation.charge(&invocation.bytes, raw_len, MAX_SERVICE_BYTES)?;
     let result = invocation.service(request)?;
-    let bytes = serde_json::to_vec(&result)?;
-    if bytes.len() > MAX_CHUNK {
-        return Err(Error::Protocol.into());
-    }
+    let bytes = json::encode::<_, MAX_CHUNK>(result)?;
     invocation.charge(&invocation.bytes, bytes.len(), MAX_SERVICE_BYTES)?;
     Ok(bytes)
 });
 extism::host_fn!(pub(super) ene_emit(context: Weak<Invocation>; raw: &[u8]) {
-    if raw.len() > MAX_CHUNK {
-        return Err(Error::Protocol.into());
-    }
     let raw_len = raw.len();
-    let event = serde_json::from_slice::<Event>(raw)?;
+    let event = BoundedJson::<Event, MAX_CHUNK>::from_bytes_owned(raw)?.0;
     let invocation = context
         .get()?
         .lock()
@@ -79,7 +71,6 @@ pub(super) struct Invocation {
     pub(super) events: mpsc::Sender<Event>,
     pub(super) validator: Mutex<Events>,
     pub(super) cancel: CancellationToken,
-    pub(super) timeout: Duration,
     pub(super) runtime: tokio::runtime::Handle,
 }
 impl Invocation {
@@ -88,7 +79,8 @@ impl Invocation {
             tokio::select! { biased;
                 _ = self.cancel.cancelled() => Err(Error::Cancelled),
                 _ = self.events.closed() => Err(Error::Cancelled),
-                result = tokio::time::timeout(self.timeout, work) => result.unwrap_or(Err(Error::Timeout)),
+                // The enclosing call timeout drops Cancellation and cancels this token.
+                result = work => result,
             }
         })
     }

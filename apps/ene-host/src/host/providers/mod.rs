@@ -13,10 +13,14 @@
 //! the plugins the operator installed rather than to the connections that
 //! happen to reference them.
 mod grant;
+#[cfg(test)]
+mod safety_tests;
 mod services;
 
 pub(crate) use grant::Grant;
-pub(crate) use services::BrokerServices;
+#[cfg(test)]
+pub(crate) use services::construction_failure;
+pub(crate) use services::{BrokerServices, http_broker};
 
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};
@@ -310,7 +314,7 @@ impl Running {
 mod tests {
     use super::*;
 
-    fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
+    pub(super) fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
         let path = path.as_ref();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();

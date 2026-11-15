@@ -5,10 +5,22 @@
 //! one implementation of that boundary: the speech and completion adapters
 //! both hand it to their instance.
 use ene_plugin::{Failure, ServiceRequest};
-use ene_plugin_runtime::{instance::Services, service::HttpBroker};
+use ene_plugin_runtime::{
+    instance::Services,
+    service::{HttpBroker, HttpGrants},
+};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
+
+pub(crate) fn http_broker(grants: Arc<dyn HttpGrants>) -> Result<Arc<HttpBroker>, reqwest::Error> {
+    #[cfg(test)]
+    if construction_failure::active() {
+        // A real builder error without depending on TLS or process-wide state.
+        reqwest::Client::builder().user_agent("\n").build()?;
+    }
+    HttpBroker::new(grants).map(Arc::new)
+}
 
 /// The services a provider call declares: the broker, and nothing else.
 pub(crate) struct BrokerServices {
@@ -48,5 +60,38 @@ impl Services for BrokerServices {
 
     fn check(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async { Ok(()) })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod construction_failure {
+    use std::{cell::Cell, marker::PhantomData, rc::Rc};
+
+    thread_local! {
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn active() -> bool {
+        ACTIVE.get()
+    }
+
+    pub(crate) struct Guard {
+        previous: bool,
+        _thread: PhantomData<Rc<()>>,
+    }
+
+    impl Guard {
+        pub(crate) fn enter() -> Self {
+            Self {
+                previous: ACTIVE.replace(true),
+                _thread: PhantomData,
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.set(self.previous);
+        }
     }
 }

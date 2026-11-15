@@ -377,7 +377,7 @@ pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine
     let connection = voice_connection(world, ConnectionKind::Tts)?;
     // A plugin that serves this connection's adapter answers instead of the
     // built-in HTTP client, so a custom protocol needs no host change.
-    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Tts) {
+    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Tts)? {
         return Ok(Arc::new(engine));
     }
     Ok(Arc::new(HttpEngine::new(
@@ -395,7 +395,7 @@ pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine
         return Ok(Arc::clone(engine));
     }
     let connection = voice_connection(world, ConnectionKind::Stt)?;
-    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt) {
+    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt)? {
         return Ok(Arc::new(engine));
     }
     Ok(Arc::new(HttpEngine::new(
@@ -410,14 +410,17 @@ fn plugin_engine(
     world: &World,
     connection: &Connection,
     kind: ConnectionKind,
-) -> Option<plugin::PluginSpeech> {
-    let providers = world.get_resource::<crate::host::providers::Providers>()?;
+) -> std::result::Result<Option<plugin::PluginSpeech>, SetupError> {
+    let Some(providers) = world.get_resource::<crate::host::providers::Providers>() else {
+        return Ok(None);
+    };
     plugin::PluginSpeech::new(
         providers,
         connection,
         world.get_resource::<Credentials>(),
         kind,
     )
+    .map_err(|error| SetupError::Broken(format!("plugin HTTP transport: {error}")))
 }
 
 pub(crate) fn configured(

@@ -143,11 +143,25 @@ fn text(block: &ContentBlock) -> Result<()> {
     }
 }
 
+struct RawSize(usize);
+
+impl std::io::Write for RawSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("raw field too large"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn raw(value: Option<&serde_json::Value>) -> Result<()> {
-    if value.is_some_and(|value| {
-        serde_json::to_vec(value).map_or(true, |bytes| bytes.len() > MAX_RAW_BYTES)
-    }) {
-        return Err(Error::Protocol);
+    if let Some(value) = value {
+        serde_json::to_writer(&mut RawSize(MAX_RAW_BYTES), value).map_err(|_| Error::Protocol)?;
     }
     Ok(())
 }
@@ -195,6 +209,69 @@ mod tests {
 
     fn accept(events: &mut Events, event: HarnessEvent) -> Result<()> {
         events.accept(&ene_plugin::Event::Harness { event })
+    }
+
+    #[test]
+    fn raw_size_matches_json_bytes_including_escaping_and_unicode() {
+        use serde_json::json;
+        for value in [
+            json!(null),
+            json!(true),
+            json!(-12),
+            json!(u64::MAX),
+            json!(1.25),
+            json!("雪🦀"),
+            json!("\"\\\n\u{0000}"),
+            json!([1, false, null]),
+            json!({"\"雪": ["\\", 12]}),
+        ] {
+            let encoded = serde_json::to_vec(&value).unwrap();
+            let mut size = RawSize(encoded.len());
+            serde_json::to_writer(&mut size, &value).unwrap();
+            assert_eq!(size.0, 0);
+            assert!(serde_json::to_writer(&mut RawSize(encoded.len() - 1), &value).is_err());
+        }
+        let a: serde_json::Value = serde_json::from_str(r#"{ "text" : "\u96ea" }"#).unwrap();
+        let b = json!({"text": "雪"});
+        assert_eq!(a, b);
+        assert_eq!(raw(Some(&a)).is_ok(), raw(Some(&b)).is_ok());
+    }
+
+    #[test]
+    fn both_raw_fields_in_calls_and_updates_have_exact_byte_limits() {
+        use serde_json::json;
+        for field in ["rawInput", "rawOutput"] {
+            for kind in ["tool_call", "tool_call_update"] {
+                for text in [
+                    "x".repeat(MAX_RAW_BYTES - 2),
+                    format!("{}雪", "x".repeat(MAX_RAW_BYTES - 5)),
+                    format!("{}\n", "x".repeat(MAX_RAW_BYTES - 4)),
+                ] {
+                    for over in [false, true] {
+                        let value = json!(if over {
+                            format!("{text}x")
+                        } else {
+                            text.clone()
+                        });
+                        assert_eq!(
+                            serde_json::to_vec(&value).unwrap().len(),
+                            MAX_RAW_BYTES + usize::from(over)
+                        );
+                        let mut update =
+                            json!({"sessionUpdate": kind, "toolCallId": "call", "title": "title"});
+                        update[field] = value;
+                        let event: HarnessEvent =
+                            serde_json::from_value(json!({"type": "update", "update": update}))
+                                .unwrap();
+                        assert_eq!(
+                            accept(&mut events(), event).is_err(),
+                            over,
+                            "{kind} {field}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

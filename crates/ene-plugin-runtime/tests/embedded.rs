@@ -68,6 +68,89 @@ fn emit(text: &str) -> String {
     format!("{} local.get $p call $emit",write(&json!({"type":"character","target":{"device_id":"device","character_id":"character"},"action":{"type":"speak","text":text}}).to_string()))
 }
 #[tokio::test]
+async fn return_limits_count_the_raw_bytes_before_decoding() {
+    for size in [MAX_CHUNK, MAX_CHUNK + 1] {
+        let body = format!(
+            r#"
+            i64.const {size} call $alloc local.set $p
+            (loop $fill
+                local.get $p local.get $i i64.extend_i32_u i64.add i32.const 32 call $store
+                local.get $i i32.const 1 i32.add local.tee $i i32.const {size} i32.lt_u br_if $fill)
+            local.get $p i32.const 123 call $store
+            local.get $p i64.const 1 i64.add i32.const 125 call $store
+            local.get $p i64.const {size} call $output i32.const 0 return
+        "#
+        );
+        let (package, _temp) = package(&wasm(&body), Target::Host, &[]);
+        let cancel = CancellationToken::new();
+        let mut instance = Instance::load(package, "main".into(), 1, &cancel)
+            .await
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let result = instance
+            .invoke(character(), Arc::new(DenyServices), tx, &cancel)
+            .await;
+        if size == MAX_CHUNK {
+            assert_eq!(result.unwrap(), json!({}));
+        } else {
+            assert!(matches!(result, Err(ene_plugin_runtime::Error::Protocol)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn result_operations_decode_their_existing_typed_documents() {
+    let operations = [
+        json!({"type": "embed", "request": {"endpoint": "", "options": {}, "model": "m", "inputs": ["a"], "dimensions": 1}}),
+        json!({"type": "synthesize", "request": {"endpoint": "", "options": {}, "model": "m", "text": "a", "voice": "v", "speed": 1.0, "format": "pcm16"}}),
+        json!({"type": "transcribe", "request": {"endpoint": "", "options": {}, "model": "m", "pcm_base64": "", "sample_rate": 24000, "language": null}}),
+    ];
+    let documents = [
+        json!({"vectors": [[1.0]]}),
+        json!({"handle": "audio", "sample_rate": 24000, "format": "pcm16", "bytes": 2}),
+        json!({"text": "雪"}),
+    ];
+    for (operation, document) in operations.into_iter().zip(documents) {
+        for valid in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("plugin");
+            directory(&root);
+            let reply = if valid {
+                document.clone()
+            } else {
+                json!({"wrong": true})
+            }
+            .to_string();
+            let body = format!(
+                "{} local.get $p local.get $p call $length call $output i32.const 0 return",
+                write(&reply)
+            );
+            write_file(&root.join("main.wasm"), wasm(&body));
+            write_file(&root.join("manifest.json"), json!({"contract_version": CONTRACT_VERSION, "id": "typed", "name": "Typed", "version": "1", "entrypoints": [{"id": "main", "target": "host", "file": "main.wasm", "provides": ["embedding", "tts", "stt"], "provider": {"id": "typed", "endpoint": "http://127.0.0.1:1", "auth": {"type": "none"}, "destinations": []}}]}).to_string());
+            let cancel = CancellationToken::new();
+            let mut instance =
+                Instance::load(Package::load(&root).unwrap(), "main".into(), 1, &cancel)
+                    .await
+                    .unwrap();
+            let (tx, _rx) = mpsc::channel(1);
+            let result = instance
+                .invoke(
+                    serde_json::from_value(operation.clone()).unwrap(),
+                    Arc::new(DenyServices),
+                    tx,
+                    &cancel,
+                )
+                .await;
+            if valid {
+                assert_eq!(result.unwrap(), document);
+            } else {
+                assert!(matches!(result, Err(ene_plugin_runtime::Error::Json(_))));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn service_budget_counts_received_json_bytes() {
     // Trailing whitespace is legal JSON that re-encoding would hide.
     let request = format!(
@@ -229,7 +312,10 @@ async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
     );
     for body in [
         "(loop $forever br $forever)".to_string(),
-        "i32.const 7 return".to_string(),
+        format!(
+            "{} local.get $p i64.const 2 call $output i32.const 7 return",
+            write("{}")
+        ),
         bad_event,
         format!("i64.const {} call $alloc call $emit", MAX_CHUNK + 1),
         format!(
@@ -252,6 +338,10 @@ async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
             .unwrap()
             .is_err()
         );
+        assert!(matches!(
+            instance.initialize(&cancel).await,
+            Err(ene_plugin_runtime::Error::Unavailable)
+        ));
     }
 }
 #[tokio::test]
@@ -587,19 +677,18 @@ impl Services for Brokered {
     }
 }
 
-/// An embedding provider plugin: it fetches its endpoint through the host's
-/// HTTP path, reads the reply, and answers with the host's own reply document.
+/// A broker-routing fixture that reads its endpoint through host HTTP and
+/// returns a fixed, valid EmbeddingResult independently of the HTTP reply.
 fn embedding_package(url: &str) -> (Package, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("plugin");
     directory(&root);
-    // Each service answer is left in `$p`; the last one is what the guest
-    // returns, so the test can see the exchange's final chunk.
     let body = format!(
-        "{} local.get $p call $service local.set $p {} local.get $p call $service local.set $p {} local.get $p call $service local.set $p local.get $p local.get $p call $length call $output i32.const 0 return",
+        "{} local.get $p call $service drop {} local.get $p call $service drop {} local.get $p call $service drop {} local.get $p local.get $p call $length call $output i32.const 0 return",
         write(&json!({"type":"http_open","request":{"method":"POST","url":url,"headers":{},"body_base64":null}}).to_string()),
         write(&json!({"type":"http_read","handle":"http-1"}).to_string()),
         write(&json!({"type":"http_close","handle":"http-1"}).to_string()),
+        write(&json!({"vectors": [[1.0]]}).to_string()),
     );
     write_file(&root.join("main.wasm"), wasm(&body));
     write_file(
@@ -651,7 +740,7 @@ async fn an_embedding_plugin_reaches_its_endpoint_through_the_broker() {
     let mut instance = Instance::load(package, "main".into(), 1, &cancel)
         .await
         .unwrap();
-    let broker = Arc::new(HttpBroker::new(Arc::new(AllowUrl(url.clone()))));
+    let broker = Arc::new(HttpBroker::new(Arc::new(AllowUrl(url.clone()))).unwrap());
     let (tx, _rx) = mpsc::channel(1);
     let output = instance
         .invoke(
@@ -673,8 +762,7 @@ async fn an_embedding_plugin_reaches_its_endpoint_through_the_broker() {
         )
         .await
         .unwrap();
-    // The guest returns its last service answer, the close's success envelope.
-    assert_eq!(output, json!({"Ok": {}}));
+    assert_eq!(output, json!({"vectors": [[1.0]]}));
     // A refused exchange leaves the endpoint untouched, so waiting on it would
     // hang. Bound the wait and report what actually happened.
     tokio::time::timeout(Duration::from_secs(5), served)
@@ -718,6 +806,22 @@ fn generation_package() -> (Package, tempfile::TempDir) {
         .as_bytes(),
     );
     (Package::load(&root).unwrap(), temp)
+}
+
+#[tokio::test]
+async fn initialization_decodes_llm_capabilities_as_a_typed_document() {
+    let (_package, temp) = generation_package();
+    let root = temp.path().join("plugin");
+    write_file(
+        &root.join("main.wasm"),
+        provider_wasm_with("", &json!({"streaming_text": "yes"})),
+    );
+    let package = Package::load(&root).unwrap();
+    let cancel = CancellationToken::new();
+    assert!(matches!(
+        Instance::load(package, "main".into(), 1, &cancel).await,
+        Err(ene_plugin_runtime::Error::Json(_))
+    ));
 }
 
 /// A model-listing plugin: it answers `ListModels` with its `Models` event.

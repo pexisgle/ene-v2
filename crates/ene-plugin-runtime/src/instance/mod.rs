@@ -1,5 +1,8 @@
 //! Extism instances execute on Tokio's blocking pool; host capabilities stay explicit.
 mod invocation;
+mod json;
+#[cfg(test)]
+mod lifecycle_tests;
 mod supervisor;
 
 pub use invocation::{DenyServices, Services};
@@ -8,6 +11,8 @@ pub use supervisor::Supervisor;
 use crate::{Error, Package, Result, contract::Events, limits::*};
 use ene_plugin::*;
 use invocation::{Cancellation, Invocation, SLOTS, ene_emit, ene_service};
+use json::BoundedJson;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
     sync::{Arc, Mutex, Weak, atomic::AtomicUsize},
@@ -23,6 +28,8 @@ pub struct Instance {
     entrypoint: String,
     generation: u64,
     permit: Arc<OwnedSemaphorePermit>,
+    #[cfg(test)]
+    native_exit: Option<tokio::sync::oneshot::Sender<lifecycle_tests::NativeExit>>,
     /// What a provider entry declared at `ene_initialize`; guests that are not
     /// providers declare nothing the host reads.
     pub capabilities: Option<LlmCapabilities>,
@@ -123,6 +130,8 @@ impl Instance {
                 entrypoint,
                 generation,
                 permit: Arc::new(permit),
+                #[cfg(test)]
+                native_exit: None,
                 capabilities: None,
             })
         });
@@ -134,14 +143,14 @@ impl Instance {
         instance.initialize(cancel).await?;
         Ok(instance)
     }
-    async fn call(
+    async fn call<T: DeserializeOwned + Send + 'static>(
         &mut self,
         function: &'static str,
         input: Vec<u8>,
         invocation: Option<Arc<Invocation>>,
         cancel: &CancellationToken,
         timeout: Duration,
-    ) -> Result<Value> {
+    ) -> Result<T> {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -160,6 +169,8 @@ impl Instance {
         };
         let permit = self.permit.clone();
         let context = self.context.get().map_err(Error::Execution)?;
+        #[cfg(test)]
+        let native_exit = self.native_exit.take();
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let result = (|| {
@@ -168,13 +179,16 @@ impl Instance {
                 }
                 *context.lock().map_err(|_| Error::Unavailable)? =
                     invocation.as_ref().map(Arc::downgrade).unwrap_or_default();
-                let result = plugin.call::<_, &[u8]>(function, input);
-                *context.lock().map_err(|_| Error::Unavailable)? = Weak::new();
-                let raw = result.map_err(Error::Execution)?;
-                if raw.len() > MAX_CHUNK {
-                    return Err(Error::Protocol);
+                let result = plugin.call::<_, BoundedJson<T, MAX_CHUNK>>(function, input);
+                #[cfg(test)]
+                if let Some(native_exit) = native_exit {
+                    let _ = native_exit.send(lifecycle_tests::NativeExit {
+                        error: result.as_ref().err().map(ToString::to_string),
+                        fuel_consumed: plugin.fuel_consumed(),
+                    });
                 }
-                Ok(serde_json::from_slice(raw)?)
+                *context.lock().map_err(|_| Error::Unavailable)? = Weak::new();
+                result.map(|value| value.0).map_err(json::error)
             })();
             (plugin, result)
         });
@@ -205,7 +219,7 @@ impl Instance {
             _ = events.closed() => return Err(Error::Cancelled),
             result = tokio::time::timeout(timeout, services.check()) => result.map_err(|_| Error::Timeout)??,
         }
-        let input = serde_json::to_vec(&operation)?;
+        let input = json::encode::<_, MAX_MESSAGE_BYTES>(&operation)?;
         let context = Arc::new(Invocation {
             services,
             declared: entry.uses.clone(),
@@ -215,24 +229,41 @@ impl Instance {
             events,
             validator: Mutex::new(Events::new(&operation)),
             cancel: cancel.child_token(),
-            timeout,
             runtime: tokio::runtime::Handle::current(),
         });
         let result = tokio::select! { biased;
             _ = context.events.closed() => Err(Error::Cancelled),
-            result = self.call("ene_invoke", input, Some(context.clone()), cancel, timeout) => result,
+            result = async {
+                match &operation {
+                    Operation::Embed { .. } => {
+                        let value = self.call::<EmbeddingResult>("ene_invoke", input, Some(context.clone()), cancel, timeout).await?;
+                        Ok(serde_json::to_value(value)?)
+                    }
+                    Operation::Synthesize { .. } => {
+                        let value = self.call::<SynthesisResult>("ene_invoke", input, Some(context.clone()), cancel, timeout).await?;
+                        Ok(serde_json::to_value(value)?)
+                    }
+                    Operation::Transcribe { .. } => {
+                        let value = self.call::<TranscriptionResult>("ene_invoke", input, Some(context.clone()), cancel, timeout).await?;
+                        Ok(serde_json::to_value(value)?)
+                    }
+                    _ => self.call::<Value>("ene_invoke", input, Some(context.clone()), cancel, timeout).await,
+                }
+            } => result,
         };
+        let plugin = self.plugin.take();
         let result = async {
             let value = result?;
             context.validator.lock().map_err(|_| Error::Unavailable)?.finish()?;
             tokio::select! { biased;
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
+                _ = context.events.closed() => return Err(Error::Cancelled),
                 result = tokio::time::timeout(timeout, context.services.check()) => result.map_err(|_| Error::Timeout)??,
             }
             Ok(value)
         }.await;
-        if result.is_err() {
-            self.plugin = None;
+        if result.is_ok() {
+            self.plugin = plugin;
         }
         result
     }
@@ -243,8 +274,24 @@ impl Instance {
     /// Run the guest's initialization hook. A provider entry declares its
     /// capabilities here; they are decoded once and the document is dropped.
     pub async fn initialize(&mut self, cancel: &CancellationToken) -> Result<()> {
-        let document = self
-            .call(
+        let entry = self.package.entry(&self.entrypoint)?;
+        let llm_provider = entry.provider.is_some() && entry.provides.contains(&Extension::Llm);
+        if llm_provider {
+            let capabilities = self
+                .call::<LlmCapabilities>(
+                    "ene_initialize",
+                    b"{}".to_vec(),
+                    None,
+                    cancel,
+                    INITIALIZE_TIMEOUT,
+                )
+                .await?;
+            if !capabilities.streaming_text {
+                return Err(Error::Unsupported);
+            }
+            self.capabilities = Some(capabilities);
+        } else {
+            self.call::<Value>(
                 "ene_initialize",
                 b"{}".to_vec(),
                 None,
@@ -252,18 +299,6 @@ impl Instance {
                 INITIALIZE_TIMEOUT,
             )
             .await?;
-        let entry = self.package.entry(&self.entrypoint)?;
-        if entry.provider.is_none() {
-            return Ok(());
-        }
-        // A provider declares the capabilities of the modality it serves. Only
-        // an LLM provider has to stream text, so the check applies to it alone.
-        if entry.provides.contains(&Extension::Llm) {
-            let capabilities: LlmCapabilities = serde_json::from_value(document)?;
-            if !capabilities.streaming_text {
-                return Err(Error::Unsupported);
-            }
-            self.capabilities = Some(capabilities);
         }
         Ok(())
     }

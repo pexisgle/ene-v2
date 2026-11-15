@@ -49,9 +49,8 @@ impl HttpGrants for DenyHttp {
 struct Open {
     status: u16,
     headers: BTreeMap<String, String>,
-    /// The body, read to its end under the cap when the exchange opened. A
-    /// brokered reply is bounded, so holding it is simpler than streaming it
-    /// and cannot outlive the invocation that asked for it.
+    /// Buffered under the body cap and exchange timeout before open returns.
+    /// Handles live until read, close, or broker drop; the caller owns that scope.
     body: Vec<u8>,
     /// How much of `body` has been handed out.
     read: usize,
@@ -68,20 +67,20 @@ pub struct HttpBroker {
 impl HttpBroker {
     /// A broker that authorizes through `grants`. Redirects stay off so a
     /// checked destination cannot bounce the request elsewhere.
-    pub fn new(grants: Arc<dyn HttpGrants>) -> Self {
+    pub fn new(grants: Arc<dyn HttpGrants>) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_default();
-        Self {
+            .build()?;
+        Ok(Self {
             grants,
             client,
             open: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
-        }
+        })
     }
 
-    /// Sends `request` for `provider` and returns its first chunk.
+    /// Buffers the bounded reply under one exchange timeout, then returns a handle.
+    /// Reads split that buffer into ABI-sized chunks, not live network updates.
     pub async fn open(&self, provider: &str, request: HttpRequest) -> Result<HttpChunk, Failure> {
         let url = Url::parse(&request.url).map_err(|_| Failure::new("invalid_url"))?;
         if !self.grants.allows(provider, &url) {
@@ -116,16 +115,18 @@ impl HttpBroker {
         if let Some(body) = body {
             call = call.body(body);
         }
-        let response = tokio::time::timeout(HTTP_TIMEOUT, call.send())
-            .await
-            .map_err(|_| Failure::new("http_timeout"))?
-            .map_err(|error| Failure {
+        let (status, headers, body) = tokio::time::timeout(HTTP_TIMEOUT, async {
+            let response = call.send().await.map_err(|error| Failure {
                 code: "http_failed".into(),
                 message: error.to_string(),
             })?;
-        let status = response.status().as_u16();
-        let headers = copy_headers(response.headers());
-        let body = bounded(response).await?;
+            let status = response.status().as_u16();
+            let headers = copy_headers(response.headers());
+            let body = bounded(response).await?;
+            Ok::<_, Failure>((status, headers, body))
+        })
+        .await
+        .map_err(|_| Failure::new("http_timeout"))??;
         let handle = format!("http-{}", self.next.fetch_add(1, Ordering::Relaxed));
         let mut open = self
             .open
@@ -315,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_destination_the_grant_refuses_never_reaches_the_network() {
-        let broker = HttpBroker::new(Arc::new(Allow("http://allowed.test".into())));
+        let broker = HttpBroker::new(Arc::new(Allow("http://allowed.test".into()))).unwrap();
         let error = broker
             .open("provider", request("http://denied.test/x".into()))
             .await
@@ -344,7 +345,7 @@ mod tests {
                 .await;
             String::from_utf8_lossy(&head).into_owned()
         });
-        let broker = HttpBroker::new(Arc::new(Allow(format!("http://{address}"))));
+        let broker = HttpBroker::new(Arc::new(Allow(format!("http://{address}")))).unwrap();
         broker
             .open("provider", request(format!("http://{address}/x")))
             .await
@@ -359,9 +360,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_plugin_cannot_set_a_header_the_host_owns() {
-        let broker = HttpBroker::new(Arc::new(Allow("http://allowed.test".into())));
+        let broker = HttpBroker::new(Arc::new(Allow("http://allowed.test".into()))).unwrap();
         let mut headers = BTreeMap::new();
-        headers.insert("authorization".into(), "Bearer plugin-chosen".into());
+        headers.insert("AuThOrIzAtIoN".into(), "Bearer plugin-chosen".into());
         let mut call = request("http://allowed.test/x".into());
         call.headers = headers;
         let error = broker.open("provider", call).await.unwrap_err();
@@ -374,7 +375,7 @@ mod tests {
 
         let body: &'static [u8] = b"0123456789";
         let (url, server) = serve(body).await;
-        let broker = HttpBroker::new(Arc::new(Allow(url.clone())));
+        let broker = HttpBroker::new(Arc::new(Allow(url.clone()))).unwrap();
         let first = broker
             .open("provider", request(format!("{url}/x")))
             .await
@@ -406,7 +407,7 @@ mod tests {
     async fn a_reply_larger_than_the_cap_is_refused() {
         let big: &'static [u8] = Box::leak(vec![b'x'; MAX_HTTP_BODY + 1].into_boxed_slice());
         let (url, server) = serve(big).await;
-        let broker = HttpBroker::new(Arc::new(Allow(url.clone())));
+        let broker = HttpBroker::new(Arc::new(Allow(url.clone()))).unwrap();
         let error = broker
             .open("provider", request(format!("{url}/x")))
             .await
@@ -418,7 +419,7 @@ mod tests {
     #[tokio::test]
     async fn closing_a_handle_drops_it_without_reading_the_rest() {
         let (url, server) = serve(b"unread").await;
-        let broker = HttpBroker::new(Arc::new(Allow(url.clone())));
+        let broker = HttpBroker::new(Arc::new(Allow(url.clone()))).unwrap();
         let opened = broker
             .open("provider", request(format!("{url}/x")))
             .await
@@ -432,8 +433,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redirects_never_reach_an_unchecked_destination() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let forbidden = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = forbidden.local_addr().unwrap();
+        let allowed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", allowed.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = allowed.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(socket.read(&mut request).await.unwrap(), 0);
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{target}/secret\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let broker = HttpBroker::new(Arc::new(Allow(origin.clone()))).unwrap();
+        let opened = broker.open("provider", request(origin)).await.unwrap();
+        assert_eq!(opened.status, 302);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), forbidden.accept())
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prompt_headers_do_not_leave_body_reads_unbounded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(socket.read(&mut request).await.unwrap(), 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let broker = HttpBroker::new(Arc::new(Allow(origin.clone()))).unwrap();
+        let result = tokio::time::timeout(
+            HTTP_TIMEOUT + std::time::Duration::from_secs(2),
+            broker.open("provider", request(origin)),
+        )
+        .await;
+        server.abort();
+        assert_eq!(result.unwrap().unwrap_err().code, "http_timeout");
+        assert!(broker.open.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_length_bodies_are_also_capped() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(socket.read(&mut request).await.unwrap(), 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = socket.write_all(&vec![b'x'; MAX_HTTP_BODY + 1]).await;
+        });
+        let broker = HttpBroker::new(Arc::new(Allow(origin.clone()))).unwrap();
+        assert_eq!(
+            broker
+                .open("provider", request(origin))
+                .await
+                .unwrap_err()
+                .code,
+            "http_body_too_large"
+        );
+        assert!(broker.open.lock().unwrap().is_empty());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn protected_response_headers_are_never_copied() {
+        let mut headers = HeaderMap::new();
+        for name in [
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "host",
+            "content-length",
+            "transfer-encoding",
+        ] {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static("host-secret"),
+            );
+        }
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        assert_eq!(
+            copy_headers(&headers),
+            BTreeMap::from([("content-type".into(), "application/json".into())])
+        );
+    }
+
+    #[tokio::test]
     async fn the_denying_broker_refuses_every_exchange() {
-        let broker = HttpBroker::new(Arc::new(DenyHttp));
+        let broker = HttpBroker::new(Arc::new(DenyHttp)).unwrap();
         let error = broker
             .open("provider", request("http://127.0.0.1:1/x".into()))
             .await
