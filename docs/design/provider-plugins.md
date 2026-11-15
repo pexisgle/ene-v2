@@ -1,0 +1,264 @@
+# 全プロバイダーのプラグイン化：設計提案
+
+状態：提案（2026-11-15）。実装前のレビュー対象。[プラグイン設計](plugins.md)、[技術スタック](tech-stack.md)、[音声](voice-avatar.md)、[心と自動記憶](mind.md)を参照する。
+
+---
+
+## 0. 目的と前提
+
+LLM・Embedding・TTS・STT の全プロバイダーを `ene-plugin` / `ene-plugin-runtime` 基盤へ移す。プロバイダー追加をホストの再ビルドから切り離し、認証・宛先・上限の制御を1箇所に集約することが目的である。
+
+現状の事実確認（本リポジトリで実測）：
+
+| 事実 | 根拠 |
+| --- | --- |
+| `ene-host` は `ene-plugin` / `ene-plugin-runtime` を一切リンクしていない | `apps/ene-host/Cargo.toml` に依存行が0件 |
+| `Services` トレイトの実装はテスト用の5つのみ。ホスト側の実装は存在しない | `grep "impl Services for"` の結果 |
+| `Service::Http` の実処理は未実装。`DenyServices` が全て拒否する | `instance/invocation.rs:23` |
+| `Extension` は `Llm` / `Character` / `Harness` の3つ | `manifest.rs:19-23` |
+| `Operation` は `ListModels` / `Generate` / `Character` / `Harness` の4つ | `api/wire.rs:15-27` |
+| `HttpOpen` は 512 KiB の単発ボディ前提。ストリーミング応答の上限は呼び出し単位 | `limits.rs` |
+
+つまり本提案は「既存の配線を移す」のではなく、**未接続の基盤にプロバイダー契約を足して接続する**作業になる。この差分を過小に見積もると、音声の16MB上限やモデルのストリーミングが移行時に失われる。
+
+---
+
+## 1. `ene-plugin` 契約の拡張
+
+### 1.1 `Extension` に3つを追加する
+
+```rust
+pub enum Extension {
+    Llm,
+    Embedding,
+    Tts,
+    Stt,
+    Character,
+    Harness,
+}
+```
+
+`serde(rename_all = "snake_case")` により manifest の文字列は `embedding` / `tts` / `stt` になる。`contract_version` を 4 から 5 へ上げ、旧 manifest は明示的に拒否する（現行は `deny_unknown_fields` で、未知の `provides` 値は復号時点で落ちる）。
+
+### 1.2 `Operation` に3つを追加する
+
+```rust
+pub enum Operation {
+    // 既存
+    ListModels { endpoint: String, options: Value },
+    Generate { request: GenerationRequest },
+    Character { target: CharacterTarget, event: CharacterEvent },
+    Harness { input: HarnessInput },
+    // 追加
+    Embed { request: EmbeddingRequest },
+    Synthesize { request: SynthesisRequest },
+    Transcribe { request: TranscriptionRequest },
+}
+```
+
+`extension()` の対応は `Embed → Embedding`、`Synthesize → Tts`、`Transcribe → Stt`。
+
+### 1.3 入出力型（`api/audio.rs` と `api/embedding.rs` を新設）
+
+```rust
+// api/embedding.rs
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingRequest {
+    pub endpoint: String,
+    pub options: Value,
+    pub model: String,
+    pub inputs: Vec<String>,
+    /// 要求次元数。0 はプロバイダー既定。
+    pub dimensions: usize,
+}
+
+// api/audio.rs
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SynthesisRequest {
+    pub endpoint: String,
+    pub options: Value,
+    pub model: String,
+    pub text: String,
+    pub voice: String,
+    pub speed: Option<f32>,
+    /// 期待する出力形式。現行ホストは PCM 24kHz を要求する。
+    pub format: AudioFormat,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptionRequest {
+    pub endpoint: String,
+    pub options: Value,
+    pub model: String,
+    /// 16bit モノラル PCM。
+    pub pcm_base64: String,
+    pub sample_rate: u32,
+    pub language: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioFormat {
+    /// 16bit モノラル PCM。サンプルレートは応答が持つ。
+    Pcm16,
+    /// RIFF/WAVE。プロバイダーが WAV しか返さない場合に使う。
+    Wav,
+}
+```
+
+応答は `Event` ではなく **`Operation` の戻り値**（`service` の応答）にする。音声は大きく、`Event` の `MAX_CHUNK`（128 KiB）に収まらないためである。戻り値は次の型にする。
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SynthesisResult {
+    pub audio_base64: String,
+    pub sample_rate: u32,
+    pub format: AudioFormat,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingResult {
+    /// `inputs` と同じ順・同じ長さ。
+    pub vectors: Vec<Vec<f32>>,
+}
+```
+
+**この設計の帰結。** 音声1回の応答は `MAX_MESSAGE_BYTES`（1 MiB）に収まらない。現行の `MAX_CHUNK` は 128 KiB である。したがって音声は「1回の呼び出しで返す」形にせず、`HttpOpen` / `HttpRead` / `HttpClose` と同じ**ハンドル方式のチャンク読み出し**を `Synthesize` にも用意する必要がある。具体的には `Operation::Synthesize` の戻り値をハンドルにし、`ServiceRequest::AudioRead { handle }` で 128 KiB ずつ引く。この追加は本提案の必須要素であり、省略すると長い発話が必ず失敗する。
+
+### 1.4 `ProviderConfiguration` / `AuthProfile` の流用範囲
+
+両方そのまま流用できる。理由は、どちらもプロトコル非依存だからである。
+
+- `AuthProfile`（`None` / `Bearer` / `Header` / `Query`）は TTS・STT・Embedding の認証方式をすべて表現できる。VOICEVOX は `None`、OpenAI 系は `Bearer`、一部ゲートウェイは `Header` である。
+- `ProviderConfiguration` の `destinations` は宛先制限にそのまま使える。`routing`（`Direct` / `OpenRouter`）は LLM 固有なので、音声・埋め込みでは `Direct` 固定で無視する。
+- `settings` の `SettingField` は現行 `voice.rs` の `Options`（`voice` / `language` / `speed` / `speaker` / `path` 等）を表現できる。**`path` を含む演算子設定はここへ移す**。これが現行テストの契約（`voice/tests.rs:647`）を保つ道である。
+
+追加が要るのは1点だけである。`ProviderConfiguration` に「この provider が提供する拡張」を持たせる。現状は `EntryPoint.provides` がそれを持つが、1つの provider 設定が複数拡張を提供する場合（OpenAI が LLM と TTS と STT を提供する）に、どの `provides` がどの `settings` に対応するかが曖昧になる。`ProviderConfiguration` に `extensions: Vec<Extension>` を足し、`settings` をその共通部分として扱う。
+
+---
+
+## 2. `Service::Http` 境界への一元化
+
+### 2.1 現状の穴
+
+`Service::Http` は `ServiceRequest::HttpOpen` として定義されているが、`ene-plugin-runtime` に実装がない。`DenyServices` が `permission_required` を返すだけである。つまり「認証情報の注入・宛先制限・リダイレクト禁止・タイムアウト・ボディ上限」は**まだどこにもない**。本提案の中核はここを1箇所に作ることである。
+
+### 2.2 単一の実装点
+
+`crates/ene-plugin-runtime/src/service/http.rs` を新設し、`HttpBroker` を1つだけ置く。
+
+```rust
+pub struct HttpBroker {
+    /// 接続ごとの認可。ホストが渡す。
+    grants: Arc<dyn HttpGrants>,
+    /// プロセスで共有する reqwest クライアント。リダイレクト禁止。
+    client: reqwest::Client,
+    /// 開いているハンドル。上限付き。
+    open: Mutex<HashMap<String, Open>>,
+}
+
+pub trait HttpGrants: Send + Sync {
+    /// この宛先へこの provider が送ってよいか。
+    fn allows(&self, provider: &str, url: &Url) -> bool;
+    /// 認証ヘッダ。プラグインには値を見せない。
+    fn authorize(&self, provider: &str, headers: &mut HeaderMap) -> Result<(), Failure>;
+}
+```
+
+`HttpOpen` の処理は次の1本になる。
+
+1. `grants.allows(provider, url)` で宛先を検査する。許可は `ProviderConfiguration.destinations` の origin 一致で決める。
+2. `grants.authorize` で認証ヘッダを注入する。プラグインが同じヘッダを送ってきたら**拒否**する（上書きさせない）。
+3. `client` で送る。`redirect(Policy::none)`、`timeout(既定30秒)`、`content_length` とストリーム読み出しの両方で **16 MiB** を上限にする。
+4. 応答は `HttpRead` で 128 KiB ずつ返す。読み出し総量が上限を超えたら `Failure`。
+
+### 2.3 上限値の置き場所
+
+現行ホストの `MAX_BODY_BYTES = 16 MiB`（`voice.rs:48`）を `limits.rs` の `MAX_HTTP_BODY` として移す。`MAX_SERVICE_BYTES`（16 MiB、1呼び出しの合計）とは別物である。前者は1応答、後者は呼び出し全体の累計で、両方要る。
+
+### 2.4 現行の防御を落とさないための対応表
+
+| 現行の防御 | 現在の場所 | 移行先 |
+| --- | --- | --- |
+| 応答 16 MiB 上限 | `voice.rs:48` + `net::read_body` | `HttpBroker` の読み出し上限 |
+| リダイレクト禁止 | `net.rs:17` | `HttpBroker` のクライアント |
+| 接続ごとのタイムアウト | `voice.rs:169` | `HttpOpen` の `timeout` |
+| ベアラ注入 | `voice.rs:316` `post()` | `HttpGrants::authorize` |
+| 宛先の制限 | `ProviderConfiguration.destinations` | `HttpGrants::allows` |
+| 認証情報をプラグインに見せない | 現行 `provider.rs` の方針 | 同じ（`authorize` はホスト側で走る） |
+
+この表の全行が `HttpBroker` の1ファイルに来る。これが「一元化」の実体である。
+
+---
+
+## 3. `ene-host` との接続と移行パス
+
+### 3.1 ホスト側の実行境界
+
+ホストは既に4つの境界を持っている。これをそのまま受け口にする。
+
+| 境界 | 現在の実装 | プラグイン版 |
+| --- | --- | --- |
+| `DynModel<Completion>` | `model::connect` が `catalog.connect_with` で構築 | `DynModel<Completion>` を実装するアダプタ |
+| `DynModel<Embedding>` | `mind/embedding.rs::connect` が `ProviderConfig` を match | 同上 |
+| `dyn TtsEngine` | `voice.rs` の `HttpEngine` | `PluginTts` |
+| `dyn SttEngine` | `voice.rs` の `HttpEngine` | `PluginStt` |
+
+`DynModel<Op>` は `rig_core::driver::DynModel` で、`call(request)` を持つ。プラグインアダプタはこの型を返せばよい。**トレイトを自作する必要はない。** これは監査時に確認した事実で、`DynModel` は `From<Model<W, T>>` を持つが、任意の実装を受け付けるコンストラクタは公開されていない。
+
+ここに制約がある。`DynModel` をプラグインから作るには、`rig_core::wire::Wire` を実装した型を作り、`Model::new(wire, http)` に渡す必要がある。`Wire` は `encode` / `decode` / `describe` を持つ公開トレイトである。したがって**プラグイン LLM アダプタは `Wire` 実装として書く**のが正しい。`DynModel` を直接組み立てる道は公開されていない。
+
+`TtsEngine` / `SttEngine` はホスト固有のトレイトなので、プラグイン実装を足すのは自由である。こちらは素直に `PluginTts` を書けばよい。
+
+### 3.2 標準プロバイダーの扱い
+
+**同梱 Wasm にしない。** 理由は3つある。
+
+1. 起動時間。`MAX_INSTANCES = 16` に対し、LLM・Embedding・TTS・STT で4つ常時消費する。`INITIALIZE_TIMEOUT` は30秒で、起動のたびにコンパイルが走る。
+2. デバッグ性。同梱 Wasm のスタックトレースはホストのものより読みにくい。
+3. 移行リスク。既に動いている経路を一度 Wasm に通すと、不具合の切り分けが2層になる。
+
+代わりに **`rig-core` のカタログ経路を標準として残し、プラグインは追加プロバイダーの経路にする**。つまり `model::connect` は「カタログに居る provider なら現行経路、居ないならプラグイン」と分岐する。この分岐は1箇所（`model::connect` の冒頭）に閉じる。
+
+### 3.3 移行順序
+
+各段階が独立に検証可能になるよう4段に切る。
+
+**段階1：`HttpBroker` を作る。** プラグインを接続せず、`HttpBroker` 単体のテストを書く。宛先拒否・リダイレクト拒否・16 MiB 上限・認証ヘッダ注入の4つを固定する。この段階ではホストの挙動は変わらない。
+
+**段階2：Embedding を移す。** 4つの中で最も小さい（入出力が文字列とベクトルだけ、ストリーミングなし、音声なし）。`Embedding` 拡張と `Operation::Embed` を追加し、`mind/embedding.rs::connect` を「プラグインがあれば使う、無ければ現行」に変える。既存の `CompactVectorIndex` はそのまま。
+
+**段階3：LLM を移す。** `Wire` 実装のアダプタを書き、`model::connect` に分岐を足す。ここが最もリスクが高い。ストリーミング（`Operation::Generate` の `Delta` イベント）とツール呼び出しの両方を通す必要がある。`examples/plugins/openrouter-wasm` が `provides: ["llm"]` の manifest と `Wire` 相当の実装を持つので、これを雛形にする。ただしこの example は `just build-test-plugins` でビルドされるだけで、ホストから実行された実績はない（`grep` で実行箇所0件）。雛形であって動作実績ではない。
+
+**段階4：TTS / STT を移す。** 音声は `SynthesisResult` のチャンク読み出しが要るので最後にする。`path` オプションは `ProviderConfiguration.settings` に移し、現行テストの契約を保つ。
+
+### 3.4 移行期間中の共存
+
+共存は**接続種別ごとに排他**にする。1つの `Connection` が「プラグイン経路」か「カタログ経路」のどちらか一方だけを通る。両方を通す fallback は作らない。理由は、失敗時にどちらが答えたか分からなくなるためである。
+
+判定は `Connection.endpoint().adapter` が `provider_of()`（カタログ）に解決できるかで行う。解決できれば現行経路、できなければプラグイン経路。現行の `provider_of` は既にこの判定に使われている（`model.rs:154`）。
+
+---
+
+## 4. この提案が引き受けるリスク
+
+| リスク | 内容 | 対処 |
+| --- | --- | --- |
+| 音声のチャンク化 | `SynthesisResult` が 1 MiB を超える | `AudioRead` ハンドル方式を段階4の前提にする |
+| `Wire` 実装の難度 | `DynModel` は公開コンストラクタを持たない | `examples/plugins/openrouter-wasm` を雛形にする |
+| インスタンス数 | 4拡張 × 接続数で `MAX_INSTANCES = 16` に当たる | 接続ごとに1インスタンスではなく、provider ごとに1つを共有する |
+| 起動時間 | 初回コンパイルが30秒上限に近い | 段階2で実測する。超えるなら `MAX_CODE` かキャッシュを見直す |
+| 契約破壊 | `contract_version` 4 → 5 | 旧 manifest は明示的に拒否し、エラー文で版を名指す |
+
+---
+
+## 5. 決めていないこと
+
+1. **`AudioRead` を `ServiceRequest` に足すか、`Operation` の戻り値を分割するか。** 前者は `HttpRead` と対称で覚えやすい。後者は `ServiceRequest` を増やさない。私は前者を推すが、`ServiceRequest` が9種から10種に増える。
+2. **`ProviderConfiguration.extensions` を足すか、`EntryPoint.provides` との二重管理を許すか。** 私は足す方針で書いたが、manifest の変更になるため確認が要る。
+3. **標準プロバイダーを将来 Wasm に寄せるか。** 本提案では「寄せない」とした。移行が完了した後に再評価する。
