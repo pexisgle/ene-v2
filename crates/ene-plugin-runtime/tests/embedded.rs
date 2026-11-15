@@ -793,6 +793,7 @@ async fn a_generation_plugin_streams_text_and_finishes() {
                 model: "local".into(),
                 preamble: "p".into(),
                 messages: vec![],
+                tools: vec![],
                 max_tokens: 16,
             },
         },
@@ -838,8 +839,17 @@ async fn a_listing_plugin_answers_with_its_models() {
 /// A provider module whose `ene_initialize` declares streaming text, as an
 /// LLM provider must.
 fn provider_wasm(body: &str) -> Vec<u8> {
+    provider_wasm_with(
+        body,
+        &json!({"streaming_text": true, "model_list": true, "tool_calls": true}),
+    )
+}
+
+/// A provider module declaring `capabilities`, whose `ene_invoke` runs `body`.
+fn provider_wasm_with(body: &str, capabilities: &Value) -> Vec<u8> {
     let empty = write("{}");
-    let capabilities = write(&json!({"streaming_text": true, "model_list": true}).to_string());
+    let declared = capabilities.to_string();
+    let capabilities = write(&declared);
     wat::parse_str(format!(r#"(module
         (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
         (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
@@ -847,7 +857,187 @@ fn provider_wasm(body: &str) -> Vec<u8> {
         (import "extism:host/env" "length" (func $length (param i64) (result i64)))
         (import "extism:host/user" "ene_service" (func $service (param i64) (result i64)))
         (import "extism:host/user" "ene_emit" (func $emit (param i64)))
-        (func (export "ene_initialize") (result i32) (local $p i64) {capabilities} local.get $p i64.const 41 call $output i32.const 0)
+        (func (export "ene_initialize") (result i32) (local $p i64) {capabilities} local.get $p i64.const {} call $output i32.const 0)
         (func (export "ene_invoke") (result i32) (local $p i64) (local $i i32)
-            {body} {empty} local.get $p i64.const 2 call $output i32.const 0))"#)).unwrap()
+            {body} {empty} local.get $p i64.const 2 call $output i32.const 0))"#, declared.len())).unwrap()
+}
+
+/// A plugin that reads its input: it asks for a tool call the first time, and
+/// answers with text once the conversation carries that call's result.
+fn tool_plugin() -> Vec<u8> {
+    // The guest compares the input's length against a threshold rather than
+    // parsing JSON in WAT: the first turn carries no result, the second does.
+    let call = write(
+        &json!({
+            "type": "tool_call",
+            "id": "call-1",
+            "name": "lookup",
+            "arguments": {"query": "weather"}
+        })
+        .to_string(),
+    );
+    let text = write(&json!({"type": "delta", "text": "晴れです"}).to_string());
+    let finished = write(&json!({"type": "finished", "reason": "stop"}).to_string());
+    wat::parse_str(format!(r#"(module
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+        (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (import "extism:host/env" "length" (func $length (param i64) (result i64)))
+        (import "extism:host/env" "input_length" (func $input_length (result i64)))
+        (import "extism:host/user" "ene_emit" (func $emit (param i64)))
+        (func (export "ene_initialize") (result i32) (local $p i64)
+            {caps} local.get $p i64.const {caps_len} call $output i32.const 0)
+        (func (export "ene_invoke") (result i32) (local $p i64)
+            (if (result i32) (i64.lt_u (call $input_length) (i64.const {threshold}))
+                (then {call} local.get $p call $emit {finished} local.get $p call $emit i32.const 0)
+                (else {text} local.get $p call $emit {finished} local.get $p call $emit i32.const 0))
+            drop
+            {empty} local.get $p i64.const 2 call $output i32.const 0))"#,
+        caps = write(&json!({"streaming_text": true, "tool_calls": true}).to_string()),
+        caps_len = json!({"streaming_text": true, "tool_calls": true}).to_string().len(),
+        // A first turn is a short request; the turn that carries the result is
+        // longer because the result is in it.
+        threshold = 400,
+        empty = write("{}"),
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_plugin_asks_for_a_tool_and_answers_once_it_has_the_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("plugin");
+    directory(&root);
+    write_file(&root.join("main.wasm"), tool_plugin());
+    write_file(
+        &root.join("manifest.json"),
+        json!({
+            "contract_version": CONTRACT_VERSION,
+            "id": "tool-llm", "name": "Tool LLM", "version": "1",
+            "entrypoints": [{
+                "id": "main", "target": "host", "file": "main.wasm",
+                "provides": ["llm"], "uses": ["http"],
+                "provider": {
+                    "id": "tool-llm", "endpoint": "http://127.0.0.1:1",
+                    "auth": {"type": "none"},
+                    "destinations": ["http://127.0.0.1:1"],
+                    "extensions": ["llm"]
+                }
+            }]
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    let package = Package::load(&root).unwrap();
+    let cancel = CancellationToken::new();
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
+        .await
+        .unwrap();
+    instance.initialize(&cancel).await.unwrap();
+
+    // First turn: the plugin asks for a call instead of answering.
+    let tool = ToolSpec {
+        name: "lookup".into(),
+        description: "look up a fact".into(),
+        parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    let collect = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    instance
+        .invoke(
+            Operation::Generate {
+                request: GenerationRequest {
+                    endpoint: "http://127.0.0.1:1".into(),
+                    options: json!({}),
+                    model: "local".into(),
+                    preamble: String::new(),
+                    messages: vec![ChatMessage::text("user", "天気は?")],
+                    tools: vec![tool.clone()],
+                    max_tokens: 64,
+                },
+            },
+            Arc::new(DenyServices),
+            tx,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let first = collect.await.unwrap();
+    let (id, name, arguments) = first
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolCall {
+                id,
+                name,
+                arguments,
+            } => Some((id.clone(), name.clone(), arguments.clone())),
+            _ => None,
+        })
+        .expect("the plugin asked for a tool call");
+    assert_eq!(id, "call-1");
+    assert_eq!(name, "lookup");
+    assert_eq!(arguments["query"], "weather");
+
+    // Second turn: the host returns the result, and the plugin answers.
+    let (tx, mut rx) = mpsc::channel(16);
+    let collect = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    instance
+        .invoke(
+            Operation::Generate {
+                request: GenerationRequest {
+                    endpoint: "http://127.0.0.1:1".into(),
+                    options: json!({}),
+                    model: "local".into(),
+                    preamble: String::new(),
+                    messages: vec![
+                        ChatMessage::text("user", "天気は?"),
+                        ChatMessage::ToolCalls {
+                            calls: vec![ToolCallRequest {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                            }],
+                        },
+                        ChatMessage::ToolResult {
+                            call_id: id,
+                            name,
+                            content: "晴れ、25度".into(),
+                            is_error: false,
+                        },
+                    ],
+                    tools: vec![tool],
+                    max_tokens: 64,
+                },
+            },
+            Arc::new(DenyServices),
+            tx,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let second = collect.await.unwrap();
+    let text: String = second
+        .iter()
+        .filter_map(|event| match event {
+            Event::Delta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "晴れです", "the second turn answers in text");
+    assert!(
+        matches!(second.last(), Some(Event::Finished { reason }) if reason == "stop"),
+        "{second:?}"
+    );
 }

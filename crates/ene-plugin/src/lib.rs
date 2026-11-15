@@ -20,7 +20,7 @@ pub use failure::Failure;
 pub use manifest::{
     CONTRACT_VERSION, EntryPoint, Extension, Manifest, ProviderConfiguration, Service, Target,
 };
-pub use provider::{Model, ModelMetadata};
+pub use provider::{ChatMessage, Model, ModelMetadata, ToolCallRequest, ToolSpec};
 #[cfg(target_family = "wasm")]
 mod sdk;
 #[cfg(target_family = "wasm")]

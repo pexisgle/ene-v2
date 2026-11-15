@@ -13,7 +13,8 @@
 use super::super::providers::Running;
 use crate::host::error::HostError;
 use ene_plugin::{
-    Event as PluginEvent, GenerationRequest, Operation as PluginOperation, provider::ChatMessage,
+    Event as PluginEvent, GenerationRequest, Operation as PluginOperation, ToolCallRequest,
+    ToolSpec, provider::ChatMessage,
 };
 use ene_plugin_runtime::instance::Services;
 use futures_util::stream;
@@ -21,7 +22,7 @@ use rig_core::{
     DynModel,
     completion::{
         CompletionRequest, FinishReason, Message, Usage,
-        message::{AssistantContent, UserContent},
+        message::{AssistantContent, ToolResultContent, UserContent},
     },
     driver::{Exchange, Opened, Opening, Transport},
     error::{EncodeError, ProviderError},
@@ -39,6 +40,12 @@ use std::sync::Arc;
 pub(crate) enum PluginFrame {
     /// A text fragment.
     Text(String),
+    /// A tool call the model asked for.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
     /// The turn ended with the plugin's reason.
     Finished(String),
 }
@@ -92,16 +99,57 @@ impl Wire for PluginCompletion {
     ) -> Result<CompletionPayload, EncodeError> {
         let mut messages = Vec::new();
         for message in &request.chat_history {
-            let (role, text) = match message.as_ref() {
-                Message::System { content } => ("system", content.clone()),
-                Message::User { content } => ("user", user_text(content)),
-                Message::Assistant(turn) => ("assistant", assistant_text(&turn.content)),
-            };
-            if !text.is_empty() {
-                messages.push(ChatMessage {
-                    role: role.to_owned(),
-                    text,
-                });
+            match message.as_ref() {
+                Message::System { content } => {
+                    if !content.is_empty() {
+                        messages.push(ChatMessage::text("system", content.clone()));
+                    }
+                }
+                Message::User { content } => {
+                    for item in content {
+                        match item {
+                            UserContent::Text(text) if !text.text.is_empty() => {
+                                messages.push(ChatMessage::text("user", text.text.clone()));
+                            }
+                            // A tool's answer is its own turn, so the model
+                            // can tell it apart from something the user said.
+                            UserContent::ToolResult(result) => {
+                                messages.push(ChatMessage::ToolResult {
+                                    call_id: result.call.wire().into_owned(),
+                                    name: result.name.to_string(),
+                                    content: result_text(&result.content),
+                                    is_error: result.is_error,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Message::Assistant(turn) => {
+                    let text = assistant_text(&turn.content);
+                    if !text.is_empty() {
+                        messages.push(ChatMessage::text("assistant", text));
+                    }
+                    // The calls the assistant asked for are their own turn,
+                    // ahead of the results that answer them.
+                    let calls: Vec<ToolCallRequest> = turn
+                        .content
+                        .iter()
+                        .filter_map(|item| match item {
+                            AssistantContent::ToolCall(call) => Some(ToolCallRequest {
+                                id: call.id.wire().into_owned(),
+                                name: call.function.name.to_string(),
+                                arguments: serde_json::Value::Object(
+                                    call.function.arguments.clone(),
+                                ),
+                            }),
+                            _ => None,
+                        })
+                        .collect();
+                    if !calls.is_empty() {
+                        messages.push(ChatMessage::ToolCalls { calls });
+                    }
+                }
             }
         }
         Ok(CompletionPayload {
@@ -111,6 +159,15 @@ impl Wire for PluginCompletion {
                 model: self.model.clone(),
                 preamble: String::new(),
                 messages,
+                tools: request
+                    .tools
+                    .iter()
+                    .map(|tool| ToolSpec {
+                        name: tool.name.to_string(),
+                        description: tool.description.clone(),
+                        parameters: tool.parameters.clone(),
+                    })
+                    .collect(),
                 max_tokens: request.max_tokens.unwrap_or(4096),
             },
         })
@@ -125,14 +182,32 @@ impl Wire for PluginCompletion {
     }
 }
 
-/// The text of a user turn, joined. A tool result is left out: a plugin's
-/// contract carries plain turns, and a call's answer is the host's to place.
-fn user_text(content: &[UserContent]) -> String {
+/// What a tool returned, as the one text a plugin's contract carries. A
+/// structured result is serialized, so the model sees what the tool said
+/// rather than a rendering of it.
+fn result_text(content: &[ToolResultContent]) -> String {
     content
         .iter()
-        .filter_map(|item| match item {
-            UserContent::Text(text) => Some(text.text.clone()),
-            _ => None,
+        .map(|item| match item {
+            ToolResultContent::Text(text) => text.text.clone(),
+            ToolResultContent::Json { value } => value.to_string(),
+            ToolResultContent::Image(image) => {
+                format!(
+                    "[image: {}]",
+                    image
+                        .media_type
+                        .as_ref()
+                        .map_or("unknown", |kind| match kind {
+                            rig_core::completion::message::ImageMediaType::JPEG => "jpeg",
+                            rig_core::completion::message::ImageMediaType::PNG => "png",
+                            rig_core::completion::message::ImageMediaType::GIF => "gif",
+                            rig_core::completion::message::ImageMediaType::WEBP => "webp",
+                            rig_core::completion::message::ImageMediaType::HEIC => "heic",
+                            rig_core::completion::message::ImageMediaType::HEIF => "heif",
+                            rig_core::completion::message::ImageMediaType::SVG => "svg",
+                        })
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join("")
@@ -188,6 +263,27 @@ impl<'id> rig_core::wire::Decoder<'id, Completion, PluginFrame> for PluginDecode
                 out.push(index, &text)?;
                 Ok(Flow::More)
             }
+            PluginFrame::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                // A call is one whole block: the plugin states its arguments
+                // in one event, so there is nothing to stream into it.
+                let index = out.fresh_index();
+                let call_id = rig_core::completion::message::CallId::from_wire(id);
+                let name = rig_core::completion::message::ToolName::new(name)
+                    .map_err(|_| ProviderError::Response("a tool call named no tool".into()))?;
+                let body =
+                    serde_json::Value::Object(arguments.as_object().cloned().unwrap_or_default());
+                out.whole(
+                    index,
+                    Block::Call { id: call_id, name },
+                    body,
+                    &arguments.to_string(),
+                )?;
+                Ok(Flow::More)
+            }
             PluginFrame::Finished(reason) => {
                 self.ended = true;
                 self.reason = Some(reason);
@@ -233,12 +329,14 @@ fn finish_reason(reason: Option<&str>) -> FinishReason {
 
 /// Folds the reply's events into the provider document `raw` holds.
 ///
-/// A plugin's frames carry text and an end, so the document is the answer's
-/// text and the reason it stopped. It is not a provider envelope: the plugin
-/// is the provider, and this is what it said.
+/// A plugin's frames carry text, the calls it asked for and an end, so the
+/// document is the answer's text, its calls and the reason it stopped. It is
+/// not a provider envelope: the plugin is the provider, and this is what it
+/// said.
 #[derive(Default)]
 pub(crate) struct PluginDocument {
     text: String,
+    calls: Vec<serde_json::Value>,
     reason: Option<String>,
 }
 
@@ -246,6 +344,15 @@ impl Reassemble<PluginFrame> for PluginDocument {
     fn absorb(&mut self, event: &PluginFrame) {
         match event {
             PluginFrame::Text(text) => self.text.push_str(text),
+            PluginFrame::ToolCall {
+                id,
+                name,
+                arguments,
+            } => self.calls.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "arguments": arguments,
+            })),
             PluginFrame::Finished(reason) => self.reason = Some(reason.clone()),
         }
     }
@@ -253,6 +360,7 @@ impl Reassemble<PluginFrame> for PluginDocument {
     fn finish(self) -> serde_json::Value {
         serde_json::json!({
             "text": self.text,
+            "calls": self.calls,
             "reason": self.reason,
         })
     }
@@ -298,6 +406,18 @@ impl Transport<PluginCompletion> for CompletionTransport {
                     Some(PluginEvent::Delta { text }) => {
                         Some((Ok(PluginFrame::Text(text)), (events, running)))
                     }
+                    Some(PluginEvent::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    }) => Some((
+                        Ok(PluginFrame::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        }),
+                        (events, running),
+                    )),
                     Some(PluginEvent::Finished { reason }) => {
                         Some((Ok(PluginFrame::Finished(reason)), (events, running)))
                     }

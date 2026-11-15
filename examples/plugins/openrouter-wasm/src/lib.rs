@@ -9,23 +9,68 @@ mod guest {
         Ok(Json(LlmCapabilities {
             streaming_text: true,
             model_list: true,
+            tool_calls: true,
         }))
     }
     #[plugin_fn]
     pub fn ene_invoke(Json(operation): Json<Operation>) -> FnResult<Json<Value>> {
         let (endpoint, body, models) = match operation {
             Operation::Generate { request } => {
-                let mut messages: Vec<Value> = request
-                    .messages
-                    .iter()
-                    .map(|m| json!({"role":m.role,"content":m.text}))
-                    .collect();
+                let mut messages: Vec<Value> = Vec::new();
+                for message in &request.messages {
+                    match message {
+                        ChatMessage::Text { role, text } => {
+                            messages.push(json!({"role": role, "content": text}));
+                        }
+                        // The assistant turn that asked for the calls, in the
+                        // shape an OpenAI-compatible endpoint replays.
+                        ChatMessage::ToolCalls { calls } => messages.push(json!({
+                            "role": "assistant",
+                            "tool_calls": calls
+                                .iter()
+                                .map(|call| json!({
+                                    "id": call.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": call.name,
+                                        "arguments": call.arguments.to_string(),
+                                    },
+                                }))
+                                .collect::<Vec<_>>(),
+                        })),
+                        ChatMessage::ToolResult {
+                            call_id, content, ..
+                        } => messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": content,
+                        })),
+                    }
+                }
                 if !request.preamble.is_empty() {
                     messages.insert(0, json!({"role":"system","content":request.preamble}));
                 }
                 let mut body =
                     json!({"model":request.model,"stream":true,"max_tokens":request.max_tokens});
                 body["messages"] = Value::Array(messages);
+                if !request.tools.is_empty() {
+                    body["tools"] = Value::Array(
+                        request
+                            .tools
+                            .iter()
+                            .map(|tool| {
+                                json!({
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool.name,
+                                        "description": tool.description,
+                                        "parameters": tool.parameters,
+                                    },
+                                })
+                            })
+                            .collect(),
+                    );
+                }
                 (
                     format!(
                         "{}/chat/completions",
@@ -90,6 +135,30 @@ mod guest {
                         {
                             if let Some(text) = choice["delta"]["content"].as_str() {
                                 emit(Event::Delta { text: text.into() })?;
+                            }
+                            // A streamed call arrives in fragments; the
+                            // provider states the whole call once the turn
+                            // stops, so only a complete one is emitted.
+                            for call in choice["delta"]["tool_calls"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                            {
+                                let Some(id) = call["id"].as_str() else {
+                                    continue;
+                                };
+                                let Some(name) = call["function"]["name"].as_str() else {
+                                    continue;
+                                };
+                                let arguments = call["function"]["arguments"]
+                                    .as_str()
+                                    .and_then(|raw| serde_json::from_str(raw).ok())
+                                    .unwrap_or_else(|| json!({}));
+                                emit(Event::ToolCall {
+                                    id: id.into(),
+                                    name: name.into(),
+                                    arguments,
+                                })?;
                             }
                             if let Some(value) = choice["finish_reason"].as_str() {
                                 reason = Some(value.to_string());

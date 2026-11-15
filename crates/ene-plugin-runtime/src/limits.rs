@@ -9,6 +9,10 @@ pub const MAX_CHUNK: usize = 128 * 1024;
 pub const MAX_EVENTS: usize = 256;
 /// Streaming operations can produce more events under bounded channel backpressure.
 pub const MAX_STREAM_EVENTS: u64 = 65_536;
+
+/// The most tool calls one reply may ask for. A turn is answered once, so a
+/// reply that asks for more than this is not a turn the host can finish.
+pub const MAX_TOOL_CALLS: usize = 64;
 pub const MAX_SERVICE_CALLS: usize = 4096;
 /// Aggregate request/response budget for application services in one invocation.
 pub const MAX_SERVICE_BYTES: usize = 16 * 1024 * 1024;

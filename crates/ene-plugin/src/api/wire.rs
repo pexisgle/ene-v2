@@ -57,6 +57,13 @@ pub enum Event {
     Delta {
         text: String,
     },
+    /// The model asked for a tool call instead of, or before, answering.
+    ToolCall {
+        id: String,
+        name: String,
+        /// The arguments as a JSON object.
+        arguments: Value,
+    },
     Models {
         models: Vec<crate::provider::Model>,
     },
@@ -75,7 +82,10 @@ pub enum Event {
 impl Event {
     pub fn extension(&self) -> Extension {
         match self {
-            Self::Delta { .. } | Self::Models { .. } | Self::Finished { .. } => Extension::Llm,
+            Self::Delta { .. }
+            | Self::ToolCall { .. }
+            | Self::Models { .. }
+            | Self::Finished { .. } => Extension::Llm,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
         }
