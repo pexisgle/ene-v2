@@ -43,7 +43,6 @@ reqwest.workspace = true
 rig-core.workspace = true
 rig-agent.workspace = true
 rig-ecs.workspace = true
-rig-http.workspace = true
 rig-memory.workspace = true
 rig-rmcp.workspace = true
 rmcp.workspace = true

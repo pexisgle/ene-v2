@@ -3179,7 +3179,6 @@ dependencies = [
  "rig-agent",
  "rig-core",
  "rig-ecs",
- "rig-http",
  "rig-memory",
  "rig-reqwest",
  "rig-rmcp",
