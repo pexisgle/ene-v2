@@ -263,7 +263,18 @@ pub trait HttpGrants: Send + Sync {
 
 段階3で分かったこと。`Completion` の decoder は `Out` の part 書き込み API（`open` / `push` / `finish`）を使う。`Out::event` と `Out::raw` は `Completion` では型レベルで塞がれており、イベントを直接注入する道はない。したがって reassembler は「イベントを畳んで文書を作る」係であり、decoder は「イベントを part に変換する」係として分かれる。この分離は rig の他のプロバイダー実装と同じ形である。
 
-ツール呼び出しは現状のプラグイン契約（`Event::Delta` と `Event::Finished`）では表現できない。`GenerationRequest` にツール定義がなく、`Event` にツール呼び出しの variant がないためである。段階3の要件にあった「ツール呼び出しを含む」は、契約側に `ToolCall` イベントと `tools` フィールドを足す別作業になる。今回は契約を変えず、テキスト生成とモデル一覧を実 Wasm で通した。
+ツール呼び出しは段階3では表現できなかった。`GenerationRequest` にツール定義がなく、`Event` にツール呼び出しの variant がなかったためである。これは契約拡張（`contract_version` 6）として別途実装した。
+
+- `GenerationRequest.tools: Vec<ToolSpec>`（`name` / `description` / `parameters`）
+- `ChatMessage` をタグ付きの3形にした。`Text { role, text }`、`ToolCalls { calls }`、`ToolResult { call_id, name, content, is_error }`。アシスタントの呼び出しとその結果を、通常のテキストと区別して ReAct の2ターン目以降に渡せる。
+- `Event::ToolCall { id, name, arguments }`
+- `LlmCapabilities.tool_calls`（宣言したプラグインにだけツールを渡す）
+
+ホスト側は rig の `ToolDefinition` と履歴（`AssistantContent::ToolCall` / `UserContent::ToolResult`）をこの形にエンコードし、`Event::ToolCall` を `Block::Call` としてデコードする。`Block::Call` は `whole` で1ブロックとして書く（引数は1イベントで揃うため、ストリームにする余地がない）。`FinishReason` は rig が `Stop` を `ToolCalls` に整合させるので、プラグインが `stop` を返しても呼び出しがあれば正しく `ToolCalls` になる。
+
+検証は `contract/llm.rs` が持つ。空の `id` / `name`、オブジェクトでない `arguments`、`MAX_TOOL_CALLS = 64` を超える呼び出しは `Error::Protocol` で拒否する。実装中に、`Events::accept` が `Finished` と `Models` しか LLM 検証に渡していないことが分かった。`ToolCall` の検証が到達不能だったため、ディスパッチを直した。この不具合は追加したテストが検出した。
+
+往復テストは `crates/ene-plugin-runtime/tests/embedded.rs` に置いた。実 Wasm プラグインが1ターン目に `ToolCall` を返し、ホストが結果を返した2ターン目にテキストで答えて完了する。
 
 ---
 
