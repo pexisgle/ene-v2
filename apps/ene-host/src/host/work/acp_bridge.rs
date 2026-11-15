@@ -236,6 +236,9 @@ struct RelayArgs {
 
 #[cfg(test)]
 mod tests {
+    // Every test here drives the unix-socket proxy, so the module's items are
+    // unused where it does not exist.
+    #[cfg(unix)]
     use super::*;
     /// The path a sandboxed agent takes: TCP to the relay, a unix socket to the
     /// host's proxy, and the proxy's own TCP connection to the model.
