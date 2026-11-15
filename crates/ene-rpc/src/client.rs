@@ -4,7 +4,6 @@ use connectrpc::{
     client::{ClientConfig, HttpClient},
 };
 use http::header::{AUTHORIZATION, HeaderValue};
-use std::time::Duration;
 use url::Url;
 
 /// HTTP on a literal loopback address, and nothing else. Credentials never
@@ -34,9 +33,7 @@ pub fn connect(endpoint: &str, token: &str) -> Result<(HttpClient, ClientConfig)
     let mut bearer = HeaderValue::from_str(&format!("Bearer {}", token))
         .map_err(|_| ConnectError::invalid_argument("invalid API endpoint or Bearer token"))?;
     bearer.set_sensitive(true);
-    let transport = HttpClient::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .plaintext();
+    let transport = HttpClient::plaintext();
     let config = ClientConfig::new(
         endpoint
             .as_str()
