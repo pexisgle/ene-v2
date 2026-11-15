@@ -250,6 +250,21 @@ pub trait HttpGrants: Send + Sync {
 
 判定は `Connection.endpoint().adapter` が `provider_of()`（カタログ）に解決できるかで行う。解決できれば現行経路、できなければプラグイン経路。現行の `provider_of` は既にこの判定に使われている（`model.rs:154`）。
 
+### 3.5 実装状況（2026-11-15）
+
+| 段階 | 状態 | 根拠 |
+| --- | --- | --- |
+| 1. `HttpBroker` | 完了 | `crates/ene-plugin-runtime/src/service/http.rs`。7つのテストが宛先拒否・認証注入・予約ヘッダ拒否・チャンク読み出し・上限・close・既定拒否を固定 |
+| 2. 契約 | 完了 | `Extension::{Embedding,Tts,Stt}`、`Operation::{Embed,Synthesize,Transcribe}`、`ProviderConfiguration.extensions`、`AudioRead`。`contract_version` は 5 |
+| 2. レジストリ | 完了 | `apps/ene-host/src/host/providers/`。起動時に `<state_dir>/plugins/` を読み、接続が参照するプラグインだけを開始する |
+| 2. Embedding | 完了 | `mind/plugin.rs` の `Wire` + `Transport` が `DynModel<Embedding>` に消去される |
+| 3. LLM | 完了 | `model/plugin.rs`。`Completion` は `Emit = Assembled` なので、decoder に加えて `Reassemble<StreamEvent>` を実装した。`model::connect` / `probe` / `list_models` がレジストリを引く |
+| 4. TTS / STT | 完了 | `voice/plugin.rs` の `PluginSpeech` が既存の `TtsEngine` / `SttEngine` を実装。認証は `providers/grant.rs` が持ち、ゲストには渡らない |
+
+段階3で分かったこと。`Completion` の decoder は `Out` の part 書き込み API（`open` / `push` / `finish`）を使う。`Out::event` と `Out::raw` は `Completion` では型レベルで塞がれており、イベントを直接注入する道はない。したがって reassembler は「イベントを畳んで文書を作る」係であり、decoder は「イベントを part に変換する」係として分かれる。この分離は rig の他のプロバイダー実装と同じ形である。
+
+ツール呼び出しは現状のプラグイン契約（`Event::Delta` と `Event::Finished`）では表現できない。`GenerationRequest` にツール定義がなく、`Event` にツール呼び出しの variant がないためである。段階3の要件にあった「ツール呼び出しを含む」は、契約側に `ToolCall` イベントと `tools` フィールドを足す別作業になる。今回は契約を変えず、テキスト生成とモデル一覧を実 Wasm で通した。
+
 ---
 
 ## 4. この提案が引き受けるリスク
