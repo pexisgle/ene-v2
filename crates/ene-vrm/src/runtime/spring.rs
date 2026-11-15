@@ -544,6 +544,98 @@ mod tests {
     }
 
     #[test]
+    fn fixed_clock_candidate_preserves_cap_and_remainder_but_needs_manual_consumption() {
+        let mut timer = Stepper::default();
+        let mut fixed = Time::<bevy::time::Fixed>::from_duration(STEP_PERIOD);
+        for frame in [
+            STEP_PERIOD / 2,
+            STEP_PERIOD / 2,
+            Duration::from_nanos(1),
+            Duration::from_secs(10),
+            STEP_PERIOD - Duration::from_nanos(1),
+            STEP_PERIOD * 2,
+            Duration::ZERO,
+        ] {
+            fixed.accumulate_overstep(frame.min(STEP_PERIOD * MAX_STEPS));
+            let steps = (fixed.overstep().as_nanos() / fixed.timestep().as_nanos()) as u32;
+            fixed.discard_overstep(STEP_PERIOD * steps);
+            assert_eq!(timer.advance(frame), steps as usize);
+            assert_eq!(timer.0.elapsed(), fixed.overstep());
+            assert!(steps <= MAX_STEPS);
+        }
+    }
+
+    #[test]
+    fn spring_steps_are_independent_of_frame_partition() {
+        for frames in [30, 60, 120] {
+            let total = STEP_PERIOD.as_nanos() * 60;
+            let mut clock = Stepper::default();
+            let mut count = 0;
+            for i in 0..frames {
+                let delta = total * (i + 1) / frames - total * i / frames;
+                count += clock.advance(Duration::from_nanos(delta as u64));
+            }
+            assert_eq!(count, 60);
+            assert_eq!(clock.0.elapsed(), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn zero_step_restores_pose_and_current_frame_parent_is_used() {
+        let (mut current, a) = simulation(1., true);
+        let (mut reference, b) = simulation(1., true);
+        let root_a = current.world().get::<ChildOf>(a).unwrap().parent();
+        let root_b = reference.world().get::<ChildOf>(b).unwrap().parent();
+        let transform = Transform::from_xyz(4., 3., 2.).with_rotation(Quat::from_rotation_z(0.5));
+        reference.world_mut().entity_mut(root_b).insert(transform);
+        reference.world_mut().run_schedule(PostUpdate);
+        current.add_systems(
+            PostUpdate,
+            (move |mut transforms: Query<&mut Transform>| {
+                *transforms.get_mut(root_a).unwrap() = transform;
+            })
+            .before(crate::VrmSystems::SpringBone),
+        );
+        current.update();
+        reference.update();
+        let expected = reference.world().get::<Transform>(b).unwrap().rotation;
+        let actual = current.world().get::<Transform>(a).unwrap().rotation;
+        assert!(actual.abs_diff_eq(expected, 1e-5));
+        current.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::ZERO,
+        ));
+        current
+            .world_mut()
+            .get_mut::<Transform>(a)
+            .unwrap()
+            .rotation = Quat::IDENTITY;
+        current.update();
+        assert!(
+            current
+                .world()
+                .get::<Transform>(a)
+                .unwrap()
+                .rotation
+                .abs_diff_eq(actual, 1e-5)
+        );
+    }
+
+    #[test]
+    fn spring_clock_does_not_touch_global_fixed_time() {
+        let (mut app, _) = simulation(1., false);
+        let mut global = Time::<bevy::time::Fixed>::from_duration(Duration::from_millis(7));
+        global.accumulate_overstep(Duration::from_millis(3));
+        app.insert_resource(global);
+        for _ in 0..10 {
+            app.world_mut().run_schedule(PostUpdate);
+        }
+        let clock = app.world().resource::<Time<bevy::time::Fixed>>();
+        assert_eq!(clock.timestep(), Duration::from_millis(7));
+        assert_eq!(clock.overstep(), Duration::from_millis(3));
+        assert_eq!(clock.elapsed(), Duration::ZERO);
+    }
+
+    #[test]
     fn center_space_scale_and_rest_pose_invariants() {
         // Center space only changes where inertia is stored, not the pose.
         let (mut free, a) = simulation(1., false);

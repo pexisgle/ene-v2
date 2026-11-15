@@ -352,8 +352,19 @@ impl GltfExtensionHandler for VrmExtensions {
                 let Some(value) = material.extension_value(VRMC_MATERIALS_MTOON) else {
                     continue;
                 };
-                let toon: schema::Toon = schema::Toon::deserialize(value).map_err(invalid)?;
-                require_v1(&toon.schema.spec_version, "VRMC_materials_mtoon")?;
+                if let Some(shift) = value
+                    .get("shadingShiftTexture")
+                    .filter(|shift| !shift.is_null())
+                {
+                    gltf::json::texture::Info::deserialize(shift).map_err(invalid)?;
+                }
+                let authored =
+                    vrm_spec::vrmc_materials_mtoon_1_0::VrmcMaterialsMtoonSchema::deserialize(
+                        value,
+                    )
+                    .map_err(invalid)?;
+                require_v1(&authored.spec_version, "VRMC_materials_mtoon")?;
+                let toon = schema::Toon::compile(authored).map_err(invalid)?;
                 self.materials
                     .insert(material.index().expect("indexed material"), toon);
             }
@@ -500,6 +511,7 @@ impl GltfExtensionHandler for VrmExtensions {
         entity: &mut EntityWorldMut,
     ) {
         if self.definition.is_some() {
+            entity.insert(crate::animation::NativeNode(node.index()));
             self.nodes.insert(node.index(), entity.id());
         }
     }
@@ -513,6 +525,9 @@ impl GltfExtensionHandler for VrmExtensions {
         let Some(definition) = &self.definition else {
             return;
         };
+        world
+            .entity_mut(root)
+            .insert(crate::animation::NativeSceneRoot);
         // VRM metadata is document-wide but nodes are per-scene. Only the scene
         // that Bevy (and `VrmLoader::load`) uses may be attached.
         if scene.index() != self.selected_scene {

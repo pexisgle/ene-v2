@@ -3,21 +3,13 @@ use bevy::{
     prelude::*,
     render::render_resource::ShaderType,
 };
-use serde::Deserialize;
 use vrm_spec::vrmc_materials_mtoon_1_0::{OutlineWidthMode, VrmcMaterialsMtoonSchema};
 
-/// `VRMC_materials_mtoon` as authored.
-///
-/// `vrm-spec` owns the parameter and texture fields. Only `shadingShiftTexture`
-/// is parsed locally: `vrm-spec` types that slot without the
-/// `KHR_texture_transform` this crate needs for UV animation, while the other
-/// five slots already use `gltf`'s typed texture info.
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub(crate) struct Toon {
-    #[serde(flatten)]
-    pub schema: VrmcMaterialsMtoonSchema,
-    pub shading_shift_texture: Option<ShadingShiftTexture>,
+    pub params: ToonParams,
+    textures: [Option<gltf::json::texture::Info>; 6],
+    outline: OutlineMode,
 }
 
 /// Values uploaded to the shader. Defaults match three-vrm.
@@ -146,13 +138,6 @@ pub(crate) enum OutlineMode {
     ScreenCoordinates,
 }
 
-#[derive(Clone, Deserialize)]
-pub(crate) struct ShadingShiftTexture {
-    #[serde(flatten)]
-    pub texture: gltf::json::texture::Info,
-    pub scale: Option<f32>,
-}
-
 pub(crate) fn texture_transform(
     info: &gltf::json::texture::Info,
 ) -> Option<&gltf::json::extensions::texture::TextureTransform> {
@@ -214,15 +199,39 @@ impl UvTransform {
 }
 
 impl Toon {
+    pub fn compile(schema: VrmcMaterialsMtoonSchema) -> serde_json::Result<Self> {
+        let mut params = ToonParams::from(&schema);
+        params.shading_shift_texture_scale = schema
+            .shading_shift_texture
+            .as_ref()
+            .and_then(|slot| slot.scale)
+            .unwrap_or(1.) as f32;
+        let shift = schema
+            .shading_shift_texture
+            .as_ref()
+            .map(|slot| serde_json::from_value(serde_json::to_value(slot)?))
+            .transpose()?;
+        let outline = match schema.outline_width_mode {
+            Some(OutlineWidthMode::WorldCoordinates) => OutlineMode::WorldCoordinates,
+            Some(OutlineWidthMode::ScreenCoordinates) => OutlineMode::ScreenCoordinates,
+            Some(OutlineWidthMode::None) | None => OutlineMode::None,
+        };
+        Ok(Self {
+            params,
+            textures: [
+                schema.shade_multiply_texture,
+                shift,
+                schema.rim_multiply_texture,
+                schema.matcap_texture,
+                schema.uv_animation_mask_texture,
+                schema.outline_width_multiply_texture,
+            ],
+            outline,
+        })
+    }
+
     pub fn textures(&self) -> [Option<&gltf::json::texture::Info>; 6] {
-        [
-            self.schema.shade_multiply_texture.as_ref(),
-            self.shading_shift_texture.as_ref().map(|s| &s.texture),
-            self.schema.rim_multiply_texture.as_ref(),
-            self.schema.matcap_texture.as_ref(),
-            self.schema.uv_animation_mask_texture.as_ref(),
-            self.schema.outline_width_multiply_texture.as_ref(),
-        ]
+        self.textures.each_ref().map(Option::as_ref)
     }
     pub fn texture_uvs(&self) -> u32 {
         let mut bits = 0;
@@ -236,10 +245,55 @@ impl Toon {
         bits
     }
     pub fn outline_mode(&self) -> OutlineMode {
-        match self.schema.outline_width_mode {
-            Some(OutlineWidthMode::WorldCoordinates) => OutlineMode::WorldCoordinates,
-            Some(OutlineWidthMode::ScreenCoordinates) => OutlineMode::ScreenCoordinates,
-            Some(OutlineWidthMode::None) | None => OutlineMode::None,
-        }
+        self.outline
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn native_defaults_and_shift_transform_are_compiled() {
+        let compile = |value| Toon::compile(serde_json::from_value(value).unwrap()).unwrap();
+        let defaults = compile(json!({"specVersion":"1.0"}));
+        assert_eq!(defaults.params.shade_color_factor, Vec3::ZERO);
+        assert_eq!(defaults.params.matcap_factor, Vec3::ONE);
+        assert_eq!(defaults.params.shading_toony_factor, 0.9);
+        assert_eq!(defaults.params.parametric_rim_fresnel_power_factor, 5.);
+        assert_eq!(defaults.params.shading_shift_texture_scale, 1.);
+        let toon = compile(json!({"specVersion":"1.0", "shadingShiftTexture": {
+            "index":2, "scale":0.3, "texCoord":0,
+            "extensions":{"KHR_texture_transform":{
+                "offset":[0.2,0.4],"rotation":0.5,"scale":[0,-2],"texCoord":1
+            }}
+        }}));
+        let textures = toon.textures();
+        let shift = textures[1].unwrap();
+        assert_eq!(shift.index.value(), 2);
+        assert_eq!(toon.params.shading_shift_texture_scale, 0.3);
+        assert_eq!(toon.texture_uvs(), 1 << 1);
+        let uv = UvTransform::from_json(shift);
+        assert_eq!(uv.scale, Vec2::new(0., -2.));
+        assert_eq!(uv.offset, Vec2::new(0.2, 0.4));
+        assert_eq!(uv.rotation, -0.5);
+        assert!(
+            uv.affine()
+                .transform_point2(Vec2::ZERO)
+                .abs_diff_eq(uv.offset, 1e-6)
+        );
+        let omitted = compile(json!({"specVersion":"1.0", "shadingShiftTexture":{"index":0}}));
+        assert_eq!(texture_uv(omitted.textures()[1].unwrap()), 0);
+        assert_eq!(omitted.params.shading_shift_texture_scale, 1.);
+    }
+
+    #[test]
+    fn malformed_native_shift_transform_is_not_ignored() {
+        let authored = serde_json::from_value(json!({"specVersion":"1.0", "shadingShiftTexture":{
+            "index":0,"extensions":{"KHR_texture_transform":{"scale":[1]}}
+        }}))
+        .unwrap();
+        assert!(Toon::compile(authored).is_err());
     }
 }

@@ -74,9 +74,9 @@ impl Binds {
 }
 
 pub(crate) fn weight<'a>(
-    transforms: impl Fn(Entity) -> Option<f32> + 'a,
+    inputs: impl Fn(Entity) -> Option<f32> + 'a,
 ) -> impl Fn(&ExpressionBinding) -> f32 + 'a {
-    move |binding| transforms(binding.target).unwrap_or(0.)
+    move |binding| inputs(binding.target).unwrap_or(0.)
 }
 
 fn expressions(definitions: &Expressions) -> impl Iterator<Item = (ExpressionName, &Expression)> {
@@ -151,7 +151,7 @@ pub(crate) fn attach(
             validate_expression(expression)?;
             let target = world
                 .spawn((
-                    Transform::default(),
+                    animation::ExpressionInput::default(),
                     animation::expression_target(&name),
                     AnimatedBy(root),
                     ChildOf(root),
@@ -203,7 +203,8 @@ pub(crate) fn attach(
 }
 
 pub(crate) fn setup(app: &mut App) {
-    app.register_type::<Binds>()
+    app.add_observer(material::world_ready)
+        .register_type::<Binds>()
         .register_type::<MaterialBinds<StandardMaterial>>()
         .register_type::<MaterialBinds<MToonMaterial>>()
         .add_systems(
@@ -292,18 +293,13 @@ pub(crate) fn apply(
         Option<&MaterialBinds<StandardMaterial>>,
         Option<&MaterialBinds<MToonMaterial>>,
     )>,
-    transforms: Query<&Transform>,
+    inputs: Query<&animation::ExpressionInput>,
     mut morphs: Query<&mut MorphWeights>,
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut toon: ResMut<Assets<MToonMaterial>>,
 ) {
     for (binds, standard_binds, toon_binds) in &roots {
-        let raw = weight(|entity| {
-            transforms
-                .get(entity)
-                .ok()
-                .map(|transform| transform.translation.x)
-        });
+        let raw = weight(|entity| inputs.get(entity).ok().and_then(|input| input.value));
         let effective = effective(&binds.bindings, &raw);
         for target in &binds.morphs {
             if let Ok(mut morph) = morphs.get_mut(target.entity) {
@@ -342,10 +338,9 @@ mod tests {
             .and_then(|binds| binds.target(&ExpressionName::Custom(name.into())))
             .unwrap();
         app.world_mut()
-            .get_mut::<Transform>(target)
+            .get_mut::<animation::ExpressionInput>(target)
             .unwrap()
-            .translation
-            .x = value;
+            .value = Some(value);
     }
 
     fn bindings(definitions: &Expressions) -> Vec<ExpressionBinding> {

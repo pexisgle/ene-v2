@@ -1,10 +1,10 @@
 use crate::{
     VrmSystems,
-    animation::RestPose,
+    animation::{ExpressionInput, GazeInput, RestPose},
     expressions::{self, ExpressionName},
     schema,
 };
-use bevy::{ecs::system::SystemChangeTick, prelude::*};
+use bevy::prelude::*;
 
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone, opaque)]
@@ -12,36 +12,11 @@ pub(crate) struct Gaze {
     pub(crate) definition: schema::LookAt,
     #[entities]
     pub(crate) input: Entity,
-    pub(crate) active: bool,
 }
 
 pub(crate) fn setup(app: &mut App) {
     app.register_type::<Gaze>()
-        .add_systems(PostUpdate, reset_gaze.before(bevy::app::AnimationSystems))
         .add_systems(PostUpdate, look_at.in_set(VrmSystems::LookAt));
-}
-
-fn reset_gaze(
-    mut roots: Query<(&super::Vrm, &mut Gaze)>,
-    mut transforms: Query<(&RestPose, &mut Transform)>,
-) {
-    for (vrm, mut gaze) in &mut roots {
-        gaze.set_changed();
-        if !gaze.active {
-            continue;
-        }
-        for name in [
-            schema::HumanBoneName::LeftEye,
-            schema::HumanBoneName::RightEye,
-        ] {
-            if let Some(eye) = vrm.bone(name)
-                && let Ok((rest, mut t)) = transforms.get_mut(eye)
-            {
-                t.rotation = rest.local.rotation;
-            }
-        }
-        gaze.active = false;
-    }
 }
 
 /// Resolves a VRM range map with the three-vrm defaults.
@@ -66,28 +41,23 @@ pub(crate) fn remap(
 
 #[allow(clippy::type_complexity)]
 fn look_at(
-    mut roots: Query<(&super::Vrm, &mut Gaze, Option<&expressions::Binds>)>,
+    roots: Query<(&super::Vrm, &Gaze, Option<&expressions::Binds>)>,
     rests: Query<&RestPose>,
-    mut transforms: ParamSet<(Query<&mut Transform>, Query<Ref<Transform>>)>,
-    ticks: SystemChangeTick,
+    gazes: Query<&GazeInput>,
+    mut inputs: Query<&mut ExpressionInput>,
+    mut transforms: Query<&mut Transform>,
 ) {
-    for (vrm, mut gaze, binds) in &mut roots {
-        let angles = if let Ok(input) = transforms.p1().get(gaze.input)
-            && input
-                .last_changed()
-                .is_newer_than(gaze.last_changed(), ticks.this_run())
-        {
-            let (yaw, pitch, _) = input.rotation.to_euler(EulerRot::YXZ);
-            Vec2::new(yaw.to_degrees(), -pitch.to_degrees())
-        } else {
+    for (vrm, gaze, binds) in &roots {
+        let Some(rotation) = gazes.get(gaze.input).ok().and_then(|input| input.rotation) else {
             continue;
         };
+        let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
+        let angles = Vec2::new(yaw.to_degrees(), -pitch.to_degrees());
         let kind = gaze
             .definition
             .look_at_type
             .unwrap_or(schema::LookAtType::Bone);
         let bone = matches!(kind, schema::LookAtType::Bone);
-        gaze.active = bone;
         let definition = &gaze.definition;
         let pitch = if angles.y > 0. {
             remap(definition.range_map_vertical_up.as_ref(), kind, angles.y)
@@ -95,13 +65,9 @@ fn look_at(
             -remap(definition.range_map_vertical_down.as_ref(), kind, angles.y)
         };
         if bone {
-            let input = transforms.p1();
             let scale = binds.map_or(1., |binds| {
                 let weights = expressions::weight(|entity| {
-                    input
-                        .get(entity)
-                        .ok()
-                        .map(|transform| transform.translation.x)
+                    inputs.get(entity).ok().and_then(|input| input.value)
                 });
                 expressions::look_at_scale(binds, &weights)
             });
@@ -118,7 +84,7 @@ fn look_at(
                 let yaw = remap(map, kind, angles.x) * angles.x.signum() * scale;
                 if let Some(eye) = vrm.bone(name)
                     && let Ok(rest) = rests.get(eye)
-                    && let Ok(mut t) = transforms.p0().get_mut(eye)
+                    && let Ok(mut t) = transforms.get_mut(eye)
                 {
                     t.rotation = rest.frame.localize(Quat::from_euler(
                         EulerRot::YXZ,
@@ -157,11 +123,91 @@ fn look_at(
             ] {
                 if let Some(channel) =
                     binds.and_then(|binds| binds.target(&ExpressionName::Preset(name)))
-                    && let Ok(mut transform) = transforms.p0().get_mut(channel)
+                    && let Ok(mut input) = inputs.get_mut(channel)
                 {
-                    transform.translation.x = w;
+                    input.value = Some(w);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::animation::{self, Pose, RestFrame};
+    use bevy::platform::collections::HashMap;
+
+    #[derive(Resource)]
+    struct Sample(Option<Quat>);
+
+    #[test]
+    fn neutral_gaze_overrides_eye_pose_but_missing_gaze_does_not() {
+        let mut app = App::new();
+        animation::setup(&mut app);
+        setup(&mut app);
+        app.configure_sets(PostUpdate, VrmSystems::Pose.before(VrmSystems::LookAt));
+        app.insert_resource(Sample(None));
+        app.add_systems(
+            PostUpdate,
+            (|sample: Res<Sample>,
+              mut poses: Query<&mut Pose>,
+              mut gazes: Query<&mut GazeInput>| {
+                for mut pose in &mut poses {
+                    pose.rotation = Some(Quat::from_rotation_x(0.5));
+                }
+                for mut gaze in &mut gazes {
+                    gaze.rotation = sample.0;
+                }
+            })
+            .after(bevy::app::AnimationSystems)
+            .before(VrmSystems::Pose),
+        );
+        let eye = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                Pose::default(),
+                RestPose {
+                    local: Transform::default(),
+                    frame: RestFrame {
+                        local: Quat::IDENTITY,
+                        global: Quat::IDENTITY,
+                    },
+                    translation_from_normalized: bevy::math::Mat3A::IDENTITY,
+                },
+            ))
+            .id();
+        let input = app.world_mut().spawn(GazeInput::default()).id();
+        app.world_mut().spawn((super::super::Vrm {
+            bones: HashMap::from([(schema::HumanBoneName::LeftEye, eye)]),
+            meta: serde_json::from_value(serde_json::json!({"name":"test","authors":["test"],"licenseUrl":"https://vrm.dev/licenses/1.0/"})).unwrap(),
+        }, Gaze { definition: serde_json::from_value(serde_json::json!({"type":"bone"})).unwrap(), input }));
+        app.update();
+        assert!(
+            app.world()
+                .get::<Transform>(eye)
+                .unwrap()
+                .rotation
+                .abs_diff_eq(Quat::from_rotation_x(0.5), 1e-6)
+        );
+        app.world_mut().resource_mut::<Sample>().0 = Some(Quat::IDENTITY);
+        app.update();
+        assert!(
+            app.world()
+                .get::<Transform>(eye)
+                .unwrap()
+                .rotation
+                .abs_diff_eq(Quat::IDENTITY, 1e-6)
+        );
+        app.world_mut().resource_mut::<Sample>().0 = None;
+        app.update();
+        assert!(
+            app.world()
+                .get::<Transform>(eye)
+                .unwrap()
+                .rotation
+                .abs_diff_eq(Quat::from_rotation_x(0.5), 1e-6)
+        );
     }
 }

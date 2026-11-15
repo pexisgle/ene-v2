@@ -128,7 +128,7 @@ pub(crate) fn attach(
         }
         let input = world
             .spawn((
-                Transform::default(),
+                animation::GazeInput::default(),
                 animation::gaze_target(),
                 AnimatedBy(root),
                 ChildOf(root),
@@ -137,7 +137,6 @@ pub(crate) fn attach(
         world.entity_mut(root).insert(look_at::Gaze {
             definition: definition.clone(),
             input,
-            active: false,
         });
     }
     world.entity_mut(root).insert((

@@ -20,15 +20,48 @@ pub(crate) struct MaterialBinds<M: bevy::pbr::Material>(
     pub(super) HashMap<(usize, Handle<M>), MaterialInstance<M>>,
 );
 
-/// Clone each affected material once per scene instance.
-///
-/// A root without `MaterialBinds` is retried every frame until every affected
-/// material is available; only then are handles replaced. An empty map marks
-/// roots whose expressions do not target materials.
+#[derive(Component)]
+pub(super) struct MaterialInitializationRequested;
+
+#[derive(Clone)]
+struct MaterialTarget<M: bevy::pbr::Material> {
+    entity: Entity,
+    slot: usize,
+    original: Handle<M>,
+    uv: UvTransform,
+    emission: f32,
+}
+
+#[derive(Component)]
+pub(super) struct PendingMaterials<M: bevy::pbr::Material>(std::marker::PhantomData<M>);
+
+pub(super) fn world_ready(
+    ready: On<bevy::world_serialization::WorldInstanceReady>,
+    spawner: Res<bevy::world_serialization::WorldInstanceSpawner>,
+    roots: Query<(), With<Binds>>,
+    mut commands: Commands,
+) {
+    for entity in spawner.iter_instance_entities(ready.instance_id) {
+        if roots.contains(entity) {
+            commands
+                .entity(entity)
+                .insert(MaterialInitializationRequested);
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub(super) fn initialize_materials<M: bevy::pbr::Material + Clone>(
     mut commands: Commands,
-    roots: Query<(Entity, &Binds), Without<MaterialBinds<M>>>,
+    roots: Query<
+        (
+            Entity,
+            Ref<Binds>,
+            Has<PendingMaterials<M>>,
+            Has<MaterialInitializationRequested>,
+        ),
+        Without<MaterialBinds<M>>,
+    >,
     children: Query<&Children>,
     mut meshes: ParamSet<(
         Query<(
@@ -41,46 +74,59 @@ pub(super) fn initialize_materials<M: bevy::pbr::Material + Clone>(
     )>,
     mut materials: ResMut<Assets<M>>,
 ) {
-    for (root, binds) in &roots {
-        let affected: std::collections::HashSet<_> = binds.materials().collect();
-        let mut targets = Vec::new();
-        let mut pending = false;
-        {
-            let meshes = meshes.p0();
-            for entity in std::iter::once(root).chain(children.iter_descendants(root)) {
-                let Ok((slot, handle, base_uv, emissive_strength)) = meshes.get(entity) else {
-                    continue;
-                };
-                if !affected.contains(&slot.0) {
-                    continue;
-                }
-                if !materials.contains(&handle.0) {
-                    pending = true;
-                    break;
-                }
-                let base_uv = base_uv.map_or_else(UvTransform::default, |uv| uv.0);
-                let emissive_strength = emissive_strength.map_or(1., |strength| strength.0);
-                targets.push((entity, slot.0, handle.0.clone(), base_uv, emissive_strength));
-            }
+    for (root, binds, pending, requested) in &roots {
+        if !binds.is_added() && !requested && !pending {
+            continue;
         }
-        if pending {
+        let affected: std::collections::HashSet<_> = binds.materials().collect();
+        let targets = {
+            let meshes = meshes.p0();
+            std::iter::once(root)
+                .chain(children.iter_descendants(root))
+                .filter_map(|entity| {
+                    let (slot, handle, base_uv, emission) = meshes.get(entity).ok()?;
+                    affected.contains(&slot.0).then(|| MaterialTarget {
+                        entity,
+                        slot: slot.0,
+                        original: handle.0.clone(),
+                        uv: base_uv.map_or_else(UvTransform::default, |uv| uv.0),
+                        emission: emission.map_or(1., |strength| strength.0),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        if targets
+            .iter()
+            .any(|target| !materials.contains(&target.original))
+        {
+            if !pending {
+                commands
+                    .entity(root)
+                    .insert(PendingMaterials::<M>(std::marker::PhantomData));
+            }
             continue;
         }
         let mut instances = HashMap::default();
         let mut handles = meshes.p1();
-        for (entity, slot, original, base_uv, emissive_strength) in targets {
-            let clone = match instances.entry((slot, original.clone())) {
+        for target in targets {
+            let clone = match instances.entry((target.slot, target.original.clone())) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let material = materials.get(&original).cloned().expect("checked above");
-                    entry.insert((materials.add(material), base_uv, emissive_strength))
+                    let material = materials
+                        .get(&target.original)
+                        .cloned()
+                        .expect("checked above");
+                    entry.insert((materials.add(material), target.uv, target.emission))
                 }
             };
-            if let Ok(mut handle) = handles.get_mut(entity) {
+            if let Ok(mut handle) = handles.get_mut(target.entity) {
                 handle.0 = clone.0.clone();
             }
         }
-        commands.entity(root).insert(MaterialBinds::<M>(instances));
+        commands
+            .entity(root)
+            .remove::<PendingMaterials<M>>()
+            .insert(MaterialBinds::<M>(instances));
     }
 }
 
