@@ -185,15 +185,16 @@ impl HttpBroker {
         })
     }
 
-    /// Drops `handle` without reading the rest.
+    /// Drops `handle` without reading the rest. Closing a handle whose body was
+    /// already read to its end succeeds: the end state is the same, so a guest
+    /// may close unconditionally.
     pub fn close(&self, handle: &str) -> Result<(), Failure> {
         let mut open = self
             .open
             .lock()
             .map_err(|_| Failure::new("http_unavailable"))?;
-        open.remove(handle)
-            .map(|_| ())
-            .ok_or_else(|| Failure::new("unknown_handle"))
+        open.remove(handle);
+        Ok(())
     }
 }
 

@@ -1,7 +1,7 @@
 //! Shared wire enums for operations, events and service requests.
 use super::{
-    CharacterAction, CharacterEvent, CharacterTarget, GenerationRequest, HarnessEvent,
-    HarnessInput, HttpRequest,
+    CharacterAction, CharacterEvent, CharacterTarget, EmbeddingRequest, GenerationRequest,
+    HarnessEvent, HarnessInput, HttpRequest, SynthesisRequest, TranscriptionRequest,
 };
 use crate::manifest::{Extension, Service};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,15 @@ pub enum Operation {
     Generate {
         request: GenerationRequest,
     },
+    Embed {
+        request: EmbeddingRequest,
+    },
+    Synthesize {
+        request: SynthesisRequest,
+    },
+    Transcribe {
+        request: TranscriptionRequest,
+    },
     Character {
         target: CharacterTarget,
         event: CharacterEvent,
@@ -30,6 +39,9 @@ impl Operation {
     pub fn extension(&self) -> Extension {
         match self {
             Self::ListModels { .. } | Self::Generate { .. } => Extension::Llm,
+            Self::Embed { .. } => Extension::Embedding,
+            Self::Synthesize { .. } => Extension::Tts,
+            Self::Transcribe { .. } => Extension::Stt,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
         }
@@ -73,15 +85,37 @@ impl Event {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServiceRequest {
-    Log { message: String },
+    Log {
+        message: String,
+    },
     Configuration,
-    StateRead { key: String },
-    StateWrite { key: String, value: Value },
-    HttpOpen { request: HttpRequest },
-    HttpRead { handle: String },
-    HttpClose { handle: String },
-    Models { request: GenerationRequest },
-    Tool { name: String, arguments: Value },
+    StateRead {
+        key: String,
+    },
+    StateWrite {
+        key: String,
+        value: Value,
+    },
+    HttpOpen {
+        request: HttpRequest,
+    },
+    HttpRead {
+        handle: String,
+    },
+    HttpClose {
+        handle: String,
+    },
+    /// The next chunk of a synthesis answer, read back like an HTTP reply.
+    AudioRead {
+        handle: String,
+    },
+    Models {
+        request: GenerationRequest,
+    },
+    Tool {
+        name: String,
+        arguments: Value,
+    },
 }
 
 impl ServiceRequest {
@@ -91,6 +125,7 @@ impl ServiceRequest {
             Self::Configuration => Service::Configuration,
             Self::StateRead { .. } | Self::StateWrite { .. } => Service::State,
             Self::HttpOpen { .. } | Self::HttpRead { .. } | Self::HttpClose { .. } => Service::Http,
+            Self::AudioRead { .. } => Service::Http,
             Self::Models { .. } => Service::Models,
             Self::Tool { .. } => Service::Tools,
         }

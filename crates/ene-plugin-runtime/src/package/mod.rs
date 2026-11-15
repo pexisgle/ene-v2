@@ -70,14 +70,29 @@ impl Package {
                 return Err(Error::Invalid);
             }
             if let Some(p) = &e.provider {
-                if !e.provides.contains(&Extension::Llm)
+                // A provider serves at least one modality, and may serve
+                // several from one endpoint. `extensions` names them when the
+                // entrypoint provides more than the provider answers for.
+                let serves_provider = e
+                    .provides
+                    .iter()
+                    .any(|extension| extension.serves_provider());
+                if !serves_provider
                     || !identifier(&p.id)
                     || p.id == "openai"
                     || !providers.insert(&p.id)
+                    || p.extensions.iter().any(|extension| {
+                        !extension.serves_provider() || !e.provides.contains(extension)
+                    })
+                    || p.extensions.iter().collect::<BTreeSet<_>>().len() != p.extensions.len()
                 {
                     return Err(Error::Invalid);
                 }
-            } else if e.provides.contains(&Extension::Llm) {
+            } else if e
+                .provides
+                .iter()
+                .any(|extension| extension.serves_provider())
+            {
                 return Err(Error::Invalid);
             }
         }
@@ -207,6 +222,70 @@ mod tests {
         write_file(&dir.join("main.wasm"), b"return {}");
         write_file(&dir.join("manifest.json"), serde_json::json!({"contract_version":ene_plugin::CONTRACT_VERSION,"id":"sample","name":"Sample","version":"1","entrypoints":[{"id":"behavior","target":"host","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes());
     }
+    #[test]
+    fn a_provider_serves_any_modality_and_names_them_when_it_serves_several() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        directory(&root);
+        write_file(&root.join("main.wasm"), b"return {}");
+        let write = |provider: serde_json::Value, provides: serde_json::Value| {
+            write_file(
+                &root.join("manifest.json"),
+                serde_json::json!({
+                    "contract_version": ene_plugin::CONTRACT_VERSION,
+                    "id": "provider", "name": "P", "version": "1",
+                    "entrypoints": [{
+                        "id": "main", "target": "host", "file": "main.wasm",
+                        "provides": provides, "uses": ["http"], "provider": provider
+                    }]
+                })
+                .to_string()
+                .as_bytes(),
+            );
+        };
+        let provider = |extensions: serde_json::Value| {
+            serde_json::json!({
+                "id": "voicevox", "endpoint": "http://127.0.0.1:50021",
+                "auth": {"type": "none"},
+                "destinations": ["http://127.0.0.1:50021"],
+                "extensions": extensions
+            })
+        };
+        // An embedding-only provider needs no LLM entry.
+        write(
+            provider(serde_json::json!(["embedding"])),
+            serde_json::json!(["embedding"]),
+        );
+        Package::load(&root).unwrap();
+        // One endpoint may serve several modalities.
+        write(
+            provider(serde_json::json!(["llm", "embedding", "tts"])),
+            serde_json::json!(["llm", "embedding", "tts"]),
+        );
+        Package::load(&root).unwrap();
+        // A named extension the entrypoint does not provide is refused.
+        write(
+            provider(serde_json::json!(["embedding", "tts"])),
+            serde_json::json!(["embedding"]),
+        );
+        assert!(Package::load(&root).is_err());
+        // A provider extension without a provider is refused.
+        write_file(
+            &root.join("manifest.json"),
+            serde_json::json!({
+                "contract_version": ene_plugin::CONTRACT_VERSION,
+                "id": "provider", "name": "P", "version": "1",
+                "entrypoints": [{
+                    "id": "main", "target": "host", "file": "main.wasm",
+                    "provides": ["embedding"]
+                }]
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(Package::load(&root).is_err());
+    }
+
     #[test]
     fn acp_entrypoints_require_a_command_and_no_code_file() {
         let source = tempfile::tempdir().unwrap();

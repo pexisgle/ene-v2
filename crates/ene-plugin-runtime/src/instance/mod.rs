@@ -252,14 +252,19 @@ impl Instance {
                 INITIALIZE_TIMEOUT,
             )
             .await?;
-        if self.package.entry(&self.entrypoint)?.provider.is_none() {
+        let entry = self.package.entry(&self.entrypoint)?;
+        if entry.provider.is_none() {
             return Ok(());
         }
-        let capabilities: LlmCapabilities = serde_json::from_value(document)?;
-        if !capabilities.streaming_text {
-            return Err(Error::Unsupported);
+        // A provider declares the capabilities of the modality it serves. Only
+        // an LLM provider has to stream text, so the check applies to it alone.
+        if entry.provides.contains(&Extension::Llm) {
+            let capabilities: LlmCapabilities = serde_json::from_value(document)?;
+            if !capabilities.streaming_text {
+                return Err(Error::Unsupported);
+            }
+            self.capabilities = Some(capabilities);
         }
-        self.capabilities = Some(capabilities);
         Ok(())
     }
 }

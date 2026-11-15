@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Shared compatibility version for manifests, extension APIs.
-pub const CONTRACT_VERSION: u32 = 4;
+pub const CONTRACT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,8 +18,19 @@ pub enum Target {
 #[serde(rename_all = "snake_case")]
 pub enum Extension {
     Llm,
+    Embedding,
+    Tts,
+    Stt,
     Character,
     Harness,
+}
+
+impl Extension {
+    /// Whether this extension is served by a provider configuration, as
+    /// opposed to a client-facing behaviour such as `Character`.
+    pub fn serves_provider(self) -> bool {
+        matches!(self, Self::Llm | Self::Embedding | Self::Tts | Self::Stt)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -81,6 +92,13 @@ pub struct ProviderConfiguration {
     pub destinations: Vec<String>,
     #[serde(default)]
     pub models: Vec<crate::provider::Model>,
+    /// Which extensions this one provider serves. A provider that answers for
+    /// several modalities (an OpenAI-compatible endpoint serving chat,
+    /// embeddings and speech) names all of them, so a host can tell which
+    /// `settings` and `models` apply to which request. Empty means the
+    /// entrypoint's `provides`.
+    #[serde(default)]
+    pub extensions: Vec<Extension>,
 }
 fn object() -> Value {
     serde_json::json!({})

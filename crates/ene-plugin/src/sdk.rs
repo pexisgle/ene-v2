@@ -35,3 +35,7 @@ pub fn http_read(handle: String) -> Result<HttpChunk, extism_pdk::Error> {
 pub fn http_close(handle: String) -> Result<(), extism_pdk::Error> {
     service(ServiceRequest::HttpClose { handle })
 }
+/// The next chunk of a synthesis answer, read back like an HTTP reply.
+pub fn audio_read(handle: String) -> Result<HttpChunk, extism_pdk::Error> {
+    service(ServiceRequest::AudioRead { handle })
+}

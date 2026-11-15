@@ -3,6 +3,7 @@ use ene_plugin_runtime::{
     Package,
     instance::{DenyServices, Instance, Services, Supervisor},
     limits::{MAX_CHUNK, MAX_MESSAGE_BYTES, WASM_TABLE_ELEMENTS},
+    service::{HttpBroker, HttpGrants},
 };
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
@@ -541,4 +542,143 @@ async fn sdk_guest_preserves_typed_events_and_service_failures() {
         failure.to_string().contains("permission_required"),
         "{failure}"
     );
+}
+
+/// Grants that allow one origin, as a provider host would for its endpoint.
+struct AllowUrl(String);
+impl HttpGrants for AllowUrl {
+    fn allows(&self, _: &str, url: &url::Url) -> bool {
+        url.origin().ascii_serialization() == self.0
+    }
+    fn authorize(&self, _: &str, _: &mut reqwest::header::HeaderMap) -> Result<(), Failure> {
+        Ok(())
+    }
+}
+
+/// Services that serve HTTP through the broker.
+struct Brokered {
+    broker: Arc<HttpBroker>,
+    provider: String,
+}
+
+impl Services for Brokered {
+    fn handle(
+        &self,
+        request: ServiceRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, Failure>> {
+        let broker = self.broker.clone();
+        let provider = self.provider.clone();
+        Box::pin(async move {
+            Ok(match request {
+                ServiceRequest::HttpOpen { request } => {
+                    json!(broker.open(&provider, request).await?)
+                }
+                ServiceRequest::HttpRead { handle } => json!(broker.read(&handle)?),
+                ServiceRequest::HttpClose { handle } => {
+                    broker.close(&handle)?;
+                    json!({})
+                }
+                _ => return Err(Failure::new("undeclared_service")),
+            })
+        })
+    }
+    fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// An embedding provider plugin: it fetches its endpoint through the host's
+/// HTTP path, reads the reply, and answers with the host's own reply document.
+fn embedding_package(url: &str) -> (Package, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("plugin");
+    directory(&root);
+    // Each service answer is left in `$p`; the last one is what the guest
+    // returns, so the test can see the exchange's final chunk.
+    let body = format!(
+        "{} local.get $p call $service local.set $p {} local.get $p call $service local.set $p {} local.get $p call $service local.set $p local.get $p local.get $p call $length call $output i32.const 0 return",
+        write(&json!({"type":"http_open","request":{"method":"POST","url":url,"headers":{},"body_base64":null}}).to_string()),
+        write(&json!({"type":"http_read","handle":"http-1"}).to_string()),
+        write(&json!({"type":"http_close","handle":"http-1"}).to_string()),
+    );
+    write_file(&root.join("main.wasm"), wasm(&body));
+    write_file(
+        &root.join("manifest.json"),
+        json!({
+            "contract_version": CONTRACT_VERSION,
+            "id": "embedding", "name": "Embedding", "version": "1",
+            "entrypoints": [{
+                "id": "main", "target": "host", "file": "main.wasm",
+                "provides": ["embedding"], "uses": ["http"],
+                "provider": {
+                    "id": "local-embedding",
+                    "endpoint": url,
+                    "auth": {"type": "none"},
+                    "destinations": [url],
+                    "extensions": ["embedding"]
+                }
+            }]
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    (Package::load(&root).unwrap(), temp)
+}
+
+#[tokio::test]
+async fn an_embedding_plugin_reaches_its_endpoint_through_the_broker() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let served = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+                break;
+            }
+            head.push(byte[0]);
+        }
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+            .await;
+    });
+    let url = format!("http://{address}");
+    let (package, _temp) = embedding_package(&url);
+    let cancel = CancellationToken::new();
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
+        .await
+        .unwrap();
+    let broker = Arc::new(HttpBroker::new(Arc::new(AllowUrl(url.clone()))));
+    let (tx, _rx) = mpsc::channel(1);
+    let output = instance
+        .invoke(
+            Operation::Embed {
+                request: EmbeddingRequest {
+                    endpoint: url,
+                    options: json!({}),
+                    model: "m".into(),
+                    inputs: vec!["a".into()],
+                    dimensions: 1,
+                },
+            },
+            Arc::new(Brokered {
+                broker,
+                provider: "local-embedding".into(),
+            }),
+            tx,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    // The guest returns its last service answer, the close's success envelope.
+    assert_eq!(output, json!({"Ok": {}}));
+    // A refused exchange leaves the endpoint untouched, so waiting on it would
+    // hang. Bound the wait and report what actually happened.
+    tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .expect("the plugin never reached its endpoint")
+        .unwrap();
 }
