@@ -1,10 +1,11 @@
 use crate::{
     character::{AvatarState, Character},
     control::Control,
-    desktop::{self, Drag, HitRegions, Output},
+    desktop::{self, HitRegions, NativeInput, Output},
 };
 use bevy::{
     app::{AppExit, PluginsState},
+    picking::pointer::{PointerAction, PointerButton},
     prelude::*,
     window::{RawHandleWrapper, WindowWrapper},
 };
@@ -25,12 +26,15 @@ pub fn setup(app: &mut App) {
     app.set_runner(run);
 }
 
-fn pointer(app: &mut App, output: Entity, local: Vec2, button: Option<bool>) {
-    app.world_mut().write_message(desktop::PointerInput {
-        output,
-        local,
-        button,
-    });
+fn pointer(app: &mut App, output: Entity, local: Vec2, action: PointerAction, available: bool) {
+    // Capability removal is visible before this dispatch replays its synthetic release.
+    if !available {
+        desktop::cancel_pointer(app.world_mut());
+        return;
+    }
+    app.world_mut()
+        .resource_mut::<NativeInput>()
+        .send(output, local, action);
 }
 
 fn run(mut app: App) -> AppExit {
@@ -123,6 +127,7 @@ fn run(mut app: App) -> AppExit {
                         windows.insert(id, window);
                     }
                     if let Some(&window) = windows.get(&id) {
+                        let pointer_available = state.get_pointers_iter().next().is_some();
                         match message {
                             DispatchMessage::MouseEnter {
                                 surface_x,
@@ -135,7 +140,13 @@ fn run(mut app: App) -> AppExit {
                                 ..
                             } => {
                                 cursor = Vec2::new(*surface_x as f32, *surface_y as f32);
-                                pointer(&mut app, window, cursor, None);
+                                pointer(
+                                    &mut app,
+                                    window,
+                                    cursor,
+                                    PointerAction::Move { delta: Vec2::ZERO },
+                                    pointer_available,
+                                );
                             }
                             DispatchMessage::MouseButton {
                                 button: 0x110,
@@ -146,11 +157,16 @@ fn run(mut app: App) -> AppExit {
                                     &mut app,
                                     window,
                                     cursor,
-                                    Some(*state == WEnum::Value(ButtonState::Pressed)),
+                                    if *state == WEnum::Value(ButtonState::Pressed) {
+                                        PointerAction::Press(PointerButton::Primary)
+                                    } else {
+                                        PointerAction::Release(PointerButton::Primary)
+                                    },
+                                    pointer_available,
                                 );
                             }
                             DispatchMessage::Unfocus => {
-                                app.world_mut().resource_mut::<Drag>().entity = None;
+                                desktop::cancel_pointer(app.world_mut());
                             }
                             _ => {}
                         }
@@ -158,7 +174,7 @@ fn run(mut app: App) -> AppExit {
                 }
             }
             ExWlShellEvent::NormalDispatch if state.get_pointers_iter().next().is_none() => {
-                app.world_mut().resource_mut::<Drag>().entity = None;
+                desktop::cancel_pointer(app.world_mut());
             }
             _ => {}
         }
@@ -263,4 +279,139 @@ fn run(mut app: App) -> AppExit {
         return AppExit::error();
     }
     exit_rx.try_recv().unwrap_or(AppExit::Success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::{Config, Notification};
+    use bevy::picking::{
+        hover::PointerCaptureMap,
+        pointer::{PointerId, PointerMap, PointerPressState},
+    };
+
+    const PRESS: PointerAction = PointerAction::Press(PointerButton::Primary);
+    const RELEASE: PointerAction = PointerAction::Release(PointerButton::Primary);
+
+    fn interaction_app() -> (App, Entity, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, desktop::setup))
+            .add_message::<Notification>();
+        let output = app
+            .world_mut()
+            .spawn(Output {
+                name: "test".into(),
+                origin: Vec2::ZERO,
+                size: Vec2::splat(100.),
+                units_per_logical_pixel: 1.,
+            })
+            .id();
+        let mut character = Character::new(
+            "a".into(),
+            Config {
+                position: Some([50., 50.]),
+                ..default()
+            },
+        );
+        character.state = AvatarState::Ready;
+        let actor = app
+            .world_mut()
+            .spawn((character, Transform::default()))
+            .id();
+        app.world_mut().spawn((
+            Mesh3d::default(),
+            bevy::camera::primitives::Aabb::from_min_max(Vec3::splat(-48.), Vec3::splat(48.)),
+            GlobalTransform::from_translation(Vec3::new(50., -50., 0.)),
+            InheritedVisibility::VISIBLE,
+            ChildOf(actor),
+        ));
+        app.world_mut().get_mut::<HitRegions>(output).unwrap().0 =
+            vec![(actor, Rect::from_corners(Vec2::ZERO, Vec2::splat(100.)))];
+        (app, output, actor)
+    }
+
+    fn notifications(app: &mut App) -> Vec<serde_json::Value> {
+        app.world_mut()
+            .resource_mut::<Messages<Notification>>()
+            .drain()
+            .map(|notification| notification.0)
+            .collect()
+    }
+
+    fn assert_released(app: &App) {
+        assert!(
+            !app.world()
+                .resource::<PointerCaptureMap>()
+                .is_captured(&PointerId::Mouse)
+        );
+        let pointer = app
+            .world()
+            .resource::<PointerMap>()
+            .get_entity(PointerId::Mouse)
+            .unwrap();
+        assert!(
+            !app.world()
+                .get::<PointerPressState>(pointer)
+                .unwrap()
+                .is_any_pressed()
+        );
+    }
+
+    #[test]
+    fn removed_pointer_batch_cancels_before_synthetic_release_and_restores() {
+        for queued_press in [false, true] {
+            let (mut app, output, actor) = interaction_app();
+            pointer(&mut app, output, Vec2::splat(50.), PRESS, true);
+            if !queued_press {
+                app.update();
+            }
+            pointer(&mut app, output, Vec2::splat(50.), RELEASE, false);
+            desktop::cancel_pointer(app.world_mut());
+            app.update();
+            assert!(notifications(&mut app).is_empty());
+            assert_released(&app);
+
+            pointer(
+                &mut app,
+                output,
+                Vec2::splat(80.),
+                PointerAction::Move { delta: Vec2::ZERO },
+                true,
+            );
+            pointer(&mut app, output, Vec2::splat(80.), RELEASE, true);
+            app.update();
+            assert!(notifications(&mut app).is_empty());
+            assert_eq!(
+                app.world().get::<Character>(actor).unwrap().config.position,
+                Some([50., 50.])
+            );
+            assert_released(&app);
+
+            for action in [PRESS, RELEASE] {
+                pointer(&mut app, output, Vec2::splat(50.), action, true);
+            }
+            app.update();
+            assert_eq!(
+                notifications(&mut app),
+                vec![serde_json::json!({"event":"click", "character":"a"})]
+            );
+            assert_released(&app);
+        }
+    }
+
+    #[test]
+    fn removed_pointer_preserves_earlier_queued_completed_gestures() {
+        let (mut app, output, _) = interaction_app();
+        for action in [PRESS, RELEASE, PRESS] {
+            pointer(&mut app, output, Vec2::splat(50.), action, true);
+        }
+        pointer(&mut app, output, Vec2::splat(50.), RELEASE, false);
+        desktop::cancel_pointer(app.world_mut());
+        app.update();
+        assert_eq!(
+            notifications(&mut app),
+            vec![serde_json::json!({"event":"click", "character":"a"})]
+        );
+        assert_released(&app);
+    }
 }

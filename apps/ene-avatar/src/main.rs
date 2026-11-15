@@ -24,6 +24,7 @@ fn main() -> bevy::app::AppExit {
     app.add_plugins(
         DefaultPlugins
             .set(TaskPoolPlugin { task_pool_options })
+            .disable::<bevy::picking::input::PointerInputPlugin>()
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,
