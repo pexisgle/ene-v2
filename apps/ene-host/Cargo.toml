@@ -70,3 +70,6 @@ ene-rpc = { workspace = true, features = ["client"] }
 rig-core = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix.workspace = true
