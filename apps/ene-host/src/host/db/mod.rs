@@ -65,7 +65,8 @@ impl Store {
         map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Option<T>> {
         let connection = self.conn()?;
-        Ok(connection.query_row(sql, params, map).optional()?)
+        let mut statement = connection.prepare_cached(sql)?;
+        Ok(statement.query_row(params, map).optional()?)
     }
 
     /// Runs one statement that must return exactly one row.
@@ -75,7 +76,9 @@ impl Store {
         params: impl rusqlite::Params,
         map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<T> {
-        Ok(self.conn()?.query_row(sql, params, map)?)
+        let connection = self.conn()?;
+        let mut statement = connection.prepare_cached(sql)?;
+        Ok(statement.query_row(params, map)?)
     }
 
     /// Runs a query that returns every matching row.
@@ -86,7 +89,7 @@ impl Store {
         map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>> {
         let connection = self.conn()?;
-        let mut statement = connection.prepare(sql)?;
+        let mut statement = connection.prepare_cached(sql)?;
         let rows = statement.query_map(params, map)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
@@ -233,6 +236,43 @@ mod tests {
             assert!(error.contains("stored config is corrupt"));
             assert!(!error.contains("private text"));
         }
+    }
+
+    #[test]
+    fn repeated_queries_keep_parameters_results_and_errors_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE query_values (id INTEGER PRIMARY KEY, value TEXT NOT NULL)",
+            )
+            .unwrap();
+        let insert = "INSERT INTO query_values (value) VALUES (?1) RETURNING id";
+        for (value, expected) in [("first", 1), ("second", 2)] {
+            let id: i64 = store.write_one(insert, [value], |row| row.get(0)).unwrap();
+            assert_eq!(id, expected);
+        }
+        let select = "SELECT value FROM query_values WHERE id = ?1";
+        for (id, expected) in [(2, Some("second")), (99, None), (1, Some("first"))] {
+            let value: Option<String> = store.fetch(select, [id], |row| row.get(0)).unwrap();
+            assert_eq!(value.as_deref(), expected);
+        }
+        assert!(store.fetch::<i64>(select, [1], |row| row.get(0)).is_err());
+        let value: Option<String> = store.fetch(select, [2], |row| row.get(0)).unwrap();
+        assert_eq!(value.as_deref(), Some("second"));
+        let select_all = "SELECT value FROM query_values WHERE id >= ?1 ORDER BY id";
+        for (minimum, expected) in [(1, vec!["first", "second"]), (2, vec!["second"])] {
+            let values: Vec<String> = store
+                .fetch_all(select_all, [minimum], |row| row.get(0))
+                .unwrap();
+            assert_eq!(values, expected);
+        }
+        let id: i64 = store
+            .write_one(insert, ["third"], |row| row.get(0))
+            .unwrap();
+        assert_eq!(id, 3);
     }
 
     #[test]

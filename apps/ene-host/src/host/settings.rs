@@ -223,15 +223,8 @@ impl Connection {
         self.config.endpoint()
     }
 
-    /// The place the provider reads its secret from, per adapter.
-    pub(crate) fn environment_variable(&self) -> Option<&'static str> {
-        match self.endpoint().adapter.as_str() {
-            "openai" => Some("OPENAI_API_KEY"),
-            "openrouter" => Some("OPENROUTER_API_KEY"),
-            "anthropic" => Some("ANTHROPIC_API_KEY"),
-            "gemini" => Some("GEMINI_API_KEY"),
-            _ => None,
-        }
+    pub(crate) fn environment_variable(&self) -> Option<String> {
+        provider(&self.endpoint().adapter).and_then(|provider| provider.environment_variable)
     }
 }
 

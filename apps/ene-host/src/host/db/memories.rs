@@ -465,7 +465,7 @@ impl Store {
         }
         let minimum = mode.minimum_importance();
         let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?3 \
              AND m.id IN (SELECT value FROM json_each(?4))"
         ))?;
@@ -488,7 +488,7 @@ impl Store {
     /// character budget, newest first.
     pub(crate) fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {
         let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories WHERE owner = ?1 AND importance = 10 \
              ORDER BY COALESCE(last_accessed_at, recorded_at) DESC, rowid DESC"
         ))?;
@@ -515,7 +515,7 @@ impl Store {
         limit: usize,
     ) -> Result<(Vec<Memory>, Option<i64>)> {
         let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories WHERE owner = ?1 AND rowid > ?2 \
              ORDER BY rowid LIMIT ?3"
         ))?;
@@ -554,7 +554,7 @@ impl Store {
                     .replace('%', "\\%")
                     .replace('_', "\\_")
             );
-            let mut statement = connection.prepare(&format!(
+            let mut statement = connection.prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?3 \
                  AND m.content LIKE ?4 ESCAPE '\\' ORDER BY m.importance DESC, m.rowid DESC \
                  LIMIT 20"
@@ -569,7 +569,7 @@ impl Store {
             return Ok(memories);
         }
         let expression = terms.join(" OR ");
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare_cached(&format!(
             "SELECT {JOINED_COLUMNS} FROM memories m JOIN memories_fts f ON m.rowid = f.rowid \
              WHERE {VISIBLE} AND m.importance >= ?3 AND memories_fts MATCH ?4 \
              ORDER BY bm25(memories_fts) ASC LIMIT 20"
@@ -640,7 +640,7 @@ impl Store {
         let lower = after.and_then(|after| after.parse::<u64>().ok());
         let upper = through.parse::<u64>().ok();
         let connection = self.conn()?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare_cached(
             "SELECT turn_id, memory_id FROM memory_injections \
              WHERE companion_id = ?1 ORDER BY rowid",
         )?;
@@ -822,7 +822,7 @@ impl Store {
             return Ok(Vec::new());
         };
         let connection = self.conn()?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare_cached(
             "SELECT id, memory_revision FROM memories WHERE owner = ?3 \
              AND embedding_model = ?1 AND embedding_dimensions = ?2 \
              AND embedding IS NOT NULL AND embedding_content_revision = content_revision \
@@ -911,7 +911,7 @@ impl Store {
         // Nothing (or too little) retrieved: important and recent memories are
         // still the material a merge can cite.
         let connection = self.conn()?;
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories \
              WHERE owner = ?1 AND importance >= 2 \
              ORDER BY importance DESC, COALESCE(last_accessed_at, recorded_at) DESC, rowid DESC \
@@ -1084,7 +1084,7 @@ impl Store {
 
     pub(crate) fn memory_edges(&self, id: &str) -> Result<Vec<(String, String)>> {
         let connection = self.conn()?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare_cached(
             "SELECT relation, to_id FROM memory_edges WHERE from_id = ?1 \
              UNION ALL SELECT relation, from_id FROM memory_edges WHERE to_id = ?1",
         )?;
@@ -1105,7 +1105,7 @@ pub(crate) fn missing_embeddings(
     let Some(dimensions) = dimensions_of_space(space) else {
         return Ok(Vec::new());
     };
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT id, content, content_revision FROM memories \
          WHERE (embedding IS NULL OR embedding_model IS NOT ?1 \
          OR embedding_dimensions IS NOT ?2 OR embedding_content_revision IS NULL \

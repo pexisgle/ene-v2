@@ -491,6 +491,44 @@ mod tests {
         address
     }
 
+    #[test]
+    fn session_secrets_are_shared_by_clones_but_isolated_between_instances() {
+        let first = Credentials::new(true);
+        let first_clone = first.clone();
+        let second = Credentials::new(true);
+        let second_clone = second.clone();
+        let connection = "same-connection";
+
+        assert_eq!(first.secret(connection), None);
+        assert_eq!(second.secret(connection), None);
+
+        save_secret(&first, connection, "first-secret").unwrap();
+        assert_eq!(first.secret(connection).as_deref(), Some("first-secret"));
+        assert_eq!(
+            first_clone.secret(connection).as_deref(),
+            Some("first-secret")
+        );
+        assert_eq!(second.secret(connection), None);
+        assert_eq!(second_clone.secret(connection), None);
+
+        save_secret(&second_clone, connection, "second-secret").unwrap();
+        assert_eq!(second.secret(connection).as_deref(), Some("second-secret"));
+        assert_eq!(first.secret(connection).as_deref(), Some("first-secret"));
+
+        delete_secret(&first_clone, connection).unwrap();
+        assert_eq!(first.secret(connection), None);
+        assert_eq!(first_clone.secret(connection), None);
+        assert_eq!(second.secret(connection).as_deref(), Some("second-secret"));
+        assert_eq!(
+            second_clone.secret(connection).as_deref(),
+            Some("second-secret")
+        );
+
+        delete_secret(&second_clone, connection).unwrap();
+        assert_eq!(second.secret(connection), None);
+        assert_eq!(second_clone.secret(connection), None);
+    }
+
     /// The probe lists models through the configured endpoint whichever
     /// adapter names it: `openai` and `openrouter` have registry presets,
     /// `gemini` maps to rig's `gcp.gemini` provider and reads its native
