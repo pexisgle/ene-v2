@@ -8,8 +8,7 @@ use crate::host::error::HostError;
 use jiff::{Timestamp, tz::TimeZone};
 use rusqlite::params;
 
-/// A five-field cron expression. A six-field one counts seconds and a
-/// seven-field one names years, so both are refused before croner reads them.
+/// A literal five-field cron expression, without seconds, years or nicknames.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Cron {
     parsed: croner::Cron,
@@ -24,15 +23,16 @@ impl Cron {
         if expression.chars().count() > 256 {
             return Err(HostError::invalid("cron_expr is too long"));
         }
-        let fields = expression.split_whitespace().count();
-        if fields != 5 {
-            return Err(HostError::invalid(format!(
-                "cron_expr must have exactly 5 fields \
-                 (minute hour day-of-month month day-of-week), got {fields}"
-            )));
+        if expression.contains('@') {
+            return Err(HostError::invalid(
+                "cron_expr must use 5 literal fields, not a nickname",
+            ));
         }
-        let parsed = expression
-            .parse::<croner::Cron>()
+        let parsed = croner::parser::CronParser::builder()
+            .seconds(croner::parser::Seconds::Disallowed)
+            .year(croner::parser::Year::Disallowed)
+            .build()
+            .parse(expression)
             .map_err(|error| HostError::invalid(format!("cron_expr is invalid: {error}")))?;
         Ok(Self { parsed })
     }
@@ -276,24 +276,26 @@ impl Store {
         at: Timestamp,
         next_run_at: Option<Timestamp>,
     ) -> Result<bool> {
-        let changed = self.conn()?.execute(
-            "UPDATE schedules SET last_triggered_at = ?2, next_run_at = ?3, enabled = ?4 \
+        let changed = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE schedules SET last_triggered_at = ?2, next_run_at = ?3, enabled = ?4 \
              WHERE id = ?1",
-            params![
+            )?
+            .execute(params![
                 id,
                 stamp(at),
                 next_run_at.map(stamp),
                 if next_run_at.is_some() { 1 } else { 0 }
-            ],
-        )?;
+            ])?;
         Ok(changed > 0)
     }
 
     pub(crate) fn cancel_schedule(&self, companion: &str, id: &str) -> Result<bool> {
-        let changed = self.conn()?.execute(
-            "DELETE FROM schedules WHERE id = ?1 AND companion_id = ?2",
-            params![id, companion],
-        )?;
+        let changed = self
+            .conn()?
+            .prepare_cached("DELETE FROM schedules WHERE id = ?1 AND companion_id = ?2")?
+            .execute(params![id, companion])?;
         Ok(changed > 0)
     }
 }
@@ -336,8 +338,49 @@ mod tests {
     }
 
     #[test]
+    fn jiff_stamps_keep_whole_second_utc_text_and_accepted_inputs() {
+        let times = [
+            "2026-01-01T00:00:00.000000001Z",
+            "2026-01-01T00:00:00.999999999Z",
+            "2026-01-01T00:00:01Z",
+        ]
+        .map(|text| text.parse::<Timestamp>().unwrap());
+        assert_eq!(
+            times.map(stamp),
+            [
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:01Z",
+            ]
+        );
+        assert_ne!(times[0].to_string(), stamp(times[0]));
+        let mut stored = times.map(stamp);
+        stored.sort();
+        assert_eq!(stored, times.map(stamp));
+        let expected: Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        for text in [
+            "2026-01-01T09:00:00+09:00",
+            "2026-01-01 00:00:00Z",
+            "2026-01-01t00:00:00z",
+        ] {
+            assert_eq!(parse_run_at(text, &TimeZone::UTC).unwrap(), expected);
+            assert_eq!(super::super::epoch(text), Some(expected.as_second()));
+        }
+        assert!(!super::super::now().contains('.'));
+    }
+
+    #[test]
     fn a_cron_expression_must_name_exactly_five_fields() {
-        for expression in ["", "* * * *", "* * * * * *", "* * * * * * *", "not a cron"] {
+        for expression in [
+            "",
+            "* * * *",
+            "* * * * * *",
+            "* * * * * * *",
+            "not a cron",
+            "@daily",
+            "@yearly",
+            " @hourly ",
+        ] {
             assert!(Cron::parse(expression).is_err(), "{expression}");
         }
         // The length cap is the host's own bound, not the parser's.

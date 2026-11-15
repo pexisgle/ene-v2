@@ -1,6 +1,6 @@
 //! Clients, their declared capabilities, activation generations and bound
 //! device operations.
-use super::{Result, Store, enum_column, json_column, now, optional_json_column, to_json};
+use super::{Result, Store, enum_name_column, json_column, now, optional_json_column, to_json};
 use crate::host::client::{Activation, CapabilitySpec, Client, DeviceOperation, DeviceStatus};
 use crate::host::error::{Failure, HostError};
 use rusqlite::{OptionalExtension, Row, params};
@@ -88,8 +88,7 @@ impl Store {
             ));
         }
         let revision = current + 1;
-        let changed = self.conn()?.query_row(
-            &format!(
+        let changed = self.conn()?.prepare_cached(&format!(
                 "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
                  capability_specs, revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform, \
@@ -97,7 +96,7 @@ impl Store {
                  capability_specs = excluded.capability_specs, revision = excluded.revision, \
                  last_seen = excluded.last_seen WHERE clients.revision = ?9 \
                  RETURNING {CLIENT_COLUMNS}"
-            ),
+            ))?.query_row(
             params![
                 id,
                 name,
@@ -141,23 +140,25 @@ impl Store {
             return Err(HostError::conflict("client changed since it was read"));
         }
         let next = existing.revision + 1;
-        let changed = self.conn()?.query_row(
-            &format!(
+        let changed = self
+            .conn()?
+            .prepare_cached(&format!(
                 "UPDATE clients SET capabilities = ?2, granted_capabilities = ?3, \
                  capability_specs = ?4, revision = ?5, last_seen = ?6 \
                  WHERE id = ?1 AND revision = ?7 RETURNING {CLIENT_COLUMNS}"
-            ),
-            params![
-                id,
-                to_json(&capabilities.to_vec())?,
-                to_json(&granted)?,
-                to_json(&specs.to_vec())?,
-                next,
-                now(),
-                existing.revision,
-            ],
-            row_to_client,
-        );
+            ))?
+            .query_row(
+                params![
+                    id,
+                    to_json(&capabilities.to_vec())?,
+                    to_json(&granted)?,
+                    to_json(&specs.to_vec())?,
+                    next,
+                    now(),
+                    existing.revision,
+                ],
+                row_to_client,
+            );
         changed
             .optional()?
             .ok_or_else(|| HostError::conflict("client changed since it was read"))
@@ -232,11 +233,13 @@ impl Store {
 
     pub(crate) fn insert_operation(&self, operation: &DeviceOperation) -> Result<()> {
         let stamp = now();
-        self.conn()?.execute(
-            "INSERT INTO device_operations (operation_id, client_id, activation_revision, \
+        self.conn()?
+            .prepare_cached(
+                "INSERT INTO device_operations (operation_id, client_id, activation_revision, \
              capability, input, work_id, status, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
+            )?
+            .execute(params![
                 operation.id,
                 operation.client_id,
                 operation.activation_revision,
@@ -246,8 +249,7 @@ impl Store {
                 operation.status.as_str(),
                 stamp,
                 stamp,
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -260,11 +262,12 @@ impl Store {
     }
 
     pub(crate) fn set_operation_status(&self, id: &str, status: DeviceStatus) -> Result<()> {
-        self.conn()?.execute(
-            "UPDATE device_operations SET status = ?2, updated_at = ?3 \
+        self.conn()?
+            .prepare_cached(
+                "UPDATE device_operations SET status = ?2, updated_at = ?3 \
              WHERE operation_id = ?1",
-            params![id, status.as_str(), now()],
-        )?;
+            )?
+            .execute(params![id, status.as_str(), now()])?;
         Ok(())
     }
 
@@ -288,22 +291,24 @@ impl Store {
         } else {
             DeviceStatus::Failed
         };
-        let updated = self.conn()?.query_row(
-            &format!(
+        let updated = self
+            .conn()?
+            .prepare_cached(&format!(
                 "UPDATE device_operations SET status = ?2, output = ?3, failure = ?4, \
                  updated_at = ?5 WHERE operation_id = ?1 \
                  AND status NOT IN ('completed','failed','uncertain') \
                  RETURNING {OPERATION_COLUMNS}"
-            ),
-            params![
-                id,
-                status.as_str(),
-                output.map(to_json).transpose()?,
-                failure.map(to_json).transpose()?,
-                now(),
-            ],
-            row_to_operation,
-        );
+            ))?
+            .query_row(
+                params![
+                    id,
+                    status.as_str(),
+                    output.map(to_json).transpose()?,
+                    failure.map(to_json).transpose()?,
+                    now(),
+                ],
+                row_to_operation,
+            );
         match updated.optional()? {
             Some(operation) => Ok(Some(operation)),
             None => self.operation(id),
@@ -328,23 +333,27 @@ impl Store {
     /// `client_moved` and is never re-dispatched anywhere.
     pub(crate) fn fail_operations_of(&self, client: &str, revision: u64) -> Result<usize> {
         let failure = Failure::new("client_moved", "the active client moved");
-        let changed = self.conn()?.execute(
-            "UPDATE device_operations SET status = 'failed', failure = ?3, updated_at = ?4 \
+        let changed = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE device_operations SET status = 'failed', failure = ?3, updated_at = ?4 \
              WHERE client_id = ?1 AND activation_revision = ?2 \
              AND status IN ('pending','dispatched')",
-            params![client, revision, to_json(&failure)?, now()],
-        )?;
+            )?
+            .execute(params![client, revision, to_json(&failure)?, now()])?;
         Ok(changed)
     }
 
     /// Startup: dispatched operations whose result never arrived are no
     /// longer trusted. Pending ones wait for the client to reconnect.
     pub(crate) fn mark_unanswered_operations_uncertain(&self) -> Result<usize> {
-        let changed = self.conn()?.execute(
-            "UPDATE device_operations SET status = 'uncertain', updated_at = ?1 \
+        let changed = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE device_operations SET status = 'uncertain', updated_at = ?1 \
              WHERE status = 'dispatched'",
-            [now()],
-        )?;
+            )?
+            .execute([now()])?;
         Ok(changed)
     }
 }
@@ -353,7 +362,7 @@ const OPERATION_COLUMNS: &str = "operation_id, client_id, activation_revision, c
      work_id, status, output, failure, created_at, updated_at";
 
 fn row_to_operation(row: &Row<'_>) -> rusqlite::Result<DeviceOperation> {
-    let status = enum_column(row, "status", "unknown device status", DeviceStatus::parse)?;
+    let status = enum_name_column(row, "status", "unknown device status")?;
     Ok(DeviceOperation {
         id: row.get("operation_id")?,
         client_id: row.get("client_id")?,
@@ -390,11 +399,13 @@ impl Store {
     /// Restores a client row exactly as it was, for rolling back a declaration
     /// whose tool publication failed.
     pub(crate) fn restore_client(&self, client: &Client) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT OR REPLACE INTO clients (id, name, platform, capabilities, \
+        self.conn()?
+            .prepare_cached(
+                "INSERT OR REPLACE INTO clients (id, name, platform, capabilities, \
              granted_capabilities, capability_specs, revision, last_seen) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
+            )?
+            .execute(params![
                 client.id,
                 client.name,
                 client.platform,
@@ -403,23 +414,22 @@ impl Store {
                 to_json(&client.capability_specs)?,
                 client.revision,
                 client.last_seen,
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
     pub(crate) fn delete_client(&self, id: &str) -> Result<()> {
         self.conn()?
-            .execute("DELETE FROM clients WHERE id = ?1", [id])?;
+            .prepare_cached("DELETE FROM clients WHERE id = ?1")?
+            .execute([id])?;
         Ok(())
     }
 
     /// Restores an activation row exactly, for rolling back a move whose tool
     /// publication failed.
     pub(crate) fn restore_activation(&self, activation: &Activation) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT OR REPLACE INTO activations (companion_id, client_id, revision, updated_at) \
-             VALUES (?1, ?2, ?3, ?4)",
+        self.conn()?.prepare_cached("INSERT OR REPLACE INTO activations (companion_id, client_id, revision, updated_at) \
+             VALUES (?1, ?2, ?3, ?4)")?.execute(
             params![
                 activation.companion_id,
                 activation.client_id,
@@ -431,10 +441,9 @@ impl Store {
     }
 
     pub(crate) fn delete_activation(&self, companion: &str) -> Result<()> {
-        self.conn()?.execute(
-            "DELETE FROM activations WHERE companion_id = ?1",
-            [companion],
-        )?;
+        self.conn()?
+            .prepare_cached("DELETE FROM activations WHERE companion_id = ?1")?
+            .execute([companion])?;
         Ok(())
     }
 }

@@ -13,7 +13,7 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use rig_core::completion::{AssistantContent, Message as CompletionMessage};
+use rig_core::completion::Message as CompletionMessage;
 use rig_core::conversation::{Author, AuthorKind, EntryRef};
 use rig_core::message::UserContent;
 use rig_ecs::model::{Connection as ModelConnection, Models};
@@ -406,12 +406,7 @@ pub(crate) fn entry_text(entry: &EntryRef<'_>) -> Option<String> {
             (!text.is_empty()).then(|| text.to_owned())
         }
         CompletionMessage::Assistant(reply) => {
-            let mut text = String::new();
-            for item in &reply.content {
-                if let AssistantContent::Text(item) = item {
-                    text.push_str(&item.text);
-                }
-            }
+            let text = reply.text();
             let text = text.trim();
             (!text.is_empty()).then(|| text.to_owned())
         }
@@ -652,6 +647,36 @@ impl Plugin for AgentPlugin {
 mod tests {
     use super::*;
     use rig_core::conversation::{Conversation as History, Entry, RequestId};
+
+    #[test]
+    fn transcript_text_keeps_full_text_blocks_without_separators_or_reasoning() {
+        use rig_core::completion::{AssistantContent, AssistantMessage};
+
+        let long = "full\ntext ".repeat(30);
+        let history = History::from_messages([
+            CompletionMessage::User {
+                content: vec![UserContent::text("  user"), UserContent::text("\ntext  ")],
+            },
+            CompletionMessage::Assistant(AssistantMessage::new(vec![
+                AssistantContent::text("  first"),
+                AssistantContent::reasoning("private reasoning"),
+                AssistantContent::text("second\n"),
+                AssistantContent::text(long.clone()),
+            ])),
+            CompletionMessage::Assistant(AssistantMessage::new(vec![
+                AssistantContent::reasoning("private reasoning"),
+                AssistantContent::text(" \n\t"),
+            ])),
+            CompletionMessage::system("hidden system context"),
+        ]);
+        let text: Vec<_> = history.entries().map(|entry| entry_text(&entry)).collect();
+        assert_eq!(text[0].as_deref(), Some("user\ntext"));
+        assert_eq!(
+            text[1],
+            Some(format!("firstsecond\n{long}").trim().to_owned())
+        );
+        assert_eq!(&text[2..], &[None, None]);
+    }
 
     #[tokio::test]
     async fn connected_assignments_observe_cloned_credential_mutations() {

@@ -18,7 +18,7 @@ pub(crate) enum PolicyEffect {
     Confirm,
 }
 
-/// An enum stored and sent as a snake_case name, with its two conversions.
+/// The spelling stored in policy rules.
 impl PolicyEffect {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -26,12 +26,6 @@ impl PolicyEffect {
             Self::Deny => "deny",
             Self::Confirm => "confirm",
         }
-    }
-
-    /// Reads a stored name back through the same serde spelling the wire uses.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
-            .ok()
     }
 }
 
@@ -63,12 +57,6 @@ impl ApprovalStatus {
             Self::Denied => "denied",
             Self::Expired => "expired",
         }
-    }
-
-    /// Reads a stored name back through the same serde spelling the wire uses.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
-            .ok()
     }
 }
 

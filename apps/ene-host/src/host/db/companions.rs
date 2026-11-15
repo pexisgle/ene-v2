@@ -46,12 +46,14 @@ impl Store {
 
     pub(crate) fn insert_companion(&self, companion: &Companion) -> Result<()> {
         let connection = self.conn()?;
-        connection.execute(
-            "INSERT INTO companions (id, name, mind, profile, profile_revision, state, \
+        connection
+            .prepare_cached(
+                "INSERT INTO companions (id, name, mind, profile, profile_revision, state, \
              state_revision, body, voice, assignments, persona, voice_identifier, revision, \
              created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
+            )?
+            .execute(params![
                 companion.id,
                 companion.name,
                 companion.mind,
@@ -67,19 +69,21 @@ impl Store {
                 companion.revision,
                 companion.created_at,
                 companion.updated_at,
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
     /// Saves an edited companion with an optimistic revision check.
     pub(crate) fn update_companion(&self, companion: &Companion, expected: u64) -> Result<()> {
-        let updated = self.conn()?.execute(
-            "UPDATE companions SET name = ?2, mind = ?3, profile = ?4, profile_revision = ?5, \
+        let updated = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE companions SET name = ?2, mind = ?3, profile = ?4, profile_revision = ?5, \
              state = ?6, state_revision = ?7, body = ?8, voice = ?9, assignments = ?10, \
              persona = ?11, voice_identifier = ?12, revision = ?13, updated_at = ?14 \
              WHERE id = ?1 AND revision = ?15",
-            params![
+            )?
+            .execute(params![
                 companion.id,
                 companion.name,
                 companion.mind,
@@ -95,8 +99,7 @@ impl Store {
                 companion.revision,
                 companion.updated_at,
                 expected,
-            ],
-        )?;
+            ])?;
         require(updated, "companion changed since it was read")
     }
 
@@ -107,11 +110,19 @@ impl Store {
         profile: &Profile,
     ) -> Result<u64> {
         let next = expected + 1;
-        let updated = self.conn()?.execute(
-            "UPDATE companions SET profile = ?2, profile_revision = ?3, updated_at = ?4 \
+        let updated = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE companions SET profile = ?2, profile_revision = ?3, updated_at = ?4 \
              WHERE id = ?1 AND profile_revision = ?5",
-            params![companion_id, to_json(profile)?, next, now(), expected],
-        )?;
+            )?
+            .execute(params![
+                companion_id,
+                to_json(profile)?,
+                next,
+                now(),
+                expected
+            ])?;
         require(updated, "profile changed since it was read")?;
         Ok(next)
     }
@@ -119,7 +130,8 @@ impl Store {
     pub(crate) fn delete_companion(&self, id: &str) -> Result<bool> {
         let deleted = self
             .conn()?
-            .execute("DELETE FROM companions WHERE id = ?1", [id])?;
+            .prepare_cached("DELETE FROM companions WHERE id = ?1")?
+            .execute([id])?;
         Ok(deleted > 0)
     }
 }

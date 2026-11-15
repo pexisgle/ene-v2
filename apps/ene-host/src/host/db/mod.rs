@@ -27,6 +27,10 @@ fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     Ok(connection)
 }
 
+fn configure_connection(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+}
+
 /// The relational state, shared by every system on the Rig thread.
 #[derive(Clone, bevy_ecs::prelude::Resource)]
 pub(crate) struct Store(Arc<Mutex<Connection>>);
@@ -44,6 +48,7 @@ impl Store {
                 "state database version {version} is newer than this host ({VERSION})"
             )));
         }
+        configure_connection(&connection)?;
         connection.execute_batch(include_str!("schema.sql"))?;
         connection.pragma_update(None, "user_version", VERSION)?;
         Ok(Self(Arc::new(Mutex::new(connection))))
@@ -164,15 +169,16 @@ pub(crate) fn optional_json_column<T: serde::de::DeserializeOwned>(
         .transpose()
 }
 
-/// Reads an enum-name column.
-pub(crate) fn enum_column<T>(
+/// Reads a Serde enum-name column without constructing a JSON string.
+pub(crate) fn enum_name_column<T: serde::de::DeserializeOwned>(
     row: &rusqlite::Row<'_>,
     name: &str,
     what: &str,
-    parse: impl FnOnce(&str) -> Option<T>,
 ) -> rusqlite::Result<T> {
     let index = row.as_ref().column_index(name)?;
-    parse(&row.get::<_, String>(index)?).ok_or_else(|| corrupt(index, what))
+    let text: String = row.get(index)?;
+    T::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(&text))
+        .map_err(|_| corrupt(index, what))
 }
 
 pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
@@ -213,6 +219,175 @@ pub(crate) fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_columns_keep_domain_values_and_json_null_as_text() {
+        use serde_json::{Value, json};
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE json_values (value TEXT NOT NULL, optional TEXT)")
+            .unwrap();
+        for value in [
+            Value::Null,
+            json!(1),
+            json!(1.0),
+            json!(["tea"]),
+            json!({"nested": null}),
+        ] {
+            connection.execute("DELETE FROM json_values", []).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO json_values VALUES (?1, ?2)",
+                    [to_json(&value).unwrap(), "null".into()],
+                )
+                .unwrap();
+            let stored: (String, Value, Option<Value>) = connection
+                .query_row(
+                    "SELECT typeof(value), value, optional FROM json_values",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            json_column(row, "value", "bad JSON")?,
+                            optional_json_column(row, "optional", "bad JSON")?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(stored, ("text".into(), value, Some(Value::Null)));
+        }
+        let domain: Vec<String> = connection
+            .query_row("SELECT '[\"tea\",\"coffee\"]' AS value", [], |row| {
+                json_column(row, "value", "bad domain")
+            })
+            .unwrap();
+        assert_eq!(domain, ["tea", "coffee"]);
+        let absent: Option<Value> = connection
+            .query_row("SELECT NULL AS value", [], |row| {
+                optional_json_column(row, "value", "bad JSON")
+            })
+            .unwrap();
+        assert_eq!(absent, None);
+    }
+
+    #[test]
+    fn serde_enum_columns_preserve_names_and_reject_unknown_values() {
+        use crate::host::{
+            client::DeviceStatus,
+            permission::{ApprovalStatus, PolicyEffect},
+            settings::ConnectionKind,
+            work::{RunState, WorkStatus},
+        };
+        fn check<
+            T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        >(
+            values: &[T],
+        ) {
+            let connection = Connection::open_in_memory().unwrap();
+            for value in values {
+                let name = serde_json::to_value(value).unwrap();
+                let parsed: T = connection
+                    .query_row("SELECT ?1 AS name", [name.as_str().unwrap()], |row| {
+                        enum_name_column(row, "name", "unknown enum")
+                    })
+                    .unwrap();
+                assert_eq!(&parsed, value);
+            }
+            for name in ["unknown", "", "Pending", " pending"] {
+                let error = connection
+                    .query_row::<T, _, _>("SELECT 1, ?1 AS name", [name], |row| {
+                        enum_name_column(row, "name", "unknown enum")
+                    })
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, _)
+                ));
+            }
+        }
+        check(&[
+            PolicyEffect::Allow,
+            PolicyEffect::Deny,
+            PolicyEffect::Confirm,
+        ]);
+        check(&[
+            ApprovalStatus::Pending,
+            ApprovalStatus::Approved,
+            ApprovalStatus::Denied,
+            ApprovalStatus::Expired,
+        ]);
+        check(&[
+            DeviceStatus::Pending,
+            DeviceStatus::Dispatched,
+            DeviceStatus::Completed,
+            DeviceStatus::Failed,
+            DeviceStatus::Uncertain,
+        ]);
+        check(&[
+            ConnectionKind::Llm,
+            ConnectionKind::Tts,
+            ConnectionKind::Stt,
+            ConnectionKind::Embedding,
+            ConnectionKind::Mcp,
+            ConnectionKind::Acp,
+        ]);
+        check(&[WorkStatus::Idle, WorkStatus::Active, WorkStatus::Closed]);
+        check(&[
+            RunState::Starting,
+            RunState::Running,
+            RunState::WaitingInput,
+            RunState::Cancelling,
+            RunState::Completed,
+            RunState::Cancelled,
+            RunState::CancellationUnconfirmed,
+            RunState::Failed,
+        ]);
+    }
+
+    #[test]
+    fn primary_and_secondary_connections_share_options_and_transactions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let mut secondary = store.open_secondary().unwrap();
+        let options = |connection: &Connection| {
+            let journal: String = connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap();
+            let sync: i64 = connection
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .unwrap();
+            let busy: i64 = connection
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .unwrap();
+            (journal, sync, busy)
+        };
+        assert_eq!(options(&store.conn().unwrap()), ("wal".into(), 1, 5000));
+        assert_eq!(options(&secondary), ("wal".into(), 1, 5000));
+        let transaction = secondary
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        transaction.execute("INSERT INTO user_profiles (id, name, updated_at) VALUES ('rollback', 'discard', 'now')", []).unwrap();
+        transaction.rollback().unwrap();
+        assert_eq!(
+            store
+                .conn()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM user_profiles", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        secondary.execute("INSERT INTO user_profiles (id, name, updated_at) VALUES ('committed', 'visible', 'now')", []).unwrap();
+        assert_eq!(
+            store
+                .conn()
+                .unwrap()
+                .query_row("SELECT name FROM user_profiles", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "visible"
+        );
+    }
 
     #[test]
     fn corrupt_json_reports_the_column_without_disclosing_its_contents() {

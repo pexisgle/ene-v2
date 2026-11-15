@@ -17,7 +17,7 @@ use crate::host::{
     notify::Notifier,
 };
 use bevy_ecs::prelude::*;
-use rig_agent::{agent::AgentBuilder, extractor::ExtractorBuilder};
+use rig_agent::extractor::ExtractorBuilder;
 use rig_core::completion::Message;
 use rig_core::conversation::{Conversation as CoreConversation, TurnEnd};
 use rig_core::{DynModel, operation::Completion};
@@ -294,12 +294,12 @@ async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Vec<Fac
         .spec()
         .map(|spec| spec.default_options(None))
         .unwrap_or_default();
-    let builder = AgentBuilder::new(model.clone()).options(options);
-    let extraction = ExtractorBuilder::<Extraction>::from_agent_builder(builder)
+    let extraction = ExtractorBuilder::<Extraction>::new(model.clone())
         .append_preamble(SYSTEM_PROMPT)
         .retries(0)
         .build()
         .extract(prompt)
+        .options(options)
         .await
         .map_err(|error| HostError::unavailable(format!("consolidation output: {error}")))?;
     Ok(normalize(extraction.output))
@@ -645,6 +645,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_extractor_preserves_the_entire_request_and_cache_defaults() {
+        use rig_core::test_utils::{MockCompletionModel, MockTurn};
+        use rig_core::{catalog::Catalog, completion::CacheRetention};
+
+        let mut spec = Catalog::builtin()
+            .resolve("openai/gpt-4o-mini")
+            .unwrap()
+            .shared();
+        std::sync::Arc::make_mut(&mut spec).caching.retention = vec![CacheRetention::Short];
+        let mock = MockCompletionModel::from_turns(
+            (0..2)
+                .map(|_| MockTurn::tool_call("facts", "submit", serde_json::json!({"facts": []}))),
+        )
+        .priced_as(spec);
+        let model: DynModel<Completion> = mock.clone().into();
+        let options = model.spec().unwrap().default_options(None);
+        assert_eq!(options.cache, Some(CacheRetention::Short));
+        ExtractorBuilder::<Extraction>::from_agent_builder(
+            rig_agent::agent::AgentBuilder::new(model.clone()).options(options),
+        )
+        .append_preamble(SYSTEM_PROMPT)
+        .retries(0)
+        .build()
+        .extract("The user prefers tea.")
+        .await
+        .unwrap();
+        assert!(
+            extract(&model, "The user prefers tea.".into())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        assert!(
+            requests[1]
+                .system_instructions()
+                .unwrap()
+                .contains(SYSTEM_PROMPT)
+        );
+        assert_eq!(requests[1].options.cache, Some(CacheRetention::Short));
+    }
+
+    #[tokio::test]
     async fn extraction_submits_bounded_facts_and_rejects_free_text() {
         use rig_core::test_utils::{MockCompletionModel, MockTurn};
         let model: DynModel<Completion> = MockCompletionModel::from_turns([
@@ -664,6 +709,38 @@ mod tests {
             ["injected"]
         );
         assert!(extract(&model, "No facts.".into()).await.is_err());
+    }
+
+    #[test]
+    fn failed_jobs_keep_the_durable_range_pending_and_retry_only_their_companion() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("host.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let mut conversation = CoreConversation::new();
+        let first = answer(&mut conversation, "first", "answered");
+        let next = answer(&mut conversation, "next", "answered");
+        store
+            .consolidate(&batch(None, &first.get().to_string()), &[])
+            .unwrap();
+        let now = Instant::now();
+        let mut jobs = Consolidation::default();
+        assert!(jobs.begin("ene", now));
+        assert!(!jobs.begin("ene", now));
+        assert!(jobs.begin("other", now));
+        jobs.fail("ene", now);
+        assert!(!jobs.begin("ene", now + RETRY_DELAY - Duration::from_nanos(1)));
+        assert!(jobs.running.contains("other"));
+        assert!(jobs.begin("ene", now + RETRY_DELAY));
+        drop(jobs);
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        let mut restarted = Consolidation::default();
+        assert!(restarted.begin("ene", now));
+        let cursor = store.consolidation_cursor("ene").unwrap();
+        let pending = pending_turns(&conversation, cursor.as_deref(), MAX_TURNS);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].turn_id, next.get().to_string());
     }
 
     #[test]

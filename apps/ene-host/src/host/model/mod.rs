@@ -161,6 +161,18 @@ pub(crate) fn provider_of(adapter: &str) -> Option<ProviderId> {
     })
 }
 
+/// Registry configuration for listing and embedding, including the host's
+/// OpenAI-compatible fallback for adapters without a registered wire.
+pub(crate) fn provider_config(adapter: &str, base: &str, secret: Option<String>) -> ProviderConfig {
+    let secret = secret.unwrap_or_default();
+    let default = super::settings::provider(adapter).map_or_else(String::new, |p| p.endpoint);
+    match provider_of(adapter).and_then(|provider| provider.config(secret.clone())) {
+        Some(config) if base != default => config.with_base_url(base),
+        Some(config) => config,
+        None => ProviderConfig::OpenAi(OpenAIConfig::new(secret).with_base_url(base)),
+    }
+}
+
 type ConnectModel = dyn Fn(
         &Store,
         &Credentials,
@@ -354,17 +366,7 @@ async fn list_models(
     if let Some(running) = providers.running(adapter, ene_plugin::Extension::Llm) {
         return plugin_models(running, base).await;
     }
-    let secret = secret.unwrap_or_default();
-    // The host's adapter list is not rig's provider list: `gemini` is
-    // `gcp.gemini` there, and an adapter the registry does not know has no
-    // preset at all. Those keep the OpenAI-compatible `/models` wire the host
-    // has always probed, pinned to the connection's endpoint.
-    let default = super::settings::provider(adapter).map_or_else(String::new, |p| p.endpoint);
-    let config = match provider_of(adapter).and_then(|p| p.config(secret.clone())) {
-        Some(config) if base != default => config.with_base_url(base),
-        Some(config) => config,
-        None => ProviderConfig::OpenAi(OpenAIConfig::new(secret).with_base_url(base)),
-    };
+    let config = provider_config(adapter, base, secret);
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
         match &config {
@@ -460,9 +462,95 @@ mod tests {
         llm_connection(adapter, endpoint, &["gpt-5-mini"])
     }
 
+    #[test]
+    fn registry_configs_keep_native_defaults_and_custom_endpoints() {
+        for adapter in ["openai", "openrouter", "anthropic", "gemini"] {
+            let base = super::super::settings::provider(adapter).unwrap().endpoint;
+            let preset = provider_of(adapter).unwrap().config("key").unwrap();
+            let config = provider_config(adapter, &base, Some("key".into()));
+            assert_eq!(config, preset, "{adapter}");
+            let custom = provider_config(adapter, "http://127.0.0.1:1234", Some("key".into()));
+            assert_eq!(
+                custom,
+                preset.with_base_url("http://127.0.0.1:1234"),
+                "{adapter}"
+            );
+        }
+        assert_eq!(
+            provider_config("custom", "http://127.0.0.1:1234", None),
+            ProviderConfig::OpenAi(OpenAIConfig::new("").with_base_url("http://127.0.0.1:1234"))
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_keeps_catalog_overrides_and_unknown_tool_support() {
+        use crate::host::{mind::Assignment, tests::Harness};
+        use rig_core::catalog::Pricing;
+
+        let harness = Harness::new([]);
+        let store = harness.store();
+        let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+        let credentials = Credentials::new(true);
+        let providers = super::super::providers::Providers::none();
+        let mut overrides = Catalog::default();
+        let original = Catalog::builtin()
+            .resolve("openai/gpt-4o-mini")
+            .unwrap()
+            .spec
+            .clone();
+        let override_pricing = Pricing::new(1.25, 5.0);
+        let spec = original.clone().with_pricing(override_pricing);
+        overrides.insert(spec.clone());
+        let catalog = Catalog::builtin().with_overrides(&overrides);
+        for adapter in ["openai", "gemini"] {
+            let mut connection = connection_for(adapter, "http://127.0.0.1:1234");
+            connection.id = adapter.into();
+            credentials.remember(adapter, "explicit-key".into());
+            store
+                .update_settings(store.settings_revision().unwrap(), &[(connection, 0)], &[])
+                .unwrap();
+            for id in ["gpt-4o-mini", "ene-unlisted-model"] {
+                companion.assignments.companion = Assignment {
+                    connection_id: adapter.into(),
+                    model_id: id.into(),
+                };
+                let model = connect(
+                    &store,
+                    &credentials,
+                    &catalog,
+                    &companion,
+                    Role::Companion,
+                    &providers,
+                )
+                .unwrap();
+                let connected = model.spec().unwrap();
+                assert_eq!(connected.id, id);
+                assert_eq!(connected.provider, provider_of(adapter).unwrap());
+                if adapter == "openai" && id == "gpt-4o-mini" {
+                    let pricing = connected.pricing.as_ref().unwrap();
+                    assert_eq!(
+                        (pricing.input, pricing.output),
+                        (override_pricing.input, override_pricing.output)
+                    );
+                    assert_eq!(
+                        pricing.cache_read,
+                        original.pricing.as_ref().unwrap().cache_read
+                    );
+                    assert_eq!(connected.context_window, original.context_window);
+                } else {
+                    assert!(connected.tools);
+                }
+            }
+        }
+    }
+
     /// Serves the model listing the request path asks for: Gemini's native
     /// reply under `/v1beta/models`, the OpenAI-shaped one elsewhere.
-    async fn models_endpoint() -> std::net::SocketAddr {
+    async fn models_endpoint() -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
+        let (sent, received) = tokio::sync::mpsc::unbounded_channel();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -474,11 +562,12 @@ mod tests {
                     continue;
                 };
                 let request = String::from_utf8_lossy(&request[..read]);
+                sent.send(request.to_string()).unwrap();
                 let path = request.split_whitespace().nth(1).unwrap_or_default();
                 let body = if path.starts_with("/v1beta/models") {
                     r#"{"models":[{"name":"models/gemini-probe"}]}"#
                 } else {
-                    r#"{"data":[{"id":"probe-model"}]}"#
+                    r#"{"data":[{"id":"probe-model","display_name":"Probe model"}]}"#
                 };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
@@ -488,7 +577,7 @@ mod tests {
                 let _ = socket.write_all(response.as_bytes()).await;
             }
         });
-        address
+        (address, received)
     }
 
     #[test]
@@ -535,25 +624,57 @@ mod tests {
     /// listing, and a custom adapter falls back to the OpenAI-shaped wire.
     #[tokio::test]
     async fn the_probe_lists_models_for_any_adapter() {
-        let address = models_endpoint().await;
+        let (address, mut requests) = models_endpoint().await;
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        for (adapter, model) in [
-            ("openai", "probe-model"),
-            ("openrouter", "probe-model"),
-            ("gemini", "gemini-probe"),
-            ("custom", "probe-model"),
+        let credentials = Credentials::new(true);
+        credentials.remember("c1", "explicit-key".into());
+        for (adapter, model, path, authentication) in [
+            (
+                "openai",
+                "probe-model",
+                "/models",
+                "authorization: Bearer explicit-key",
+            ),
+            (
+                "openrouter",
+                "probe-model",
+                "/models",
+                "authorization: Bearer explicit-key",
+            ),
+            (
+                "anthropic",
+                "probe-model",
+                "/v1/models",
+                "x-api-key: explicit-key",
+            ),
+            (
+                "gemini",
+                "gemini-probe",
+                "/v1beta/models",
+                "key=explicit-key",
+            ),
+            (
+                "custom",
+                "probe-model",
+                "/models",
+                "authorization: Bearer explicit-key",
+            ),
         ] {
             let endpoint = format!("http://{address}");
             let connection = connection_for(adapter, &endpoint);
             let check = probe(
                 &store,
-                &Credentials::default(),
+                &credentials,
                 &connection,
                 &super::super::providers::Providers::none(),
             )
             .await;
             assert!(check.healthy, "{adapter}: {:?}", check.failure);
+            let request = requests.recv().await.unwrap();
+            let uri = request.split_whitespace().nth(1).unwrap();
+            assert_eq!(uri.split('?').next().unwrap(), path, "{adapter}");
+            assert!(request.contains(authentication), "{adapter}: {request}");
             assert!(
                 check.resources.iter().any(|known| known == model),
                 "{adapter}: {:?}",

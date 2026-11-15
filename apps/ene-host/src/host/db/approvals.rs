@@ -1,16 +1,11 @@
 //! Approval requests: persistence, resolution and startup expiry.
-use super::{Result, Store, enum_column, now};
+use super::{Result, Store, enum_name_column, now};
 use crate::host::error::HostError;
 use crate::host::permission::{Approval, ApprovalStatus};
 use rusqlite::{Row, params};
 
 fn row_to_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
-    let status = enum_column(
-        row,
-        "status",
-        "unknown approval status",
-        ApprovalStatus::parse,
-    )?;
+    let status = enum_name_column(row, "status", "unknown approval status")?;
     Ok(Approval {
         request_id: row.get("request_id")?,
         session_id: row.get("session_id")?,
@@ -34,10 +29,9 @@ const COLUMNS: &str = "request_id, session_id, run_id, work_id, action_payload_h
 
 impl Store {
     pub(crate) fn insert_approval(&self, approval: &Approval) -> Result<()> {
-        self.conn()?.execute(
-            &format!(
+        self.conn()?.prepare_cached(&format!(
                 "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
-            ),
+            ))?.execute(
             params![
                 approval.request_id,
                 approval.session_id,
@@ -97,21 +91,25 @@ impl Store {
     /// Startup: an approval whose call cannot be resolved is expired rather
     /// than left pending forever.
     pub(crate) fn expire_pending_approvals(&self) -> Result<usize> {
-        let expired = self.conn()?.execute(
-            "UPDATE approval_requests SET status = 'expired', resolved_at = ?1 \
+        let expired = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE approval_requests SET status = 'expired', resolved_at = ?1 \
              WHERE status = 'pending'",
-            [now()],
-        )?;
+            )?
+            .execute([now()])?;
         Ok(expired)
     }
 
     /// Expires only the pending approvals of one companion.
     pub(crate) fn expire_approvals_for(&self, companion: &str) -> Result<usize> {
-        let expired = self.conn()?.execute(
-            "UPDATE approval_requests SET status = 'expired', resolved_at = ?2 \
+        let expired = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE approval_requests SET status = 'expired', resolved_at = ?2 \
              WHERE status = 'pending' AND session_id = ?1",
-            params![companion, now()],
-        )?;
+            )?
+            .execute(params![companion, now()])?;
         Ok(expired)
     }
 }

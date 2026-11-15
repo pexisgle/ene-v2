@@ -53,10 +53,6 @@ impl WorkStatus {
             Self::Closed => "closed",
         }
     }
-
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        serde_json::from_value(text.into()).ok()
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,10 +80,6 @@ impl RunState {
             Self::CancellationUnconfirmed => "cancellation_unconfirmed",
             Self::Failed => "failed",
         }
-    }
-
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        serde_json::from_value(text.into()).ok()
     }
 
     pub(crate) fn is_terminal(self) -> bool {

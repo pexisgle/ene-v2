@@ -176,8 +176,8 @@ fn insert_row(
          recorded_at, source_context) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING {FIELDS}"
     );
     connection
+        .prepare_cached(&sql)?
         .query_row(
-            &sql,
             params![
                 memory.id,
                 memory.owner,
@@ -201,11 +201,12 @@ fn add_edge(
     to_id: &str,
     created_at: &str,
 ) -> Result<()> {
-    transaction.execute(
-        "INSERT OR IGNORE INTO memory_edges (from_id, relation, to_id, created_at) \
+    transaction
+        .prepare_cached(
+            "INSERT OR IGNORE INTO memory_edges (from_id, relation, to_id, created_at) \
          VALUES (?1, ?2, ?3, ?4)",
-        params![from_id, relation, to_id, created_at],
-    )?;
+        )?
+        .execute(params![from_id, relation, to_id, created_at])?;
     Ok(())
 }
 
@@ -221,19 +222,18 @@ fn read_memory_tx(
     id: &str,
 ) -> Result<Option<StoredMemory>> {
     transaction
-        .query_row(
+        .prepare_cached(
             "SELECT owner, content, importance, memory_revision \
              FROM memories WHERE id = ?1",
-            [id],
-            |row| {
-                Ok(StoredMemory {
-                    owner: row.get(0)?,
-                    content: row.get(1)?,
-                    importance: row.get(2)?,
-                    memory_revision: row.get(3)?,
-                })
-            },
-        )
+        )?
+        .query_row([id], |row| {
+            Ok(StoredMemory {
+                owner: row.get(0)?,
+                content: row.get(1)?,
+                importance: row.get(2)?,
+                memory_revision: row.get(3)?,
+            })
+        })
         .optional()
         .map_err(Into::into)
 }
@@ -251,11 +251,8 @@ fn supersede_tx(
         return Ok(());
     }
     let exists = transaction
-        .query_row(
-            "SELECT 1 FROM memories WHERE id = ?1 AND owner = ?2",
-            params![old_id, companion_id],
-            |_| Ok(()),
-        )
+        .prepare_cached("SELECT 1 FROM memories WHERE id = ?1 AND owner = ?2")?
+        .query_row(params![old_id, companion_id], |_| Ok(()))
         .optional()?
         .is_some();
     if !exists {
@@ -276,11 +273,12 @@ fn lower_superseded_tx(
     if old_id == new_id {
         return Ok(());
     }
-    transaction.execute(
-        "UPDATE memories SET importance = MIN(importance, 2), \
+    transaction
+        .prepare_cached(
+            "UPDATE memories SET importance = MIN(importance, 2), \
          memory_revision = memory_revision + 1 WHERE id = ?1 AND owner = ?2",
-        params![old_id, companion_id],
-    )?;
+        )?
+        .execute(params![old_id, companion_id])?;
     Ok(())
 }
 
@@ -294,11 +292,8 @@ impl Store {
     pub(crate) fn memory(&self, id: &str) -> Result<Option<Memory>> {
         let connection = self.conn()?;
         let memory = connection
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"),
-                [id],
-                row_to_memory,
-            )
+            .prepare_cached(&format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"))?
+            .query_row([id], row_to_memory)
             .optional()?;
         Ok(memory)
     }
@@ -341,12 +336,12 @@ impl Store {
         }
         let updated = self
             .conn()?
-            .query_row(
-                &format!(
-                    "UPDATE memories SET importance = ?2, audiences = ?3, \
+            .prepare_cached(&format!(
+                "UPDATE memories SET importance = ?2, audiences = ?3, \
                      memory_revision = memory_revision + 1 \
                      WHERE id = ?1 AND memory_revision = ?4 RETURNING {FIELDS}"
-                ),
+            ))?
+            .query_row(
                 params![id, importance, to_json(&audiences)?, memory.memory_revision],
                 row_to_memory,
             )
@@ -358,14 +353,15 @@ impl Store {
     /// citation calls this, never a plain search.
     pub(crate) fn cite_memory(&self, id: &str, turn_id: &str, estimated: bool) -> Result<()> {
         let connection = self.conn()?;
-        connection.execute(
-            "UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1",
-            params![id, now()],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO memory_edges (from_id, relation, to_id, created_at) \
+        connection
+            .prepare_cached("UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1")?
+            .execute(params![id, now()])?;
+        connection
+            .prepare_cached(
+                "INSERT OR IGNORE INTO memory_edges (from_id, relation, to_id, created_at) \
              VALUES (?1, ?2, ?3, ?4)",
-            params![
+            )?
+            .execute(params![
                 id,
                 if estimated {
                     "estimated_cited_in"
@@ -374,8 +370,7 @@ impl Store {
                 },
                 turn_id,
                 now()
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -588,11 +583,10 @@ impl Store {
     pub(crate) fn consolidation_cursor(&self, companion: &str) -> Result<Option<String>> {
         let connection = self.conn()?;
         let cursor = connection
-            .query_row(
+            .prepare_cached(
                 "SELECT last_processed_turn_id FROM consolidation_state WHERE companion_id = ?1",
-                [companion],
-                |row| row.get(0),
-            )
+            )?
+            .query_row([companion], |row| row.get(0))
             .optional()?;
         Ok(cursor)
     }
@@ -610,20 +604,22 @@ impl Store {
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for id in ids.iter().filter(|id| !id.is_empty()).take(MAX_INJECTED) {
-            transaction.execute(
-                "INSERT OR REPLACE INTO memory_injections \
+            transaction
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO memory_injections \
                  (companion_id, turn_id, memory_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![companion, turn_id, id, now()],
-            )?;
+                )?
+                .execute(params![companion, turn_id, id, now()])?;
         }
         // Keep the ledger bounded: only the newest turns can still be
         // consolidated, and a job reads at most MAX_TURNS of them.
-        transaction.execute(
-            "DELETE FROM memory_injections WHERE companion_id = ?1 AND turn_id NOT IN (\
+        transaction
+            .prepare_cached(
+                "DELETE FROM memory_injections WHERE companion_id = ?1 AND turn_id NOT IN (\
              SELECT turn_id FROM memory_injections WHERE companion_id = ?1 \
              GROUP BY turn_id ORDER BY CAST(turn_id AS INTEGER) DESC LIMIT ?2)",
-            params![companion, KEEP_INJECTED_TURNS as i64],
-        )?;
+            )?
+            .execute(params![companion, KEEP_INJECTED_TURNS as i64])?;
         transaction.commit()?;
         Ok(())
     }
@@ -667,7 +663,8 @@ impl Store {
         Ok(ids)
     }
 
-    /// Hashes a mind update for idempotency comparison.
+    /// Hashes the historical serialized JSON bytes. RFC 8785 changes number
+    /// spellings and Unicode key order, invalidating persisted replay receipts.
     pub(crate) fn mind_hash(&self, value: &Value) -> Vec<u8> {
         digest(to_json(value).unwrap_or_default().as_bytes())
     }
@@ -683,12 +680,13 @@ impl Store {
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing: Option<(String, Vec<u8>, String)> = transaction
-            .query_row(
+            .prepare_cached(
                 "SELECT companion_id, request_hash, result FROM mind_operations \
                  WHERE operation_id = ?1",
-                [&update.operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+            )?
+            .query_row([&update.operation_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
             .optional()?;
         if let Some((companion_id, hash, stored)) = existing {
             if companion_id == update.companion_id && hash == update.request_hash {
@@ -751,16 +749,17 @@ impl Store {
         }
         let mut state_revision = None;
         if let Some(state) = &update.state {
-            let rows = transaction.execute(
-                "UPDATE companions SET state = ?2, state_revision = state_revision + 1, \
+            let rows = transaction
+                .prepare_cached(
+                    "UPDATE companions SET state = ?2, state_revision = state_revision + 1, \
                  updated_at = ?3 WHERE id = ?1 AND state_revision = ?4",
-                params![
+                )?
+                .execute(params![
                     update.companion_id,
                     state.state,
                     stamp,
                     state.expected_revision
-                ],
-            )?;
+                ])?;
             if rows == 0 {
                 return Err(HostError::conflict("mind changed since it was read"));
             }
@@ -774,18 +773,19 @@ impl Store {
             "state_revision": state_revision,
             "operation_id": update.operation_id,
         });
-        transaction.execute(
-            "INSERT INTO mind_operations \
+        transaction
+            .prepare_cached(
+                "INSERT INTO mind_operations \
              (operation_id, companion_id, request_hash, result, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
+            )?
+            .execute(params![
                 update.operation_id,
                 update.companion_id,
                 update.request_hash,
                 to_json(&result)?,
                 stamp
-            ],
-        )?;
+            ])?;
         transaction.commit()?;
         Ok(result)
     }
@@ -805,7 +805,7 @@ impl Store {
                 HostError::storage("the state database has no file a second connection could open")
             })?;
         let connection = open_connection(Path::new(path))?;
-        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        super::configure_connection(&connection)?;
         Ok(connection)
     }
 
@@ -842,13 +842,14 @@ impl Store {
         };
         let row: Option<(i64, Vec<u8>)> = self
             .conn()?
-            .query_row(
+            .prepare_cached(
                 "SELECT embedding_dimensions, embedding FROM memories WHERE id = ?1 \
                  AND embedding_model = ?2 AND embedding_dimensions = ?3 \
                  AND embedding IS NOT NULL AND embedding_content_revision = content_revision",
-                params![id, space, dimensions as i64],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            )?
+            .query_row(params![id, space, dimensions as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .optional()?;
         Ok(row.map(|(dimensions, bytes)| (dimensions as usize, bytes)))
     }
@@ -1003,15 +1004,16 @@ impl Store {
                         "memory changed while consolidation was running",
                     ));
                 }
-                let rows = transaction.execute(
-                    "UPDATE memories SET content = ?3, importance = ?4, \
+                let rows = transaction
+                    .prepare_cached(
+                        "UPDATE memories SET content = ?3, importance = ?4, \
                      content_revision = content_revision + 1, \
                      memory_revision = memory_revision + 1, last_accessed_at = ?5, \
                      embedding = NULL, embedding_model = NULL, \
                      embedding_dimensions = NULL, embedding_content_revision = NULL \
                      WHERE id = ?1 AND memory_revision = ?2",
-                    params![id, revision, content, importance, stamp],
-                )?;
+                    )?
+                    .execute(params![id, revision, content, importance, stamp])?;
                 if rows == 0 {
                     return Err(HostError::conflict(
                         "memory changed while consolidation was running",
@@ -1053,10 +1055,9 @@ impl Store {
             }
         }
         for id in &accepted {
-            let rows = transaction.execute(
-                "UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1",
-                params![id, stamp],
-            )?;
+            let rows = transaction
+                .prepare_cached("UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1")?
+                .execute(params![id, stamp])?;
             if rows > 0 {
                 add_edge(
                     &transaction,
@@ -1134,12 +1135,19 @@ pub(crate) fn write_embedding(
     dimensions: usize,
     bytes: &[u8],
 ) -> Result<bool> {
-    let updated = connection.execute(
-        "UPDATE memories SET embedding = ?3, embedding_model = ?4, \
+    let updated = connection
+        .prepare_cached(
+            "UPDATE memories SET embedding = ?3, embedding_model = ?4, \
          embedding_dimensions = ?5, embedding_content_revision = content_revision \
          WHERE id = ?1 AND content_revision = ?2",
-        params![id, content_revision, bytes, space, dimensions as i64],
-    )?;
+        )?
+        .execute(params![
+            id,
+            content_revision,
+            bytes,
+            space,
+            dimensions as i64
+        ])?;
     Ok(updated > 0)
 }
 
@@ -1158,12 +1166,13 @@ fn forget_memory_tx(
     if current.memory_revision != expected {
         return Err(HostError::conflict("memory changed since it was read"));
     }
-    let rows = transaction.execute(
-        "UPDATE memories SET importance = 0, \
+    let rows = transaction
+        .prepare_cached(
+            "UPDATE memories SET importance = 0, \
          memory_revision = memory_revision + 1 \
          WHERE id = ?1 AND memory_revision = ?2",
-        params![id, expected],
-    )?;
+        )?
+        .execute(params![id, expected])?;
     if rows == 0 {
         return Err(HostError::conflict("memory changed since it was read"));
     }
@@ -1198,8 +1207,9 @@ fn correct_memory_tx(
     let importance_changed = importance != current.importance;
     if content_changed || importance_changed {
         let changed_content = if content_changed { 1i64 } else { 0i64 };
-        let rows = transaction.execute(
-            "UPDATE memories SET content = ?3, importance = ?4, \
+        let rows = transaction
+            .prepare_cached(
+                "UPDATE memories SET content = ?3, importance = ?4, \
              content_revision = content_revision + ?5, \
              memory_revision = memory_revision + 1, last_accessed_at = ?6, \
              embedding = CASE WHEN ?5 = 1 THEN NULL ELSE embedding END, \
@@ -1208,8 +1218,15 @@ fn correct_memory_tx(
              embedding_content_revision = CASE WHEN ?5 = 1 THEN NULL \
                  ELSE embedding_content_revision END \
              WHERE id = ?1 AND memory_revision = ?2",
-            params![id, expected, content, importance, changed_content, stamp],
-        )?;
+            )?
+            .execute(params![
+                id,
+                expected,
+                content,
+                importance,
+                changed_content,
+                stamp
+            ])?;
         if rows == 0 {
             return Err(HostError::conflict("memory changed since it was read"));
         }
@@ -1230,16 +1247,18 @@ fn advance_consolidation_cursor_tx(
     stamp: &str,
 ) -> Result<()> {
     let changed = match expected {
-        Some(expected) => transaction.execute(
-            "UPDATE consolidation_state SET last_processed_turn_id = ?3, updated_at = ?4 \
+        Some(expected) => transaction
+            .prepare_cached(
+                "UPDATE consolidation_state SET last_processed_turn_id = ?3, updated_at = ?4 \
              WHERE companion_id = ?1 AND last_processed_turn_id = ?2",
-            params![companion_id, expected, next, stamp],
-        )?,
-        None => transaction.execute(
-            "INSERT OR IGNORE INTO consolidation_state \
+            )?
+            .execute(params![companion_id, expected, next, stamp])?,
+        None => transaction
+            .prepare_cached(
+                "INSERT OR IGNORE INTO consolidation_state \
              (companion_id, last_processed_turn_id, updated_at) VALUES (?1, ?2, ?3)",
-            params![companion_id, next, stamp],
-        )?,
+            )?
+            .execute(params![companion_id, next, stamp])?,
     };
     if changed == 0 {
         return Err(HostError::conflict(
@@ -1255,13 +1274,14 @@ pub(crate) fn profile_lines(store: &Store) -> Vec<String> {
     let Ok(connection) = store.conn() else {
         return Vec::new();
     };
-    let row: Option<(String, String, String)> = connection
-        .query_row(
-            "SELECT name, preferences, static_constraints FROM user_profiles \
-             ORDER BY updated_at DESC, id LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
+    let Ok(mut statement) = connection.prepare_cached(
+        "SELECT name, preferences, static_constraints FROM user_profiles \
+         ORDER BY updated_at DESC, id LIMIT 1",
+    ) else {
+        return Vec::new();
+    };
+    let row: Option<(String, String, String)> = statement
+        .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .optional()
         .unwrap_or(None);
     let Some((name, preferences, static_constraints)) = row else {
@@ -1366,6 +1386,110 @@ mod tests {
             memories,
             state,
         })
+    }
+
+    #[test]
+    fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let first = store.insert_memory(new_memory("first", 3)).unwrap();
+        let second = store.insert_memory(new_memory("second", 4)).unwrap();
+        let connection = store.open_secondary().unwrap();
+        let a = 1.0_f32.to_le_bytes();
+        let b = 2.0_f32.to_le_bytes();
+        for (memory, bytes) in [(&first, &a), (&second, &b), (&first, &b)] {
+            assert!(
+                write_embedding(
+                    &connection,
+                    &memory.id,
+                    memory.content_revision,
+                    "fake:1:v1",
+                    1,
+                    bytes
+                )
+                .unwrap()
+            );
+        }
+        assert!(
+            !write_embedding(
+                &connection,
+                &first.id,
+                first.content_revision + 1,
+                "fake:1:v1",
+                1,
+                &a
+            )
+            .unwrap()
+        );
+        assert!(
+            write_embedding(
+                &connection,
+                &second.id,
+                second.content_revision,
+                "fake:1:v1",
+                1,
+                &a
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            store.embedding_blob(&first.id, "fake:1:v1").unwrap(),
+            Some((1, b.to_vec()))
+        );
+        assert_eq!(
+            store.embedding_blob(&second.id, "fake:1:v1").unwrap(),
+            Some((1, a.to_vec()))
+        );
+    }
+
+    #[test]
+    fn historical_hash_receipts_replay_after_reopening() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("host.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let fixtures = [
+            ("float", r#"{"n":1.0}"#),
+            ("unicode", "{\"\u{e000}\":1,\"\u{10000}\":2}"),
+        ];
+        for (operation, historical) in fixtures {
+            let request: Value = serde_json::from_str(historical).unwrap();
+            let legacy_hash = digest(historical.as_bytes());
+            assert_eq!(store.mind_hash(&request), legacy_hash);
+            let canonical = serde_json_canonicalizer::to_string(&request).unwrap();
+            assert_ne!(digest(canonical.as_bytes()), legacy_hash);
+            store.conn().unwrap().execute(
+                "INSERT INTO mind_operations (operation_id, companion_id, request_hash, result, created_at) \
+                 VALUES (?1, 'ene', ?2, '{\"replayed\":true}', ?3)",
+                params![operation, legacy_hash, now()],
+            ).unwrap();
+        }
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        for (operation, historical) in fixtures {
+            let request: Value = serde_json::from_str(historical).unwrap();
+            assert_eq!(
+                apply(
+                    &store,
+                    operation,
+                    &store.mind_hash(&request),
+                    Vec::new(),
+                    None
+                )
+                .unwrap(),
+                value!({"replayed": true})
+            );
+            let canonical = serde_json_canonicalizer::to_string(&request).unwrap();
+            assert!(matches!(
+                apply(
+                    &store,
+                    operation,
+                    &digest(canonical.as_bytes()),
+                    Vec::new(),
+                    None
+                ),
+                Err(HostError::Conflict(_))
+            ));
+        }
     }
 
     #[test]

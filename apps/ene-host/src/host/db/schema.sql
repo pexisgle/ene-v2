@@ -4,9 +4,6 @@
 -- Baseline schema. Unknown newer user_version values are rejected at startup;
 -- there is no in-place migration of older development databases.
 
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-
 -- Companions: the author's profile, the grown mind and the assigned models.
 CREATE TABLE IF NOT EXISTS companions (
     id TEXT PRIMARY KEY,

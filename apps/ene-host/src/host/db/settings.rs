@@ -1,20 +1,15 @@
 //! Settings and connections.
 use super::{
-    Result, Store, corrupt, enum_column, json_column, now, optional_json_column, require_found,
-    to_json,
+    Result, Store, corrupt, enum_name_column, json_column, now, optional_json_column,
+    require_found, to_json,
 };
 use crate::host::error::HostError;
-use crate::host::settings::{Check, Connection, ConnectionConfig, ConnectionKind, Settings};
+use crate::host::settings::{Check, Connection, ConnectionConfig, Settings};
 use rusqlite::{Row, params};
 use std::collections::HashSet;
 
 fn row_to_connection(row: &Row<'_>) -> rusqlite::Result<Connection> {
-    let kind = enum_column(
-        row,
-        "kind",
-        "unknown connection kind",
-        ConnectionKind::parse,
-    )?;
+    let kind = enum_name_column(row, "kind", "unknown connection kind")?;
     let config: ConnectionConfig =
         json_column(row, "config", "stored connection config is corrupt")?;
     if config.kind() != kind {
@@ -49,10 +44,11 @@ impl Store {
             Some(row) => row,
             None => {
                 let stamp = now();
-                self.conn()?.execute(
-                    "INSERT INTO settings_state (id, revision, updated_at) VALUES (1, 1, ?1)",
-                    [&stamp],
-                )?;
+                self.conn()?
+                    .prepare_cached(
+                        "INSERT INTO settings_state (id, revision, updated_at) VALUES (1, 1, ?1)",
+                    )?
+                    .execute([&stamp])?;
                 (1, stamp)
             }
         };
@@ -130,23 +126,22 @@ impl Store {
                     )));
                 }
             };
-            let changed = transaction.execute(
+            let changed = transaction.prepare_cached(
                 "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
                  last_check, revision, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
                  kind = excluded.kind, config = excluded.config, revision = excluded.revision, \
                  updated_at = excluded.updated_at WHERE connections.revision = excluded.revision - 1",
-                params![
-                    input.id,
-                    input.name,
-                    input.enabled,
-                    input.kind.as_str(),
-                    to_json(&input.config)?,
-                    input.credential_state.as_str(),
-                    revision,
-                    stamp,
-                ],
-            )?;
+            )?.execute(params![
+                input.id,
+                input.name,
+                input.enabled,
+                input.kind.as_str(),
+                to_json(&input.config)?,
+                input.credential_state.as_str(),
+                revision,
+                stamp,
+            ])?;
             if changed == 0 {
                 return Err(HostError::conflict(format!(
                     "connection `{}` changed since it was read",
@@ -156,13 +151,16 @@ impl Store {
         }
         for id in remove_ids {
             super::validate_id(id)?;
-            transaction.execute("DELETE FROM connections WHERE id = ?1", [id])?;
+            transaction
+                .prepare_cached("DELETE FROM connections WHERE id = ?1")?
+                .execute([id])?;
         }
-        let changed = transaction.execute(
-            "UPDATE settings_state SET revision = ?2, updated_at = ?3 \
+        let changed = transaction
+            .prepare_cached(
+                "UPDATE settings_state SET revision = ?2, updated_at = ?3 \
              WHERE id = 1 AND revision = ?4",
-            params![1, next, stamp, expected_revision],
-        )?;
+            )?
+            .execute(params![1, next, stamp, expected_revision])?;
         if changed == 0 {
             return Err(HostError::conflict("settings changed since they were read"));
         }
@@ -176,18 +174,22 @@ impl Store {
         id: &str,
         state: crate::host::settings::CredentialState,
     ) -> Result<()> {
-        let changed = self.conn()?.execute(
-            "UPDATE connections SET credential_state = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, state.as_str(), now()],
-        )?;
+        let changed = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE connections SET credential_state = ?2, updated_at = ?3 WHERE id = ?1",
+            )?
+            .execute(params![id, state.as_str(), now()])?;
         require_found(changed, "connection not found")
     }
 
     pub(crate) fn set_check(&self, id: &str, check: &Check) -> Result<()> {
-        let changed = self.conn()?.execute(
-            "UPDATE connections SET last_check = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, to_json(check)?, now()],
-        )?;
+        let changed = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE connections SET last_check = ?2, updated_at = ?3 WHERE id = ?1",
+            )?
+            .execute(params![id, to_json(check)?, now()])?;
         require_found(changed, "connection not found")
     }
 }
@@ -195,7 +197,9 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::settings::{ConnectionConfig, CredentialState, Endpoint, LlmConnection};
+    use crate::host::settings::{
+        ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
+    };
 
     fn connection(id: &str) -> Connection {
         Connection {
@@ -216,6 +220,106 @@ mod tests {
             revision: 1,
             last_check: None,
         }
+    }
+
+    #[test]
+    fn historical_unknown_credential_state_is_absent_but_invalid_kinds_are_corrupt() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        store
+            .update_settings(1, &[(connection("c1"), 0)], &[])
+            .unwrap();
+        for (stored, expected) in [
+            ("absent", CredentialState::Absent),
+            ("registered", CredentialState::Registered),
+            ("environment", CredentialState::Environment),
+            ("historical-unknown", CredentialState::Absent),
+        ] {
+            store
+                .conn()
+                .unwrap()
+                .execute(
+                    "UPDATE connections SET credential_state = ?1 WHERE id = 'c1'",
+                    [stored],
+                )
+                .unwrap();
+            assert_eq!(
+                store.connection("c1").unwrap().unwrap().credential_state,
+                expected
+            );
+        }
+        for kind in ["unknown", "", "Llm", " llm", "tts"] {
+            store
+                .conn()
+                .unwrap()
+                .execute("UPDATE connections SET kind = ?1 WHERE id = 'c1'", [kind])
+                .unwrap();
+            assert!(
+                matches!(store.connection("c1"), Err(HostError::Storage(_))),
+                "{kind}"
+            );
+        }
+        store
+            .conn()
+            .unwrap()
+            .execute("UPDATE connections SET kind = 'llm' WHERE id = 'c1'", [])
+            .unwrap();
+        assert_eq!(
+            store.connection("c1").unwrap().unwrap().kind,
+            ConnectionKind::Llm
+        );
+    }
+
+    #[test]
+    fn repeated_settings_mutations_keep_bindings_revisions_and_missing_rows_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        assert_eq!(store.settings().unwrap().revision, 1);
+        let mut settings = store
+            .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)], &[])
+            .unwrap();
+        for (id, state, healthy) in [
+            ("c1", CredentialState::Registered, true),
+            ("c2", CredentialState::Environment, false),
+            ("c1", CredentialState::Absent, false),
+        ] {
+            let check = Check {
+                healthy,
+                checked_at: now(),
+                ..Default::default()
+            };
+            store.set_credential_state(id, state).unwrap();
+            store.set_check(id, &check).unwrap();
+            let stored = store.connection(id).unwrap().unwrap();
+            assert_eq!(stored.credential_state, state);
+            assert_eq!(stored.last_check, Some(check));
+        }
+        assert!(matches!(
+            store.set_credential_state("missing", CredentialState::Absent),
+            Err(HostError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.set_check("missing", &Check::default()),
+            Err(HostError::NotFound(_))
+        ));
+        for id in ["c2", "c1", "c2"] {
+            let mut changed = store.connection(id).unwrap().unwrap();
+            let expected = changed.revision;
+            changed.name.push_str(" edited");
+            settings = store
+                .update_settings(settings.revision, &[(changed.clone(), expected)], &[])
+                .unwrap();
+            let stored = store.connection(id).unwrap().unwrap();
+            assert_eq!(stored.name, changed.name);
+            assert_eq!(stored.revision, expected + 1);
+        }
+        for id in ["c1", "c2"] {
+            settings = store
+                .update_settings(settings.revision, &[], &[id.into()])
+                .unwrap();
+            assert!(store.connection(id).unwrap().is_none());
+        }
+        assert!(settings.connections.is_empty());
     }
 
     #[test]

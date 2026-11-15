@@ -2,7 +2,7 @@
 //! (docs/design/compaction.md).
 use super::{
     agent::CompanionAgent,
-    background::Background,
+    background::{self, AbortOnDropHandle},
     db::Store,
     mind::Role,
     model::{self, Credentials},
@@ -200,7 +200,7 @@ fn cut(history: &History, budget: u64, head: usize) -> Option<MessageId> {
         &TokenBudget::new(usize::try_from(budget).unwrap_or(usize::MAX)),
     )
     .len();
-    let start = pairing::safe_start(messages, messages.len() - kept);
+    let start = messages.len() - kept;
     let at = history
         .entries()
         .skip(start)
@@ -225,7 +225,7 @@ type Outcome = std::result::Result<Summary, String>;
 /// One companion's summary slot: the call in flight and its own retry clock.
 #[derive(Default)]
 struct CompanionSummary {
-    running: Option<Background<Outcome>>,
+    running: Option<AbortOnDropHandle<Outcome>>,
     retry_after: Option<Instant>,
 }
 
@@ -253,7 +253,7 @@ impl CompactionState {
         })
     }
 
-    fn start(&mut self, companion: &str, running: Background<Outcome>) {
+    fn start(&mut self, companion: &str, running: AbortOnDropHandle<Outcome>) {
         debug_assert!(
             self.companions
                 .get(companion)
@@ -275,7 +275,7 @@ impl CompactionState {
     }
 
     /// Takes the one finished task, with the companion it belongs to.
-    fn take_finished(&mut self) -> Option<(String, Background<Outcome>)> {
+    fn take_finished(&mut self) -> Option<(String, AbortOnDropHandle<Outcome>)> {
         let companion = self.companions.iter().find_map(|(companion, state)| {
             state
                 .running
@@ -387,7 +387,7 @@ fn summarize_when_idle(
         let Some(spec) = bound.spec().cloned() else {
             continue;
         };
-        let task = Background::spawn(
+        let task = background::spawn(
             &runtime.0,
             wake.as_deref(),
             generate(history, previous, Arc::new(spec), bound),
@@ -406,8 +406,7 @@ fn collect_summaries(
         return;
     };
     state.defer(&companion, Instant::now() + RETRY);
-    let outcome = running
-        .take()
+    let outcome = background::take(running)
         .unwrap_or_else(|| Err("the summary task was cancelled".to_owned()));
     match outcome {
         Ok(summary) => {
@@ -534,6 +533,28 @@ mod tests {
             Message::System { content } => content.clone(),
             _ => panic!("the injected head is not a system message"),
         }
+    }
+
+    #[test]
+    fn every_cut_budget_keeps_a_complete_newest_request() {
+        let history = conversation(4);
+        let latest = history
+            .entries()
+            .rev()
+            .find(|entry| entry.is_request())
+            .unwrap()
+            .id;
+        for budget in 0..=estimate_tokens(history.messages()) {
+            if let Some(id) = cut(&history, budget, 0) {
+                let at = history.index_of(id).unwrap();
+                assert!(history.entries().nth(at).unwrap().is_request());
+                assert!(at <= history.index_of(latest).unwrap());
+                History::from_messages(history.messages()[at..].iter().cloned())
+                    .validate()
+                    .expect("every kept result still has its call");
+            }
+        }
+        assert_eq!(cut(&history, 0, 0), Some(latest));
     }
 
     #[test]
@@ -753,6 +774,50 @@ mod tests {
     }
 
     #[test]
+    fn background_handles_run_on_tokio_wake_and_abort_on_drop() {
+        use std::sync::atomic::AtomicUsize;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wake = Wake::new({
+            let wakes = wakes.clone();
+            move || {
+                wakes.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let (done, received) = tokio::sync::oneshot::channel();
+        let task = background::spawn(runtime.handle(), Some(&wake), async move {
+            let value = tokio::time::timeout(Duration::from_secs(1), async { 42 })
+                .await
+                .unwrap();
+            done.send(()).unwrap();
+            value
+        });
+        runtime.block_on(received).unwrap();
+        assert!(task.is_finished());
+        assert_eq!(background::take(task), Some(42));
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(dropped.clone());
+        let task = background::spawn(runtime.handle(), Some(&wake), async move {
+            let _guard = guard;
+            std::future::pending::<()>().await
+        });
+        drop(task);
+        runtime.block_on(tokio::task::yield_now());
+        assert!(dropped.load(Ordering::Relaxed));
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "cancellation does not report completion"
+        );
+    }
+
+    #[test]
     fn user_activity_aborts_only_the_running_companions_summary() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -760,7 +825,7 @@ mod tests {
             .unwrap();
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(Arc::clone(&dropped));
-        let task = Background::spawn(runtime.handle(), None, async move {
+        let task = background::spawn(runtime.handle(), None, async move {
             let _guard = guard;
             std::future::pending::<Outcome>().await
         });

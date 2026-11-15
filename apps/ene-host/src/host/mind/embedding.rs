@@ -22,12 +22,7 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use itertools::Itertools;
-use rig_core::{
-    driver::DynModel,
-    embeddings::{Embedding as VectorEmbedding, distance::VectorDistance},
-    operation::Embedding,
-    providers::{openai::OpenAIConfig, registry::ProviderConfig},
-};
+use rig_core::{driver::DynModel, operation::Embedding, providers::registry::ProviderConfig};
 use rig_ecs::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -152,19 +147,7 @@ fn connect(
             dimensions,
         ));
     }
-    let secret = secret.unwrap_or_default();
-    let default = crate::host::settings::provider(adapter).map_or_else(String::new, |p| p.endpoint);
-    let config = match crate::host::model::provider_of(adapter)
-        .and_then(|provider| provider.config(secret.clone()))
-    {
-        Some(config) if endpoint != default => config.with_base_url(endpoint.to_owned()),
-        Some(config) => config,
-        // An adapter outside rig's registry keeps the OpenAI-compatible wire
-        // the host has always spoken for embeddings.
-        None => {
-            ProviderConfig::OpenAi(OpenAIConfig::new(secret).with_base_url(endpoint.to_owned()))
-        }
-    };
+    let config = crate::host::model::provider_config(adapter, endpoint, secret);
     let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::unavailable)?);
     // `Embedding` is the provider-neutral operation both clients erase into, so
     // the call below is the same whichever adapter answered.
@@ -419,28 +402,10 @@ impl CompactVectorIndex {
         if query.len() != current.dimensions || limit == 0 {
             return Vec::new();
         }
-        let query = VectorEmbedding {
-            document: String::new(),
-            vec: query.iter().copied().map(f64::from).collect(),
-        };
-        // Rig's distance API owns f64 vectors. Reuse one scratch vector rather
-        // than widening the cache or allocating for each candidate.
-        let mut vector = VectorEmbedding {
-            document: String::new(),
-            vec: Vec::with_capacity(current.dimensions),
-        };
         (0..current.entries.len())
             .map(|index| {
-                vector.vec.clear();
-                vector.vec.extend(
-                    current
-                        .vector(index)
-                        .unwrap_or_default()
-                        .iter()
-                        .copied()
-                        .map(f64::from),
-                );
-                let similarity = query.cosine_similarity(&vector, false);
+                let vector = current.vector(index).unwrap_or_default();
+                let similarity = cosine_similarity(query, vector);
                 let score = if similarity.is_finite() {
                     similarity.clamp(-1.0, 1.0) as f32
                 } else {
@@ -456,6 +421,25 @@ impl CompactVectorIndex {
             .map(|(index, score)| (current.entries[index].0.clone(), score))
             .collect()
     }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    // Match Rig 0.46's f64 reduction order without widening the stored vectors.
+    let pair_sum = |a: &[f32], b: &[f32], term: fn(f64, f64) -> f64| {
+        a.chunks(256)
+            .zip(b.chunks(256))
+            .map(|(a, b)| {
+                a.iter()
+                    .zip(b)
+                    .map(|(&x, &y)| term(f64::from(x), f64::from(y)))
+                    .sum::<f64>()
+            })
+            .sum::<f64>()
+    };
+    let dot = pair_sum(a, b, |x, y| x * y);
+    let magnitude_a = pair_sum(a, a, |x, _| x.powi(2)).sqrt();
+    let magnitude_b = pair_sum(b, b, |x, _| x.powi(2)).sqrt();
+    dot / (magnitude_a * magnitude_b)
 }
 
 /// The companion ids with a backfill in flight and the failures to report.
@@ -635,6 +619,57 @@ mod tests {
     use super::*;
     use crate::host::db::memories::MemoryRecord;
     use crate::host::mind::memory::Memory;
+
+    #[test]
+    fn borrowed_cosine_matches_rig_scores_and_ranks() {
+        use rig_core::embeddings::{Embedding, distance::VectorDistance};
+
+        let score = |similarity: f64| {
+            if similarity.is_finite() {
+                similarity.clamp(-1.0, 1.0) as f32
+            } else {
+                0.0
+            }
+        };
+        for dimensions in [0, 1, 2, 255, 256, 257, 511, 512, 513, 1536] {
+            let query: Vec<f32> = (0..dimensions)
+                .map(|i| ((i * 17 % 101) as f32 - 50.0) / 13.0)
+                .collect();
+            let mut space = Space::default();
+            let mut expected = Vec::new();
+            let embedding = |values: &[f32]| Embedding {
+                document: String::new(),
+                vec: values.iter().copied().map(f64::from).collect(),
+            };
+            for candidate in 0..24 {
+                let vector: Vec<f32> = (0..dimensions)
+                    .map(|i| match candidate {
+                        0 => 0.0,
+                        1 => f32::NAN,
+                        2 => f32::INFINITY,
+                        3 => f32::MAX,
+                        4 => f32::MIN_POSITIVE,
+                        _ => ((i * (candidate + 1) % 97) as f32 - 48.0) / 11.0,
+                    })
+                    .collect();
+                let old = embedding(&query).cosine_similarity(&embedding(&vector), false);
+                let new = cosine_similarity(&query, &vector);
+                assert!(old.to_bits() == new.to_bits() || (old.is_nan() && new.is_nan()));
+                space.push(&candidate.to_string(), 1, &vector);
+                expected.push((candidate.to_string(), score(old)));
+            }
+            expected.sort_by(|(_, left), (_, right)| right.total_cmp(left));
+            expected.truncate(9);
+            let mut index = CompactVectorIndex::default();
+            index.spaces.insert(("owner".into(), "space".into()), space);
+            assert_eq!(index.ranked("owner", "space", &query, 9), expected);
+            assert!(
+                index
+                    .ranked("owner", "space", &vec![0.0; dimensions + 1], 9)
+                    .is_empty()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn embedding_credentials_rotate_and_revoke_across_clones() {

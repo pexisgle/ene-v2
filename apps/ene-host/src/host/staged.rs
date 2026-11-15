@@ -17,7 +17,7 @@
 //! leaves a tick running.
 use super::{
     agent::{self, CompanionAgent},
-    background::Background,
+    background::{self, AbortOnDropHandle},
     compaction::{self, InactivityTracker},
     db::{Result, Store},
     error::HostError,
@@ -66,7 +66,7 @@ struct InFlight {
     /// must not be spliced into.
     messages: usize,
     /// The running call; aborting it drops the request in flight.
-    call: Background<Outcome>,
+    call: AbortOnDropHandle<Outcome>,
 }
 
 /// What the tick's call produced: an answer to promote, silence, or a failure
@@ -169,7 +169,7 @@ fn begin_tick(
             .filter(|tool| tool.0.name.as_str() == "noop")
             .map(|tool| Arc::clone(&tool.0))
             .collect();
-        let call = Background::spawn(&runtime.0, wake.as_deref(), async move {
+        let call = background::spawn(&runtime.0, wake.as_deref(), async move {
             tokio::time::timeout(TIMEOUT, async move {
                 let tail = recall::dynamic_tail(
                     &store,
@@ -288,14 +288,7 @@ fn acting_reply(response: &CompletionResponse) -> Option<AssistantMessage> {
         .filter(|content| matches!(content, AssistantContent::Text(_)))
         .cloned()
         .collect();
-    let text: String = content
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect();
-    (!text.trim().is_empty()).then(|| AssistantMessage::new(content))
+    (!response.text().trim().is_empty()).then(|| AssistantMessage::new(content))
 }
 
 /// Settles the tick in flight: a user message or the timeout aborts it, an
@@ -321,9 +314,7 @@ fn settle_tick(
     let Some(in_flight) = ticks.in_flight.take() else {
         return;
     };
-    let outcome = in_flight
-        .call
-        .take()
+    let outcome = background::take(in_flight.call)
         .unwrap_or_else(|| Err("the heartbeat tick was cancelled".to_owned()));
     match outcome {
         Ok(Some(reply)) => {

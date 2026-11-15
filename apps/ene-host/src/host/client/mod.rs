@@ -222,12 +222,6 @@ impl DeviceStatus {
         }
     }
 
-    /// Reads a stored name back through the same serde spelling `as_str` writes.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
-            .ok()
-    }
-
     pub(crate) fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Uncertain)
     }

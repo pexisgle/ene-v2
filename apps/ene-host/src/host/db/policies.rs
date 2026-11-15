@@ -1,12 +1,12 @@
 //! Saved policy rules.
-use super::{Result, Store, enum_column};
+use super::{Result, Store, enum_name_column};
 use crate::host::error::HostError;
-use crate::host::permission::{PolicyEffect, PolicyRule};
+use crate::host::permission::PolicyRule;
 use rusqlite::{Row, params};
 use std::collections::HashSet;
 
 fn row_to_rule(row: &Row<'_>) -> rusqlite::Result<PolicyRule> {
-    let effect = enum_column(row, "effect", "unknown policy effect", PolicyEffect::parse)?;
+    let effect = enum_name_column(row, "effect", "unknown policy effect")?;
     Ok(PolicyRule {
         id: row.get("id")?,
         tool_name: row.get("tool_name")?,
@@ -50,12 +50,14 @@ impl Store {
         let mut connection = self.conn()?;
         let transaction = connection.transaction()?;
         for rule in add_or_update {
-            transaction.execute(
-                "INSERT INTO policy_rules (id, tool_name, pattern, effect, created_at) \
+            transaction
+                .prepare_cached(
+                    "INSERT INTO policy_rules (id, tool_name, pattern, effect, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5) \
                  ON CONFLICT(id) DO UPDATE SET tool_name = excluded.tool_name, \
                  pattern = excluded.pattern, effect = excluded.effect",
-                params![
+                )?
+                .execute(params![
                     rule.id,
                     rule.tool_name,
                     rule.pattern,
@@ -65,11 +67,12 @@ impl Store {
                     } else {
                         rule.created_at.clone()
                     }
-                ],
-            )?;
+                ])?;
         }
         for id in removed {
-            transaction.execute("DELETE FROM policy_rules WHERE id = ?1", [id])?;
+            transaction
+                .prepare_cached("DELETE FROM policy_rules WHERE id = ?1")?
+                .execute([id])?;
         }
         transaction.commit()?;
         drop(connection);

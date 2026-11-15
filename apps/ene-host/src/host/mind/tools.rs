@@ -1,7 +1,7 @@
 //! The parent's explicit memory tools.
 use crate::host::{
     agent::CompanionAgent,
-    background::Background,
+    background::{self, AbortOnDropHandle},
     db::{
         Result, Store,
         memories::{MindStateChange, MindUpdate, NewMemory, StateUpdate, detail},
@@ -93,21 +93,25 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
 
 enum RecallWork {
     Ready(String),
-    Running(Background<Result<String>>),
+    Running(AbortOnDropHandle<Result<String>>),
 }
 
 #[derive(Component)]
-struct PendingRecall(Option<Background<Result<String>>>);
+struct PendingRecall(Option<AbortOnDropHandle<Result<String>>>);
 
 fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut PendingRecall)>) {
     for (call, mut pending) in &mut pending {
-        if !pending.0.as_ref().is_some_and(Background::is_finished) {
+        if !pending
+            .0
+            .as_ref()
+            .is_some_and(AbortOnDropHandle::is_finished)
+        {
             continue;
         }
         let result = pending
             .0
             .take()
-            .and_then(|task| task.take())
+            .and_then(background::take)
             .unwrap_or_else(|| Err(HostError::unavailable("memory recall was cancelled")));
         commands.queue(move |world: &mut World| {
             if world.get_entity(call).is_err() {
@@ -138,7 +142,7 @@ fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<RecallWo
     let Some(runtime) = world.get_resource::<HostRuntime>() else {
         return recall_result(&store, &companion, &args, &[]).map(RecallWork::Ready);
     };
-    Ok(RecallWork::Running(Background::spawn(
+    Ok(RecallWork::Running(background::spawn(
         &runtime.0,
         world.get_resource::<Wake>(),
         async move {

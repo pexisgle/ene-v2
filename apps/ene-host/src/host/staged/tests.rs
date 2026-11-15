@@ -105,6 +105,44 @@ fn turn_text(message: &Message) -> String {
     }
 }
 
+#[tokio::test]
+async fn acting_reply_keeps_only_original_text_blocks_and_treats_blank_as_silence() {
+    let text = vec![
+        AssistantContent::text(" hello"),
+        AssistantContent::text("world\n"),
+    ];
+    let choices = [
+        (vec![], None),
+        (vec![AssistantContent::text(" \n\t")], None),
+        (vec![AssistantContent::reasoning("private reasoning")], None),
+        (
+            vec![
+                text[0].clone(),
+                AssistantContent::reasoning("private reasoning"),
+                text[1].clone(),
+            ],
+            Some(text),
+        ),
+        (
+            vec![
+                AssistantContent::text("do not promote a tool-calling reply"),
+                AssistantContent::tool_call(
+                    "noop-1",
+                    rig_core::message::ToolName::new("noop").unwrap(),
+                    serde_json::json!({}),
+                ),
+            ],
+            None,
+        ),
+    ];
+    for (choice, expected) in choices {
+        let model: DynModel<Completion> =
+            MockCompletionModel::from_turns([MockTurn::from_contents(choice)]).into();
+        let reply = ask(CompletionRequest::new("tick"), model).await.unwrap();
+        assert_eq!(reply.map(|reply| reply.content), expected);
+    }
+}
+
 #[test]
 fn a_silent_tick_leaves_the_conversation_and_the_log_unchanged() {
     let tick = MockCompletionModel::from_turns([MockTurn::tool_call(
@@ -300,7 +338,7 @@ fn user_activity_aborts_an_in_flight_tick() {
         .unwrap();
     let dropped = Arc::new(AtomicBool::new(false));
     let guard = Dropped(Arc::clone(&dropped));
-    let task = Background::spawn(runtime.handle(), None, async move {
+    let task = background::spawn(runtime.handle(), None, async move {
         let _guard = guard;
         std::future::pending::<Outcome>().await
     });

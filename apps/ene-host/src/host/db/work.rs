@@ -1,7 +1,7 @@
 //! Work sessions, runs and inquiries.
 use super::{
-    Result, Store, enum_column, json_column, now, optional_json_column, or_stamp, require_found,
-    to_json,
+    Result, Store, enum_name_column, json_column, now, optional_json_column, or_stamp,
+    require_found, to_json,
 };
 use crate::host::error::{Failure, HostError};
 use crate::host::work::{Inquiry, Run, RunState, WorkSession, WorkStatus};
@@ -12,7 +12,7 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<WorkSession> {
         id: row.get("id")?,
         companion_id: row.get("companion_id")?,
         title: row.get("title")?,
-        status: enum_column(row, "status", "unknown work status", WorkStatus::parse)?,
+        status: enum_name_column(row, "status", "unknown work status")?,
         client_id: row.get("client_id")?,
         activation_revision: row.get::<_, u64>("activation_revision")?,
         created_at: row.get("created_at")?,
@@ -28,7 +28,7 @@ fn row_to_run(row: &Row<'_>) -> rusqlite::Result<Run> {
         run_id: row.get("run_id")?,
         work_id: row.get("work_id")?,
         instruction: row.get("instruction")?,
-        state: enum_column(row, "state", "unknown run state", RunState::parse)?,
+        state: enum_name_column(row, "state", "unknown run state")?,
         pending_request_id: row.get("pending_request_id")?,
         failure: optional_json_column::<Failure>(row, "failure", "stored failure is corrupt")?,
         cancellation_requested_at: row.get("cancellation_requested_at")?,
@@ -88,10 +88,9 @@ impl Store {
 
     pub(crate) fn insert_work_session(&self, session: &WorkSession) -> Result<()> {
         let stamp = now();
-        self.conn()?.execute(
-            &format!(
+        self.conn()?.prepare_cached(&format!(
                 "INSERT INTO work_sessions ({SESSION_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-            ),
+            ))?.execute(
             params![
                 session.id,
                 session.companion_id,
@@ -107,10 +106,10 @@ impl Store {
     }
 
     pub(crate) fn set_work_status(&self, id: &str, status: WorkStatus) -> Result<()> {
-        let changed = self.conn()?.execute(
-            "UPDATE work_sessions SET status = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, status.as_str(), now()],
-        )?;
+        let changed = self
+            .conn()?
+            .prepare_cached("UPDATE work_sessions SET status = ?2, updated_at = ?3 WHERE id = ?1")?
+            .execute(params![id, status.as_str(), now()])?;
         require_found(changed, "work session not found")
     }
 
@@ -158,10 +157,9 @@ impl Store {
 
     pub(crate) fn insert_run(&self, run: &Run) -> Result<()> {
         let stamp = now();
-        self.conn()?.execute(
-            &format!(
+        self.conn()?.prepare_cached(&format!(
                 "INSERT INTO work_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-            ),
+            ))?.execute(
             params![
                 run.run_id,
                 run.work_id,
@@ -180,11 +178,14 @@ impl Store {
     }
 
     pub(crate) fn update_run(&self, run: &Run) -> Result<()> {
-        let changed = self.conn()?.execute(
-            "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
+        let changed = self
+            .conn()?
+            .prepare_cached(
+                "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
              cancellation_requested_at = ?5, cancellation_reason = ?6, unverified_pids = ?7, \
              updated_at = ?8 WHERE run_id = ?1",
-            params![
+            )?
+            .execute(params![
                 run.run_id,
                 run.state.as_str(),
                 run.pending_request_id,
@@ -193,8 +194,7 @@ impl Store {
                 run.cancellation_reason,
                 to_json(&run.unverified_pids)?,
                 now(),
-            ],
-        )?;
+            ])?;
         require_found(changed, "run not found")
     }
 
@@ -225,18 +225,19 @@ impl Store {
     }
 
     pub(crate) fn insert_inquiry(&self, inquiry: &Inquiry) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT INTO work_inquiries (request_id, work_id, run_id, prompt, choices, answer, \
+        self.conn()?
+            .prepare_cached(
+                "INSERT INTO work_inquiries (request_id, work_id, run_id, prompt, choices, answer, \
              created_at, resolved_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL)",
-            params![
+            )?
+            .execute(params![
                 inquiry.request_id,
                 inquiry.work_id,
                 inquiry.run_id,
                 inquiry.prompt,
                 to_json(&inquiry.choices)?,
                 or_stamp(&inquiry.created_at, &now()),
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 

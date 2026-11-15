@@ -7,7 +7,7 @@
 use super::embedding::{self, Embeddings};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent},
-    background::Background,
+    background::{self, AbortOnDropHandle},
     compaction,
     db::{Store, now},
     model::Credentials,
@@ -65,18 +65,22 @@ struct AwaitingTail;
 #[derive(Component)]
 struct PendingTail {
     turn: Entity,
-    task: Option<Background<String>>,
+    task: Option<AbortOnDropHandle<String>>,
 }
 
 fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &mut PendingTail)>) {
     for (hold, of, mut pending) in &mut pending {
-        if !pending.task.as_ref().is_some_and(Background::is_finished) {
+        if !pending
+            .task
+            .as_ref()
+            .is_some_and(AbortOnDropHandle::is_finished)
+        {
             continue;
         }
         let tail = pending
             .task
             .take()
-            .and_then(|task| task.take())
+            .and_then(background::take)
             .unwrap_or_else(opening);
         commands.entity(pending.turn).try_insert(DynamicTail(tail));
         commands.entity(of.0).try_remove::<AwaitingTail>();
@@ -120,7 +124,7 @@ fn inject_tail(
                 };
                 let embeddings = embeddings.clone();
                 let credentials = credentials.as_deref().cloned();
-                let task = Background::spawn(&runtime.0, wake.as_deref(), async move {
+                let task = background::spawn(&runtime.0, wake.as_deref(), async move {
                     dynamic_tail(
                         &store,
                         &perception,
