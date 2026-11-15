@@ -82,26 +82,28 @@ impl Credentials {
 
 fn keyring_entry(connection: &str) -> std::result::Result<keyring::Entry, HostError> {
     keyring::Entry::new(KEYRING_SERVICE, &format!("connection:{connection}"))
-        .map_err(|error| HostError::unavailable(format!("credential store: {error}")))
+        .map_err(|error| HostError::Unavailable(format!("credential store: {error}")))
 }
 
 fn read_keyring(connection: &str) -> std::result::Result<Option<String>, HostError> {
     match keyring_entry(connection)?.get_password() {
         Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(HostError::unavailable(format!("credential store: {error}"))),
+        Err(error) => Err(HostError::Unavailable(format!("credential store: {error}"))),
     }
 }
 
 /// Stores a secret in the keyring (or only in memory for a session-only host).
 pub(crate) fn save_secret(credentials: &Credentials, connection: &str, secret: &str) -> Result<()> {
     if secret.is_empty() || secret.chars().count() > 8_192 {
-        return Err(HostError::invalid("credential must be 1-8192 characters"));
+        return Err(HostError::Invalid(
+            ("credential must be 1-8192 characters").into(),
+        ));
     }
     if !credentials.session_only() {
         keyring_entry(connection)?
             .set_password(secret)
-            .map_err(|error| HostError::unavailable(format!("credential store: {error}")))?;
+            .map_err(|error| HostError::Unavailable(format!("credential store: {error}")))?;
     }
     if credentials.session_only() {
         credentials.remember(connection, secret.to_owned());
@@ -115,7 +117,7 @@ pub(crate) fn delete_secret(credentials: &Credentials, connection: &str) -> Resu
     if !credentials.session_only() {
         match keyring_entry(connection)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(error) => return Err(HostError::unavailable(format!("credential store: {error}"))),
+            Err(error) => return Err(HostError::Unavailable(format!("credential store: {error}"))),
         }
     }
     credentials.forget(connection);
@@ -204,18 +206,18 @@ pub(crate) fn connect(
 ) -> Result<DynModel<Completion>> {
     let assignment = companion
         .model(role)
-        .ok_or_else(|| HostError::unavailable("no model is assigned to this role"))?;
+        .ok_or_else(|| HostError::Unavailable(("no model is assigned to this role").into()))?;
     let connection = store
         .connection(&assignment.connection_id)?
-        .ok_or_else(|| HostError::unavailable("the assigned connection does not exist"))?;
+        .ok_or_else(|| HostError::Unavailable(("the assigned connection does not exist").into()))?;
     if !connection.enabled {
-        return Err(HostError::unavailable(
-            "the assigned connection is disabled",
+        return Err(HostError::Unavailable(
+            ("the assigned connection is disabled").into(),
         ));
     }
     if connection.kind != ConnectionKind::Llm {
-        return Err(HostError::unavailable(
-            "the assigned connection is not an LLM connection",
+        return Err(HostError::Unavailable(
+            ("the assigned connection is not an LLM connection").into(),
         ));
     }
     let endpoint = connection.endpoint();
@@ -225,7 +227,7 @@ pub(crate) fn connect(
         let grant =
             super::providers::Grant::new(running.provider(), &connection, Some(credentials));
         let broker = super::providers::http_broker(Arc::new(grant))
-            .map_err(|error| HostError::unavailable(format!("plugin HTTP transport: {error}")))?;
+            .map_err(|error| HostError::Unavailable(format!("plugin HTTP transport: {error}")))?;
         return Ok(plugin_completion(
             running,
             assignment.model_id.clone(),
@@ -233,7 +235,7 @@ pub(crate) fn connect(
         ));
     }
     let provider = provider_of(&endpoint.adapter).ok_or_else(|| {
-        HostError::unavailable(format!("unsupported adapter `{}`", endpoint.adapter))
+        HostError::Unavailable(format!("unsupported adapter `{}`", endpoint.adapter))
     })?;
     // The adapter's label names the connection; the catalog files the model
     // under the provider's rig name, which differs for `gemini`.
@@ -252,10 +254,10 @@ pub(crate) fn connect(
     let default =
         super::settings::provider(&endpoint.adapter).map_or_else(String::new, |p| p.endpoint);
     let base = super::settings::endpoint_of(&connection)
-        .ok_or_else(|| HostError::unavailable("the connection has no endpoint to call"))?;
+        .ok_or_else(|| HostError::Unavailable(("the connection has no endpoint to call").into()))?;
     // Rig builds the model requests, so their deadline sits on the model
     // client; every other host request shares the unbounded one.
-    let client = net::model_client().map_err(HostError::unavailable)?;
+    let client = net::model_client().map_err(HostError::Unavailable)?;
     let mut options = ConnectOptions::new().http(rig_reqwest::ReqwestClient::from(client));
     if let Some(secret) = secret {
         options = options.api_key(secret);
@@ -267,7 +269,7 @@ pub(crate) fn connect(
     }
     let model = catalog
         .connect_with(spec.as_ref(), options)
-        .map_err(|error| HostError::unavailable(format!("model connection: {error}")))?;
+        .map_err(|error| HostError::Unavailable(format!("model connection: {error}")))?;
     Ok(model)
 }
 

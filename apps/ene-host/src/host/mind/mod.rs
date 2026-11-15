@@ -95,26 +95,26 @@ impl Companion {
     pub(crate) fn validate(&self) -> Result<()> {
         super::db::validate_id(&self.id)?;
         if self.name.trim().is_empty() || self.name.chars().count() > 128 {
-            return Err(HostError::invalid(
-                "companion name must be 1-128 characters",
+            return Err(HostError::Invalid(
+                ("companion name must be 1-128 characters").into(),
             ));
         }
         if self.mind.chars().count() > 8_000 {
-            return Err(HostError::invalid("companion mind is too long"));
+            return Err(HostError::Invalid(("companion mind is too long").into()));
         }
         if self
             .persona
             .as_ref()
             .is_some_and(|text| text.chars().count() > 8_000)
         {
-            return Err(HostError::invalid("companion persona is too long"));
+            return Err(HostError::Invalid(("companion persona is too long").into()));
         }
         if self
             .voice_identifier
             .as_ref()
             .is_some_and(|text| text.chars().count() > 128)
         {
-            return Err(HostError::invalid("voice identifier is too long"));
+            return Err(HostError::Invalid(("voice identifier is too long").into()));
         }
         self.body.validate()?;
         self.voice.validate()?;
@@ -128,7 +128,7 @@ impl Companion {
         .flatten()
         {
             if text.chars().count() > 4_000 {
-                return Err(HostError::invalid("profile entry is too long"));
+                return Err(HostError::Invalid(("profile entry is too long").into()));
             }
         }
         Ok(())
@@ -213,7 +213,7 @@ pub(crate) fn get(store: &Store, id: &str) -> Result<w::Companion> {
     store
         .companion(id)?
         .map(|companion| wire::companion(&companion))
-        .ok_or_else(|| HostError::not_found("companion not found"))
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))
 }
 
 fn document_field(field: Option<&w::JsonDocument>) -> JsonDoc {
@@ -228,7 +228,7 @@ pub(crate) fn create(
 ) -> Result<w::Companion> {
     let store = world.resource::<Store>().clone();
     if store.companions()?.len() >= 16 {
-        return Err(HostError::exhausted("too many companions"));
+        return Err(HostError::Exhausted(("too many companions").into()));
     }
     let profile = request
         .profile
@@ -295,7 +295,7 @@ pub(crate) fn update(
     let store = world.resource::<Store>().clone();
     let mut companion = store
         .companion(&request.id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if let Some(name) = request.name {
         companion.name = name;
     }
@@ -352,7 +352,7 @@ pub(crate) fn update(
 pub(crate) fn delete(world: &mut World, id: &str) -> Result<()> {
     let store = world.resource::<Store>().clone();
     if !store.delete_companion(id)? {
-        return Err(HostError::not_found("companion not found"));
+        return Err(HostError::NotFound(("companion not found").into()));
     }
     if let Some(entity) = agent::agent_of(world, id) {
         world.trigger(Retire { entity });
@@ -373,7 +373,7 @@ fn notify(world: &mut World, companion: &Companion) {
 pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
     let companion = store
         .companion(id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let cursor = store.consolidation_cursor(id)?;
     Ok(w::MindView {
         companion_id: id.to_owned(),
@@ -397,7 +397,7 @@ pub(crate) fn update_profile(
     let store = world.resource::<Store>().clone();
     store
         .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let profile = request
         .profile
         .as_option()
@@ -419,15 +419,15 @@ pub(crate) fn control_memory(
         Some(w::MemoryAction::Share) => super::db::memories::MemoryActionKind::Share,
         Some(w::MemoryAction::Unshare) => super::db::memories::MemoryActionKind::Unshare,
         Some(w::MemoryAction::Unspecified) | None => {
-            return Err(HostError::invalid("a memory action is required"));
+            return Err(HostError::Invalid(("a memory action is required").into()));
         }
     };
     let memory = store
         .memory(&request.memory_id)?
-        .ok_or_else(|| HostError::not_found("memory not found"))?;
+        .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
     if memory.owner != request.companion_id {
-        return Err(HostError::permission(
-            "only the owner may change a memory's importance or audience",
+        return Err(HostError::Permission(
+            ("only the owner may change a memory's importance or audience").into(),
         ));
     }
     let memory = store.control_memory(&request.memory_id, action, None)?;
@@ -448,7 +448,7 @@ pub(crate) fn list_memories(
     let store = world.resource::<Store>().clone();
     store
         .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let limit = request.limit.unwrap_or(50).clamp(1, 200) as usize;
     let cursor = request
         .cursor

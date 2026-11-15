@@ -552,8 +552,8 @@ fn resolve_capability(
     // Declared capability tools are offered to the parent only; the hand uses
     // the generic dispatcher so its work-session binding stays explicit.
     if world.get::<super::agent::WorkAgent>(agent).is_some() {
-        return Err(HostError::permission(
-            "capability tools are offered to the parent only",
+        return Err(HostError::Permission(
+            ("capability tools are offered to the parent only").into(),
         ));
     }
     let Some(spec) =
@@ -654,9 +654,11 @@ pub(crate) fn submit(
     let store = world.resource::<Store>().clone();
     let approval = store
         .approval(request_id)?
-        .ok_or_else(|| HostError::not_found("approval not found"))?;
+        .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
     if approval.status != ApprovalStatus::Pending {
-        return Err(HostError::conflict("approval is no longer pending"));
+        return Err(HostError::Conflict(
+            ("approval is no longer pending").into(),
+        ));
     }
     super::compaction::note_user_activity(world);
     // A device approval is bound to the client generation it was issued for:
@@ -672,15 +674,15 @@ pub(crate) fn submit(
             if let Some(hold) = release(world, request_id) {
                 refuse(world, hold.call, "client_moved: the active client moved");
             }
-            return Err(HostError::conflict(
-                "client_moved: the approval is bound to an old client generation",
+            return Err(HostError::Conflict(
+                ("client_moved: the approval is bound to an old client generation").into(),
             ));
         }
     }
     let Some(hold) = release(world, request_id) else {
         store.resolve_approval(request_id, ApprovalStatus::Expired)?;
-        return Err(HostError::conflict(
-            "approval is not attached to a live tool call",
+        return Err(HostError::Conflict(
+            ("approval is not attached to a live tool call").into(),
         ));
     };
     let changed = world
@@ -700,8 +702,8 @@ pub(crate) fn submit(
             hold.call,
             "the operation arguments changed after the approval was requested",
         );
-        return Err(HostError::conflict(
-            "approval no longer matches the call arguments",
+        return Err(HostError::Conflict(
+            ("approval no longer matches the call arguments").into(),
         ));
     }
     match decision {

@@ -40,10 +40,10 @@ impl Store {
         for rule in add_or_update {
             super::validate_id(&rule.id)?;
             if rule.tool_name.trim().is_empty() || rule.tool_name.chars().count() > 128 {
-                return Err(HostError::invalid("rule tool name is required"));
+                return Err(HostError::Invalid(("rule tool name is required").into()));
             }
             if rule.pattern.is_empty() || rule.pattern.chars().count() > 4_000 {
-                return Err(HostError::invalid("rule pattern is required"));
+                return Err(HostError::Invalid(("rule pattern is required").into()));
             }
         }
         let now = super::now();

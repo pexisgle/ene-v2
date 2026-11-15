@@ -214,8 +214,8 @@ fn connect(
     providers: &crate::host::providers::Providers,
 ) -> Result<DynModel<Completion>> {
     let (Some(credentials), Some(models)) = (credentials, models) else {
-        return Err(HostError::unavailable(
-            "the heartbeat tick has no model connection",
+        return Err(HostError::Unavailable(
+            ("the heartbeat tick has no model connection").into(),
         ));
     };
     (factory.0)(

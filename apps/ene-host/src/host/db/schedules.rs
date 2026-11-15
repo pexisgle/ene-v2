@@ -21,11 +21,11 @@ impl Cron {
     /// error, not an empty schedule.
     pub(crate) fn parse(expression: &str) -> Result<Self> {
         if expression.chars().count() > 256 {
-            return Err(HostError::invalid("cron_expr is too long"));
+            return Err(HostError::Invalid(("cron_expr is too long").into()));
         }
         if expression.contains('@') {
-            return Err(HostError::invalid(
-                "cron_expr must use 5 literal fields, not a nickname",
+            return Err(HostError::Invalid(
+                ("cron_expr must use 5 literal fields, not a nickname").into(),
             ));
         }
         let parsed = croner::parser::CronParser::builder()
@@ -33,7 +33,7 @@ impl Cron {
             .year(croner::parser::Year::Disallowed)
             .build()
             .parse(expression)
-            .map_err(|error| HostError::invalid(format!("cron_expr is invalid: {error}")))?;
+            .map_err(|error| HostError::Invalid(format!("cron_expr is invalid: {error}")))?;
         Ok(Self { parsed })
     }
 
@@ -62,7 +62,9 @@ pub(crate) fn next_occurrence(
 ) -> Result<Timestamp> {
     Cron::parse(expression)?
         .next_after(after, zone)
-        .ok_or_else(|| HostError::invalid("cron_expr names no time within the search window"))
+        .ok_or_else(|| {
+            HostError::Invalid(("cron_expr names no time within the search window").into())
+        })
 }
 
 /// The wall clock schedules are read against: the host's local time zone and
@@ -149,15 +151,17 @@ fn parse_run_at(text: &str, zone: &TimeZone) -> Result<Timestamp> {
         return Ok(at);
     }
     let local: jiff::civil::DateTime = text.parse().map_err(|_| {
-        HostError::invalid("run_at must be an RFC 3339 time or a local date and time")
+        HostError::Invalid(("run_at must be an RFC 3339 time or a local date and time").into())
     })?;
     // A bare date parses as midnight; the head has to say when on that day.
     if !text.chars().any(|c| matches!(c, 'T' | 't' | ' ')) {
-        return Err(HostError::invalid("run_at must include a time of day"));
+        return Err(HostError::Invalid(
+            ("run_at must include a time of day").into(),
+        ));
     }
     zone.to_zoned(local)
         .map(|zoned| zoned.timestamp())
-        .map_err(|_| HostError::invalid("run_at is outside the supported range"))
+        .map_err(|_| HostError::Invalid(("run_at is outside the supported range").into()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,19 +201,19 @@ impl Store {
         let cron_expr = cron_expr.filter(|value| !value.trim().is_empty());
         match (run_at, cron_expr) {
             (None, None) => {
-                return Err(HostError::invalid(
-                    "a schedule needs exactly one of run_at or cron_expr",
+                return Err(HostError::Invalid(
+                    ("a schedule needs exactly one of run_at or cron_expr").into(),
                 ));
             }
             (Some(_), Some(_)) => {
-                return Err(HostError::invalid(
-                    "run_at and cron_expr are mutually exclusive",
+                return Err(HostError::Invalid(
+                    ("run_at and cron_expr are mutually exclusive").into(),
                 ));
             }
             _ => {}
         }
         if title.chars().count() > 200 || instruction.chars().count() > 4_000 {
-            return Err(HostError::invalid("schedule text is too long"));
+            return Err(HostError::Invalid(("schedule text is too long").into()));
         }
         let now = clock.now();
         // The first firing is resolved here, against the host's wall clock,
@@ -218,8 +222,8 @@ impl Store {
             (Some(run_at), None) => stamp(parse_run_at(run_at, clock.zone())?),
             (None, Some(cron_expr)) => stamp(next_occurrence(cron_expr, now, clock.zone())?),
             _ => {
-                return Err(HostError::invalid(
-                    "a schedule needs exactly one of run_at or cron_expr",
+                return Err(HostError::Invalid(
+                    ("a schedule needs exactly one of run_at or cron_expr").into(),
                 ));
             }
         };

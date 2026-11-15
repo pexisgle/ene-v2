@@ -86,7 +86,7 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
     world
         .get::<CompanionAgent>(agent)
         .map(|agent| agent.companion_id.clone())
-        .ok_or_else(|| HostError::internal("this tool belongs to a companion"))
+        .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
 }
 
 fn create(world: &mut World, agent: Entity, args: CreateArgs) -> Result<String> {

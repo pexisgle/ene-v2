@@ -57,7 +57,7 @@ impl w::ClientService for Services {
                 let store = app.world().resource::<Store>().clone();
                 store
                     .client(&client_id)?
-                    .ok_or_else(|| HostError::not_found("client not found"))?;
+                    .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
                 Ok(())
             }
         })

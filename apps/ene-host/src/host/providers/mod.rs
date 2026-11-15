@@ -123,18 +123,18 @@ impl Providers {
         if let Some(running) = self
             .running
             .lock()
-            .map_err(|_| HostError::unavailable("the provider registry is poisoned"))?
+            .map_err(|_| HostError::Unavailable(("the provider registry is poisoned").into()))?
             .get(&key)
         {
             return Ok(Arc::clone(running));
         }
         let loaded = self.get(adapter).ok_or_else(|| {
-            HostError::unavailable(format!("no plugin is installed as `{adapter}`"))
+            HostError::Unavailable(format!("no plugin is installed as `{adapter}`"))
         })?;
         let running = Arc::new(Running::start(Arc::clone(loaded), extension, 1).await?);
         self.running
             .lock()
-            .map_err(|_| HostError::unavailable("the provider registry is poisoned"))?
+            .map_err(|_| HostError::Unavailable(("the provider registry is poisoned").into()))?
             .insert(key, Arc::clone(&running));
         Ok(running)
     }
@@ -194,7 +194,7 @@ pub(crate) fn plugins_dir(state: &Path) -> PathBuf {
 
 fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
     let package = Package::load(path)
-        .map_err(|error| HostError::unavailable(format!("plugin package: {error}")))?;
+        .map_err(|error| HostError::Unavailable(format!("plugin package: {error}")))?;
     let id = package.manifest.id.clone();
     let mut entries = HashMap::new();
     let mut provider = None;
@@ -211,7 +211,7 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
         }
     }
     let provider = provider.ok_or_else(|| {
-        HostError::unavailable(format!("the plugin `{id}` serves no provider extension"))
+        HostError::Unavailable(format!("the plugin `{id}` serves no provider extension"))
     })?;
     Ok((
         id,
@@ -241,7 +241,7 @@ impl Running {
         generation: u64,
     ) -> Result<Self, HostError> {
         let entrypoint = loaded.entry(extension).ok_or_else(|| {
-            HostError::unavailable(format!(
+            HostError::Unavailable(format!(
                 "the plugin `{}` serves no {extension:?}",
                 loaded.package.manifest.id
             ))
@@ -254,11 +254,11 @@ impl Running {
             &cancel,
         )
         .await
-        .map_err(|error| HostError::unavailable(format!("plugin load: {error}")))?;
+        .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
         instance
             .initialize(&cancel)
             .await
-            .map_err(|error| HostError::unavailable(format!("plugin initialize: {error}")))?;
+            .map_err(|error| HostError::Unavailable(format!("plugin initialize: {error}")))?;
         Ok(Self {
             loaded,
             instance: tokio::sync::Mutex::new(instance),
@@ -301,7 +301,7 @@ impl Running {
         instance
             .invoke(operation, services, events, &self.cancel)
             .await
-            .map_err(|error| HostError::unavailable(format!("plugin call: {error}")))
+            .map_err(|error| HostError::Unavailable(format!("plugin call: {error}")))
     }
 
     /// The provider configuration this instance answers under.

@@ -39,12 +39,12 @@ impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| HostError::storage(format!("state directory: {error}")))?;
+                .map_err(|error| HostError::Storage(format!("state directory: {error}")))?;
         }
         let connection = open_connection(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > VERSION {
-            return Err(HostError::storage(format!(
+            return Err(HostError::Storage(format!(
                 "state database version {version} is newer than this host ({VERSION})"
             )));
         }
@@ -59,7 +59,7 @@ impl Store {
     pub(crate) fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
         self.0
             .lock()
-            .map_err(|_| HostError::storage("state database lock was poisoned"))
+            .map_err(|_| HostError::Storage(("state database lock was poisoned").into()))
     }
 
     /// Runs a query that returns at most one row.
@@ -125,8 +125,8 @@ pub(crate) fn validate_id(id: &str) -> Result<()> {
         || id.chars().count() > 128
         || id.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
     {
-        return Err(HostError::invalid(
-            "id must be 1-128 printable ASCII characters",
+        return Err(HostError::Invalid(
+            ("id must be 1-128 printable ASCII characters").into(),
         ));
     }
     Ok(())
@@ -134,7 +134,7 @@ pub(crate) fn validate_id(id: &str) -> Result<()> {
 
 /// Parses a stored JSON column.
 pub(crate) fn json(text: &str) -> Result<serde_json::Value> {
-    serde_json::from_str(text).map_err(|_| HostError::storage("stored JSON is corrupt"))
+    serde_json::from_str(text).map_err(|_| HostError::Storage(("stored JSON is corrupt").into()))
 }
 
 /// A stored value that does not match its domain type: the row is corrupt.
@@ -182,7 +182,7 @@ pub(crate) fn enum_name_column<T: serde::de::DeserializeOwned>(
 }
 
 pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(value).map_err(|error| HostError::storage(error.to_string()))
+    serde_json::to_string(value).map_err(|error| HostError::Storage(error.to_string()))
 }
 
 /// The caller's stamp, or `fallback` (one `now()` shared by a row) when the
@@ -198,7 +198,7 @@ pub(crate) fn or_stamp(value: &str, fallback: &str) -> String {
 /// Turns a zero-row write into the conflict it represents.
 pub(crate) fn require(changed: usize, message: &str) -> Result<()> {
     if changed == 0 {
-        return Err(HostError::conflict(message));
+        return Err(HostError::Conflict((message).into()));
     }
     Ok(())
 }
@@ -206,7 +206,7 @@ pub(crate) fn require(changed: usize, message: &str) -> Result<()> {
 /// Turns a zero-row write into the missing row it represents.
 pub(crate) fn require_found(changed: usize, message: &str) -> Result<()> {
     if changed == 0 {
-        return Err(HostError::not_found(message));
+        return Err(HostError::NotFound((message).into()));
     }
     Ok(())
 }

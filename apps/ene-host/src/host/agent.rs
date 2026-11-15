@@ -191,13 +191,13 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
         Some(agent) => (agent.companion_id.clone(), Role::Companion),
         None => match world.get::<WorkAgent>(entity) {
             Some(agent) => (agent.companion_id.clone(), Role::Task),
-            None => return Err(HostError::internal("an agent without a role")),
+            None => return Err(HostError::Internal(("an agent without a role").into())),
         },
     };
     let store = world.resource::<Store>().clone();
     let companion = store
         .companion(&companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let assignment = companion.model(role).map(|assignment| {
         (
             assignment.connection_id.clone(),
@@ -235,10 +235,9 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
             let model = (factory.0)(&store, &credentials, &catalog, &companion, role, &providers)?;
-            let spec =
-                std::sync::Arc::new(model.spec().cloned().ok_or_else(|| {
-                    HostError::internal("a completion model without catalog facts")
-                })?);
+            let spec = std::sync::Arc::new(model.spec().cloned().ok_or_else(|| {
+                HostError::Internal(("a completion model without catalog facts").into())
+            })?);
             let handler =
                 rig_core::serve::ErasedHandler::new(rig_core::serve::adapters::ModelAdapter::<
                     rig_core::operation::Completion,

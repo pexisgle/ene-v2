@@ -474,22 +474,22 @@ fn view(store: &Store, work_id: &str) -> Result<w::WorkView> {
 fn require_companion(store: &Store, id: &str) -> Result<Companion> {
     store
         .companion(id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))
 }
 
 fn require_session(store: &Store, id: &str) -> Result<WorkSession> {
     store
         .work_session(id)?
-        .ok_or_else(|| HostError::not_found("work session not found"))
+        .ok_or_else(|| HostError::NotFound(("work session not found").into()))
 }
 
 fn require_inquiry(store: &Store, request_id: &str, work_id: &str) -> Result<Inquiry> {
     let inquiry = store
         .inquiry(request_id)?
-        .ok_or_else(|| HostError::not_found("inquiry not found"))?;
+        .ok_or_else(|| HostError::NotFound(("inquiry not found").into()))?;
     if inquiry.work_id != work_id {
-        return Err(HostError::invalid(
-            "the inquiry belongs to another work session",
+        return Err(HostError::Invalid(
+            ("the inquiry belongs to another work session").into(),
         ));
     }
     Ok(inquiry)
@@ -499,7 +499,7 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
     let store = world.resource::<Store>().clone();
     let companion = require_companion(&store, &request.companion_id)?;
     if request.instruction.trim().is_empty() {
-        return Err(HostError::invalid("an instruction is required"));
+        return Err(HostError::Invalid(("an instruction is required").into()));
     }
     let (client_id, activation_revision) = binding_for(&store, &request)?;
     let session = WorkSession {
@@ -555,17 +555,19 @@ fn plan_backend(
         return Ok(Backend::Rig);
     };
     if !connection.enabled {
-        return Err(HostError::unavailable(
-            "the assigned ACP connection is disabled",
+        return Err(HostError::Unavailable(
+            ("the assigned ACP connection is disabled").into(),
         ));
     }
     if config.command.trim().is_empty() {
-        return Err(HostError::unavailable("the ACP connection has no command"));
+        return Err(HostError::Unavailable(
+            ("the ACP connection has no command").into(),
+        ));
     }
     // A session that already ran on ACP keeps its context in that process.
     if !store.runs(work_id)?.is_empty() {
-        return Err(HostError::unavailable(
-            "the ACP agent of this work session is no longer running",
+        return Err(HostError::Unavailable(
+            ("the ACP agent of this work session is no longer running").into(),
         ));
     }
     Ok(Backend::Acp(Some(config)))
@@ -578,13 +580,13 @@ pub(crate) fn start_run(
 ) -> Result<Run> {
     let store = world.resource::<Store>().clone();
     if session.status == WorkStatus::Closed {
-        return Err(HostError::conflict("work session is closed"));
+        return Err(HostError::Conflict(("work session is closed").into()));
     }
     if instruction.trim().is_empty() {
-        return Err(HostError::invalid("an instruction is required"));
+        return Err(HostError::Invalid(("an instruction is required").into()));
     }
     if let Some(active) = store.active_run(&session.id)? {
-        return Err(HostError::conflict(format!(
+        return Err(HostError::Conflict(format!(
             "the work session is already running run {}",
             active.run_id
         )));
@@ -636,8 +638,8 @@ pub(crate) fn start_run(
                 Ok(true) => None,
                 Ok(false) => {
                     acp::shutdown(world, &session.id);
-                    Some(HostError::unavailable(
-                        "the ACP agent is not accepting prompts",
+                    Some(HostError::Unavailable(
+                        ("the ACP agent is not accepting prompts").into(),
                     ))
                 }
                 Err(error) => Some(error),
@@ -685,15 +687,15 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<(Option<S
     super::db::validate_id(&request.client_id)?;
     store
         .client(&request.client_id)?
-        .ok_or_else(|| HostError::not_found("client not found"))?;
+        .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
     let Some(activation) = activation else {
-        return Err(HostError::conflict(
-            "the companion has no active client to bind the session to",
+        return Err(HostError::Conflict(
+            ("the companion has no active client to bind the session to").into(),
         ));
     };
     if activation.client_id.as_deref() != Some(request.client_id.as_str()) {
-        return Err(HostError::conflict(
-            "the requested client is not the active client of this companion",
+        return Err(HostError::Conflict(
+            ("the requested client is not the active client of this companion").into(),
         ));
     }
     Ok((activation.client_id, activation.revision))
@@ -703,7 +705,7 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     let store = world.resource::<Store>().clone();
     let session = require_session(&store, &request.work_id)?;
     if session.status == WorkStatus::Closed {
-        return Err(HostError::conflict("work session is closed"));
+        return Err(HostError::Conflict(("work session is closed").into()));
     }
     let inquiry_id = request.request_id.clone().unwrap_or_default();
     let hash = super::db::digest(
@@ -715,8 +717,8 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
             receipt(world, agent, &request.work_id, &request.request_key)
     {
         if stored != hash {
-            return Err(HostError::already_exists(
-                "this request key already accepted different content",
+            return Err(HostError::AlreadyExists(
+                ("this request key already accepted different content").into(),
             ));
         }
         return Ok(w::WorkAcceptance {
@@ -736,25 +738,29 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     };
     if let Some(mut run) = store.active_run(&request.work_id)? {
         if run.state.is_terminal() {
-            return Err(HostError::conflict("work session has no active run"));
+            return Err(HostError::Conflict(
+                ("work session has no active run").into(),
+            ));
         }
         if world
             .resource::<AcpBackends>()
             .0
             .contains_key(&request.work_id)
         {
-            return Err(HostError::conflict(
-                "the ACP agent is running a prompt; wait for it to finish before sending more input",
+            return Err(HostError::Conflict(
+                ("the ACP agent is running a prompt; wait for it to finish before sending more input").into(),
             ));
         }
         let Some(agent) = agent else {
-            return Err(HostError::unavailable("the work agent is not running"));
+            return Err(HostError::Unavailable(
+                ("the work agent is not running").into(),
+            ));
         };
         bind(world, agent, &run.run_id);
         if let Some(inquiry) = &inquiry {
             if inquiry.run_id != run.run_id {
-                return Err(HostError::conflict(
-                    "the inquiry belongs to a run that is no longer active",
+                return Err(HostError::Conflict(
+                    ("the inquiry belongs to a run that is no longer active").into(),
                 ));
             }
             store.resolve_inquiry(&inquiry_id, &request.text)?;
@@ -873,27 +879,27 @@ pub(crate) fn answer_inquiry(
     let inquiry = require_inquiry(&store, &request.request_id, &request.work_id)?;
     let session = require_session(&store, &request.work_id)?;
     if session.status == WorkStatus::Closed {
-        return Err(HostError::conflict("work session is closed"));
+        return Err(HostError::Conflict(("work session is closed").into()));
     }
     if world
         .resource::<AcpBackends>()
         .0
         .contains_key(&request.work_id)
     {
-        return Err(HostError::unavailable(
-            "ACP work sessions do not report inquiries",
+        return Err(HostError::Unavailable(
+            ("ACP work sessions do not report inquiries").into(),
         ));
     }
     let mut run = store
         .active_run(&request.work_id)?
-        .ok_or_else(|| HostError::conflict("work session has no active run"))?;
+        .ok_or_else(|| HostError::Conflict(("work session has no active run").into()))?;
     if run.run_id != inquiry.run_id {
-        return Err(HostError::conflict(
-            "the inquiry belongs to a run that is no longer active",
+        return Err(HostError::Conflict(
+            ("the inquiry belongs to a run that is no longer active").into(),
         ));
     }
     let agent = agent_of(world, &request.work_id)
-        .ok_or_else(|| HostError::unavailable("the work agent is not running"))?;
+        .ok_or_else(|| HostError::Unavailable(("the work agent is not running").into()))?;
     bind(world, agent, &run.run_id);
     store.resolve_inquiry(&inquiry.request_id, &request.answer)?;
     resume(&mut run);

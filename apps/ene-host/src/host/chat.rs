@@ -17,15 +17,15 @@ pub(crate) const MAX_INPUT_CHARS: usize = 32_000;
 /// is in the session log; the same request key returns the same id.
 pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w::Acceptance> {
     if request.text.trim().is_empty() {
-        return Err(HostError::invalid("a message is required"));
+        return Err(HostError::Invalid(("a message is required").into()));
     }
     if request.text.chars().count() > MAX_INPUT_CHARS {
-        return Err(HostError::invalid("the message is too large"));
+        return Err(HostError::Invalid(("the message is too large").into()));
     }
     if rig_memory::estimate_tokens(&[rig_core::completion::Message::user(&request.text)])
         > MAX_INPUT_TOKENS as u64
     {
-        return Err(HostError::invalid("the message is too large"));
+        return Err(HostError::Invalid(("the message is too large").into()));
     }
     super::db::validate_id(&request.companion_id)?;
     if !request.request_key.is_empty() {
@@ -41,9 +41,9 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     let store = world.resource::<Store>().clone();
     store
         .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let agent = agent::agent_of(world, &request.companion_id)
-        .ok_or_else(|| HostError::not_found("companion agent not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion agent not found").into()))?;
     agent::ensure_model(world, agent)?;
 
     // A receipt is only trusted when the input it names is actually in the
@@ -89,10 +89,10 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
         .failed
         .clone()
     {
-        return Err(HostError::unavailable(reason));
+        return Err(HostError::Unavailable(reason));
     }
     if !has_input(app.world_mut(), agent, &request_id) {
-        return Err(HostError::unavailable("the input was not saved"));
+        return Err(HostError::Unavailable(("the input was not saved").into()));
     }
     Ok(w::Acceptance {
         request_id,
@@ -112,8 +112,8 @@ fn accepted(world: &World, agent: Entity, key: &str, hash: &[u8]) -> Result<Opti
             continue;
         }
         if recorded != hash {
-            return Err(HostError::already_exists(
-                "this request key already accepted different content",
+            return Err(HostError::AlreadyExists(
+                ("this request key already accepted different content").into(),
             ));
         }
         return Ok(Some(request_id));
@@ -155,7 +155,7 @@ pub(crate) fn stop(world: &mut World, request: w::StopRequest) -> Result<()> {
     let store = world.resource::<Store>().clone();
     store
         .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if let Some(agent) = agent::agent_of(world, &request.companion_id) {
         world.trigger(StopTurn {
             entity: agent,
@@ -175,9 +175,9 @@ pub(crate) fn history(
     let store = world.resource::<Store>().clone();
     store
         .companion(request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let agent = agent::agent_of(world, request.companion_id)
-        .ok_or_else(|| HostError::not_found("companion agent not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion agent not found").into()))?;
     let after = request
         .cursor
         .and_then(|cursor| cursor.parse::<u64>().ok())
@@ -210,14 +210,14 @@ pub(crate) fn message_by_id(
     request: &w::MessageRequestView<'_>,
 ) -> Result<w::Message> {
     let agent = agent::agent_of(world, request.companion_id)
-        .ok_or_else(|| HostError::not_found("companion agent not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion agent not found").into()))?;
     let wanted = request
         .message_id
         .parse::<u64>()
-        .map_err(|_| HostError::invalid("message id is not a number"))?;
+        .map_err(|_| HostError::Invalid(("message id is not a number").into()))?;
     let conversation = world
         .get::<Conversation>(agent)
-        .ok_or_else(|| HostError::not_found("message not found"))?;
+        .ok_or_else(|| HostError::NotFound(("message not found").into()))?;
     for entry in conversation.entries() {
         if entry.id.get() != wanted {
             continue;
@@ -227,7 +227,7 @@ pub(crate) fn message_by_id(
         };
         return Ok(message(request.companion_id, "", &entry, text));
     }
-    Err(HostError::not_found("message not found"))
+    Err(HostError::NotFound(("message not found").into()))
 }
 
 pub(crate) fn message(

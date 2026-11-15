@@ -200,7 +200,7 @@ impl Runtime {
                             app.world_mut().write_message(AppExit::Success);
                             tick(&mut app);
                             return match &app.world().resource::<HostState>().failed {
-                                Some(reason) => Err(HostError::unavailable(reason.clone())),
+                                Some(reason) => Err(HostError::Unavailable(reason.clone())),
                                 None => Ok(()),
                             };
                         }
@@ -302,12 +302,12 @@ impl Runtime {
             .handle
             .commands
             .try_send(job(reply))
-            .map_err(|_| HostError::exhausted("host command queue is full or closed"));
+            .map_err(|_| HostError::Exhausted(("host command queue is full or closed").into()));
         async move {
             submitted?;
             received
                 .await
-                .map_err(|_| HostError::unavailable("Rig kernel stopped"))?
+                .map_err(|_| HostError::Unavailable(("Rig kernel stopped").into()))?
         }
     }
 
@@ -326,18 +326,18 @@ impl Runtime {
             .handle
             .thread
             .lock()
-            .map_err(|_| HostError::internal("Rig kernel lock failed"))?
+            .map_err(|_| HostError::Internal(("Rig kernel lock failed").into()))?
             .take();
         tokio::task::spawn_blocking(move || {
             thread.map_or(Ok(()), |thread| {
                 let _ = shutdown.try_send(());
                 thread
                     .join()
-                    .map_err(|_| HostError::internal("Rig kernel panicked"))?
+                    .map_err(|_| HostError::Internal(("Rig kernel panicked").into()))?
             })
         })
         .await
-        .map_err(|_| HostError::internal("Rig kernel join failed"))?
+        .map_err(|_| HostError::Internal(("Rig kernel join failed").into()))?
     }
 }
 
@@ -511,7 +511,7 @@ pub(crate) fn subscribe(
     if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
         db::validate_id(client_id)?;
         if store.client(client_id)?.is_none() {
-            return Err(HostError::not_found("client not found"));
+            return Err(HostError::NotFound(("client not found").into()));
         }
     }
     let receiver = app.world().resource::<Notifier>().subscribe();

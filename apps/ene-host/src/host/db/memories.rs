@@ -149,8 +149,8 @@ pub(crate) struct MindUpdate {
 
 fn check_content(content: &str) -> Result<()> {
     if content.trim().is_empty() || content.chars().count() > 4_000 {
-        return Err(HostError::invalid(
-            "memory content must be 1-4000 characters",
+        return Err(HostError::Invalid(
+            ("memory content must be 1-4000 characters").into(),
         ));
     }
     Ok(())
@@ -158,7 +158,7 @@ fn check_content(content: &str) -> Result<()> {
 
 fn check_importance(importance: u8) -> Result<()> {
     if importance > MAX_IMPORTANCE {
-        return Err(HostError::invalid("importance must be 0-10"));
+        return Err(HostError::Invalid(("importance must be 0-10").into()));
     }
     Ok(())
 }
@@ -308,7 +308,7 @@ impl Store {
     ) -> Result<Memory> {
         let memory = self
             .memory(id)?
-            .ok_or_else(|| HostError::not_found("memory not found"))?;
+            .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
         let (importance, audiences) = match action {
             MemoryActionKind::Forget => (0u8, memory.audiences.clone()),
             MemoryActionKind::Remember => (memory.importance.max(3), memory.audiences.clone()),
@@ -346,7 +346,7 @@ impl Store {
                 row_to_memory,
             )
             .optional()?;
-        updated.ok_or_else(|| HostError::conflict("memory changed since it was read"))
+        updated.ok_or_else(|| HostError::Conflict(("memory changed since it was read").into()))
     }
 
     /// Marks a memory as actually used. Only explicit tool use or a verified
@@ -673,7 +673,9 @@ impl Store {
     /// state and the idempotency receipt commit together, or none do.
     pub(crate) fn apply_mind_update(&self, update: &MindUpdate) -> Result<Value> {
         if update.operation_id.is_empty() || update.operation_id.chars().count() > 128 {
-            return Err(HostError::invalid("operation_id must be 1-128 characters"));
+            return Err(HostError::Invalid(
+                ("operation_id must be 1-128 characters").into(),
+            ));
         }
         let stamp = now();
         let mut connection = self.conn()?;
@@ -692,8 +694,8 @@ impl Store {
             if companion_id == update.companion_id && hash == update.request_hash {
                 return json(&stored);
             }
-            return Err(HostError::conflict(
-                "operation_id was already used with different content",
+            return Err(HostError::Conflict(
+                ("operation_id was already used with different content").into(),
             ));
         }
         let mut inserted = Vec::new();
@@ -702,8 +704,8 @@ impl Store {
         for memory in &update.memories {
             if memory.forget {
                 let Some(id) = &memory.id else {
-                    return Err(HostError::invalid(
-                        "forget needs the id of the memory to lower",
+                    return Err(HostError::Invalid(
+                        ("forget needs the id of the memory to lower").into(),
                     ));
                 };
                 forget_memory_tx(&transaction, update, id, memory.expected_revision)?;
@@ -713,15 +715,15 @@ impl Store {
                     && memory.importance.is_none()
                     && memory.supersedes.is_none()
                 {
-                    return Err(HostError::invalid(
-                        "a correction needs content, importance or supersedes",
+                    return Err(HostError::Invalid(
+                        ("a correction needs content, importance or supersedes").into(),
                     ));
                 }
                 correct_memory_tx(&transaction, update, memory, id, &stamp)?;
                 updated.push(id.clone());
             } else {
                 if memory.content.trim().is_empty() {
-                    return Err(HostError::invalid("memory content is required"));
+                    return Err(HostError::Invalid(("memory content is required").into()));
                 }
                 let id = uuid::Uuid::new_v4().to_string();
                 insert_row(
@@ -761,7 +763,9 @@ impl Store {
                     state.expected_revision
                 ])?;
             if rows == 0 {
-                return Err(HostError::conflict("mind changed since it was read"));
+                return Err(HostError::Conflict(
+                    ("mind changed since it was read").into(),
+                ));
             }
             state_revision = Some(state.expected_revision + 1);
         }
@@ -802,7 +806,9 @@ impl Store {
             .path()
             .filter(|path| !path.is_empty())
             .ok_or_else(|| {
-                HostError::storage("the state database has no file a second connection could open")
+                HostError::Storage(
+                    ("the state database has no file a second connection could open").into(),
+                )
             })?;
         let connection = open_connection(Path::new(path))?;
         super::configure_connection(&connection)?;
@@ -933,7 +939,9 @@ impl Store {
     /// any mismatch rolls back every memory, edge and cursor change.
     pub(crate) fn consolidate(&self, batch: &Batch, facts: &[Fact]) -> Result<Commit> {
         if batch.companion_id.trim().is_empty() || batch.new_cursor.trim().is_empty() {
-            return Err(HostError::invalid("consolidation batch is incomplete"));
+            return Err(HostError::Invalid(
+                ("consolidation batch is incomplete").into(),
+            ));
         }
         let expected: HashMap<&str, u64> = batch
             .context
@@ -962,8 +970,8 @@ impl Store {
                 continue;
             }
             if content.chars().count() > 4_000 {
-                return Err(HostError::invalid(
-                    "consolidated memory content is too long",
+                return Err(HostError::Invalid(
+                    ("consolidated memory content is too long").into(),
                 ));
             }
             let importance = fact.importance.unwrap_or(3).min(10);
@@ -993,15 +1001,15 @@ impl Store {
             });
             if let Some((id, revision)) = merge {
                 let current = read_memory_tx(&transaction, &id)?
-                    .ok_or_else(|| HostError::conflict("the superseded memory is gone"))?;
+                    .ok_or_else(|| HostError::Conflict(("the superseded memory is gone").into()))?;
                 if current.owner != batch.companion_id {
-                    return Err(HostError::permission(
-                        "consolidation cannot merge another companion's memory",
+                    return Err(HostError::Permission(
+                        ("consolidation cannot merge another companion's memory").into(),
                     ));
                 }
                 if current.memory_revision != revision {
-                    return Err(HostError::conflict(
-                        "memory changed while consolidation was running",
+                    return Err(HostError::Conflict(
+                        ("memory changed while consolidation was running").into(),
                     ));
                 }
                 let rows = transaction
@@ -1015,8 +1023,8 @@ impl Store {
                     )?
                     .execute(params![id, revision, content, importance, stamp])?;
                 if rows == 0 {
-                    return Err(HostError::conflict(
-                        "memory changed while consolidation was running",
+                    return Err(HostError::Conflict(
+                        ("memory changed while consolidation was running").into(),
                     ));
                 }
                 updated += 1;
@@ -1157,14 +1165,18 @@ fn forget_memory_tx(
     id: &str,
     expected_revision: Option<u64>,
 ) -> Result<()> {
-    let current =
-        read_memory_tx(transaction, id)?.ok_or_else(|| HostError::not_found("memory not found"))?;
+    let current = read_memory_tx(transaction, id)?
+        .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
     if current.owner != update.companion_id {
-        return Err(HostError::permission("only the owner may forget a memory"));
+        return Err(HostError::Permission(
+            ("only the owner may forget a memory").into(),
+        ));
     }
     let expected = expected_revision.unwrap_or(current.memory_revision);
     if current.memory_revision != expected {
-        return Err(HostError::conflict("memory changed since it was read"));
+        return Err(HostError::Conflict(
+            ("memory changed since it was read").into(),
+        ));
     }
     let rows = transaction
         .prepare_cached(
@@ -1174,7 +1186,9 @@ fn forget_memory_tx(
         )?
         .execute(params![id, expected])?;
     if rows == 0 {
-        return Err(HostError::conflict("memory changed since it was read"));
+        return Err(HostError::Conflict(
+            ("memory changed since it was read").into(),
+        ));
     }
     Ok(())
 }
@@ -1186,14 +1200,18 @@ fn correct_memory_tx(
     id: &str,
     stamp: &str,
 ) -> Result<()> {
-    let current =
-        read_memory_tx(transaction, id)?.ok_or_else(|| HostError::not_found("memory not found"))?;
+    let current = read_memory_tx(transaction, id)?
+        .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
     if current.owner != update.companion_id {
-        return Err(HostError::permission("only the owner may correct a memory"));
+        return Err(HostError::Permission(
+            ("only the owner may correct a memory").into(),
+        ));
     }
     let expected = memory.expected_revision.unwrap_or(current.memory_revision);
     if current.memory_revision != expected {
-        return Err(HostError::conflict("memory changed since it was read"));
+        return Err(HostError::Conflict(
+            ("memory changed since it was read").into(),
+        ));
     }
     let content = if memory.content.trim().is_empty() {
         current.content.clone()
@@ -1228,7 +1246,9 @@ fn correct_memory_tx(
                 stamp
             ])?;
         if rows == 0 {
-            return Err(HostError::conflict("memory changed since it was read"));
+            return Err(HostError::Conflict(
+                ("memory changed since it was read").into(),
+            ));
         }
     }
     if let Some(old) = &memory.supersedes {
@@ -1261,8 +1281,8 @@ fn advance_consolidation_cursor_tx(
             .execute(params![companion_id, next, stamp])?,
     };
     if changed == 0 {
-        return Err(HostError::conflict(
-            "the consolidation cursor moved before the commit",
+        return Err(HostError::Conflict(
+            ("the consolidation cursor moved before the commit").into(),
         ));
     }
     Ok(())

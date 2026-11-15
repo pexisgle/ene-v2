@@ -18,10 +18,10 @@ pub(crate) struct HostState {
 impl HostState {
     pub(crate) fn ready(&self) -> Result<()> {
         if let Some(reason) = &self.failed {
-            return Err(HostError::unavailable(reason.clone()));
+            return Err(HostError::Unavailable(reason.clone()));
         }
         if self.closing {
-            return Err(HostError::unavailable("host is stopping"));
+            return Err(HostError::Unavailable(("host is stopping").into()));
         }
         Ok(())
     }

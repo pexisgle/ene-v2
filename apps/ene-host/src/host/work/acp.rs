@@ -160,10 +160,12 @@ pub(crate) fn spawn(
 ) -> Result<AcpHandle, HostError> {
     let command = connection.command.trim();
     if command.is_empty() {
-        return Err(HostError::invalid("the ACP connection has no command"));
+        return Err(HostError::Invalid(
+            ("the ACP connection has no command").into(),
+        ));
     }
     let cwd = std::env::current_dir()
-        .map_err(|error| HostError::unavailable(format!("ACP working directory: {error}")))?;
+        .map_err(|error| HostError::Unavailable(format!("ACP working directory: {error}")))?;
     // Resolve against the PATH the child will actually receive, not the
     // host's: a configured `env.PATH` replaces the inherited one.
     let program = resolve_program(command, &connection.endpoint.options, &cwd)?;
@@ -211,7 +213,9 @@ pub(crate) fn spawn(
         }
     }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|rt| rt.0.clone()) else {
-        return Err(HostError::unavailable("the host runtime is unavailable"));
+        return Err(HostError::Unavailable(
+            ("the host runtime is unavailable").into(),
+        ));
     };
     runtime.spawn(run_backend(
         work_id.to_owned(),
@@ -707,7 +711,7 @@ fn resolve_program(command: &str, options: &str, cwd: &Path) -> Result<PathBuf, 
         .find_map(|(name, value)| (name == "PATH").then_some(OsString::from(value)));
     let path = configured.or_else(|| std::env::var_os("PATH"));
     which::which_in(command, path, cwd).map_err(|_| {
-        HostError::unavailable(format!(
+        HostError::Unavailable(format!(
             "ACP command `{command}` was not found in the PATH the child receives"
         ))
     })

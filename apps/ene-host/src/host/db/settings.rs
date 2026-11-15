@@ -92,13 +92,15 @@ impl Store {
     ) -> Result<Settings> {
         let current = self.settings()?;
         if current.revision != expected_revision {
-            return Err(HostError::conflict("settings changed since they were read"));
+            return Err(HostError::Conflict(
+                ("settings changed since they were read").into(),
+            ));
         }
         let mut ids = HashSet::new();
         for (input, _) in inputs {
             input.validate()?;
             if !ids.insert(input.id.as_str()) {
-                return Err(HostError::invalid("connection is listed twice"));
+                return Err(HostError::Invalid(("connection is listed twice").into()));
             }
         }
         let stamp = now();
@@ -113,14 +115,14 @@ impl Store {
             let revision = match existing {
                 Some(existing) if *expected == existing.revision => existing.revision + 1,
                 Some(_) => {
-                    return Err(HostError::conflict(format!(
+                    return Err(HostError::Conflict(format!(
                         "connection `{}` changed since it was read",
                         input.id
                     )));
                 }
                 None if *expected == 0 => 1,
                 None => {
-                    return Err(HostError::conflict(format!(
+                    return Err(HostError::Conflict(format!(
                         "connection `{}` does not exist",
                         input.id
                     )));
@@ -143,7 +145,7 @@ impl Store {
                 stamp,
             ])?;
             if changed == 0 {
-                return Err(HostError::conflict(format!(
+                return Err(HostError::Conflict(format!(
                     "connection `{}` changed since it was read",
                     input.id
                 )));
@@ -162,7 +164,9 @@ impl Store {
             )?
             .execute(params![1, next, stamp, expected_revision])?;
         if changed == 0 {
-            return Err(HostError::conflict("settings changed since they were read"));
+            return Err(HostError::Conflict(
+                ("settings changed since they were read").into(),
+            ));
         }
         transaction.commit()?;
         drop(connection);

@@ -63,8 +63,8 @@ impl CapabilitySpec {
     pub(crate) fn validate(&self) -> Result<()> {
         let name = self.name.trim();
         if name.is_empty() || name.chars().count() > 64 || name.contains(char::is_whitespace) {
-            return Err(HostError::invalid(
-                "capability names must be 1-64 non-space characters",
+            return Err(HostError::Invalid(
+                ("capability names must be 1-64 non-space characters").into(),
             ));
         }
         if !self.tool_name.is_empty() {
@@ -74,27 +74,31 @@ impl CapabilitySpec {
                     .bytes()
                     .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
             {
-                return Err(HostError::invalid(
-                    "capability tool names must be 1-64 [A-Za-z0-9_-] characters",
+                return Err(HostError::Invalid(
+                    ("capability tool names must be 1-64 [A-Za-z0-9_-] characters").into(),
                 ));
             }
             if BUILTIN_TOOLS.contains(&self.tool_name.as_str()) {
-                return Err(HostError::invalid(format!(
+                return Err(HostError::Invalid(format!(
                     "tool name `{}` is reserved by the host",
                     self.tool_name
                 )));
             }
         }
         if self.description.chars().count() > 2_000 {
-            return Err(HostError::invalid("capability description is too long"));
+            return Err(HostError::Invalid(
+                ("capability description is too long").into(),
+            ));
         }
         if self.approval_target.chars().count() > 500 {
-            return Err(HostError::invalid("capability approval target is too long"));
+            return Err(HostError::Invalid(
+                ("capability approval target is too long").into(),
+            ));
         }
         let schema = json::parse_schema(&self.input_schema)?;
         if !schema.is_object() {
-            return Err(HostError::invalid(
-                "capability input schema must be an object",
+            return Err(HostError::Invalid(
+                ("capability input schema must be an object").into(),
             ));
         }
         if !self.output_schema.trim().is_empty() {
@@ -106,7 +110,9 @@ impl CapabilitySpec {
                 .iter()
                 .any(|preset| preset.chars().count() > 64)
         {
-            return Err(HostError::invalid("capability presets are too long"));
+            return Err(HostError::Invalid(
+                ("capability presets are too long").into(),
+            ));
         }
         Ok(())
     }
@@ -136,21 +142,21 @@ pub(crate) fn validate_declarations(
     let mut tools = std::collections::HashSet::new();
     for capability in capabilities {
         if !seen.insert(capability.as_str()) {
-            return Err(HostError::invalid(format!(
+            return Err(HostError::Invalid(format!(
                 "capability `{capability}` is declared twice"
             )));
         }
     }
     for spec in specs {
         if !capabilities.iter().any(|name| name == &spec.name) {
-            return Err(HostError::invalid(format!(
+            return Err(HostError::Invalid(format!(
                 "capability spec `{}` is not in capabilities",
                 spec.name
             )));
         }
         spec.validate()?;
         if !spec.tool_name.is_empty() && !tools.insert(spec.tool_name.as_str()) {
-            return Err(HostError::invalid(format!(
+            return Err(HostError::Invalid(format!(
                 "tool name `{}` is declared twice",
                 spec.tool_name
             )));
@@ -245,7 +251,7 @@ pub(crate) struct DeviceOperation {
 /// Validates `input` against the declared schema of `spec`.
 pub(crate) fn validate_input(spec: &CapabilitySpec, input: &serde_json::Value) -> Result<()> {
     let schema = json::parse_schema(&spec.input_schema)?;
-    json::validate(&schema, input).map_err(HostError::invalid)
+    json::validate(&schema, input).map_err(HostError::Invalid)
 }
 
 /// Validates a client's operation output against its declared output schema.
@@ -254,7 +260,7 @@ pub(crate) fn validate_output(spec: &CapabilitySpec, output: &serde_json::Value)
         return Ok(());
     }
     let schema = json::parse_schema(&spec.output_schema)?;
-    json::validate(&schema, output).map_err(HostError::invalid)
+    json::validate(&schema, output).map_err(HostError::Invalid)
 }
 
 /// Fills the approval-card target from the client's template and the verified
@@ -494,8 +500,8 @@ pub(crate) fn set_capabilities(
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
     if !request.granted_capabilities.is_empty() {
-        return Err(HostError::permission(
-            "a client cannot grant capabilities to itself",
+        return Err(HostError::Permission(
+            ("a client cannot grant capabilities to itself").into(),
         ));
     }
     let granted = world
@@ -540,12 +546,12 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     let store = world.resource::<Store>().clone();
     store
         .companion(&request.companion_id)?
-        .ok_or_else(|| HostError::not_found("companion not found"))?;
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if !request.release {
         super::db::validate_id(&request.client_id)?;
         store
             .client(&request.client_id)?
-            .ok_or_else(|| HostError::not_found("client not found"))?;
+            .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
     }
     let previous = store.activation(&request.companion_id)?;
     let client = (!request.release).then_some(request.client_id.as_str());
@@ -605,7 +611,7 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
     super::db::validate_id(&event.client_id)?;
     store
         .client(&event.client_id)?
-        .ok_or_else(|| HostError::not_found("client not found"))?;
+        .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
     let Some((companion_id, revision)) = store.activation_for_client(&event.client_id)? else {
         // A connected client that is not active produces nothing the head may
         // act on. Not an error: the event is simply discarded.

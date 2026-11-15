@@ -83,8 +83,8 @@ impl Store {
         let existing = self.client(id)?;
         let current = existing.as_ref().map_or(0, |client| client.revision);
         if expected_revision != current {
-            return Err(HostError::conflict(
-                "client changed since it was registered",
+            return Err(HostError::Conflict(
+                ("client changed since it was registered").into(),
             ));
         }
         let revision = current + 1;
@@ -112,7 +112,7 @@ impl Store {
         );
         changed
             .optional()?
-            .ok_or_else(|| HostError::conflict("client changed since it was registered"))
+            .ok_or_else(|| HostError::Conflict(("client changed since it was registered").into()))
     }
 
     /// Test-only shorthand for a client that is granted nothing. The host
@@ -135,9 +135,11 @@ impl Store {
     ) -> Result<Client> {
         let existing = self
             .client(id)?
-            .ok_or_else(|| HostError::not_found("client not found"))?;
+            .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
         if revision != existing.revision {
-            return Err(HostError::conflict("client changed since it was read"));
+            return Err(HostError::Conflict(
+                ("client changed since it was read").into(),
+            ));
         }
         let next = existing.revision + 1;
         let changed = self
@@ -161,7 +163,7 @@ impl Store {
             );
         changed
             .optional()?
-            .ok_or_else(|| HostError::conflict("client changed since it was read"))
+            .ok_or_else(|| HostError::Conflict(("client changed since it was read").into()))
     }
 
     pub(crate) fn activations(&self) -> Result<Vec<Activation>> {
@@ -192,7 +194,9 @@ impl Store {
         let current = self.activation(companion)?;
         let revision = current.as_ref().map_or(0, |activation| activation.revision);
         if expected != revision {
-            return Err(HostError::conflict("activation changed since it was read"));
+            return Err(HostError::Conflict(
+                ("activation changed since it was read").into(),
+            ));
         }
         let next = revision + 1;
         self.fetch(
@@ -206,7 +210,7 @@ impl Store {
             params![companion, client, next, now(), expected],
             row_to_activation,
         )?
-        .ok_or_else(|| HostError::conflict("activation changed since it was read"))
+        .ok_or_else(|| HostError::Conflict(("activation changed since it was read").into()))
     }
 
     /// The client generation an agent's calls must target: the active client
@@ -219,7 +223,7 @@ impl Store {
         if let Some(work) = work {
             let session = self
                 .work_session(work)?
-                .ok_or_else(|| HostError::not_found("work session not found"))?;
+                .ok_or_else(|| HostError::NotFound(("work session not found").into()))?;
             return Ok(session
                 .client_id
                 .map(|client| (client, session.activation_revision)));

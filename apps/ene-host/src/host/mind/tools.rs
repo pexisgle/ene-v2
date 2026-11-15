@@ -88,7 +88,7 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
     world
         .get::<CompanionAgent>(agent)
         .map(|agent| agent.companion_id.clone())
-        .ok_or_else(|| HostError::internal("this tool belongs to a companion"))
+        .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
 }
 
 enum RecallWork {
@@ -112,7 +112,11 @@ fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut Pend
             .0
             .take()
             .and_then(background::take)
-            .unwrap_or_else(|| Err(HostError::unavailable("memory recall was cancelled")));
+            .unwrap_or_else(|| {
+                Err(HostError::Unavailable(
+                    ("memory recall was cancelled").into(),
+                ))
+            });
         commands.queue(move |world: &mut World| {
             if world.get_entity(call).is_err() {
                 return;
@@ -134,7 +138,7 @@ fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut Pend
 fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<RecallWork> {
     let companion = companion(world, agent)?;
     if args.query.chars().count() > 4_000 {
-        return Err(HostError::invalid("query is too long"));
+        return Err(HostError::Invalid(("query is too long").into()));
     }
     let store = world.resource::<Store>().clone();
     let embeddings = world.resource::<Embeddings>().clone();
@@ -195,10 +199,10 @@ fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
     let store = world.resource::<Store>().clone();
     let memory = store
         .memory(&args.id)?
-        .ok_or_else(|| HostError::not_found("memory not found"))?;
+        .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
     if !memory.visible_to(&companion) {
-        return Err(HostError::permission(
-            "this memory belongs to another companion",
+        return Err(HostError::Permission(
+            ("this memory belongs to another companion").into(),
         ));
     }
     // Reading with the tool is an explicit use, so the recall recency moves.
@@ -232,13 +236,13 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
         Some(patch) => {
             let current = store
                 .companion(&companion)?
-                .ok_or_else(|| HostError::not_found("companion not found"))?;
+                .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
             let mut next = current.state.clone();
             patch.apply(&mut next);
             Some(MindStateChange {
                 expected_revision: current.state_revision,
                 state: serde_json::to_string(&next)
-                    .map_err(|error| HostError::internal(format!("companion state: {error}")))?,
+                    .map_err(|error| HostError::Internal(format!("companion state: {error}")))?,
             })
         }
         None => None,

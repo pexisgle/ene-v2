@@ -209,7 +209,7 @@ fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
                     if first.tool_description() != spec.tool_description()
                         || json::parse_schema(&first.input_schema)? != parameters
                     {
-                        return Err(HostError::conflict(format!(
+                        return Err(HostError::Conflict(format!(
                             "tool name `{name}` is declared with a different description or \
                              input schema by companions `{}` and `{}`",
                             tool.bindings[0].companion_id, activation.companion_id
@@ -242,7 +242,7 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
     for (name, tool) in desired(&store)? {
         let parameters = json::parse_schema(&tool.spec.input_schema)?;
         let tool_name = ToolName::new(name.clone())
-            .map_err(|_| HostError::internal("a capability tool name was empty"))?;
+            .map_err(|_| HostError::Internal(("a capability tool name was empty").into()))?;
         wanted.push((name, tool_name, tool, parameters));
     }
     let published = world.resource::<CapabilityTools>().entities.clone();
@@ -290,7 +290,7 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
                 let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default())
                 else {
                     rollback(world, &spawned, &stale);
-                    return Err(HostError::conflict(format!(
+                    return Err(HostError::Conflict(format!(
                         "tool name `{name}` is already registered"
                     )));
                 };
@@ -474,8 +474,8 @@ pub(crate) fn tool_spec_for(
     if !tool.bindings.iter().any(|binding| {
         binding.client_id == client.id && binding.activation_revision == activation_revision
     }) {
-        return Err(HostError::conflict(
-            "client_moved: the capability tool is not published for the bound generation",
+        return Err(HostError::Conflict(
+            ("client_moved: the capability tool is not published for the bound generation").into(),
         ));
     }
     let Some(spec) = client
@@ -487,8 +487,8 @@ pub(crate) fn tool_spec_for(
     };
     let parameters = json::parse_schema(&spec.input_schema)?;
     if definition.description != spec.tool_description() || definition.parameters != parameters {
-        return Err(HostError::conflict(
-            "the capability tool changed after it was published",
+        return Err(HostError::Conflict(
+            ("the capability tool changed after it was published").into(),
         ));
     }
     Ok(Some(spec))

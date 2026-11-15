@@ -102,18 +102,20 @@ pub(crate) struct PendingEmbedding {
 async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let response = tokio::time::timeout(EMBED_TIMEOUT, target.model.call(texts.to_vec()))
         .await
-        .map_err(|_| HostError::unavailable("the embedding endpoint did not answer in time"))?
-        .map_err(|error| HostError::unavailable(format!("embedding endpoint: {error}")))?;
+        .map_err(|_| {
+            HostError::Unavailable(("the embedding endpoint did not answer in time").into())
+        })?
+        .map_err(|error| HostError::Unavailable(format!("embedding endpoint: {error}")))?;
     if response.embeddings.len() != texts.len() {
-        return Err(HostError::unavailable(
-            "embedding endpoint returned the wrong number of vectors",
+        return Err(HostError::Unavailable(
+            ("embedding endpoint returned the wrong number of vectors").into(),
         ));
     }
     let mut vectors = Vec::with_capacity(response.embeddings.len());
     for embedding in response.embeddings {
         if embedding.vec.len() != target.dimensions {
-            return Err(HostError::unavailable(
-                "embedding dimensions do not match the connection",
+            return Err(HostError::Unavailable(
+                ("embedding dimensions do not match the connection").into(),
             ));
         }
         // The wire carries f64; the database keeps f32.
@@ -148,7 +150,7 @@ fn connect(
         ));
     }
     let config = crate::host::model::provider_config(adapter, endpoint, secret);
-    let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::unavailable)?);
+    let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::Unavailable)?);
     // `Embedding` is the provider-neutral operation both clients erase into, so
     // the call below is the same whichever adapter answered.
     let model: DynModel<Embedding> = match config {
@@ -161,8 +163,8 @@ fn connect(
             .embedding(model_id.to_owned(), Some(dimensions))
             .erase(),
         ProviderConfig::Anthropic(_) => {
-            return Err(HostError::unavailable(
-                "the Anthropic adapter serves no embeddings",
+            return Err(HostError::Unavailable(
+                ("the Anthropic adapter serves no embeddings").into(),
             ));
         }
     };
@@ -273,7 +275,7 @@ fn encode(vector: &[f32]) -> Vec<u8> {
 
 fn decode(bytes: &[u8]) -> Result<Vec<f32>> {
     if !bytes.len().is_multiple_of(4) {
-        return Err(HostError::storage("stored embedding is corrupt"));
+        return Err(HostError::Storage(("stored embedding is corrupt").into()));
     }
     let (chunks, _) = bytes.as_chunks::<4>();
     Ok(chunks
@@ -369,8 +371,8 @@ impl CompactVectorIndex {
             };
             let vector = decode(&bytes)?;
             if vector.len() != dimensions {
-                return Err(HostError::storage(
-                    "stored embedding dimensions do not match its length",
+                return Err(HostError::Storage(
+                    ("stored embedding dimensions do not match its length").into(),
                 ));
             }
             if next.dimensions == 0 {
@@ -575,14 +577,14 @@ async fn fill(
         let texts: Vec<String> = pending.iter().map(|row| row.content.clone()).collect();
         let vectors = request(&target, &texts).await?;
         if vectors.len() != pending.len() {
-            return Err(HostError::unavailable(
-                "embedding endpoint returned the wrong number of vectors",
+            return Err(HostError::Unavailable(
+                ("embedding endpoint returned the wrong number of vectors").into(),
             ));
         }
         for (row, vector) in pending.iter().zip(&vectors) {
             if vector.len() != target.dimensions {
-                return Err(HostError::unavailable(
-                    "embedding dimensions do not match the connection",
+                return Err(HostError::Unavailable(
+                    ("embedding dimensions do not match the connection").into(),
                 ));
             }
             if crate::host::db::memories::write_embedding(

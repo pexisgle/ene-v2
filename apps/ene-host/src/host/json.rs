@@ -32,11 +32,13 @@ impl JsonDoc {
     /// or an array; plain JSON text is accepted when no schema is named.
     pub(crate) fn validate(&self) -> Result<()> {
         if self.schema.chars().count() > 128 {
-            return Err(HostError::invalid("json document schema is too long"));
+            return Err(HostError::Invalid(
+                ("json document schema is too long").into(),
+            ));
         }
         if !self.schema.is_empty() && !self.json.is_object() && !self.json.is_array() {
-            return Err(HostError::invalid(
-                "a schema'd json document must be an object or an array",
+            return Err(HostError::Invalid(
+                ("a schema'd json document must be an object or an array").into(),
             ));
         }
         Ok(())
@@ -50,9 +52,11 @@ pub(crate) fn parse_object(text: &str) -> Result<Value> {
         return Ok(json!({}));
     }
     let value: Value = serde_json::from_str(text)
-        .map_err(|_| HostError::invalid("arguments must be a JSON object"))?;
+        .map_err(|_| HostError::Invalid(("arguments must be a JSON object").into()))?;
     if !value.is_object() {
-        return Err(HostError::invalid("arguments must be a JSON object"));
+        return Err(HostError::Invalid(
+            ("arguments must be a JSON object").into(),
+        ));
     }
     Ok(value)
 }
@@ -63,9 +67,11 @@ pub(crate) fn parse_schema(text: &str) -> Result<Value> {
         return Ok(json!({"type": "object"}));
     }
     let value: Value = serde_json::from_str(text)
-        .map_err(|_| HostError::invalid("input schema must be a JSON object"))?;
+        .map_err(|_| HostError::Invalid(("input schema must be a JSON object").into()))?;
     if !value.is_object() {
-        return Err(HostError::invalid("input schema must be a JSON object"));
+        return Err(HostError::Invalid(
+            ("input schema must be a JSON object").into(),
+        ));
     }
     Ok(value)
 }

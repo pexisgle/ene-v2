@@ -242,7 +242,7 @@ impl w::SettingsService for Services {
                 let store = app.world().resource::<Store>().clone();
                 let connection = store
                     .connection(&id)?
-                    .ok_or_else(|| HostError::not_found("connection not found"))?;
+                    .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
                 Ok((connection, store))
             })
             .await
@@ -288,7 +288,7 @@ async fn connection(runtime: &Runtime, id: &str) -> Result<Connection, ConnectEr
             let store = app.world().resource::<Store>();
             store
                 .connection(&id)?
-                .ok_or_else(|| HostError::not_found("connection not found"))
+                .ok_or_else(|| HostError::NotFound(("connection not found").into()))
         })
         .await
         .map_err(ConnectError::from)
@@ -300,7 +300,7 @@ fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {
         Some(w::PolicyEffect::Deny) => permission::PolicyEffect::Deny,
         Some(w::PolicyEffect::Confirm) => permission::PolicyEffect::Confirm,
         Some(w::PolicyEffect::Unspecified) | None => {
-            return Err(HostError::invalid("a policy effect is required"));
+            return Err(HostError::Invalid(("a policy effect is required").into()));
         }
     };
     Ok(permission::PolicyRule {

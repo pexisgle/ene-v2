@@ -43,22 +43,28 @@ pub(crate) struct Endpoint {
 impl Endpoint {
     pub(crate) fn validate(&self) -> Result<()> {
         if self.adapter.trim().is_empty() || self.adapter.chars().count() > 64 {
-            return Err(HostError::invalid("connection adapter is required"));
+            return Err(HostError::Invalid(
+                ("connection adapter is required").into(),
+            ));
         }
         if self.endpoint.chars().count() > 2_048 {
-            return Err(HostError::invalid("connection endpoint is too long"));
+            return Err(HostError::Invalid(
+                ("connection endpoint is too long").into(),
+            ));
         }
         if !self.endpoint.trim().is_empty() {
             let url = url::Url::parse(&self.endpoint)
-                .map_err(|_| HostError::invalid("connection endpoint must be a URL"))?;
+                .map_err(|_| HostError::Invalid(("connection endpoint must be a URL").into()))?;
             if !matches!(url.scheme(), "https" | "http") {
-                return Err(HostError::invalid("connection endpoint must be http(s)"));
+                return Err(HostError::Invalid(
+                    ("connection endpoint must be http(s)").into(),
+                ));
             }
         }
         let schema = super::json::parse_schema(&self.options_schema)?;
         let options = super::json::parse_object(&self.options)?;
         super::json::validate(&schema, &options)
-            .map_err(|error| HostError::invalid(format!("connection options: {error}")))?;
+            .map_err(|error| HostError::Invalid(format!("connection options: {error}")))?;
         Ok(())
     }
 }
@@ -116,19 +122,27 @@ impl ConnectionConfig {
                 if config.model_ids.len() > 4_096
                     || config.model_ids.iter().any(|id| id.chars().count() > 512)
                 {
-                    return Err(HostError::invalid("connection model list is too large"));
+                    return Err(HostError::Invalid(
+                        ("connection model list is too large").into(),
+                    ));
                 }
             }
             Self::Embedding(config) => {
                 if config.model_id.chars().count() > 512 {
-                    return Err(HostError::invalid("embedding model id is too long"));
+                    return Err(HostError::Invalid(
+                        ("embedding model id is too long").into(),
+                    ));
                 }
                 if config.dimensions > 65_536 {
-                    return Err(HostError::invalid("embedding dimensions are too large"));
+                    return Err(HostError::Invalid(
+                        ("embedding dimensions are too large").into(),
+                    ));
                 }
             }
             Self::Acp(config) if config.command.trim().is_empty() => {
-                return Err(HostError::invalid("ACP connections need a command"));
+                return Err(HostError::Invalid(
+                    ("ACP connections need a command").into(),
+                ));
             }
             Self::Mcp(config)
                 if config.command.trim().is_empty()
@@ -136,8 +150,8 @@ impl ConnectionConfig {
             {
                 // A connection the host cannot open would be a setting that
                 // saves and then silently contributes no tools.
-                return Err(HostError::invalid(
-                    "MCP connections need a command or an endpoint",
+                return Err(HostError::Invalid(
+                    ("MCP connections need a command or an endpoint").into(),
                 ));
             }
             _ => {}
@@ -201,13 +215,13 @@ impl Connection {
     pub(crate) fn validate(&self) -> Result<()> {
         super::db::validate_id(&self.id)?;
         if self.name.trim().is_empty() || self.name.chars().count() > 128 {
-            return Err(HostError::invalid(
-                "connection name must be 1-128 characters",
+            return Err(HostError::Invalid(
+                ("connection name must be 1-128 characters").into(),
             ));
         }
         if self.config.kind() != self.kind {
-            return Err(HostError::invalid(
-                "connection kind does not match the config it carries",
+            return Err(HostError::Invalid(
+                ("connection kind does not match the config it carries").into(),
             ));
         }
         self.config.validate()

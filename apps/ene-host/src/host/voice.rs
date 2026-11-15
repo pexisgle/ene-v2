@@ -920,8 +920,8 @@ impl Voice {
     fn flush(&self, companion: &str, reason: w::FlushReason) -> Result<()> {
         let mut state = self.lock();
         if !state.owners.contains_key(companion) {
-            return Err(HostError::not_found(
-                "no client owns this companion's audio output",
+            return Err(HostError::NotFound(
+                ("no client owns this companion's audio output").into(),
             ));
         }
         finish(&mut state, companion, Some(reason));
@@ -1337,14 +1337,18 @@ pub(crate) fn bind_input(
     activation_revision: u64,
 ) -> Result<InputBinding> {
     if client_id.is_empty() {
-        return Err(HostError::invalid("client_id is required for audio input"));
+        return Err(HostError::Invalid(
+            ("client_id is required for audio input").into(),
+        ));
     }
     db::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>() else {
-        return Err(HostError::unavailable("the host state is not available"));
+        return Err(HostError::Unavailable(
+            ("the host state is not available").into(),
+        ));
     };
     if store.client(client_id)?.is_none() {
-        return Err(HostError::not_found("client not found"));
+        return Err(HostError::NotFound(("client not found").into()));
     }
     let activations = store.activations()?;
     let active = activations
@@ -1355,13 +1359,13 @@ pub(crate) fn bind_input(
             && activation.revision == activation_revision
     });
     if !active {
-        return Err(HostError::conflict(
-            "the client is not the active client of any companion",
+        return Err(HostError::Conflict(
+            ("the client is not the active client of any companion").into(),
         ));
     }
     if !matched {
-        return Err(HostError::conflict(
-            "client_moved: the activation revision is stale",
+        return Err(HostError::Conflict(
+            ("client_moved: the activation revision is stale").into(),
         ));
     }
     Ok(InputBinding {
@@ -1504,22 +1508,24 @@ pub(crate) fn subscribe_audio(
     activation_revision: u64,
 ) -> Result<AudioSubscription> {
     if client_id.is_empty() {
-        return Err(HostError::invalid("client_id is required"));
+        return Err(HostError::Invalid(("client_id is required").into()));
     }
     db::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>().cloned() else {
-        return Err(HostError::unavailable("the host state is not available"));
+        return Err(HostError::Unavailable(
+            ("the host state is not available").into(),
+        ));
     };
     if store.client(client_id)?.is_none() {
-        return Err(HostError::not_found("client not found"));
+        return Err(HostError::NotFound(("client not found").into()));
     }
     let activations = store.activations()?;
     if !activations
         .iter()
         .any(|activation| activation.client_id.as_deref() == Some(client_id))
     {
-        return Err(HostError::conflict(
-            "the client is not the active client of any companion",
+        return Err(HostError::Conflict(
+            ("the client is not the active client of any companion").into(),
         ));
     }
     let owned: Vec<String> = activations
@@ -1531,12 +1537,14 @@ pub(crate) fn subscribe_audio(
         .map(|activation| activation.companion_id.clone())
         .collect();
     if owned.is_empty() {
-        return Err(HostError::conflict(
-            "client_moved: the activation revision is stale",
+        return Err(HostError::Conflict(
+            ("client_moved: the activation revision is stale").into(),
         ));
     }
     let Some(voice) = world.get_resource::<Voice>().cloned() else {
-        return Err(HostError::internal("the voice plugin is not installed"));
+        return Err(HostError::Internal(
+            ("the voice plugin is not installed").into(),
+        ));
     };
     let subscription = voice.register(client_id);
     for companion_id in owned {
@@ -1564,7 +1572,7 @@ pub(crate) fn report_playback(
     };
     db::validate_id(&report.client_id)?;
     if store.client(&report.client_id)?.is_none() {
-        return Err(HostError::not_found("client not found"));
+        return Err(HostError::NotFound(("client not found").into()));
     }
     let Some(voice) = world.get_resource::<Voice>().cloned() else {
         return Ok(response(false));
@@ -1760,8 +1768,8 @@ pub(crate) fn on_turn_end(world: &mut World, companion: &str) {
 
 pub(crate) fn flush(world: &mut World, companion: &str, reason: w::FlushReason) -> Result<()> {
     let Some(voice) = world.get_resource::<Voice>().cloned() else {
-        return Err(HostError::not_found(
-            "no client owns this companion's audio output",
+        return Err(HostError::NotFound(
+            ("no client owns this companion's audio output").into(),
         ));
     };
     voice.flush(companion, reason)

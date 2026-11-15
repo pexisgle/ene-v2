@@ -34,42 +34,6 @@ pub(crate) enum HostError {
 }
 
 impl HostError {
-    pub(crate) fn invalid(message: impl Into<String>) -> Self {
-        Self::Invalid(message.into())
-    }
-
-    pub(crate) fn not_found(message: impl Into<String>) -> Self {
-        Self::NotFound(message.into())
-    }
-
-    pub(crate) fn conflict(message: impl Into<String>) -> Self {
-        Self::Conflict(message.into())
-    }
-
-    pub(crate) fn already_exists(message: impl Into<String>) -> Self {
-        Self::AlreadyExists(message.into())
-    }
-
-    pub(crate) fn permission(message: impl Into<String>) -> Self {
-        Self::Permission(message.into())
-    }
-
-    pub(crate) fn exhausted(message: impl Into<String>) -> Self {
-        Self::Exhausted(message.into())
-    }
-
-    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
-        Self::Unavailable(message.into())
-    }
-
-    pub(crate) fn storage(message: impl Into<String>) -> Self {
-        Self::Storage(message.into())
-    }
-
-    pub(crate) fn internal(message: impl Into<String>) -> Self {
-        Self::Internal(message.into())
-    }
-
     /// Whether this failure means the host can no longer trust its state and
     /// must stop accepting new work.
     pub(crate) fn is_storage(&self) -> bool {

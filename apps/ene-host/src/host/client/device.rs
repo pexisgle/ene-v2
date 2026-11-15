@@ -108,32 +108,36 @@ pub(crate) fn accept(
     let binding = world
         .get::<CallBinding>(call)
         .cloned()
-        .ok_or_else(|| HostError::internal("a device call without a binding"))?;
+        .ok_or_else(|| HostError::Internal(("a device call without a binding").into()))?;
     let (companion_id, work_id) = agent_context(world, agent)
-        .ok_or_else(|| HostError::internal("a device call without an agent"))?;
+        .ok_or_else(|| HostError::Internal(("a device call without an agent").into()))?;
     let current = store.target(&companion_id, work_id.as_deref())?;
     if current.as_ref() != Some(&(binding.client_id.clone(), binding.activation_revision)) {
-        return Err(HostError::conflict(
-            "client_moved: the active client changed before the operation was dispatched",
+        return Err(HostError::Conflict(
+            ("client_moved: the active client changed before the operation was dispatched").into(),
         ));
     }
     let client = store
         .client(&binding.client_id)?
-        .ok_or_else(|| HostError::conflict("the bound client is no longer registered"))?;
+        .ok_or_else(|| HostError::Conflict(("the bound client is no longer registered").into()))?;
     if !client
         .capabilities
         .iter()
         .any(|name| name == &binding.capability)
     {
-        return Err(HostError::conflict("the capability is no longer declared"));
+        return Err(HostError::Conflict(
+            ("the capability is no longer declared").into(),
+        ));
     }
     if !client.is_granted(&binding.capability) {
-        return Err(HostError::conflict("the capability is no longer granted"));
+        return Err(HostError::Conflict(
+            ("the capability is no longer granted").into(),
+        ));
     }
     if let Some(spec) = spec {
         if spec.name != binding.capability {
-            return Err(HostError::conflict(
-                "the capability no longer matches the accepted operation",
+            return Err(HostError::Conflict(
+                ("the capability no longer matches the accepted operation").into(),
             ));
         }
         super::validate_input(spec, &input)?;
@@ -237,7 +241,7 @@ pub(crate) fn complete(
 ) -> Result<w::DeviceOperationState> {
     let store = world.resource::<Store>().clone();
     let Some(operation) = store.operation(&result.operation_id)? else {
-        return Err(HostError::not_found("device operation not found"));
+        return Err(HostError::NotFound(("device operation not found").into()));
     };
     if result.activation_revision != operation.activation_revision
         || result.client_id != operation.client_id
@@ -298,7 +302,7 @@ pub(crate) fn complete(
     };
     let updated = store
         .complete_operation(&operation.id, success, output.as_ref(), failure.as_ref())?
-        .ok_or_else(|| HostError::storage("device operation update did not persist"))?;
+        .ok_or_else(|| HostError::Storage(("device operation update did not persist").into()))?;
     let waiter = world
         .resource_mut::<Waiting>()
         .by_operation
@@ -332,7 +336,7 @@ pub(crate) fn get(world: &mut World, request: w::Id) -> Result<w::DeviceOperatio
     let store = world.resource::<Store>().clone();
     let operation = store
         .operation(&request.id)?
-        .ok_or_else(|| HostError::not_found("device operation not found"))?;
+        .ok_or_else(|| HostError::NotFound(("device operation not found").into()))?;
     Ok(wire::device_state(&operation))
 }
 

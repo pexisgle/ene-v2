@@ -91,7 +91,7 @@ pub(crate) fn connection_from(input: w::ConnectionInput) -> Result<Connection, H
         Some(w::ConnectionKind::Mcp) => ConnectionKind::Mcp,
         Some(w::ConnectionKind::Acp) => ConnectionKind::Acp,
         Some(w::ConnectionKind::Unspecified) | None => {
-            return Err(HostError::invalid("connection kind is required"));
+            return Err(HostError::Invalid(("connection kind is required").into()));
         }
     };
     let config = input
@@ -99,7 +99,7 @@ pub(crate) fn connection_from(input: w::ConnectionInput) -> Result<Connection, H
         .into_option()
         .and_then(|config| config.config)
         .map(config_from_wire)
-        .ok_or_else(|| HostError::invalid("connection config is required"))?;
+        .ok_or_else(|| HostError::Invalid(("connection config is required").into()))?;
     Ok(Connection {
         id: input.id,
         name: input.name,

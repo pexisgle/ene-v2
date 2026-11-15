@@ -85,7 +85,7 @@ impl Store {
             params![request_id, status.as_str(), resolved],
             row_to_approval,
         )?
-        .ok_or_else(|| HostError::conflict("approval is missing or no longer pending"))
+        .ok_or_else(|| HostError::Conflict(("approval is missing or no longer pending").into()))
     }
 
     /// Startup: an approval whose call cannot be resolved is expired rather

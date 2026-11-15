@@ -301,7 +301,7 @@ async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Vec<Fac
         .extract(prompt)
         .options(options)
         .await
-        .map_err(|error| HostError::unavailable(format!("consolidation output: {error}")))?;
+        .map_err(|error| HostError::Unavailable(format!("consolidation output: {error}")))?;
     Ok(normalize(extraction.output))
 }
 

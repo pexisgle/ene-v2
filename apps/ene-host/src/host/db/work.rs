@@ -116,7 +116,7 @@ impl Store {
     pub(crate) fn close_work(&self, id: &str) -> Result<()> {
         let session = self
             .work_session(id)?
-            .ok_or_else(|| HostError::not_found("work session not found"))?;
+            .ok_or_else(|| HostError::NotFound(("work session not found").into()))?;
         if session.status == WorkStatus::Closed {
             return Ok(());
         }
@@ -245,7 +245,9 @@ impl Store {
     /// question cannot be answered twice.
     pub(crate) fn resolve_inquiry(&self, request_id: &str, answer: &str) -> Result<Inquiry> {
         if answer.trim().is_empty() || answer.chars().count() > 16_000 {
-            return Err(HostError::invalid("answer must be 1-16000 characters"));
+            return Err(HostError::Invalid(
+                ("answer must be 1-16000 characters").into(),
+            ));
         }
         self.fetch(
             &format!(
@@ -255,6 +257,6 @@ impl Store {
             params![request_id, answer, now()],
             row_to_inquiry,
         )?
-        .ok_or_else(|| HostError::conflict("inquiry is missing or already answered"))
+        .ok_or_else(|| HostError::Conflict(("inquiry is missing or already answered").into()))
     }
 }

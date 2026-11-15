@@ -90,14 +90,14 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
     world
         .get::<CompanionAgent>(agent)
         .map(|agent| agent.companion_id.clone())
-        .ok_or_else(|| HostError::internal("this tool belongs to a companion"))
+        .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
 }
 
 fn own_session(world: &World, work_id: &str, companion: &str) -> Result<WorkSession> {
     let session = super::require_session(world.resource::<Store>(), work_id)?;
     if session.companion_id != companion {
-        return Err(HostError::permission(
-            "this work session belongs to another companion",
+        return Err(HostError::Permission(
+            ("this work session belongs to another companion").into(),
         ));
     }
     Ok(session)
@@ -106,7 +106,7 @@ fn own_session(world: &World, work_id: &str, companion: &str) -> Result<WorkSess
 fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     let companion = companion(world, agent)?;
     if args.instruction.trim().is_empty() {
-        return Err(HostError::invalid("an instruction is required"));
+        return Err(HostError::Invalid(("an instruction is required").into()));
     }
     // Every companion receives the same transcription. The delegation key is
     // the transcription id the host bound to this turn, never an LLM argument,
@@ -127,11 +127,13 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     if let Some(work_id) = args.work_id.as_deref().filter(|id| !id.is_empty()) {
         let session = own_session(world, work_id, &companion)?;
         if session.status == WorkStatus::Closed {
-            return Err(HostError::conflict("work session is closed"));
+            return Err(HostError::Conflict(("work session is closed").into()));
         }
         let store = world.resource::<Store>().clone();
         if store.active_run(work_id)?.is_some() {
-            return Err(HostError::conflict("the work session is already running"));
+            return Err(HostError::Conflict(
+                ("the work session is already running").into(),
+            ));
         }
         let run = super::start_run(world, &session, &args.instruction)?;
         return Ok(json!({"work_id": work_id, "run_id": run.run_id}).to_string());
@@ -212,8 +214,8 @@ fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
 
 fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> {
     let Some(work) = world.get::<WorkAgent>(agent).cloned() else {
-        return Err(HostError::permission(
-            "report is only available to a running task",
+        return Err(HostError::Permission(
+            ("report is only available to a running task").into(),
         ));
     };
     let store = world.resource::<Store>().clone();
@@ -230,7 +232,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
         return Ok(json!({"accepted": false, "reason": "the run already ended"}).to_string());
     }
     if args.content.trim().is_empty() {
-        return Err(HostError::invalid("report content is required"));
+        return Err(HostError::Invalid(("report content is required").into()));
     }
     let run_id = run.run_id.clone();
     let cancelling = run.state == RunState::Cancelling;
@@ -270,7 +272,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             store.update_run(&waiting)?;
             let session = store
                 .work_session(&work.work_id)?
-                .ok_or_else(|| HostError::not_found("work session not found"))?;
+                .ok_or_else(|| HostError::NotFound(("work session not found").into()))?;
             super::notify_event(
                 world,
                 &session,
@@ -325,7 +327,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             );
             Ok(json!({"accepted": true}).to_string())
         }
-        other => Err(HostError::invalid(format!("unknown report kind `{other}`"))),
+        other => Err(HostError::Invalid(format!("unknown report kind `{other}`"))),
     }
 }
 
