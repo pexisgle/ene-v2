@@ -11,10 +11,20 @@ const createPlugin = require('@extism/extism');
     const split = unicode.indexOf(Buffer.from('こ')) + 1;
     const delta = { type: 'delta', text: 'hello' };
     const finished = { type: 'finished', reason: 'stop' };
+    const fragmentedTool = [
+        { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'weather', arguments: '' } }] },
+        { tool_calls: [{ index: 0, function: { arguments: '{"city":' } }] },
+        { tool_calls: [{ index: 0, function: { arguments: '"Tokyo"}' } }] },
+    ].map((delta, index) => `data: ${JSON.stringify({ choices: [{ index: 0, delta,
+        finish_reason: index === 2 ? 'tool_calls' : null }] })}\n\n`).join('') + 'data: [DONE]\n\n';
     // The broker still has an open response after delivering the terminal event.
     for (const { chunks = [], done = false, response, error, models = false,
         expected = [delta, finished] } of [
         { chunks: [text + 'data: [DONE]\n\n'] },
+        { chunks: [fragmentedTool], expected: [
+            { type: 'tool_call', id: 'call-1', name: 'weather', arguments: { city: 'Tokyo' } },
+            { type: 'finished', reason: 'tool_calls' },
+        ] },
         { chunks: [text + 'data: [DO', 'NE]\r\n\r\n'] },
         { chunks: [text + 'data: [DONE]\n\n'], done: true },
         { chunks: [text.repeat(128) + 'data: [DONE]\n\n'], expected: [...Array(128).fill(delta), finished] },
@@ -68,7 +78,7 @@ const createPlugin = require('@extism/extism');
                 ? { type: 'list_models', endpoint: 'https://openrouter.ai/api/v1', options: {} }
                 : { type: 'generate', request: {
                 endpoint: 'https://openrouter.ai/api/v1', options: {}, model: 'fixture',
-                preamble: 'Be helpful', messages: [{ role: 'user', text: 'hello' }], max_tokens: 32,
+                preamble: 'Be helpful', messages: [{ kind: 'text', role: 'user', text: 'hello' }], max_tokens: 32,
             } }));
             if (error) {
                 await assert.rejects(invoke, error);
