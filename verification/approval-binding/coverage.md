@@ -1,6 +1,6 @@
 # Coverage: approval → dispatch → result generation binding
 
-sync-commit: `51bdd595cf1fcf7e9f00c5b5de9902b500529c1a`
+sync-commit: `60ba55ba3ea0d3e8821deca3745204568c1d3e34`
 
 ## The promise
 
@@ -29,10 +29,19 @@ Four properties, each checked by TLC over every reachable state:
    and revision completes it. A late result from a moved client must be
    discarded, not applied.
 
-None of these has been found violated at the sync commit. The covered files were
-last changed by `6abe228` (library refactor); the sync commit above is the later
-checkout commit at which they were re-read and the model re-run, after the
-companion-binding fix `51bdd59` touched only `agent.rs`.
+The covered guards were re-read at the sync commit after cached-statement,
+Serde-enum and direct-error-constructor migrations. Their generation comparisons,
+SQL predicates and mutation order are unchanged. The unmodified sync checker and
+base model passed. Each mutant produced its expected invariant violation.
+The [audit record](<../../docs/refactoring/library-delegation-audit.json>) retains
+the verification evidence and its limits.
+
+Real HTTP/2 device streams also verified current-generation consent and completion,
+expired consent after a move, and refusal of old-client or old-revision results.
+The public API did not force a move between approval and dispatch. That ordering
+has bounded model coverage only. Gate re-evaluation after a move can create a new
+consent card, which the single-approval model does not represent. Approving the
+observed replacement card did not dispatch the already-refused call.
 
 ## Covered code
 
