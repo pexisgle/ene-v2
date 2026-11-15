@@ -119,15 +119,7 @@ fn voice_world(store: &Store) -> World {
 }
 
 fn client_binding(world: &World) -> InputBinding {
-    bind_input(
-        world,
-        &w::AudioInputChunk {
-            client_id: "c1".into(),
-            activation_revision: 1,
-            ..Default::default()
-        },
-    )
-    .unwrap()
+    bind_input(world, "c1", 1).unwrap()
 }
 
 /// A pending device approval, as the gate issues it for `c1`, revision 1.
@@ -623,16 +615,34 @@ fn the_autonomous_relay_stops_after_five_completions() {
 }
 
 #[test]
+fn input_binding_validates_first_metadata_and_allows_omitted_followups() {
+    let (_root, store) = store_with_client();
+    let world = voice_world(&store);
+    assert!(matches!(
+        bind_input(&world, "", 1),
+        Err(HostError::Invalid(_))
+    ));
+    assert!(matches!(
+        bind_input(&world, "missing", 1),
+        Err(HostError::NotFound(_))
+    ));
+    assert!(matches!(
+        bind_input(&world, "c1", 0),
+        Err(HostError::Conflict(_))
+    ));
+    let binding = bind_input(&world, "c1", 1).unwrap();
+    assert!(binding.accepts("c1", 1));
+    assert!(binding.accepts("", 0));
+    assert!(!binding.accepts("other", 1));
+    assert!(!binding.accepts("c1", 2));
+}
+
+#[test]
 fn a_moved_activation_discards_the_transcription() {
     let (_root, store) = store_with_client();
     let mut world = test_world();
     world.insert_resource(store.clone());
-    let chunk = w::AudioInputChunk {
-        client_id: "c1".into(),
-        activation_revision: 1,
-        ..Default::default()
-    };
-    let binding = bind_input(&world, &chunk).unwrap();
+    let binding = bind_input(&world, "c1", 1).unwrap();
     assert!(accept_transcription(&mut world, "t1", "こんにちは", &binding, None).unwrap());
     assert!(
         world
@@ -653,15 +663,7 @@ fn a_moved_activation_discards_the_transcription() {
             .contains(&"t2".to_owned())
     );
 
-    let moved = bind_input(
-        &world,
-        &w::AudioInputChunk {
-            client_id: "c1".into(),
-            activation_revision: 2,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let moved = bind_input(&world, "c1", 2).unwrap();
     assert!(accept_transcription(&mut world, "t3", "ただいま", &moved, None).unwrap());
     assert!(
         world

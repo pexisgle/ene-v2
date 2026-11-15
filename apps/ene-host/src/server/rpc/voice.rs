@@ -48,11 +48,13 @@ impl w::VoiceService for Services {
                             break;
                         }
                         Ok(Some(Ok(message))) => {
-                            let chunk = message.to_owned_message();
                             if recognition.binding.is_none() {
-                                let candidate = chunk.clone();
+                                let candidate = message.clone();
                                 match runtime
-                                    .read(move |app| Ok(voice::bind_input(app.world(), &candidate)))
+                                    .read(move |app| {
+                                        let chunk = candidate.view();
+                                        Ok(voice::bind_input(app.world(), chunk.client_id, chunk.activation_revision))
+                                    })
                                     .await
                                     .map_err(ConnectError::from)?
                                 {
@@ -63,10 +65,11 @@ impl w::VoiceService for Services {
                                     }
                                 }
                             }
+                            let chunk = message.view();
                             if !recognition
                                 .binding
                                 .as_ref()
-                                .is_some_and(|binding| binding.accepts(&chunk))
+                                .is_some_and(|binding| binding.accepts(chunk.client_id, chunk.activation_revision))
                             {
                                 continue;
                             }
@@ -126,7 +129,7 @@ impl w::VoiceService for Services {
                                         ..Default::default()
                                     });
                                 }
-                                recognition.pending.extend_from_slice(&chunk.pcm_data);
+                                recognition.pending.extend_from_slice(chunk.pcm_data);
                                 (
                                     recognition.pending.len() >= voice::MAX_STT_BYTES,
                                     false,
@@ -163,22 +166,30 @@ impl w::VoiceService for Services {
         {
             return Err(setup_error(error));
         }
-        let request = request.to_owned_message();
-        let voice::AudioSubscription {
-            subscription_id,
-            mut receiver,
-            mut control,
-        } = self
+        let request = request.to_owned_view();
+        let (
+            voice::AudioSubscription {
+                subscription_id,
+                mut receiver,
+                mut control,
+            },
+            client_id,
+        ) = self
             .runtime
-            .read({
-                let request = request.clone();
-                move |app| voice::subscribe_audio(app.world_mut(), request)
+            .read(move |app| {
+                let request = request.reborrow();
+                let subscription = voice::subscribe_audio(
+                    app.world_mut(),
+                    request.client_id,
+                    request.activation_revision,
+                )?;
+                Ok((subscription, request.client_id.to_owned()))
             })
             .await
             .map_err(ConnectError::from)?;
         let guard = StreamGuard {
             runtime: self.runtime.clone(),
-            client_id: request.client_id,
+            client_id,
             subscription: subscription_id,
         };
         let stream = async_stream::stream! {
@@ -339,6 +350,125 @@ mod tests {
     use rig_ecs::prelude::Update;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    #[tokio::test]
+    async fn microphone_stream_keeps_binding_echo_and_rate_boundaries() {
+        use crate::host::settings::{
+            Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, SttConnection,
+        };
+        use connectrpc::StreamMessage;
+        use w::VoiceService;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = captured.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/audio/transcriptions",
+                    axum::routing::post(move |body: bytes::Bytes| {
+                        let received = received.clone();
+                        async move {
+                            let mut wav =
+                                hound::WavReader::new(std::io::Cursor::new(body)).unwrap();
+                            let rate = wav.spec().sample_rate;
+                            let samples =
+                                wav.samples::<i16>().collect::<Result<Vec<_>, _>>().unwrap();
+                            let mut received = received.lock().unwrap();
+                            received.push((rate, samples));
+                            format!("capture {}", received.len())
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        runtime
+            .read(move |app| {
+                let store = app.world().resource::<Store>();
+                store.register_client(&ClientDeclaration {
+                    id: "c1",
+                    name: "desk",
+                    platform: "linux",
+                    capabilities: &[],
+                    specs: &[],
+                    expected_revision: 0,
+                })?;
+                store.activate("ene", Some("c1"), 0)?;
+                let connection = Connection {
+                    id: "stt".into(),
+                    name: "local".into(),
+                    enabled: true,
+                    kind: ConnectionKind::Stt,
+                    config: ConnectionConfig::Stt(SttConnection {
+                        endpoint: Endpoint {
+                            adapter: "raw".into(),
+                            endpoint: format!("http://{address}"),
+                            options_schema: String::new(),
+                            options: r#"{"protocol":"raw"}"#.into(),
+                        },
+                        language_hints: Vec::new(),
+                    }),
+                    credential_state: CredentialState::Absent,
+                    revision: 1,
+                    last_check: None,
+                };
+                store.update_settings(store.settings()?.revision, &[(connection, 0)], &[])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let chunk = |client: &str, revision, rate, sample: i16, speaking| {
+            StreamMessage::from_message(&w::AudioInputChunk {
+                client_id: client.into(),
+                activation_revision: revision,
+                sample_rate: rate,
+                pcm_data: sample.to_le_bytes().repeat(1_600),
+                is_companion_speaking: speaking,
+                ..Default::default()
+            })
+        };
+        let messages = vec![
+            chunk("c1", 1, 24_000, 1, false),
+            chunk("other", 1, 24_000, 2, false),
+            chunk("c1", 2, 24_000, 3, false),
+            chunk("", 0, 0, 4, true),
+            chunk("", 0, 16_000, 5, false),
+            chunk("", 0, 24_000, 6, false),
+            StreamMessage::from_message(&w::AudioInputChunk::default()),
+        ];
+        let service = Services {
+            runtime: runtime.clone(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        };
+        let response = service
+            .stream_audio_input(
+                RequestContext::new(http::HeaderMap::new()),
+                Box::pin(futures_util::stream::iter(messages.into_iter().map(Ok))),
+            )
+            .await
+            .unwrap();
+        let events: Vec<_> = response.body.collect().await;
+        let finals: Vec<_> = events
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|event| event.is_final)
+            .map(|event| event.text)
+            .collect();
+        assert_eq!(finals, ["capture 1", "capture 2"]);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            [(16_000, vec![5; 1_600]), (24_000, vec![6; 1_600])]
+        );
+        runtime.shutdown().await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
     #[derive(Resource, Default)]
     struct Frames(u64);
 
@@ -371,7 +501,9 @@ mod tests {
         };
         let first = request();
         let old = runtime
-            .read(move |app| voice::subscribe_audio(app.world_mut(), first))
+            .read(move |app| {
+                voice::subscribe_audio(app.world_mut(), &first.client_id, first.activation_revision)
+            })
             .await
             .unwrap();
         let old_guard = StreamGuard {
@@ -381,7 +513,13 @@ mod tests {
         };
         let second = request();
         let mut current = runtime
-            .read(move |app| voice::subscribe_audio(app.world_mut(), second))
+            .read(move |app| {
+                voice::subscribe_audio(
+                    app.world_mut(),
+                    &second.client_id,
+                    second.activation_revision,
+                )
+            })
             .await
             .unwrap();
         let current_guard = StreamGuard {

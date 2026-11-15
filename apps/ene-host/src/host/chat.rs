@@ -168,16 +168,18 @@ pub(crate) fn stop(world: &mut World, request: w::StopRequest) -> Result<()> {
 }
 
 /// The conversation transcript, oldest first, paged by message id.
-pub(crate) fn history(world: &mut World, request: w::HistoryRequest) -> Result<w::History> {
+pub(crate) fn history(
+    world: &mut World,
+    request: &w::HistoryRequestView<'_>,
+) -> Result<w::History> {
     let store = world.resource::<Store>().clone();
     store
-        .companion(&request.companion_id)?
+        .companion(request.companion_id)?
         .ok_or_else(|| HostError::not_found("companion not found"))?;
-    let agent = agent::agent_of(world, &request.companion_id)
+    let agent = agent::agent_of(world, request.companion_id)
         .ok_or_else(|| HostError::not_found("companion agent not found"))?;
     let after = request
         .cursor
-        .as_deref()
         .and_then(|cursor| cursor.parse::<u64>().ok())
         .map(|after| after + 1);
     let limit = request.limit.unwrap_or(100).clamp(1, 200) as usize;
@@ -190,7 +192,7 @@ pub(crate) fn history(world: &mut World, request: w::HistoryRequest) -> Result<w
             let Some(text) = agent::entry_text(&entry) else {
                 continue;
             };
-            items.push(message(&request.companion_id, "", &entry, text));
+            items.push(message(request.companion_id, "", &entry, text));
         }
     }
     if items.len() > limit {
@@ -203,8 +205,11 @@ pub(crate) fn history(world: &mut World, request: w::HistoryRequest) -> Result<w
 }
 
 /// One message by id.
-pub(crate) fn message_by_id(world: &mut World, request: w::MessageRequest) -> Result<w::Message> {
-    let agent = agent::agent_of(world, &request.companion_id)
+pub(crate) fn message_by_id(
+    world: &mut World,
+    request: &w::MessageRequestView<'_>,
+) -> Result<w::Message> {
+    let agent = agent::agent_of(world, request.companion_id)
         .ok_or_else(|| HostError::not_found("companion agent not found"))?;
     let wanted = request
         .message_id
@@ -220,7 +225,7 @@ pub(crate) fn message_by_id(world: &mut World, request: w::MessageRequest) -> Re
         let Some(text) = agent::entry_text(&entry) else {
             continue;
         };
-        return Ok(message(&request.companion_id, "", &entry, text));
+        return Ok(message(request.companion_id, "", &entry, text));
     }
     Err(HostError::not_found("message not found"))
 }

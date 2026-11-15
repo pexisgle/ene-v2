@@ -1322,31 +1322,34 @@ pub(crate) struct InputBinding {
 }
 
 impl InputBinding {
-    pub(crate) fn accepts(&self, chunk: &w::AudioInputChunk) -> bool {
-        (chunk.client_id.is_empty() || chunk.client_id == self.client_id)
-            && (chunk.activation_revision == 0
-                || chunk.activation_revision == self.activation_revision)
+    pub(crate) fn accepts(&self, client_id: &str, activation_revision: u64) -> bool {
+        (client_id.is_empty() || client_id == self.client_id)
+            && (activation_revision == 0 || activation_revision == self.activation_revision)
     }
 }
 
-pub(crate) fn bind_input(world: &World, chunk: &w::AudioInputChunk) -> Result<InputBinding> {
-    if chunk.client_id.is_empty() {
+pub(crate) fn bind_input(
+    world: &World,
+    client_id: &str,
+    activation_revision: u64,
+) -> Result<InputBinding> {
+    if client_id.is_empty() {
         return Err(HostError::invalid("client_id is required for audio input"));
     }
-    db::validate_id(&chunk.client_id)?;
+    db::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>() else {
         return Err(HostError::unavailable("the host state is not available"));
     };
-    if store.client(&chunk.client_id)?.is_none() {
+    if store.client(client_id)?.is_none() {
         return Err(HostError::not_found("client not found"));
     }
     let activations = store.activations()?;
     let active = activations
         .iter()
-        .any(|activation| activation.client_id.as_deref() == Some(chunk.client_id.as_str()));
+        .any(|activation| activation.client_id.as_deref() == Some(client_id));
     let matched = activations.iter().any(|activation| {
-        activation.client_id.as_deref() == Some(chunk.client_id.as_str())
-            && activation.revision == chunk.activation_revision
+        activation.client_id.as_deref() == Some(client_id)
+            && activation.revision == activation_revision
     });
     if !active {
         return Err(HostError::conflict(
@@ -1359,8 +1362,8 @@ pub(crate) fn bind_input(world: &World, chunk: &w::AudioInputChunk) -> Result<In
         ));
     }
     Ok(InputBinding {
-        client_id: chunk.client_id.clone(),
-        activation_revision: chunk.activation_revision,
+        client_id: client_id.to_owned(),
+        activation_revision,
     })
 }
 
@@ -1494,22 +1497,23 @@ pub(crate) struct AudioSubscription {
 
 pub(crate) fn subscribe_audio(
     world: &mut World,
-    request: w::SubscribeAudioRequest,
+    client_id: &str,
+    activation_revision: u64,
 ) -> Result<AudioSubscription> {
-    if request.client_id.is_empty() {
+    if client_id.is_empty() {
         return Err(HostError::invalid("client_id is required"));
     }
-    db::validate_id(&request.client_id)?;
+    db::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return Err(HostError::unavailable("the host state is not available"));
     };
-    if store.client(&request.client_id)?.is_none() {
+    if store.client(client_id)?.is_none() {
         return Err(HostError::not_found("client not found"));
     }
     let activations = store.activations()?;
     if !activations
         .iter()
-        .any(|activation| activation.client_id.as_deref() == Some(request.client_id.as_str()))
+        .any(|activation| activation.client_id.as_deref() == Some(client_id))
     {
         return Err(HostError::conflict(
             "the client is not the active client of any companion",
@@ -1518,8 +1522,8 @@ pub(crate) fn subscribe_audio(
     let owned: Vec<String> = activations
         .iter()
         .filter(|activation| {
-            activation.client_id.as_deref() == Some(request.client_id.as_str())
-                && activation.revision == request.activation_revision
+            activation.client_id.as_deref() == Some(client_id)
+                && activation.revision == activation_revision
         })
         .map(|activation| activation.companion_id.clone())
         .collect();
@@ -1531,13 +1535,9 @@ pub(crate) fn subscribe_audio(
     let Some(voice) = world.get_resource::<Voice>().cloned() else {
         return Err(HostError::internal("the voice plugin is not installed"));
     };
-    let subscription = voice.register(&request.client_id);
+    let subscription = voice.register(client_id);
     for companion_id in owned {
-        voice.publish(
-            &companion_id,
-            &request.client_id,
-            request.activation_revision,
-        );
+        voice.publish(&companion_id, client_id, activation_revision);
     }
     Ok(subscription)
 }

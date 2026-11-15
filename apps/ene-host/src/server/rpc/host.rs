@@ -22,23 +22,23 @@ impl w::HostService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::SubscribeRequest>,
     ) -> ServiceResult<ServiceStream<w::Notification>> {
-        let request = request.to_owned_message();
-        let subscriber = (!request.client_id.is_empty()).then(|| request.client_id.clone());
+        let subscriber = (!request.client_id.is_empty()).then(|| request.client_id.to_owned());
         let subscriber_view = subscriber.clone();
-        let cursor = request.cursor.as_option().cloned();
+        let cursor = request.cursor.as_option().map(|cursor| w::Cursor {
+            epoch: cursor.epoch.to_owned(),
+            seq: cursor.seq,
+            ..Default::default()
+        });
         // A cursor from this epoch resumes from the replay ring; an unknown or
         // stale cursor (or a gap) falls back to a fresh snapshot.
-        let replayed = match cursor.as_ref() {
+        let replayed = match cursor {
             Some(cursor) => self
                 .runtime
-                .read({
-                    let cursor = cursor.clone();
-                    move |app| {
-                        Ok(app
-                            .world()
-                            .resource::<crate::host::notify::Notifier>()
-                            .replay(&cursor))
-                    }
+                .read(move |app| {
+                    Ok(app
+                        .world()
+                        .resource::<crate::host::notify::Notifier>()
+                        .replay(&cursor))
                 })
                 .await
                 .map_err(ConnectError::from)?,
@@ -155,5 +155,94 @@ fn visible(event: &w::Notification, subscriber: Option<&str>) -> bool {
     match (event.client_id.as_deref(), subscriber) {
         (Some(target), Some(subscriber)) => target == subscriber,
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{Runtime, db::clients::ClientDeclaration, notify::Notifier};
+    use connectrpc::StreamMessage;
+    use tokio_util::sync::CancellationToken;
+    use w::HostService;
+
+    fn event(label: &str) -> w::notification::Event {
+        w::notification::Event::Generic(Box::new(w::HostEvent {
+            kind: label.into(),
+            ..Default::default()
+        }))
+    }
+
+    #[tokio::test]
+    async fn subscription_replays_and_filters_after_request_body_is_dropped() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let cursor = runtime
+            .read(|app| {
+                app.world()
+                    .resource::<Store>()
+                    .register_client(&ClientDeclaration {
+                        id: "c1",
+                        name: "desk",
+                        platform: "linux",
+                        capabilities: &[],
+                        specs: &[],
+                        expected_revision: 0,
+                    })?;
+                Ok(app.world().resource::<Notifier>().cursor())
+            })
+            .await
+            .unwrap();
+        runtime
+            .call(|app| {
+                let mut notifier = app.world_mut().resource_mut::<Notifier>();
+                notifier.push(None, Some("other"), event("hidden"));
+                notifier.push(None, Some("c1"), event("replayed"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let shutdown = CancellationToken::new();
+        let service = Services {
+            runtime: runtime.clone(),
+            shutdown: shutdown.clone(),
+        };
+        let mut stream = {
+            let message = StreamMessage::from_message(&w::SubscribeRequest {
+                client_id: "c1".into(),
+                cursor: Some(cursor).into(),
+                ..Default::default()
+            });
+            service
+                .subscribe(
+                    RequestContext::new(http::HeaderMap::new()),
+                    ServiceRequest::from_parts(message.view(), message.bytes()),
+                )
+                .await
+                .unwrap()
+                .body
+        };
+        let replayed = stream.next().await.unwrap().unwrap();
+        assert_eq!(replayed.client_id.as_deref(), Some("c1"));
+        assert!(
+            matches!(replayed.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "replayed")
+        );
+        runtime
+            .call(|app| {
+                let mut notifier = app.world_mut().resource_mut::<Notifier>();
+                notifier.push(None, Some("other"), event("hidden live"));
+                notifier.push(None, Some("c1"), event("live"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let live = stream.next().await.unwrap().unwrap();
+        assert!(
+            matches!(live.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "live")
+        );
+        assert!(live.cursor.as_option().unwrap().seq > replayed.cursor.as_option().unwrap().seq);
+        shutdown.cancel();
+        assert!(stream.next().await.is_none());
+        runtime.shutdown().await.unwrap();
     }
 }

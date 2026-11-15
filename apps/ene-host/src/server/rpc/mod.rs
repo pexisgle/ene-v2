@@ -1,10 +1,20 @@
 //! Connect service implementations and the owner-authentication boundary.
 
-/// Declares a service method that hands its owned request to one host
-/// operation. The first form selects the read-only lane, `app` passes the
-/// `App` itself instead of its world, and the bare form is a write on the
-/// world; the expansion keeps the connectrpc call/read shape.
+/// Declares a host operation. `read_view` retains the byte owner until the
+/// queued read borrows it. `read` materializes an owned message, `app` passes
+/// the `App`, and the bare form writes to the world.
 macro_rules! request {
+    (read_view $name:ident, $request:ty, $response:ty, $op:path) => {
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, $request>,
+        ) -> connectrpc::ServiceResult<$response> {
+            let request = request.to_owned_view();
+            self.read(move |app| $op(app.world_mut(), request.reborrow()))
+                .await
+        }
+    };
     (read $name:ident, $request:ty, $response:ty, $op:path) => {
         async fn $name(
             &self,

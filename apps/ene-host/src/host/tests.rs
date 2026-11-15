@@ -190,8 +190,8 @@ impl Harness {
         self.run_until(move |world| {
             chat::history(
                 world,
-                w::HistoryRequest {
-                    companion_id: companion.clone(),
+                &w::HistoryRequestView {
+                    companion_id: &companion,
                     ..Default::default()
                 },
             )
@@ -202,8 +202,8 @@ impl Harness {
     fn history(&mut self) -> w::History {
         chat::history(
             self.app.world_mut(),
-            w::HistoryRequest {
-                companion_id: self.companion.clone(),
+            &w::HistoryRequestView {
+                companion_id: &self.companion,
                 ..Default::default()
             },
         )
@@ -1351,8 +1351,8 @@ fn a_delivery_without_a_bound_model_starts_no_turn() {
 fn history_texts(harness: &mut Harness) -> Vec<String> {
     chat::history(
         harness.app.world_mut(),
-        w::HistoryRequest {
-            companion_id: harness.companion.clone(),
+        &w::HistoryRequestView {
+            companion_id: &harness.companion,
             ..Default::default()
         },
     )
