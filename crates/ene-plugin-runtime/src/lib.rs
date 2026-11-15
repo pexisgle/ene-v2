@@ -1,6 +1,7 @@
 pub mod instance;
 pub mod limits;
 pub mod package;
+pub mod service;
 pub use package::Package;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

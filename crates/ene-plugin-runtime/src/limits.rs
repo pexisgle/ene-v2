@@ -12,6 +12,16 @@ pub const MAX_STREAM_EVENTS: u64 = 65_536;
 pub const MAX_SERVICE_CALLS: usize = 4096;
 /// Aggregate request/response budget for application services in one invocation.
 pub const MAX_SERVICE_BYTES: usize = 16 * 1024 * 1024;
+/// The most of one brokered HTTP reply body the host reads. A plugin cannot
+/// raise it: the budget belongs to the broker, not to the request.
+pub const MAX_HTTP_BODY: usize = 16 * 1024 * 1024;
+/// Raw bytes of one brokered HTTP reply chunk. Base64 inflates by 4/3, so this
+/// keeps the encoded chunk under [`MAX_CHUNK`] with room for its envelope.
+pub const MAX_HTTP_CHUNK: usize = 64 * 1024;
+/// The most reply headers the broker copies into a chunk.
+pub const MAX_HTTP_HEADERS: usize = 8 * 1024;
+/// How long one brokered HTTP exchange may take, end to end.
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Aggregate event budget for one invocation, including provider streams.
 pub const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INSTANCES: usize = 16;

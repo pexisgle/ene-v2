@@ -11,7 +11,10 @@ workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 ene-plugin.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+base64.workspace = true
+reqwest.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros"] }
 tokio-util.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
