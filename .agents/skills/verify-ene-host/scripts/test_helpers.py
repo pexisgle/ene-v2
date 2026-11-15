@@ -40,6 +40,14 @@ class FragmentedSocket:
 
 
 class ReaderTests(unittest.TestCase):
+    def setUp(self):
+        def expired(signum, frame):
+            raise AssertionError("reader exceeded the test watchdog")
+        previous = signal.signal(signal.SIGALRM, expired)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        self.addCleanup(signal.alarm, 0)
+        signal.alarm(2)
+
     def test_fragmented_lines_and_exact_body(self):
         reader = connect.Reader(FragmentedSocket([
             b"HTTP/1.", b"1 200 OK\r", b"\nContent-Len", b"gth: 7\r\n\r", b"\n{\"n\"", b":1}",
@@ -234,10 +242,50 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(process.wait(timeout=1), -signal.SIGTERM)
             self.assertTrue((self.run / "state").exists())
 
-    def test_cleanup_failure_is_not_success(self):
-        result = self.host(script='rm() { return 1; }; stop')
+    def test_failed_launch_reaps_host_and_removes_discovery(self):
+        fixture = self.run / "host-fixture"
+        fixture.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+        fixture.chmod(0o700)
+        result = self.host(script='binary="$run/host-fixture"; wait_ready() { cp "$identity_file" "$run/launched.identity"; return 1; }; launch')
         self.assertNotEqual(result.returncode, 0)
-        self.assertTrue((self.run / "state").exists())
+        identity = json.loads((self.run / "launched.identity").read_text())
+        self.assertFalse(Path(f'/proc/{identity["pid"]}').exists())
+        self.assertFalse((self.run / "host.pid").exists())
+        self.assertFalse((self.run / "host.identity").exists())
+        self.assertFalse((self.run / "runtime" / "connection.json").exists())
+
+    def test_capture_failure_terminates_only_owned_child(self):
+        with self.owned() as (process, _):
+            (self.run / "host.identity").unlink()
+            (self.run / "host.identity").mkdir()
+            result = subprocess.run([sys.executable, str(SCRIPTS / "process.py"), "capture", str(self.run), str(process.pid)], capture_output=True, text=True, timeout=2)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(process.wait(timeout=1), -signal.SIGTERM)
+
+    def test_capture_records_owned_child_and_rejects_parent(self):
+        with self.owned() as (process, identity):
+            args = [sys.executable, str(SCRIPTS / "process.py"), "capture", str(self.run)]
+            result = subprocess.run(args + [str(process.pid)], capture_output=True, text=True, timeout=2)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads((self.run / "host.identity").read_text()), identity)
+            result = subprocess.run(args + [str(os.getpid())], capture_output=True, text=True, timeout=2)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIsNone(process.poll())
+
+    def test_already_exited_host_can_be_cleaned(self):
+        with self.owned() as (process, _):
+            process.terminate()
+            process.wait(timeout=1)
+            result = self.host()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((self.run / "runtime").exists())
+
+    def test_cleanup_failure_is_not_success(self):
+        for script in ('rm() { return 1; }; stop', 'rm() { :; }; stop'):
+            with self.subTest(script=script):
+                result = self.host(script=script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue((self.run / "state").exists())
 
 
 if __name__ == "__main__":

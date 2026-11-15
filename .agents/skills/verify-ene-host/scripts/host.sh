@@ -26,6 +26,7 @@ run_id=${2:-$(date +%Y%m%d-%H%M%S)}
 run=${VERIFY_RUN_DIR:-$root/$run_id}
 connection=$run/runtime/connection.json
 pid_file=$run/host.pid
+identity_file=$run/host.identity
 binary=$repo/target/debug/ene-host
 
 fail() { echo "host.sh: $*" >&2; exit 1; }
@@ -45,8 +46,9 @@ build() {
 wait_ready() {
   local deadline=$((SECONDS + 30))
   while [ $SECONDS -lt $deadline ]; do
+    python3 "$here/process.py" alive "$run" || return 1
     if [ -s "$connection" ] \
-      && ENE_HOST_CONNECTION=$connection python3 "$here/connect.py" rpc ene.host.v1.HostService/GetSnapshot >/dev/null 2>&1; then
+      && ENE_HOST_CONNECTION=$connection python3 "$here/connect.py" rpc ene.host.v1.HostService/GetSnapshot --timeout 1 >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
@@ -55,14 +57,19 @@ wait_ready() {
 }
 
 launch() {
+  rm -f "$connection" || fail "could not remove stale host discovery"
   # The host creates state/ and runtime/ itself and insists on 0700; do not pre-create them.
   ENE_HOST_STATE_DIR=$run/state ENE_HOST_RUNTIME_DIR=$run/runtime \
     "$binary" >/dev/null 2>"$run/host.stderr" &
-  echo $! >"$pid_file"
+  local pid=$!
+  if ! python3 "$here/process.py" capture "$run" "$pid"; then
+    wait "$pid" 2>/dev/null
+    fail "could not capture the launched host identity"
+  fi
   if ! wait_ready; then
     tail -n 20 "$run/host.stderr" >&2
-    kill -9 "$(cat "$pid_file")" 2>/dev/null
-    rm -f "$pid_file"
+    terminate
+    wait "$pid" 2>/dev/null
     fail "host did not become ready within 30s"
   fi
   cp "$connection" "$run/evidence/connection.json"
@@ -71,7 +78,9 @@ launch() {
 }
 
 start() {
-  [ -e "$run" ] && [ -s "$pid_file" ] && fail "run directory $run already has a host; stop it first"
+  if [ -e "$pid_file" ] || [ -e "$identity_file" ]; then
+    fail "run directory $run already has a host record; stop it first"
+  fi
   mkdir -p "$run/evidence"
   build
   launch
@@ -79,16 +88,8 @@ start() {
 
 # SIGTERM the recorded host and wait. Keeps state/, unlike stop.
 terminate() {
-  [ -s "$pid_file" ] || fail "no host pid in $run; start one first"
-  local pid
-  pid=$(cat "$pid_file")
-  kill -TERM "$pid" 2>/dev/null
-  for _ in $(seq 1 300); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL "$pid" 2>/dev/null
-    echo "host.sh: host $pid ignored SIGTERM and was killed" >&2
-  fi
-  rm -f "$pid_file"
+  python3 "$here/process.py" terminate "$run" || fail "refused host termination or could not verify exit"
+  rm -f "$pid_file" "$identity_file" "$connection" || fail "could not remove host discovery files"
 }
 
 # Restart on the same state: the persistence check that stop cannot provide.
@@ -104,7 +105,7 @@ doctor() {
   status() { # status <ok|bad> <check> <detail>
     if [ "$1" = ok ]; then printf 'PASS  %s\n' "$2"; else printf 'FAIL  %s (%s)\n' "$2" "$3"; rc=1; fi
   }
-  [ -s "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null \
+  [ -s "$pid_file" ] && python3 "$here/process.py" alive "$run" \
     && status ok "host process is alive (pid $(cat "$pid_file"))" \
     || status bad "host process is alive" "no live pid in $pid_file"
   [ -s "$connection" ] \
@@ -131,9 +132,14 @@ doctor() {
 }
 
 stop() {
-  [ -s "$pid_file" ] && terminate
+  if [ -e "$pid_file" ] || [ -e "$identity_file" ]; then
+    terminate
+  fi
   # Scratch state only; evidence/ and the host log stay for the proof.
-  rm -rf "$run/state" "$run/runtime"
+  rm -rf "$run/state" "$run/runtime" || fail "could not remove scratch directories"
+  if [ -e "$run/state" ] || [ -L "$run/state" ] || [ -e "$run/runtime" ] || [ -L "$run/runtime" ]; then
+    fail "scratch directories remain after stop"
+  fi
   echo "stopped; evidence kept in $run/evidence"
 }
 

@@ -39,17 +39,17 @@ class Reader:
     def __init__(self, sock, timeout):
         self.sock = sock
         self.buf = b""
-        self.timeout = timeout
-        self.sock.settimeout(min(timeout, 0.5))
+        self.deadline = time.monotonic() + timeout
 
     def fill(self):
         while True:
-            if self.buf:
-                return
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("timed out reading the response")
+            self.sock.settimeout(min(remaining, 0.5))
             try:
                 data = self.sock.recv(65536)
             except socket.timeout:
-                self.sock.settimeout(min(self.timeout, 0.5))
                 continue
             if not data:
                 raise EOFError("connection closed")
@@ -158,39 +158,34 @@ def open_call(target, path, body, headers, timeout):
     request.append(f"Content-Length: {len(body)}")
     request.append("")
     request.append("")
-    sock.sendall("\r\n".join(request).encode() + body)
-
-    reader = Reader(sock, timeout)
-    status_line = reader.read_until(b"\r\n").decode("latin-1")
-    parts = status_line.split(" ", 2)
     try:
-        status = int(parts[1])
-    except (IndexError, ValueError) as error:
-        raise ProtocolError(f"bad status line: {status_line!r}") from error
-    response_headers = {}
-    while True:
-        line = reader.read_until(b"\r\n")
-        if line == b"\r\n":
-            break
-        key, _, value = line.partition(b":")
-        response_headers[key.strip().lower().decode("latin-1")] = value.strip().decode("latin-1")
-    return sock, reader, status, response_headers
+        sock.sendall("\r\n".join(request).encode() + body)
+        reader = Reader(sock, timeout)
+        status_line = reader.read_until(b"\r\n").decode("latin-1")
+        parts = status_line.split(" ", 2)
+        try:
+            status = int(parts[1])
+        except (IndexError, ValueError) as error:
+            raise ProtocolError(f"bad status line: {status_line!r}") from error
+        response_headers = {}
+        while True:
+            line = reader.read_until(b"\r\n")
+            if line == b"\r\n":
+                break
+            key, _, value = line.partition(b":")
+            response_headers[key.strip().lower().decode("latin-1")] = value.strip().decode("latin-1")
+        return sock, reader, status, response_headers
+    except Exception:
+        sock.close()
+        raise
 
 
 def read_unary(reader, headers, timeout):
     body = b""
     if headers.get("transfer-encoding", "").lower() == "chunked":
         decoder = ChunkDecoder()
-        deadline = time.monotonic() + timeout
         while not decoder.done:
-            if time.monotonic() > deadline:
-                raise ProtocolError("timed out reading the response body")
-            try:
-                data = _drain(reader)
-            except EOFError:
-                break
-            if not data:
-                continue
+            data = _drain(reader)
             body += b"".join(decoder.feed(data))
     else:
         length = int(headers.get("content-length", "0"))
@@ -200,17 +195,11 @@ def read_unary(reader, headers, timeout):
 
 
 def _drain(reader):
-    """Return whatever the socket has right now; empty on timeout."""
-    if reader.buf:
-        out, reader.buf = reader.buf, b""
-        return out
-    try:
-        data = reader.sock.recv(65536)
-    except socket.timeout:
-        return b""
-    if not data:
-        raise EOFError("connection closed")
-    return data
+    """Return buffered data or wait for bytes within the reader's deadline."""
+    if not reader.buf:
+        reader.fill()
+    out, reader.buf = reader.buf, b""
+    return out
 
 
 def unary(args, target):
@@ -243,25 +232,20 @@ def stream(args, target):
     )
     sys.stderr.write(f"HTTP {status}\n")
     if status != 200:
-        payload = read_unary(reader, headers, args.timeout)
-        sys.stdout.write(payload.decode("utf-8", "replace") + "\n")
-        sock.close()
+        try:
+            payload = read_unary(reader, headers, args.timeout)
+            sys.stdout.write(payload.decode("utf-8", "replace") + "\n")
+        finally:
+            sock.close()
         return 1
 
     decoder = ChunkDecoder()
     envelopes = EnvelopeDecoder()
     received = 0
     error_seen = False
-    deadline = time.monotonic() + args.timeout
     try:
-        while received < args.count and not error_seen:
-            if time.monotonic() > deadline:
-                break
+        while received < args.count and not error_seen and not decoder.done:
             data = _drain(reader)
-            if not data:
-                if decoder.done:
-                    break
-                continue
             for chunk in decoder.feed(data):
                 for flags, payload in envelopes.feed(chunk):
                     # Each frame is written as it arrives, so this can run in the
@@ -271,7 +255,7 @@ def stream(args, target):
                     received += 1
                     if flags & 0x02 and b'"error"' in payload:
                         error_seen = True
-    except EOFError:
+    except (EOFError, TimeoutError):
         pass
     finally:
         sock.close()
@@ -301,7 +285,7 @@ def main():
     try:
         target = connection(path)
         return unary(args, target) if args.command == "rpc" else stream(args, target)
-    except (OSError, KeyError, ValueError, ProtocolError) as error:
+    except (OSError, EOFError, KeyError, ValueError, ProtocolError) as error:
         sys.stderr.write(f"error: {error}\n")
         return 2
 
