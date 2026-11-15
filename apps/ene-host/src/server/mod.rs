@@ -9,21 +9,8 @@ use std::error::Error;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const USAGE: &str = "ene-host takes no arguments.\n\
-The endpoint and Owner token are published in the runtime directory's connection.json.\n\
-ENE_HOST_STATE_DIR overrides the SQLite/rig directory.\n\
-ENE_HOST_RUNTIME_DIR overrides the discovery/lock directory.";
-
 #[tokio::main(flavor = "multi_thread")]
 pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-    if let Some(argument) = std::env::args_os().nth(1) {
-        if argument == "-h" || argument == "--help" {
-            println!("{USAGE}");
-            return Ok(());
-        }
-        eprintln!("{USAGE}");
-        return Err("invalid arguments".into());
-    }
     let (state, runtime_path) = crate::paths()?;
     // The host runs for one desktop: its log goes to stderr, warnings and
     // above unless `RUST_LOG` asks for more.

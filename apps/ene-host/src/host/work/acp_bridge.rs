@@ -7,7 +7,7 @@
 //! the socket, and runs the agent itself. The agent finds the proxy through
 //! `HTTPS_PROXY`, so a client that ignores that variable has no network at all
 //! rather than an open one.
-use clap::Parser;
+
 use std::{
     ffi::OsString,
     io,
@@ -173,14 +173,7 @@ async fn connect(mut client: tokio::net::UnixStream) -> io::Result<()> {
 /// `acp-relay --socket PATH --listen 127.0.0.1:PORT -- PROGRAM [ARGS...]`, run
 /// inside the sandbox. Serves loopback on `port`, runs the agent with its own
 /// stdio so the ACP conversation passes through untouched, and exits with it.
-pub(crate) fn relay(arguments: &[OsString]) -> i32 {
-    let args = match RelayArgs::try_parse_from(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let _ = error.print();
-            return error.exit_code();
-        }
-    };
+pub fn relay(args: RelayArgs) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -237,9 +230,15 @@ async fn forward(listener: tokio::net::TcpListener, socket: PathBuf) {
     }
 }
 
-#[derive(Parser)]
-#[command(name = "acp-relay", no_binary_name = true, args_override_self = true)]
-struct RelayArgs {
+// The relay's own arguments, as the launcher writes them
+// ([`super::acp::plan`]). The usage line is the relay's own name, because a
+// sandboxed launch prints it under that name rather than the host's.
+#[derive(clap::Args, Debug)]
+#[command(
+    args_override_self = true,
+    override_usage = "acp-relay [OPTIONS] --socket <SOCKET> -- <COMMAND>..."
+)]
+pub struct RelayArgs {
     #[arg(long, allow_hyphen_values = true)]
     socket: PathBuf,
     #[arg(
