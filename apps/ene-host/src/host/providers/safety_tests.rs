@@ -148,6 +148,18 @@ fn guest_write(data: &str) -> String {
 
 // Extism's enabled Wasmtime `wat` feature accepts this textual module directly.
 async fn providers(root: &Path, extension: Extension, body: &str, destination: &str) -> Providers {
+    let providers = installed_providers(root, extension, body, destination, json!({"type":"none"}));
+    providers.start("openrouter", extension).await.unwrap();
+    providers
+}
+
+fn installed_providers(
+    root: &Path,
+    extension: Extension,
+    body: &str,
+    destination: &str,
+    auth: serde_json::Value,
+) -> Providers {
     let path = root.join(PLUGINS_DIR).join("openrouter");
     let capabilities = r#"{"streaming_text":true,"model_list":true,"tool_calls":true}"#;
     let wasm = format!(
@@ -155,6 +167,9 @@ async fn providers(root: &Path, extension: Extension, body: &str, destination: &
         (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
         (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
         (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (import "extism:host/env" "length" (func $length (param i64) (result i64)))
+        (import "extism:host/env" "load_u8" (func $load (param i64) (result i32)))
+        (import "extism:host/env" "error_set" (func $error (param i64)))
         (import "extism:host/env" "input_length" (func $input_length (result i64)))
         (import "extism:host/env" "input_load_u8" (func $input_byte (param i64) (result i32)))
         (import "extism:host/user" "ene_service" (func $service (param i64) (result i64)))
@@ -179,16 +194,14 @@ async fn providers(root: &Path, extension: Extension, body: &str, destination: &
                 "provides": [extension], "uses": ["http"],
                 "provider": {
                     "id": "p08-plugin", "endpoint": destination,
-                    "auth": {"type": "none"}, "destinations": [destination],
+                    "auth": auth, "destinations": [destination],
                     "options": {"fixture_option": "preserved"}
                 }
             }]
         })
         .to_string(),
     );
-    let providers = Providers::load(root);
-    providers.start("openrouter", extension).await.unwrap();
-    providers
+    Providers::load(root)
 }
 
 fn reply(document: &str) -> String {
@@ -201,6 +214,46 @@ fn reply(document: &str) -> String {
 
 fn emit(document: &str) -> String {
     format!("{} local.get $p call $emit", guest_write(document))
+}
+
+fn service(document: serde_json::Value) -> String {
+    format!(
+        "{} local.get $p call $service local.set $p",
+        guest_write(&document.to_string())
+    )
+}
+
+fn assert_guest_bytes(needle: &str, input: bool, present: bool) -> String {
+    let length = if input {
+        "call $input_length"
+    } else {
+        "local.get $p call $length"
+    };
+    let mut matches = String::new();
+    for (offset, byte) in needle.bytes().enumerate() {
+        matches += &if input {
+            format!("local.get $i i64.const {offset} i64.add call $input_byte ")
+        } else {
+            format!("local.get $p local.get $i i64.add i64.const {offset} i64.add call $load ")
+        };
+        matches += &format!("i32.const {byte} i32.eq ");
+        if offset > 0 {
+            matches += "i32.and ";
+        }
+    }
+    let (missing, found) = if present {
+        ("unreachable", "br $found")
+    } else {
+        ("br $found", "unreachable")
+    };
+    format!(
+        "block $found i64.const 0 local.set $i loop $scan
+            local.get $i i64.const {} i64.add {length} i64.gt_u if {missing} end
+            {matches} if {found} end
+            local.get $i i64.const 1 i64.add local.set $i br $scan
+        end end",
+        needle.len()
+    )
 }
 
 fn observe_request() -> CompletionRequest {
@@ -508,6 +561,419 @@ async fn p10_listing_rejects_missing_or_failed_results() {
         incorrectly_healthy.is_empty(),
         "failed listing reported healthy: {incorrectly_healthy:?}"
     );
+}
+
+#[tokio::test]
+async fn p10_listing_starts_installed_plugins_and_accepts_empty_models() {
+    let native = NativeEndpoint::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let connection = connection(ConnectionKind::Llm, &native.base);
+    let store = store(root.path(), &connection);
+    let providers = installed_providers(
+        root.path(),
+        Extension::Llm,
+        &format!(
+            "{} {}",
+            emit(r#"{"type":"models","models":[]}"#),
+            reply("{}")
+        ),
+        &native.base,
+        json!({"type":"none"}),
+    );
+    assert!(providers.running("openrouter", Extension::Llm).is_none());
+    for _ in 0..2 {
+        let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+        assert!(check.healthy, "{:?}", check.failure);
+        assert_eq!(check.resources, ["m"]);
+    }
+    assert!(providers.running("openrouter", Extension::Llm).is_some());
+    native.assert_requests(0);
+}
+
+#[test]
+fn p10_concurrent_cold_probes_share_startup_without_admission_failures() {
+    use std::{future::Future, task::Poll, time::Duration};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let native = NativeEndpoint::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let connection = connection(ConnectionKind::Llm, &native.base);
+        let store = store(root.path(), &connection);
+        let credentials = Credentials::new(true);
+        let providers = installed_providers(
+            root.path(),
+            Extension::Llm,
+            &format!(
+                "{} {}",
+                emit(
+                    r#"{"type":"models","models":[{"id":"shared-plugin-model","name":"Shared"}]}"#
+                ),
+                reply("{}")
+            ),
+            &native.base,
+            json!({"type":"none"}),
+        );
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = entered.send(());
+            let _ = blocked.recv();
+        });
+        ready.await.unwrap();
+        let mut probes: Vec<_> = (0..17)
+            .map(|_| Box::pin(model::probe(&store, &credentials, &connection, &providers)))
+            .collect();
+        let mut checks: Vec<_> = (0..probes.len()).map(|_| None).collect();
+        std::future::poll_fn(|cx| {
+            for (probe, check) in probes.iter_mut().zip(&mut checks) {
+                if let Poll::Ready(result) = probe.as_mut().poll(cx) {
+                    *check = Some(result);
+                }
+            }
+            Poll::Ready(())
+        })
+        .await;
+        assert!(providers.running("openrouter", Extension::Llm).is_none());
+        drop(release);
+        blocker.await.unwrap();
+        let checks = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut completed = Vec::new();
+            for (probe, check) in probes.into_iter().zip(checks) {
+                completed.push(match check {
+                    Some(check) => check,
+                    None => probe.await,
+                });
+            }
+            completed
+        })
+        .await
+        .expect("concurrent cold probes did not finish");
+        let failures: Vec<_> = checks
+            .iter()
+            .enumerate()
+            .filter(|(_, check)| !check.healthy)
+            .map(|(index, check)| (index, &check.failure))
+            .collect();
+        native.assert_requests(0);
+        assert!(failures.is_empty(), "cold probe failures: {failures:?}");
+        for check in checks {
+            assert!(check.resources.contains(&"shared-plugin-model".to_owned()));
+            assert!(!check.resources.contains(&"native-model".to_owned()));
+        }
+    });
+}
+
+#[test]
+fn p10_cold_probe_deadline_includes_queued_startup_and_allows_retry() {
+    use std::time::{Duration, Instant};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let native = NativeEndpoint::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let connection = connection(ConnectionKind::Llm, &native.base);
+        let store = store(root.path(), &connection);
+        let credentials = Credentials::new(true);
+        let providers = installed_providers(
+            root.path(),
+            Extension::Llm,
+            &format!(
+                "{} {}",
+                emit(r#"{"type":"models","models":[]}"#),
+                reply("{}")
+            ),
+            &native.base,
+            json!({"type":"none"}),
+        );
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = entered.send(());
+            let _ = blocked.recv();
+        });
+        ready.await.unwrap();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(18),
+            model::probe(&store, &credentials, &connection, &providers),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        drop(release);
+        blocker.await.unwrap();
+        let check = result.expect("cold startup escaped the 15-second probe deadline");
+        assert!(!check.healthy);
+        assert_eq!(
+            check.failure.unwrap().message,
+            "the plugin did not answer in 15s"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(15),
+            "deadline fired early: {elapsed:?}"
+        );
+        assert!(providers.running("openrouter", Extension::Llm).is_none());
+        let retry = tokio::time::timeout(
+            Duration::from_secs(5),
+            model::probe(&store, &credentials, &connection, &providers),
+        )
+        .await
+        .expect("cancelled startup poisoned the next probe");
+        assert!(retry.healthy, "{:?}", retry.failure);
+        native.assert_requests(0);
+    });
+}
+
+#[tokio::test]
+async fn p10_listing_initialization_failure_never_selects_native() {
+    let native = NativeEndpoint::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let connection = connection(ConnectionKind::Llm, &native.base);
+    let store = store(root.path(), &connection);
+    installed_providers(
+        root.path(),
+        Extension::Llm,
+        &reply("{}"),
+        &native.base,
+        json!({"type":"none"}),
+    );
+    let path = root.path().join(PLUGINS_DIR).join("openrouter/main.wasm");
+    let wasm = std::fs::read_to_string(&path).unwrap().replace(
+        "(func (export \"ene_initialize\") (result i32) (local $p i64)",
+        "(func (export \"ene_initialize\") (result i32) (local $p i64) unreachable",
+    );
+    super::tests::write(path, wasm);
+    let providers = Providers::load(root.path());
+    assert!(providers.get("openrouter").is_some());
+    let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+    assert!(!check.healthy);
+    let failure = check.failure.unwrap();
+    assert_eq!(failure.code, "connection_check");
+    assert!(
+        failure.message.contains("plugin load:"),
+        "{}",
+        failure.message
+    );
+    assert!(providers.running("openrouter", Extension::Llm).is_none());
+    native.assert_requests(0);
+}
+
+#[tokio::test]
+async fn p10_listing_uses_authorized_http_and_connection_credentials() {
+    use base64::Engine;
+    let native = NativeEndpoint::start().await;
+    let upstream = NativeEndpoint::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let connection = connection(ConnectionKind::Llm, &native.base);
+    let store = store(root.path(), &connection);
+    let secret = "listing-host-secret";
+    let credentials = Credentials::new(true);
+    credentials.remember("another-connection", "wrong-secret".into());
+    credentials.remember(&connection.id, secret.into());
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(br#"{"data":[{"id":"native-model"}]}"#);
+    let body = [
+        assert_guest_bytes(&format!("\"endpoint\":\"{}\"", native.base), true, true),
+        assert_guest_bytes(r#""options":{"fixture_option":"preserved"}"#, true, true),
+        assert_guest_bytes(secret, true, false),
+        assert_guest_bytes("replacement-secret", true, false),
+        service(json!({"type":"http_open", "request":{
+            "method":"GET", "url":format!("{}/models", upstream.base), "headers":{}
+        }})),
+        assert_guest_bytes(r#""Ok":{"#, false, true),
+        service(json!({"type":"http_read", "handle":"http-1"})),
+        assert_guest_bytes(&format!("\"data_base64\":\"{encoded}\""), false, true),
+        assert_guest_bytes(r#""done":true"#, false, true),
+        assert_guest_bytes(secret, false, false),
+        assert_guest_bytes("replacement-secret", false, false),
+        assert_guest_bytes("private-response", false, false),
+        assert_guest_bytes("set-cookie", false, false),
+        service(json!({"type":"http_close", "handle":"http-1"})),
+        assert_guest_bytes(r#"{"Ok":null}"#, false, true),
+        emit(r#"{"type":"models","models":[{"id":"plugin-http-model","name":"HTTP"}]}"#),
+        reply("{}"),
+    ]
+    .join(" ");
+    let providers = installed_providers(
+        root.path(),
+        Extension::Llm,
+        &body,
+        &upstream.base,
+        json!({"type":"bearer"}),
+    );
+    for key in [secret, "replacement-secret"] {
+        credentials.remember(&connection.id, key.into());
+        let check = model::probe(&store, &credentials, &connection, &providers).await;
+        assert!(check.healthy, "{:?}", check.failure);
+        assert!(check.resources.contains(&"plugin-http-model".into()));
+        assert!(!check.resources.contains(&"native-model".into()));
+        assert_eq!(
+            upstream.headers.lock().unwrap().last().unwrap()["authorization"]
+                .to_str()
+                .unwrap(),
+            format!("Bearer {key}")
+        );
+    }
+    upstream.assert_requests(2);
+    native.assert_requests(0);
+}
+
+#[tokio::test]
+async fn p10_listing_http_failures_never_select_native_or_expand_origins() {
+    for denied in [true, false] {
+        let native = NativeEndpoint::start().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let approved = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let root = tempfile::tempdir().unwrap();
+        let connection = connection(ConnectionKind::Llm, &native.base);
+        let store = store(root.path(), &connection);
+        let destination = if denied { &native.base } else { &approved };
+        let body = format!(
+            "{} local.get $p call $error i32.const 1 return",
+            service(json!({"type":"http_open", "request":{
+                "method":"GET", "url":destination, "headers":{}
+            }}))
+        );
+        let providers = providers(root.path(), Extension::Llm, &body, &approved).await;
+        let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+        assert!(!check.healthy);
+        let failure = check.failure.unwrap();
+        assert_eq!(failure.code, "connection_check");
+        let code = if denied {
+            "destination_denied"
+        } else {
+            "http_failed"
+        };
+        assert!(failure.message.contains(code), "{}", failure.message);
+        native.assert_requests(0);
+    }
+}
+
+#[tokio::test]
+async fn p10_listing_timeout_and_caller_drop_close_http() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for timeout in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let connection = connection(ConnectionKind::Llm, &base);
+        let body = format!(
+            "{} {} {}",
+            service(json!({
+                "type":"http_open", "request":{"method":"GET", "url":base, "headers":{}}
+            })),
+            emit(r#"{"type":"models","models":[]}"#),
+            reply("{}")
+        );
+        let providers = providers(root.path(), Extension::Llm, &body, &base).await;
+        let store = store(root.path(), &connection);
+        let credentials = Credentials::new(true);
+        let mut run = Box::pin(model::probe(&store, &credentials, &connection, &providers));
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                result = &mut run => panic!("listing returned before HTTP started: {result:?}"),
+                result = listener.accept() => result.unwrap(),
+            }
+        })
+        .await
+        .unwrap();
+        let mut request = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        assert!(String::from_utf8_lossy(&request).starts_with("GET / HTTP/1.1"));
+        if timeout {
+            let check = run.await;
+            assert!(!check.healthy);
+            assert_eq!(
+                check.failure.unwrap().message,
+                "the plugin did not answer in 15s"
+            );
+        } else {
+            drop(run);
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut byte = [0];
+            assert_eq!(
+                socket.read(&mut byte).await.unwrap(),
+                0,
+                "broker socket outlived listing"
+            );
+        })
+        .await
+        .expect("HTTP socket outlived the listing check");
+        let _ = socket.shutdown().await;
+        let check = tokio::time::timeout(
+            Duration::from_secs(2),
+            model::probe(&store, &credentials, &connection, &providers),
+        )
+        .await
+        .expect("the cancelled invocation kept the provider occupied");
+        assert!(!check.healthy);
+        assert!(check.failure.unwrap().message.contains("unavailable"));
+    }
+}
+
+#[tokio::test]
+async fn p10_bounded_stream_drains_beyond_capacity_and_closes_after_guest_success() {
+    use ene_plugin::{Event, Operation};
+    use std::time::Duration;
+    let root = tempfile::tempdir().unwrap();
+    let body = format!(
+        "{} {} {}",
+        format!("{} ", emit(r#"{"type":"delta","text":"chunk"}"#)).repeat(64),
+        emit(r#"{"type":"finished","reason":"stop"}"#),
+        reply("{}")
+    );
+    let providers = providers(root.path(), Extension::Llm, &body, "https://unused.example").await;
+    let running = providers.running("openrouter", Extension::Llm).unwrap();
+    let broker = http_broker(Arc::new(ene_plugin_runtime::service::DenyHttp)).unwrap();
+    let native = Arc::downgrade(&broker);
+    let services = BrokerServices::new(broker, running.provider().id.clone());
+    let (sender, mut events) = tokio::sync::mpsc::channel(16);
+    assert_eq!(sender.max_capacity(), 16);
+    let operation = Operation::Generate {
+        request: serde_json::from_value(json!({
+            "endpoint":"https://unused.example", "options":{}, "model":"m",
+            "preamble":"", "messages":[], "tools":[], "max_tokens":1
+        }))
+        .unwrap(),
+    };
+    let (result, collected) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            running.invoke_streaming(operation, services, sender),
+            async move {
+                let mut collected = Vec::new();
+                while let Some(event) = events.recv().await {
+                    collected.push(event);
+                }
+                collected
+            }
+        )
+    })
+    .await
+    .expect("bounded stream failed to drain or its channel never closed");
+    result.unwrap();
+    assert_eq!(collected.len(), 65);
+    assert!(
+        collected[..64]
+            .iter()
+            .all(|event| matches!(event, Event::Delta { text } if text == "chunk"))
+    );
+    assert!(matches!(&collected[64], Event::Finished { reason } if reason == "stop"));
+    assert!(native.upgrade().is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
