@@ -12,6 +12,10 @@
 //! what keeps that boundary synchronous, and it bounds the instance count to
 //! the plugins the operator installed rather than to the connections that
 //! happen to reference them.
+mod grant;
+
+pub(crate) use grant::Grant;
+
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};
 /// Started instances, keyed by the adapter and extension they serve.
