@@ -13,8 +13,10 @@
 //! the plugins the operator installed rather than to the connections that
 //! happen to reference them.
 mod grant;
+mod services;
 
 pub(crate) use grant::Grant;
+pub(crate) use services::BrokerServices;
 
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};
@@ -267,12 +269,33 @@ impl Running {
         services: Arc<dyn ene_plugin_runtime::instance::Services>,
     ) -> Result<serde_json::Value, HostError> {
         let (sender, mut events) = tokio::sync::mpsc::channel(16);
-        // The host does not consume a provider's streamed events yet; drain
-        // them so a plugin that emits does not block on a full channel.
+        // A caller that wants no stream still must drain it, or a plugin that
+        // emits would block on a full channel.
         tokio::spawn(async move { while events.recv().await.is_some() {} });
+        self.call(operation, services, sender).await
+    }
+
+    /// Runs one operation and hands its events to `events` as they arrive, so
+    /// a streamed answer reaches the caller while the plugin is still
+    /// producing it.
+    pub(crate) async fn invoke_streaming(
+        &self,
+        operation: ene_plugin::Operation,
+        services: Arc<dyn ene_plugin_runtime::instance::Services>,
+        events: tokio::sync::mpsc::Sender<ene_plugin::Event>,
+    ) -> Result<serde_json::Value, HostError> {
+        self.call(operation, services, events).await
+    }
+
+    async fn call(
+        &self,
+        operation: ene_plugin::Operation,
+        services: Arc<dyn ene_plugin_runtime::instance::Services>,
+        events: tokio::sync::mpsc::Sender<ene_plugin::Event>,
+    ) -> Result<serde_json::Value, HostError> {
         let mut instance = self.instance.lock().await;
         instance
-            .invoke(operation, services, sender, &self.cancel)
+            .invoke(operation, services, events, &self.cancel)
             .await
             .map_err(|error| HostError::unavailable(format!("plugin call: {error}")))
     }

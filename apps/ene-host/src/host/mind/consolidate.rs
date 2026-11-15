@@ -202,6 +202,7 @@ fn target(
     credentials: Option<&Credentials>,
     models: &Models,
     companion: &Companion,
+    providers: &crate::host::providers::Providers,
 ) -> Option<DynModel<Completion>> {
     let credentials = credentials?;
     model::connect(
@@ -210,6 +211,7 @@ fn target(
         models.0.catalog(),
         companion,
         Role::Consolidation,
+        providers,
     )
     .ok()
 }
@@ -397,6 +399,7 @@ struct Sources<'a> {
     embeddings: &'a Embeddings,
     credentials: Option<&'a Credentials>,
     models: &'a Models,
+    providers: &'a crate::host::providers::Providers,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -408,6 +411,7 @@ fn schedule_consolidation(
     embeddings: Res<Embeddings>,
     credentials: Option<Res<Credentials>>,
     models: Res<Models>,
+    providers: Res<crate::host::providers::Providers>,
     mut jobs: ResMut<Consolidation>,
 ) {
     let now = Instant::now();
@@ -417,6 +421,7 @@ fn schedule_consolidation(
         embeddings: &embeddings,
         credentials: credentials.as_deref(),
         models: &models,
+        providers: &providers,
     };
     let mut answered: HashSet<String> = HashSet::new();
     for (outcome, of) in &settled {
@@ -497,6 +502,7 @@ fn start(
         sources.credentials,
         sources.models,
         &companion,
+        sources.providers,
     ) else {
         jobs.fail(companion_id, now);
         return;

@@ -439,7 +439,7 @@ mod tests {
         world.insert_resource(Notifier::new());
         world.insert_resource(Credentials::default());
         world.init_resource::<rig_ecs::model::Models>();
-        world.insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _| {
+        world.insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
             Ok(bound(&model))
         })));
         world

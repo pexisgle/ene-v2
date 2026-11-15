@@ -1,10 +1,13 @@
 //! LLM connections: secrets, the model catalog and the rig connection an
 //! agent runs on.
+mod plugin;
+
 use super::db::{Result, Store};
 use super::error::HostError;
 use super::mind::{Companion, Role};
 use super::net;
 use super::settings::{Check, Connection, ConnectionConfig, ConnectionKind, CredentialState};
+pub(crate) use plugin::completion as plugin_completion;
 use rig_core::catalog::{Catalog, ModelSpec};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
@@ -158,7 +161,14 @@ pub(crate) fn provider_of(adapter: &str) -> Option<ProviderId> {
     })
 }
 
-type ConnectModel = dyn Fn(&Store, &Credentials, &Catalog, &Companion, Role) -> Result<DynModel<Completion>>
+type ConnectModel = dyn Fn(
+        &Store,
+        &Credentials,
+        &Catalog,
+        &Companion,
+        Role,
+        &super::providers::Providers,
+    ) -> Result<DynModel<Completion>>
     + Send
     + Sync;
 
@@ -178,6 +188,7 @@ pub(crate) fn connect(
     catalog: &Catalog,
     companion: &Companion,
     role: Role,
+    providers: &super::providers::Providers,
 ) -> Result<DynModel<Completion>> {
     let assignment = companion
         .model(role)
@@ -196,6 +207,20 @@ pub(crate) fn connect(
         ));
     }
     let endpoint = connection.endpoint();
+    // A plugin that serves this connection's adapter answers instead of the
+    // catalog, so a provider rig does not ship needs no host change.
+    if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
+        let grant =
+            super::providers::Grant::new(running.provider(), &connection, Some(credentials));
+        let broker = Arc::new(ene_plugin_runtime::service::HttpBroker::new(Arc::new(
+            grant,
+        )));
+        return Ok(plugin_completion(
+            running,
+            assignment.model_id.clone(),
+            broker,
+        ));
+    }
     let provider = provider_of(&endpoint.adapter).ok_or_else(|| {
         HostError::unavailable(format!("unsupported adapter `{}`", endpoint.adapter))
     })?;
@@ -264,6 +289,7 @@ pub(crate) async fn probe(
     _store: &Store,
     credentials: &Credentials,
     connection: &Connection,
+    providers: &super::providers::Providers,
 ) -> Check {
     let checked_at = super::db::now();
     let failure = |message: String| Check {
@@ -291,7 +317,7 @@ pub(crate) async fn probe(
     let Some(base) = super::settings::endpoint_of(connection) else {
         return failure("the connection has no endpoint to probe".into());
     };
-    let listed = match list_models(connection, &base, secret).await {
+    let listed = match list_models(connection, &base, secret, providers).await {
         Ok(models) => models,
         Err(error) => return failure(error),
     };
@@ -320,8 +346,14 @@ async fn list_models(
     connection: &Connection,
     base: &str,
     secret: Option<String>,
+    providers: &super::providers::Providers,
 ) -> std::result::Result<Vec<String>, String> {
     let adapter = connection.endpoint().adapter.as_str();
+    // A plugin lists its own models, through the same `ListModels` operation
+    // the agent loop would use, so the probe reads what the plugin serves.
+    if let Some(running) = providers.running(adapter, ene_plugin::Extension::Llm) {
+        return plugin_models(running, base).await;
+    }
     let secret = secret.unwrap_or_default();
     // The host's adapter list is not rig's provider list: `gemini` is
     // `gcp.gemini` there, and an adapter the registry does not know has no
@@ -352,6 +384,51 @@ async fn list_models(
     Ok(list.data.into_iter().map(|model| model.id).collect())
 }
 
+/// Asks a provider plugin for the models it serves.
+///
+/// The plugin answers `ListModels` with its `Models` event, which the runtime
+/// validates before the host sees it; this reads that event out of the stream
+/// the call produced.
+async fn plugin_models(
+    running: std::sync::Arc<super::providers::Running>,
+    base: &str,
+) -> std::result::Result<Vec<String>, String> {
+    let (sender, mut events) = tokio::sync::mpsc::channel(16);
+    let provider = running.provider().id.clone();
+    let endpoint = base.to_owned();
+    let options = running.provider().options.clone();
+    // A model list is control-plane: the plugin may name models without
+    // reaching the network, so the broker denies any exchange it attempts.
+    let services: std::sync::Arc<dyn ene_plugin_runtime::instance::Services> =
+        super::providers::BrokerServices::new(
+            std::sync::Arc::new(ene_plugin_runtime::service::HttpBroker::new(
+                std::sync::Arc::new(ene_plugin_runtime::service::DenyHttp),
+            )),
+            provider,
+        );
+    let collected = tokio::time::timeout(PROBE_TIMEOUT, async move {
+        let mut models = Vec::new();
+        let call = tokio::spawn(async move {
+            running
+                .invoke_streaming(
+                    ene_plugin::Operation::ListModels { endpoint, options },
+                    services,
+                    sender,
+                )
+                .await
+        });
+        while let Some(event) = events.recv().await {
+            if let ene_plugin::Event::Models { models: listed } = event {
+                models = listed.into_iter().map(|model| model.id).collect();
+            }
+        }
+        let _ = call.await;
+        models
+    })
+    .await
+    .map_err(|_| format!("the plugin did not answer in {}s", PROBE_TIMEOUT.as_secs()))?;
+    Ok(collected)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,7 +508,13 @@ mod tests {
         ] {
             let endpoint = format!("http://{address}");
             let connection = connection_for(adapter, &endpoint);
-            let check = probe(&store, &Credentials::default(), &connection).await;
+            let check = probe(
+                &store,
+                &Credentials::default(),
+                &connection,
+                &super::super::providers::Providers::none(),
+            )
+            .await;
             assert!(check.healthy, "{adapter}: {:?}", check.failure);
             assert!(
                 check.resources.iter().any(|known| known == model),

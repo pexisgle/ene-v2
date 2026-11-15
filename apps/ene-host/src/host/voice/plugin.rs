@@ -9,7 +9,7 @@ use super::{BoxFuture, HttpResult, SAMPLE_RATE, SttEngine, TtsEngine};
 use crate::host::{
     error::HostError,
     model::Credentials,
-    providers::{Grant, Providers},
+    providers::{BrokerServices, Grant, Providers},
     settings::{Connection, ConnectionKind},
 };
 use ene_plugin::{
@@ -56,10 +56,7 @@ impl PluginSpeech {
 
     /// The services a speech call needs: the broker, and nothing else.
     fn services(&self) -> Arc<dyn Services> {
-        Arc::new(BrokerServices {
-            broker: Arc::clone(&self.broker),
-            provider: self.running.provider().id.clone(),
-        })
+        BrokerServices::new(Arc::clone(&self.broker), self.running.provider().id.clone())
     }
 
     /// Reads a synthesis answer back, chunk by chunk, into one buffer.
@@ -156,48 +153,6 @@ impl SttEngine for PluginSpeech {
                 .trim()
                 .to_owned())
         })
-    }
-}
-
-/// The services a speech call declares: the broker only.
-struct BrokerServices {
-    broker: Arc<HttpBroker>,
-    provider: String,
-}
-
-impl Services for BrokerServices {
-    fn handle(
-        &self,
-        request: ene_plugin::ServiceRequest,
-    ) -> futures_util::future::BoxFuture<
-        '_,
-        std::result::Result<serde_json::Value, ene_plugin::Failure>,
-    > {
-        let broker = Arc::clone(&self.broker);
-        let provider = self.provider.clone();
-        Box::pin(async move {
-            Ok(match request {
-                ene_plugin::ServiceRequest::HttpOpen { request } => {
-                    serde_json::to_value(broker.open(&provider, request).await?)
-                        .map_err(|_| ene_plugin::Failure::new("serialize"))?
-                }
-                ene_plugin::ServiceRequest::HttpRead { handle } => {
-                    serde_json::to_value(broker.read(&handle)?)
-                        .map_err(|_| ene_plugin::Failure::new("serialize"))?
-                }
-                ene_plugin::ServiceRequest::HttpClose { handle } => {
-                    broker.close(&handle)?;
-                    serde_json::Value::Null
-                }
-                _ => return Err(ene_plugin::Failure::new("undeclared_service")),
-            })
-        })
-    }
-
-    fn check(
-        &self,
-    ) -> futures_util::future::BoxFuture<'_, std::result::Result<(), ene_plugin::Failure>> {
-        Box::pin(async { Ok(()) })
     }
 }
 

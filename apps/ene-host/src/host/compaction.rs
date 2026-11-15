@@ -336,6 +336,7 @@ fn summarize_when_idle(
     host: Option<Res<HostState>>,
     runtime: Option<Res<HostRuntime>>,
     wake: Option<Res<Wake>>,
+    providers: Option<Res<crate::host::providers::Providers>>,
 ) {
     if state.is_running() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
         return;
@@ -373,6 +374,9 @@ fn summarize_when_idle(
             models.0.catalog(),
             &companion,
             Role::Compaction,
+            providers
+                .as_deref()
+                .unwrap_or(&crate::host::providers::Providers::none()),
         ) else {
             tracing::warn!(companion = %agent.companion_id, "no compaction model is assigned");
             state.defer(&agent.companion_id, now + RETRY);

@@ -27,7 +27,7 @@ fn harness(tick: MockCompletionModel) -> (Harness, tokio::runtime::Runtime) {
         .insert_resource(HostRuntime(runtime.handle().clone()));
     harness.app.insert_resource(ModelFactory(Arc::new({
         let model = tick.clone();
-        move |_, _, _, _, _| Ok(bound(&model))
+        move |_, _, _, _, _, _| Ok(bound(&model))
     })));
     harness.app.init_resource::<Embeddings>();
     (harness, runtime)

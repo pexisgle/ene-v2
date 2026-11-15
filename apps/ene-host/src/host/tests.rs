@@ -63,7 +63,7 @@ impl Harness {
             }))
             .insert_resource(SessionStore::new(logs))
             .insert_resource(super::model::ModelFactory(Arc::new(
-                move |_, _, _, _, _| Ok(bound(&model)),
+                move |_, _, _, _, _, _| Ok(bound(&model)),
             )))
             .add_plugins((
                 AgentPlugin,

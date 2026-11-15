@@ -99,6 +99,7 @@ fn begin_tick(
     agents: Query<(&CompanionAgent, &Conversation, Has<ActiveTurn>)>,
     wake: Option<Res<Wake>>,
     factory: Res<ModelFactory>,
+    providers: Option<Res<crate::host::providers::Providers>>,
 ) {
     if ticks.in_flight.is_some()
         || ticks.last_started.is_some_and(|last| last.elapsed() < IDLE)
@@ -140,6 +141,9 @@ fn begin_tick(
             models.as_deref(),
             companion,
             &factory,
+            providers
+                .as_deref()
+                .unwrap_or(&crate::host::providers::Providers::none()),
         );
         let Ok(bound) = bound else {
             continue;
@@ -207,6 +211,7 @@ fn connect(
     models: Option<&Models>,
     companion: &Companion,
     factory: &ModelFactory,
+    providers: &crate::host::providers::Providers,
 ) -> Result<DynModel<Completion>> {
     let (Some(credentials), Some(models)) = (credentials, models) else {
         return Err(HostError::unavailable(
@@ -219,6 +224,7 @@ fn connect(
         models.0.catalog(),
         companion,
         Role::Companion,
+        providers,
     )
 }
 

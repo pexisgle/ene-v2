@@ -79,6 +79,7 @@ pub(crate) struct Runtime {
     handle: Arc<Handle>,
     credentials: Credentials,
     hub: DeviceHub,
+    providers: providers::Providers,
 }
 
 struct Handle {
@@ -126,6 +127,7 @@ impl Runtime {
         // instances the stored connections reference start here too, for the
         // same reason: a frame cannot await a load.
         let providers = providers::Providers::load(state);
+        let runtime_providers = providers.clone();
         // An operator who installed a plugin that did not load has no other
         // way to find out: the connection it named simply resolves to nothing.
         let installed: Vec<&str> = providers.adapters().collect();
@@ -218,7 +220,12 @@ impl Runtime {
             }),
             credentials,
             hub,
+            providers: runtime_providers,
         })
+    }
+
+    pub(crate) fn providers(&self) -> providers::Providers {
+        self.providers.clone()
     }
 
     pub(crate) fn credentials(&self) -> Credentials {

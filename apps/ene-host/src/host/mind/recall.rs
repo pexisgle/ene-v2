@@ -438,7 +438,7 @@ mod tests {
         let probe = model.clone();
         harness
             .app
-            .insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _| {
+            .insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
                 Ok(model.clone().priced_as(spec.clone()).into())
             })));
         harness

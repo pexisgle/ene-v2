@@ -250,7 +250,8 @@ impl w::SettingsService for Services {
         let credentials = self.runtime.credentials();
         // The probe performs a network request, so it must not run on the ECS
         // thread; the connection was captured above.
-        let check = model::probe(&store, &credentials, &connection).await;
+        let check =
+            model::probe(&store, &credentials, &connection, &self.runtime.providers()).await;
         let request_id = request.request_key.to_owned();
         let resource_id = request.resource_id.map(str::to_owned);
         let id = connection.id;

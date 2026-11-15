@@ -230,7 +230,11 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
         Some(connection) => connection,
         None => {
             let catalog = world.resource::<Models>().0.catalog().clone();
-            let model = (factory.0)(&store, &credentials, &catalog, &companion, role)?;
+            let providers = world
+                .get_resource::<crate::host::providers::Providers>()
+                .cloned()
+                .unwrap_or_default();
+            let model = (factory.0)(&store, &credentials, &catalog, &companion, role, &providers)?;
             let spec =
                 std::sync::Arc::new(model.spec().cloned().ok_or_else(|| {
                     HostError::internal("a completion model without catalog facts")
@@ -680,7 +684,7 @@ mod tests {
         harness
             .app
             .world_mut()
-            .insert_resource(ModelFactory(Arc::new(move |_, credentials, _, _, _| {
+            .insert_resource(ModelFactory(Arc::new(move |_, credentials, _, _, _, _| {
                 let text = credentials
                     .secret("credential-model")
                     .unwrap_or_else(|| "absent".into());

@@ -682,3 +682,172 @@ async fn an_embedding_plugin_reaches_its_endpoint_through_the_broker() {
         .expect("the plugin never reached its endpoint")
         .unwrap();
 }
+
+/// A generation plugin: it emits two text deltas and a finish reason, as a
+/// streaming provider does.
+fn generation_package() -> (Package, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("plugin");
+    directory(&root);
+    let delta = |text: &str| write(&json!({"type":"delta","text":text}).to_string());
+    let body = format!(
+        "{} local.get $p call $emit {} local.get $p call $emit {} local.get $p call $emit {} local.get $p local.get $p call $length call $output i32.const 0 return",
+        delta("こんに"),
+        delta("ちは"),
+        write(&json!({"type":"finished","reason":"stop"}).to_string()),
+        write("{}"),
+    );
+    write_file(&root.join("main.wasm"), provider_wasm(&body));
+    write_file(
+        &root.join("manifest.json"),
+        json!({
+            "contract_version": CONTRACT_VERSION,
+            "id": "local-llm", "name": "Local LLM", "version": "1",
+            "entrypoints": [{
+                "id": "main", "target": "host", "file": "main.wasm",
+                "provides": ["llm"], "uses": ["http"],
+                "provider": {
+                    "id": "local-llm", "endpoint": "http://127.0.0.1:1",
+                    "auth": {"type": "none"},
+                    "destinations": ["http://127.0.0.1:1"],
+                    "extensions": ["llm"]
+                }
+            }]
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    (Package::load(&root).unwrap(), temp)
+}
+
+/// A model-listing plugin: it answers `ListModels` with its `Models` event.
+fn listing_package() -> (Package, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("plugin");
+    directory(&root);
+    let models = json!({
+        "type": "models",
+        "models": [
+            {"id": "local-small", "name": "Local Small"},
+            {"id": "local-large", "name": "Local Large"}
+        ]
+    });
+    let body = format!(
+        "{} local.get $p call $emit {} local.get $p local.get $p call $length call $output i32.const 0 return",
+        write(&models.to_string()),
+        write("{}"),
+    );
+    write_file(&root.join("main.wasm"), provider_wasm(&body));
+    write_file(
+        &root.join("manifest.json"),
+        json!({
+            "contract_version": CONTRACT_VERSION,
+            "id": "local-list", "name": "Local List", "version": "1",
+            "entrypoints": [{
+                "id": "main", "target": "host", "file": "main.wasm",
+                "provides": ["llm"], "uses": ["http"],
+                "provider": {
+                    "id": "local-list", "endpoint": "http://127.0.0.1:1",
+                    "auth": {"type": "none"},
+                    "destinations": ["http://127.0.0.1:1"],
+                    "extensions": ["llm"]
+                }
+            }]
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    (Package::load(&root).unwrap(), temp)
+}
+
+/// The events a generation produced, in order.
+async fn generate(package: Package, operation: Operation) -> (Value, Vec<Event>) {
+    let cancel = CancellationToken::new();
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(16);
+    let collect = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    let output = instance
+        .invoke(operation, Arc::new(DenyServices), tx, &cancel)
+        .await
+        .unwrap();
+    (output, collect.await.unwrap())
+}
+
+#[tokio::test]
+async fn a_generation_plugin_streams_text_and_finishes() {
+    let (package, _temp) = generation_package();
+    let (output, events) = generate(
+        package,
+        Operation::Generate {
+            request: GenerationRequest {
+                endpoint: "http://127.0.0.1:1".into(),
+                options: json!({}),
+                model: "local".into(),
+                preamble: "p".into(),
+                messages: vec![],
+                max_tokens: 16,
+            },
+        },
+    )
+    .await;
+    assert_eq!(output, json!({}));
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Delta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "こんにちは", "the deltas arrive in order");
+    assert!(
+        matches!(events.last(), Some(Event::Finished { reason }) if reason == "stop"),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_listing_plugin_answers_with_its_models() {
+    let (package, _temp) = listing_package();
+    let (_, events) = generate(
+        package,
+        Operation::ListModels {
+            endpoint: "http://127.0.0.1:1".into(),
+            options: json!({}),
+        },
+    )
+    .await;
+    let models = events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Models { models } => Some(models),
+            _ => None,
+        })
+        .expect("the plugin listed its models");
+    let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(ids, ["local-small", "local-large"]);
+}
+
+/// A provider module whose `ene_initialize` declares streaming text, as an
+/// LLM provider must.
+fn provider_wasm(body: &str) -> Vec<u8> {
+    let empty = write("{}");
+    let capabilities = write(&json!({"streaming_text": true, "model_list": true}).to_string());
+    wat::parse_str(format!(r#"(module
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+        (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (import "extism:host/env" "length" (func $length (param i64) (result i64)))
+        (import "extism:host/user" "ene_service" (func $service (param i64) (result i64)))
+        (import "extism:host/user" "ene_emit" (func $emit (param i64)))
+        (func (export "ene_initialize") (result i32) (local $p i64) {capabilities} local.get $p i64.const 41 call $output i32.const 0)
+        (func (export "ene_invoke") (result i32) (local $p i64) (local $i i32)
+            {body} {empty} local.get $p i64.const 2 call $output i32.const 0))"#)).unwrap()
+}
