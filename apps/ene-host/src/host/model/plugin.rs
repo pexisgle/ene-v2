@@ -11,7 +11,6 @@
 //! decoder that writes the reply's parts, and a reassembler that folds the
 //! events back into the provider document `raw` holds.
 use super::super::providers::Running;
-use crate::host::error::HostError;
 use ene_plugin::{
     Event as PluginEvent, GenerationRequest, Operation as PluginOperation, ToolCallRequest,
     ToolSpec, provider::ChatMessage,
@@ -27,7 +26,6 @@ use rig_core::{
     driver::{Exchange, Opened, Opening, Transport},
     error::{EncodeError, ProviderError},
     operation::{Block, Completion, Finish},
-    streaming::StreamEvent,
     wire::{
         Descriptor, Flow, Mode, Out, Wire, WireEvent,
         document::{Reassemble, Serves},
@@ -199,12 +197,7 @@ fn result_text(content: &[ToolResultContent]) -> String {
                         .as_ref()
                         .map_or("unknown", |kind| match kind {
                             rig_core::completion::message::ImageMediaType::JPEG => "jpeg",
-                            rig_core::completion::message::ImageMediaType::PNG => "png",
-                            rig_core::completion::message::ImageMediaType::GIF => "gif",
-                            rig_core::completion::message::ImageMediaType::WEBP => "webp",
-                            rig_core::completion::message::ImageMediaType::HEIC => "heic",
-                            rig_core::completion::message::ImageMediaType::HEIF => "heif",
-                            rig_core::completion::message::ImageMediaType::SVG => "svg",
+                            kind => kind.extension(),
                         })
                 )
             }
@@ -432,8 +425,33 @@ impl Transport<PluginCompletion> for CompletionTransport {
     }
 }
 
-/// Keeps the unused-import lint honest when a build omits the callers.
-const _: fn() = || {
-    let _ = std::mem::size_of::<HostError>();
-    let _ = std::mem::size_of::<StreamEvent>();
-};
+#[cfg(test)]
+mod tests {
+    use super::result_text;
+    use rig_core::completion::message::{
+        DocumentSourceKind, Image, ImageMediaType, ToolResultContent,
+    };
+
+    #[test]
+    fn tool_results_preserve_text_and_legacy_image_labels() {
+        let mut content = vec![
+            ToolResultContent::text("tool"),
+            ToolResultContent::Json {
+                value: serde_json::json!({"ok": true}),
+            },
+        ];
+        content.extend(
+            [Some(ImageMediaType::JPEG), Some(ImageMediaType::PNG), None].map(|media_type| {
+                ToolResultContent::Image(Image {
+                    data: DocumentSourceKind::Raw(vec![1, 2, 3]),
+                    media_type,
+                    ..Default::default()
+                })
+            }),
+        );
+        assert_eq!(
+            result_text(&content),
+            "tool{\"ok\":true}[image: jpeg][image: png][image: unknown]"
+        );
+    }
+}

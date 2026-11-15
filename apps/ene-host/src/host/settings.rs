@@ -267,20 +267,22 @@ fn field(key: &str, label: &str, kind: &str, required: bool) -> SettingField {
     }
 }
 
-/// One built-in provider: the id doubles as the adapter and names the
-/// environment variable the secret may come from.
-fn catalog_entry(id: &str, name: &str, endpoint: &str, settings: &[(&str, &str)]) -> Provider {
+fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> Provider {
+    let provider = super::model::provider_of(id).expect("built-in provider is registered in Rig");
+    let config = provider
+        .config("")
+        .expect("built-in provider has API-key config");
     Provider {
         id: id.into(),
         name: name.into(),
         adapter: id.into(),
-        endpoint: endpoint.into(),
+        endpoint: config.base_url().into(),
         settings: settings
             .iter()
             .map(|(key, label)| field(key, label, "string", false))
             .collect(),
-        requires_credentials: true,
-        environment_variable: Some(format!("{}_API_KEY", id.to_uppercase())),
+        requires_credentials: provider.requires_credential(),
+        environment_variable: provider.api_key_envs().first().map(|name| (*name).into()),
     }
 }
 
@@ -291,31 +293,19 @@ pub(crate) fn providers() -> Vec<Provider> {
         catalog_entry(
             "openai",
             "OpenAI",
-            "https://api.openai.com/v1",
             &[("base_url", "Base URL"), ("organization", "Organization")],
         ),
         catalog_entry(
             "openrouter",
             "OpenRouter",
-            "https://openrouter.ai/api/v1",
             &[
                 ("base_url", "Base URL"),
                 ("site_url", "Site URL"),
                 ("app_name", "App name"),
             ],
         ),
-        catalog_entry(
-            "anthropic",
-            "Anthropic",
-            "https://api.anthropic.com",
-            &[("base_url", "Base URL")],
-        ),
-        catalog_entry(
-            "gemini",
-            "Google Gemini",
-            "https://generativelanguage.googleapis.com",
-            &[("base_url", "Base URL")],
-        ),
+        catalog_entry("anthropic", "Anthropic", &[("base_url", "Base URL")]),
+        catalog_entry("gemini", "Google Gemini", &[("base_url", "Base URL")]),
     ]
 }
 
