@@ -12,14 +12,24 @@
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
+//!
+//! The registry is the handler's own sink: [`rig_rmcp::McpClientHandler`]
+//! refreshes its tool list into [`EcsTools`], which renames each tool to its
+//! model-facing name and pushes the result to the host thread. The host thread
+//! is the only writer of tool entities, so a refresh that arrives while the
+//! frame is running waits for the next one instead of racing it.
 use crate::host::{
     db::Store,
     resources::{HostRuntime, HostToolNames},
     settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
-use rig_agent::tool::server::{ToolServer, ToolServerHandle};
-use rig_core::{effect::HandlerKey, message::ToolName};
+use rig_core::{
+    completion::ToolDefinition,
+    message::ToolName,
+    serve::ErasedHandler,
+    tool::{DynamicTool, ManagedToolSink, ManagedToolToken},
+};
 use rig_ecs::prelude::*;
 use rig_rmcp::{
     McpClientHandler, McpConnection,
@@ -37,6 +47,7 @@ use rig_rmcp::{
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    sync::{Arc, Mutex},
 };
 use tokio::sync::mpsc;
 
@@ -49,14 +60,8 @@ struct Server {
     connection: McpConnection,
     /// The connection revision these tools were built from.
     revision: u64,
-    /// The managed registry owns refresh generations and disconnected tools.
-    registry: ToolServerHandle,
-    tools: HashMap<String, Installed>,
-}
-
-struct Installed {
-    generation: HandlerKey,
-    entity: Entity,
+    /// The host tool entity per model-facing name.
+    tools: HashMap<String, Entity>,
 }
 
 /// The servers that are up right now, keyed by connection id.
@@ -72,7 +77,6 @@ enum Event {
         id: String,
         revision: u64,
         connection: McpConnection,
-        registry: ToolServerHandle,
     },
     Failed {
         id: String,
@@ -93,11 +97,100 @@ impl Default for McpEvents {
     }
 }
 
+/// One server's tool list as its handler last reported it.
+struct Update {
+    id: String,
+    /// Every tool it serves now, by model-facing name.
+    tools: Vec<(String, ToolDefinition, ErasedHandler)>,
+}
+
+/// The updates the handlers pushed, drained by the host thread. An update for
+/// a server the frame has not attached yet waits here for the next one.
+#[derive(Resource, Default, Clone)]
+struct McpUpdates(Arc<Mutex<Vec<Update>>>);
+
+impl McpUpdates {
+    fn push(&self, update: Update) {
+        self.0.lock().unwrap().push(update);
+    }
+
+    fn take(&self) -> Vec<Update> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+
+    /// Puts back what this frame could not apply, ahead of anything newer.
+    fn restore(&self, deferred: Vec<Update>) {
+        let mut queue = self.0.lock().unwrap();
+        let mut all = deferred;
+        all.append(&mut queue);
+        *queue = all;
+    }
+}
+
+/// One server's tool sink: the registry `McpClientHandler` refreshes into.
+///
+/// It runs on whichever thread the handler called it from, so it owns no ECS
+/// state: it renames each tool, keeps the generations the handler hands back,
+/// and queues the result for the host thread.
+struct EcsTools {
+    id: String,
+    label: String,
+    /// The operator's allow-list; empty serves every tool.
+    allowed: Vec<String>,
+    updates: McpUpdates,
+}
+
+impl ManagedToolSink for EcsTools {
+    fn add_managed_tools(&self, tools: Vec<DynamicTool>) -> HashMap<String, ManagedToolToken> {
+        self.install(tools)
+    }
+
+    fn reconcile_managed_tools(
+        &self,
+        _expected: HashMap<String, ManagedToolToken>,
+        tools: Vec<DynamicTool>,
+    ) -> HashMap<String, ManagedToolToken> {
+        self.install(tools)
+    }
+}
+
+impl EcsTools {
+    /// Renames what this server serves and queues the whole list. The returned
+    /// tokens are the generations the handler hands back to the next refresh;
+    /// the host thread diffs the list against the entities it already has.
+    fn install(&self, tools: Vec<DynamicTool>) -> HashMap<String, ManagedToolToken> {
+        let mut installed = HashMap::with_capacity(tools.len());
+        let mut served = Vec::with_capacity(tools.len());
+        for tool in tools {
+            let (mut definition, handler, _) = tool.into_parts();
+            let name = definition.name.as_str().to_owned();
+            if !self.allowed.is_empty() && !self.allowed.contains(&name) {
+                continue;
+            }
+            let Some(exposed) = exposed_name(&self.label, &self.id, &name) else {
+                continue;
+            };
+            let Ok(tool_name) = ToolName::new(exposed.clone()) else {
+                continue;
+            };
+            definition.name = tool_name;
+            installed.insert(exposed.clone(), ManagedToolToken::new());
+            served.push((exposed, definition, handler));
+        }
+        self.updates.push(Update {
+            id: self.id.clone(),
+            tools: served,
+        });
+        installed
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<McpServers>()
         .init_resource::<HostToolNames>()
         .init_resource::<Connecting>()
         .init_resource::<McpEvents>()
+        .init_resource::<McpUpdates>()
         .init_resource::<McpSettings>()
         .add_systems(Update, sync.after(AgentLoop));
 }
@@ -147,7 +240,7 @@ fn desired(store: &Store) -> Vec<(String, Desired)> {
 }
 
 /// Connects what the settings ask for, retires what they no longer do, and
-/// attaches the tools a connect task listed.
+/// attaches the tools a handler listed.
 fn sync(world: &mut World) {
     let closing = world
         .get_resource::<crate::host::resources::HostState>()
@@ -183,7 +276,6 @@ fn sync(world: &mut World) {
                 id,
                 revision,
                 connection,
-                registry,
             } => {
                 world.resource_mut::<Connecting>().0.remove(&id);
                 let Some((_, want)) = wanted.iter().find(|(wanted, _)| *wanted == id) else {
@@ -195,15 +287,7 @@ fn sync(world: &mut World) {
                     runtime.spawn(async move { connection.close().await });
                     continue;
                 }
-                attach(
-                    world,
-                    &id,
-                    revision,
-                    &want.name,
-                    connection,
-                    registry,
-                    &want.allowed,
-                );
+                attach(world, &id, revision, connection);
             }
             Event::Failed { id, reason } => {
                 world.resource_mut::<Connecting>().0.remove(&id);
@@ -231,24 +315,25 @@ fn sync(world: &mut World) {
         retire_one(world, &id);
     }
 
+    apply_updates(world);
+
     let sender = world.resource::<McpEvents>().sender.clone();
+    let updates = world.resource::<McpUpdates>().clone();
     for (id, want) in wanted {
-        if world.resource::<McpServers>().0.contains_key(&id) {
-            refresh_tools(world, &id, &want.name, &want.allowed);
-            continue;
-        }
-        if world.resource::<Connecting>().0.contains(&id) {
+        if world.resource::<McpServers>().0.contains_key(&id)
+            || world.resource::<Connecting>().0.contains(&id)
+        {
             continue;
         }
         world.resource_mut::<Connecting>().0.insert(id.clone());
         let sender = sender.clone();
+        let updates = updates.clone();
         runtime.spawn(async move {
-            let event = match open(&want).await {
-                Ok((connection, registry)) => Event::Connected {
+            let event = match open(&id, &want, updates).await {
+                Ok((connection, revision)) => Event::Connected {
                     id,
-                    revision: want.revision,
+                    revision,
                     connection,
-                    registry,
                 },
                 Err(reason) => Event::Failed { id, reason },
             };
@@ -266,10 +351,19 @@ fn drain(world: &mut World) -> Vec<Event> {
     out
 }
 
-/// Opens one server and lists its tools.
-async fn open(want: &Desired) -> Result<(McpConnection, ToolServerHandle), String> {
-    let registry = ToolServer::new().run();
-    let handler = McpClientHandler::new(ClientConfig::default(), registry.clone());
+/// Opens one server and lists its tools into `updates`.
+async fn open(
+    id: &str,
+    want: &Desired,
+    updates: McpUpdates,
+) -> Result<(McpConnection, u64), String> {
+    let sink = EcsTools {
+        id: id.to_owned(),
+        label: want.name.clone(),
+        allowed: want.allowed.clone(),
+        updates,
+    };
+    let handler = McpClientHandler::new(ClientConfig::default(), sink);
     let connection = if !want.command.is_empty() {
         // A stdio server is a child process the host owns.
         let args = want.args.clone();
@@ -306,97 +400,73 @@ async fn open(want: &Desired) -> Result<(McpConnection, ToolServerHandle), Strin
     } else {
         return Err("the MCP connection names neither a command nor an endpoint".to_owned());
     };
-    Ok((connection, registry))
+    Ok((connection, want.revision))
 }
 
 /// The managed registry owns generations and liveness. ECS owns exposed names.
-fn attach(
-    world: &mut World,
-    id: &str,
-    revision: u64,
-    label: &str,
-    connection: McpConnection,
-    registry: ToolServerHandle,
-    allowed: &[String],
-) {
+fn attach(world: &mut World, id: &str, revision: u64, connection: McpConnection) {
     world.resource_mut::<McpServers>().0.insert(
         id.to_owned(),
         Server {
             connection,
             revision,
-            registry,
             tools: HashMap::new(),
         },
     );
-    refresh_tools(world, id, label, allowed);
 }
 
-fn refresh_tools(world: &mut World, id: &str, label: &str, allowed: &[String]) {
-    let snapshot = world.resource::<McpServers>().0[id].registry.snapshot();
-    let desired: HashMap<_, _> = snapshot
-        .definitions()
-        .iter()
-        .filter_map(|definition| {
-            let name = definition.name.as_str();
-            if !allowed.is_empty() && !allowed.iter().any(|allowed| allowed == name) {
-                return None;
+/// Applies the tool lists the handlers pushed: despawns what a server dropped
+/// and spawns what it added.
+fn apply_updates(world: &mut World) {
+    let updates = world.resource::<McpUpdates>().take();
+    let mut deferred = Vec::new();
+    let mut changed = false;
+    for update in updates {
+        let Some(mut server) = world.resource_mut::<McpServers>().0.remove(&update.id) else {
+            // A connect task's first list can land before the frame attaches
+            // its connection. Keep it only while that connect is still
+            // running: a server the settings dropped leaves nothing behind.
+            if world.resource::<Connecting>().0.contains(&update.id) {
+                deferred.push(update);
             }
-            let exposed = exposed_name(label, id, name)?;
-            let registered = snapshot.get(name)?;
-            let mut definition = (**definition).clone();
-            definition.name = ToolName::new(exposed.clone()).ok()?;
-            Some((
-                exposed,
-                (
-                    registered.key().raw().clone(),
-                    definition,
-                    registered.handler().clone(),
-                ),
-            ))
-        })
-        .collect();
-    let retired: Vec<_> = world.resource::<McpServers>().0[id]
-        .tools
-        .iter()
-        .filter(|(name, installed)| {
-            desired
-                .get(*name)
-                .is_none_or(|(generation, _, _)| *generation != installed.generation)
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    let mut changed = !retired.is_empty();
-    for name in retired {
-        let installed = world
+            continue;
+        };
+        // The list is the server's whole set, so a name it no longer carries
+        // is one this host must stop offering.
+        let served: HashSet<&str> = update
+            .tools
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        let stale: Vec<String> = server
+            .tools
+            .keys()
+            .filter(|name| !served.contains(name.as_str()))
+            .cloned()
+            .collect();
+        for name in stale {
+            if let Some(entity) = server.tools.remove(&name) {
+                if let Ok(entity) = world.get_entity_mut(entity) {
+                    entity.despawn();
+                }
+                changed = true;
+            }
+        }
+        for (name, definition, handler) in update.tools {
+            if server.tools.contains_key(&name) {
+                continue;
+            }
+            if let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default()) {
+                server.tools.insert(name, entity);
+                changed = true;
+            }
+        }
+        world
             .resource_mut::<McpServers>()
             .0
-            .get_mut(id)
-            .unwrap()
-            .tools
-            .remove(&name)
-            .unwrap();
-        if let Ok(entity) = world.get_entity_mut(installed.entity) {
-            entity.despawn();
-        }
+            .insert(update.id, server);
     }
-    for (name, (generation, definition, handler)) in desired {
-        if world.resource::<McpServers>().0[id]
-            .tools
-            .contains_key(&name)
-        {
-            continue;
-        }
-        if let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default()) {
-            world
-                .resource_mut::<McpServers>()
-                .0
-                .get_mut(id)
-                .unwrap()
-                .tools
-                .insert(name, Installed { generation, entity });
-            changed = true;
-        }
-    }
+    world.resource::<McpUpdates>().restore(deferred);
     if changed {
         sync_names(world);
     }
@@ -420,8 +490,8 @@ fn retire_one(world: &mut World, id: &str) {
     let Some(server) = world.resource_mut::<McpServers>().0.remove(id) else {
         return;
     };
-    for installed in server.tools.into_values() {
-        if let Ok(entity) = world.get_entity_mut(installed.entity) {
+    for entity in server.tools.into_values() {
+        if let Ok(entity) = world.get_entity_mut(entity) {
             entity.despawn();
         }
     }
@@ -473,7 +543,6 @@ impl Plugin for McpPlugin {
         register(app);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,8 +624,14 @@ mod tests {
             let _ = running.waiting().await;
         });
         let transport = AsyncRwTransport::<RoleClient, _, _>::new(client_read, client_write);
-        let registry = ToolServer::new().run();
-        let connection = McpClientHandler::new(ClientConfig::default(), registry.clone())
+        let updates = McpUpdates::default();
+        let sink = EcsTools {
+            id: "c1".into(),
+            label: "notes".into(),
+            allowed: Vec::new(),
+            updates: updates.clone(),
+        };
+        let connection = McpClientHandler::new(ClientConfig::default(), sink)
             .connect(transport)
             .await
             .expect("the server lists its tools");
@@ -574,7 +649,9 @@ mod tests {
         let world = harness.app.world_mut();
         world.init_resource::<McpServers>();
         world.init_resource::<HostToolNames>();
-        attach(world, "c1", 1, "notes", connection, registry, &[]);
+        world.insert_resource(updates);
+        attach(world, "c1", 1, connection);
+        apply_updates(world);
         assert!(
             world
                 .resource::<HostToolNames>()
@@ -618,7 +695,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let world = harness.app.world_mut();
-                refresh_tools(world, "c1", "notes", &[]);
+                apply_updates(world);
                 if !world
                     .resource::<HostToolNames>()
                     .0
