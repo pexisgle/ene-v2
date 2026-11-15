@@ -477,6 +477,39 @@ async fn p08_listing_construction_failure_never_selects_native() {
     native.assert_requests(0);
 }
 
+#[tokio::test]
+async fn p10_listing_rejects_missing_or_failed_results() {
+    let mut incorrectly_healthy = Vec::new();
+    for (case, body) in [
+        ("missing_models", reply("{}")),
+        ("trap", "unreachable".to_owned()),
+        (
+            "models_then_trap",
+            format!(
+                "{} unreachable",
+                emit(r#"{"type":"models","models":[{"id":"partial","name":"Partial"}]}"#)
+            ),
+        ),
+    ] {
+        let native = NativeEndpoint::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let connection = connection(ConnectionKind::Llm, &native.base);
+        let store = store(root.path(), &connection);
+        let providers = providers(root.path(), Extension::Llm, &body, &native.base).await;
+        let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+        if check.healthy {
+            incorrectly_healthy.push(case);
+        } else {
+            assert_eq!(check.failure.unwrap().code, "connection_check", "{case}");
+        }
+        native.assert_requests(0);
+    }
+    assert!(
+        incorrectly_healthy.is_empty(),
+        "failed listing reported healthy: {incorrectly_healthy:?}"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn p08_speech_construction_failure_never_selects_native() {
     for (kind, extension) in [

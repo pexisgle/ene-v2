@@ -365,6 +365,23 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_connect_without_destination_approval_does_not_dial() {
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = target.local_addr().unwrap();
+        let request = format!("CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n\r\n");
+        let answer = answer_to(request.as_bytes()).await;
+        let dialed = tokio::time::timeout(std::time::Duration::from_millis(100), target.accept())
+            .await
+            .is_ok();
+        assert!(
+            answer.starts_with(b"HTTP/1.1 403") && !dialed,
+            "unapproved target dialed={dialed}; response={}",
+            String::from_utf8_lossy(&answer)
+        );
+    }
+
     /// A client may send its first tunnel bytes in the same write as the
     /// request, so the proxy must not swallow what it read past the head.
     #[cfg(unix)]
