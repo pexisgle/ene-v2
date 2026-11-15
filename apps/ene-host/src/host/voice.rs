@@ -473,7 +473,9 @@ fn credential(
     Ok(credentials.and_then(|credentials| model::connection_secret(connection, Some(credentials))))
 }
 
-fn wire_pcm(pcm: Vec<u8>, sample_rate: u32) -> HttpResult<Vec<u8>> {
+type ResamplerCache = Option<(u32, u32, rubato::Fft<f32>)>;
+
+fn wire_pcm(pcm: Vec<u8>, sample_rate: u32, cache: &mut ResamplerCache) -> HttpResult<Vec<u8>> {
     if !pcm.len().is_multiple_of(2) {
         return Err("the TTS engine returned an odd number of PCM bytes".into());
     }
@@ -483,10 +485,15 @@ fn wire_pcm(pcm: Vec<u8>, sample_rate: u32) -> HttpResult<Vec<u8>> {
     if sample_rate == SAMPLE_RATE {
         return Ok(pcm);
     }
-    resample_mono(&pcm, sample_rate, SAMPLE_RATE)
+    resample_mono(&pcm, sample_rate, SAMPLE_RATE, cache)
 }
 
-fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
+fn resample_mono(
+    pcm: &[u8],
+    from: u32,
+    to: u32,
+    cache: &mut ResamplerCache,
+) -> HttpResult<Vec<u8>> {
     use rubato::{Fft, FixedSync, Resampler};
     if from == 0 {
         return Err("the TTS engine returned audio without a sample rate".into());
@@ -504,13 +511,20 @@ fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
         return Ok(Vec::new());
     }
     let expected = ((samples.len() as f64) * f64::from(to) / f64::from(from)).round() as usize;
-    let mut resampler = Fft::<f32>::new(from as usize, to as usize, 1_024, 1, FixedSync::Input)
-        .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
+    let resampler = match cache {
+        Some((cached_from, cached_to, resampler)) if *cached_from == from && *cached_to == to => {
+            resampler
+        }
+        slot => {
+            let resampler = Fft::<f32>::new(from as usize, to as usize, 1_024, 1, FixedSync::Input)
+                .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
+            &mut slot.insert((from, to, resampler)).2
+        }
+    };
     let input =
         rubato::audioadapter_buffers::direct::InterleavedSlice::new(&samples, 1, samples.len())
             .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?;
-    // `process_all` trims the resampler's startup delay and flushes the tail
-    // with silence, so the clip keeps its length without a manual loop.
+    // `process_all` resets the cached filter between independent sentences.
     let mut resampled = resampler
         .process_all(&input, samples.len(), None)
         .map_err(|error| format!("the TTS sample rate cannot be converted: {error}"))?
@@ -525,8 +539,41 @@ fn resample_mono(pcm: &[u8], from: u32, to: u32) -> HttpResult<Vec<u8>> {
 }
 
 fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
-    if !pcm.len().is_multiple_of(2) {
+    let mut wav = Cursor::new(Vec::new());
+    write_wav(&mut wav, pcm, sample_rate)?;
+    Ok(wav.into_inner())
+}
+
+fn wav_sample_count(samples: usize) -> HttpResult<u32> {
+    let count =
+        u32::try_from(samples).map_err(|_| "the audio is too large for a WAV".to_owned())?;
+    // Mono i16 uses a 44-byte header, with 36 bytes counted in the RIFF size.
+    if count
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(36))
+        .is_none()
+        || samples
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(44))
+            .is_none()
+    {
+        return Err("the audio is too large for a WAV".into());
+    }
+    Ok(count)
+}
+
+fn write_wav<W: std::io::Write + std::io::Seek>(
+    wav: &mut W,
+    pcm: &[u8],
+    sample_rate: u32,
+) -> HttpResult<()> {
+    let (samples, remainder) = pcm.as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err("the audio has an odd number of PCM bytes".to_owned());
+    }
+    let count = wav_sample_count(samples.len())?;
+    if sample_rate == 0 || sample_rate.checked_mul(2).is_none() {
+        return Err("the audio sample rate cannot be written to a WAV".into());
     }
     let spec = hound::WavSpec {
         channels: 1,
@@ -534,18 +581,18 @@ fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut wav = Cursor::new(Vec::with_capacity(44 + pcm.len()));
-    let mut writer =
-        hound::WavWriter::new(&mut wav, spec).expect("an in-memory WAV header cannot fail");
-    for sample in pcm.as_chunks::<2>().0 {
-        writer
-            .write_sample(i16::from_le_bytes(*sample))
-            .expect("an in-memory WAV sample cannot fail");
+    let mut writer = hound::WavWriter::new(wav, spec)
+        .map_err(|error| format!("the audio WAV header could not be created: {error}"))?;
+    let mut batch = writer.get_i16_writer(count);
+    for sample in samples {
+        batch.write_sample(i16::from_le_bytes(*sample));
     }
+    batch
+        .flush()
+        .map_err(|error| format!("the audio WAV samples could not be written: {error}"))?;
     writer
         .finalize()
-        .expect("an in-memory WAV header cannot fail");
-    Ok(wav.into_inner())
+        .map_err(|error| format!("the audio WAV could not be finalized: {error}"))
 }
 
 fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
@@ -907,8 +954,9 @@ impl Voice {
         let runner = self.clone();
         let id = utterance_id.to_owned();
         work.task = Some(AbortOnDropHandle::new(self.runtime.spawn(async move {
+            let mut cache: ResamplerCache = None;
             let mut pending =
-                FuturesOrdered::<BoxFuture<'static, (u32, HttpResult<Vec<u8>>)>>::new();
+                FuturesOrdered::<BoxFuture<'static, (u32, HttpResult<(Vec<u8>, u32)>)>>::new();
             loop {
                 {
                     let mut state = runner.lock();
@@ -933,6 +981,7 @@ impl Voice {
                 tokio::select! {
                     _ = notify.notified() => {},
                     Some((sequence, outcome)) = pending.next(), if !pending.is_empty() => {
+                        let outcome = outcome.and_then(|(pcm, rate)| wire_pcm(pcm, rate, &mut cache));
                         runner.complete(&id, sequence, outcome);
                     }
                 }
@@ -1220,11 +1269,14 @@ fn deliver(
     }
 }
 
-async fn synthesize(engine: &dyn TtsEngine, text: String, voice: String) -> HttpResult<Vec<u8>> {
+async fn synthesize(
+    engine: &dyn TtsEngine,
+    text: String,
+    voice: String,
+) -> HttpResult<(Vec<u8>, u32)> {
     match tokio::time::timeout(SYNTHESIS_TIMEOUT, engine.synthesize(text, voice)).await {
         Err(_) => Err("the TTS connection timed out".into()),
-        Ok(Err(error)) => Err(error),
-        Ok(Ok((pcm, sample_rate))) => wire_pcm(pcm, sample_rate),
+        Ok(outcome) => outcome,
     }
 }
 

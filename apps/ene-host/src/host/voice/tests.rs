@@ -247,6 +247,113 @@ async fn skipped_sentences_still_finish_the_utterance() {
 }
 
 #[tokio::test]
+async fn normalization_errors_skip_sentences_without_losing_order() {
+    struct InvalidTts;
+    impl TtsEngine for InvalidTts {
+        fn synthesize<'a>(
+            &'a self,
+            text: String,
+            _: String,
+        ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
+            Box::pin(async move {
+                Ok(if text.starts_with("odd") {
+                    (vec![0], 48_000)
+                } else if text.starts_with("zero") {
+                    (vec![0, 0], 0)
+                } else if text.starts_with("empty") {
+                    (Vec::new(), 48_000)
+                } else {
+                    (pcm_bytes([100; 16]), 48_000)
+                })
+            })
+        }
+    }
+    let voice = Voice::new(tokio::runtime::Handle::current());
+    let mut events = voice.register("c1").receiver;
+    voice.publish("ene", "c1", 1);
+    voice.begin("ene", Arc::new(InvalidTts), String::new());
+    voice.speak("ene", "odd。zero。empty。valid。");
+    voice.end_turn("ene");
+    let collected = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut collected = Vec::new();
+        loop {
+            let event = events.recv().await.unwrap();
+            let done = finished(std::slice::from_ref(&event)) == Some(4);
+            collected.push(event);
+            if done {
+                break collected;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let skipped: Vec<_> = collected
+        .iter()
+        .filter_map(|event| match &event.event {
+            Some(w::audio_output_event::Event::Skipped(skipped)) => Some(skipped.sequence_no),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(skipped, [0, 1]);
+    assert_eq!(chunks(&collected), [3]);
+    assert_eq!(finished(&collected), Some(4));
+}
+
+#[tokio::test]
+async fn a_flushed_inflight_synthesis_cannot_emit_into_the_next_generation() {
+    struct BlockedTts {
+        started: Notify,
+        release: Notify,
+    }
+    impl TtsEngine for BlockedTts {
+        fn synthesize<'a>(
+            &'a self,
+            _: String,
+            _: String,
+        ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
+            Box::pin(async move {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok((pcm_bytes([i16::MAX; 32]), 48_000))
+            })
+        }
+    }
+    let voice = Voice::new(tokio::runtime::Handle::current());
+    let mut events = voice.register("c1").receiver;
+    voice.publish("ene", "c1", 1);
+    let engine = Arc::new(BlockedTts {
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    voice.begin("ene", engine.clone(), String::new());
+    voice.speak("ene", "old。");
+    tokio::time::timeout(Duration::from_secs(5), engine.started.notified())
+        .await
+        .unwrap();
+    voice.flush("ene", w::FlushReason::BargeIn).unwrap();
+    voice.begin("ene", Arc::new(FakeTts { fail: false }), String::new());
+    voice.speak("ene", "new。");
+    voice.end_turn("ene");
+    let generation = voice.lock().owners["ene"].generation_id;
+    engine.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let event = events.recv().await.unwrap();
+        match event.event {
+            Some(w::audio_output_event::Event::Chunk(chunk)) => {
+                assert_eq!(chunk.generation_id, generation);
+                assert_eq!(chunk.pcm_data, pcm_bytes("new。".bytes().map(i16::from)));
+            }
+            other => panic!("expected current audio, got {other:?}"),
+        }
+        let event = events.recv().await.unwrap();
+        assert_eq!(finished(&[event]), Some(1));
+    })
+    .await
+    .unwrap();
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn a_flush_invalidates_the_older_generation() {
     let mut world = test_world();
     let subscription = world.resource::<Voice>().register("c1");
@@ -565,6 +672,182 @@ fn a_moved_activation_discards_the_transcription() {
     );
 }
 
+fn pcm_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {
+    samples.into_iter().flat_map(i16::to_le_bytes).collect()
+}
+
+#[test]
+fn finite_clips_keep_the_rounded_sample_count() {
+    for from in [16_000, 24_000, 32_000, 44_100, 48_000, 96_000] {
+        for len in [0, 1, 2, 7, 127, 1_023, 1_024, 1_025, 4_097, 24_001] {
+            let pcm = pcm_bytes((0..len).map(|index| (index * 997) as i16));
+            let converted = resample_mono(&pcm, from, SAMPLE_RATE, &mut None).unwrap();
+            let expected = (len as f64 * f64::from(SAMPLE_RATE) / f64::from(from)).round();
+            assert_eq!(converted.len(), expected as usize * 2, "{from}, {len}");
+            if from == SAMPLE_RATE {
+                assert_eq!(converted, pcm);
+            }
+        }
+    }
+    assert!(
+        resample_mono(&[0, 0], 96_000, SAMPLE_RATE, &mut None)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(wire_pcm(vec![0], SAMPLE_RATE, &mut None).is_err());
+    assert!(wire_pcm(Vec::new(), 0, &mut None).is_err());
+}
+
+#[test]
+fn reused_resamplers_match_cold_bytes_without_leaking_between_clips() {
+    let mut cache = None;
+    for from in [44_100, 48_000, 96_000, 16_000, 44_100] {
+        for len in [0, 1, 2, 17, 127, 1_023, 1_024, 4_097, 24_001] {
+            let impulse = pcm_bytes((0..len).map(|index| if index == 0 { i16::MAX } else { 0 }));
+            let signal = pcm_bytes((0..len).map(|index| (index * 997) as i16));
+            let silence = vec![0; len * 2];
+            for pcm in [&impulse, &silence, &signal, &silence, &signal] {
+                let cold = resample_mono(pcm, from, SAMPLE_RATE, &mut None).unwrap();
+                let reused = resample_mono(pcm, from, SAMPLE_RATE, &mut cache).unwrap();
+                assert_eq!(reused, cold, "{from}, {len}");
+                if pcm == &silence {
+                    assert!(reused.iter().all(|byte| *byte == 0), "{from}, {len}");
+                }
+            }
+            let identity = wire_pcm(signal.clone(), SAMPLE_RATE, &mut cache).unwrap();
+            assert_eq!(identity, signal);
+            assert!(wire_pcm(Vec::new(), from, &mut cache).unwrap().is_empty());
+        }
+    }
+    let pcm = pcm_bytes([i16::MIN, i16::MAX, 0, -123, 123]);
+    for (from, to) in [(48_000, 16_000), (48_000, 24_000), (48_000, 16_000)] {
+        assert_eq!(
+            resample_mono(&pcm, from, to, &mut cache).unwrap(),
+            resample_mono(&pcm, from, to, &mut None).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn wrapped_wav_preserves_mono_i16_samples() {
+    for samples in [vec![], vec![i16::MIN, -1, 0, 1, i16::MAX]] {
+        for rate in STT_SAMPLE_RATES {
+            let pcm = pcm_bytes(samples.iter().copied());
+            let wav = wav_wrap(&pcm, rate).unwrap();
+            let mut reader = hound::WavReader::new(Cursor::new(&wav)).unwrap();
+            assert_eq!(reader.spec().channels, 1);
+            assert_eq!(reader.spec().bits_per_sample, 16);
+            assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
+            assert_eq!(reader.spec().sample_rate, rate);
+            assert_eq!(reader.duration() as usize, samples.len());
+            assert_eq!(
+                reader
+                    .samples::<i16>()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap(),
+                samples
+            );
+            assert_eq!(wav.len(), 44 + pcm.len());
+            assert_eq!(&wav[44..], pcm);
+            assert_eq!(
+                u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize,
+                36 + pcm.len()
+            );
+            assert_eq!(
+                u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize,
+                pcm.len()
+            );
+            let mut reference = Cursor::new(Vec::new());
+            let mut writer = hound::WavWriter::new(&mut reference, reader.spec()).unwrap();
+            for sample in &samples {
+                writer.write_sample(*sample).unwrap();
+            }
+            writer.finalize().unwrap();
+            assert_eq!(wav, reference.into_inner());
+        }
+    }
+    assert!(wav_wrap(&[0], SAMPLE_RATE).is_err());
+    assert!(wav_wrap(&[], 0).is_err());
+    assert!(wav_wrap(&[], u32::MAX / 2 + 1).is_err());
+    assert!(wav_wrap(&[], u32::MAX / 2).is_ok());
+}
+
+#[test]
+fn wav_counts_reject_riff_and_integer_overflow_without_allocating() {
+    assert_eq!(wav_sample_count(0).unwrap(), 0);
+    let max = ((u32::MAX - 36) / 2) as usize;
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(wav_sample_count(max).unwrap(), max as u32);
+    assert!(wav_sample_count(max + 1).is_err());
+    assert!(wav_sample_count(u32::MAX as usize).is_err());
+    assert!(wav_sample_count(usize::MAX).is_err());
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WavFailure {
+    Create,
+    Samples,
+    FinalizeSeek,
+    FinalizeWrite,
+    FinalizeFlush,
+}
+
+struct FailingWav {
+    bytes: Cursor<Vec<u8>>,
+    failure: WavFailure,
+}
+
+impl std::io::Write for FailingWav {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let fails = match self.failure {
+            WavFailure::Create => self.bytes.position() == 0,
+            WavFailure::Samples => self.bytes.position() >= 44,
+            WavFailure::FinalizeWrite => self.bytes.position() == 4,
+            _ => false,
+        };
+        if fails {
+            return Err(std::io::Error::other("injected WAV write failure"));
+        }
+        std::io::Write::write(&mut self.bytes, bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if matches!(self.failure, WavFailure::FinalizeFlush) {
+            return Err(std::io::Error::other("injected WAV flush failure"));
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Seek for FailingWav {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        if matches!(self.failure, WavFailure::FinalizeSeek) {
+            return Err(std::io::Error::other("injected WAV seek failure"));
+        }
+        std::io::Seek::seek(&mut self.bytes, position)
+    }
+}
+
+#[test]
+fn wav_creation_batch_flush_and_finalization_errors_propagate() {
+    for (failure, stage) in [
+        (WavFailure::Create, "header could not be created"),
+        (WavFailure::Samples, "samples could not be written"),
+        (WavFailure::FinalizeSeek, "could not be finalized"),
+        (WavFailure::FinalizeWrite, "could not be finalized"),
+        (WavFailure::FinalizeFlush, "could not be finalized"),
+    ] {
+        let mut sink = FailingWav {
+            bytes: Cursor::new(Vec::new()),
+            failure,
+        };
+        let error =
+            write_wav(&mut sink, &pcm_bytes([i16::MIN, 0, i16::MAX]), SAMPLE_RATE).unwrap_err();
+        assert!(error.contains(stage), "{failure:?}: {error}");
+        assert!(error.contains("injected WAV"), "{failure:?}: {error}");
+    }
+}
+
 /// A stereo WAV in the 16-bit shape the TTS endpoints return.
 fn stereo_wav(frames: &[(i16, i16)]) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(frames.len() * 4);
@@ -591,6 +874,87 @@ fn a_negative_second_stereo_channel_is_averaged_not_clamped_positive() {
         .map(|pair| i16::from_le_bytes(*pair))
         .collect();
     assert_eq!(samples, [-500, -32_768, 1_000]);
+}
+
+#[tokio::test]
+async fn stt_requests_send_decodable_wav_samples() {
+    use crate::host::settings::{CredentialState, SttConnection};
+    use axum::{Router, routing::post};
+
+    for raw in [false, true] {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/audio/transcriptions",
+            post(move |request: axum::extract::Request| async move {
+                let content_type = request.headers()[reqwest::header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap();
+                if raw {
+                    assert_eq!(content_type, "application/octet-stream");
+                } else {
+                    assert!(content_type.starts_with("multipart/form-data;"));
+                }
+                let body = axum::body::to_bytes(request.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let start = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
+                if raw {
+                    assert_eq!(start, 0);
+                }
+                let mut reader = hound::WavReader::new(Cursor::new(&body[start..])).unwrap();
+                assert_eq!(reader.spec().sample_rate, SAMPLE_RATE);
+                assert_eq!(reader.spec().channels, 1);
+                assert_eq!(reader.spec().bits_per_sample, 16);
+                assert_eq!(
+                    reader
+                        .samples::<i16>()
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .unwrap(),
+                    [i16::MIN, 0, i16::MAX]
+                );
+                if raw { "heard" } else { r#"{"text":"heard"}"# }
+            }),
+        );
+        let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
+        let engine = HttpEngine::new(
+            Connection {
+                id: "wav-stt".into(),
+                name: "WAV STT".into(),
+                enabled: true,
+                kind: ConnectionKind::Stt,
+                config: ConnectionConfig::Stt(SttConnection {
+                    endpoint: Endpoint {
+                        adapter: "openai".into(),
+                        endpoint: format!("http://{address}"),
+                        options:
+                            serde_json::json!({"protocol": if raw { "raw" } else { "openai" }})
+                                .to_string(),
+                        ..Default::default()
+                    },
+                    language_hints: Vec::new(),
+                }),
+                credential_state: CredentialState::Absent,
+                revision: 1,
+                last_check: None,
+            },
+            None,
+            ConnectionKind::Stt,
+        )
+        .unwrap();
+        assert_eq!(
+            engine
+                .transcribe(pcm_bytes([i16::MIN, 0, i16::MAX]), SAMPLE_RATE)
+                .await
+                .unwrap(),
+            "heard"
+        );
+        assert!(engine.transcribe(vec![0], SAMPLE_RATE).await.is_err());
+    }
 }
 
 #[tokio::test]
@@ -685,7 +1049,12 @@ async fn the_worker_orders_audio_and_finishes_the_utterance() {
                 } else {
                     self.0.notify_one();
                 }
-                Ok((vec![0, 0], SAMPLE_RATE))
+                let first = text.starts_with("first");
+                let rate = if first { 48_000 } else { 44_100 };
+                Ok((
+                    pcm_bytes((0..128).map(|index| if first { index * 97 } else { -index * 53 })),
+                    rate,
+                ))
             })
         }
     }
@@ -707,6 +1076,15 @@ async fn the_worker_orders_audio_and_finishes_the_utterance() {
     .expect("the worker finishes the utterance");
     assert_eq!(chunks(&collected), [0, 1]);
     assert_eq!(finished(&collected), Some(2));
+    for event in &collected {
+        if let Some(w::audio_output_event::Event::Chunk(chunk)) = &event.event {
+            let first = chunk.sequence_no == 0;
+            let pcm = pcm_bytes((0..128).map(|index| if first { index * 97 } else { -index * 53 }));
+            let rate = if first { 48_000 } else { 44_100 };
+            assert_eq!(chunk.sample_rate, SAMPLE_RATE);
+            assert_eq!(chunk.pcm_data, wire_pcm(pcm, rate, &mut None).unwrap());
+        }
+    }
 }
 
 #[tokio::test]
