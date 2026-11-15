@@ -233,7 +233,14 @@ pub trait HttpGrants: Send + Sync {
 
 **段階2：Embedding を移す。** 4つの中で最も小さい（入出力が文字列とベクトルだけ、ストリーミングなし、音声なし）。`Embedding` 拡張と `Operation::Embed` を追加し、`mind/embedding.rs::connect` を「プラグインがあれば使う、無ければ現行」に変える。既存の `CompactVectorIndex` はそのまま。
 
-**段階3：LLM を移す。** `Wire` 実装のアダプタを書き、`model::connect` に分岐を足す。ここが最もリスクが高い。ストリーミング（`Operation::Generate` の `Delta` イベント）とツール呼び出しの両方を通す必要がある。`examples/plugins/openrouter-wasm` が `provides: ["llm"]` の manifest と `Wire` 相当の実装を持つので、これを雛形にする。ただしこの example は `just build-test-plugins` でビルドされるだけで、ホストから実行された実績はない（`grep` で実行箇所0件）。雛形であって動作実績ではない。
+**段階2で判明した制約（2026-11-15、実装時に確認）。** 契約側（拡張・操作・ブローカー・実 Wasm 経路のテスト）は入った。ホスト側の接続で2つの壁が出た。
+
+1. **`target()` が同期関数である。** `mind/embedding.rs:166` は同期で、`semantic_ids`（`:236`）、バックフィル（`:553`）、テスト（`:741`）から呼ばれる。プラグインのロードは `Instance::load(...).await` なので非同期であり、同期関数からは呼べない。埋め込みの経路を非同期化するか、プラグインを起動時に先読みして同期で引くレジストリを置くかのどちらかが要る。
+2. **ホストにプラグイン探索が無い。** `ene-host` は `ene-plugin` も `ene-plugin-runtime` もリンクしておらず、プラグインのディレクトリを読む経路も無い。`Connection.endpoint().adapter` がプラグインを指すとき、どのパッケージをどのディレクトリから読むのかを決める層が先に要る。
+
+この2点は段階2の前提ではなく、段階2が新たに必要とする作業である。`Wire` + `Transport` のアダプタ自体は書けて型検査も通ることを確認済み（`PluginEmbedding` が `rig_core::driver::Transport` を実装し、`Unreassembled` と `wire::Json` で `DynModel<Embedding>` に消去できる）。ブロッカーはアダプタではなく、同期境界とパッケージ探索である。
+
+**段階3：LLM を移す。** `Wire` 実装のアダプタを書き、`model::connect` に分岐を足す。ここが最もリスクが高い。ストリーミング（`Operation::Generate` の `Delta` イベント）とツール呼び出しの両方を通す必要がある。`examples/plugins/openrouter-wasm` が `provides: ["llm"]` の manifest と `Wire` 相当の実装を持つので、これを雛形にする。ただしこの example は `just build-test-plugins` でビルドされるだけで、ホストから実行された実績はない（`grep` で実行箇所0件）。雛形であって動作実績ではない。段階3も段階2と同じくパッケージ探索を前提にする。
 
 **段階4：TTS / STT を移す。** 音声は `SynthesisResult` のチャンク読み出しが要るので最後にする。`path` オプションは `ProviderConfiguration.settings` に移し、現行テストの契約を保つ。
 
@@ -250,15 +257,24 @@ pub trait HttpGrants: Send + Sync {
 | リスク | 内容 | 対処 |
 | --- | --- | --- |
 | 音声のチャンク化 | `SynthesisResult` が 1 MiB を超える | `AudioRead` ハンドル方式を段階4の前提にする |
-| `Wire` 実装の難度 | `DynModel` は公開コンストラクタを持たない | `examples/plugins/openrouter-wasm` を雛形にする |
+| `Wire` 実装の難度 | `DynModel` は公開コンストラクタを持たない | 解決済み。`Wire` + `Transport` + `Unreassembled` で消去できることを型検査で確認した |
+| 同期境界 | `mind/embedding.rs::target()` は同期、プラグインのロードは非同期 | 段階2の前提作業。経路の非同期化か、起動時先読みのレジストリ |
+| パッケージ探索 | ホストはプラグインをリンクも探索もしていない | 段階2の前提作業。接続の adapter からパッケージを解決する層 |
 | インスタンス数 | 4拡張 × 接続数で `MAX_INSTANCES = 16` に当たる | 接続ごとに1インスタンスではなく、provider ごとに1つを共有する |
 | 起動時間 | 初回コンパイルが30秒上限に近い | 段階2で実測する。超えるなら `MAX_CODE` かキャッシュを見直す |
-| 契約破壊 | `contract_version` 4 → 5 | 旧 manifest は明示的に拒否し、エラー文で版を名指す |
+| 契約破壊 | `contract_version` 4 → 5 | 旧 manifest は明示的に拒否する。`Package::load` が版不一致で落ちることをテスト済み |
 
 ---
 
-## 5. 決めていないこと
+## 5. 決定済みと、残っている決定
 
-1. **`AudioRead` を `ServiceRequest` に足すか、`Operation` の戻り値を分割するか。** 前者は `HttpRead` と対称で覚えやすい。後者は `ServiceRequest` を増やさない。私は前者を推すが、`ServiceRequest` が9種から10種に増える。
-2. **`ProviderConfiguration.extensions` を足すか、`EntryPoint.provides` との二重管理を許すか。** 私は足す方針で書いたが、manifest の変更になるため確認が要る。
-3. **標準プロバイダーを将来 Wasm に寄せるか。** 本提案では「寄せない」とした。移行が完了した後に再評価する。
+決定済み（2026-11-15、オペレーター承認）。
+
+1. **`AudioRead` を `ServiceRequest` に足す。** 承認され、実装済み。`HttpRead` と対称なハンドル方式で、`Service::Http` に属する。
+2. **`ProviderConfiguration.extensions` を足す。** 承認され、実装済み。`contract_version` は 5。`Package::load` は、provider を持つ entrypoint が provider 系の拡張を1つも提供しない場合と、`extensions` が `provides` に無い拡張を名指す場合を拒否する。
+3. **標準プロバイダーはハイブリッド。** 承認され、`rig-core` のカタログ経路を残す。追加プロバイダーはプラグイン経路。
+
+残っている決定。
+
+1. **同期境界をどう越えるか。** 埋め込みの `target()` を非同期化するか、プラグインを起動時に先読みするレジストリを置くか。前者は呼び出し元4箇所の色を変える。後者は起動時間とメモリを先払いする。私は後者を推す。理由は、`target()` の呼び出し元がすべてフレーム内の同期文脈にあり、色を変えるとECSシステムの境界まで波及するためである。
+2. **プラグインのパッケージをどこから読むか。** 状態ディレクトリ配下の `plugins/` を既定にする案。接続の adapter 名とパッケージの `id` を一致させるか、接続に明示的なパッケージパスを持たせるか。
