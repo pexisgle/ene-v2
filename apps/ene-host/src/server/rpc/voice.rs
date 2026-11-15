@@ -322,18 +322,111 @@ struct StreamGuard {
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        let runtime = self.runtime.clone();
         let client_id = self.client_id.clone();
         let subscription = self.subscription.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let _ = runtime
-                    .read(move |app| {
-                        voice::unsubscribe_audio(app.world(), &client_id, &subscription);
-                        Ok(())
-                    })
-                    .await;
-            });
-        }
+        drop(self.runtime.read(move |app| {
+            voice::unsubscribe_audio(app.world(), &client_id, &subscription);
+            Ok(())
+        }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::db::{Store, clients::ClientDeclaration};
+    use bevy_ecs::prelude::{ResMut, Resource};
+    use rig_ecs::prelude::Update;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    #[derive(Resource, Default)]
+    struct Frames(u64);
+
+    #[tokio::test]
+    async fn audio_guard_cleanup_outside_tokio_preserves_replacement_without_a_frame() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        runtime
+            .read(|app| {
+                app.insert_resource(Frames::default())
+                    .add_systems(Update, |mut frames: ResMut<Frames>| frames.0 += 1);
+                let store = app.world().resource::<Store>();
+                store.register_client(&ClientDeclaration {
+                    id: "c1",
+                    name: "desk",
+                    platform: "linux",
+                    capabilities: &[],
+                    specs: &[],
+                    expected_revision: 0,
+                })?;
+                store.activate("ene", Some("c1"), 0)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = || w::SubscribeAudioRequest {
+            client_id: "c1".into(),
+            activation_revision: 1,
+            ..Default::default()
+        };
+        let first = request();
+        let old = runtime
+            .read(move |app| voice::subscribe_audio(app.world_mut(), first))
+            .await
+            .unwrap();
+        let old_guard = StreamGuard {
+            runtime: runtime.clone(),
+            client_id: "c1".into(),
+            subscription: old.subscription_id,
+        };
+        let second = request();
+        let mut current = runtime
+            .read(move |app| voice::subscribe_audio(app.world_mut(), second))
+            .await
+            .unwrap();
+        let current_guard = StreamGuard {
+            runtime: runtime.clone(),
+            client_id: "c1".into(),
+            subscription: current.subscription_id,
+        };
+        std::thread::spawn(move || drop(old_guard)).join().unwrap();
+        runtime.read(|_| Ok(())).await.unwrap();
+        assert!(matches!(
+            current.receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            current.control.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+
+        let check = runtime.clone();
+        let (before, after) = runtime
+            .read(move |app| {
+                let before = app.world().resource::<Frames>().0;
+                drop(current_guard);
+                let after = check.read(|app| Ok(app.world().resource::<Frames>().0));
+                Ok((before, after))
+            })
+            .await
+            .unwrap();
+        assert_eq!(after.await.unwrap(), before);
+        assert!(matches!(
+            current.receiver.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
+        assert!(matches!(
+            current.control.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
+        runtime.call(|_| Ok(())).await.unwrap();
+        assert!(
+            runtime
+                .read(|app| Ok(app.world().resource::<Frames>().0))
+                .await
+                .unwrap()
+                > before
+        );
+        runtime.shutdown().await.unwrap();
     }
 }

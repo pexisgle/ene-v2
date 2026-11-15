@@ -7,7 +7,7 @@
 //! builds model requests on, where the deadline can only sit on the client.
 //! They stay apart because the same [`client`] also carries an MCP stream,
 //! which is long-lived by design.
-use futures_util::StreamExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use std::{sync::OnceLock, time::Duration};
 
 /// How long one model call may take end to end.
@@ -51,59 +51,19 @@ pub(crate) async fn read_body(
     {
         return Err(too_large(what, max));
     }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("the {what} endpoint body: {error}"))?;
-        if chunk.len() > max - body.len() {
-            return Err(too_large(what, max));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    Limited::new(reqwest::Body::from(response), max)
+        .collect()
+        .await
+        .map(|body| body.to_bytes().to_vec())
+        .map_err(|error| {
+            if error.is::<LengthLimitError>() {
+                too_large(what, max)
+            } else {
+                format!("the {what} endpoint body: {error}")
+            }
+        })
 }
 
 fn too_large(what: &str, max: usize) -> String {
     format!("the {what} endpoint answered more data than the host reads ({max} bytes)")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// Serves one fixed HTTP response and returns its address.
-    async fn serve(response: Vec<u8>) -> std::net::SocketAddr {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut request = [0u8; 1_024];
-                let _ = socket.read(&mut request).await;
-                let _ = socket.write_all(&response).await;
-            }
-        });
-        address
-    }
-
-    #[tokio::test]
-    async fn bodies_are_refused_at_the_cap_declared_or_streamed() {
-        let mut chunked = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
-        chunked.extend_from_slice(&[b'x'; 128]);
-        let declared = b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\n\r\n".to_vec();
-        for response in [declared, chunked] {
-            let address = serve(response).await;
-            let response = client()
-                .unwrap()
-                .get(format!("http://{address}/"))
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await
-                .unwrap();
-            let error = read_body(response, 64, "test").await.unwrap_err();
-            assert!(error.contains("more data"), "{error}");
-        }
-    }
 }

@@ -7,7 +7,14 @@
 //! the socket, and runs the agent itself. The agent finds the proxy through
 //! `HTTPS_PROXY`, so a client that ignores that variable has no network at all
 //! rather than an open one.
-use std::{ffi::OsString, io, path::PathBuf, process::Stdio};
+use clap::Parser;
+use std::{
+    ffi::OsString,
+    io,
+    path::PathBuf,
+    process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// The loopback port the relay listens on inside the sandbox. The namespace is
 /// private to one launch, so a fixed port cannot collide with the host.
@@ -35,13 +42,22 @@ impl Bridge {
 pub(crate) struct Proxy {
     pub(crate) bridge: Bridge,
     handle: tokio::task::AbortHandle,
+    closed: AtomicBool,
 }
 
 impl Proxy {
     /// Stops the proxy and removes its socket.
     pub(crate) fn close(&self) {
-        self.handle.abort();
-        let _ = std::fs::remove_file(&self.bridge.socket);
+        if !self.closed.swap(true, Ordering::Relaxed) {
+            self.handle.abort();
+            let _ = std::fs::remove_file(&self.bridge.socket);
+        }
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -59,13 +75,11 @@ pub(crate) fn open(runtime: &tokio::runtime::Handle, socket: PathBuf) -> io::Res
             ),
         ));
     }
-    let _ = std::fs::remove_file(&socket);
-    let listener = std::os::unix::net::UnixListener::bind(&socket)?;
-    listener.set_nonblocking(true)?;
+    let listener = {
+        let _entered = runtime.enter();
+        tokio::net::UnixListener::bind(&socket)?
+    };
     let task = runtime.spawn(async move {
-        let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
-            return;
-        };
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
@@ -81,6 +95,7 @@ pub(crate) fn open(runtime: &tokio::runtime::Handle, socket: PathBuf) -> io::Res
             port: RELAY_PORT,
         },
         handle: task.abort_handle(),
+        closed: AtomicBool::new(false),
     })
 }
 
@@ -139,9 +154,12 @@ async fn connect(mut client: tokio::net::UnixStream) -> io::Result<()> {
 /// inside the sandbox. Serves loopback on `port`, runs the agent with its own
 /// stdio so the ACP conversation passes through untouched, and exits with it.
 pub(crate) fn relay(arguments: &[OsString]) -> i32 {
-    let Some((bridge, command)) = parse_relay(arguments) else {
-        eprintln!("acp-relay: usage: --socket PATH --listen ADDR -- PROGRAM [ARGS...]");
-        return 2;
+    let args = match RelayArgs::try_parse_from(arguments) {
+        Ok(args) => args,
+        Err(error) => {
+            let _ = error.print();
+            return error.exit_code();
+        }
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -154,7 +172,7 @@ pub(crate) fn relay(arguments: &[OsString]) -> i32 {
         }
     };
     let listener = match runtime
-        .block_on(async { tokio::net::TcpListener::bind(("127.0.0.1", bridge.port)).await })
+        .block_on(async { tokio::net::TcpListener::bind(("127.0.0.1", args.port)).await })
     {
         Ok(listener) => listener,
         Err(error) => {
@@ -163,18 +181,11 @@ pub(crate) fn relay(arguments: &[OsString]) -> i32 {
         }
     };
     #[cfg(unix)]
-    {
-        let socket = bridge.socket.clone();
-        runtime.spawn(forward(listener, socket));
-    }
+    runtime.spawn(forward(listener, args.socket));
     #[cfg(not(unix))]
     drop(listener);
-    let Some((program, args)) = command.split_first() else {
-        eprintln!("acp-relay: no program");
-        return 2;
-    };
-    let status = std::process::Command::new(program)
-        .args(args)
+    let status = std::process::Command::new(&args.command[0])
+        .args(&args.command[1..])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -206,48 +217,26 @@ async fn forward(listener: tokio::net::TcpListener, socket: PathBuf) {
     }
 }
 
-/// The socket and the program of a relay command line.
-fn parse_relay(arguments: &[OsString]) -> Option<(Bridge, Vec<OsString>)> {
-    let mut socket: Option<PathBuf> = None;
-    let mut port = RELAY_PORT;
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = arguments[index].to_str()?;
-        match argument {
-            "--" => {
-                let command: Vec<OsString> = arguments[index + 1..].to_vec();
-                return Some((
-                    Bridge {
-                        socket: socket?,
-                        port,
-                    },
-                    command,
-                ));
-            }
-            "--socket" => {
-                socket = Some(PathBuf::from(arguments.get(index + 1)?));
-                index += 2;
-            }
-            "--listen" => {
-                let address = arguments.get(index + 1)?.to_str()?;
-                port = address.rsplit(':').next()?.parse().ok()?;
-                index += 2;
-            }
-            _ => return None,
-        }
-    }
-    None
+#[derive(Parser)]
+#[command(name = "acp-relay", no_binary_name = true, args_override_self = true)]
+struct RelayArgs {
+    #[arg(long, allow_hyphen_values = true)]
+    socket: PathBuf,
+    #[arg(
+        long = "listen",
+        allow_hyphen_values = true,
+        value_name = "ADDR",
+        default_value_t = RELAY_PORT,
+        value_parser = |address: &str| address.rsplit(':').next().unwrap_or_default().parse::<u16>()
+    )]
+    port: u16,
+    #[arg(last = true, required = true, num_args = 1..)]
+    command: Vec<OsString>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-
-    fn args(items: &[&str]) -> Vec<OsString> {
-        items.iter().map(OsString::from).collect()
-    }
-
     /// The path a sandboxed agent takes: TCP to the relay, a unix socket to the
     /// host's proxy, and the proxy's own TCP connection to the model.
     #[cfg(unix)]
@@ -304,34 +293,24 @@ mod tests {
         proxy.close();
     }
 
-    #[test]
-    fn a_relay_command_line_names_the_socket_the_port_and_the_program() {
-        let parsed = parse_relay(&args(&[
-            "--socket",
-            "/run/ene/proxy.sock",
-            "--listen",
-            "127.0.0.1:3128",
-            "--",
-            "agent",
-            "--stdio",
-        ]))
-        .expect("a relay command line");
-        assert_eq!(parsed.0.socket, Path::new("/run/ene/proxy.sock"));
-        assert_eq!(parsed.0.port, 3128);
-        assert_eq!(parsed.1, args(&["agent", "--stdio"]));
-    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxy_owns_its_socket_until_close_or_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("proxy.sock");
+        let runtime = tokio::runtime::Handle::current();
+        let proxy = open(&runtime, socket.clone()).unwrap();
+        assert!(socket.exists());
+        drop(proxy);
+        assert!(!socket.exists());
 
-    #[test]
-    fn a_relay_command_line_without_a_program_is_refused() {
-        assert!(
-            parse_relay(&args(&[
-                "--socket",
-                "/tmp/x.sock",
-                "--listen",
-                "127.0.0.1:1"
-            ]))
-            .is_none()
-        );
-        assert!(parse_relay(&args(&["agent"])).is_none());
+        let proxy = open(&runtime, socket.clone()).unwrap();
+        proxy.close();
+        assert!(!socket.exists());
+        std::fs::write(&socket, "not our socket").unwrap();
+        drop(proxy);
+        assert_eq!(std::fs::read_to_string(&socket).unwrap(), "not our socket");
+        assert!(open(&runtime, socket.clone()).is_err());
+        assert_eq!(std::fs::read_to_string(&socket).unwrap(), "not our socket");
     }
 }

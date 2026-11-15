@@ -5,7 +5,6 @@
 -- there is no in-place migration of older development databases.
 
 PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
 
 -- Companions: the author's profile, the grown mind and the assigned models.

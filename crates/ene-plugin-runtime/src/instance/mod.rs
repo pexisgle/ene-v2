@@ -10,7 +10,7 @@ use ene_plugin::*;
 use invocation::{Cancellation, Invocation, SLOTS, ene_emit, ene_service};
 use serde_json::Value;
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    sync::{Arc, Mutex, Weak, atomic::AtomicUsize},
     time::Duration,
 };
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Instance {
     plugin: Option<extism::Plugin>,
+    context: extism::UserData<Weak<Invocation>>,
     package: Package,
     entrypoint: String,
     generation: u64,
@@ -33,7 +34,12 @@ fn extension_timeout(extension: Extension) -> Duration {
         EXECUTION_TIMEOUT
     }
 }
-fn build(package: &Package, file: &str, timeout: Duration) -> Result<extism::Plugin> {
+fn build(
+    package: &Package,
+    file: &str,
+    timeout: Duration,
+    context: extism::UserData<Weak<Invocation>>,
+) -> Result<extism::Plugin> {
     let code = package.code(file)?.to_vec();
     let mut manifest = extism::Manifest::new([extism::Wasm::data(code)])
         .with_allowed_hosts(std::iter::empty())
@@ -60,18 +66,12 @@ fn build(package: &Package, file: &str, timeout: Duration) -> Result<extism::Plu
         .with_initialization_fuel_limit(WASM_INITIALIZATION_FUEL)
         .with_function(
             "ene_service",
-            [extism::ValType::I64],
-            [extism::ValType::I64],
-            extism::UserData::new(()),
+            [extism::PTR],
+            [extism::PTR],
+            context.clone(),
             ene_service,
         )
-        .with_function(
-            "ene_emit",
-            [extism::ValType::I64],
-            [],
-            extism::UserData::new(()),
-            ene_emit,
-        )
+        .with_function("ene_emit", [extism::PTR], [], context, ene_emit)
         .build()
         .map_err(Error::Execution)
 }
@@ -111,12 +111,14 @@ impl Instance {
                 return Err(Error::Cancelled);
             }
             package.verify()?;
-            let plugin = build(&package, &file, timeout)?;
+            let context = extism::UserData::new(Weak::new());
+            let plugin = build(&package, &file, timeout, context.clone())?;
             if token.is_cancelled() {
                 return Err(Error::Cancelled);
             }
             Ok(Self {
                 plugin: Some(plugin),
+                context,
                 package,
                 entrypoint,
                 generation,
@@ -157,19 +159,18 @@ impl Instance {
             armed: true,
         };
         let permit = self.permit.clone();
+        let context = self.context.get().map_err(Error::Execution)?;
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let result = (|| {
                 if token.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                let raw = match invocation {
-                    Some(invocation) => {
-                        plugin.call_with_host_context::<_, &[u8], _>(function, input, invocation)
-                    }
-                    None => plugin.call::<_, &[u8]>(function, input),
-                }
-                .map_err(Error::Execution)?;
+                *context.lock().map_err(|_| Error::Unavailable)? =
+                    invocation.as_ref().map(Arc::downgrade).unwrap_or_default();
+                let result = plugin.call::<_, &[u8]>(function, input);
+                *context.lock().map_err(|_| Error::Unavailable)? = Weak::new();
+                let raw = result.map_err(Error::Execution)?;
                 if raw.len() > MAX_CHUNK {
                     return Err(Error::Protocol);
                 }

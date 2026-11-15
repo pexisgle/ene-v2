@@ -22,5 +22,5 @@ curl -sS --max-time 60 https://api.openai.com/v1/audio/speech \
 
 echo '=== stream it through the host ==='
 cd "$repo"
-ENE_STT_FIXTURE=$fixture direnv exec . cargo test -p ene-host --locked --test voice_stt -- --nocapture 2>&1 |
+ENE_STT_FIXTURE=$fixture direnv exec . cargo test -p ene-host --locked --test voice_stt -- --ignored --nocapture 2>&1 |
   grep -E "transcript:|skipping|panicked|test result" | head -6

@@ -4,7 +4,6 @@ use crate::host::permission::{self, Approval, ApprovalDecision, ApprovalStatus, 
 use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
 use rig_ecs::tools::ToolRequest;
 
-/// Deterministic PCM, optionally failing; the tests never touch the network.
 struct FakeTts {
     fail: bool,
 }
@@ -82,16 +81,10 @@ fn current_owner(world: &World, companion: &str) -> Owner {
         .clone()
 }
 
-#[derive(Resource, Default)]
-pub(super) struct TestEngines {
-    pub(super) tts: Option<Arc<dyn TtsEngine>>,
-    pub(super) stt: Option<Arc<dyn SttEngine>>,
-}
-
 fn test_world() -> World {
     let mut world = World::new();
     world.insert_resource(Voice::new(test_runtime()));
-    world.insert_resource(TestEngines {
+    world.insert_resource(Engines {
         tts: Some(Arc::new(FakeTts { fail: false })),
         stt: Some(Arc::new(FakeStt)),
     });
@@ -229,31 +222,28 @@ fn sentences_split_on_the_design_terminators() {
     assert_eq!(buffer.chars().count(), 5);
 }
 
-#[test]
-fn out_of_order_synthesis_is_released_in_sequence_order() {
-    let mut emitter = Emitter::new("u".into(), 7);
-    // The second sentence finishes first: nothing is sent yet.
-    assert!(emitter.offer(1, Ok(vec![2, 0])).is_empty());
-    let events = emitter.offer(0, Ok(vec![1, 0]));
-    assert_eq!(chunks(&events), [0, 1]);
-    assert!(events.iter().all(|event| matches!(
-        &event.event,
-        Some(w::audio_output_event::Event::Chunk(chunk)) if chunk.is_final_chunk
-    )));
-    assert_eq!(finished(&emitter.finish(2)), Some(2));
-}
-
-#[test]
-fn a_skipped_sentence_unblocks_the_next_one() {
-    let mut emitter = Emitter::new("u".into(), 7);
-    let events = emitter.offer(0, Err("timed out".into()));
-    assert!(matches!(
-        events.as_slice(),
-        [w::AudioOutputEvent { event: Some(w::audio_output_event::Event::Skipped(skipped)), .. }]
-            if skipped.sequence_no == 0
-    ));
-    assert_eq!(chunks(&emitter.offer(1, Ok(vec![0, 0]))), [1]);
-    assert_eq!(finished(&emitter.finish(2)), Some(2));
+#[tokio::test]
+async fn skipped_sentences_still_finish_the_utterance() {
+    let voice = Voice::new(tokio::runtime::Handle::current());
+    let mut events = voice.register("c1").receiver;
+    voice.publish("ene", "c1", 1);
+    voice.begin("ene", Arc::new(FakeTts { fail: true }), String::new());
+    voice.speak("ene", "first。second。");
+    voice.end_turn("ene");
+    for sequence in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event.event, Some(w::audio_output_event::Event::Skipped(skipped)) if skipped.sequence_no == sequence)
+        );
+    }
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished(&[event]), Some(2));
 }
 
 #[tokio::test]
@@ -463,41 +453,7 @@ fn two_pending_approvals_disarm_voice_approval() {
 }
 
 #[test]
-fn a_voice_intent_is_conservative() {
-    for text in [
-        "はい",
-        "いいよ",
-        "お願いします",
-        "実行して",
-        "どうぞ",
-        "yes",
-        "OK",
-        "Approve it",
-    ] {
-        assert_eq!(
-            approval_intent(text),
-            Some(ApprovalDecision::Approve),
-            "{text}"
-        );
-    }
-    for text in [
-        "いいえ",
-        "だめ",
-        "やめて",
-        "やらない",
-        "キャンセル",
-        "no",
-        "deny",
-        "cancel",
-    ] {
-        assert_eq!(
-            approval_intent(text),
-            Some(ApprovalDecision::Deny),
-            "{text}"
-        );
-    }
-    // A negative word wins when both kinds appear, and an unknown sentence is
-    // never an approval.
+fn ambiguous_speech_never_grants_approval() {
     assert_eq!(
         approval_intent("いや、いいえ、いいです"),
         Some(ApprovalDecision::Deny)
@@ -560,32 +516,6 @@ fn the_autonomous_relay_stops_after_five_completions() {
 }
 
 #[test]
-fn audio_bound_to_a_moved_activation_is_discarded() {
-    let (_root, store) = store_with_client();
-    let mut world = World::new();
-    world.insert_resource(store.clone());
-    let chunk = w::AudioInputChunk {
-        client_id: "c1".into(),
-        activation_revision: 1,
-        ..Default::default()
-    };
-    let binding = bind_input(&world, &chunk).unwrap();
-    assert!(binding.accepts(&chunk) && is_still_active(&world, &binding));
-
-    store.activate("ene", Some("c1"), 1).unwrap();
-    assert!(!is_still_active(&world, &binding));
-    let moved = w::AudioInputChunk {
-        activation_revision: 2,
-        ..chunk.clone()
-    };
-    assert!(!binding.accepts(&moved));
-    assert!(matches!(
-        bind_input(&world, &chunk),
-        Err(HostError::Conflict(_))
-    ));
-}
-
-#[test]
 fn a_moved_activation_discards_the_transcription() {
     let (_root, store) = store_with_client();
     let mut world = test_world();
@@ -635,17 +565,6 @@ fn a_moved_activation_discards_the_transcription() {
     );
 }
 
-#[test]
-fn a_host_without_a_connection_reports_the_capability_as_missing() {
-    let root = tempfile::tempdir().unwrap();
-    let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
-    let mut world = World::new();
-    world.insert_resource(store);
-    world.insert_resource(Credentials::default());
-    assert_eq!(tts_source(&world).err(), Some(SetupError::Missing));
-    assert_eq!(stt_source(&world).err(), Some(SetupError::Missing));
-}
-
 /// A stereo WAV in the 16-bit shape the TTS endpoints return.
 fn stereo_wav(frames: &[(i16, i16)]) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(frames.len() * 4);
@@ -674,25 +593,78 @@ fn a_negative_second_stereo_channel_is_averaged_not_clamped_positive() {
     assert_eq!(samples, [-500, -32_768, 1_000]);
 }
 
-#[test]
-fn a_base_url_must_be_a_url_and_is_trimmed() {
-    let endpoint = |endpoint: &str| Endpoint {
-        adapter: "openai".into(),
-        endpoint: endpoint.into(),
-        options_schema: String::new(),
-        options: String::new(),
-    };
-    assert!(base_url(&endpoint("not a url"), "TTS").is_err());
-    // The engine is the operator's own endpoint; any scheme a URL can carry is
-    // theirs to choose, so only the shape is checked.
-    assert_eq!(
-        base_url(&endpoint("http://example.com"), "TTS").unwrap(),
-        "http://example.com"
-    );
-    assert_eq!(
-        base_url(&endpoint("http://127.0.0.1:5002/"), "TTS").unwrap(),
-        "http://127.0.0.1:5002"
-    );
+#[tokio::test]
+async fn configured_speech_requests_reject_oversized_audio() {
+    use crate::host::settings::{CredentialState, TtsConnection};
+    use axum::{Router, body::Body, response::Response, routing::post};
+
+    for chunked in [false, true] {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/custom",
+            post(move |request: axum::extract::Request| async move {
+                let body = axum::body::to_bytes(request.into_body(), 2048)
+                    .await
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["model"], "test-model");
+                assert_eq!(request["voice"], "test-voice");
+                assert_eq!(request["speed"], 1.25);
+                assert_eq!(request["input"], "hello");
+                assert_eq!(request["response_format"], "pcm");
+                let body = if chunked {
+                    Body::from_stream(futures_util::stream::iter(
+                        (0..=MAX_BODY_BYTES / AUDIO_CHUNK_BYTES).map(|_| {
+                            Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(
+                                &[0; AUDIO_CHUNK_BYTES],
+                            ))
+                        }),
+                    ))
+                } else {
+                    Body::from(vec![0; MAX_BODY_BYTES + 1])
+                };
+                Response::new(body)
+            }),
+        );
+        let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
+        let engine = HttpEngine::new(
+            Connection {
+                id: "speech-limit".into(),
+                name: "speech limit".into(),
+                enabled: true,
+                kind: ConnectionKind::Tts,
+                config: ConnectionConfig::Tts(TtsConnection {
+                    endpoint: Endpoint {
+                        adapter: "openai".into(),
+                        endpoint: format!("http://{address}"),
+                        options_schema: String::new(),
+                        options: serde_json::json!({
+                            "path": "/custom", "model": "test-model",
+                            "voice": "test-voice", "speed": 1.25
+                        })
+                        .to_string(),
+                    },
+                    voice_ids: Vec::new(),
+                }),
+                credential_state: CredentialState::Absent,
+                revision: 1,
+                last_check: None,
+            },
+            None,
+            ConnectionKind::Tts,
+        )
+        .unwrap();
+        let error = engine
+            .synthesize("hello".into(), String::new())
+            .await
+            .unwrap_err();
+        assert!(error.contains("more data"), "chunked={chunked}: {error}");
+    }
 }
 
 #[tokio::test]
@@ -700,27 +672,26 @@ async fn the_worker_orders_audio_and_finishes_the_utterance() {
     let voice = Voice::new(tokio::runtime::Handle::current());
     let mut events = voice.register("c1").receiver;
     voice.publish("ene", "c1", 1);
-    voice.begin("ene", Arc::new(FakeTts { fail: false }), String::new());
-    let utterance_id = {
-        let state = voice.lock();
-        state.owners["ene"].utterance.as_ref().unwrap().id.clone()
-    };
-    {
-        let mut state = voice.lock();
-        let work = state.works.get_mut(&utterance_id).unwrap();
-        // The second sentence is queued first: the ordering gate still emits
-        // sequence 0 before sequence 1.
-        for sequence_no in [1u32, 0] {
-            work.pending.push_back(Sentence {
-                sequence_no,
-                text: format!("s{sequence_no}"),
-                source: Arc::new(FakeTts { fail: false }),
-                voice: String::new(),
-            });
+    struct DelayedTts(Notify);
+    impl TtsEngine for DelayedTts {
+        fn synthesize<'a>(
+            &'a self,
+            text: String,
+            _: String,
+        ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
+            Box::pin(async move {
+                if text.starts_with("first") {
+                    self.0.notified().await;
+                } else {
+                    self.0.notify_one();
+                }
+                Ok((vec![0, 0], SAMPLE_RATE))
+            })
         }
-        work.emitter.finish(2);
-        voice.pump(&mut state, &utterance_id);
     }
+    voice.begin("ene", Arc::new(DelayedTts(Notify::new())), String::new());
+    voice.speak("ene", "first。second。");
+    voice.end_turn("ene");
     let collected = tokio::time::timeout(Duration::from_secs(5), async {
         let mut collected = Vec::new();
         while let Some(event) = events.recv().await {

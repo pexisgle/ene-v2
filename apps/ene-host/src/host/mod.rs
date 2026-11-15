@@ -108,7 +108,7 @@ impl Runtime {
     ) -> std::result::Result<Self, StartError> {
         let store = Store::open(&state.join("host.sqlite3")).map_err(boxed)?;
         let session_only = std::env::var_os("ENE_HOST_SESSION_CREDENTIALS").is_some();
-        let credentials = Credentials::load(&store, session_only);
+        let credentials = Credentials::new(session_only);
         let logs = DirStore::open(state.join("rig")).map_err(boxed)?;
         let (commands, command_rx) = crossbeam_channel::bounded::<Job>(QUEUE);
         let (wake_tx, wake_rx) = crossbeam_channel::bounded::<()>(1);
@@ -215,12 +215,15 @@ impl Runtime {
         self.hub.clone()
     }
 
-    /// Runs `operation` on the app thread, advances one frame and flushes the
-    /// notifications it produced.
-    pub(crate) async fn call<T: Send + 'static>(
+    /// Tries to enqueue `operation` immediately. Accepted jobs advance one
+    /// frame and flush notifications even if the reply future is dropped.
+    pub(crate) fn call<T: Send + 'static, F>(
         &self,
-        operation: impl FnOnce(&mut App) -> Result<T> + Send + 'static,
-    ) -> Result<T> {
+        operation: F,
+    ) -> impl Future<Output = Result<T>> + Send + use<T, F>
+    where
+        F: FnOnce(&mut App) -> Result<T> + Send + 'static,
+    {
         self.send(move |reply| {
             Box::new(move |app| {
                 let result = app
@@ -238,14 +241,17 @@ impl Runtime {
                 let _ = reply.send(result);
             })
         })
-        .await
     }
 
-    /// Runs `operation` without advancing the agent loop.
-    pub(crate) async fn read<T: Send + 'static>(
+    /// Tries to enqueue `operation` immediately. Accepted jobs run without
+    /// advancing the agent loop even if the reply future is dropped.
+    pub(crate) fn read<T: Send + 'static, F>(
         &self,
-        operation: impl FnOnce(&mut App) -> Result<T> + Send + 'static,
-    ) -> Result<T> {
+        operation: F,
+    ) -> impl Future<Output = Result<T>> + Send + use<T, F>
+    where
+        F: FnOnce(&mut App) -> Result<T> + Send + 'static,
+    {
         self.send(move |reply| {
             Box::new(move |app| {
                 let result = app
@@ -261,21 +267,27 @@ impl Runtime {
                 let _ = reply.send(result);
             })
         })
-        .await
     }
 
-    async fn send<T: Send + 'static>(
+    fn send<T: Send + 'static, F>(
         &self,
-        job: impl FnOnce(oneshot::Sender<Result<T>>) -> Job,
-    ) -> Result<T> {
+        job: F,
+    ) -> impl Future<Output = Result<T>> + Send + use<T, F>
+    where
+        F: FnOnce(oneshot::Sender<Result<T>>) -> Job,
+    {
         let (reply, received) = oneshot::channel();
-        self.handle
+        let submitted = self
+            .handle
             .commands
             .try_send(job(reply))
-            .map_err(|_| HostError::exhausted("host command queue is full or closed"))?;
-        received
-            .await
-            .map_err(|_| HostError::unavailable("Rig kernel stopped"))?
+            .map_err(|_| HostError::exhausted("host command queue is full or closed"));
+        async move {
+            submitted?;
+            received
+                .await
+                .map_err(|_| HostError::unavailable("Rig kernel stopped"))?
+        }
     }
 
     pub(crate) async fn begin_shutdown(&self) {
@@ -483,4 +495,91 @@ pub(crate) fn subscribe(
     }
     let receiver = app.world().resource::<Notifier>().subscribe();
     Ok((snapshot(app)?, receiver))
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn discarded_replies_leave_bounded_nonblocking_actor_jobs() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let (entered, started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let blocked = runtime.read(move |_| {
+            entered.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok(())
+        });
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+        let completed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..QUEUE - 1 {
+            let completed = completed.clone();
+            drop(runtime.read(move |_| {
+                completed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+        let last = runtime.read({
+            let completed = completed.clone();
+            move |_| {
+                completed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            runtime
+                .call::<(), _>(|_| panic!("a full queue must reject this job"))
+                .await,
+            Err(HostError::Exhausted(_))
+        ));
+        assert_eq!(completed.load(Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        blocked.await.unwrap();
+        last.await.unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), QUEUE);
+        runtime.shutdown().await.unwrap();
+        assert!(matches!(
+            runtime
+                .read::<(), _>(|_| panic!("a closed queue must reject this job"))
+                .await,
+            Err(HostError::Exhausted(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_errors_with_discarded_replies_still_stop_the_host() {
+        for mutation in [false, true] {
+            let state = tempfile::tempdir().unwrap();
+            let runtime = Runtime::start(state.path()).await.unwrap();
+            runtime
+                .read(|app| {
+                    app.world()
+                        .resource::<Store>()
+                        .conn()?
+                        .execute_batch("DROP TABLE clients")?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let broken = |app: &mut App| app.world().resource::<Store>().client("c1").map(|_| ());
+            if mutation {
+                drop(runtime.call(broken));
+            } else {
+                drop(runtime.read(broken));
+            }
+            assert!(matches!(
+                runtime
+                    .read::<(), _>(|_| panic!("a failed host must refuse work"))
+                    .await,
+                Err(HostError::Unavailable(_))
+            ));
+            assert!(matches!(
+                runtime.shutdown().await,
+                Err(HostError::Unavailable(_))
+            ));
+        }
+    }
 }

@@ -4,13 +4,10 @@ use crate::{Error, Result};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::{
     ambient_authority,
-    fs::{Dir, File as CapFile, OpenOptions},
+    fs::{Dir, File as CapFile, Metadata, MetadataExt as _, OpenOptions},
+    time::SystemTime,
 };
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt as _;
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt as _;
-use std::{io::Read, path::Path, time::SystemTime};
+use std::{io::Read, path::Path};
 
 #[derive(Clone, Debug)]
 pub(super) struct Stamp {
@@ -26,7 +23,7 @@ pub(super) struct Stamp {
     ctime_nsec: i64,
 }
 #[cfg(unix)]
-fn stamp(metadata: &std::fs::Metadata) -> Stamp {
+fn stamp(metadata: &Metadata) -> Stamp {
     Stamp {
         len: metadata.len(),
         modified: metadata.modified().ok(),
@@ -37,14 +34,14 @@ fn stamp(metadata: &std::fs::Metadata) -> Stamp {
     }
 }
 #[cfg(not(unix))]
-fn stamp(metadata: &std::fs::Metadata) -> Stamp {
+fn stamp(metadata: &Metadata) -> Stamp {
     Stamp {
         len: metadata.len(),
         modified: metadata.modified().ok(),
     }
 }
 #[cfg(unix)]
-pub(super) fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
+pub(super) fn unchanged(metadata: &Metadata, stamp: &Stamp) -> bool {
     metadata.is_file()
         && metadata.len() == stamp.len
         && metadata.modified().ok() == stamp.modified
@@ -54,34 +51,30 @@ pub(super) fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
         && metadata.ctime_nsec() == stamp.ctime_nsec
 }
 #[cfg(not(unix))]
-pub(super) fn unchanged(metadata: &std::fs::Metadata, stamp: &Stamp) -> bool {
+pub(super) fn unchanged(metadata: &Metadata, stamp: &Stamp) -> bool {
     metadata.is_file() && metadata.len() == stamp.len && metadata.modified().ok() == stamp.modified
 }
 
-fn invalid() -> Error {
-    Error::Invalid
-}
-
 #[cfg(windows)]
-fn reparse_free(metadata: &std::fs::Metadata) -> bool {
+fn reparse_free(metadata: &Metadata) -> bool {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
 }
 
 fn owned_dir(dir: &Dir) -> Result<()> {
-    if !dir.dir_metadata()?.is_dir() {
-        return Err(invalid());
+    let metadata = dir.dir_metadata()?;
+    if !metadata.is_dir() {
+        return Err(Error::Invalid);
     }
     #[cfg(unix)]
     {
-        let metadata = dir.try_clone()?.into_std_file().metadata()?;
         if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o022 != 0 {
-            return Err(invalid());
+            return Err(Error::Invalid);
         }
     }
     #[cfg(windows)]
-    if !reparse_free(&dir.try_clone()?.into_std_file().metadata()?) {
-        return Err(invalid());
+    if !reparse_free(&metadata) {
+        return Err(Error::Invalid);
     }
     Ok(())
 }
@@ -89,18 +82,17 @@ fn owned_dir(dir: &Dir) -> Result<()> {
 fn owned_file(file: &CapFile) -> Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
-        return Err(invalid());
+        return Err(Error::Invalid);
     }
     #[cfg(unix)]
     {
-        let metadata = file.try_clone()?.into_std().metadata()?;
         if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o022 != 0 {
-            return Err(invalid());
+            return Err(Error::Invalid);
         }
     }
     #[cfg(windows)]
-    if !reparse_free(&file.try_clone()?.into_std().metadata()?) {
-        return Err(invalid());
+    if !reparse_free(&metadata) {
+        return Err(Error::Invalid);
     }
     Ok(())
 }
@@ -115,9 +107,9 @@ pub(super) fn open_root(root: &Path) -> Result<Dir> {
                 .unwrap_or_else(|| Path::new("."));
             Dir::open_ambient_dir(parent, ambient_authority())?
                 .open_dir_nofollow(name)
-                .map_err(|_| invalid())?
+                .map_err(|_| Error::Invalid)?
         }
-        None => Dir::open_ambient_dir(root, ambient_authority()).map_err(|_| invalid())?,
+        None => Dir::open_ambient_dir(root, ambient_authority()).map_err(|_| Error::Invalid)?,
     };
     owned_dir(&dir)?;
     Ok(dir)
@@ -140,7 +132,7 @@ pub(super) fn read(root: &Dir, path: &str, limit: u64) -> Result<(Vec<u8>, Stamp
     Ok((bytes, stamp(&m)))
 }
 
-fn open_code(root: &Dir, path: &str) -> Result<std::fs::File> {
+pub(super) fn open_code(root: &Dir, path: &str) -> Result<CapFile> {
     let mut directory = root.try_clone()?;
     let mut components = Path::new(path).components().peekable();
     while let Some(component) = components.next() {
@@ -149,14 +141,14 @@ fn open_code(root: &Dir, path: &str) -> Result<std::fs::File> {
             options.read(true).follow(FollowSymlinks::No).nonblock(true);
             let file = directory
                 .open_with(component.as_os_str(), &options)
-                .map_err(|_| invalid())?;
+                .map_err(|_| Error::Invalid)?;
             owned_file(&file)?;
-            return Ok(file.into_std());
+            return Ok(file);
         }
         directory = directory
             .open_dir_nofollow(component.as_os_str())
-            .map_err(|_| invalid())?;
+            .map_err(|_| Error::Invalid)?;
         owned_dir(&directory)?;
     }
-    Err(invalid())
+    Err(Error::Invalid)
 }

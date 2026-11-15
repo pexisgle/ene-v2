@@ -20,7 +20,7 @@ use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The firing loop runs at most once per this real-time interval, so a burst
 /// of frames (and the frames a client request adds) never fires twice.
@@ -51,13 +51,6 @@ pub(crate) struct ListArgs {}
 #[serde(deny_unknown_fields)]
 pub(crate) struct CancelArgs {
     pub(crate) schedule_id: String,
-}
-
-/// The last real-time poll, so the loop checks due schedules once a second
-/// however often the app runs a frame.
-#[derive(Resource, Default)]
-pub(crate) struct SchedulePoll {
-    last: Option<Instant>,
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -216,19 +209,6 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
 
 /// Checks the schedules once a real-time second and delivers the due ones.
 fn fire_due_schedules(world: &mut World) {
-    {
-        let Some(mut poll) = world.get_resource_mut::<SchedulePoll>() else {
-            return;
-        };
-        let now = Instant::now();
-        if poll
-            .last
-            .is_some_and(|last| now.duration_since(last) < POLL_INTERVAL)
-        {
-            return;
-        }
-        poll.last = Some(now);
-    }
     let now = world
         .get_resource::<ScheduleClock>()
         .map_or_else(Timestamp::now, ScheduleClock::now);
@@ -244,198 +224,19 @@ pub(crate) struct AutonomyPlugin;
 impl Plugin for AutonomyPlugin {
     fn build(&self, app: &mut App) {
         register(app);
-        app.init_resource::<ScheduleClock>()
-            .init_resource::<SchedulePoll>()
-            .add_systems(Update, fire_due_schedules.after(AgentLoop));
-    }
-}
-
-/// A headless app with one companion, the kernel, the session log and the
-/// autonomy plugins, for the tests of this module and `staged`.
-#[cfg(test)]
-pub(crate) mod testing {
-    use crate::host::{
-        self,
-        agent::{self, TestModel},
-        db::{Store, schedules::ScheduleClock},
-        mind, model,
-        notify::Notifier,
-        permission,
-        resources::{DeviceHub, DeviceTimeout, HostState, Perception, Waiting},
-    };
-    use bevy_ecs::prelude::*;
-    use ene_rpc as w;
-    use rig_core::catalog::Catalog;
-    use rig_core::operation::Completion;
-    use rig_core::serve::{ErasedHandler, adapters::ModelAdapter};
-    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-    use rig_ecs::effects::Handler;
-    use rig_ecs::prelude::*;
-    use rig_ecs::session_log::SessionStore;
-    use rig_memory::DirStore;
-    use std::{
-        sync::{Arc, mpsc},
-        time::{Duration, Instant},
-    };
-
-    pub(crate) struct Harness {
-        pub(crate) app: App,
-        pub(crate) companion: String,
-        pub(crate) root: tempfile::TempDir,
-        wakes: mpsc::Receiver<()>,
-    }
-
-    impl Harness {
-        pub(crate) fn new(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>) -> Self {
-            Self::with_clock(turns, ScheduleClock::system())
-        }
-
-        /// A harness whose schedules are read on `clock`'s wall clock.
-        pub(crate) fn with_clock(
-            turns: impl IntoIterator<Item = Vec<MockStreamEvent>>,
-            clock: ScheduleClock,
-        ) -> Self {
-            let root = tempfile::tempdir().unwrap();
-            let model = MockCompletionModel::from_stream_turns(turns);
-            let state = root.path();
-            let store = Store::open(&state.join("host.sqlite3")).unwrap();
-            let logs = DirStore::open(state.join("rig")).unwrap();
-            let (sender, wakes) = mpsc::channel();
-            let mut app = App::new();
-            app.set_error_handler(bevy_ecs::error::warn)
-                .add_plugins(TaskPoolPlugin::default())
-                .insert_resource(store)
-                .insert_resource(clock)
-                .insert_resource(model::Credentials::default())
-                .insert_resource(DeviceHub::default())
-                .insert_resource(HostState::default())
-                .insert_resource(Notifier::new())
-                .insert_resource(Waiting::default())
-                .insert_resource(Perception::default())
-                .insert_resource(permission::Approvals::default())
-                .insert_resource(DeviceTimeout(Duration::from_millis(100)))
-                .insert_resource(rig_ecs::tasks::Wake::new(move || {
-                    let _ = sender.send(());
-                }))
-                .insert_resource(SessionStore::new(logs))
-                .insert_resource(TestModel(Arc::new(move || bound(&model))))
-                .init_resource::<crate::host::compaction::InactivityTracker>()
-                .add_plugins((
-                    AgentPlugin,
-                    SessionLogPlugin,
-                    agent::AgentPlugin,
-                    super::AutonomyPlugin,
-                    crate::host::staged::StagedPlugin,
-                ));
-            app.finish();
-            if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
-                time.set_max_delta(Duration::from_secs(60));
-            }
-            app.update();
-            let companion = mind::create(
-                app.world_mut(),
-                w::CreateCompanionRequest {
-                    name: "ene".into(),
-                    mind: "kind".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .id;
-            app.update();
-            Self {
-                app,
-                companion,
-                root,
-                wakes,
-            }
-        }
-
-        pub(crate) fn store(&self) -> Store {
-            self.app.world().resource::<Store>().clone()
-        }
-
-        pub(crate) fn companion_agent(&mut self) -> Entity {
-            agent::agent_of(self.app.world_mut(), &self.companion).expect("the companion agent")
-        }
-
-        pub(crate) fn conversation(&self, agent: Entity) -> &Conversation {
-            self.app
-                .world()
-                .get::<Conversation>(agent)
-                .expect("an agent conversation")
-        }
-
-        /// The names under the DirStore's `logs/`, sorted; the session log's
-        /// files.
-        pub(crate) fn log_names(&self) -> Vec<String> {
-            let dir = self.root.path().join("rig").join("logs");
-            let mut names: Vec<String> = std::fs::read_dir(dir)
-                .map(|entries| {
-                    entries
-                        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-                        .collect()
-                })
-                .unwrap_or_default();
-            names.sort();
-            names
-        }
-
-        /// Advances one frame and flushes its notifications.
-        pub(crate) fn tick(&mut self) {
-            host::tick(&mut self.app);
-        }
-
-        pub(crate) fn run_until(&mut self, done: impl Fn(&mut World) -> bool) {
-            let started = Instant::now();
-            while started.elapsed() < Duration::from_secs(10) {
-                self.tick();
-                if done(self.app.world_mut()) {
-                    return;
-                }
-                let _ = self.wakes.recv_timeout(Duration::from_millis(20));
-            }
-            panic!("the condition did not hold in time");
-        }
-    }
-
-    pub(crate) fn text_turn(text: &str) -> Vec<MockStreamEvent> {
-        vec![
-            MockStreamEvent::text(text),
-            MockStreamEvent::final_response_with_default_usage(),
-        ]
-    }
-
-    pub(crate) fn bound(model: &MockCompletionModel) -> model::Bound {
-        let spec = Catalog::builtin()
-            .resolve("deepseek/deepseek-flash")
-            .unwrap()
-            .shared();
-        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
-            spec.reference(),
-            model.clone(),
-        ));
-        model::Bound {
-            connection: rig_ecs::model::Connection {
-                spec: Arc::clone(&spec),
-                handler: Handler(handler),
-            },
-        }
-    }
-
-    /// The text of every conversation entry, oldest first.
-    pub(crate) fn texts(conversation: &Conversation) -> Vec<String> {
-        conversation
-            .entries()
-            .filter_map(|entry| agent::entry_text(&entry))
-            .collect()
+        app.init_resource::<ScheduleClock>().add_systems(
+            Update,
+            fire_due_schedules
+                .after(AgentLoop)
+                .run_if(on_real_timer(POLL_INTERVAL).or_else(run_once)),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{Harness, text_turn};
     use super::*;
+    use crate::host::tests::{Harness, text_turn, texts};
     use jiff::civil::date;
 
     /// A UTC instant at whole-second precision.
@@ -492,9 +293,10 @@ mod tests {
         let agent = harness.companion_agent();
         let before = harness.conversation(agent).messages().len();
 
-        // One real frame runs the firing loop; the message is queued for the
-        // head and the row records it.
-        harness.app.world_mut().resource_mut::<SchedulePoll>().last = None;
+        harness
+            .app
+            .world_mut()
+            .insert_resource(bevy_time::TimeUpdateStrategy::ManualDuration(POLL_INTERVAL));
         harness.tick();
         assert_eq!(incoming(harness.app.world_mut()), 1);
         let (enabled, last, next) = row(&harness.store(), &schedule.id);
@@ -511,7 +313,7 @@ mod tests {
                     .is_some_and(|text| text.contains("リマインドの時間だよ"))
             })
         });
-        let texts = super::testing::texts(harness.conversation(agent));
+        let texts = texts(harness.conversation(agent));
         assert_eq!(texts.len(), before + 2);
         assert!(
             texts[before].contains("[スケジュール実行: 朝会] "),
@@ -521,9 +323,11 @@ mod tests {
         assert!(texts[before].contains("9時に集合と伝える"));
         assert_eq!(texts[before + 1], "リマインドの時間だよ");
 
-        // The disabled row never fires again, even when the loop polls again.
         let delivered = harness.conversation(agent).messages().len();
-        harness.app.world_mut().resource_mut::<SchedulePoll>().last = None;
+        harness
+            .app
+            .world_mut()
+            .insert_resource(bevy_time::TimeUpdateStrategy::ManualDuration(POLL_INTERVAL));
         harness.tick();
         assert_eq!(harness.conversation(agent).messages().len(), delivered);
     }

@@ -63,6 +63,13 @@ mod tests {
             "file:///rpc",
             "http://127.0.0.1/wrong",
             "http://127.0.0.1/v1",
+            "http://127.0.0.1/rpc#secret",
+            "http://user@127.0.0.1/rpc",
+            "http://user:secret@127.0.0.1/rpc",
+            "http://127.0.0.1:65536/rpc",
+            "http://127.0.0.1:invalid/rpc",
+            "http://[::1]evil:80/rpc",
+            "http://[::1]evil/rpc",
         ] {
             assert!(connect(endpoint, "credential").is_err());
         }

@@ -21,14 +21,17 @@ use crate::host::{
     settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
+use itertools::Itertools;
 use rig_core::{
     driver::DynModel,
+    embeddings::{Embedding as VectorEmbedding, distance::VectorDistance},
     operation::Embedding,
     providers::{openai::OpenAIConfig, registry::ProviderConfig},
 };
 use rig_ecs::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -58,14 +61,24 @@ pub(crate) fn dimensions_of_space(space: &str) -> Option<usize> {
     dimensions.parse().ok()
 }
 
-/// Everything needed to call one embedding endpoint.
+#[derive(Clone)]
 struct Target {
-    adapter: String,
-    model_id: String,
+    model: DynModel<Embedding>,
     dimensions: usize,
-    endpoint: String,
-    secret: Option<String>,
     space: String,
+}
+
+#[derive(Default)]
+struct Models {
+    revision: u64,
+    credential_generation: Option<u64>,
+    targets: HashMap<(String, String), Target>,
+}
+
+#[derive(Resource, Clone, Default)]
+pub(crate) struct Embeddings {
+    models: Arc<Mutex<Models>>,
+    index: Arc<Mutex<CompactVectorIndex>>,
 }
 
 /// A vector row waiting for an embedding.
@@ -78,39 +91,7 @@ pub(crate) struct PendingEmbedding {
 
 /// Embeds `texts` in the space `target` names.
 async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    let secret = target.secret.clone().unwrap_or_default();
-    let default =
-        crate::host::settings::provider(&target.adapter).map_or_else(String::new, |p| p.endpoint);
-    let config = match crate::host::model::provider_of(&target.adapter)
-        .and_then(|provider| provider.config(secret.clone()))
-    {
-        Some(config) if target.endpoint != default => config.with_base_url(target.endpoint.clone()),
-        Some(config) => config,
-        // An adapter outside rig's registry keeps the OpenAI-compatible wire
-        // the host has always spoken for embeddings.
-        None => {
-            ProviderConfig::OpenAi(OpenAIConfig::new(secret).with_base_url(target.endpoint.clone()))
-        }
-    };
-    let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::unavailable)?);
-    // `Embedding` is the provider-neutral operation both clients erase into, so
-    // the call below is the same whichever adapter answered.
-    let model: DynModel<Embedding> = match config {
-        ProviderConfig::OpenAi(config) => config
-            .connect(http)
-            .embedding(target.model_id.clone(), Some(target.dimensions))
-            .erase(),
-        ProviderConfig::Gemini(config) => config
-            .connect(http)
-            .embedding(target.model_id.clone(), Some(target.dimensions))
-            .erase(),
-        ProviderConfig::Anthropic(_) => {
-            return Err(HostError::unavailable(
-                "the Anthropic adapter serves no embeddings",
-            ));
-        }
-    };
-    let response = tokio::time::timeout(EMBED_TIMEOUT, model.call(texts.to_vec()))
+    let response = tokio::time::timeout(EMBED_TIMEOUT, target.model.call(texts.to_vec()))
         .await
         .map_err(|_| HostError::unavailable("the embedding endpoint did not answer in time"))?
         .map_err(|error| HostError::unavailable(format!("embedding endpoint: {error}")))?;
@@ -138,20 +119,45 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     Ok(vectors)
 }
 
-/// Embeds one query on the host runtime for the recall path. The caller blocks
-/// the ECS thread, so it passes the handle it already has instead of an
-/// second copy of the handle on a resource of its own.
-fn embed(runtime: &tokio::runtime::Handle, target: &Target, text: &str) -> Result<Vec<f32>> {
-    let vector = runtime
-        .block_on(request(target, &[text.to_owned()]))?
-        .pop()
-        .ok_or_else(|| HostError::unavailable("embedding endpoint returned no vector"))?;
-    if vector.len() != target.dimensions {
-        return Err(HostError::unavailable(
-            "embedding dimensions do not match the connection",
-        ));
-    }
-    Ok(vector)
+fn connect(
+    adapter: &str,
+    endpoint: &str,
+    secret: Option<String>,
+    model_id: &str,
+    dimensions: usize,
+) -> Result<DynModel<Embedding>> {
+    let secret = secret.unwrap_or_default();
+    let default = crate::host::settings::provider(adapter).map_or_else(String::new, |p| p.endpoint);
+    let config = match crate::host::model::provider_of(adapter)
+        .and_then(|provider| provider.config(secret.clone()))
+    {
+        Some(config) if endpoint != default => config.with_base_url(endpoint.to_owned()),
+        Some(config) => config,
+        // An adapter outside rig's registry keeps the OpenAI-compatible wire
+        // the host has always spoken for embeddings.
+        None => {
+            ProviderConfig::OpenAi(OpenAIConfig::new(secret).with_base_url(endpoint.to_owned()))
+        }
+    };
+    let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::unavailable)?);
+    // `Embedding` is the provider-neutral operation both clients erase into, so
+    // the call below is the same whichever adapter answered.
+    let model: DynModel<Embedding> = match config {
+        ProviderConfig::OpenAi(config) => config
+            .connect(http)
+            .embedding(model_id.to_owned(), Some(dimensions))
+            .erase(),
+        ProviderConfig::Gemini(config) => config
+            .connect(http)
+            .embedding(model_id.to_owned(), Some(dimensions))
+            .erase(),
+        ProviderConfig::Anthropic(_) => {
+            return Err(HostError::unavailable(
+                "the Anthropic adapter serves no embeddings",
+            ));
+        }
+    };
+    Ok(model)
 }
 
 /// Resolves the companion's `Embedding` assignment to a callable target.
@@ -161,6 +167,7 @@ fn target(
     store: &Store,
     credentials: Option<&Credentials>,
     companion: &Companion,
+    embeddings: &Embeddings,
 ) -> Result<Option<Target>> {
     let Some(assignment) = companion.model(Role::Embedding) else {
         return Ok(None);
@@ -187,40 +194,55 @@ fn target(
     let Some(endpoint) = crate::host::settings::endpoint_of(&connection) else {
         return Ok(None);
     };
+    let revision = store.settings_revision()?;
+    let key = (connection.id.clone(), model_id.to_owned());
+    let mut models = crate::host::lock(&embeddings.models);
+    let credential_generation = credentials.map(Credentials::generation);
+    if models.revision != revision || models.credential_generation != credential_generation {
+        models.targets.clear();
+        models.revision = revision;
+        models.credential_generation = credential_generation;
+    }
+    if let Some(target) = models.targets.get(&key) {
+        return Ok(Some(target.clone()));
+    }
     let secret = crate::host::model::connection_secret(&connection, credentials);
-    Ok(Some(Target {
-        adapter: connection.endpoint().adapter.clone(),
-        model_id: model_id.to_owned(),
-        dimensions,
-        endpoint,
+    let model = connect(
+        &connection.endpoint().adapter,
+        &endpoint,
         secret,
+        model_id,
+        dimensions,
+    )?;
+    let target = Target {
+        model,
+        dimensions,
         space: space_id(model_id, dimensions),
-    }))
+    };
+    models.targets.insert(key, target.clone());
+    Ok(Some(target))
 }
 
-/// The semantic candidates for one query, or none when no embedding space is
-/// configured or the caller has no runtime to embed on. A failure degrades to
-/// lexical recall; it never fails the turn.
-pub(crate) fn semantic_ids(
+pub(crate) async fn semantic_ids(
     store: &Store,
-    runtime: Option<&tokio::runtime::Handle>,
-    index: &mut CompactVectorIndex,
+    embeddings: &Embeddings,
     credentials: Option<&Credentials>,
     companion: &str,
     query: &str,
 ) -> Vec<String> {
-    let Some(runtime) = runtime else {
-        return Vec::new();
-    };
     let Ok(Some(record)) = store.companion(companion) else {
         return Vec::new();
     };
-    let Ok(Some(target)) = target(store, credentials, &record) else {
+    let Ok(Some(target)) = target(store, credentials, &record, embeddings) else {
         return Vec::new();
     };
-    let Ok(vector) = embed(runtime, &target, query) else {
+    let Ok(mut vectors) = request(&target, &[query.to_owned()]).await else {
         return Vec::new();
     };
+    let Some(vector) = vectors.pop() else {
+        return Vec::new();
+    };
+    let mut index = crate::host::lock(&embeddings.index);
     if index.sync(store, companion, &target.space).is_err() {
         return Vec::new();
     }
@@ -248,32 +270,6 @@ fn decode(bytes: &[u8]) -> Result<Vec<f32>> {
         .iter()
         .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
-}
-
-/// Cosine similarity over two slices, with no allocation. A zero norm, a
-/// length mismatch or a non-finite component is `0.0`: the caller treats it
-/// as no evidence rather than inventing one.
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.len() != right.len() || left.is_empty() {
-        return 0.0;
-    }
-    let mut dot = 0.0f32;
-    let mut left_norm = 0.0f32;
-    let mut right_norm = 0.0f32;
-    for (a, b) in left.iter().zip(right) {
-        dot += a * b;
-        left_norm += a * a;
-        right_norm += b * b;
-    }
-    if left_norm <= 0.0 || right_norm <= 0.0 {
-        return 0.0;
-    }
-    let similarity = dot / (left_norm.sqrt() * right_norm.sqrt());
-    if similarity.is_finite() {
-        similarity.clamp(-1.0, 1.0)
-    } else {
-        0.0
-    }
 }
 
 /// One embedding space as one contiguous `Vec<f32>`: `entries[i]` is the
@@ -315,36 +311,6 @@ impl Space {
         (self.entries.get(index).map(|entry| entry.1) == Some(revision))
             .then(|| self.vector(index))
             .flatten()
-    }
-}
-
-/// One candidate of a ranking. `Ord` is its rank: a higher score is better,
-/// and on a tie the earlier entry is.
-#[derive(Clone, Copy, Debug)]
-struct Candidate {
-    score: f32,
-    index: usize,
-}
-
-impl PartialEq for Candidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
-    }
-}
-
-impl Eq for Candidate {}
-
-impl PartialOrd for Candidate {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Candidate {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.score
-            .total_cmp(&other.score)
-            .then_with(|| other.index.cmp(&self.index))
     }
 }
 
@@ -426,31 +392,41 @@ impl CompactVectorIndex {
         if query.len() != current.dimensions || limit == 0 {
             return Vec::new();
         }
-        let mut best: std::collections::BinaryHeap<std::cmp::Reverse<Candidate>> =
-            std::collections::BinaryHeap::with_capacity(limit.min(current.entries.len()));
-        for index in 0..current.entries.len() {
-            let score = current
-                .vector(index)
-                .map_or(0.0, |vector| cosine_similarity(query, vector));
-            let candidate = Candidate { score, index };
-            if best.len() < limit {
-                best.push(std::cmp::Reverse(candidate));
-            } else if best
-                .peek()
-                .is_some_and(|std::cmp::Reverse(worst)| candidate > *worst)
-            {
-                best.pop();
-                best.push(std::cmp::Reverse(candidate));
-            }
-        }
-        best.into_sorted_vec()
-            .into_iter()
-            .filter_map(|std::cmp::Reverse(candidate)| {
-                current
-                    .entries
-                    .get(candidate.index)
-                    .map(|(id, _)| (id.clone(), candidate.score))
+        let query = VectorEmbedding {
+            document: String::new(),
+            vec: query.iter().copied().map(f64::from).collect(),
+        };
+        // Rig's distance API owns f64 vectors. Reuse one scratch vector rather
+        // than widening the cache or allocating for each candidate.
+        let mut vector = VectorEmbedding {
+            document: String::new(),
+            vec: Vec::with_capacity(current.dimensions),
+        };
+        (0..current.entries.len())
+            .map(|index| {
+                vector.vec.clear();
+                vector.vec.extend(
+                    current
+                        .vector(index)
+                        .unwrap_or_default()
+                        .iter()
+                        .copied()
+                        .map(f64::from),
+                );
+                let similarity = query.cosine_similarity(&vector, false);
+                let score = if similarity.is_finite() {
+                    similarity.clamp(-1.0, 1.0) as f32
+                } else {
+                    0.0
+                };
+                (index, score)
             })
+            .k_smallest_by(limit, |(left, left_score), (right, right_score)| {
+                right_score
+                    .total_cmp(left_score)
+                    .then_with(|| left.cmp(right))
+            })
+            .map(|(index, score)| (current.entries[index].0.clone(), score))
             .collect()
     }
 }
@@ -485,6 +461,7 @@ fn backfill(
     store: Res<Store>,
     runtime: Option<Res<crate::host::resources::HostRuntime>>,
     credentials: Option<Res<Credentials>>,
+    embeddings: Res<Embeddings>,
     mut state: ResMut<Backfill>,
     mut notifier: Option<ResMut<crate::host::notify::Notifier>>,
 ) {
@@ -521,7 +498,8 @@ fn backfill(
         if state.running.contains(&companion.id) {
             continue;
         }
-        let Ok(Some(target)) = target(&store, credentials.as_deref(), &companion) else {
+        let Ok(Some(target)) = target(&store, credentials.as_deref(), &companion, &embeddings)
+        else {
             continue;
         };
         match store.memories_missing_embedding(&target.space, 1) {
@@ -539,12 +517,23 @@ fn backfill(
             state.running.remove(&companion.id);
             continue;
         };
+        let credentials = credentials.as_deref().cloned();
+        let embeddings = embeddings.clone();
         runtime.spawn(async move {
             // The ECS connection is not moved: the task opens its own
             // connection to the same database, with the same WAL pragmas, so
             // the store's lock is never held while it writes.
             let result = match store.open_secondary() {
-                Ok(connection) => fill(connection, &target).await,
+                Ok(connection) => {
+                    fill(
+                        connection,
+                        &store,
+                        &embeddings,
+                        credentials.as_ref(),
+                        &companion,
+                    )
+                    .await
+                }
                 Err(error) => Err(error),
             };
             let _ = sender.send((companion_id, result));
@@ -552,11 +541,18 @@ fn backfill(
     }
 }
 
-/// Embeds missing and stale vectors until the batch budget is spent. All
-/// reads and writes go through the task's own connection.
-async fn fill(connection: rusqlite::Connection, target: &Target) -> Result<usize> {
+async fn fill(
+    connection: rusqlite::Connection,
+    store: &Store,
+    embeddings: &Embeddings,
+    credentials: Option<&Credentials>,
+    companion: &Companion,
+) -> Result<usize> {
     let mut written = 0;
     while written < MAX_BACKFILL {
+        let Some(target) = target(store, credentials, companion, embeddings)? else {
+            break;
+        };
         let pending = crate::host::db::memories::missing_embeddings(
             &connection,
             &target.space,
@@ -566,7 +562,7 @@ async fn fill(connection: rusqlite::Connection, target: &Target) -> Result<usize
             break;
         }
         let texts: Vec<String> = pending.iter().map(|row| row.content.clone()).collect();
-        let vectors = request(target, &texts).await?;
+        let vectors = request(&target, &texts).await?;
         if vectors.len() != pending.len() {
             return Err(HostError::unavailable(
                 "embedding endpoint returned the wrong number of vectors",
@@ -595,7 +591,7 @@ async fn fill(connection: rusqlite::Connection, target: &Target) -> Result<usize
 
 /// Registers the vector cache and its backfill.
 pub(crate) fn register(app: &mut App) {
-    app.init_resource::<CompactVectorIndex>()
+    app.init_resource::<Embeddings>()
         .init_resource::<Backfill>()
         .add_systems(Update, backfill.after(AgentLoop));
 }
@@ -605,7 +601,200 @@ mod tests {
     use super::*;
     use crate::host::db::memories::MemoryRecord;
     use crate::host::mind::memory::Memory;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn embedding_credentials_rotate_and_revoke_across_clones() {
+        use crate::host::{
+            model,
+            settings::{Connection, CredentialState, EmbeddingConnection, Endpoint},
+            tests::Harness,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let credentials = Credentials::new(true);
+        let endpoint_credentials = credentials.clone();
+        let endpoint = tokio::spawn(async move {
+            let mut headers = Vec::new();
+            for count in [1, 1, 1, 1, 1, MAX_EMBED_BATCH, MAX_EMBED_BATCH, 1] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut part = [0; 4096];
+                    let read = socket.read(&mut part).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&part[..read]);
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                let content_length: usize = std::str::from_utf8(&request[..header_end])
+                    .unwrap()
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + content_length {
+                    let mut part = [0; 4096];
+                    let read = socket.read(&mut part).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&part[..read]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                headers.push(
+                    request
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("authorization")
+                                .then(|| value.trim().to_owned())
+                        })
+                        .unwrap_or_default(),
+                );
+                match headers.len() {
+                    6 => model::save_secret(
+                        &endpoint_credentials,
+                        "credential-embedding",
+                        "backfill-new-key",
+                    )
+                    .unwrap(),
+                    7 => {
+                        model::delete_secret(&endpoint_credentials, "credential-embedding").unwrap()
+                    }
+                    _ => {}
+                }
+                let body = serde_json::json!({
+                    "data": (0..count).map(|index| serde_json::json!({
+                        "embedding": [1.0, 0.0], "index": index
+                    })).collect::<Vec<_>>(),
+                    "usage": {"prompt_tokens": 1, "total_tokens": 1}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            headers
+        });
+        let harness = Harness::new([]);
+        let store = harness.store();
+        let writer = credentials.clone();
+        let embeddings = Embeddings::default();
+        let connection = Connection {
+            id: "credential-embedding".into(),
+            name: "embedding".into(),
+            enabled: true,
+            kind: ConnectionKind::Embedding,
+            credential_state: CredentialState::Absent,
+            revision: 0,
+            last_check: None,
+            config: ConnectionConfig::Embedding(EmbeddingConnection {
+                endpoint: Endpoint {
+                    adapter: "custom".into(),
+                    endpoint: format!("http://{address}"),
+                    options_schema: String::new(),
+                    options: String::new(),
+                },
+                model_id: "credential-model".into(),
+                dimensions: 2,
+            }),
+        };
+        store
+            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)], &[])
+            .unwrap();
+        let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+        companion.assignments.embedding = Some(super::super::Assignment {
+            connection_id: "credential-embedding".into(),
+            model_id: "credential-model".into(),
+        });
+        store
+            .update_companion(&companion, companion.revision)
+            .unwrap();
+        let revision = store.settings_revision().unwrap();
+        for secret in [Some("old-key"), Some("new-key"), None] {
+            match secret {
+                Some(secret) => {
+                    model::save_secret(&writer, "credential-embedding", secret).unwrap()
+                }
+                None => model::delete_secret(&writer, "credential-embedding").unwrap(),
+            }
+            store
+                .set_credential_state(
+                    "credential-embedding",
+                    if secret.is_some() {
+                        CredentialState::Registered
+                    } else {
+                        CredentialState::Absent
+                    },
+                )
+                .unwrap();
+            let target = target(&store, Some(&credentials), &companion, &embeddings)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                request(&target, &["query".into()]).await.unwrap(),
+                [vec![1.0, 0.0]]
+            );
+        }
+        writer.remember("credential-embedding", "direct-key".into());
+        let target = target(&store, Some(&credentials), &companion, &embeddings)
+            .unwrap()
+            .unwrap();
+        request(&target, &["query".into()]).await.unwrap();
+        writer.forget("credential-embedding");
+        let target = self::target(&store, Some(&credentials), &companion, &embeddings)
+            .unwrap()
+            .unwrap();
+        request(&target, &["query".into()]).await.unwrap();
+        writer.remember("credential-embedding", "backfill-old-key".into());
+        let pending = MAX_EMBED_BATCH * 2 + 1;
+        for index in 0..pending {
+            let mut record = memory(&format!("memory {index}"));
+            record.owner = companion.id.clone();
+            store.insert_memory(record).unwrap();
+        }
+        assert_eq!(
+            fill(
+                store.open_secondary().unwrap(),
+                &store,
+                &embeddings,
+                Some(&credentials),
+                &companion,
+            )
+            .await
+            .unwrap(),
+            pending
+        );
+        assert_eq!(store.settings_revision().unwrap(), revision);
+        let headers = tokio::time::timeout(Duration::from_secs(3), endpoint)
+            .await
+            .unwrap()
+            .unwrap();
+        println!("embedding credential lifecycle {headers:?}");
+        assert_eq!(
+            headers,
+            [
+                "Bearer old-key",
+                "Bearer new-key",
+                "Bearer",
+                "Bearer direct-key",
+                "Bearer",
+                "Bearer backfill-old-key",
+                "Bearer backfill-new-key",
+                "Bearer"
+            ]
+        );
+    }
 
     fn store() -> Store {
         let temp = tempfile::tempdir().unwrap();
@@ -634,59 +823,6 @@ mod tests {
             &encode(vector),
         )
         .unwrap();
-    }
-
-    /// Serves the reply shape the request path asks for: Gemini's native batch
-    /// reply under `:batchEmbedContents`, the OpenAI-shaped one elsewhere.
-    async fn embedding_endpoint() -> std::net::SocketAddr {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                let mut request = [0u8; 4_096];
-                let Ok(read) = socket.read(&mut request).await else {
-                    continue;
-                };
-                let request = String::from_utf8_lossy(&request[..read]);
-                let path = request.split_whitespace().nth(1).unwrap_or_default();
-                let body = if path.contains(":batchEmbedContents") {
-                    r#"{"embeddings":[{"values":[1.0,0.0]},{"values":[0.0,1.0]}]}"#
-                } else {
-                    r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[0.0,1.0],"index":1}],
-                        "usage":{"prompt_tokens":2,"total_tokens":2}}"#
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-            }
-        });
-        address
-    }
-
-    /// `gemini` reaches Gemini's native batch endpoint; an adapter rig has no
-    /// preset for keeps the OpenAI-shaped one.
-    #[tokio::test]
-    async fn embedding_wires_follow_the_adapter() {
-        let address = embedding_endpoint().await;
-        for adapter in ["gemini", "custom"] {
-            let target = Target {
-                adapter: adapter.into(),
-                model_id: "gemini-embedding-001".into(),
-                dimensions: 2,
-                endpoint: format!("http://{address}"),
-                secret: None,
-                space: space_id("gemini-embedding-001", 2),
-            };
-            let vectors = request(&target, &["a".to_owned(), "b".to_owned()])
-                .await
-                .unwrap();
-            assert_eq!(vectors, [vec![1.0, 0.0], vec![0.0, 1.0]], "{adapter}");
-        }
     }
 
     #[test]
@@ -768,29 +904,78 @@ mod tests {
     }
 
     #[test]
-    fn the_backfill_connection_writes_without_the_store_lock() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("host.sqlite3");
-        let store = Store::open(&path).unwrap();
-        let memory = store.insert_memory(memory("tea")).unwrap();
+    fn ranking_keeps_database_order_for_ties_and_bounds_top_k() {
+        let store = store();
         let space = space_id("fake", 2);
-        let connection = store.open_secondary().unwrap();
-        // The store's own connection is not borrowed for the write.
-        let pending =
-            crate::host::db::memories::missing_embeddings(&connection, &space, 8).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert!(
-            crate::host::db::memories::write_embedding(
-                &connection,
-                &memory.id,
-                memory.content_revision,
-                &space,
-                2,
-                &encode(&[1.0, 0.0]),
-            )
-            .unwrap()
+        let mut ids = Vec::new();
+        for (id, vector) in [
+            ("z-first", [2.0, 0.0]),
+            ("negative", [-3.0, 0.0]),
+            ("a-second", [1.0, 0.0]),
+            ("orthogonal", [0.0, 8.0]),
+            ("m-third", [20.0, 0.0]),
+            ("angled", [3.0, 4.0]),
+        ] {
+            let mut record = memory(id);
+            record.id = id.into();
+            let memory = store.insert_memory(record).unwrap();
+            embed(&store, &memory, &space, 2, &vector);
+            ids.push(memory.id);
+        }
+        let mut index = CompactVectorIndex::default();
+        index.sync(&store, "ene", &space).unwrap();
+        let rank = |limit| index.ranked("ene", &space, &[1.0, 0.0], limit);
+        assert!(rank(0).is_empty());
+        assert_eq!(rank(1), [(ids[0].clone(), 1.0)]);
+        assert_eq!(rank(2), [(ids[0].clone(), 1.0), (ids[2].clone(), 1.0)]);
+        assert_eq!(
+            rank(20),
+            [
+                (ids[0].clone(), 1.0),
+                (ids[2].clone(), 1.0),
+                (ids[4].clone(), 1.0),
+                (ids[5].clone(), 0.6),
+                (ids[3].clone(), 0.0),
+                (ids[1].clone(), -1.0),
+            ]
         );
-        let stored = store.embedding_blob(&memory.id, &space).unwrap();
-        assert_eq!(stored.unwrap().0, 2);
+        index.sync(&store, "ene", &space).unwrap();
+        assert_eq!(index.ranked("ene", &space, &[1.0, 0.0], 2)[1].0, ids[2]);
+    }
+
+    #[test]
+    fn invalid_comparisons_stay_finite_zero_evidence() {
+        let store = store();
+        let space = space_id("fake", 2);
+        let mut ids = Vec::new();
+        for vector in [
+            [1.0, 0.0],
+            [0.0, 0.0],
+            [f32::NAN, 0.0],
+            [f32::INFINITY, 0.0],
+            [-1.0, 0.0],
+        ] {
+            let memory = store.insert_memory(memory("vector")).unwrap();
+            embed(&store, &memory, &space, 2, &vector);
+            ids.push(memory.id);
+        }
+        let mut index = CompactVectorIndex::default();
+        index.sync(&store, "ene", &space).unwrap();
+        assert_eq!(
+            index.ranked("ene", &space, &[1.0, 0.0], 20),
+            [
+                (ids[0].clone(), 1.0),
+                (ids[1].clone(), 0.0),
+                (ids[2].clone(), 0.0),
+                (ids[3].clone(), 0.0),
+                (ids[4].clone(), -1.0),
+            ]
+        );
+        for query in [[0.0, 0.0], [f32::NAN, 0.0], [f32::INFINITY, 0.0]] {
+            assert_eq!(
+                index.ranked("ene", &space, &query, 2),
+                [(ids[0].clone(), 0.0), (ids[1].clone(), 0.0)]
+            );
+        }
     }
 }

@@ -1,28 +1,35 @@
 //! The host's own failure type. Connect status mapping lives at the RPC edge,
 //! so the host stays independent of any transport.
-use std::fmt;
-
 pub(crate) type Result<T> = std::result::Result<T, HostError>;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum HostError {
     /// The request is malformed or carries an unsupported value.
+    #[error("{0}")]
     Invalid(String),
     /// The addressed entity does not exist.
+    #[error("{0}")]
     NotFound(String),
     /// The request contradicts current state, such as a stale revision.
+    #[error("{0}")]
     Conflict(String),
     /// The addressed entity already exists.
+    #[error("{0}")]
     AlreadyExists(String),
     /// The caller is not allowed to perform the operation.
+    #[error("{0}")]
     Permission(String),
     /// A bounded resource, such as the command queue, is exhausted.
+    #[error("{0}")]
     Exhausted(String),
     /// The capability exists but is not available right now.
+    #[error("{0}")]
     Unavailable(String),
     /// The state database or the session log failed. The host stops.
+    #[error("{0}")]
     Storage(String),
     /// A defect the host cannot classify.
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -97,14 +104,6 @@ impl HostError {
         }
     }
 }
-
-impl fmt::Display for HostError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.message())
-    }
-}
-
-impl std::error::Error for HostError {}
 
 /// A user-visible failure: a stable code and a short, non-secret message.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

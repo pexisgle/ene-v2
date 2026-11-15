@@ -136,17 +136,93 @@ impl Drop for StreamGuard {
         if !current {
             return;
         }
-        let runtime = self.runtime.clone();
         let client_id = self.client_id.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let _ = runtime
-                    .call(move |app| {
-                        client::device::disconnected(app.world_mut(), &client_id);
-                        Ok(())
-                    })
-                    .await;
-            });
-        }
+        drop(self.runtime.call(move |app| {
+            client::device::disconnected(app.world_mut(), &client_id);
+            Ok(())
+        }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::client::{DeviceOperation, DeviceStatus};
+
+    #[tokio::test]
+    async fn device_guard_cleanup_outside_tokio_preserves_replacement_and_pending_operations() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        runtime
+            .read(|app| {
+                let store = app.world().resource::<Store>();
+                for (id, status) in [
+                    ("sent", DeviceStatus::Dispatched),
+                    ("unsent", DeviceStatus::Pending),
+                ] {
+                    store.insert_operation(&DeviceOperation {
+                        id: id.into(),
+                        client_id: "c1".into(),
+                        activation_revision: 1,
+                        capability: "device.files".into(),
+                        input: serde_json::json!({}),
+                        work_id: None,
+                        status,
+                        output: None,
+                        failure: None,
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                    })?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let hub = runtime.hub();
+        let (old, _old_receiver) = hub.register("c1");
+        let old = StreamGuard {
+            runtime: runtime.clone(),
+            hub: hub.clone(),
+            client_id: "c1".into(),
+            subscription: old,
+        };
+        let (subscription, mut receiver) = hub.register("c1");
+        let current = StreamGuard {
+            runtime: runtime.clone(),
+            hub: hub.clone(),
+            client_id: "c1".into(),
+            subscription: subscription.clone(),
+        };
+        std::thread::spawn(move || drop(old)).join().unwrap();
+        let status = runtime
+            .read(|app| {
+                Ok(app
+                    .world()
+                    .resource::<Store>()
+                    .operation("sent")?
+                    .unwrap()
+                    .status)
+            })
+            .await
+            .unwrap();
+        assert_eq!(hub.subscription("c1"), Some(subscription));
+        assert_eq!(status, DeviceStatus::Dispatched);
+        assert!(hub.send("c1", w::DeviceEvent::default()));
+        assert!(receiver.try_recv().is_ok());
+
+        std::thread::spawn(move || drop(current)).join().unwrap();
+        assert!(!hub.connected("c1"));
+        let statuses = runtime
+            .read(|app| {
+                let store = app.world().resource::<Store>();
+                Ok((
+                    store.operation("sent")?.unwrap().status,
+                    store.operation("unsent")?.unwrap().status,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(statuses, (DeviceStatus::Uncertain, DeviceStatus::Pending));
+        runtime.shutdown().await.unwrap();
     }
 }

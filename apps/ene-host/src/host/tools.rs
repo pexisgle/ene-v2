@@ -10,18 +10,9 @@ pub(crate) fn run_tool<A: Clone + Send + Sync + 'static>(
 ) -> impl Fn(On<ToolCalled<A>>, Commands) {
     move |called: On<ToolCalled<A>>, mut commands: Commands| {
         let event = called.event();
-        let (call, agent, tool_call, args) = (
-            event.call,
-            event.agent,
-            event.tool_call.clone(),
-            event.args.clone(),
-        );
-        let _ = tool_call;
+        let (call, agent, args) = (event.call, event.agent, event.args.clone());
+        let call_id = event.tool_call.id.to_string();
         commands.queue(move |world: &mut World| {
-            let call_id = world
-                .get::<ToolRequest>(call)
-                .map(|request| request.call.id.to_string())
-                .unwrap_or_default();
             let result = handler(world, agent, &call_id, args);
             match result {
                 Ok(text) => super::permission::answer(world, call, &text),

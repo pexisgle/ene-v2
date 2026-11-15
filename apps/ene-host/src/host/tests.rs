@@ -3,8 +3,7 @@
 #![cfg(test)]
 
 use super::{
-    agent::{self, TestModel},
-    chat, client,
+    agent, chat, client,
     client::device,
     db::Store,
     permission,
@@ -16,10 +15,7 @@ use ene_rpc as w;
 use rig_core::catalog::Catalog;
 use rig_core::completion::Message;
 use rig_core::operation::Completion;
-use rig_core::serve::ErasedHandler;
-use rig_core::serve::adapters::ModelAdapter;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-use rig_ecs::effects::Handler;
 use rig_ecs::prelude::*;
 use rig_ecs::session_log::SessionStore;
 use rig_memory::DirStore;
@@ -30,9 +26,9 @@ use std::{
 
 pub(crate) struct Harness {
     pub(crate) app: App,
-    companion: String,
+    pub(crate) companion: String,
     wakes: mpsc::Receiver<()>,
-    _root: tempfile::TempDir,
+    pub(crate) root: tempfile::TempDir,
 }
 
 impl Harness {
@@ -66,7 +62,9 @@ impl Harness {
                 let _ = sender.send(());
             }))
             .insert_resource(SessionStore::new(logs))
-            .insert_resource(TestModel(Arc::new(move || bound(&model))))
+            .insert_resource(super::model::ModelFactory(Arc::new(
+                move |_, _, _, _, _| Ok(bound(&model)),
+            )))
             .add_plugins((
                 AgentPlugin,
                 SessionLogPlugin,
@@ -76,6 +74,8 @@ impl Harness {
                 work::WorkPlugin,
                 super::mind::MindPlugin,
                 super::compaction::CompactionPlugin,
+                super::autonomy::AutonomyPlugin,
+                super::staged::StagedPlugin,
             ));
         app.finish();
         if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
@@ -97,16 +97,53 @@ impl Harness {
             app,
             companion,
             wakes,
-            _root: root,
+            root,
         }
     }
 
-    /// An app that binds models for real: no `TestModel`, so `ensure_model`
-    /// reads the stored assignments and the host's own environment, as the
-    /// running host does.
+    pub(crate) fn with_clock(
+        turns: impl IntoIterator<Item = Vec<MockStreamEvent>>,
+        clock: super::db::schedules::ScheduleClock,
+    ) -> Self {
+        let mut harness = Self::new(turns);
+        harness.app.world_mut().insert_resource(clock);
+        harness
+    }
+
+    pub(crate) fn companion_agent(&mut self) -> Entity {
+        agent::agent_of(self.app.world_mut(), &self.companion).expect("the companion agent")
+    }
+
+    pub(crate) fn conversation(&self, agent: Entity) -> &Conversation {
+        self.app
+            .world()
+            .get::<Conversation>(agent)
+            .expect("an agent conversation")
+    }
+
+    pub(crate) fn log_names(&self) -> Vec<String> {
+        let dir = self.root.path().join("rig").join("logs");
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    pub(crate) fn tick(&mut self) {
+        super::tick(&mut self.app);
+    }
+
     fn unbound() -> Self {
         let mut harness = Self::with_policy([], "*");
-        harness.app.world_mut().remove_resource::<TestModel>();
+        harness
+            .app
+            .world_mut()
+            .insert_resource(super::model::ModelFactory::default());
         harness
     }
 
@@ -125,8 +162,8 @@ impl Harness {
 
     pub(crate) fn run_until(&mut self, done: impl Fn(&mut World) -> bool) {
         let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(5) {
-            self.app.update();
+        while started.elapsed() < Duration::from_secs(10) {
+            self.tick();
             if done(self.app.world_mut()) {
                 return;
             }
@@ -141,7 +178,7 @@ impl Harness {
         panic!("the condition did not hold in time; failed={failed:?}");
     }
 
-    fn store(&self) -> Store {
+    pub(crate) fn store(&self) -> Store {
         self.app.world().resource::<Store>().clone()
     }
 
@@ -174,21 +211,12 @@ impl Harness {
     }
 }
 
-fn bound(model: &MockCompletionModel) -> super::model::Bound {
+pub(crate) fn bound(model: &MockCompletionModel) -> rig_core::DynModel<Completion> {
     let spec = Catalog::builtin()
         .resolve("deepseek/deepseek-flash")
         .unwrap()
         .shared();
-    let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
-        spec.reference(),
-        model.clone(),
-    ));
-    super::model::Bound {
-        connection: rig_ecs::model::Connection {
-            spec: Arc::clone(&spec),
-            handler: Handler(handler),
-        },
-    }
+    model.clone().priced_as(spec).into()
 }
 
 fn answered(world: &mut World) -> bool {
@@ -200,7 +228,7 @@ fn answered(world: &mut World) -> bool {
     })
 }
 
-fn text_turn(text: &str) -> Vec<MockStreamEvent> {
+pub(crate) fn text_turn(text: &str) -> Vec<MockStreamEvent> {
     vec![
         MockStreamEvent::text(text),
         MockStreamEvent::final_response_with_default_usage(),
@@ -1219,7 +1247,13 @@ fn a_companion_survives_a_create_and_an_edit_without_a_bound_model() {
     let store = harness.store();
     assert!(store.companion(&companion).unwrap().is_some());
     let entity = agent::agent_of(harness.app.world_mut(), &companion).expect("an agent");
-    assert!(harness.app.world().get::<agent::Binding>(entity).is_none());
+    assert!(
+        harness
+            .app
+            .world()
+            .get::<rig_ecs::model::Connection>(entity)
+            .is_none()
+    );
     // The client learns why the companion cannot reply yet.
     let replay = harness
         .app
@@ -1327,4 +1361,11 @@ fn history_texts(harness: &mut Harness) -> Vec<String> {
     .iter()
     .map(|item| item.text.clone())
     .collect()
+}
+
+pub(crate) fn texts(conversation: &Conversation) -> Vec<String> {
+    conversation
+        .entries()
+        .filter_map(|entry| agent::entry_text(&entry))
+        .collect()
 }

@@ -1,11 +1,8 @@
 //! A real host process: private discovery, owner auth and graceful SIGTERM.
 #![cfg(unix)]
 
-use std::{
-    path::Path,
-    process::{Child, Command},
-    time::Duration,
-};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+use std::{path::Path, time::Duration};
 
 fn connection_file(runtime: &Path) -> Option<(String, String)> {
     let bytes = std::fs::read(runtime.join("connection.json")).ok()?;
@@ -16,15 +13,18 @@ fn connection_file(runtime: &Path) -> Option<(String, String)> {
     ))
 }
 
-fn spawn(state: &Path, runtime: &Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_ene-host"))
-        .env("ENE_HOST_STATE_DIR", state)
-        .env("ENE_HOST_RUNTIME_DIR", runtime)
-        .env("ENE_HOST_SESSION_CREDENTIALS", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("start ene-host")
+fn spawn(state: &Path, runtime: &Path) -> Box<dyn ChildWrapper> {
+    CommandWrap::with_new(env!("CARGO_BIN_EXE_ene-host"), |command| {
+        command
+            .env("ENE_HOST_STATE_DIR", state)
+            .env("ENE_HOST_RUNTIME_DIR", runtime)
+            .env("ENE_HOST_SESSION_CREDENTIALS", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    })
+    .wrap(KillOnDrop)
+    .spawn()
+    .expect("start ene-host")
 }
 
 async fn discovery(runtime: &Path) -> (String, String) {
@@ -40,23 +40,13 @@ async fn discovery(runtime: &Path) -> (String, String) {
     .expect("host did not publish discovery")
 }
 
-async fn stop(child: &mut Child) {
-    let status = Command::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let exited = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if child.try_wait().unwrap().is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    assert!(exited.is_ok(), "host did not stop");
+async fn stop(child: &mut Box<dyn ChildWrapper>) {
+    child.signal(15).expect("send SIGTERM");
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .expect("host did not stop")
+        .expect("wait for host");
+    assert!(status.success(), "host shutdown failed: {status}");
 }
 
 #[tokio::test]

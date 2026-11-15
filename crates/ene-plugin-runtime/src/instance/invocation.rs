@@ -1,12 +1,12 @@
 //! Host functions and per-invocation budgets shared by all instances.
-use crate::{Error, Result, contract::Events, limits::*};
+use crate::{Error, contract::Events, limits::*};
 use ene_plugin::*;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::{
     future::Future,
     sync::{
-        Arc, LazyLock, Mutex,
+        Arc, LazyLock, Mutex, Weak,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -32,19 +32,18 @@ impl Services for DenyServices {
 // A cancelled compilation still holds its slot until the native compiler returns.
 pub(super) static SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_INSTANCES)));
-pub(super) fn ene_service(
-    plugin: &mut extism::CurrentPlugin,
-    input: &[extism::Val],
-    output: &mut [extism::Val],
-    _: extism::UserData<()>,
-) -> std::result::Result<(), extism::Error> {
-    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+extism::host_fn!(pub(super) ene_service(context: Weak<Invocation>; raw: &[u8]) -> Vec<u8> {
     if raw.len() > MAX_MESSAGE_BYTES {
         return Err(Error::Protocol.into());
     }
     let raw_len = raw.len();
     let request = serde_json::from_slice::<ServiceRequest>(raw)?;
-    let invocation = plugin.host_context::<Arc<Invocation>>()?.clone();
+    let invocation = context
+        .get()?
+        .lock()
+        .map_err(|_| Error::Unavailable)?
+        .upgrade()
+        .ok_or(Error::Unavailable)?;
     // Charge the bytes actually received and sent, not their re-encoded form.
     invocation.charge(&invocation.bytes, raw_len, MAX_SERVICE_BYTES)?;
     let result = invocation.service(request)?;
@@ -53,25 +52,24 @@ pub(super) fn ene_service(
         return Err(Error::Protocol.into());
     }
     invocation.charge(&invocation.bytes, bytes.len(), MAX_SERVICE_BYTES)?;
-    plugin.memory_set_val(&mut output[0], bytes)
-}
-pub(super) fn ene_emit(
-    plugin: &mut extism::CurrentPlugin,
-    input: &[extism::Val],
-    _: &mut [extism::Val],
-    _: extism::UserData<()>,
-) -> std::result::Result<(), extism::Error> {
-    let raw: &[u8] = plugin.memory_get_val(&input[0])?;
+    Ok(bytes)
+});
+extism::host_fn!(pub(super) ene_emit(context: Weak<Invocation>; raw: &[u8]) {
     if raw.len() > MAX_CHUNK {
         return Err(Error::Protocol.into());
     }
     let raw_len = raw.len();
     let event = serde_json::from_slice::<Event>(raw)?;
-    let invocation = plugin.host_context::<Arc<Invocation>>()?.clone();
+    let invocation = context
+        .get()?
+        .lock()
+        .map_err(|_| Error::Unavailable)?
+        .upgrade()
+        .ok_or(Error::Unavailable)?;
     invocation.charge(&invocation.stream_bytes, raw_len, MAX_STREAM_BYTES)?;
     invocation.emit(event)?;
     Ok(())
-}
+});
 pub(super) struct Invocation {
     pub(super) services: Arc<dyn Services>,
     pub(super) declared: Vec<Service>,
@@ -85,7 +83,7 @@ pub(super) struct Invocation {
     pub(super) runtime: tokio::runtime::Handle,
 }
 impl Invocation {
-    fn wait<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
+    fn wait<T>(&self, work: impl Future<Output = crate::Result<T>>) -> crate::Result<T> {
         self.runtime.block_on(async {
             tokio::select! { biased;
                 _ = self.cancel.cancelled() => Err(Error::Cancelled),
@@ -94,7 +92,10 @@ impl Invocation {
             }
         })
     }
-    fn service(&self, request: ServiceRequest) -> Result<std::result::Result<Value, Failure>> {
+    fn service(
+        &self,
+        request: ServiceRequest,
+    ) -> crate::Result<std::result::Result<Value, Failure>> {
         if self.calls.fetch_add(1, Ordering::Relaxed) >= MAX_SERVICE_CALLS {
             return Err(Error::Protocol);
         }
@@ -108,7 +109,7 @@ impl Invocation {
             Ok(result)
         })
     }
-    fn emit(&self, event: Event) -> Result<()> {
+    fn emit(&self, event: Event) -> crate::Result<()> {
         self.validator
             .lock()
             .map_err(|_| Error::Unavailable)?
@@ -118,7 +119,7 @@ impl Invocation {
             self.events.send(event).await.map_err(|_| Error::Cancelled)
         })
     }
-    fn charge(&self, total: &AtomicUsize, bytes: usize, limit: usize) -> Result<()> {
+    fn charge(&self, total: &AtomicUsize, bytes: usize, limit: usize) -> crate::Result<()> {
         let total = total
             .fetch_add(bytes, Ordering::Relaxed)
             .checked_add(bytes)

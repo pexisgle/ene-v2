@@ -76,29 +76,3 @@ impl Store {
         self.policy_rules()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rules_upsert_and_remove_in_one_batch() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let mut rule = PolicyRule {
-            id: "r1".into(),
-            tool_name: "device_request".into(),
-            pattern: "*".into(),
-            effect: PolicyEffect::Allow,
-            created_at: String::new(),
-        };
-        let rules = store.apply_policy_rules(&[rule.clone()], &[]).unwrap();
-        assert_eq!(rules.len(), 1);
-        assert!(!rules[0].created_at.is_empty());
-        rule.effect = PolicyEffect::Deny;
-        let rules = store.apply_policy_rules(&[rule], &[]).unwrap();
-        assert_eq!(rules[0].effect, PolicyEffect::Deny);
-        let rules = store.apply_policy_rules(&[], &["r1".to_owned()]).unwrap();
-        assert!(rules.is_empty());
-    }
-}

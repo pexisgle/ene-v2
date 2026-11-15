@@ -1,6 +1,7 @@
 //! The parent's explicit memory tools.
 use crate::host::{
     agent::CompanionAgent,
+    background::Background,
     db::{
         Result, Store,
         memories::{MindStateChange, MindUpdate, NewMemory, StateUpdate, detail},
@@ -8,7 +9,7 @@ use crate::host::{
     },
     error::HostError,
     mind::{
-        embedding::{self, CompactVectorIndex},
+        embedding::{self, Embeddings},
         memory::RecallMode,
     },
     model::Credentials,
@@ -56,7 +57,16 @@ pub(crate) fn register(app: &mut App) {
         "mind_recall",
         "Search the companion's memories. Use it when the current context is not enough.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| recall(world, agent, args)),
+        |called: On<ToolCalled<RecallArgs>>, mut commands: Commands| {
+            let (call, agent, args) = (called.call, called.agent, called.args.clone());
+            commands.queue(move |world: &mut World| match recall(world, agent, args) {
+                Ok(RecallWork::Running(task)) => {
+                    world.entity_mut(call).insert(PendingRecall(Some(task)));
+                }
+                Ok(RecallWork::Ready(text)) => crate::host::permission::answer(world, call, &text),
+                Err(error) => crate::host::permission::refuse(world, call, &error.to_string()),
+            });
+        },
     )
     .add_open_tool::<ReadArgs, _>(
         "mind_read",
@@ -70,7 +80,8 @@ pub(crate) fn register(app: &mut App) {
          The host binds the owner and commits everything atomically.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| update(world, agent, args)),
-    );
+    )
+    .add_systems(Update, complete_recall.after(AgentLoop));
 }
 
 fn companion(world: &World, agent: Entity) -> Result<String> {
@@ -80,36 +91,82 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
         .ok_or_else(|| HostError::internal("this tool belongs to a companion"))
 }
 
-fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<String> {
+enum RecallWork {
+    Ready(String),
+    Running(Background<Result<String>>),
+}
+
+#[derive(Component)]
+struct PendingRecall(Option<Background<Result<String>>>);
+
+fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut PendingRecall)>) {
+    for (call, mut pending) in &mut pending {
+        if !pending.0.as_ref().is_some_and(Background::is_finished) {
+            continue;
+        }
+        let result = pending
+            .0
+            .take()
+            .and_then(|task| task.take())
+            .unwrap_or_else(|| Err(HostError::unavailable("memory recall was cancelled")));
+        commands.queue(move |world: &mut World| {
+            if world.get_entity(call).is_err() {
+                return;
+            }
+            world.entity_mut(call).remove::<PendingRecall>();
+            match result {
+                Ok(text) => crate::host::permission::answer(world, call, &text),
+                Err(error) => {
+                    if error.is_storage() {
+                        crate::host::fail(world, error.to_string());
+                    }
+                    crate::host::permission::refuse(world, call, &error.to_string());
+                }
+            }
+        });
+    }
+}
+
+fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<RecallWork> {
     let companion = companion(world, agent)?;
     if args.query.chars().count() > 4_000 {
         return Err(HostError::invalid("query is too long"));
     }
-    let limit = args.limit.unwrap_or(8).clamp(1, 16) as usize;
     let store = world.resource::<Store>().clone();
-    // The semantic half is optional: without a usable embedding connection,
-    // or a runtime to embed on, there is no query vector and recall stays
-    // lexical (semantic: false).
-    let semantic = {
-        let runtime = world
-            .get_resource::<HostRuntime>()
-            .map(|runtime| runtime.0.clone());
-        let credentials = world.get_resource::<Credentials>().cloned();
-        let mut index = world.resource_mut::<CompactVectorIndex>();
-        embedding::semantic_ids(
-            &store,
-            runtime.as_ref(),
-            &mut index,
-            credentials.as_ref(),
-            &companion,
-            &args.query,
-        )
+    let embeddings = world.resource::<Embeddings>().clone();
+    let credentials = world.get_resource::<Credentials>().cloned();
+    let Some(runtime) = world.get_resource::<HostRuntime>() else {
+        return recall_result(&store, &companion, &args, &[]).map(RecallWork::Ready);
     };
+    Ok(RecallWork::Running(Background::spawn(
+        &runtime.0,
+        world.get_resource::<Wake>(),
+        async move {
+            let semantic = embedding::semantic_ids(
+                &store,
+                &embeddings,
+                credentials.as_ref(),
+                &companion,
+                &args.query,
+            )
+            .await;
+            recall_result(&store, &companion, &args, &semantic)
+        },
+    )))
+}
+
+fn recall_result(
+    store: &Store,
+    companion: &str,
+    args: &RecallArgs,
+    semantic: &[String],
+) -> Result<String> {
+    let limit = args.limit.unwrap_or(8).clamp(1, 16) as usize;
     let outcome = store.recall_hybrid(
-        &companion,
+        companion,
         &args.query,
         RecallMode::Explicit,
-        &semantic,
+        semantic,
         limit,
     )?;
     let items: Vec<Value> = outcome

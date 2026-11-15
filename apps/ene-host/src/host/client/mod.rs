@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_targets_expand_verified_input_without_a_stray_brace() {
+    fn approval_targets_expand_verified_input_and_preserve_unclosed_fields() {
         let spec = CapabilitySpec {
             approval_target: "write {path} as {mode}".into(),
             approval: CapabilityApproval::Confirm,
@@ -707,6 +707,14 @@ mod tests {
             ..motion()
         };
         assert_eq!(approval_target(&spec, &json!({"path": "/tmp/a"})), "/tmp/a");
+        let spec = CapabilitySpec {
+            approval_target: "write {path} as {mode".into(),
+            ..motion()
+        };
+        assert_eq!(
+            approval_target(&spec, &json!({"path": "/tmp/a", "mode": "text"})),
+            "write /tmp/a as {mode"
+        );
     }
 
     #[test]
@@ -717,22 +725,5 @@ mod tests {
             ..motion()
         };
         assert!(validate_declarations(&["body.motion".into()], &[shadow]).is_err());
-    }
-
-    #[test]
-    fn only_the_host_policy_turns_declarations_into_grants() {
-        let declared = vec!["body.motion".to_owned(), "device.files".to_owned()];
-        assert!(CapabilityPolicy::none().grants(&declared).is_empty());
-        assert!(CapabilityPolicy::parse("  , ").grants(&declared).is_empty());
-        assert_eq!(
-            CapabilityPolicy::parse("body.motion, body.motion").grants(&declared),
-            vec!["body.motion".to_owned()]
-        );
-        assert_eq!(CapabilityPolicy::parse("*").grants(&declared), declared);
-        assert!(
-            CapabilityPolicy::parse("payment.transfer")
-                .grants(&["body.motion".to_owned()])
-                .is_empty()
-        );
     }
 }

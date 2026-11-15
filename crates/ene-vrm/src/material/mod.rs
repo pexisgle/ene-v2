@@ -595,16 +595,19 @@ mod tests {
                 morph.clone(),
             ))
             .id();
-        app.world_mut().spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(outline_material),
-            Visibility::Visible,
-            NoFrustumCulling,
-            Transform::IDENTITY,
-            ChildOf(body),
-            skin,
-            morph,
-        ));
+        let outline = app
+            .world_mut()
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(outline_material),
+                Visibility::Visible,
+                NoFrustumCulling,
+                Transform::IDENTITY,
+                ChildOf(body),
+                skin,
+                morph,
+            ))
+            .id();
 
         let target =
             app.world_mut()
@@ -640,12 +643,6 @@ mod tests {
                 pipeline.state
             );
         }
-        let entities: Vec<Entity> = app
-            .world_mut()
-            .query_filtered::<Entity, With<MeshMaterial3d<MToonMaterial>>>()
-            .iter(app.world())
-            .collect();
-        assert_eq!(entities.len(), 2, "body and outline materials");
-        assert_specialized_pipelines_ok(&app, &entities);
+        assert_specialized_pipelines_ok(&app, &[body, outline]);
     }
 }

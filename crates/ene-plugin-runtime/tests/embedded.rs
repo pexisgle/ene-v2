@@ -1,7 +1,7 @@
 use ene_plugin::*;
 use ene_plugin_runtime::{
     Package,
-    instance::{DenyServices, Instance, Services},
+    instance::{DenyServices, Instance, Services, Supervisor},
     limits::{MAX_CHUNK, MAX_MESSAGE_BYTES, WASM_TABLE_ELEMENTS},
 };
 use futures_util::future::BoxFuture;
@@ -39,6 +39,7 @@ fn wasm(body: &str) -> Vec<u8> {
         (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
         (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
         (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (import "extism:host/env" "length" (func $length (param i64) (result i64)))
         (import "extism:host/user" "ene_service" (func $service (param i64) (result i64)))
         (import "extism:host/user" "ene_emit" (func $emit (param i64)))
         (func (export "ene_initialize") (result i32) (local $p i64) {empty} local.get $p i64.const 2 call $output i32.const 0)
@@ -375,6 +376,7 @@ async fn revocation_during_a_host_function_prevents_subsequent_guest_output() {
 }
 
 struct Tagged {
+    tag: &'static str,
     seen: Arc<tokio::sync::Mutex<Vec<String>>>,
 }
 
@@ -389,7 +391,7 @@ impl Services for Tagged {
                 seen.lock().await.push(key);
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            Ok(json!({}))
+            Ok(json!(self.tag))
         })
     }
     fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
@@ -398,17 +400,21 @@ impl Services for Tagged {
 }
 
 #[tokio::test]
-async fn concurrent_instances_receive_their_own_host_context() {
-    let code = wasm(&format!(
-        "{} local.get $p call $service drop",
-        write(&json!({"type":"state_read","key":"a"}).to_string())
-    ));
-    let (package, _temp) = package(&code, Target::Host, &[Service::State]);
+async fn concurrent_and_reused_instances_receive_their_own_services() {
+    let code = |key| {
+        wasm(&format!(
+            "{} local.get $p call $service local.set $p local.get $p local.get $p call $length call $output i32.const 0 return",
+            write(&json!({"type":"state_read","key":key}).to_string())
+        ))
+    };
+    let (first_package, _first_temp) = package(&code("first-key"), Target::Host, &[Service::State]);
+    let (second_package, _second_temp) =
+        package(&code("second-key"), Target::Host, &[Service::State]);
     let cancel = CancellationToken::new();
-    let mut first = Instance::load(package.clone(), "main".into(), 1, &cancel)
+    let mut first = Instance::load(first_package, "main".into(), 1, &cancel)
         .await
         .unwrap();
-    let mut second = Instance::load(package, "main".into(), 2, &cancel)
+    let mut second = Instance::load(second_package, "main".into(), 2, &cancel)
         .await
         .unwrap();
     let first_seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -419,6 +425,7 @@ async fn concurrent_instances_receive_their_own_host_context() {
         first.invoke(
             character(),
             Arc::new(Tagged {
+                tag: "first",
                 seen: first_seen.clone()
             }),
             first_tx,
@@ -427,14 +434,111 @@ async fn concurrent_instances_receive_their_own_host_context() {
         second.invoke(
             character(),
             Arc::new(Tagged {
+                tag: "second",
                 seen: second_seen.clone()
             }),
             second_tx,
             &cancel
         )
     );
-    first_result.unwrap();
-    second_result.unwrap();
-    assert_eq!(*first_seen.lock().await, vec!["a"]);
-    assert_eq!(*second_seen.lock().await, vec!["a"]);
+    assert_eq!(first_result.unwrap(), json!({"Ok": "first"}));
+    assert_eq!(second_result.unwrap(), json!({"Ok": "second"}));
+    assert_eq!(*first_seen.lock().await, vec!["first-key"]);
+    assert_eq!(*second_seen.lock().await, vec!["second-key"]);
+
+    first.initialize(&cancel).await.unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    let reused_seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let result = first
+        .invoke(
+            character(),
+            Arc::new(Tagged {
+                tag: "reused",
+                seen: reused_seen.clone(),
+            }),
+            tx,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"Ok": "reused"}));
+    assert_eq!(*reused_seen.lock().await, vec!["first-key"]);
+    assert_eq!(*first_seen.lock().await, vec!["first-key"]);
+}
+
+#[tokio::test]
+async fn supervisor_shutdown_waits_for_cleanup_and_refuses_new_tasks() {
+    let supervisor = Supervisor::default();
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let started = entered.clone();
+    let finished = dropped.clone();
+    supervisor
+        .spawn(async move {
+            let _drop = Dropped(finished);
+            started.notify_one();
+            std::future::pending::<()>().await;
+        })
+        .await
+        .unwrap();
+    supervisor
+        .spawn(async { panic!("fixture task failure") })
+        .await
+        .unwrap();
+    entered.notified().await;
+    supervisor.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+        .await
+        .unwrap();
+    assert!(supervisor.spawn(async {}).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires ENE_REFERENCE_WASM pointing to a freshly built ene-reference-wasm"]
+async fn sdk_guest_preserves_typed_events_and_service_failures() {
+    let code =
+        std::fs::read(std::env::var_os("ENE_REFERENCE_WASM").expect("ENE_REFERENCE_WASM")).unwrap();
+    let (package, _temp) = package(&code, Target::Host, &[Service::State]);
+    let cancel = CancellationToken::new();
+    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(16);
+    let output = instance
+        .invoke(
+            Operation::Harness {
+                input: HarnessInput::Start {
+                    prompt: vec![text_block("inspect")],
+                },
+            },
+            Arc::new(DenyServices),
+            tx,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(output, json!({}));
+    let mut events = Vec::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+    {
+        events.push(event);
+    }
+    assert_eq!(events.len(), 4);
+    assert!(matches!(
+        events.last(),
+        Some(Event::Harness {
+            event: HarnessEvent::RequestPermission { .. }
+        })
+    ));
+    let (tx, _rx) = mpsc::channel(1);
+    let failure = instance
+        .invoke(character(), Arc::new(DenyServices), tx, &cancel)
+        .await
+        .unwrap_err();
+    assert!(
+        failure.to_string().contains("permission_required"),
+        "{failure}"
+    );
 }

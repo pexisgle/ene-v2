@@ -50,8 +50,7 @@ impl Supervisor {
                 Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(_) => {
-                    running.abort_all();
-                    while running.join_next().await.is_some() {}
+                    running.shutdown().await;
                     break;
                 }
             }

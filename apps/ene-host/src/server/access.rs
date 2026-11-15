@@ -2,6 +2,7 @@
 //!
 //! Directory permissions, atomic publication and lock checks belong to
 //! `private-fs`; the host only supplies the paths and token.
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use io_lifetimes::AsFilelike;
 use private_fs::{Durability, FileAccess, FileCreation, OpenOptions, PrivateDir, PrivateFile};
 #[cfg(test)]
@@ -11,7 +12,6 @@ use std::{
     io,
     path::Path,
 };
-use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -48,10 +48,12 @@ impl Access {
                 .try_lock()
                 .map_err(|_| io::Error::other("state or runtime directory already in use"))?;
         }
+        let mut token = [0u8; 32];
+        getrandom::fill(&mut token)?;
         Ok(Self {
             _locks: locks,
             directory,
-            token: format!("{}{}", Uuid::new_v4(), Uuid::new_v4()),
+            token: URL_SAFE_NO_PAD.encode(token),
             #[cfg(test)]
             connection: runtime.join("connection.json"),
         })

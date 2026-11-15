@@ -7,7 +7,7 @@
 //! its result comes back to the ECS thread and is committed there.
 use super::{
     Companion, Role,
-    embedding::{self, CompactVectorIndex},
+    embedding::{self, Embeddings},
 };
 use crate::host::{
     agent::CompanionAgent,
@@ -17,16 +17,15 @@ use crate::host::{
     notify::Notifier,
 };
 use bevy_ecs::prelude::*;
-use rig_core::catalog::ModelSpec;
-use rig_core::completion::{CompletionRequest, Message};
+use rig_agent::{agent::AgentBuilder, extractor::ExtractorBuilder};
+use rig_core::completion::Message;
 use rig_core::conversation::{Conversation as CoreConversation, TurnEnd};
-use rig_core::serve::ErasedHandler;
+use rig_core::{DynModel, operation::Completion};
 use rig_ecs::model::Models;
 use rig_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -81,30 +80,13 @@ pub(crate) struct Batch {
 
 /// One extracted fact. `audience` is `""` (private), `"*"` (every
 /// companion) or another companion id.
-///
-/// The schema is inlined into the request's output schema, and its fields are
-/// listed as required even though serde defaults keep parsing tolerant of a
-/// model that omits one: the model is told what a complete fact looks like.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(
-    inline,
-    deny_unknown_fields,
-    extend(
-        "required" = [
-            "content",
-            "importance",
-            "audience",
-            "supersedes",
-            "cited_memory_ids"
-        ]
-    )
-)]
+#[schemars(inline, deny_unknown_fields)]
 pub(crate) struct Fact {
-    #[serde(default)]
     #[schemars(length(max = 4000))]
     pub(crate) content: String,
     #[serde(default)]
-    #[schemars(required, range(min = 0, max = 10))]
+    #[schemars(range(min = 0, max = 10))]
     pub(crate) importance: Option<u8>,
     #[serde(default)]
     #[schemars(length(max = 128))]
@@ -117,12 +99,9 @@ pub(crate) struct Fact {
     pub(crate) cited_memory_ids: Vec<String>,
 }
 
-/// The extraction response: `facts` is required by the schema while serde
-/// still defaults an omitted array to empty.
-#[derive(Deserialize, schemars::JsonSchema)]
-#[schemars(deny_unknown_fields, extend("required" = ["facts"]))]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct Extraction {
-    #[serde(default)]
     facts: Vec<Fact>,
 }
 
@@ -216,13 +195,6 @@ pub(crate) fn validate_citations(cited: &[String], injected: &[String]) -> Vec<S
         .collect()
 }
 
-/// The model connection a consolidation job calls: the same provider-agnostic
-/// path compaction uses, so Anthropic and Gemini assignments work too.
-struct Target {
-    spec: Arc<ModelSpec>,
-    handler: ErasedHandler,
-}
-
 /// Resolves the companion's `Consolidation` assignment (or its documented
 /// companion fallback) to a connected model.
 fn target(
@@ -230,20 +202,16 @@ fn target(
     credentials: Option<&Credentials>,
     models: &Models,
     companion: &Companion,
-) -> Option<Target> {
+) -> Option<DynModel<Completion>> {
     let credentials = credentials?;
-    let bound = model::connect(
+    model::connect(
         store,
         credentials,
         models.0.catalog(),
         companion,
         Role::Consolidation,
     )
-    .ok()?;
-    Some(Target {
-        spec: Arc::clone(&bound.connection.spec),
-        handler: bound.connection.handler.0.clone(),
-    })
+    .ok()
 }
 
 /// The extraction system prompt: facts only, separate records, never revive
@@ -255,11 +223,6 @@ const SYSTEM_PROMPT: &str = "あなたはコンパニオンの経験記憶を整
 importance 1以下（忘却済み）の既存記憶を高重要度で復活させてはいけません。\
 cited_memory_ids には、提示された「注入済み記憶ID」に含まれるIDだけを書きます。\
 出力は指定されたJSONスキーマのみです。";
-
-fn schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(Extraction))
-        .expect("a generated JSON schema is always a JSON value")
-}
 
 /// Renders the extraction prompt. It carries the transcript, the candidate
 /// memories with their revisions, and the ids the host injected.
@@ -293,27 +256,7 @@ pub(crate) fn prompt(turns: &[Turn], context: &[MemoryContext], injected: &[Stri
     prompt
 }
 
-/// Parses the model's last message into facts. Fences and surrounding prose
-/// are tolerated, but the JSON itself must validate.
-pub(crate) fn parse_extraction(text: &str) -> Result<Vec<Fact>> {
-    let body = text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```JSON")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    let start = body
-        .find('{')
-        .ok_or_else(|| HostError::unavailable("consolidation output has no JSON object"))?;
-    let end = body
-        .rfind('}')
-        .ok_or_else(|| HostError::unavailable("consolidation output has no JSON object"))?;
-    let body = body
-        .get(start..=end)
-        .ok_or_else(|| HostError::unavailable("consolidation output is not valid JSON"))?;
-    let extraction: Extraction = serde_json::from_str(body)
-        .map_err(|error| HostError::unavailable(format!("consolidation output: {error}")))?;
+fn normalize(extraction: Extraction) -> Vec<Fact> {
     let mut facts = Vec::new();
     for mut fact in extraction.facts {
         fact.content = fact.content.trim().to_owned();
@@ -340,28 +283,24 @@ pub(crate) fn parse_extraction(text: &str) -> Result<Vec<Fact>> {
             break;
         }
     }
-    Ok(facts)
+    facts
 }
 
-/// The request for one extraction, on the connection's own model.
-fn request(target: &Target, prompt: String) -> Result<CompletionRequest> {
-    let schema = schemars::Schema::try_from(schema())
-        .map_err(|error| HostError::internal(format!("consolidation schema: {error}")))?;
-    Ok(CompletionRequest::new(Message::user(prompt))
-        .preamble(SYSTEM_PROMPT)
-        .output_schema(schema)
-        .options(target.spec.default_options(None)))
-}
-
-/// One unary model call through the connection's effect handler. The request
-/// is fitted to the model it goes to, as a turn's request is, so a provider
-/// other than OpenAI-compatible ones is answered in its own dialect.
-async fn extract(target: &Target, prompt: String) -> Result<Vec<Fact>> {
-    let request = request(target, prompt)?;
-    let response = model::unary(&target.handler, request)
+/// The provider must submit typed facts. Text and fenced JSON are not accepted.
+async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Vec<Fact>> {
+    let options = model
+        .spec()
+        .map(|spec| spec.default_options(None))
+        .unwrap_or_default();
+    let builder = AgentBuilder::new(model.clone()).options(options);
+    let extraction = ExtractorBuilder::<Extraction>::from_agent_builder(builder)
+        .append_preamble(SYSTEM_PROMPT)
+        .retries(0)
+        .build()
+        .extract(prompt)
         .await
-        .map_err(HostError::unavailable)?;
-    parse_extraction(&response.text())
+        .map_err(|error| HostError::unavailable(format!("consolidation output: {error}")))?;
+    Ok(normalize(extraction.output))
 }
 
 /// The retrieval query for a job's merge candidates: the newest turns' text,
@@ -455,7 +394,7 @@ pub(crate) fn register(app: &mut App) {
 struct Sources<'a> {
     store: &'a Store,
     runtime: Option<&'a tokio::runtime::Handle>,
-    index: &'a mut CompactVectorIndex,
+    embeddings: &'a Embeddings,
     credentials: Option<&'a Credentials>,
     models: &'a Models,
 }
@@ -466,7 +405,7 @@ fn schedule_consolidation(
     agents: Query<(&CompanionAgent, &Conversation)>,
     store: Res<Store>,
     runtime: Option<Res<crate::host::resources::HostRuntime>>,
-    mut index: ResMut<CompactVectorIndex>,
+    embeddings: Res<Embeddings>,
     credentials: Option<Res<Credentials>>,
     models: Res<Models>,
     mut jobs: ResMut<Consolidation>,
@@ -475,7 +414,7 @@ fn schedule_consolidation(
     let mut sources = Sources {
         store: &store,
         runtime: runtime.as_deref().map(|rt| &rt.0),
-        index: &mut index,
+        embeddings: &embeddings,
         credentials: credentials.as_deref(),
         models: &models,
     };
@@ -567,25 +506,6 @@ fn start(
     // memories only as a fallback. Forgotten memories surface when the topic
     // matches, so the model sees that the user asked to forget them.
     let query = turn_query(&pending);
-    let semantic = embedding::semantic_ids(
-        sources.store,
-        sources.runtime,
-        sources.index,
-        sources.credentials,
-        companion_id,
-        &query,
-    );
-    let context =
-        match sources
-            .store
-            .consolidation_context(companion_id, &query, &semantic, MAX_CONTEXT)
-        {
-            Ok(context) => context,
-            Err(_) => {
-                jobs.fail(companion_id, now);
-                return;
-            }
-        };
     let injected =
         match sources
             .store
@@ -597,12 +517,11 @@ fn start(
                 return;
             }
         };
-    let prompt = prompt(&pending, &context, &injected);
-    let batch = Batch {
+    let mut batch = Batch {
         companion_id: companion_id.to_owned(),
         job_start,
         new_cursor,
-        context,
+        context: Vec::new(),
         injected,
     };
     let sender = jobs.sender();
@@ -612,10 +531,25 @@ fn start(
         jobs.fail(companion_id, now);
         return;
     };
+    let store = sources.store.clone();
+    let embeddings = sources.embeddings.clone();
+    let credentials = sources.credentials.cloned();
     runtime.spawn(async move {
-        let result = extract(&target, prompt)
-            .await
-            .map_err(|error| error.to_string());
+        let result = async {
+            let semantic = embedding::semantic_ids(
+                &store,
+                &embeddings,
+                credentials.as_ref(),
+                &batch.companion_id,
+                &query,
+            )
+            .await;
+            batch.context =
+                store.consolidation_context(&batch.companion_id, &query, &semantic, MAX_CONTEXT)?;
+            extract(&target, prompt(&pending, &batch.context, &batch.injected)).await
+        }
+        .await
+        .map_err(|error: HostError| error.to_string());
         let _ = sender.send((batch, result));
     });
 }
@@ -702,6 +636,28 @@ mod tests {
             importance: memory.importance,
             content: memory.content.clone(),
         }
+    }
+
+    #[tokio::test]
+    async fn extraction_submits_bounded_facts_and_rejects_free_text() {
+        use rig_core::test_utils::{MockCompletionModel, MockTurn};
+        let model: DynModel<Completion> = MockCompletionModel::from_turns([
+            MockTurn::tool_call("facts", "submit", serde_json::json!({
+                "facts": [{"content": "  prefers tea  ", "importance": 7,
+                    "audience": "", "supersedes": null, "cited_memory_ids": ["injected", "ghost"]}]
+            })),
+            MockTurn::text("```json\n{\"facts\": []}\n```"),
+        ]).into();
+        let facts = extract(&model, "The user prefers tea.".into())
+            .await
+            .unwrap();
+        assert_eq!(facts[0].content, "prefers tea");
+        assert_eq!(facts[0].importance, Some(7));
+        assert_eq!(
+            validate_citations(&facts[0].cited_memory_ids, &["injected".into()]),
+            ["injected"]
+        );
+        assert!(extract(&model, "No facts.".into()).await.is_err());
     }
 
     #[test]

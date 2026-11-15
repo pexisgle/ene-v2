@@ -8,7 +8,7 @@ use super::{
     db::{Result, Store},
     error::HostError,
     mind::{Companion, Role},
-    model::{self, Credentials},
+    model::{Credentials, ModelFactory},
     notify::Notifier,
 };
 use bevy_ecs::prelude::*;
@@ -22,31 +22,30 @@ use std::collections::HashMap;
 
 /// One agent per companion, addressed by the companion id.
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
+#[require(LastProjectedEntry)]
 pub(crate) struct CompanionAgent {
     pub(crate) companion_id: String,
 }
 
 /// One agent per open run, addressed by its run id.
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
+#[require(LastProjectedEntry)]
 pub(crate) struct WorkAgent {
     pub(crate) work_id: String,
     pub(crate) run_id: String,
     pub(crate) companion_id: String,
 }
 
-/// What the agent's model connection was built from, to keep it current.
-#[derive(Component, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Binding {
-    pub(crate) connection_id: String,
-    pub(crate) model_id: String,
-    pub(crate) settings_revision: u64,
+#[derive(Resource, Default)]
+struct Connections {
+    revision: u64,
+    credential_generation: u64,
+    factory: Option<ModelFactory>,
+    models: HashMap<(String, String), ModelConnection>,
 }
 
-/// The last conversation entry this host projected per agent.
-#[derive(Resource, Default)]
-pub(crate) struct Published {
-    cursor: HashMap<String, u64>,
-}
+#[derive(Component, Default)]
+pub(crate) struct LastProjectedEntry(Option<u64>);
 
 /// The last summary a work run reported through `report`.
 #[derive(Resource, Default)]
@@ -187,19 +186,7 @@ pub(crate) fn spawn_work_agent(
 
 /// Binds the agent's model when its assignment or the settings changed.
 pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
-    #[cfg(test)]
-    if let Some(test) = world.get_resource::<TestModel>() {
-        let bound = (test.0)();
-        world.entity_mut(entity).insert((
-            bound.connection,
-            Binding {
-                connection_id: "test".into(),
-                model_id: "test".into(),
-                settings_revision: 0,
-            },
-        ));
-        return Ok(());
-    }
+    world.init_resource::<Connections>();
     let (companion_id, role) = match world.get::<CompanionAgent>(entity) {
         Some(agent) => (agent.companion_id.clone(), Role::Companion),
         None => match world.get::<WorkAgent>(entity) {
@@ -211,30 +198,61 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
     let companion = store
         .companion(&companion_id)?
         .ok_or_else(|| HostError::not_found("companion not found"))?;
-    let assignment = companion
-        .model(role)
-        .ok_or_else(|| HostError::unavailable("no model is assigned to this role"))?;
-    let settings_revision = store.settings_revision()?;
-    let current = world.get::<Binding>(entity).cloned();
-    let current_ok = current.as_ref().is_some_and(|binding| {
-        binding.connection_id == assignment.connection_id
-            && binding.model_id == assignment.model_id
-            && binding.settings_revision == settings_revision
-    }) && world.get::<ModelConnection>(entity).is_some();
-    if current_ok {
-        return Ok(());
-    }
+    let assignment = companion.model(role).map(|assignment| {
+        (
+            assignment.connection_id.clone(),
+            assignment.model_id.clone(),
+        )
+    });
+    let revision = store.settings_revision()?;
     let credentials = world.resource::<Credentials>().clone();
-    let catalog = world.resource::<Models>().0.catalog().clone();
-    let bound = model::connect(&store, &credentials, &catalog, &companion, role)?;
-    world.entity_mut(entity).insert((
-        bound.connection,
-        Binding {
-            connection_id: assignment.connection_id.clone(),
-            model_id: assignment.model_id.clone(),
-            settings_revision,
-        },
-    ));
+    let credential_generation = credentials.generation();
+    let factory = world.resource::<ModelFactory>().clone();
+    {
+        let mut cache = world.resource_mut::<Connections>();
+        if cache.revision != revision
+            || cache.credential_generation != credential_generation
+            || cache
+                .factory
+                .as_ref()
+                .is_none_or(|previous| !std::sync::Arc::ptr_eq(&previous.0, &factory.0))
+        {
+            cache.models.clear();
+            cache.revision = revision;
+            cache.credential_generation = credential_generation;
+            cache.factory = Some(factory.clone());
+        }
+    }
+    let cached = assignment
+        .as_ref()
+        .and_then(|key| world.resource::<Connections>().models.get(key).cloned());
+    let connection = match cached {
+        Some(connection) => connection,
+        None => {
+            let catalog = world.resource::<Models>().0.catalog().clone();
+            let model = (factory.0)(&store, &credentials, &catalog, &companion, role)?;
+            let spec =
+                std::sync::Arc::new(model.spec().cloned().ok_or_else(|| {
+                    HostError::internal("a completion model without catalog facts")
+                })?);
+            let handler =
+                rig_core::serve::ErasedHandler::new(rig_core::serve::adapters::ModelAdapter::<
+                    rig_core::operation::Completion,
+                >::new(spec.reference(), model));
+            let connection = ModelConnection {
+                spec,
+                handler: rig_ecs::effects::Handler(handler),
+            };
+            if let Some(key) = assignment {
+                world
+                    .resource_mut::<Connections>()
+                    .models
+                    .insert(key, connection.clone());
+            }
+            connection
+        }
+    };
+    world.entity_mut(entity).insert(connection);
     Ok(())
 }
 
@@ -279,7 +297,7 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
             world
                 .entity_mut(entity)
                 .insert(SystemPrompt(system_prompt(&companion)));
-            world.entity_mut(entity).remove::<Binding>();
+            world.entity_mut(entity).remove::<ModelConnection>();
             // The store is the source of truth and the binding is derived, so a
             // model the host cannot bind yet is a notice: a turn, an edit or the
             // next start retries it. A storage failure still fails.
@@ -414,6 +432,7 @@ type AgentRows = (
     &'static Conversation,
     Option<&'static CompanionAgent>,
     Option<&'static WorkAgent>,
+    &'static mut LastProjectedEntry,
 );
 
 /// The agent rows a turn projection needs.
@@ -423,43 +442,26 @@ type TurnAgentRows = (
     Option<&'static WorkAgent>,
 );
 
+type UnpublishedMessages = Or<(Changed<Conversation>, Added<LastProjectedEntry>)>;
+
 /// Projects every new conversation entry into `MessageCreated` notifications.
 fn publish_messages(
-    agents: Query<AgentRows>,
+    mut agents: Query<AgentRows, UnpublishedMessages>,
     mut notifier: ResMut<Notifier>,
-    mut published: ResMut<Published>,
 ) {
-    for (id, conversation, companion, work) in &agents {
+    for (_, conversation, companion, work, mut published) in &mut agents {
         let companion_id = companion_of(companion, work).unwrap_or_default();
-        let last = published.cursor.get(&id.0).copied().unwrap_or(0);
-        let mut newest = last;
-        for entry in conversation.entries() {
-            let sequence = entry.id.get();
-            newest = newest.max(sequence);
-            if sequence <= last {
-                continue;
-            }
+        let work_id = work.map(|agent| agent.work_id.as_str()).unwrap_or_default();
+        let start = conversation
+            .entries()
+            .rposition(|entry| published.0.is_some_and(|last| entry.id.get() <= last))
+            .map_or(0, |at| at + 1);
+        for entry in conversation.entries().skip(start) {
+            published.0 = Some(entry.id.get());
             let Some(text) = entry_text(&entry) else {
                 continue;
             };
-            let message = w::Message {
-                id: sequence.to_string(),
-                companion_id: companion_id.to_owned(),
-                work_id: work.map(|agent| agent.work_id.clone()).unwrap_or_default(),
-                role: role_of(&entry).into(),
-                text,
-                created_at: entry.made.to_string(),
-                sequence,
-                request_id: entry
-                    .author
-                    .and_then(|author| author.request.as_ref())
-                    .map(|request| request.0.clone()),
-                author: entry
-                    .author
-                    .map(|author| author.label())
-                    .unwrap_or_default(),
-                ..Default::default()
-            };
+            let message = super::chat::message(companion_id, work_id, &entry, text);
             notifier.push(
                 Some(companion_id),
                 None,
@@ -468,9 +470,6 @@ fn publish_messages(
                     ..Default::default()
                 })),
             );
-        }
-        if newest > last {
-            published.cursor.insert(id.0.clone(), newest);
         }
     }
 }
@@ -628,7 +627,8 @@ pub(crate) struct AgentPlugin;
 
 impl Plugin for AgentPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Published>()
+        app.init_resource::<Connections>()
+            .init_resource::<ModelFactory>()
             .init_resource::<WorkReports>()
             .add_systems(Startup, reconcile)
             .add_systems(
@@ -644,10 +644,163 @@ impl Plugin for AgentPlugin {
     }
 }
 
-/// Test-only model injection: the host never builds provider connections in
-/// a unit test.
 #[cfg(test)]
-#[derive(Resource, Clone)]
-pub(crate) struct TestModel(
-    pub(crate) std::sync::Arc<dyn Fn() -> super::model::Bound + Send + Sync>,
-);
+mod tests {
+    use super::*;
+    use rig_core::conversation::{Conversation as History, Entry, RequestId};
+
+    #[tokio::test]
+    async fn connected_assignments_observe_cloned_credential_mutations() {
+        use crate::host::{model, tests::Harness};
+        use rig_core::{
+            completion::CompletionRequest,
+            effect::{Answered, EffectKind},
+            serve::serve_inline,
+            test_utils::{MockCompletionModel, MockTurn},
+        };
+        use std::sync::Arc;
+
+        let mut harness = Harness::new([]);
+        let store = harness.store();
+        let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+        companion.assignments.companion = crate::host::mind::Assignment {
+            connection_id: "credential-model".into(),
+            model_id: "fake".into(),
+        };
+        store
+            .update_companion(&companion, companion.revision)
+            .unwrap();
+        let credentials = Credentials::new(true);
+        let writer = credentials.clone();
+        harness.app.world_mut().insert_resource(credentials);
+        let spec = rig_core::catalog::Catalog::builtin()
+            .resolve("openai/gpt-4o-mini")
+            .unwrap()
+            .shared();
+        harness
+            .app
+            .world_mut()
+            .insert_resource(ModelFactory(Arc::new(move |_, credentials, _, _, _| {
+                let text = credentials
+                    .secret("credential-model")
+                    .unwrap_or_else(|| "absent".into());
+                Ok(
+                    MockCompletionModel::from_turns((0..8).map(|_| MockTurn::text(text.clone())))
+                        .priced_as(spec.clone())
+                        .into(),
+                )
+            })));
+        let entity = harness.companion_agent();
+        for expected in ["old-key", "new-key", "absent", "direct-key", "absent"] {
+            match expected {
+                "old-key" | "new-key" => {
+                    model::save_secret(&writer, "credential-model", expected).unwrap()
+                }
+                "direct-key" => writer.remember("credential-model", expected.into()),
+                _ => model::delete_secret(&writer, "credential-model").unwrap(),
+            }
+            ensure_model(harness.app.world_mut(), entity).unwrap();
+            let handler = harness
+                .app
+                .world()
+                .get::<ModelConnection>(entity)
+                .unwrap()
+                .handler
+                .0
+                .clone();
+            let answer = serve_inline(
+                &handler,
+                EffectKind::Completion {
+                    request: CompletionRequest::new("hi").into(),
+                    stream: false,
+                },
+            )
+            .await
+            .unwrap();
+            let Answered::Completion(answer) = answer else {
+                panic!("expected completion")
+            };
+            assert_eq!(answer.text(), expected);
+        }
+    }
+
+    #[test]
+    fn messages_publish_once_oldest_first_across_additions_and_restores() {
+        let mut app = App::new();
+        app.insert_resource(Notifier::new())
+            .add_systems(Update, publish_messages);
+        let mut events = app.world().resource::<Notifier>().subscribe();
+        let mut history = History::new();
+        history.push(Entry::new(CompletionMessage::user("hello")).by(Author {
+            request: Some(RequestId("request-1".into())),
+            ..Author::user()
+        }));
+        history.push(CompletionMessage::system("hidden context"));
+        history.push(CompletionMessage::assistant("answer"));
+        let entity = app
+            .world_mut()
+            .spawn((
+                AgentId("work-run".into()),
+                Conversation(history),
+                WorkAgent {
+                    work_id: "work-1".into(),
+                    run_id: "run-1".into(),
+                    companion_id: "ene".into(),
+                },
+            ))
+            .id();
+        app.update();
+        app.world_mut().resource_mut::<Notifier>().flush();
+        let messages: Vec<w::Message> = std::iter::from_fn(|| events.try_recv().ok())
+            .map(|event| match event.event.unwrap() {
+                w::notification::Event::MessageCreated(created) => {
+                    created.message.as_option().unwrap().clone()
+                }
+                _ => panic!("only transcript messages are published"),
+            })
+            .collect();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["hello", "answer"]
+        );
+        assert!(messages[0].sequence < messages[1].sequence);
+        assert_eq!(messages[0].request_id.as_deref(), Some("request-1"));
+        assert_eq!(messages[0].role, w::MessageRole::User);
+        assert_eq!(messages[0].companion_id, "ene");
+        assert_eq!(messages[0].work_id, "work-1");
+        assert_eq!(messages[0].author, Author::user().label());
+        assert!(!messages[0].created_at.is_empty());
+
+        let mut restored = app.world().get::<Conversation>(entity).unwrap().0.view();
+        restored.push(CompletionMessage::system("more hidden context"));
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(Conversation(restored.view()));
+        app.update();
+        app.world_mut().resource_mut::<Notifier>().flush();
+        assert!(events.try_recv().is_err());
+
+        restored.extend([
+            CompletionMessage::user("next"),
+            CompletionMessage::assistant("new answer"),
+        ]);
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(Conversation(restored));
+        app.update();
+        app.update();
+        app.world_mut().resource_mut::<Notifier>().flush();
+        let texts: Vec<String> = std::iter::from_fn(|| events.try_recv().ok())
+            .map(|event| match event.event.unwrap() {
+                w::notification::Event::MessageCreated(created) => {
+                    created.message.as_option().unwrap().text.clone()
+                }
+                _ => panic!("only transcript messages are published"),
+            })
+            .collect();
+        assert_eq!(texts, ["next", "new answer"]);
+    }
+}

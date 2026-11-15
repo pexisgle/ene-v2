@@ -6,25 +6,25 @@ use serde::de::DeserializeOwned;
 #[link(wasm_import_module = "extism:host/user")]
 unsafe extern "C" {
     fn ene_service(input: u64) -> u64;
-    fn ene_emit(input: u64);
+}
+
+#[extism_pdk::host_fn("extism:host/user")]
+extern "ExtismHost" {
+    fn ene_emit(event: Json<Event>);
 }
 
 /// Decode the response directly into its expected type, preserving service failures.
 ///
-/// The PDK host_fn macro does not free host-returned memory; this wrapper owns
-/// and frees that allocation explicitly.
+/// PDK 1.4.1's host_fn macro does not free host-returned memory, so this wrapper
+/// keeps the response in ManagedMemory until decoding finishes.
 pub fn service<T: DeserializeOwned>(request: ServiceRequest) -> Result<T, extism_pdk::Error> {
     let input = extism_pdk::ManagedMemory::from(extism_pdk::ToMemory::to_memory(&Json(request))?);
-    let output = extism_pdk::Memory::from(unsafe { ene_service(input.offset()) });
-    let bytes = output.to_vec();
-    output.free();
-    let Json(result) = <Json<Result<T, Failure>> as extism_pdk::FromBytes>::from_bytes(&bytes)?;
+    let output = extism_pdk::ManagedMemory::new(unsafe { ene_service(input.offset()) }.into());
+    let Json(result) = output.as_ref().to::<Json<Result<T, Failure>>>()?;
     Ok(result?)
 }
 pub fn emit(event: Event) -> Result<(), extism_pdk::Error> {
-    let input = extism_pdk::ManagedMemory::from(extism_pdk::ToMemory::to_memory(&Json(event))?);
-    unsafe { ene_emit(input.offset()) };
-    Ok(())
+    unsafe { ene_emit(Json(event)) }
 }
 pub fn http_open(request: HttpRequest) -> Result<HttpChunk, extism_pdk::Error> {
     service(ServiceRequest::HttpOpen { request })

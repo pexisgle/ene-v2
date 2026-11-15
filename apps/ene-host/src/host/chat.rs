@@ -22,7 +22,9 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     if request.text.chars().count() > MAX_INPUT_CHARS {
         return Err(HostError::invalid("the message is too large"));
     }
-    if estimate_tokens(&request.text) > MAX_INPUT_TOKENS {
+    if rig_memory::estimate_tokens(&[rig_core::completion::Message::user(&request.text)])
+        > MAX_INPUT_TOKENS as u64
+    {
         return Err(HostError::invalid("the message is too large"));
     }
     super::db::validate_id(&request.companion_id)?;
@@ -136,15 +138,6 @@ fn receipts(world: &World, agent: Entity) -> Vec<(String, String, Vec<u8>)> {
         .collect()
 }
 
-/// The estimate the compaction budget uses too, so the ingress guard and the
-/// summary budget cannot disagree about how large a message is.
-fn estimate_tokens(text: &str) -> usize {
-    usize::try_from(rig_memory::estimate_tokens(&[
-        rig_core::completion::Message::user(text),
-    ]))
-    .unwrap_or(usize::MAX)
-}
-
 fn has_input(world: &World, agent: Entity, request_id: &str) -> bool {
     let Some(conversation) = world.get::<Conversation>(agent) else {
         return false;
@@ -197,7 +190,7 @@ pub(crate) fn history(world: &mut World, request: w::HistoryRequest) -> Result<w
             let Some(text) = agent::entry_text(&entry) else {
                 continue;
             };
-            items.push(message(&request.companion_id, "", &entry, &text));
+            items.push(message(&request.companion_id, "", &entry, text));
         }
     }
     if items.len() > limit {
@@ -227,23 +220,23 @@ pub(crate) fn message_by_id(world: &mut World, request: w::MessageRequest) -> Re
         let Some(text) = agent::entry_text(&entry) else {
             continue;
         };
-        return Ok(message(&request.companion_id, "", &entry, &text));
+        return Ok(message(&request.companion_id, "", &entry, text));
     }
     Err(HostError::not_found("message not found"))
 }
 
-fn message(
+pub(crate) fn message(
     companion: &str,
     work: &str,
     entry: &rig_core::conversation::EntryRef<'_>,
-    text: &str,
+    text: String,
 ) -> w::Message {
     w::Message {
         id: entry.id.get().to_string(),
         companion_id: companion.to_owned(),
         work_id: work.to_owned(),
         role: agent::role_of(entry).into(),
-        text: text.to_owned(),
+        text,
         created_at: entry.made.to_string(),
         sequence: entry.id.get(),
         request_id: entry

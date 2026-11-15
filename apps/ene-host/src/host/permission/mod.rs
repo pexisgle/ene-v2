@@ -30,7 +30,8 @@ impl PolicyEffect {
 
     /// Reads a stored name back through the same serde spelling the wire uses.
     pub(crate) fn parse(text: &str) -> Option<Self> {
-        serde_json::from_value(text.into()).ok()
+        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
+            .ok()
     }
 }
 
@@ -66,7 +67,8 @@ impl ApprovalStatus {
 
     /// Reads a stored name back through the same serde spelling the wire uses.
     pub(crate) fn parse(text: &str) -> Option<Self> {
-        serde_json::from_value(text.into()).ok()
+        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
+            .ok()
     }
 }
 

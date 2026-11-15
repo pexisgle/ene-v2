@@ -2,19 +2,16 @@
 //! how user activity cancels it.
 use super::*;
 use crate::host::{
-    agent::TestModel,
-    autonomy::testing::{Harness, bound},
     compaction::Summary,
     db::memories::MemoryRecord,
+    model::ModelFactory,
     resources::PerceptionEvent,
+    tests::{Harness, bound},
 };
 use rig_core::conversation::Aside;
 use rig_core::message::UserContent;
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A harness with the tick's dependencies: a host runtime, a heartbeat model
 /// and the recall resources an ordinary turn gets from `MindPlugin`.
@@ -28,11 +25,11 @@ fn harness(tick: MockCompletionModel) -> (Harness, tokio::runtime::Runtime) {
     harness
         .app
         .insert_resource(HostRuntime(runtime.handle().clone()));
-    harness.app.insert_resource(TestModel(Arc::new({
+    harness.app.insert_resource(ModelFactory(Arc::new({
         let model = tick.clone();
-        move || bound(&model)
+        move |_, _, _, _, _| Ok(bound(&model))
     })));
-    harness.app.init_resource::<CompactVectorIndex>();
+    harness.app.init_resource::<Embeddings>();
     (harness, runtime)
 }
 
@@ -303,9 +300,9 @@ fn user_activity_aborts_an_in_flight_tick() {
         .unwrap();
     let dropped = Arc::new(AtomicBool::new(false));
     let guard = Dropped(Arc::clone(&dropped));
-    let task = runtime.spawn(async move {
+    let task = Background::spawn(runtime.handle(), None, async move {
         let _guard = guard;
-        std::future::pending::<()>().await;
+        std::future::pending::<Outcome>().await
     });
     let started = Instant::now();
     let mut world = World::new();
@@ -318,7 +315,7 @@ fn user_activity_aborts_an_in_flight_tick() {
             prompt: TICK.to_owned(),
             messages: 0,
             started,
-            call: Background::new(task, Arc::new(Mutex::new(None))),
+            call: task,
         }),
         last_started: Some(started),
         next: 0,

@@ -5,6 +5,7 @@ use axum::{
     response::Response as HttpResponse,
 };
 use connectrpc::ConnectError;
+use http::uri::Authority;
 use subtle::ConstantTimeEq;
 use url::Host;
 
@@ -91,56 +92,39 @@ fn authority_list(value: &str) -> Vec<String> {
 /// A `Host` or `Origin` authority the operator named: the host must match, and
 /// the port too when the entry names one.
 fn configured(value: &str, allowed: &[String]) -> bool {
-    let Some((host, port)) = authority(value) else {
+    let Some(host) = authority(value) else {
         return false;
     };
     allowed.iter().any(|entry| {
-        let Some((wanted, wanted_port)) = authority(entry) else {
-            return false;
-        };
-        host.eq_ignore_ascii_case(wanted) && wanted_port.is_none_or(|wanted| Some(wanted) == port)
+        authority(entry).is_some_and(|wanted| {
+            host.host().eq_ignore_ascii_case(wanted.host())
+                && wanted.port().is_none_or(|wanted| {
+                    host.port()
+                        .is_some_and(|port| wanted.as_str() == port.as_str())
+                })
+        })
     })
 }
 
-/// Splits an authority into its host and optional port. Userinfo, paths,
-/// whitespace and a non-numeric port are refused.
-fn authority(value: &str) -> Option<(&str, Option<&str>)> {
-    if value.is_empty()
-        || value
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'@' | b'/' | b'?' | b'#'))
+/// HTTP authorities may carry userinfo or an invalid port; ene trusts neither.
+fn authority(value: &str) -> Option<Authority> {
+    let parsed: Authority = value.parse().ok()?;
+    let suffix = value.strip_prefix(parsed.host())?;
+    if value.contains('@')
+        || (!suffix.is_empty()
+            && !parsed
+                .port()
+                .is_some_and(|port| suffix.strip_prefix(':') == Some(port.as_str())))
     {
         return None;
     }
-    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
-        let end = rest.find(']')?;
-        let host = &value[..end + 2];
-        let tail = &rest[end + 1..];
-        let port = if tail.is_empty() {
-            None
-        } else {
-            Some(tail.strip_prefix(':')?)
-        };
-        (host, port)
-    } else {
-        match value.rsplit_once(':') {
-            Some((host, port)) => (host, Some(port)),
-            None => (value, None),
-        }
-    };
-    if let Some(port) = port
-        && (port.is_empty() || port.parse::<u16>().is_err())
-    {
-        return None;
-    }
-    Some((host, port))
+    Some(parsed)
 }
 
 /// A `Host` authority: `localhost`, `127.0.0.1` or `[::1]`, with a numeric
 /// port. Userinfo, paths and whitespace are never accepted.
 fn loopback_host(value: &str) -> bool {
-    authority(value)
-        .is_some_and(|(host, _)| host == "[::1]" || matches!(host, "localhost" | "127.0.0.1"))
+    authority(value).is_some_and(|host| matches!(host.host(), "[::1]" | "localhost" | "127.0.0.1"))
 }
 
 /// An `Origin` header: an http(s) URL whose authority is a literal loopback
@@ -316,6 +300,15 @@ mod tests {
             "localhost@evil.com",
             "127.0.0.1@evil.com",
             "localhost:notaport",
+            "localhost:",
+            "localhost:65536",
+            "[::1]:",
+            "[::1]:notaport",
+            "[::1]evil:80",
+            "[::1]evil",
+            "user@localhost",
+            "localhost?query",
+            "localhost#fragment",
             "localhost/evil",
             "127.0.0.1.evil.com",
         ] {

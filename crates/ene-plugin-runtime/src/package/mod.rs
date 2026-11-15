@@ -126,8 +126,12 @@ impl Package {
     }
     /// Metadata-only check for listings; enforcement uses `verify`.
     pub fn current(&self) -> bool {
+        let Ok(root) = open_root(&self.root) else {
+            return false;
+        };
         self.stamps.iter().all(|(path, stamp)| {
-            std::fs::symlink_metadata(self.root.join(path))
+            read::open_code(&root, path)
+                .and_then(|file| file.metadata().map_err(Into::into))
                 .is_ok_and(|metadata| unchanged(&metadata, stamp))
         })
     }
@@ -268,6 +272,26 @@ mod tests {
             .unwrap();
         assert!(matches!(package.verify(), Err(Error::Changed)));
     }
+    #[cfg(unix)]
+    #[test]
+    fn verification_rejects_a_directory_replaced_by_a_link_to_the_same_code() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join("package");
+        fixture(&root);
+        directory(&root.join("code"));
+        std::fs::rename(root.join("main.wasm"), root.join("code/main.wasm")).unwrap();
+        let manifest_path = root.join("manifest.json");
+        let mut manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.entrypoints[0].file = "code/main.wasm".into();
+        write_file(&manifest_path, serde_json::to_vec(&manifest).unwrap());
+        let package = Package::load(&root).unwrap();
+        std::fs::rename(root.join("code"), root.join("original")).unwrap();
+        std::os::unix::fs::symlink("original", root.join("code")).unwrap();
+        assert!(!package.current());
+        assert!(package.verify().is_err());
+    }
+
     #[test]
     fn entrypoints_share_a_single_code_snapshot_and_budget() {
         let source = tempfile::tempdir().unwrap();

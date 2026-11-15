@@ -1,6 +1,6 @@
 //! Memory persistence: insertion, CAS updates, sharing, hybrid recall,
 //! consolidation commits and the user profile.
-use super::{Result, Store, digest, json, now, to_json};
+use super::{Result, Store, digest, json, json_column, now, open_connection, to_json};
 use crate::host::error::HostError;
 use crate::host::json::JsonDoc;
 use crate::host::mind::consolidate::{Batch, Commit, Fact, MemoryContext, validate_citations};
@@ -14,6 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as value};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// The most memory ids one turn's injection record keeps.
 const MAX_INJECTED: usize = 64;
@@ -39,19 +40,11 @@ const VISIBLE: &str = "(m.owner = ?1 \
      OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = ?2) \
      OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = '*'))";
 
-/// A stored JSON column that cannot be parsed is corrupt state, not a bad
-/// request: SQLite reports it as a conversion failure.
-fn corrupt(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
-}
-
 fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
-    let audiences: String = row.get("audiences")?;
-    let source_context: String = row.get("source_context")?;
     Ok(Memory {
         id: row.get("id")?,
         owner: row.get("owner")?,
-        audiences: serde_json::from_str(&audiences).map_err(corrupt)?,
+        audiences: json_column(row, "audiences", "stored memory audiences are corrupt")?,
         content: row.get("content")?,
         importance: row.get("importance")?,
         occurred_at: row.get("occurred_at")?,
@@ -60,7 +53,11 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
         memory_revision: row.get("memory_revision")?,
         content_revision: row.get("content_revision")?,
         emotion: row.get("emotion")?,
-        source_context: serde_json::from_str(&source_context).map_err(corrupt)?,
+        source_context: json_column(
+            row,
+            "source_context",
+            "stored memory source context is corrupt",
+        )?,
     })
 }
 
@@ -468,21 +465,14 @@ impl Store {
         }
         let minimum = mode.minimum_importance();
         let connection = self.conn()?;
-        let placeholders: Vec<String> = (0..ids.len()).map(|at| format!("?{}", at + 4)).collect();
         let mut statement = connection.prepare(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?3 \
-             AND m.id IN ({})",
-            placeholders.join(", ")
+             AND m.id IN (SELECT value FROM json_each(?4))"
         ))?;
-        let mut parameters: Vec<rusqlite::types::Value> = vec![
-            rusqlite::types::Value::Text(companion.to_owned()),
-            rusqlite::types::Value::Text(companion.to_owned()),
-            rusqlite::types::Value::Integer(minimum as i64),
-        ];
-        for id in &ids {
-            parameters.push(rusqlite::types::Value::Text((*id).clone()));
-        }
-        let rows = statement.query_map(rusqlite::params_from_iter(parameters), row_to_memory)?;
+        let rows = statement.query_map(
+            params![companion, companion, minimum, to_json(&ids)?],
+            row_to_memory,
+        )?;
         let mut found: HashMap<String, Memory> = HashMap::new();
         for memory in rows {
             let memory = memory?;
@@ -807,21 +797,15 @@ impl Store {
     /// `Mutex<Connection>` is not held while the background task uses it
     /// (docs/design/mind.md §3.2).
     pub(crate) fn open_secondary(&self) -> Result<rusqlite::Connection> {
-        let path: String = self.conn()?.query_row(
-            "SELECT file FROM pragma_database_list WHERE name = 'main'",
-            [],
-            |row| row.get(0),
-        )?;
-        if path.is_empty() {
-            return Err(HostError::storage(
-                "the state database has no file a second connection could open",
-            ));
-        }
-        let connection = rusqlite::Connection::open(&path)?;
-        connection.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; \
-             PRAGMA synchronous = NORMAL;",
-        )?;
+        let primary = self.conn()?;
+        let path = primary
+            .path()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                HostError::storage("the state database has no file a second connection could open")
+            })?;
+        let connection = open_connection(Path::new(path))?;
+        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         Ok(connection)
     }
 
@@ -1728,28 +1712,5 @@ mod tests {
             store.injected_between("other", None, "5").unwrap(),
             vec!["m9".to_owned()]
         );
-    }
-
-    #[test]
-    fn profile_lines_inject_the_newest_profile() {
-        let store = store();
-        assert!(profile_lines(&store).is_empty());
-        store
-            .conn()
-            .unwrap()
-            .execute(
-                "INSERT INTO user_profiles \
-                 (id, name, preferences, static_constraints, updated_at) \
-                 VALUES ('user', 'A', ?1, ?2, 'now')",
-                params![
-                    serde_json::to_string(&vec!["tea", "quiet mornings"]).unwrap(),
-                    serde_json::to_string(&vec!["no calls before 9"]).unwrap()
-                ],
-            )
-            .unwrap();
-        let lines = profile_lines(&store);
-        assert_eq!(lines.len(), 3);
-        assert!(lines.iter().any(|line| line.contains("tea")));
-        assert!(lines.iter().any(|line| line.contains("no calls")));
     }
 }

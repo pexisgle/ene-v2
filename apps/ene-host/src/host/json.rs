@@ -5,8 +5,8 @@
 //! declared, so the standard keywords (`pattern`, ``, `anyOf`, ...) behave
 //! as specified instead of a hand-written subset.
 use super::error::{HostError, Result};
+use hashlink::LruCache;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// A schema-tagged JSON document, the `JsonDocument` wire type.
@@ -70,15 +70,12 @@ pub(crate) fn parse_schema(text: &str) -> Result<Value> {
     Ok(value)
 }
 
-/// Compiles `schema` once and reuses the validator. Client schemas are
-/// stable between declarations, so validation does not recompile them on
-/// every capability call.
 fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, String> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<jsonschema::Validator>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    static CACHE: OnceLock<Mutex<LruCache<String, Arc<jsonschema::Validator>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(LruCache::new(256)));
     let key = serde_json::to_string(schema)
         .map_err(|error| format!("input: schema is not serializable: {error}"))?;
-    if let Some(validator) = cache.lock().ok().and_then(|map| map.get(&key).cloned()) {
+    if let Some(validator) = cache.lock().ok().and_then(|mut map| map.get(&key).cloned()) {
         return Ok(validator);
     }
     let validator = Arc::new(
@@ -86,6 +83,9 @@ fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, 
             .map_err(|error| format!("input: schema is not valid: {error}"))?,
     );
     if let Ok(mut map) = cache.lock() {
+        if let Some(cached) = map.get(&key) {
+            return Ok(Arc::clone(cached));
+        }
         map.insert(key, Arc::clone(&validator));
     }
     Ok(validator)

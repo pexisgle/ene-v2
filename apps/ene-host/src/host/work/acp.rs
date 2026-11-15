@@ -631,7 +631,6 @@ async fn terminate(child: &mut Box<dyn ChildWrapper>, timeout: Duration) -> (boo
     if matches!(child.try_wait(), Ok(Some(_))) {
         return (true, pids);
     }
-    // `start_kill` signals the whole process group; `wait` reaps it.
     if child.start_kill().is_err() {
         return (matches!(child.try_wait(), Ok(Some(_))), pids);
     }
@@ -931,6 +930,57 @@ fn network_isolated(options: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn terminating_an_agent_stops_its_process_group() {
+        let root = tempfile::tempdir().unwrap();
+        let descendant = root.path().join("descendant");
+        let mut command = command_wrap(
+            &which::which("sh").unwrap(),
+            &[
+                "-c".into(),
+                "sleep 30 & echo $! > \"$1\"; wait".into(),
+                "ene-acp-test".into(),
+                descendant.to_str().unwrap().into(),
+            ],
+            root.path(),
+            child_env("", |name| std::env::var_os(name)),
+        );
+        let mut child = command.spawn().unwrap();
+        let leader = child.id().unwrap();
+        let descendant = tokio::time::timeout(KILL_TIMEOUT, async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&descendant)
+                    && let Ok(pid) = pid.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the agent spawned its descendant");
+        let (confirmed, pids) = terminate(&mut child, KILL_TIMEOUT).await;
+        assert!(confirmed);
+        assert_eq!(pids, vec![leader]);
+        assert!(!Path::new(&format!("/proc/{leader}")).exists());
+        tokio::time::timeout(KILL_TIMEOUT, async {
+            loop {
+                let status = std::fs::read_to_string(format!("/proc/{descendant}/status"));
+                if status.is_err()
+                    || status.is_ok_and(|status| {
+                        status.lines().any(|line| line.starts_with("State:\tZ"))
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the descendant is no longer running");
+    }
 
     #[test]
     fn an_isolated_launch_runs_the_relay_and_mounts_the_socket() {

@@ -18,7 +18,10 @@ fn row_to_connection(row: &Row<'_>) -> rusqlite::Result<Connection> {
     let config: ConnectionConfig =
         json_column(row, "config", "stored connection config is corrupt")?;
     if config.kind() != kind {
-        return Err(corrupt("", "stored connection kind and config disagree"));
+        return Err(corrupt(
+            row.as_ref().column_index("config")?,
+            "stored connection kind and config disagree",
+        ));
     }
     Ok(Connection {
         id: row.get("id")?,
@@ -66,7 +69,13 @@ impl Store {
     }
 
     pub(crate) fn settings_revision(&self) -> Result<u64> {
-        Ok(self.settings()?.revision)
+        Ok(self
+            .fetch(
+                "SELECT revision FROM settings_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )?
+            .unwrap_or(1))
     }
 
     pub(crate) fn connection(&self, id: &str) -> Result<Option<Connection>> {
@@ -210,36 +219,19 @@ mod tests {
     }
 
     #[test]
-    fn settings_batches_check_revisions_and_kinds() {
+    fn a_stale_connection_rolls_back_the_whole_settings_batch() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let settings = store.settings().unwrap();
-        assert_eq!(settings.revision, 1);
-        let settings = store
-            .update_settings(1, &[(connection("c1"), 0)], &[])
+        let before = store
+            .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)], &[])
             .unwrap();
-        assert_eq!((settings.revision, settings.connections.len()), (2, 1));
-        assert!(store.update_settings(1, &[], &[]).is_err());
-        store
-            .set_credential_state("c1", CredentialState::Registered)
-            .unwrap();
-        assert_eq!(
-            store.connection("c1").unwrap().unwrap().credential_state,
-            CredentialState::Registered
-        );
-        let check = Check {
-            healthy: true,
-            checked_at: now(),
-            failure: None,
-            capabilities: vec!["streaming_text".into()],
-            resources: vec!["gpt-5".into()],
-        };
-        store.set_check("c1", &check).unwrap();
-        assert_eq!(
-            store.connection("c1").unwrap().unwrap().last_check,
-            Some(check)
-        );
-        let settings = store.update_settings(2, &[], &["c1".to_owned()]).unwrap();
-        assert!(settings.connections.is_empty());
+        let mut changed = connection("c1");
+        changed.name = "updated".into();
+        assert!(matches!(
+            store.update_settings(before.revision, &[(changed, 1), (connection("c2"), 0)], &[]),
+            Err(HostError::Conflict(_))
+        ));
+        assert_eq!(store.settings().unwrap(), before);
+        assert_eq!(store.settings_revision().unwrap(), before.revision);
     }
 }

@@ -21,6 +21,12 @@ use std::{
 /// this alpha has no in-place migration path.
 pub(crate) const VERSION: i64 = 1;
 
+fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(connection)
+}
+
 /// The relational state, shared by every system on the Rig thread.
 #[derive(Clone, bevy_ecs::prelude::Resource)]
 pub(crate) struct Store(Arc<Mutex<Connection>>);
@@ -31,8 +37,7 @@ impl Store {
             std::fs::create_dir_all(parent)
                 .map_err(|error| HostError::storage(format!("state directory: {error}")))?;
         }
-        let connection = Connection::open(path)?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let connection = open_connection(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > VERSION {
             return Err(HostError::storage(format!(
@@ -125,29 +130,12 @@ pub(crate) fn json(text: &str) -> Result<serde_json::Value> {
 }
 
 /// A stored value that does not match its domain type: the row is corrupt.
-pub(crate) fn corrupt(text: &str, what: &str) -> rusqlite::Error {
+fn corrupt(index: usize, what: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
-        text.len(),
+        index,
         rusqlite::types::Type::Text,
         Box::new(std::io::Error::other(what)),
     )
-}
-
-/// Parses a stored JSON column as `T`, reporting a parse failure as corruption.
-pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(
-    text: &str,
-    what: &str,
-) -> rusqlite::Result<T> {
-    serde_json::from_str(text).map_err(|_| corrupt(text, what))
-}
-
-/// Parses a stored enum name, reporting an unknown name as corruption.
-pub(crate) fn parse_enum<T>(
-    text: &str,
-    what: &str,
-    parse: impl FnOnce(&str) -> Option<T>,
-) -> rusqlite::Result<T> {
-    parse(text).ok_or_else(|| corrupt(text, what))
 }
 
 /// Reads a JSON column.
@@ -156,7 +144,8 @@ pub(crate) fn json_column<T: serde::de::DeserializeOwned>(
     name: &str,
     what: &str,
 ) -> rusqlite::Result<T> {
-    parse_json(&row.get::<_, String>(name)?, what)
+    let index = row.as_ref().column_index(name)?;
+    serde_json::from_str(&row.get::<_, String>(index)?).map_err(|_| corrupt(index, what))
 }
 
 /// Reads an optional JSON column.
@@ -165,9 +154,10 @@ pub(crate) fn optional_json_column<T: serde::de::DeserializeOwned>(
     name: &str,
     what: &str,
 ) -> rusqlite::Result<Option<T>> {
-    row.get::<_, Option<String>>(name)?
+    let index = row.as_ref().column_index(name)?;
+    row.get::<_, Option<String>>(index)?
         .as_deref()
-        .map(|text| parse_json(text, what))
+        .map(|text| serde_json::from_str(text).map_err(|_| corrupt(index, what)))
         .transpose()
 }
 
@@ -178,7 +168,8 @@ pub(crate) fn enum_column<T>(
     what: &str,
     parse: impl FnOnce(&str) -> Option<T>,
 ) -> rusqlite::Result<T> {
-    parse_enum(&row.get::<_, String>(name)?, what, parse)
+    let index = row.as_ref().column_index(name)?;
+    parse(&row.get::<_, String>(index)?).ok_or_else(|| corrupt(index, what))
 }
 
 pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
@@ -219,6 +210,30 @@ pub(crate) fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_json_reports_the_column_without_disclosing_its_contents() {
+        let connection = Connection::open_in_memory().unwrap();
+        let malformed = connection
+            .query_row("SELECT 1, ?1 AS config", ["private text"], |row| {
+                json_column::<serde_json::Value>(row, "config", "stored config is corrupt")
+            })
+            .unwrap_err();
+        let wrong_type = connection
+            .query_row("SELECT 1, ?1 AS config", ["\"private text\""], |row| {
+                json_column::<Vec<String>>(row, "config", "stored config is corrupt")
+            })
+            .unwrap_err();
+        for error in [malformed, wrong_type] {
+            assert!(matches!(
+                error,
+                rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, _)
+            ));
+            let error = HostError::from(error).to_string();
+            assert!(error.contains("stored config is corrupt"));
+            assert!(!error.contains("private text"));
+        }
+    }
 
     #[test]
     fn a_database_round_trips_and_refuses_a_newer_version() {

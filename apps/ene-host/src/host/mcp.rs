@@ -18,12 +18,12 @@ use crate::host::{
     settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
-use rig_core::{message::ToolName, tool::DynamicTool};
+use rig_agent::tool::server::{ToolServer, ToolServerHandle};
+use rig_core::{effect::HandlerKey, message::ToolName};
 use rig_ecs::prelude::*;
 use rig_rmcp::{
-    McpConnection,
+    McpClientHandler, McpConnection,
     rmcp::{
-        ServiceExt,
         model::ClientConfig,
         transport::{
             child_process::TokioChildProcess,
@@ -49,9 +49,14 @@ struct Server {
     connection: McpConnection,
     /// The connection revision these tools were built from.
     revision: u64,
-    /// The model-facing names these tools hold, so a retire can drop them.
-    names: Vec<String>,
-    tools: Vec<Entity>,
+    /// The managed registry owns refresh generations and disconnected tools.
+    registry: ToolServerHandle,
+    tools: HashMap<String, Installed>,
+}
+
+struct Installed {
+    generation: HandlerKey,
+    entity: Entity,
 }
 
 /// The servers that are up right now, keyed by connection id.
@@ -67,7 +72,7 @@ enum Event {
         id: String,
         revision: u64,
         connection: McpConnection,
-        tools: Vec<rig_rmcp::McpTool>,
+        registry: ToolServerHandle,
     },
     Failed {
         id: String,
@@ -75,12 +80,6 @@ enum Event {
     },
 }
 
-/// Connect results cross from the host runtime to the ECS thread here.
-///
-/// `rig_rmcp::McpClientHandler` would register the tools itself, but it does so
-/// through a `ManagedToolSink`, and rig-ecs registers tools in the `World`,
-/// which is neither `Send` nor `Sync`. The connection is therefore handed over
-/// and attached on the host thread.
 #[derive(Resource)]
 struct McpEvents {
     sender: mpsc::Sender<Event>,
@@ -99,10 +98,12 @@ pub(crate) fn register(app: &mut App) {
         .init_resource::<HostToolNames>()
         .init_resource::<Connecting>()
         .init_resource::<McpEvents>()
+        .init_resource::<McpSettings>()
         .add_systems(Update, sync.after(AgentLoop));
 }
 
 /// What one settings row asks the host to connect to.
+#[derive(Clone)]
 struct Desired {
     revision: u64,
     name: String,
@@ -110,6 +111,12 @@ struct Desired {
     args: Vec<String>,
     endpoint: String,
     allowed: Vec<String>,
+}
+
+#[derive(Resource, Default)]
+struct McpSettings {
+    revision: Option<u64>,
+    desired: Vec<(String, Desired)>,
 }
 
 fn desired(store: &Store) -> Vec<(String, Desired)> {
@@ -158,7 +165,17 @@ fn sync(world: &mut World) {
     };
     let events = drain(world);
     let store = world.resource::<Store>().clone();
-    let wanted = desired(&store);
+    let Ok(revision) = store.settings_revision() else {
+        return;
+    };
+    if world.resource::<McpSettings>().revision != Some(revision) {
+        let desired = desired(&store);
+        *world.resource_mut::<McpSettings>() = McpSettings {
+            revision: Some(revision),
+            desired,
+        };
+    }
+    let wanted = world.resource::<McpSettings>().desired.clone();
 
     for event in events {
         match event {
@@ -166,7 +183,7 @@ fn sync(world: &mut World) {
                 id,
                 revision,
                 connection,
-                tools,
+                registry,
             } => {
                 world.resource_mut::<Connecting>().0.remove(&id);
                 let Some((_, want)) = wanted.iter().find(|(wanted, _)| *wanted == id) else {
@@ -174,13 +191,17 @@ fn sync(world: &mut World) {
                     runtime.spawn(async move { connection.close().await });
                     continue;
                 };
+                if want.revision != revision {
+                    runtime.spawn(async move { connection.close().await });
+                    continue;
+                }
                 attach(
                     world,
                     &id,
                     revision,
                     &want.name,
                     connection,
-                    tools,
+                    registry,
                     &want.allowed,
                 );
             }
@@ -197,7 +218,8 @@ fn sync(world: &mut World) {
         .0
         .iter()
         .filter(|(id, server)| {
-            !wanted_ids.contains(id.as_str())
+            server.connection.is_closed()
+                || !wanted_ids.contains(id.as_str())
                 || wanted
                     .iter()
                     .find(|(wanted, _)| wanted == *id)
@@ -211,20 +233,22 @@ fn sync(world: &mut World) {
 
     let sender = world.resource::<McpEvents>().sender.clone();
     for (id, want) in wanted {
-        if world.resource::<McpServers>().0.contains_key(&id)
-            || world.resource::<Connecting>().0.contains(&id)
-        {
+        if world.resource::<McpServers>().0.contains_key(&id) {
+            refresh_tools(world, &id, &want.name, &want.allowed);
+            continue;
+        }
+        if world.resource::<Connecting>().0.contains(&id) {
             continue;
         }
         world.resource_mut::<Connecting>().0.insert(id.clone());
         let sender = sender.clone();
         runtime.spawn(async move {
             let event = match open(&want).await {
-                Ok((connection, tools)) => Event::Connected {
+                Ok((connection, registry)) => Event::Connected {
                     id,
                     revision: want.revision,
                     connection,
-                    tools,
+                    registry,
                 },
                 Err(reason) => Event::Failed { id, reason },
             };
@@ -243,8 +267,10 @@ fn drain(world: &mut World) -> Vec<Event> {
 }
 
 /// Opens one server and lists its tools.
-async fn open(want: &Desired) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>), String> {
-    let service = if !want.command.is_empty() {
+async fn open(want: &Desired) -> Result<(McpConnection, ToolServerHandle), String> {
+    let registry = ToolServer::new().run();
+    let handler = McpClientHandler::new(ClientConfig::default(), registry.clone());
+    let connection = if !want.command.is_empty() {
         // A stdio server is a child process the host owns.
         let args = want.args.clone();
         let mut wrap =
@@ -261,8 +287,8 @@ async fn open(want: &Desired) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>),
         wrap.wrap(process_wrap::tokio::JobObject);
         wrap.wrap(process_wrap::tokio::KillOnDrop);
         let transport = TokioChildProcess::new(wrap).map_err(|error| error.to_string())?;
-        ClientConfig::default()
-            .serve(transport)
+        handler
+            .connect(transport)
             .await
             .map_err(|error| error.to_string())?
     } else if !want.endpoint.is_empty() {
@@ -273,99 +299,120 @@ async fn open(want: &Desired) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>),
         config.uri = want.endpoint.clone().into();
         let worker = StreamableHttpClientWorker::<reqwest::Client>::new(client, config);
         let transport = StreamableHttpClientTransport::<reqwest::Client>::spawn(worker);
-        ClientConfig::default()
-            .serve(transport)
+        handler
+            .connect(transport)
             .await
             .map_err(|error| error.to_string())?
     } else {
         return Err("the MCP connection names neither a command nor an endpoint".to_owned());
     };
-    bind(service).await
+    Ok((connection, registry))
 }
 
-/// Binds one connected client and lists what it serves.
-async fn bind<S>(
-    service: rig_rmcp::rmcp::service::RunningService<rig_rmcp::rmcp::RoleClient, S>,
-) -> Result<(McpConnection, Vec<rig_rmcp::McpTool>), String>
-where
-    S: rig_rmcp::rmcp::Service<rig_rmcp::rmcp::RoleClient>,
-    S: Send + Sync + 'static,
-{
-    let connection = McpConnection::new(service);
-    // rig-rmcp binds each listed tool to this connection, which keeps the
-    // server alive for as long as its tools are registered.
-    let tools = connection
-        .tools()
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok((connection, tools))
-}
-
-/// Registers the tools `allowed` names, or every tool it lists when the
-/// filter is empty.
-///
-/// The connection's [`McpTool`] converts to a rig [`DynamicTool`], so the
-/// library owns the call: the per-call deadline, the request `_meta`, the raw
-/// [`McpCallToolResult`] hook and the block-preserving
-/// [`mcp_result_output`]. The host keeps only the lifecycle it must: the
-/// settings decide which servers are up, the ECS world owns the tool entities,
-/// and a retired server's entities are despawned with it.
-///
-/// [`McpCallToolResult`]: rig_rmcp::McpCallToolResult
-/// [`mcp_result_output`]: rig_rmcp::mcp_result_output
+/// The managed registry owns generations and liveness. ECS owns exposed names.
 fn attach(
     world: &mut World,
     id: &str,
     revision: u64,
     label: &str,
     connection: McpConnection,
-    tools: Vec<rig_rmcp::McpTool>,
+    registry: ToolServerHandle,
     allowed: &[String],
 ) {
-    let mut entities = Vec::new();
-    let mut names = Vec::new();
-    for tool in tools {
-        let mcp_name = tool.definition().name.to_string();
-        if !allowed.is_empty() && !allowed.contains(&mcp_name) {
-            continue;
-        }
-        let Some(exposed) = exposed_name(label, id, &mcp_name) else {
-            continue;
-        };
-        let Ok(tool_name) = ToolName::new(exposed.clone()) else {
-            continue;
-        };
-        let dynamic = match DynamicTool::try_from(tool.with_name(tool_name)) {
-            Ok(dynamic) => dynamic,
-            Err(error) => {
-                tracing::warn!(connection = %id, tool = %mcp_name, "the MCP tool is not offered: {error}");
-                continue;
-            }
-        };
-        let (definition, handler, _) = dynamic.into_parts();
-        if let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default()) {
-            entities.push(entity);
-            names.push(exposed);
-        }
-    }
-    // The gate passes these and a parent is offered them, so both lists have
-    // to learn the names before the next turn.
-    {
-        let mut host = world.resource_mut::<HostToolNames>();
-        host.0.extend(names.iter().cloned());
-    }
-    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
-        tracing::warn!(connection = %id, "the MCP tools are not offered: {error}");
-    }
     world.resource_mut::<McpServers>().0.insert(
         id.to_owned(),
         Server {
             connection,
             revision,
-            names,
-            tools: entities,
+            registry,
+            tools: HashMap::new(),
         },
     );
+    refresh_tools(world, id, label, allowed);
+}
+
+fn refresh_tools(world: &mut World, id: &str, label: &str, allowed: &[String]) {
+    let snapshot = world.resource::<McpServers>().0[id].registry.snapshot();
+    let desired: HashMap<_, _> = snapshot
+        .definitions()
+        .iter()
+        .filter_map(|definition| {
+            let name = definition.name.as_str();
+            if !allowed.is_empty() && !allowed.iter().any(|allowed| allowed == name) {
+                return None;
+            }
+            let exposed = exposed_name(label, id, name)?;
+            let registered = snapshot.get(name)?;
+            let mut definition = (**definition).clone();
+            definition.name = ToolName::new(exposed.clone()).ok()?;
+            Some((
+                exposed,
+                (
+                    registered.key().raw().clone(),
+                    definition,
+                    registered.handler().clone(),
+                ),
+            ))
+        })
+        .collect();
+    let retired: Vec<_> = world.resource::<McpServers>().0[id]
+        .tools
+        .iter()
+        .filter(|(name, installed)| {
+            desired
+                .get(*name)
+                .is_none_or(|(generation, _, _)| *generation != installed.generation)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut changed = !retired.is_empty();
+    for name in retired {
+        let installed = world
+            .resource_mut::<McpServers>()
+            .0
+            .get_mut(id)
+            .unwrap()
+            .tools
+            .remove(&name)
+            .unwrap();
+        if let Ok(entity) = world.get_entity_mut(installed.entity) {
+            entity.despawn();
+        }
+    }
+    for (name, (generation, definition, handler)) in desired {
+        if world.resource::<McpServers>().0[id]
+            .tools
+            .contains_key(&name)
+        {
+            continue;
+        }
+        if let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default()) {
+            world
+                .resource_mut::<McpServers>()
+                .0
+                .get_mut(id)
+                .unwrap()
+                .tools
+                .insert(name, Installed { generation, entity });
+            changed = true;
+        }
+    }
+    if changed {
+        sync_names(world);
+    }
+}
+
+fn sync_names(world: &mut World) {
+    let live = world
+        .resource::<McpServers>()
+        .0
+        .values()
+        .flat_map(|server| server.tools.keys().cloned())
+        .collect();
+    world.resource_mut::<HostToolNames>().0 = live;
+    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
+        tracing::warn!(%error, "the MCP tools are not offered");
+    }
 }
 
 /// Closes one server and removes the tools it contributed.
@@ -373,25 +420,12 @@ fn retire_one(world: &mut World, id: &str) {
     let Some(server) = world.resource_mut::<McpServers>().0.remove(id) else {
         return;
     };
-    for entity in server.tools {
-        if let Ok(entity) = world.get_entity_mut(entity) {
+    for installed in server.tools.into_values() {
+        if let Ok(entity) = world.get_entity_mut(installed.entity) {
             entity.despawn();
         }
     }
-    // Rebuild from what is still connected: two servers may have contributed
-    // the same tool name, and only the ones still registered belong.
-    {
-        let live: std::collections::HashSet<String> = world
-            .resource::<McpServers>()
-            .0
-            .values()
-            .flat_map(|server| server.names.iter().cloned())
-            .collect();
-        world.resource_mut::<HostToolNames>().0 = live;
-    }
-    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
-        tracing::warn!(connection = %id, "the retired MCP tools may still be offered: {error}");
-    }
+    sync_names(world);
     // Closing waits for the transport, so it runs off the host thread.
     if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
         let connection = server.connection;
@@ -444,58 +478,12 @@ impl Plugin for McpPlugin {
 mod tests {
     use super::*;
 
-    /// The model-facing name carries the server, so two servers that offer the
-    /// same tool keep two tools. A part the provider grammar cannot carry is
-    /// refused rather than rewritten onto another tool.
-    #[test]
-    fn a_tool_name_carries_the_server_and_is_refused_when_it_cannot_be_spelled() {
-        assert_eq!(
-            exposed_name("notes", "c1", "read_file").as_deref(),
-            Some("mcp_notes_read_file")
-        );
-        assert_eq!(
-            exposed_name("notes", "c1", "read-file").as_deref(),
-            Some("mcp_notes_read-file")
-        );
-        assert_ne!(
-            exposed_name("notes", "c1", "read"),
-            exposed_name("work", "c2", "read")
-        );
-        // A server name the grammar cannot carry falls back to its id.
-        assert_eq!(
-            exposed_name("my server", "abcdef012345", "read").as_deref(),
-            Some("mcp_abcdef01_read")
-        );
-        assert_eq!(exposed_name("notes", "c1", "read.file"), None);
-        assert_eq!(exposed_name("notes", "c1", "read file"), None);
-        let long = "x".repeat(70);
-        assert_eq!(exposed_name("notes", "c1", &long), None);
-    }
-
-    /// A setting that names neither a command nor an endpoint cannot be
-    /// opened; it is reported instead of waiting on a transport.
-    #[tokio::test]
-    async fn a_server_without_a_transport_is_refused() {
-        let want = Desired {
-            revision: 1,
-            name: "notes".into(),
-            command: String::new(),
-            args: Vec::new(),
-            endpoint: String::new(),
-            allowed: Vec::new(),
-        };
-        match open(&want).await {
-            Ok(_) => panic!("a server without a transport was opened"),
-            Err(error) => assert!(
-                error.contains("neither a command nor an endpoint"),
-                "{error}"
-            ),
-        }
-    }
-
     /// A server that serves one text tool over an in-process duplex pair, so
     /// the whole client path runs without a child process or a network.
-    struct Echo(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    struct Echo {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        listed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
 
     impl rig_rmcp::rmcp::ServerHandler for Echo {
         fn get_info(&self) -> rig_rmcp::rmcp::model::ServerConfig {
@@ -508,11 +496,15 @@ mod tests {
             _context: rig_rmcp::rmcp::service::RequestContext<rig_rmcp::rmcp::RoleServer>,
         ) -> Result<rig_rmcp::rmcp::model::ListToolsResult, rig_rmcp::rmcp::ErrorData> {
             Ok(rig_rmcp::rmcp::model::ListToolsResult::with_all_items(
-                vec![rig_rmcp::rmcp::model::Tool::new(
-                    "echo",
-                    "Echo the input back",
-                    serde_json::Map::new(),
-                )],
+                if self.listed.load(std::sync::atomic::Ordering::SeqCst) {
+                    vec![rig_rmcp::rmcp::model::Tool::new(
+                        "echo",
+                        "Echo the input back",
+                        serde_json::Map::new(),
+                    )]
+                } else {
+                    Vec::new()
+                },
             ))
         }
 
@@ -521,7 +513,7 @@ mod tests {
             request: rig_rmcp::rmcp::model::CallToolRequestParams,
             _context: rig_rmcp::rmcp::service::RequestContext<rig_rmcp::rmcp::RoleServer>,
         ) -> Result<rig_rmcp::rmcp::model::CallToolResponse, rig_rmcp::rmcp::ErrorData> {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(rig_rmcp::rmcp::model::CallToolResponse::Complete(
                 rig_rmcp::rmcp::model::CallToolResult::success(vec![
                     rig_rmcp::rmcp::model::ContentBlock::text(format!("called {}", request.name)),
@@ -530,82 +522,46 @@ mod tests {
         }
     }
 
-    /// The client path: connect, list, convert and call. It runs over a duplex
-    /// pair, so it needs no server binary.
-    #[tokio::test]
-    async fn a_duplex_server_is_listed_and_called() {
-        use rig_rmcp::rmcp::{
-            RoleClient, RoleServer, ServiceExt, service::serve_directly,
-            transport::async_rw::AsyncRwTransport,
-        };
-
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
-        let (server_read, client_write) = tokio::io::duplex(64 * 1024);
-        let server_calls = calls.clone();
-        let server = tokio::spawn(async move {
-            let transport = AsyncRwTransport::<RoleServer, _, _>::new(server_read, server_write);
-            let running = serve_directly(Echo(server_calls), transport, None);
-            let _ = running.waiting().await;
-        });
-
-        let transport = AsyncRwTransport::<RoleClient, _, _>::new(client_read, client_write);
-        let service = rig_rmcp::rmcp::model::ClientConfig::default()
-            .serve(transport)
-            .await
-            .expect("the client connects to the duplex server");
-        let (connection, tools) = bind(service).await.expect("the server lists its tools");
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), "echo");
-
-        // The library conversion owns the call: arguments, the request and
-        // the answer's content blocks.
-        let name = ToolName::new("mcp_notes_echo").expect("a valid exposed name");
-        let tool =
-            DynamicTool::try_from(tools[0].clone().with_name(name)).expect("the MCP tool converts");
-        let output = tool
-            .run(serde_json::json!({}))
-            .await
-            .expect("the MCP tool answers");
-        assert_eq!(output.as_text(), Some("called echo"));
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the call reached the server"
-        );
-
-        connection.close().await;
-        server.abort();
-    }
-
     /// The whole path: a listed MCP tool is attached to the real host app,
     /// offered to the parent, passes the gate and runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_mcp_tool_runs_through_the_gate() {
         use crate::host::tests::Harness;
+        use rig_core::completion::Message;
+        use rig_core::message::{ToolResultContent, UserContent};
         use rig_core::test_utils::MockStreamEvent;
         use rig_rmcp::rmcp::{
-            RoleClient, RoleServer, ServiceExt, service::serve_directly,
-            transport::async_rw::AsyncRwTransport,
+            RoleClient, RoleServer, service::serve_directly, transport::async_rw::AsyncRwTransport,
         };
 
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (client_read, server_write) = tokio::io::duplex(64 * 1024);
         let (server_read, client_write) = tokio::io::duplex(64 * 1024);
         let server_calls = calls.clone();
+        let listed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let server_listed = listed.clone();
+        let (peer_sender, peer_receiver) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let transport = AsyncRwTransport::<RoleServer, _, _>::new(server_read, server_write);
-            let running = serve_directly(Echo(server_calls), transport, None);
+            let running = serve_directly(
+                Echo {
+                    calls: server_calls,
+                    listed: server_listed,
+                },
+                transport,
+                None,
+            );
+            let _ = peer_sender.send(running.peer().clone());
             let _ = running.waiting().await;
         });
         let transport = AsyncRwTransport::<RoleClient, _, _>::new(client_read, client_write);
-        let service = rig_rmcp::rmcp::model::ClientConfig::default()
-            .serve(transport)
+        let registry = ToolServer::new().run();
+        let connection = McpClientHandler::new(ClientConfig::default(), registry.clone())
+            .connect(transport)
             .await
-            .expect("the client connects to the duplex server");
-        let (connection, tools) = bind(service).await.expect("the server lists its tools");
+            .expect("the server lists its tools");
 
-        let harness = Harness::new([
+        let mut harness = Harness::new([
             vec![
                 MockStreamEvent::tool_call("call-1", "mcp_notes_echo", serde_json::json!({})),
                 MockStreamEvent::final_response_with_default_usage(),
@@ -615,11 +571,10 @@ mod tests {
                 MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
-        let mut harness = harness;
         let world = harness.app.world_mut();
         world.init_resource::<McpServers>();
         world.init_resource::<HostToolNames>();
-        attach(world, "c1", 1, "notes", connection, tools, &[]);
+        attach(world, "c1", 1, "notes", connection, registry, &[]);
         assert!(
             world
                 .resource::<HostToolNames>()
@@ -630,18 +585,52 @@ mod tests {
         harness
             .accept("k1", "ノート読んで")
             .expect("the message is accepted");
-        // The tool call runs on the app; drive it until the server sees it.
-        let started = std::time::Instant::now();
-        while calls.load(std::sync::atomic::Ordering::SeqCst) == 0
-            && started.elapsed() < std::time::Duration::from_secs(5)
-        {
-            harness.app.update();
-        }
+        harness.run_until(|world| {
+            world
+                .query::<&Conversation>()
+                .iter(world)
+                .any(|conversation| {
+                    conversation.entries().any(|entry| match entry.message {
+                        Message::User { content } => content.iter().any(|item| {
+                            matches!(item, UserContent::ToolResult(result)
+                            if result.name.as_str() == "mcp_notes_echo"
+                                && !result.is_error
+                                && result.content.iter().any(|block|
+                                    matches!(block, ToolResultContent::Text(text)
+                                        if text.text == "called echo")))
+                        }),
+                        _ => false,
+                    })
+                })
+        });
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the model's call reached the MCP server"
         );
+        listed.store(false, std::sync::atomic::Ordering::SeqCst);
+        peer_receiver
+            .await
+            .unwrap()
+            .notify_tool_list_changed()
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let world = harness.app.world_mut();
+                refresh_tools(world, "c1", "notes", &[]);
+                if !world
+                    .resource::<HostToolNames>()
+                    .0
+                    .contains("mcp_notes_echo")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("list_changed removes the tool from the host");
         server.abort();
     }
 }

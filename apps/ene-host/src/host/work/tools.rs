@@ -344,18 +344,15 @@ fn inform(world: &mut World, companion: &str, run_id: &str, text: String, mode: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::agent::TestModel;
-    use crate::host::delegation::Delegation;
+    use crate::host::delegation::DeliveredClaims;
     use crate::host::mind::{Assignments, Companion, Profile, State};
+    use crate::host::model::{Credentials, ModelFactory};
     use crate::host::notify::Notifier;
+    use crate::host::tests::bound;
     use crate::host::work::{Runs, new_run};
-    use rig_core::catalog::Catalog;
     use rig_core::completion::Message;
     use rig_core::conversation::{Entry, RequestId};
-    use rig_core::operation::Completion;
-    use rig_core::serve::{ErasedHandler, adapters::ModelAdapter};
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-    use rig_ecs::effects::Handler;
     use std::sync::Arc;
 
     #[test]
@@ -430,34 +427,21 @@ mod tests {
         }
     }
 
-    fn bound(model: &MockCompletionModel) -> crate::host::model::Bound {
-        let spec = Catalog::builtin()
-            .resolve("deepseek/deepseek-flash")
-            .unwrap()
-            .shared();
-        let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(
-            spec.reference(),
-            model.clone(),
-        ));
-        crate::host::model::Bound {
-            connection: rig_ecs::model::Connection {
-                spec: Arc::clone(&spec),
-                handler: Handler(handler),
-            },
-        }
-    }
-
     /// A world with just enough resources for `start_work` to create a run.
     fn work_world(store: Store) -> World {
         let model =
             MockCompletionModel::from_stream_turns(std::iter::empty::<Vec<MockStreamEvent>>());
         let mut world = World::new();
         world.insert_resource(store);
-        world.insert_resource(Delegation::default());
+        world.insert_resource(DeliveredClaims::default());
         world.insert_resource(super::super::acp::AcpBackends::default());
         world.insert_resource(Runs::default());
         world.insert_resource(Notifier::new());
-        world.insert_resource(TestModel(Arc::new(move || bound(&model))));
+        world.insert_resource(Credentials::default());
+        world.init_resource::<rig_ecs::model::Models>();
+        world.insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _| {
+            Ok(bound(&model))
+        })));
         world
     }
 

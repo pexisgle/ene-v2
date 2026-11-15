@@ -18,15 +18,11 @@
 use super::{
     agent::{self, CompanionAgent},
     background::Background,
-    compaction::{self, InactivityTracker, Weigher},
+    compaction::{self, InactivityTracker},
     db::{Result, Store},
     error::HostError,
-    mind::{
-        Companion, Role,
-        embedding::CompactVectorIndex,
-        recall::{self, Recall},
-    },
-    model::{self, Bound, Credentials},
+    mind::{Companion, Role, embedding::Embeddings, recall},
+    model::{Credentials, ModelFactory},
     resources::{HostRuntime, HostState, Perception},
 };
 use bevy_ecs::prelude::*;
@@ -35,7 +31,7 @@ use rig_core::completion::{
     ToolDefinition,
 };
 use rig_core::conversation::{Author, Conversation as History, Entry};
-use rig_core::serve::ErasedHandler;
+use rig_core::{DynModel, operation::Completion};
 use rig_ecs::prelude::*;
 use std::{
     sync::Arc,
@@ -86,12 +82,6 @@ impl StagedTick {
     }
 }
 
-impl Drop for StagedTick {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
 /// Starts a tick when the user is idle and the companion can answer right now:
 /// the request is built here, the call runs on the host runtime.
 #[allow(clippy::too_many_arguments)]
@@ -104,11 +94,11 @@ fn begin_tick(
     models: Option<Res<Models>>,
     runtime: Option<Res<HostRuntime>>,
     perception: Option<Res<Perception>>,
-    index: Option<ResMut<CompactVectorIndex>>,
+    embeddings: Option<Res<Embeddings>>,
     tools: Query<&ToolDef>,
     agents: Query<(&CompanionAgent, &Conversation, Has<ActiveTurn>)>,
     wake: Option<Res<Wake>>,
-    #[cfg(test)] tick_model: Option<Res<agent::TestModel>>,
+    factory: Res<ModelFactory>,
 ) {
     if ticks.in_flight.is_some()
         || ticks.last_started.is_some_and(|last| last.elapsed() < IDLE)
@@ -124,8 +114,8 @@ fn begin_tick(
     if tracker.idle_duration() < IDLE {
         return;
     }
-    let (Some(store), Some(perception), Some(runtime), Some(mut index)) =
-        (store, perception, runtime, index)
+    let (Some(store), Some(perception), Some(runtime), Some(embeddings)) =
+        (store, perception, runtime, embeddings)
     else {
         return;
     };
@@ -144,14 +134,13 @@ fn begin_tick(
         if busy {
             continue;
         }
-        // In a test, an injected mock handler answers instead of a provider.
-        #[cfg(test)]
-        let bound = tick_model.as_deref().map_or_else(
-            || connect(&store, credentials.as_deref(), models.as_deref(), companion),
-            |model| Ok((model.0)()),
+        let bound = connect(
+            &store,
+            credentials.as_deref(),
+            models.as_deref(),
+            companion,
+            &factory,
         );
-        #[cfg(not(test))]
-        let bound = connect(&store, credentials.as_deref(), models.as_deref(), companion);
         let Ok(bound) = bound else {
             continue;
         };
@@ -164,27 +153,37 @@ fn begin_tick(
         if let Some(summary) = compaction::summary_of(&history) {
             compaction::inject_summary(&mut history, &summary);
         }
-        let tail = recall::dynamic_tail(
-            &store,
-            &perception,
-            &companion.id,
-            query.as_deref(),
-            Recall {
-                index: &mut index,
-                runtime: Some(&runtime.0),
-                credentials: credentials.as_deref(),
-            },
-            None,
-        );
-        history.push(recall::with_tail(&Message::user(TICK), &tail));
-        let Some(request) = request(companion, &mut history, &bound, &tools) else {
-            continue;
+        let store = store.clone();
+        let perception = Perception {
+            events: perception.events.clone(),
         };
-        let handler = bound.connection.handler.0.clone();
+        let embeddings = embeddings.clone();
+        let credentials = credentials.as_deref().cloned();
+        let companion_record = companion.clone();
+        let noop: Vec<_> = tools
+            .iter()
+            .filter(|tool| tool.0.name.as_str() == "noop")
+            .map(|tool| Arc::clone(&tool.0))
+            .collect();
         let call = Background::spawn(&runtime.0, wake.as_deref(), async move {
-            tokio::time::timeout(TIMEOUT, ask(request, handler))
-                .await
-                .unwrap_or_else(|_| Err("the heartbeat tick timed out".to_owned()))
+            tokio::time::timeout(TIMEOUT, async move {
+                let tail = recall::dynamic_tail(
+                    &store,
+                    &perception,
+                    &companion_record.id,
+                    query.as_deref(),
+                    &embeddings,
+                    credentials.as_ref(),
+                    None,
+                )
+                .await;
+                history.push(recall::with_tail(&Message::user(TICK), &tail));
+                let request = request(&companion_record, &mut history, &bound, noop)
+                    .ok_or_else(|| "the heartbeat tick does not fit the model window".to_owned())?;
+                ask(request, bound).await
+            })
+            .await
+            .unwrap_or_else(|_| Err("the heartbeat tick timed out".to_owned()))
         });
         let started = Instant::now();
         ticks.last_started = Some(started);
@@ -207,13 +206,14 @@ fn connect(
     credentials: Option<&Credentials>,
     models: Option<&Models>,
     companion: &Companion,
-) -> Result<Bound> {
+    factory: &ModelFactory,
+) -> Result<DynModel<Completion>> {
     let (Some(credentials), Some(models)) = (credentials, models) else {
         return Err(HostError::unavailable(
             "the heartbeat tick has no model connection",
         ));
     };
-    model::connect(
+    (factory.0)(
         store,
         credentials,
         models.0.catalog(),
@@ -228,16 +228,11 @@ fn connect(
 fn request(
     companion: &Companion,
     history: &mut History,
-    bound: &Bound,
-    tools: &Query<&ToolDef>,
+    bound: &DynModel<Completion>,
+    noop: Vec<Arc<ToolDefinition>>,
 ) -> Option<CompletionRequest> {
-    let spec = Arc::clone(&bound.connection.spec);
+    let spec = bound.spec()?;
     let prompt = agent::system_prompt(companion);
-    let noop: Vec<Arc<ToolDefinition>> = tools
-        .iter()
-        .filter(|tool| tool.0.name.as_str() == "noop")
-        .map(|tool| Arc::clone(&tool.0))
-        .collect();
     let mut request = CompletionRequest::from(Vec::<Message>::new())
         .tools(noop)
         .options(spec.default_options(None));
@@ -245,14 +240,15 @@ fn request(
     let reference = spec.reference();
     let limit = spec.input_limit().map(u64::from).unwrap_or(128_000);
     let reserve = u64::from(spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
-    let weight = Weigher {
-        model: &reference,
-        prompt: Some(&prompt),
-        tools: &request.tools,
-        anchor: None,
-        sent: None,
-    };
-    if !compaction::fit(history, &weight, limit, reserve) {
+    if !compaction::fit(
+        history,
+        &reference,
+        Some(&prompt),
+        &request.tools,
+        None,
+        None,
+        limit.saturating_sub(reserve),
+    ) {
         tracing::warn!(companion = %companion.id, "the heartbeat tick does not fit the model window");
         return None;
     }
@@ -262,10 +258,12 @@ fn request(
 
 /// Asks the head once, outside the kernel: the reply is read, not continued,
 /// so a tool call has run nothing.
-async fn ask(request: CompletionRequest, handler: ErasedHandler) -> Outcome {
-    model::unary(&handler, request)
+async fn ask(request: CompletionRequest, model: DynModel<Completion>) -> Outcome {
+    model
+        .call(request)
         .await
         .map(|response| acting_reply(&response))
+        .map_err(|error| error.to_string())
 }
 
 /// The reply a promotion writes: the text blocks, when the head spoke. A reply

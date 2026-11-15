@@ -16,6 +16,7 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use futures_util::{StreamExt, stream::FuturesOrdered};
 use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -27,8 +28,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
-use tokio::{sync::mpsc, task::JoinHandle};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{Notify, mpsc};
+use tokio_util::task::AbortOnDropHandle;
 
 pub(crate) const SAMPLE_RATE: u32 = 24_000;
 pub(crate) const STT_SAMPLE_RATES: [u32; 2] = [24_000, 16_000];
@@ -76,6 +77,12 @@ pub(crate) trait SttEngine: Send + Sync + 'static {
         pcm: Vec<u8>,
         sample_rate: u32,
     ) -> BoxFuture<'a, HttpResult<String>>;
+}
+
+#[derive(Resource, Default)]
+struct Engines {
+    tts: Option<Arc<dyn TtsEngine>>,
+    stt: Option<Arc<dyn SttEngine>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -158,8 +165,7 @@ impl HttpEngine {
             ConnectionConfig::Stt(config) if !tts => &config.language_hints,
             _ => &[],
         };
-        // The connection opts into its own deadline; the clamp is the range the
-        // old per-timeout clients enforced.
+        // Bound the deadline this connection can set on the shared client.
         let timeout = Duration::from_millis(
             options
                 .timeout_ms
@@ -192,21 +198,16 @@ impl HttpEngine {
         })
     }
 
-    fn client(&self) -> HttpResult<reqwest::Client> {
-        net::client()
-    }
-
-    /// Runs one request against the engine: the shared endpoint guard, the
-    /// engine's own deadline, the bearer token, the status check and a bounded
-    /// body read, in the order every call needs them.
+    /// Applies the engine's deadline and bearer token, checks the status, and
+    /// reads the response body up to the shared size limit.
     async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
         let response = post(call.timeout(self.timeout), self.secret.as_deref(), what).await?;
         net::read_body(response, MAX_BODY_BYTES, what).await
     }
 
-    /// The OpenAI-shaped speech wire, written out because the engine also
-    /// serves Voicevox and a raw endpoint, and because the connection's own
-    /// `path` and the PCM response format are part of its configuration.
+    /// Rig 0.46's reqwest transport reads successful bodies without a cap.
+    /// Keep this wire on `exchange` so custom paths retain the bounded read
+    /// and the connection's request deadline.
     async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
         let mut body = serde_json::json!({
             "model": self.model, "voice": if voice.is_empty() { &self.voice } else { &voice },
@@ -215,8 +216,7 @@ impl HttpEngine {
         if let Some(speed) = self.speed {
             body["speed"] = serde_json::json!(speed);
         }
-        let call = self
-            .client()?
+        let call = net::client()?
             .post(format!("{}{}", self.base, self.path))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
@@ -225,7 +225,8 @@ impl HttpEngine {
 
     async fn voicevox(&self, text: String) -> HttpResult<(Vec<u8>, u32)> {
         let encoded: String = url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
-        let call = self.client()?.post(format!(
+        let client = net::client()?;
+        let call = client.post(format!(
             "{}{}?text={encoded}&speaker={}",
             self.base, self.query_path, self.speaker
         ));
@@ -235,8 +236,7 @@ impl HttpEngine {
         if let Some(speed) = self.speed {
             body["speedScale"] = serde_json::json!(speed);
         }
-        let call = self
-            .client()?
+        let call = client
             .post(format!(
                 "{}{}?speaker={}",
                 self.base, self.synthesis_path, self.speaker
@@ -257,8 +257,7 @@ impl HttpEngine {
         if let Some(language) = &self.language {
             form = form.text("language", language.clone());
         }
-        let call = self
-            .client()?
+        let call = net::client()?
             .post(format!("{}{}", self.base, self.path))
             .multipart(form.text("response_format", "json"));
         let body = self.exchange(call, "STT").await?;
@@ -268,8 +267,7 @@ impl HttpEngine {
     }
 
     async fn raw_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        let call = self
-            .client()?
+        let call = net::client()?
             .post(format!("{}{}", self.base, self.path))
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(wav_wrap(&pcm, sample_rate)?);
@@ -370,9 +368,8 @@ fn path(value: Option<String>, default: &str) -> String {
 }
 
 pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
-    #[cfg(test)]
     if let Some(engine) = world
-        .get_resource::<tests::TestEngines>()
+        .get_resource::<Engines>()
         .and_then(|test| test.tts.as_ref())
     {
         return Ok(Arc::clone(engine));
@@ -386,9 +383,8 @@ pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine
 }
 
 pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine>, SetupError> {
-    #[cfg(test)]
     if let Some(engine) = world
-        .get_resource::<tests::TestEngines>()
+        .get_resource::<Engines>()
         .and_then(|test| test.stt.as_ref())
     {
         return Ok(Arc::clone(engine));
@@ -530,7 +526,7 @@ fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
 }
 
 fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
-    let mut reader = hound::WavReader::new(Cursor::new(bytes))
+    let reader = hound::WavReader::new(Cursor::new(bytes))
         .map_err(|_| "the TTS endpoint did not return a valid 16-bit PCM WAV".to_owned())?;
     let spec = reader.spec();
     if spec.sample_format != hound::SampleFormat::Int {
@@ -543,9 +539,9 @@ fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
         return Err("the TTS endpoint returned a WAV without channels".into());
     }
     let channels = usize::from(spec.channels);
-    let mut pcm = Vec::with_capacity(usize::try_from(reader.len()).unwrap_or(0) / channels * 2);
+    let mut pcm = Vec::with_capacity(usize::try_from(reader.duration()).unwrap_or(0) * 2);
     let mut frame = 0i32;
-    for (index, sample) in reader.samples::<i16>().enumerate() {
+    for (index, sample) in reader.into_samples::<i16>().enumerate() {
         let sample = sample.map_err(|_| "the TTS endpoint returned a truncated WAV")?;
         frame += i32::from(sample);
         if index % channels == channels - 1 {
@@ -592,9 +588,8 @@ struct Work {
     generation_id: u64,
     emitter: Emitter,
     pending: VecDeque<Sentence>,
-    in_flight: usize,
-    cancel: CancellationToken,
-    tasks: Vec<JoinHandle<()>>,
+    notify: Arc<Notify>,
+    task: Option<AbortOnDropHandle<()>>,
 }
 
 impl Work {
@@ -604,9 +599,8 @@ impl Work {
             generation_id,
             emitter: Emitter::new(utterance_id.to_owned(), generation_id),
             pending: VecDeque::new(),
-            in_flight: 0,
-            cancel: CancellationToken::new(),
-            tasks: Vec::new(),
+            notify: Arc::new(Notify::new()),
+            task: None,
         }
     }
 }
@@ -625,12 +619,7 @@ struct State {
 
 impl State {
     fn cancel(&mut self, utterance_id: &str) {
-        if let Some(work) = self.works.remove(utterance_id) {
-            work.cancel.cancel();
-            for task in work.tasks {
-                task.abort();
-            }
-        }
+        self.works.remove(utterance_id);
     }
 }
 
@@ -884,32 +873,48 @@ impl Voice {
     }
 
     fn pump(&self, state: &mut State, utterance_id: &str) {
-        loop {
-            let Some(work) = state.works.get_mut(utterance_id) else {
-                return;
-            };
-            if work.in_flight >= MAX_SYNTHESIS_SENTENCES {
-                return;
-            }
-            let Some(sentence) = work.pending.pop_front() else {
-                return;
-            };
-            work.in_flight += 1;
-            let cancel = work.cancel.clone();
-            let runner = self.clone();
-            let id = utterance_id.to_owned();
-            let handle = self.runtime.spawn(async move {
-                let outcome = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return,
-                    outcome = synthesize(&*sentence.source, sentence.text, sentence.voice) => outcome,
-                };
-                runner.complete(&id, sentence.sequence_no, outcome);
-            });
-            if let Some(work) = state.works.get_mut(utterance_id) {
-                work.tasks.push(handle);
-            }
+        let Some(work) = state.works.get_mut(utterance_id) else {
+            return;
+        };
+        work.notify.notify_one();
+        if work.task.is_some() {
+            return;
         }
+        let notify = Arc::clone(&work.notify);
+        let runner = self.clone();
+        let id = utterance_id.to_owned();
+        work.task = Some(AbortOnDropHandle::new(self.runtime.spawn(async move {
+            let mut pending =
+                FuturesOrdered::<BoxFuture<'static, (u32, HttpResult<Vec<u8>>)>>::new();
+            loop {
+                {
+                    let mut state = runner.lock();
+                    let Some(work) = state.works.get_mut(&id) else {
+                        return;
+                    };
+                    while pending.len() < MAX_SYNTHESIS_SENTENCES {
+                        let Some(sentence) = work.pending.pop_front() else {
+                            break;
+                        };
+                        pending.push_back(Box::pin(async move {
+                            let outcome =
+                                synthesize(&*sentence.source, sentence.text, sentence.voice).await;
+                            (sentence.sequence_no, outcome)
+                        }));
+                    }
+                    if pending.is_empty() {
+                        work.task.take();
+                        return;
+                    }
+                }
+                tokio::select! {
+                    _ = notify.notified() => {},
+                    Some((sequence, outcome)) = pending.next(), if !pending.is_empty() => {
+                        runner.complete(&id, sequence, outcome);
+                    }
+                }
+            }
+        })));
     }
 
     fn complete(&self, utterance_id: &str, sequence_no: u32, outcome: HttpResult<Vec<u8>>) {
@@ -917,7 +922,6 @@ impl Voice {
         let Some(work) = state.works.get_mut(utterance_id) else {
             return;
         };
-        work.in_flight = work.in_flight.saturating_sub(1);
         let events = work.emitter.offer(sequence_no, outcome);
         let companion = work.companion.clone();
         let generation_id = work.generation_id;
@@ -925,8 +929,6 @@ impl Voice {
         self.send(&mut state, &companion, generation_id, events, utterance_id);
         if finished {
             state.cancel(utterance_id);
-        } else {
-            self.pump(&mut state, utterance_id);
         }
     }
 
@@ -1083,12 +1085,6 @@ struct Emitter {
     next: u32,
     finished: Option<u32>,
     sent_finished: bool,
-    slots: Vec<Option<Slot>>,
-}
-
-enum Slot {
-    Audio(Vec<u8>),
-    Skipped,
 }
 
 impl Emitter {
@@ -1099,7 +1095,6 @@ impl Emitter {
             next: 0,
             finished: None,
             sent_finished: false,
-            slots: Vec::new(),
         }
     }
 
@@ -1111,74 +1106,44 @@ impl Emitter {
         if self.sent_finished {
             return Vec::new();
         }
-        let index = sequence_no as usize;
-        if index >= MAX_SENTENCES as usize {
-            return vec![skipped_event(
+        let mut emitted = Vec::new();
+        self.next += 1;
+        match outcome {
+            Ok(pcm) => self.emit_audio(sequence_no, pcm, &mut emitted),
+            Err(reason) => emitted.push(skipped_event(
                 &self.utterance_id,
                 self.generation_id,
                 sequence_no,
-                "sentence sequence overflow",
-            )];
+                reason,
+            )),
         }
-        if self.slots.len() <= index {
-            self.slots.resize_with(index + 1, || None);
-        }
-        let mut emitted = Vec::new();
-        match outcome {
-            Ok(pcm) => self.slots[index] = Some(Slot::Audio(pcm)),
-            Err(reason) => {
-                emitted.push(skipped_event(
-                    &self.utterance_id,
-                    self.generation_id,
-                    sequence_no,
-                    reason,
-                ));
-                self.slots[index] = Some(Slot::Skipped);
-            }
-        }
-        self.emit(&mut emitted);
+        self.emit_finished(&mut emitted);
         emitted
     }
 
     fn finish(&mut self, total_sentences: u32) -> Vec<w::AudioOutputEvent> {
         self.finished = Some(total_sentences);
         let mut emitted = Vec::new();
-        self.emit(&mut emitted);
+        self.emit_finished(&mut emitted);
         emitted
-    }
-
-    fn emit(&mut self, emitted: &mut Vec<w::AudioOutputEvent>) {
-        while let Some(slot) = self
-            .slots
-            .get_mut(self.next as usize)
-            .and_then(|slot| slot.take())
-        {
-            let sequence_no = self.next;
-            self.next += 1;
-            if let Slot::Audio(pcm) = slot {
-                self.emit_audio(sequence_no, pcm, emitted);
-            }
-        }
-        self.emit_finished(emitted);
     }
 
     fn emit_audio(&self, sequence_no: u32, pcm: Vec<u8>, emitted: &mut Vec<w::AudioOutputEvent>) {
         if pcm.is_empty() {
             return;
         }
-        let mut offset = 0usize;
-        while offset < pcm.len() {
-            let end = (offset + AUDIO_CHUNK_BYTES).min(pcm.len());
+        let chunks = pcm.chunks(AUDIO_CHUNK_BYTES);
+        let total = chunks.len();
+        for (index, chunk) in chunks.enumerate() {
             emitted.push(audio_event(w::AudioChunkEnvelope {
                 utterance_id: self.utterance_id.clone(),
                 generation_id: self.generation_id,
                 sequence_no,
-                pcm_data: pcm[offset..end].to_vec(),
+                pcm_data: chunk.to_vec(),
                 sample_rate: SAMPLE_RATE,
-                is_final_chunk: end == pcm.len(),
+                is_final_chunk: index + 1 == total,
                 ..Default::default()
             }));
-            offset = end;
         }
     }
 
@@ -1761,7 +1726,7 @@ pub(crate) struct VoicePlugin;
 impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
         let runtime = app.world().resource::<HostRuntime>().0.clone();
-        app.init_resource::<delegation::Delegation>()
+        app.init_resource::<delegation::DeliveredClaims>()
             .insert_resource(Voice::new(runtime))
             .add_systems(Update, expire_playback);
     }

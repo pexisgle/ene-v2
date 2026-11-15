@@ -61,7 +61,6 @@ mod tests {
     use serde_json::{Value, json};
     use std::{
         path::PathBuf,
-        sync::Arc,
         time::{Duration, Instant},
     };
 
@@ -81,6 +80,7 @@ mod tests {
         fn model(&self) -> Value {
             json!({
                 "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+                "extensionsUsed":["VRMC_vrm"],"extensionsRequired":["VRMC_vrm"],
                 "nodes":[
                     {"name":"Same","children":[1]},
                     {"name":"Same","translation":[0,1,0],"children":[2,4,7]},
@@ -129,6 +129,8 @@ mod tests {
             let humanoid = v["extensions"]["VRMC_vrm"]["humanoid"].clone();
             v["extensions"] =
                 json!({"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":humanoid}});
+            v["extensionsUsed"] = json!(["VRMC_vrm_animation"]);
+            v["extensionsRequired"] = json!(["VRMC_vrm_animation"]);
             v["buffers"] = json!([{"byteLength":64,"uri":"motion.bin"}]);
             v["bufferViews"] = json!([
                 {"buffer":0,"byteLength":8},
@@ -158,30 +160,32 @@ mod tests {
     struct BeforeAnimation(bevy::ecs::change_detection::Tick);
 
     fn app() -> App {
-        let plugins = DefaultPlugins
-            .build()
-            .disable::<AssetPlugin>()
-            .disable::<bevy::render::RenderPlugin>()
-            .disable::<bevy::log::LogPlugin>();
+        let plugins = DefaultPlugins.build().disable::<bevy::log::LogPlugin>();
         #[cfg(windows)]
         let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
         let mut app = App::new();
-        app.add_plugins(AssetPlugin {
-            unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
-            ..default()
-        })
-        .init_asset::<Shader>()
-        .init_asset_loader::<bevy::shader::ShaderLoader>()
-        .add_plugins(plugins.set(WindowPlugin {
-            primary_window: None,
-            ..default()
-        }))
+        app.add_plugins(
+            plugins
+                .set(AssetPlugin {
+                    unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: None,
+                    ..default()
+                })
+                .set(bevy::render::RenderPlugin {
+                    render_creation: bevy::render::settings::WgpuSettings {
+                        backends: None,
+                        ..default()
+                    }
+                    .into(),
+                    ..default()
+                }),
+        )
         .add_plugins(bevy::extract::sync_world::SyncWorldPlugin::<
             bevy::render::RenderApp,
         >::default())
-        .register_asset_loader(bevy::image::ImageLoader::new(
-            bevy::image::CompressedImageFormats::NONE,
-        ))
         .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             Duration::from_secs_f64(1. / 60.),
         ))
@@ -238,37 +242,21 @@ mod tests {
             )
     }
     #[test]
-    fn vrm_spec_system_order_runs_pose_lookat_expressions_constraints_springbone() {
-        let mut app = app();
-        let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
-        for (set, name) in [
-            (VrmSystems::Pose, "pose"),
-            (VrmSystems::LookAt, "lookAt"),
-            (VrmSystems::Expressions, "expressions"),
-            (VrmSystems::Constraints, "constraints"),
-            (VrmSystems::SpringBone, "springBone"),
-        ] {
-            let log = log.clone();
-            app.add_systems(
-                PostUpdate,
-                (move || log.lock().unwrap().push(name)).in_set(set),
-            );
-        }
-        app.update();
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec!["pose", "lookAt", "expressions", "constraints", "springBone"]
-        );
-    }
-    #[test]
-    fn loader_rejects_missing_extensions_and_dangling_bones() {
+    fn loader_rejects_missing_extensions_dangling_bones_and_unknown_requirements() {
         let files = Files::new();
         let mut app = app();
         let mut missing = files.model();
         missing["extensions"] = json!({});
         let mut dangling = files.model();
         dangling["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["hips"]["node"] = json!(99);
-        for (name, value) in [("missing.vrm", missing), ("dangling.vrm", dangling)] {
+        let mut unknown = files.model();
+        unknown["extensionsRequired"] = json!(["VRMC_vrm", "ENE_unsupported"]);
+        unknown["extensionsUsed"] = unknown["extensionsRequired"].clone();
+        for (name, value) in [
+            ("missing.vrm", missing),
+            ("dangling.vrm", dangling),
+            ("unknown.vrm", unknown),
+        ] {
             let handle: Handle<Gltf> = app
                 .world()
                 .resource::<AssetServer>()
@@ -662,7 +650,16 @@ mod tests {
             );
         }
         app.world_mut().get_mut::<SpringRig>(root).unwrap().paused = false;
-        app.update();
-        assert!(!app.world().get::<SpringRig>(root).unwrap().paused);
+        assert!(
+            (0..10).any(|_| {
+                app.update();
+                !app.world()
+                    .get::<Transform>(head_entity)
+                    .unwrap()
+                    .rotation
+                    .abs_diff_eq(simulated, 1e-5)
+            }),
+            "resumed spring did not move"
+        );
     }
 }

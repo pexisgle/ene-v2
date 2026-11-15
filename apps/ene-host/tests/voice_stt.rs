@@ -1,13 +1,7 @@
-//! The microphone path: PCM from a real recording is transcribed by the
-//! configured STT connection.
-//!
-//! Opt-in, because it needs a provider key and a fixture: set
-//! `ENE_STT_FIXTURE` to a 24 kHz / 16-bit mono PCM file and `OPENAI_API_KEY`,
-//! then `cargo test -p ene-host --test voice_stt -- --nocapture`. Without them
-//! the test reports itself as skipped instead of failing CI.
 #![cfg(unix)]
 
-use std::{path::Path, process::Command, time::Duration};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+use std::{path::Path, time::Duration};
 
 fn connection_file(runtime: &Path) -> Option<(String, String)> {
     let bytes = std::fs::read(runtime.join("connection.json")).ok()?;
@@ -18,15 +12,18 @@ fn connection_file(runtime: &Path) -> Option<(String, String)> {
     ))
 }
 
-fn spawn(state: &Path, runtime: &Path) -> std::process::Child {
-    Command::new(env!("CARGO_BIN_EXE_ene-host"))
-        .env("ENE_HOST_STATE_DIR", state)
-        .env("ENE_HOST_RUNTIME_DIR", runtime)
-        .env("ENE_HOST_SESSION_CREDENTIALS", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("start ene-host")
+fn spawn(state: &Path, runtime: &Path) -> Box<dyn ChildWrapper> {
+    CommandWrap::with_new(env!("CARGO_BIN_EXE_ene-host"), |command| {
+        command
+            .env("ENE_HOST_STATE_DIR", state)
+            .env("ENE_HOST_RUNTIME_DIR", runtime)
+            .env("ENE_HOST_SESSION_CREDENTIALS", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    })
+    .wrap(KillOnDrop)
+    .spawn()
+    .expect("start ene-host")
 }
 
 async fn discovery(runtime: &Path) -> (String, String) {
@@ -42,34 +39,24 @@ async fn discovery(runtime: &Path) -> (String, String) {
     .expect("host did not publish discovery")
 }
 
-async fn stop(child: &mut std::process::Child) {
-    let status = Command::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let _ = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if child.try_wait().unwrap().is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
+async fn stop(child: &mut Box<dyn ChildWrapper>) {
+    child.signal(15).expect("send SIGTERM");
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .expect("host did not stop")
+        .expect("wait for host");
+    assert!(status.success(), "host shutdown failed: {status}");
 }
 
 #[tokio::test]
+#[ignore = "requires ENE_STT_FIXTURE and OPENAI_API_KEY"]
 async fn streamed_audio_is_transcribed() {
-    let Ok(fixture) = std::env::var("ENE_STT_FIXTURE") else {
-        eprintln!("skipping: set ENE_STT_FIXTURE to 24 kHz 16-bit mono PCM");
-        return;
-    };
-    if std::env::var_os("OPENAI_API_KEY").is_none() {
-        eprintln!("skipping: OPENAI_API_KEY is not set");
-        return;
-    }
+    let fixture =
+        std::env::var("ENE_STT_FIXTURE").expect("set ENE_STT_FIXTURE to 24 kHz 16-bit mono PCM");
+    assert!(
+        std::env::var_os("OPENAI_API_KEY").is_some(),
+        "set OPENAI_API_KEY"
+    );
     let pcm = std::fs::read(&fixture).expect("the fixture");
 
     let temp = tempfile::tempdir().unwrap();

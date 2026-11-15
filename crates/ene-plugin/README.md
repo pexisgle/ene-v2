@@ -28,7 +28,7 @@ PDK の都合で残ります。実行基盤は `max_var_bytes = 0` にして var
 | `Failure` | ホストサービス呼び出しの失敗 |
 
 実行方式はExtism固定で、manifestに `runtime` は指定しません。Luauスクリプトは受け付けません。WasmのABIはExtismが担当します。
-共通型はクレート直下から利用できます。内部ファイルは `manifest.rs`、`api/`（`wire.rs` の共通enumと、`llm` / `speech` / `character` / `harness` / `http` の型）、`failure.rs`、`sdk.rs` です。
+共通型はクレート直下から利用できます。内部ファイルは `manifest.rs`、`api/`（`wire.rs` の共通enumと、`llm` / `character` / `harness` / `http` の型）、`failure.rs`、`sdk.rs` です。
 `provider` は認証方式、ルーティング設定、チャットメッセージを提供します。
 HTTPは `HttpOpen` / `HttpRead` / `HttpClose` で依頼し、認証情報と通信の認可はホスト側で管理する設計です。
 プラグイン provider の通信は同一 origin に限定し、Generate / ConnectionCheck は
@@ -37,7 +37,7 @@ ListModels は `GET <endpoint>/models` だけを許可します。公開カタ�
 ホスト専用の catalog transport が行います。
 `service::<T>` は応答を直接 `T` に復号します。戻り値が不要な操作は `service::<()>`、未保存ならnullを返す状態読取は `service::<Option<T>>` を使います。`http_close` の戻り値は `()` です。
 SDKのヘルパーは `Result<T, extism_pdk::Error>` を返します。サービスの `Failure` はPDKエラーの原因として保持され、`error.downcast_ref::<Failure>()` でコードを取得できます。`FnResult` は `#[plugin_fn]` のエントリポイントで使い、ヘルパーのエラーは `?` で変換します。
-Providerは生成ごとに新しいInstanceで実行します。Speechはbinding単位でInstanceを再利用し、再利用前に `ene_initialize` を再実行します。`ene_initialize` は再入可能にし、guest globalへ前回リクエスト固有の会話・音声・認証情報を残さないでください。
+Providerは生成ごとに新しいInstanceで実行します。Instanceを再利用する場合は、再利用前に `ene_initialize` を再実行します。`ene_initialize` は再入可能にし、guest globalへ前回リクエスト固有の会話・認証情報を残さないでください。
 ハーネスはACP v1のエージェント側セッションとして扱います。詳細は[タスクハーネス](#タスクハーネスacp-v1)を参照してください。
 `Log` サービスは認可後、plugin/provider IDを添えてホストの標準エラー出力へ記録します。メッセージは4096バイトまでで、改行・制御文字はエスケープします。
 manifestの参照ファイル検証と入出力のサイズ制限も実行基盤の責務です。

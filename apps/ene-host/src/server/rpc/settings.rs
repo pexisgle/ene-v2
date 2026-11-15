@@ -72,7 +72,6 @@ impl w::SettingsService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::SubmitApprovalRequest>,
     ) -> ServiceResult<w::SubmitApprovalResponse> {
-        let request = request.to_owned_message();
         let decision = match request.decision.as_known() {
             Some(w::ApprovalDecision::Approve) => permission::ApprovalDecision::Approve,
             Some(w::ApprovalDecision::AlwaysApprove) => permission::ApprovalDecision::AlwaysApprove,
@@ -81,7 +80,7 @@ impl w::SettingsService for Services {
                 permission::ApprovalDecision::Unspecified
             }
         };
-        let request_id = request.request_id;
+        let request_id = request.request_id.to_owned();
         self.call(move |app| {
             let approval = permission::submit(app.world_mut(), &request_id, decision)?;
             Ok(w::SubmitApprovalResponse {
@@ -177,12 +176,12 @@ impl w::SettingsService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::CredentialRequest>,
     ) -> ServiceResult<w::CredentialResult> {
-        let request = request.to_owned_message();
-        let id = request.id;
+        let id = request.id.to_owned();
         let secret = request
             .secret
             .filter(|secret| !secret.is_empty())
-            .ok_or_else(|| ConnectError::invalid_argument("secret is required"))?;
+            .ok_or_else(|| ConnectError::invalid_argument("secret is required"))?
+            .to_owned();
         connection(&self.runtime, &id).await?;
         let credentials = self.runtime.credentials();
         {
@@ -236,8 +235,7 @@ impl w::SettingsService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::CheckRequest>,
     ) -> ServiceResult<w::CheckResult> {
-        let request = request.to_owned_message();
-        let id = request.id.clone();
+        let id = request.id.to_owned();
         let (connection, store) = self
             .runtime
             .read(move |app| {
@@ -253,8 +251,8 @@ impl w::SettingsService for Services {
         // The probe performs a network request, so it must not run on the ECS
         // thread; the connection was captured above.
         let check = model::probe(&store, &credentials, &connection).await;
-        let request_id = request.request_key;
-        let resource_id = request.resource_id;
+        let request_id = request.request_key.to_owned();
+        let resource_id = request.resource_id.map(str::to_owned);
         let id = connection.id;
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();

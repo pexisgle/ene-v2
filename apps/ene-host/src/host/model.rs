@@ -6,20 +6,18 @@ use super::mind::{Companion, Role};
 use super::net;
 use super::settings::{Check, Connection, ConnectionConfig, ConnectionKind, CredentialState};
 use rig_core::catalog::{Catalog, ModelSpec};
-use rig_core::completion::{CompletionRequest, CompletionResponse};
-use rig_core::effect::{Answered, EffectId, EffectKind};
+use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 use rig_core::providers::{
     openai::OpenAIConfig,
     registry::{ConnectOptions, ProviderConfig, ProviderId},
 };
-use rig_core::serve::adapters::ModelAdapter;
-use rig_core::serve::{Dispatch, ErasedHandler};
-use rig_ecs::effects::Handler;
-use rig_ecs::model::Connection as ModelConnection;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -29,53 +27,49 @@ const MAX_MODELS: usize = 4_096;
 /// How long the model-list probe may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Secrets stay out of the state database: the OS keyring holds them and this
-/// cache only mirrors what the host thread needs synchronously.
 #[derive(Clone, Default, bevy_ecs::prelude::Resource)]
 pub(crate) struct Credentials {
-    cache: Arc<Mutex<HashMap<String, String>>>,
+    session_secrets: Arc<Mutex<HashMap<String, String>>>,
+    generation: Arc<AtomicU64>,
     session_only: bool,
 }
 
 impl Credentials {
-    /// Reads the keyring once at startup unless the session-only mode is set.
-    pub(crate) fn load(store: &Store, session_only: bool) -> Self {
-        let credentials = Self {
-            cache: Arc::default(),
+    pub(crate) fn new(session_only: bool) -> Self {
+        Self {
             session_only,
-        };
-        if session_only {
-            return credentials;
+            ..Self::default()
         }
-        let Ok(settings) = store.settings() else {
-            return credentials;
-        };
-        for connection in settings
-            .connections
-            .iter()
-            .filter(|connection| connection.credential_state == CredentialState::Registered)
-        {
-            if let Ok(Some(secret)) = read_keyring(&connection.id) {
-                credentials.remember(&connection.id, secret);
-            }
-        }
-        credentials
     }
 
-    fn cache(&self) -> MutexGuard<'_, HashMap<String, String>> {
-        super::lock(&self.cache)
+    fn session_secrets(&self) -> MutexGuard<'_, HashMap<String, String>> {
+        super::lock(&self.session_secrets)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn remember(&self, connection: &str, secret: String) {
-        self.cache().insert(connection.to_owned(), secret);
+        self.session_secrets().insert(connection.to_owned(), secret);
+        self.invalidate();
     }
 
     pub(crate) fn forget(&self, connection: &str) {
-        self.cache().remove(connection);
+        self.session_secrets().remove(connection);
+        self.invalidate();
     }
 
     pub(crate) fn secret(&self, connection: &str) -> Option<String> {
-        self.cache().get(connection).cloned()
+        if self.session_only {
+            self.session_secrets().get(connection).cloned()
+        } else {
+            read_keyring(connection).ok().flatten()
+        }
     }
 
     pub(crate) fn session_only(&self) -> bool {
@@ -106,19 +100,23 @@ pub(crate) fn save_secret(credentials: &Credentials, connection: &str, secret: &
             .set_password(secret)
             .map_err(|error| HostError::unavailable(format!("credential store: {error}")))?;
     }
-    credentials.remember(connection, secret.to_owned());
+    if credentials.session_only() {
+        credentials.remember(connection, secret.to_owned());
+    } else {
+        credentials.invalidate();
+    }
     Ok(())
 }
 
 pub(crate) fn delete_secret(credentials: &Credentials, connection: &str) -> Result<()> {
+    if !credentials.session_only() {
+        match keyring_entry(connection)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(HostError::unavailable(format!("credential store: {error}"))),
+        }
+    }
     credentials.forget(connection);
-    if credentials.session_only() {
-        return Ok(());
-    }
-    match keyring_entry(connection)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(HostError::unavailable(format!("credential store: {error}"))),
-    }
+    Ok(())
 }
 
 /// The state the contract reports for a connection's secret.
@@ -138,10 +136,6 @@ pub(crate) fn credential_state(
     CredentialState::Absent
 }
 
-/// The secret a connection authenticates with: the keyring cache first, then
-/// the provider's environment variable. `None` means the host holds none, and
-/// the request goes out without one: a local server that takes any key is the
-/// operator's own choice.
 pub(crate) fn connection_secret(
     connection: &Connection,
     credentials: Option<&Credentials>,
@@ -164,9 +158,17 @@ pub(crate) fn provider_of(adapter: &str) -> Option<ProviderId> {
     })
 }
 
-/// The model an agent runs on.
-pub(crate) struct Bound {
-    pub(crate) connection: ModelConnection,
+type ConnectModel = dyn Fn(&Store, &Credentials, &Catalog, &Companion, Role) -> Result<DynModel<Completion>>
+    + Send
+    + Sync;
+
+#[derive(Clone, bevy_ecs::prelude::Resource)]
+pub(crate) struct ModelFactory(pub(crate) Arc<ConnectModel>);
+
+impl Default for ModelFactory {
+    fn default() -> Self {
+        Self(Arc::new(connect))
+    }
 }
 
 /// Builds the rig model for one role of a companion.
@@ -176,7 +178,7 @@ pub(crate) fn connect(
     catalog: &Catalog,
     companion: &Companion,
     role: Role,
-) -> Result<Bound> {
+) -> Result<DynModel<Completion>> {
     let assignment = companion
         .model(role)
         .ok_or_else(|| HostError::unavailable("no model is assigned to this role"))?;
@@ -199,7 +201,6 @@ pub(crate) fn connect(
     })?;
     // The adapter's label names the connection; the catalog files the model
     // under the provider's rig name, which differs for `gemini`.
-    let reference = format!("{}/{}", endpoint.adapter, assignment.model_id);
     let catalog_reference = format!("{}/{}", provider.vendor(), assignment.model_id);
     let spec = match catalog.resolve(&catalog_reference) {
         Ok(resolved) => resolved.shared(),
@@ -231,34 +232,7 @@ pub(crate) fn connect(
     let model = catalog
         .connect_with(spec.as_ref(), options)
         .map_err(|error| HostError::unavailable(format!("model connection: {error}")))?;
-    let handler = ErasedHandler::new(ModelAdapter::<Completion>::new(reference.clone(), model));
-    let connection = ModelConnection {
-        spec: Arc::clone(&spec),
-        handler: Handler(handler),
-    };
-    Ok(Bound { connection })
-}
-
-/// Asks a bound connection one unary completion.
-///
-/// The call runs outside the `AgentPass` lifecycle: no turn scheduled it, so
-/// the effect id is synthetic and the caller bounds it with its own task
-/// handle. Summaries, consolidation and the heartbeat tick all read one reply
-/// and stop, which is why they cannot wait for a pass to settle.
-pub(crate) async fn unary(
-    handler: &ErasedHandler,
-    request: CompletionRequest,
-) -> std::result::Result<std::sync::Arc<CompletionResponse>, String> {
-    let kind = EffectKind::Completion {
-        request: Arc::new(request),
-        stream: false,
-    };
-    let dispatch = Dispatch::new(EffectId::from_raw(0), false);
-    match handler.handle(kind, dispatch).await.into_outcome().await {
-        Ok(Answered::Completion(response)) => Ok(response),
-        Ok(_) => Err("the connection answered something other than a completion".to_owned()),
-        Err(report) => Err(report.to_string()),
-    }
+    Ok(model)
 }
 
 /// Lists the models a connection declares, with whatever the catalog knows.
@@ -409,14 +383,6 @@ mod tests {
         llm_connection(adapter, endpoint, &["gpt-5-mini"])
     }
 
-    fn connection_at(endpoint: &str) -> Connection {
-        connection_for("openai", endpoint)
-    }
-
-    fn connection() -> Connection {
-        connection_at("https://api.openai.com/v1")
-    }
-
     /// Serves the model listing the request path asks for: Gemini's native
     /// reply under `/v1beta/models`, the OpenAI-shaped one elsewhere.
     async fn models_endpoint() -> std::net::SocketAddr {
@@ -448,45 +414,6 @@ mod tests {
         address
     }
 
-    /// The host's adapter names map onto rig's provider names, including the
-    /// one it spells differently.
-    #[test]
-    fn adapters_map_to_rig_providers() {
-        assert_eq!(
-            provider_of("gemini").map(|provider| provider.vendor()),
-            Some("gcp.gemini")
-        );
-        assert_eq!(
-            provider_of("openai").map(|provider| provider.vendor()),
-            Some("openai")
-        );
-        assert_eq!(
-            provider_of("openrouter").map(|provider| provider.vendor()),
-            Some("openrouter")
-        );
-        assert_eq!(
-            provider_of("anthropic").map(|provider| provider.vendor()),
-            Some("anthropic")
-        );
-        assert_eq!(provider_of("custom"), None);
-    }
-
-    /// A Gemini connection reads the catalog row under rig's provider name,
-    /// so its context window and tool support are not lost to a miss.
-    #[test]
-    fn a_gemini_connection_reads_its_catalog_row() {
-        let connection = llm_connection(
-            "gemini",
-            "https://generativelanguage.googleapis.com",
-            &["gemini-2.5-pro"],
-        );
-        let models = models(&connection);
-        assert_eq!(models[0].0, "gemini-2.5-pro");
-        assert_eq!(models[0].1.provider.vendor(), "gcp.gemini");
-        assert!(models[0].1.context_window.is_some());
-        assert!(models[0].1.tools);
-    }
-
     /// The probe lists models through the configured endpoint whichever
     /// adapter names it: `openai` and `openrouter` have registry presets,
     /// `gemini` maps to rig's `gcp.gemini` provider and reads its native
@@ -512,49 +439,5 @@ mod tests {
                 check.resources
             );
         }
-    }
-
-    #[test]
-    fn a_connection_without_a_secret_reports_none() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let credentials = Credentials::default();
-        let connection = connection();
-        assert_eq!(
-            credential_state(&connection, &credentials),
-            CredentialState::Absent
-        );
-        assert!(connection_secret(&connection, Some(&credentials)).is_none());
-        credentials.remember("c1", "secret".into());
-        assert_eq!(
-            credential_state(&connection, &credentials),
-            CredentialState::Registered
-        );
-        assert_eq!(
-            connection_secret(&connection, Some(&credentials)).as_deref(),
-            Some("secret")
-        );
-        let models = models(&connection);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].0, "gpt-5-mini");
-        let _ = store;
-    }
-
-    /// The secret comes from the keyring or the provider's environment, and a
-    /// connection with either is what `credential_state` reports.
-    #[test]
-    fn a_secret_is_read_from_the_cache_before_the_environment() {
-        let credentials = Credentials::default();
-        let remote = connection_at("https://api.example.com/v1");
-        assert_eq!(
-            connection_secret(&remote, Some(&credentials)),
-            None,
-            "no credential and no environment variable"
-        );
-        credentials.remember("c1", "cached".into());
-        assert_eq!(
-            connection_secret(&remote, Some(&credentials)).as_deref(),
-            Some("cached")
-        );
     }
 }

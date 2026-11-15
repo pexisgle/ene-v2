@@ -14,12 +14,12 @@ use rig_core::completion::{Message, ToolDefinition};
 use rig_core::conversation::{
     Aside, Author, AuthorKind, Conversation as History, Entry, EntryRef, MessageId, pairing,
 };
-use rig_core::serve::ErasedHandler;
+use rig_core::{DynModel, operation::Completion};
 use rig_ecs::prelude::*;
 use rig_memory::recent::{TokenBudget, view};
 use rig_memory::{
-    Anchor, ClearToolOutputs, CompactReason, CompactionPolicy, HeuristicTokenCounter, Prepared,
-    RequestStart, Summarizer, SummaryState, TokenCounter, next_request_tokens,
+    Anchor, ClearToolOutputs, CompactReason, CompactionPolicy, Prepared, RequestStart, Summarizer,
+    SummaryState, estimate_tokens, next_request_tokens,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -130,54 +130,6 @@ fn is_summary_entry(entry: Option<EntryRef<'_>>) -> bool {
     })
 }
 
-/// How a request is weighed: the fixed parts every call sends (system prompt and
-/// tool schemas), and rig-memory's [`Anchor`], valid only while `sent` — the
-/// [`RequestStart`] of the request it answered — still describes the prefix
-/// (doc §5.2).
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Weigher<'a> {
-    pub(crate) model: &'a str,
-    pub(crate) prompt: Option<&'a str>,
-    pub(crate) tools: &'a [Arc<ToolDefinition>],
-    pub(crate) anchor: Option<Anchor>,
-    pub(crate) sent: Option<RequestStart>,
-}
-
-impl Weigher<'_> {
-    fn prepared<'a>(&'a self, history: &'a History) -> Prepared<'a> {
-        Prepared {
-            model: self.model,
-            prompt: self.prompt,
-            tools: self.tools,
-            history,
-        }
-    }
-
-    /// The tokens the request is expected to send.
-    fn tokens(&self, history: &History) -> u64 {
-        next_request_tokens(self.anchor.as_ref(), self.sent, &self.prepared(history))
-    }
-
-    /// The heuristic estimate of the whole request, fixed parts included.
-    fn whole(&self, history: &History) -> u64 {
-        self.prepared(history).whole_tokens()
-    }
-
-    /// The request's [`RequestStart`], kept for the next reply's anchor.
-    pub(crate) fn start(&self, history: &History) -> RequestStart {
-        self.prepared(history).start()
-    }
-}
-
-/// The estimated tokens of `history` alone.
-pub(crate) fn estimate(history: &History) -> u64 {
-    rig_memory::estimate_tokens(history.messages())
-}
-
-fn message_tokens(message: &Message) -> u64 {
-    u64::try_from(HeuristicTokenCounter::default().count(message)).unwrap_or(u64::MAX)
-}
-
 /// The tokens a cut injects in front of the kept messages: the summary block
 /// when the head holds one, plus the system notice.
 fn injected_tokens(history: &History) -> u64 {
@@ -185,40 +137,48 @@ fn injected_tokens(history: &History) -> u64 {
         .entries()
         .next()
         .filter(|entry| is_summary_entry(Some(*entry)))
-        .map_or(0, |entry| message_tokens(entry.message));
-    head.saturating_add(message_tokens(&Message::system(NOTICE)))
+        .map_or(0, |entry| estimate_tokens(&[entry.message]));
+    head.saturating_add(estimate_tokens(&[Message::system(NOTICE)]))
 }
 
-fn fits(history: &History, weigher: &Weigher<'_>, limit_tokens: u64, output_reserve: u64) -> bool {
-    weigher.tokens(history) <= limit_tokens.saturating_sub(output_reserve)
-}
-
-/// Fits the request view into `limit_tokens - output_reserve`: clears old tool
-/// outputs once, then drops the oldest whole turns behind a `[System Notice: ...]`
-/// line when that is still not enough. Returns whether the request fits
-/// afterwards; `false` means the caller must refuse it. Fixed parts and the
-/// injected blocks share the same budget.
 pub(crate) fn fit(
     history: &mut History,
-    weigher: &Weigher<'_>,
-    limit_tokens: u64,
-    output_reserve: u64,
+    model: &str,
+    prompt: Option<&str>,
+    tools: &[Arc<ToolDefinition>],
+    anchor: Option<&Anchor>,
+    sent: Option<RequestStart>,
+    budget: u64,
 ) -> bool {
-    if fits(history, weigher, limit_tokens, output_reserve) {
+    let tokens = |history: &History| {
+        next_request_tokens(
+            anchor,
+            sent,
+            &Prepared {
+                model,
+                prompt,
+                tools,
+                history,
+            },
+        )
+    };
+    if tokens(history) <= budget {
         return true;
     }
-    let budget = limit_tokens.saturating_sub(output_reserve);
-    let plan = ClearToolOutputs::new(0).plan(history);
-    if plan.cleared.results > 0 {
-        plan.apply(history, None, Author::plugin("ene-host"));
-        if fits(history, weigher, limit_tokens, output_reserve) {
-            return true;
-        }
+    let cleared = ClearToolOutputs::new(0).clear_conversation(history, Author::plugin("ene-host"));
+    if cleared.results > 0 && tokens(history) <= budget {
+        return true;
     }
-    let whole = weigher.whole(history);
+    let whole = Prepared {
+        model,
+        prompt,
+        tools,
+        history,
+    }
+    .whole_tokens();
     let head = usize::from(is_summary_entry(history.entries().next()));
     // The fixed prompt and tool weight is the whole request minus its messages.
-    let fixed = whole.saturating_sub(estimate(history));
+    let fixed = whole.saturating_sub(estimate_tokens(history.messages()));
     let keep = budget
         .saturating_sub(fixed)
         .saturating_sub(injected_tokens(history));
@@ -227,7 +187,7 @@ pub(crate) fn fit(
         let notice = Entry::new(Message::system(NOTICE)).by(by.clone());
         history.splice(head..at, [notice], by);
     }
-    fits(history, weigher, limit_tokens, output_reserve)
+    tokens(history) <= budget
 }
 
 /// The id of the first message of the newest window whose messages fit
@@ -343,12 +303,6 @@ impl CompactionState {
     }
 }
 
-impl Drop for CompactionState {
-    fn drop(&mut self) {
-        self.cancel_running();
-    }
-}
-
 pub(crate) struct CompactionPlugin;
 
 impl Plugin for CompactionPlugin {
@@ -402,7 +356,7 @@ fn summarize_when_idle(
         };
         let tokens = usage
             .and_then(LastUsage::context)
-            .unwrap_or_else(|| estimate(conversation));
+            .unwrap_or_else(|| estimate_tokens(conversation.messages()));
         let ratio = tokens as f64 / f64::from(limit);
         if ratio < HARD_RATIO && !(ratio >= SOFT_RATIO && idle >= IDLE) {
             continue;
@@ -426,12 +380,13 @@ fn summarize_when_idle(
         };
         let history = conversation.0.clone();
         let previous = summary_of(&history).map_or_else(String::new, |summary| summary.text);
-        let spec = Arc::clone(&bound.connection.spec);
-        let handler = bound.connection.handler.0.clone();
+        let Some(spec) = bound.spec().cloned() else {
+            continue;
+        };
         let task = Background::spawn(
             &runtime.0,
             wake.as_deref(),
-            generate(history, previous, spec, handler),
+            generate(history, previous, Arc::new(spec), bound),
         );
         state.start(&agent.companion_id, task);
         return;
@@ -477,7 +432,7 @@ async fn generate(
     history: History,
     previous: String,
     spec: Arc<ModelSpec>,
-    handler: ErasedHandler,
+    model: DynModel<Completion>,
 ) -> Outcome {
     let state = SummaryState {
         summary: previous,
@@ -489,21 +444,15 @@ async fn generate(
         .ok_or_else(|| "the conversation is too short to summarize".to_owned())?;
     let through = through_message_id(&history, plan.keep_from)
         .ok_or_else(|| "there is nothing new to summarize".to_owned())?;
-    let text = tokio::time::timeout(SUMMARY_TIMEOUT, completion(plan.request, handler))
+    let response = tokio::time::timeout(SUMMARY_TIMEOUT, model.call(plan.request))
         .await
-        .map_err(|_| "the summarizer timed out".to_owned())??;
+        .map_err(|_| "the summarizer timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    let text = Summarizer::summary_text(&response).map_err(|error| error.to_string())?;
     Ok(Summary {
         text,
         through_message_id: through,
     })
-}
-
-async fn completion(
-    request: rig_core::completion::CompletionRequest,
-    handler: ErasedHandler,
-) -> std::result::Result<String, String> {
-    let response = model::unary(&handler, request).await?;
-    Summarizer::summary_text(&response).map_err(|error| error.to_string())
 }
 
 /// The id of the newest message a summary ending before `keep_from` stands for.
@@ -531,7 +480,6 @@ mod tests {
     use super::*;
     use rig_core::completion::{AssistantContent, AssistantMessage};
     use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn tool_turn(history: &mut History, call: &str, output: String) {
@@ -588,15 +536,33 @@ mod tests {
     fn a_fit_keeps_tool_pairs_and_drops_whole_turns() {
         let mut history = conversation(8);
         history.validate().expect("a canonical fixture");
-        let weight = Weigher::default();
-        assert!(!fits(&history, &weight, 600, 50));
-        assert!(fit(&mut history, &weight, 600, 50));
-        assert!(fits(&history, &weight, 600, 50));
+        assert!(estimate_tokens(history.messages()) > 550);
+        assert!(fit(&mut history, "", None, &[], None, None, 550));
+        assert!(estimate_tokens(history.messages()) <= 550);
         history.validate().expect("tool calls keep their results");
         assert!(noticed(&history));
         let mut entries = history.entries();
         entries.next().expect("the notice");
         assert!(entries.next().expect("a kept entry").is_request());
+    }
+
+    #[test]
+    fn fitting_clears_large_tool_outputs_only_in_the_request_view() {
+        let mut saved = History::new();
+        saved.push(Message::user("read the file"));
+        tool_turn(&mut saved, "read-1", "x".repeat(20_000));
+        saved.push(Message::assistant("done"));
+        let original = saved.messages().to_vec();
+        let mut request = saved.view();
+
+        assert!(fit(&mut request, "", None, &[], None, None, 500));
+        assert!(estimate_tokens(request.messages()) <= 500);
+        assert_eq!(request.messages().len(), saved.messages().len());
+        assert_ne!(request.messages(), saved.messages());
+        assert_eq!(saved.messages(), original);
+        request
+            .validate()
+            .expect("clearing keeps tool calls paired");
     }
 
     #[test]
@@ -606,9 +572,8 @@ mod tests {
             Message::user("q".repeat(20_000)),
             Message::assistant("a short answer"),
         ]);
-        let weight = Weigher::default();
-        assert!(!fit(&mut history, &weight, 1_000, 100));
-        assert!(!fits(&history, &weight, 1_000, 100));
+        assert!(!fit(&mut history, "", None, &[], None, None, 900));
+        assert!(estimate_tokens(history.messages()) > 900);
         assert_eq!(history.messages().len(), 2);
     }
 
@@ -616,20 +581,38 @@ mod tests {
     fn the_fixed_request_weight_counts_against_the_window() {
         let prompt = "あなたはデスクトップ常駐AIコンパニオンです。".repeat(60);
         let tools = [tool(&"t".repeat(2_000))];
-        let weight = Weigher {
-            model: "test/model",
-            prompt: Some(&prompt),
-            tools: &tools,
-            ..Weigher::default()
-        };
         let mut history = conversation(6);
-        assert!(estimate(&history) <= 1_100);
-        assert!(!fits(&history, &weight, 1_200, 100));
-        assert!(!fit(&mut history, &weight, 1_200, 100));
+        assert!(estimate_tokens(history.messages()) <= 1_100);
+        assert!(!fit(
+            &mut history,
+            "test/model",
+            Some(&prompt),
+            &tools,
+            None,
+            None,
+            1_100,
+        ));
         assert!(noticed(&history), "the fixed parts can still refuse");
         let mut history = conversation(6);
-        assert!(fit(&mut history, &weight, 2_000, 100));
-        assert!(fits(&history, &weight, 2_000, 100));
+        assert!(fit(
+            &mut history,
+            "test/model",
+            Some(&prompt),
+            &tools,
+            None,
+            None,
+            1_900,
+        ));
+        assert!(
+            Prepared {
+                model: "test/model",
+                prompt: Some(&prompt),
+                tools: &tools,
+                history: &history,
+            }
+            .whole_tokens()
+                <= 1_900
+        );
         assert!(noticed(&history));
     }
 
@@ -644,8 +627,7 @@ mod tests {
         inject_summary(&mut history, &summary);
         history.validate().expect("the summary keeps tool pairs");
         assert!(head_text(&history).starts_with(SUMMARY_HEAD));
-        let weight = Weigher::default();
-        assert!(fit(&mut history, &weight, 700, 50));
+        assert!(fit(&mut history, "", None, &[], None, None, 650));
         history.validate().expect("the notice keeps tool pairs");
         assert!(
             head_text(&history).starts_with(SUMMARY_HEAD),
@@ -678,24 +660,6 @@ mod tests {
     }
 
     #[test]
-    fn a_companion_keeps_at_most_one_summary_in_flight() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let task = runtime.spawn(std::future::pending::<()>());
-        let mut state = CompactionState::default();
-        state.start("ene", Background::new(task, Arc::new(Mutex::new(None))));
-        let now = Instant::now();
-        assert!(state.is_running(), "the shared runtime has one slot");
-        assert!(!state.may_start("ene", now), "one summary per companion");
-        assert!(
-            state.may_start("kuro", now),
-            "the slot is per companion; dispatch still checks the one runtime slot"
-        );
-    }
-
-    #[test]
     fn user_activity_aborts_only_the_running_companions_summary() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -703,12 +667,12 @@ mod tests {
             .unwrap();
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(Arc::clone(&dropped));
-        let task = runtime.spawn(async move {
+        let task = Background::spawn(runtime.handle(), None, async move {
             let _guard = guard;
-            std::future::pending::<()>().await;
+            std::future::pending::<Outcome>().await
         });
         let mut state = CompactionState::default();
-        state.start("ene", Background::new(task, Arc::new(Mutex::new(None))));
+        state.start("ene", task);
         let kuro_retry = Instant::now() + RETRY;
         state.defer("kuro", kuro_retry);
         let mut world = World::new();

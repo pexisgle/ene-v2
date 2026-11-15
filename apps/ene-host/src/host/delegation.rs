@@ -10,35 +10,26 @@
 //! request id too, so only a transcription the voice pipeline recorded here is
 //! ever claimed.
 use bevy_ecs::prelude::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use hashlink::LruCache;
 
 /// How many delivered transcriptions are remembered. Claims older than this
 /// are forgotten, which at worst lets a stale, replayed utterance claim again;
 /// the id is unique per capture, so that requires a duplicated stream.
 const MAX_TRANSCRIPTIONS: usize = 256;
 
-#[derive(Default)]
-struct Claims {
-    /// Delivery order, oldest first, so the set stays bounded.
-    delivered: VecDeque<String>,
-    /// Transcription ids the voice pipeline delivered.
-    known: HashSet<String>,
-    /// Transcription id -> the companion that claimed it.
-    owners: HashMap<String, String>,
+#[derive(Resource)]
+pub(crate) struct DeliveredClaims(LruCache<String, Option<String>>);
+
+impl Default for DeliveredClaims {
+    fn default() -> Self {
+        Self(LruCache::new(MAX_TRANSCRIPTIONS))
+    }
 }
 
-impl Claims {
+impl DeliveredClaims {
     fn record(&mut self, transcription_id: &str) {
-        if !self.known.insert(transcription_id.to_owned()) {
-            return;
-        }
-        self.delivered.push_back(transcription_id.to_owned());
-        while self.delivered.len() > MAX_TRANSCRIPTIONS {
-            let Some(oldest) = self.delivered.pop_front() else {
-                break;
-            };
-            self.known.remove(&oldest);
-            self.owners.remove(&oldest);
+        if !self.0.contains_key(transcription_id) {
+            self.0.insert(transcription_id.to_owned(), None);
         }
     }
 
@@ -47,24 +38,15 @@ impl Claims {
     /// arbitrated: it is a chat request id or a test, and returning `true`
     /// keeps manual chat working.
     fn try_claim(&mut self, transcription_id: &str, companion_id: &str) -> bool {
-        if !self.known.contains(transcription_id) {
+        let Some(owner) = self.0.peek_mut(transcription_id) else {
             return true;
-        }
-        match self.owners.get(transcription_id) {
-            Some(owner) => owner == companion_id,
-            None => {
-                self.owners
-                    .insert(transcription_id.to_owned(), companion_id.to_owned());
-                true
-            }
-        }
+        };
+        owner
+            .get_or_insert_with(|| companion_id.to_owned())
+            .as_str()
+            == companion_id
     }
 }
-
-/// The host's per-transcription delegation registry. A host without the voice
-/// plugin has no resource, so nothing is ever claimed there.
-#[derive(Resource, Default)]
-pub(crate) struct Delegation(Claims);
 
 /// Records a final transcript the voice pipeline delivered to the companions.
 pub(crate) fn record(world: &mut World, transcription_id: &str) {
@@ -72,8 +54,7 @@ pub(crate) fn record(world: &mut World, transcription_id: &str) {
         return;
     }
     world
-        .get_resource_or_insert_with(Delegation::default)
-        .0
+        .get_resource_or_insert_with(DeliveredClaims::default)
         .record(transcription_id);
 }
 
@@ -83,8 +64,30 @@ pub(crate) fn try_claim(world: &mut World, transcription_id: &str, companion_id:
     if transcription_id.is_empty() {
         return true;
     }
-    let Some(mut delegation) = world.get_resource_mut::<Delegation>() else {
+    let Some(mut delegation) = world.get_resource_mut::<DeliveredClaims>() else {
         return true;
     };
-    delegation.0.try_claim(transcription_id, companion_id)
+    delegation.try_claim(transcription_id, companion_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replayed_transcriptions_do_not_renew_or_release_a_delegation() {
+        let mut world = World::new();
+        record(&mut world, "first");
+        assert!(try_claim(&mut world, "first", "ene"));
+        for id in 1..MAX_TRANSCRIPTIONS {
+            record(&mut world, &id.to_string());
+        }
+        record(&mut world, "first");
+        assert!(try_claim(&mut world, "first", "ene"));
+        assert!(!try_claim(&mut world, "first", "other"));
+        record(&mut world, "next");
+        assert!(try_claim(&mut world, "first", "other"));
+        assert!(try_claim(&mut world, "1", "ene"));
+        assert!(!try_claim(&mut world, "1", "other"));
+    }
 }

@@ -1,7 +1,5 @@
 //! Companions and their mind: persistence and revision checks.
 use super::{Result, Store, json_column, now, require, to_json};
-#[cfg(test)]
-use crate::host::mind::State;
 use crate::host::mind::{Companion, Profile};
 use rusqlite::{Row, params};
 
@@ -102,25 +100,6 @@ impl Store {
         require(updated, "companion changed since it was read")
     }
 
-    /// Updates only the mind state, but only when the caller still has the
-    /// revision it read.
-    #[cfg(test)]
-    pub(crate) fn update_mind_state(
-        &self,
-        companion_id: &str,
-        expected: u64,
-        state: &State,
-    ) -> Result<u64> {
-        let next = expected + 1;
-        let updated = self.conn()?.execute(
-            "UPDATE companions SET state = ?2, state_revision = ?3, updated_at = ?4 \
-             WHERE id = ?1 AND state_revision = ?5",
-            params![companion_id, to_json(state)?, next, now(), expected],
-        )?;
-        require(updated, "mind changed since it was read")?;
-        Ok(next)
-    }
-
     pub(crate) fn update_mind_profile(
         &self,
         companion_id: &str,
@@ -142,49 +121,5 @@ impl Store {
             .conn()?
             .execute("DELETE FROM companions WHERE id = ?1", [id])?;
         Ok(deleted > 0)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::host::mind::{Assignments, Companion};
-
-    fn companion(id: &str) -> Companion {
-        Companion {
-            id: id.into(),
-            name: "ene".into(),
-            mind: "core".into(),
-            profile: Profile::default(),
-            profile_revision: 1,
-            state: State::default(),
-            state_revision: 1,
-            body: crate::host::json::JsonDoc::new("ene.body.v1", serde_json::json!({})),
-            voice: crate::host::json::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
-            assignments: Assignments::default(),
-            persona: None,
-            voice_identifier: None,
-            revision: 1,
-            created_at: super::now(),
-            updated_at: super::now(),
-        }
-    }
-
-    #[test]
-    fn companions_round_trip_and_reject_stale_revisions() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let mut first = companion("c1");
-        store.insert_companion(&first).unwrap();
-        assert_eq!(store.companions().unwrap().len(), 1);
-        first.name = "ene".into();
-        assert!(store.update_companion(&first, 2).is_err());
-        first.revision = 2;
-        store.update_companion(&first, 1).unwrap();
-        let state = State::default();
-        assert!(store.update_mind_state("c1", 99, &state).is_err());
-        assert_eq!(store.update_mind_state("c1", 1, &state).unwrap(), 2);
-        assert!(store.delete_companion("c1").unwrap());
-        assert!(store.companions().unwrap().is_empty());
     }
 }

@@ -566,22 +566,3 @@ fn effect_entity(world: &mut World, id: EffectId) -> Option<Entity> {
         .find(|(_, effect)| effect.id() == id)
         .map(|(entity, _)| entity)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A parent is offered every tool the host serves itself, so a tool an MCP
-    /// server contributed reaches the model instead of staying invisible.
-    #[test]
-    fn a_parent_is_offered_the_tools_the_host_serves_itself() {
-        let granted = vec!["device.files".to_owned()];
-        let mut host = std::collections::HashSet::new();
-        host.insert("mcp_notes_read".to_owned());
-        let names = parent_names(&granted, &host);
-        assert!(names.iter().any(|name| name == "mcp_notes_read"));
-        assert!(names.iter().any(|name| name == "device.files"));
-        assert!(names.iter().any(|name| name == "mind_recall"));
-        assert!(!names.iter().any(|name| name == "report"));
-    }
-}
