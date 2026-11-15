@@ -3194,6 +3194,8 @@ dependencies = [
  "hound",
  "http",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "io-lifetimes 3.0.1",
  "itertools 0.15.0",
  "jiff",

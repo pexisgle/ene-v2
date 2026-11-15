@@ -35,6 +35,8 @@ jsonschema.workspace = true
 serde_json_canonicalizer.workspace = true
 http.workspace = true
 http-body-util = "0.1"
+hyper = { version = "=1.12.0", features = ["client", "server", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
 io-lifetimes = "3"
 itertools = "0.15"
 jiff.workspace = true
