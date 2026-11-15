@@ -217,7 +217,8 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
   - さらに **`matches!(delta.event, StreamEvent::Text { .. })` で思考トークン（Reasoning / Thinking）を確実に除外**し、親コンパニオンのユーザー向け発話テキストのみを句点（`。`、`！`、`？`、改行）ごとに切り出してTTSタスクへ送出する。
 - **MCPツールの動的ECS登録（`rig-rmcp`）**:
   - 外部ファイル自動探索（`rig-mcp-client` の暗黙読み込み）を排し、公式の **`rig-rmcp`**（`McpConnection` / `ManagedToolSink`）または `rig_mcp_client::McpCorePlugin` を採用。
-  - eneの設定DBで認可されたMCPサーバーのみを明示的に接続・再接続管理し、取得されたツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。設定の正本はeneが単一所有する。
+  - ツール一覧のライフサイクル（接続時の取得、`notifications/tools/list_changed` での再取得、登録ごとの世代トークン、切断済みツールの掃除）は `McpClientHandler` が所有する。eneは `ManagedToolSink` を実装したアダプタを渡し、モデル向け名（`mcp_<server>_<tool>`）への改名と、スレッド境界を越える受け渡しだけを行う。
+  - eneの設定DBで認可されたMCPサーバーのみを明示的に接続・再接続管理し、得られたツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。ツールエンティティを書くのはホストスレッドだけで、フレーム中に届いた更新は次フレームで適用する。設定の正本はeneが単一所有する。
 - **7つの `ModelAssignments` と `rig-core` カタログの最小マッピング**:
   - `rig_core::catalog::Catalog` はモデルメタデータ（`ModelSpec`：コンテキスト長・入出力上限等）を引くための純粋なデータ辞書として利用し、モデル接続はプロバイダークライアントから `rig_ecs::model::Connection` へ直接マッピングする：
     ```rust
