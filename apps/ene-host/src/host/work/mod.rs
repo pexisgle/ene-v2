@@ -1612,9 +1612,50 @@ mod tests {
     #[cfg(unix)]
     fn kill_group(world: &World, work_id: &str) {
         for pid in acp::pids(world, work_id) {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL".to_owned(), format!("-{pid}")])
-                .status();
+            if let Ok(raw) = i32::try_from(pid)
+                && let Some(pid) = rustix::process::Pid::from_raw(raw)
+            {
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_kills_a_disposable_agent_process_group() {
+        use crate::host::settings::Endpoint;
+
+        let (_root, store) = store();
+        session(&store);
+        run(&store, "run-a", RunState::Starting);
+        let mut world = world(store.clone());
+        world.insert_resource(AcpEvents::default());
+        let connection = AcpConnection {
+            endpoint: Endpoint {
+                options: r#"{"sandbox":"none"}"#.into(),
+                ..Default::default()
+            },
+            command: "sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+        };
+        let handle = acp::spawn(&mut world, "w1", &connection).unwrap();
+        assert!(handle.prompt("run-a", "hello"));
+        world
+            .resource_mut::<AcpBackends>()
+            .0
+            .insert("w1".into(), handle);
+        let pid =
+            await_pid(&world, "w1", Duration::from_secs(5)).expect("the disposable agent started");
+        kill_group(&world, "w1");
+        let process = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rustix::process::test_kill_process(process) != Err(rustix::io::Errno::SRCH) {
+            acp::pump(&mut world);
+            assert!(
+                Instant::now() < deadline,
+                "the disposable agent was not reaped"
+            );
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

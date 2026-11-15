@@ -167,7 +167,8 @@ pub(crate) fn spawn(
     // Resolve against the PATH the child will actually receive, not the
     // host's: a configured `env.PATH` replaces the inherited one.
     let program = resolve_program(command, &connection.endpoint.options, &cwd)?;
-    let (bridge, proxy) = bridge(world, &connection.endpoint.options);
+    let bwrap = which::which("bwrap").ok();
+    let (bridge, proxy) = bridge(world, &connection.endpoint.options, bwrap.as_deref());
     let Launch {
         program,
         args,
@@ -177,6 +178,7 @@ pub(crate) fn spawn(
         &connection.args,
         &cwd,
         &connection.endpoint.options,
+        bwrap.as_deref(),
         bridge.as_ref(),
     )
     .map_err(HostError::Unavailable)?;
@@ -764,8 +766,15 @@ impl Isolation {
 /// The proxy a network-isolated launch needs. Only asked for when the user
 /// requested isolation and bwrap is present: an unisolated child has the host
 /// network and needs no bridge.
-fn bridge(world: &World, options: &str) -> (Option<Bridge>, Option<acp_bridge::Proxy>) {
-    if !network_isolated(options).unwrap_or(false) || which::which("bwrap").is_err() {
+fn bridge(
+    world: &World,
+    options: &str,
+    bwrap: Option<&Path>,
+) -> (Option<Bridge>, Option<acp_bridge::Proxy>) {
+    if sandbox_mode(options).as_deref() == Some("none")
+        || !network_isolated(options).unwrap_or(false)
+        || bwrap.is_none()
+    {
         return (None, None);
     }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
@@ -791,6 +800,7 @@ fn launch(
     args: &[String],
     cwd: &Path,
     options: &str,
+    bwrap: Option<&Path>,
     bridge: Option<&Bridge>,
 ) -> Result<Launch, String> {
     let requested = sandbox_mode(options);
@@ -805,7 +815,7 @@ fn launch(
         program,
         args,
         cwd,
-        which::which("bwrap").ok().as_deref(),
+        bwrap,
         network_isolated(options)?,
         bridge,
     )
@@ -980,6 +990,26 @@ mod tests {
         })
         .await
         .expect("the descendant is no longer running");
+    }
+
+    #[test]
+    fn a_launch_uses_its_resolved_sandbox_without_changing_fallbacks() {
+        let program = Path::new("/agent/bin/agent");
+        let cwd = Path::new("/work");
+        let bwrap = Path::new("/host/bin/bwrap");
+        let missing = launch(program, &[], cwd, r#"{"network":"isolated"}"#, None, None).unwrap();
+        assert_eq!(missing.program, program);
+        assert_eq!(missing.isolation, Isolation::Missing);
+        let partial = launch(program, &[], cwd, "", Some(bwrap), None).unwrap();
+        assert_eq!(partial.program, bwrap);
+        assert_eq!(partial.isolation, Isolation::Partial);
+        let options = r#"{"sandbox":"none","network":"isolated"}"#;
+        let plain = launch(program, &[], cwd, options, Some(bwrap), None).unwrap();
+        assert_eq!(plain.program, program);
+        assert_eq!(plain.isolation, Isolation::None);
+        let world = World::new();
+        let (bridge, proxy) = bridge(&world, options, Some(bwrap));
+        assert!(bridge.is_none() && proxy.is_none());
     }
 
     #[test]

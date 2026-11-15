@@ -15,7 +15,7 @@ pub(super) struct Guard {
     token: String,
     /// Authorities trusted besides loopback, from `ENE_HOST_ALLOWED_HOSTS`.
     /// A tunnel forwards the public name in `Host`, so the operator names it.
-    allowed: Vec<String>,
+    allowed: Vec<ValidatedAuthority>,
 }
 
 impl Guard {
@@ -26,7 +26,7 @@ impl Guard {
         Self { token, allowed }
     }
 
-    pub(super) fn allowed(&self) -> &[String] {
+    pub(super) fn allowed(&self) -> &[ValidatedAuthority] {
         &self.allowed
     }
 }
@@ -64,7 +64,11 @@ pub(super) async fn authenticate(
 /// authority in the protocol (`:authority`), so an absent `Host` is accepted
 /// there; every other version, HTTP/1.1 included, must name one. Whatever is
 /// present is still checked, and a repeated `Host` is never trusted.
-fn host_allowed(version: http::Version, headers: &http::HeaderMap, allowed: &[String]) -> bool {
+fn host_allowed(
+    version: http::Version,
+    headers: &http::HeaderMap,
+    allowed: &[ValidatedAuthority],
+) -> bool {
     let mut values = headers.get_all(http::header::HOST).iter();
     let host = values.next();
     if values.next().is_some() {
@@ -73,41 +77,53 @@ fn host_allowed(version: http::Version, headers: &http::HeaderMap, allowed: &[St
     match host {
         Some(header) => header
             .to_str()
-            .is_ok_and(|value| loopback_host(value) || configured(value, allowed)),
+            .ok()
+            .and_then(authority)
+            .is_some_and(|host| host.is_loopback() || configured(&host, allowed)),
         None => matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3),
     }
 }
 
 /// The comma-separated authorities of `ENE_HOST_ALLOWED_HOSTS`, lowercased.
-fn authority_list(value: &str) -> Vec<String> {
+fn authority_list(value: &str) -> Vec<ValidatedAuthority> {
     value
         .split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-        .filter(|entry| authority(entry).is_some())
-        .map(str::to_ascii_lowercase)
+        .filter_map(|entry| authority(&entry.to_ascii_lowercase()))
         .collect()
 }
 
 /// A `Host` or `Origin` authority the operator named: the host must match, and
 /// the port too when the entry names one.
-fn configured(value: &str, allowed: &[String]) -> bool {
-    let Some(host) = authority(value) else {
-        return false;
-    };
-    allowed.iter().any(|entry| {
-        authority(entry).is_some_and(|wanted| {
-            host.host().eq_ignore_ascii_case(wanted.host())
-                && wanted.port().is_none_or(|wanted| {
-                    host.port()
-                        .is_some_and(|port| wanted.as_str() == port.as_str())
-                })
-        })
+fn configured(host: &ValidatedAuthority, allowed: &[ValidatedAuthority]) -> bool {
+    allowed.iter().any(|wanted| {
+        host.0.host().eq_ignore_ascii_case(wanted.0.host())
+            && wanted.0.port().is_none_or(|wanted| {
+                host.0
+                    .port()
+                    .is_some_and(|port| wanted.as_str() == port.as_str())
+            })
     })
 }
 
 /// HTTP authorities may carry userinfo or an invalid port; ene trusts neither.
-fn authority(value: &str) -> Option<Authority> {
+#[derive(Clone, Debug)]
+pub(super) struct ValidatedAuthority(Authority);
+
+impl ValidatedAuthority {
+    fn is_loopback(&self) -> bool {
+        matches!(self.0.host(), "[::1]" | "localhost" | "127.0.0.1")
+    }
+}
+
+impl std::fmt::Display for ValidatedAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+fn authority(value: &str) -> Option<ValidatedAuthority> {
     let parsed: Authority = value.parse().ok()?;
     let suffix = value.strip_prefix(parsed.host())?;
     if value.contains('@')
@@ -118,18 +134,19 @@ fn authority(value: &str) -> Option<Authority> {
     {
         return None;
     }
-    Some(parsed)
+    Some(ValidatedAuthority(parsed))
 }
 
 /// A `Host` authority: `localhost`, `127.0.0.1` or `[::1]`, with a numeric
 /// port. Userinfo, paths and whitespace are never accepted.
+#[cfg(test)]
 fn loopback_host(value: &str) -> bool {
-    authority(value).is_some_and(|host| matches!(host.host(), "[::1]" | "localhost" | "127.0.0.1"))
+    authority(value).is_some_and(|host| host.is_loopback())
 }
 
 /// An `Origin` header: an http(s) URL whose authority is a literal loopback
 /// address, with no userinfo, path, query or fragment.
-fn origin_allowed(value: &str, allowed: &[String]) -> bool {
+fn origin_allowed(value: &str, allowed: &[ValidatedAuthority]) -> bool {
     let Ok(url) = url::Url::parse(value) else {
         return false;
     };
@@ -160,7 +177,7 @@ fn origin_allowed(value: &str, allowed: &[String]) -> bool {
         Some(port) => format!("{host}:{port}"),
         None => host.to_owned(),
     };
-    configured(&authority, allowed)
+    self::authority(&authority).is_some_and(|host| configured(&host, allowed))
 }
 
 #[cfg(test)]
@@ -222,7 +239,10 @@ mod tests {
     fn a_configured_authority_is_trusted_besides_loopback() {
         use http::Version;
         let allowed = authority_list(" ene.example.com , Desk.TS.NET:443 ");
-        assert_eq!(allowed, vec!["ene.example.com", "desk.ts.net:443"]);
+        assert_eq!(
+            allowed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["ene.example.com", "desk.ts.net:443"]
+        );
         // The tunnel forwards its public name; the operator named it.
         assert!(host_allowed(
             Version::HTTP_11,
@@ -277,7 +297,46 @@ mod tests {
         assert!(authority_list("").is_empty());
         assert!(authority_list(" , ").is_empty());
         assert!(authority_list("bad host,host@evil,/path").is_empty());
-        assert_eq!(authority_list("Example.COM"), vec!["example.com"]);
+        assert_eq!(authority_list("Example.COM")[0].to_string(), "example.com");
+    }
+
+    #[test]
+    fn authority_ports_stay_lexical_and_origin_loopback_stays_broader() {
+        use http::Version;
+        let allowed = authority_list("Example.COM:0443,[2001:db8::1]:443");
+        assert!(host_allowed(
+            Version::HTTP_11,
+            &hosts(&["EXAMPLE.com:0443"]),
+            &allowed
+        ));
+        assert!(!host_allowed(
+            Version::HTTP_11,
+            &hosts(&["example.com:443"]),
+            &allowed
+        ));
+        assert!(!origin_allowed("https://example.com:0443", &allowed));
+        assert!(origin_allowed("https://[2001:db8::1]", &allowed));
+        for value in [
+            "localhost:",
+            "example.com:",
+            "example.com:65536",
+            "example.com:no",
+            "user@example.com:0443",
+            "[::1]evil",
+        ] {
+            assert!(authority(value).is_none(), "{value}");
+            assert!(
+                !host_allowed(Version::HTTP_11, &hosts(&[value]), &allowed),
+                "{value}"
+            );
+        }
+        for host in ["127.0.0.2", "[0:0:0:0:0:0:0:1]", "LOCALHOST"] {
+            assert!(
+                !host_allowed(Version::HTTP_11, &hosts(&[host]), &[]),
+                "{host}"
+            );
+            assert!(origin_allowed(&format!("http://{host}"), &[]), "{host}");
+        }
     }
 
     #[test]

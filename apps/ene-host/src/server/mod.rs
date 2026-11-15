@@ -40,7 +40,12 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     if !guard.allowed().is_empty() {
         eprintln!(
             "ene-host: trusting Host/Origin authorities {} besides loopback; the Owner Bearer is still required",
-            guard.allowed().join(",")
+            guard
+                .allowed()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         );
     }
     eprintln!("ene-host: authenticated service ready on {local}");

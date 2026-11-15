@@ -109,6 +109,32 @@ mod tests {
     }
 
     #[test]
+    fn the_relay_accepts_only_a_port_or_numeric_ipv4_loopback() {
+        for value in ["0", "3128", "65535", "127.0.0.1:0", "127.0.0.1:3128"] {
+            let mut arguments = relay_arguments();
+            arguments[5] = value.into();
+            assert!(
+                matches!(parse(arguments), Ok(Invocation::Relay(_))),
+                "{value}"
+            );
+        }
+        for value in [
+            "x:y:3128",
+            "example.com:3128",
+            "[::1]:3128",
+            "0.0.0.0:3128",
+            "127.0.0.2:3128",
+            "65536",
+            "127.0.0.1:",
+            "",
+        ] {
+            let mut arguments = relay_arguments();
+            arguments[5] = value.into();
+            assert_eq!(parse(arguments).err(), Some(2), "{value}");
+        }
+    }
+
+    #[test]
     fn help_is_a_success_with_no_invocation() {
         for argument in ["-h", "--help"] {
             assert_eq!(

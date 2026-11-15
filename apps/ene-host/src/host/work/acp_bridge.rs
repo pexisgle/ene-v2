@@ -246,11 +246,24 @@ pub struct RelayArgs {
         allow_hyphen_values = true,
         value_name = "ADDR",
         default_value_t = RELAY_PORT,
-        value_parser = |address: &str| address.rsplit(':').next().unwrap_or_default().parse::<u16>()
+        value_parser = relay_port
     )]
     port: u16,
     #[arg(last = true, required = true, num_args = 1..)]
     command: Vec<OsString>,
+}
+
+fn relay_port(address: &str) -> Result<u16, String> {
+    if let Ok(port) = address.parse::<u16>() {
+        return Ok(port);
+    }
+    let address: std::net::SocketAddrV4 = address
+        .parse()
+        .map_err(|_| "expected a port or 127.0.0.1:PORT".to_owned())?;
+    if *address.ip() != std::net::Ipv4Addr::LOCALHOST {
+        return Err("the relay must listen on 127.0.0.1".to_owned());
+    }
+    Ok(address.port())
 }
 
 #[cfg(test)]
