@@ -109,23 +109,40 @@ pub(crate) fn open(_runtime: &tokio::runtime::Handle, _socket: PathBuf) -> io::R
     ))
 }
 
+/// The most of a request head the proxy buffers before it gives up.
+#[cfg(unix)]
+const MAX_HEAD: usize = 16 * 1024;
+
 /// Reads one CONNECT request, dials its target and pipes the two sides.
+///
+/// The head is read in chunks and the bytes past its terminator are kept: a
+/// client may start talking as soon as it has sent the request, so those bytes
+/// belong to the tunnel rather than to the head.
 #[cfg(unix)]
 async fn connect(mut client: tokio::net::UnixStream) -> io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut head = Vec::with_capacity(512);
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
-        if head.len() > 16 * 1024 {
+    let mut chunk = [0u8; 1024];
+    let end = loop {
+        if let Some(at) = head.windows(4).position(|window| window == b"\r\n\r\n") {
+            break at + 4;
+        }
+        if head.len() > MAX_HEAD {
             return Ok(());
         }
-        if client.read(&mut byte).await? == 0 {
+        // Never read past the bound, so the most buffered is `MAX_HEAD + 1`:
+        // one byte past the limit is enough to know the head was cut.
+        let room = (MAX_HEAD + 1 - head.len()).min(chunk.len());
+        let read = client.read(&mut chunk[..room]).await?;
+        if read == 0 {
             return Ok(());
         }
-        head.push(byte[0]);
-    }
-    let text = String::from_utf8_lossy(&head);
+        head.extend_from_slice(&chunk[..read]);
+    };
+    // A head is ASCII, but a client controls these bytes: read them lossily so
+    // a stray non-UTF-8 byte is a bad request rather than a panic.
+    let text = String::from_utf8_lossy(&head[..end]);
     let Some(target) = text
         .lines()
         .next()
@@ -146,6 +163,9 @@ async fn connect(mut client: tokio::net::UnixStream) -> io::Result<()> {
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
+    if end < head.len() {
+        upstream.write_all(&head[end..]).await?;
+    }
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
 }
@@ -240,6 +260,140 @@ mod tests {
     // unused where it does not exist.
     #[cfg(unix)]
     use super::*;
+
+    /// Drives one request through the proxy and returns every byte it answered
+    /// before the tunnel or the close.
+    #[cfg(unix)]
+    async fn answer_to(request: &[u8]) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        let proxy = tokio::spawn(connect(server));
+        client.write_all(request).await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut answered = Vec::new();
+        let mut buffer = [0u8; 512];
+        loop {
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buffer))
+                    .await;
+            match read {
+                Ok(Ok(0)) | Err(_) | Ok(Err(_)) => break,
+                Ok(Ok(read)) => {
+                    answered.extend_from_slice(&buffer[..read]);
+                    if answered.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        proxy.abort();
+        answered
+    }
+
+    /// A client that is not tunnelling gets a refusal rather than a tunnel.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_non_connect_request_is_refused() {
+        let answered = answer_to(b"GET / HTTP/1.1\r\nHost: model\r\n\r\n").await;
+        assert!(
+            answered.starts_with(b"HTTP/1.1 501"),
+            "{}",
+            String::from_utf8_lossy(&answered)
+        );
+    }
+
+    /// `CONNECT` with no authority names nothing to dial.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_connect_without_a_target_is_refused() {
+        let answered = answer_to(b"CONNECT\r\n\r\n").await;
+        assert!(
+            answered.starts_with(b"HTTP/1.1 501"),
+            "{}",
+            String::from_utf8_lossy(&answered)
+        );
+    }
+
+    /// A target that refuses the connection is the proxy's own failure, not the
+    /// client's request: 502, not 501.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreachable_target_is_a_bad_gateway() {
+        let answered = answer_to(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: model\r\n\r\n").await;
+        assert!(
+            answered.starts_with(b"HTTP/1.1 502"),
+            "{}",
+            String::from_utf8_lossy(&answered)
+        );
+    }
+
+    /// The head is bounded: one byte past 16 KiB closes the connection with no
+    /// answer, so a client cannot make the proxy buffer without limit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_overlong_head_closes_without_an_answer() {
+        let answered = answer_to(&vec![b'x'; 16 * 1024 + 1]).await;
+        assert!(
+            answered.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&answered)
+        );
+    }
+
+    /// A client that stops mid-head leaves no request to answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_head_cut_short_closes_without_an_answer() {
+        let answered = answer_to(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: model\r\n").await;
+        assert!(
+            answered.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&answered)
+        );
+    }
+
+    /// A client may send its first tunnel bytes in the same write as the
+    /// request, so the proxy must not swallow what it read past the head.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bytes_sent_with_the_request_reach_the_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let model = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let model_port = model.local_addr().unwrap().port();
+        let answered = tokio::spawn(async move {
+            let (mut stream, _) = model.accept().await.unwrap();
+            let mut early = [0u8; 4];
+            stream.read_exact(&mut early).await.unwrap();
+            early
+        });
+
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        let proxy = tokio::spawn(connect(server));
+        // One write: the request head and the tunnel's first bytes together.
+        client
+            .write_all(
+                format!("CONNECT 127.0.0.1:{model_port} HTTP/1.1\r\nHost: model\r\n\r\nping")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut head = [0u8; 39];
+        client.read_exact(&mut head).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&head).starts_with("HTTP/1.1 200"),
+            "the proxy accepts the tunnel: {}",
+            String::from_utf8_lossy(&head)
+        );
+        assert_eq!(
+            answered.await.unwrap(),
+            *b"ping",
+            "the bytes after the head are the tunnel's, not the proxy's"
+        );
+        proxy.abort();
+    }
+
     /// The path a sandboxed agent takes: TCP to the relay, a unix socket to the
     /// host's proxy, and the proxy's own TCP connection to the model.
     #[cfg(unix)]
