@@ -232,26 +232,28 @@ fn copy_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
 
 /// Reads a reply body, refusing one larger than the cap.
 async fn bounded(response: reqwest::Response) -> Result<Vec<u8>, Failure> {
-    use futures_util::StreamExt;
+    use http_body_util::BodyExt;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_HTTP_BODY as u64)
     {
         return Err(Failure::new("http_body_too_large"));
     }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| Failure {
-            code: "http_failed".into(),
-            message: error.to_string(),
-        })?;
-        if body.len() + chunk.len() > MAX_HTTP_BODY {
-            return Err(Failure::new("http_body_too_large"));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    let limited = http_body_util::Limited::new(reqwest::Body::from(response), MAX_HTTP_BODY);
+    limited
+        .collect()
+        .await
+        .map(|body| body.to_bytes().to_vec())
+        .map_err(|error| {
+            if error.is::<http_body_util::LengthLimitError>() {
+                Failure::new("http_body_too_large")
+            } else {
+                Failure {
+                    code: "http_failed".into(),
+                    message: error.to_string(),
+                }
+            }
+        })
 }
 
 #[cfg(test)]

@@ -31,9 +31,10 @@ use std::{
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
-/// Time a forced kill gets to be reaped before the stop counts as
-/// unconfirmed. Must outlast [`acp::KILL_TIMEOUT`], or a clean kill races the
-/// `CancellationUnconfirmed` classification.
+/// Time a forced stop gets to be reaped before the stop counts as
+/// unconfirmed. Must outlast the ACP backend's own stop, which asks with
+/// `SIGTERM`, waits `TERM_GRACE`, then kills within `KILL_TIMEOUT`; otherwise
+/// a clean stop races the `CancellationUnconfirmed` classification.
 const FORCE_GRACE: Duration = Duration::from_secs(10);
 const ACP_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 

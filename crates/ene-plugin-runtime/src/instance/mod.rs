@@ -3,10 +3,8 @@ mod invocation;
 mod json;
 #[cfg(test)]
 mod lifecycle_tests;
-mod supervisor;
 
 pub use invocation::{DenyServices, Services};
-pub use supervisor::Supervisor;
 
 use crate::{Error, Package, Result, contract::Events, limits::*};
 use ene_plugin::*;
@@ -49,12 +47,17 @@ fn build(
 ) -> Result<extism::Plugin> {
     let code = package.code(file)?.to_vec();
     let mut manifest = extism::Manifest::new([extism::Wasm::data(code)])
-        .with_allowed_hosts(std::iter::empty())
+        .disallow_all_hosts()
         .with_memory_max(WASM_MEMORY_PAGES)
         .with_timeout(timeout);
     // Extism vars are not part of the manifest capability; disable writes.
+    // `MemoryOptions` is not re-exported by the host SDK, so the one field is
+    // set directly rather than adding `extism-manifest` as a second pin.
     manifest.memory.max_var_bytes = Some(0);
     // Extism instantiates the kernel, the linked guest and the callable guest.
+    // `max_memory_size` is not the manifest page cap repeated: it sizes the
+    // pooling allocator's per-memory virtual reservation, which otherwise
+    // defaults to 4 GiB per slot regardless of the runtime growth limiter.
     let mut allocation = wasmtime::PoolingAllocationConfig::default();
     allocation
         .total_core_instances(3)

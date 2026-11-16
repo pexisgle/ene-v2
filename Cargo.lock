@@ -3262,6 +3262,7 @@ dependencies = [
  "ene-plugin",
  "extism",
  "futures-util",
+ "http-body-util",
  "reqwest",
  "rustix 1.1.6",
  "serde",

@@ -45,8 +45,6 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-/// Longest a forced kill may take to be reaped; `work::FORCE_GRACE` is the
-/// wait that must outlast it before a stop counts as unconfirmed.
 /// How many ACP events may queue before a backend waits. A child that
 /// floods notifications is slowed instead of grown.
 const QUEUE: usize = 256;
@@ -55,6 +53,12 @@ const QUEUE: usize = 256;
 /// that it could not be delivered.
 const COMMANDS: usize = 64;
 
+/// How long the child gets to exit after `SIGTERM` before it is killed.
+const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// Longest a forced kill may take to be reaped; `work::FORCE_GRACE` is the
+/// wait that must outlast [`TERM_GRACE`] plus this before a stop counts as
+/// unconfirmed.
 pub(super) const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) enum AcpEvent {
@@ -751,11 +755,29 @@ async fn observe_exit(child: &mut Box<dyn ChildWrapper>) -> std::io::Result<Stri
     child.wait().await.map(|status| status.to_string())
 }
 
+/// Stops the child, asking it to exit before forcing it.
+///
+/// The child leads its own process group (see [`command_wrap`]), and
+/// `ChildWrapper::signal` delivers to that whole group, so a wrapper launcher
+/// cannot leave the real agent behind. `SIGTERM` first gives the agent its
+/// documented chance to flush and exit; whatever is still running after
+/// [`TERM_GRACE`] is killed. `timeout` is the budget for the kill that
+/// follows, so the caller's own grace must outlast `TERM_GRACE + timeout`.
 async fn terminate(child: &mut Box<dyn ChildWrapper>, timeout: Duration) -> (bool, Vec<u32>) {
     let pids: Vec<u32> = child.id().into_iter().collect();
     #[cfg(unix)]
     if pids.is_empty() {
         return (matches!(child.try_wait(), Ok(Some(_))), pids);
+    }
+    #[cfg(unix)]
+    if child.signal(rustix::process::Signal::TERM.as_raw()).is_ok() {
+        // A process that exits on the signal is already reaped by this wait.
+        if matches!(
+            tokio::time::timeout(TERM_GRACE, child.wait()).await,
+            Ok(Ok(_))
+        ) {
+            return (true, pids);
+        }
     }
     let signalled = match child.start_kill() {
         Ok(()) => true,
@@ -1058,6 +1080,80 @@ fn network_isolated(options: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child that handles `SIGTERM` must be asked before it is killed: a
+    /// kill-only stop would leave `graceful` empty even though the process
+    /// could have exited cleanly.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn terminating_an_agent_asks_before_it_kills() {
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let graceful = root.path().join("graceful");
+        let mut command = command_wrap(
+            &which::which("sh").unwrap(),
+            &[
+                "-c".into(),
+                // The trap has to be installed before the stop arrives, or the
+                // default disposition ends the shell first.
+                "trap 'echo yes > \"$2\"; exit 0' TERM; echo ready > \"$1\"; \
+                 while :; do sleep 0.05; done"
+                    .into(),
+                "ene-acp-test".into(),
+                ready.to_str().unwrap().into(),
+                graceful.to_str().unwrap().into(),
+            ],
+            root.path(),
+            child_env("", |name| std::env::var_os(name)),
+        );
+        let mut child = command.spawn().unwrap();
+        tokio::time::timeout(KILL_TIMEOUT, async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the agent installed its trap");
+        let (confirmed, _pids) = terminate(&mut child, KILL_TIMEOUT).await;
+        assert!(confirmed);
+        assert_eq!(
+            std::fs::read_to_string(&graceful).ok().as_deref(),
+            Some("yes\n"),
+            "the agent was killed without being asked to exit"
+        );
+    }
+
+    /// A child that ignores `SIGTERM` must still be killed once the ask
+    /// expires, or the stop would wait on a process that never leaves.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn terminating_an_agent_that_ignores_the_ask_still_kills_it() {
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let mut command = command_wrap(
+            &which::which("sh").unwrap(),
+            &[
+                "-c".into(),
+                "trap '' TERM; echo ready > \"$1\"; while :; do sleep 0.05; done".into(),
+                "ene-acp-test".into(),
+                ready.to_str().unwrap().into(),
+            ],
+            root.path(),
+            child_env("", |name| std::env::var_os(name)),
+        );
+        let mut child = command.spawn().unwrap();
+        tokio::time::timeout(KILL_TIMEOUT, async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the agent installed its trap");
+        let (confirmed, pids) = terminate(&mut child, KILL_TIMEOUT).await;
+        assert!(confirmed, "the escalation did not reap the agent");
+        assert_eq!(pids.len(), 1);
+        assert!(!Path::new(&format!("/proc/{}", pids[0])).exists());
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

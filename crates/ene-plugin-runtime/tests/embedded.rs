@@ -1,7 +1,7 @@
 use ene_plugin::*;
 use ene_plugin_runtime::{
     Package,
-    instance::{DenyServices, Instance, Services, Supervisor},
+    instance::{DenyServices, Instance, Services},
     limits::{MAX_CHUNK, MAX_MESSAGE_BYTES, WASM_TABLE_ELEMENTS},
     service::{HttpBroker, HttpGrants},
 };
@@ -10,6 +10,18 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
+
+/// Serializes the tests that hold an instance.
+///
+/// `Instance::load` takes one of a process-wide `MAX_INSTANCES` permits, which
+/// is the bound a real host runs under. A test binary runs its tests in
+/// parallel, so without this the suite itself would exceed that bound and
+/// report `Unavailable` for a reason the production path never sees.
+static ONE_INSTANCE_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn one_instance_test() -> tokio::sync::MutexGuard<'static, ()> {
+    ONE_INSTANCE_TEST.lock().await
+}
 
 fn directory(path: &Path) {
     std::fs::create_dir_all(path).unwrap();
@@ -69,6 +81,7 @@ fn emit(text: &str) -> String {
 }
 #[tokio::test]
 async fn return_limits_count_the_raw_bytes_before_decoding() {
+    let _one_instance = one_instance_test().await;
     for size in [MAX_CHUNK, MAX_CHUNK + 1] {
         let body = format!(
             r#"
@@ -100,6 +113,7 @@ async fn return_limits_count_the_raw_bytes_before_decoding() {
 
 #[tokio::test]
 async fn result_operations_decode_their_existing_typed_documents() {
+    let _one_instance = one_instance_test().await;
     let operations = [
         json!({"type": "embed", "request": {"endpoint": "", "options": {}, "model": "m", "inputs": ["a"], "dimensions": 1}}),
         json!({"type": "synthesize", "request": {"endpoint": "", "options": {}, "model": "m", "text": "a", "voice": "v", "speed": 1.0, "format": "pcm16"}}),
@@ -152,6 +166,7 @@ async fn result_operations_decode_their_existing_typed_documents() {
 
 #[tokio::test]
 async fn service_budget_counts_received_json_bytes() {
+    let _one_instance = one_instance_test().await;
     // Trailing whitespace is legal JSON that re-encoding would hide.
     let request = format!(
         r#"{{"type":"state_read","key":"visits"}}{}"#,
@@ -177,6 +192,7 @@ async fn service_budget_counts_received_json_bytes() {
 }
 #[tokio::test]
 async fn embedded_host_instance_preserves_event_order_under_backpressure() {
+    let _one_instance = one_instance_test().await;
     let code = wasm(&format!(
         "(loop $next {} {} local.get $i i32.const 1 i32.add local.tee $i i32.const 100 i32.lt_u br_if $next)",
         emit("a"),
@@ -240,6 +256,7 @@ impl Services for Waiting {
 }
 #[tokio::test]
 async fn cancellation_and_dropped_futures_release_waiting_host_functions() {
+    let _one_instance = one_instance_test().await;
     for abort in [false, true] {
         let code = wasm(&format!(
             "{} local.get $p call $service drop",
@@ -287,6 +304,7 @@ impl Services for Unexpected {
 }
 #[tokio::test]
 async fn undeclared_services_do_not_reach_the_application() {
+    let _one_instance = one_instance_test().await;
     let body = format!(
         "{} local.get $p call $service drop",
         write(r#"{"type":"state_read","key":"x"}"#)
@@ -304,6 +322,7 @@ async fn undeclared_services_do_not_reach_the_application() {
 }
 #[tokio::test]
 async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
+    let _one_instance = one_instance_test().await;
     let bad_event = format!(
         "{} local.get $p call $emit",
         write(
@@ -346,6 +365,7 @@ async fn fuel_invalid_targets_and_oversized_payloads_are_rejected() {
 }
 #[tokio::test]
 async fn guest_memory_is_bounded_and_wasi_is_unavailable() {
+    let _one_instance = one_instance_test().await;
     let (package, _temp) = package(
         &wasm(&format!(
             "i64.const 134217728 call $alloc i64.eqz if else {} local.get $p i64.const 18 call $output i32.const 0 return end",
@@ -378,6 +398,7 @@ async fn guest_memory_is_bounded_and_wasi_is_unavailable() {
 
 #[tokio::test]
 async fn table_limits_cover_initial_size_count_and_growth() {
+    let _one_instance = one_instance_test().await;
     let grow = format!(
         r#"
         ref.null func i32.const {WASM_TABLE_ELEMENTS} table.grow i32.eqz if else unreachable end
@@ -442,6 +463,7 @@ impl Services for Revoking {
 }
 #[tokio::test]
 async fn revocation_during_a_host_function_prevents_subsequent_guest_output() {
+    let _one_instance = one_instance_test().await;
     let body = format!(
         "{} local.get $p call $service drop {}",
         write(r#"{"type":"state_read","key":"x"}"#),
@@ -492,6 +514,7 @@ impl Services for Tagged {
 
 #[tokio::test]
 async fn concurrent_and_reused_instances_receive_their_own_services() {
+    let _one_instance = one_instance_test().await;
     let code = |key| {
         wasm(&format!(
             "{} local.get $p call $service local.set $p local.get $p local.get $p call $length call $output i32.const 0 return",
@@ -558,35 +581,9 @@ async fn concurrent_and_reused_instances_receive_their_own_services() {
 }
 
 #[tokio::test]
-async fn supervisor_shutdown_waits_for_cleanup_and_refuses_new_tasks() {
-    let supervisor = Supervisor::default();
-    let entered = Arc::new(Notify::new());
-    let dropped = Arc::new(Notify::new());
-    let started = entered.clone();
-    let finished = dropped.clone();
-    supervisor
-        .spawn(async move {
-            let _drop = Dropped(finished);
-            started.notify_one();
-            std::future::pending::<()>().await;
-        })
-        .await
-        .unwrap();
-    supervisor
-        .spawn(async { panic!("fixture task failure") })
-        .await
-        .unwrap();
-    entered.notified().await;
-    supervisor.shutdown().await;
-    tokio::time::timeout(Duration::from_secs(1), dropped.notified())
-        .await
-        .unwrap();
-    assert!(supervisor.spawn(async {}).await.is_err());
-}
-
-#[tokio::test]
 #[ignore = "requires ENE_REFERENCE_WASM pointing to a freshly built ene-reference-wasm"]
 async fn sdk_guest_preserves_typed_events_and_service_failures() {
+    let _one_instance = one_instance_test().await;
     let code =
         std::fs::read(std::env::var_os("ENE_REFERENCE_WASM").expect("ENE_REFERENCE_WASM")).unwrap();
     let (package, _temp) = package(&code, Target::Host, &[Service::State]);
@@ -716,6 +713,7 @@ fn embedding_package(url: &str) -> (Package, tempfile::TempDir) {
 
 #[tokio::test]
 async fn an_embedding_plugin_reaches_its_endpoint_through_the_broker() {
+    let _one_instance = one_instance_test().await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -810,6 +808,7 @@ fn generation_package() -> (Package, tempfile::TempDir) {
 
 #[tokio::test]
 async fn initialization_decodes_llm_capabilities_as_a_typed_document() {
+    let _one_instance = one_instance_test().await;
     let (_package, temp) = generation_package();
     let root = temp.path().join("plugin");
     write_file(
@@ -887,6 +886,7 @@ async fn generate(package: Package, operation: Operation) -> (Value, Vec<Event>)
 
 #[tokio::test]
 async fn a_generation_plugin_streams_text_and_finishes() {
+    let _one_instance = one_instance_test().await;
     let (package, _temp) = generation_package();
     let (output, events) = generate(
         package,
@@ -920,6 +920,7 @@ async fn a_generation_plugin_streams_text_and_finishes() {
 
 #[tokio::test]
 async fn a_listing_plugin_answers_with_its_models() {
+    let _one_instance = one_instance_test().await;
     let (package, _temp) = listing_package();
     let (_, events) = generate(
         package,
@@ -1009,6 +1010,7 @@ fn tool_plugin() -> Vec<u8> {
 
 #[tokio::test]
 async fn a_plugin_asks_for_a_tool_and_answers_once_it_has_the_result() {
+    let _one_instance = one_instance_test().await;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("plugin");
     directory(&root);
