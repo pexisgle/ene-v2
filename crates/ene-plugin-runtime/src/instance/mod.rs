@@ -24,7 +24,6 @@ pub struct Instance {
     context: extism::UserData<Weak<Invocation>>,
     package: Package,
     entrypoint: String,
-    generation: u64,
     permit: Arc<OwnedSemaphorePermit>,
     #[cfg(test)]
     native_exit: Option<tokio::sync::oneshot::Sender<lifecycle_tests::NativeExit>>,
@@ -89,7 +88,6 @@ impl Instance {
     pub async fn load(
         package: Package,
         entrypoint: String,
-        generation: u64,
         cancel: &CancellationToken,
     ) -> Result<Self> {
         if cancel.is_cancelled() {
@@ -131,7 +129,6 @@ impl Instance {
                 context,
                 package,
                 entrypoint,
-                generation,
                 permit: Arc::new(permit),
                 #[cfg(test)]
                 native_exit: None,
@@ -271,9 +268,6 @@ impl Instance {
         result
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
     /// Run the guest's initialization hook. A provider entry declares its
     /// capabilities here; they are decoded once and the document is dropped.
     pub async fn initialize(&mut self, cancel: &CancellationToken) -> Result<()> {

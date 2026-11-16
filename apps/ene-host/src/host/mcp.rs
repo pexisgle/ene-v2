@@ -789,14 +789,7 @@ mod tests {
             settings::{Connection, CredentialState},
         };
 
-        for action in [
-            "disable",
-            "delete",
-            "revision",
-            "shutdown",
-            "failure",
-            "world drop",
-        ] {
+        for action in ["disable", "revision", "shutdown", "failure", "world drop"] {
             let root = tempfile::tempdir().unwrap();
             let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
             let mut peer = PendingPeer::new(root.path(), "initial.pid");
@@ -810,7 +803,7 @@ mod tests {
                 revision: 0,
                 last_check: None,
             };
-            store.update_settings(1, &[(row.clone(), 0)], &[]).unwrap();
+            store.update_settings(1, &[(row.clone(), 0)]).unwrap();
             let mut world = World::new();
             world.insert_resource(store.clone());
             world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
@@ -827,14 +820,11 @@ mod tests {
             match action {
                 "disable" => {
                     row.enabled = false;
-                    store.update_settings(2, &[(row.clone(), 1)], &[]).unwrap();
-                }
-                "delete" => {
-                    store.update_settings(2, &[], &[row.id.clone()]).unwrap();
+                    store.update_settings(2, &[(row.clone(), 1)]).unwrap();
                 }
                 "revision" => {
                     row.config = ConnectionConfig::Mcp(replacement.config());
-                    store.update_settings(2, &[(row.clone(), 1)], &[]).unwrap();
+                    store.update_settings(2, &[(row.clone(), 1)]).unwrap();
                 }
                 "shutdown" => world.resource_mut::<HostState>().closing = true,
                 "failure" => world.resource_mut::<HostState>().failed = Some("test failure".into()),

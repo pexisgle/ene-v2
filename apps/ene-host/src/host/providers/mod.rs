@@ -132,7 +132,7 @@ impl Providers {
         };
         let running = cell
             .get_or_try_init(|| async {
-                Running::start(Arc::clone(loaded), extension, 1)
+                Running::start(Arc::clone(loaded), extension)
                     .await
                     .map(Arc::new)
             })
@@ -240,7 +240,6 @@ impl Running {
     pub(crate) async fn start(
         loaded: Arc<Loaded>,
         extension: Extension,
-        generation: u64,
     ) -> Result<Self, HostError> {
         let entrypoint = loaded.entry(extension).ok_or_else(|| {
             HostError::Unavailable(format!(
@@ -249,12 +248,7 @@ impl Running {
             ))
         })?;
         let cancel = CancellationToken::new();
-        let mut instance = Instance::load(
-            loaded.package.clone(),
-            entrypoint.to_owned(),
-            generation,
-            &cancel,
-        )
+        let mut instance = Instance::load(loaded.package.clone(), entrypoint.to_owned(), &cancel)
         .await
         .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
         instance

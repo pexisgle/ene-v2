@@ -107,7 +107,7 @@ fn store(root: &Path, connection: &Connection) -> Store {
     let store = Store::open(&root.join("host.sqlite3")).unwrap();
     let revision = store.settings_revision().unwrap();
     store
-        .update_settings(revision, &[(connection.clone(), 0)], &[])
+        .update_settings(revision, &[(connection.clone(), 0)])
         .unwrap();
     store
 }

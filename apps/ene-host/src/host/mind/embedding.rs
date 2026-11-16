@@ -781,7 +781,7 @@ mod tests {
             }),
         };
         store
-            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)], &[])
+            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
             .unwrap();
         let mut companion = store.companion(&harness.companion).unwrap().unwrap();
         companion.assignments.embedding = Some(super::super::Assignment {

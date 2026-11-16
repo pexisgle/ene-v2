@@ -88,7 +88,6 @@ impl Store {
         &self,
         expected_revision: u64,
         inputs: &[(Connection, u64)],
-        remove_ids: &[String],
     ) -> Result<Settings> {
         let current = self.settings()?;
         if current.revision != expected_revision {
@@ -150,12 +149,6 @@ impl Store {
                     input.id
                 )));
             }
-        }
-        for id in remove_ids {
-            super::validate_id(id)?;
-            transaction
-                .prepare_cached("DELETE FROM connections WHERE id = ?1")?
-                .execute([id])?;
         }
         let changed = transaction
             .prepare_cached(
@@ -230,9 +223,7 @@ mod tests {
     fn historical_unknown_credential_state_is_absent_but_invalid_kinds_are_corrupt() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        store
-            .update_settings(1, &[(connection("c1"), 0)], &[])
-            .unwrap();
+        store.update_settings(1, &[(connection("c1"), 0)]).unwrap();
         for (stored, expected) in [
             ("absent", CredentialState::Absent),
             ("registered", CredentialState::Registered),
@@ -280,7 +271,7 @@ mod tests {
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         assert_eq!(store.settings().unwrap().revision, 1);
         let mut settings = store
-            .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)], &[])
+            .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)])
             .unwrap();
         for (id, state, healthy) in [
             ("c1", CredentialState::Registered, true),
@@ -311,19 +302,12 @@ mod tests {
             let expected = changed.revision;
             changed.name.push_str(" edited");
             settings = store
-                .update_settings(settings.revision, &[(changed.clone(), expected)], &[])
+                .update_settings(settings.revision, &[(changed.clone(), expected)])
                 .unwrap();
             let stored = store.connection(id).unwrap().unwrap();
             assert_eq!(stored.name, changed.name);
             assert_eq!(stored.revision, expected + 1);
         }
-        for id in ["c1", "c2"] {
-            settings = store
-                .update_settings(settings.revision, &[], &[id.into()])
-                .unwrap();
-            assert!(store.connection(id).unwrap().is_none());
-        }
-        assert!(settings.connections.is_empty());
     }
 
     #[test]
@@ -331,12 +315,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         let before = store
-            .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)], &[])
+            .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)])
             .unwrap();
         let mut changed = connection("c1");
         changed.name = "updated".into();
         assert!(matches!(
-            store.update_settings(before.revision, &[(changed, 1), (connection("c2"), 0)], &[]),
+            store.update_settings(before.revision, &[(changed, 1), (connection("c2"), 0)]),
             Err(HostError::Conflict(_))
         ));
         assert_eq!(store.settings().unwrap(), before);

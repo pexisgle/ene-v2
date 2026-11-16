@@ -511,7 +511,7 @@ mod tests {
             connection.id = adapter.into();
             credentials.remember(adapter, "explicit-key".into());
             store
-                .update_settings(store.settings_revision().unwrap(), &[(connection, 0)], &[])
+                .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
                 .unwrap();
             for id in ["gpt-4o-mini", "ene-unlisted-model"] {
                 companion.assignments.companion = Assignment {

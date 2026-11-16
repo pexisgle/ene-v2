@@ -155,7 +155,7 @@ fn fixture(site: WaitSite) -> (Package, tempfile::TempDir) {
 async fn gate(site: WaitSite, stop: Stop) {
     let (package, _temp) = fixture(site);
     let cancel = CancellationToken::new();
-    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
+    let mut instance = Instance::load(package, "main".into(), &cancel)
         .await
         .unwrap();
     let native_exit = if matches!(site, WaitSite::Cpu) {
@@ -377,7 +377,7 @@ impl Drop for Unblock {
 async fn native_slot_remains_held_until_a_blocking_host_poll_returns() {
     let (package, _temp) = fixture(WaitSite::Handle);
     let cancel = CancellationToken::new();
-    let mut instance = Instance::load(package, "main".into(), 1, &cancel)
+    let mut instance = Instance::load(package, "main".into(), &cancel)
         .await
         .unwrap();
     let permit = Arc::downgrade(&instance.permit);

@@ -477,7 +477,7 @@ mod tests {
             }),
         };
         store
-            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)], &[])
+            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
             .unwrap();
         let mut companion = store.companion(&id).unwrap().unwrap();
         companion.assignments.embedding = Some(Assignment {

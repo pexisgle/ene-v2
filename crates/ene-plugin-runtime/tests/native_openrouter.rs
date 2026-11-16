@@ -106,7 +106,7 @@ impl Services for FixtureHttp {
 async fn invoke(frames: &[Value]) -> (ene_plugin_runtime::Result<Value>, Vec<Event>) {
     let (package, _temp) = package();
     let cancel = CancellationToken::new();
-    let mut instance = Instance::load(package, "llm".into(), 1, &cancel)
+    let mut instance = Instance::load(package, "llm".into(), &cancel)
         .await
         .unwrap();
     assert!(instance.capabilities.unwrap().tool_calls);

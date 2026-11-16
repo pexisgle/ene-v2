@@ -417,7 +417,7 @@ mod tests {
                     revision: 1,
                     last_check: None,
                 };
-                store.update_settings(store.settings()?.revision, &[(connection, 0)], &[])?;
+                store.update_settings(store.settings()?.revision, &[(connection, 0)])?;
                 Ok(())
             })
             .await
