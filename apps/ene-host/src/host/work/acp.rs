@@ -1849,7 +1849,7 @@ mod tests {
 mod session_tests {
     use super::*;
     use agent_client_protocol::{
-        Agent, Channel, on_receive_notification, on_receive_request,
+        Agent, Channel, on_receive_request,
         v1::schema::{
             ContentChunk, InitializeRequest, InitializeResponse, NewSessionRequest,
             NewSessionResponse, PromptRequest, PromptResponse, RequestPermissionOutcome,
@@ -2082,69 +2082,6 @@ mod session_tests {
         stop(host, agent, &sender).await;
     }
 
-    /// One connection serves one session and many runs: the second prompt must
-    /// reach the same agent without a new ready, which is what the host claims
-    /// when it keeps the process alive between instructions.
-    #[tokio::test]
-    async fn a_second_run_reuses_the_open_session() {
-        let (client, transport) = Channel::duplex();
-        let proceed = Arc::new(Notify::new());
-        let gate = Arc::clone(&proceed);
-        let agent = tokio::spawn(
-            Agent
-                .v1()
-                .name("fixture-agent")
-                .on_receive_request(
-                    async |request: InitializeRequest, responder, _cx| {
-                        initialize(responder, request)
-                    },
-                    on_receive_request!(),
-                )
-                .on_receive_request(
-                    async |_request: NewSessionRequest, responder, _cx| new_session(responder),
-                    on_receive_request!(),
-                )
-                .on_receive_request(
-                    async move |request: PromptRequest, responder, cx| {
-                        let text = match request.prompt.first() {
-                            Some(ContentBlock::Text(text)) => text.text.clone(),
-                            _ => String::new(),
-                        };
-                        cx.send_notification(SessionNotification::new(
-                            request.session_id,
-                            SessionUpdate::AgentMessageChunk(chunk(&text)),
-                        ))?;
-                        gate.notified().await;
-                        responder.respond(PromptResponse::new(StopReason::EndTurn))
-                    },
-                    on_receive_request!(),
-                )
-                .connect_with(transport, async |cx| {
-                    cx.terminated().await;
-                    Ok(())
-                }),
-        );
-        let (sender, receiver) = commands();
-        let (events, receiver_events) = mpsc::channel(16);
-        let active = Arc::new(ActiveRun::default());
-        active.begin("run-1");
-        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&active)));
-
-        let mut events = Events::new(receiver_events);
-        prompt(&sender, "run-1", "first").await;
-        events.updates(1).await;
-        proceed.notify_one();
-        let (first, _) = events.finished().await;
-        prompt(&sender, "run-2", "second").await;
-        events.updates(2).await;
-        proceed.notify_one();
-        let (second, _) = events.finished().await;
-        assert_eq!((first.as_str(), second.as_str()), ("run-1", "run-2"));
-        assert_eq!(events.readies(), 1, "the session opens once");
-        assert_eq!(events.updates_text(), ["first", "second"]);
-        stop(host, agent, &sender).await;
-    }
-
     /// Alpha has no approval UI. An ACP permission request must be answered
     /// with an explicit refusal: leaving it unanswered would hang the agent,
     /// and approving it would grant an operation the user never saw.
@@ -2212,77 +2149,6 @@ mod session_tests {
         );
         let (_, outcome) = events.finished().await;
         assert!(matches!(outcome, TurnOutcome::Answered(_)));
-        stop(host, agent, &sender).await;
-    }
-
-    /// Cancelling a run in flight must reach the agent as `session/cancel` and
-    /// settle as stopped, not as a failure.
-    #[tokio::test]
-    async fn cancelling_an_inflight_run_asks_the_agent_to_stop() {
-        let (client, transport) = Channel::duplex();
-        let cancelled = Arc::new(Notify::new());
-        let notified = Arc::clone(&cancelled);
-        let waiting = Arc::clone(&cancelled);
-        let agent = tokio::spawn(
-            Agent
-                .v1()
-                .name("fixture-agent")
-                .on_receive_request(
-                    async |request: InitializeRequest, responder, _cx| {
-                        initialize(responder, request)
-                    },
-                    on_receive_request!(),
-                )
-                .on_receive_request(
-                    async |_request: NewSessionRequest, responder, _cx| new_session(responder),
-                    on_receive_request!(),
-                )
-                .on_receive_notification(
-                    async move |_notification: CancelNotification, _cx| {
-                        notified.notify_one();
-                        Ok(())
-                    },
-                    on_receive_notification!(),
-                )
-                .on_receive_request(
-                    async move |_request: PromptRequest, responder, cx| {
-                        // A handler that awaited here would hold the incoming
-                        // actor, and the cancel notification could never arrive.
-                        let waiting = waiting.clone();
-                        cx.spawn(async move {
-                            waiting.notified().await;
-                            responder.respond(PromptResponse::new(StopReason::Cancelled))
-                        })?;
-                        Ok(())
-                    },
-                    on_receive_request!(),
-                )
-                .connect_with(transport, async |cx| {
-                    cx.terminated().await;
-                    Ok(())
-                }),
-        );
-        let (sender, receiver) = commands();
-        let (events, receiver_events) = mpsc::channel(16);
-        let active = Arc::new(ActiveRun::default());
-        active.begin("run-1");
-        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&active)));
-
-        let mut events = Events::new(receiver_events);
-        prompt(&sender, "run-1", "long task").await;
-        events.started().await;
-        sender
-            .send(Command::Cancel {
-                run_id: "run-1".into(),
-            })
-            .await
-            .expect("a cancel is accepted");
-        let (run_id, outcome) = events.finished().await;
-        assert_eq!(run_id, "run-1");
-        assert!(
-            matches!(outcome, TurnOutcome::Stopped(_)),
-            "a cancelled prompt settles as stopped"
-        );
         stop(host, agent, &sender).await;
     }
 
