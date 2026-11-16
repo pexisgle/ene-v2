@@ -369,7 +369,7 @@ deepseek-harness は、高度にモジュール化されたエージェント実
 
 | 参考元 | 確認した資料・構造 | MVPで採用する考え方 | そのまま導入しないもの |
 | --- | --- | --- | --- |
-| [AIRI](#airi) | [固定コミットの構成図](https://github.com/moeru-ai/airi/blob/b40e3e87b149ea5fb75d4944440493829e601411/README.md#sub-projects-born-from-this-project)、[VRMのライフサイクル改善](https://airi.moeru.ai/docs/en/blog/DevLog-2026.03.14/) | 対話・音声・描画の分離、モデルのロード・解放と表示状態の検証 | Web・デスクトップの技術構成そのもの。eneではSlintとネイティブ描画を使う |
+| [AIRI](#airi) | [固定コミットの構成図](https://github.com/moeru-ai/airi/blob/b40e3e87b149ea5fb75d4944440493829e601411/README.md#sub-projects-born-from-this-project)、[VRMのライフサイクル改善](https://airi.moeru.ai/docs/en/blog/DevLog-2026.03.14/) | 対話・音声・描画の分離、モデルのロード・解放と表示状態の検証 | Web・デスクトップの技術構成そのもの。eneではGPUIとネイティブ描画を使う |
 | [OpenClaw](#openclaw) | [常駐Gateway](https://docs.openclaw.ai/concepts/architecture)、[モデルとランタイムの分離](https://docs.openclaw.ai/concepts/agent-runtimes) | UIと独立して稼働するホスト、モデル接続と実行ループの分離、状態の再取得 | 多数のチャネル・拡張・リモート運用をMVPへ持ち込むこと |
 | [nanobot](#nanobot) | [固定コミットのアーキテクチャ](https://github.com/HKUDS/nanobot/blob/66f5f2df15455b34fc22e656bdc1ef3d4f32e328/docs/architecture.md) | 対話と作業を分離し、非同期処理で表示や会話を止めない構造 | Pythonの実行基盤やツール群をアプリへ組み込むこと |
 | [OpenCode](#opencode) | [ヘッドレスHTTPサーバー](https://opencode.ai/docs/server/)、[用途別エージェント](https://opencode.ai/docs/agents/) | ホストをAPI経由で操作するUI、会話用と作業用のセッション・モデルの分離 | 開発用の任意シェル実行や細かな権限エディタ |
@@ -385,17 +385,22 @@ deepseek-harness は、高度にモジュール化されたエージェント実
 | Electron | Windows・macOS・Linux。ChromiumでWeb UIを描画 | Chromium・Node.js、ブラウザー由来の複数プロセス | MIT | 未計測 | 不採用。ブラウザー実行基盤を常駐させない要件に合わせる |
 | Tauri | Windows・macOS・Linux。OSのWebViewでWeb UIを描画 | Rust本体とWebView2・WKWebView・WebKitGTK等 | MIT／Apache-2.0 | 未計測 | 不採用。Electronと同じランタイムではないが、今回のUIはWebViewを使わない構成にする |
 | Qt Quick | Windows・macOS・Linux。Qt Quickの独自UIを描画可能 | Qtライブラリ、プラグイン、Rust連携のための橋渡し | LGPL／GPL／商用。モジュールごとに条件が異なる | 未計測 | 不採用。OS対応の不足ではなく、Rust連携とQtの配布依存を今回の構成へ追加しない判断 |
-| Slint | Windows・macOS・Linux。独自コンポーネントと複数の描画バックエンド | 選択したネイティブバックエンド・GPU等のOS依存 | Royalty-free／GPLv3／商用 | 未計測 | 会話・設定UIに採用。宣言的な外観とRust連携を使い、バックエンドを絞る |
+| GPUI | Windows・macOS・Linux（Wayland・X11）。GPU描画（macOSはMetal、WindowsはDirect3D 11、Linuxは公開版0.2.2がblade、mainがwgpu） | 選択した描画バックエンドとGPU等のOS依存 | Apache-2.0 | 未計測 | 会話・設定UIに採用。UIをRustの型付きコードで書き、Tailwind風のスタイルAPIを使う |
+| Slint | Windows・macOS・Linux。独自コンポーネントと複数の描画バックエンド | 選択したネイティブバックエンド・GPU等のOS依存 | Royalty-free／GPLv3／商用 | 未計測 | 不採用。`.slint`マークアップとRustの二言語構成を避け、UIをRustコードに一本化する |
 | Godot | Windows・macOS・Linux。2D・3D・UIをエンジンで描画 | エクスポートしたエンジン、VRM連携用の追加部品 | MIT。追加部品は別途確認 | 未計測 | 不採用。今回のRust構成ではBevyのVRM連携を選ぶ。Wayland常駐表示を未検証のまま対応済みとしない |
 | Bevy | Windows・macOS・Linux。Rustの描画・アニメーション基盤 | 有効化したエンジン機能、GPU・ウィンドウ関連の依存 | MIT／Apache-2.0 | 未計測 | キャラクター描画に採用。会話・設定UIまでBevyで構築せず、機能を絞る |
 
-一次資料：[Electronのプロセスモデル](https://www.electronjs.org/docs/latest/tutorial/process-model)、[Electronのライセンス](https://github.com/electron/electron/blob/main/LICENSE)、[Tauriの概要](https://v2.tauri.app/start/)、[Tauriのライセンス](https://github.com/tauri-apps/tauri#license)、[Qtの対応OS](https://doc.qt.io/qt-6/supported-platforms.html)、[Qtの配布](https://doc.qt.io/qt-6/deployment.html)、[Qtのライセンス](https://www.qt.io/development/qt-framework/qt-licensing)、[CXX-Qt](https://github.com/KDAB/cxx-qt)、[SlintのデスクトップUI](https://slint.dev/desktop)、[Slintのバックエンドと描画](https://docs.slint.dev/latest/docs/slint/guide/backends-and-renderers/backends_and_renderers/)、[Slintのライセンス](https://github.com/slint-ui/slint/blob/master/LICENSE.md)、[Godotの機能](https://docs.godotengine.org/en/stable/about/list_of_features.html)、[Godotのライセンス](https://godotengine.org/license/)、[Bevyの公式リポジトリ](https://github.com/bevyengine/bevy)。
+一次資料：[Electronのプロセスモデル](https://www.electronjs.org/docs/latest/tutorial/process-model)、[Electronのライセンス](https://github.com/electron/electron/blob/main/LICENSE)、[Tauriの概要](https://v2.tauri.app/start/)、[Tauriのライセンス](https://github.com/tauri-apps/tauri#license)、[Qtの対応OS](https://doc.qt.io/qt-6/supported-platforms.html)、[Qtの配布](https://doc.qt.io/qt-6/deployment.html)、[Qtのライセンス](https://www.qt.io/development/qt-framework/qt-licensing)、[CXX-Qt](https://github.com/KDAB/cxx-qt)、[GPUIの公式サイト](https://gpui.rs/)、[GPUIのREADME](https://github.com/zed-industries/zed/blob/main/crates/gpui/README.md)、[GPUIのライセンス](https://crates.io/crates/gpui)、[SlintのデスクトップUI](https://slint.dev/desktop)、[Slintのライセンス](https://github.com/slint-ui/slint/blob/master/LICENSE.md)、[Godotの機能](https://docs.godotengine.org/en/stable/about/list_of_features.html)、[Godotのライセンス](https://godotengine.org/license/)、[Bevyの公式リポジトリ](https://github.com/bevyengine/bevy)。
 
 この比較は性能順位を示すものではありません。常駐時の消費資源はウィンドウ数、モデル、描画頻度、依存機能によって変わるため、採用構成をリリースビルドで測定します。Pythonは利用者の環境とは独立して配布することも可能ですが、ene本体ではランタイムと依存管理を追加せずRustを選びます。言語だけでファイル操作の隔離が成立するとは判断しません。
 
-SlintはLinuxでQtがインストールされている場合、既定構成でQtバックエンドが選ばれ得ます。eneでは既定機能を無効にし、WinitとFemtoVG/WGPUを明示します。Rust APIの機能名ではLinux用に`backend-winit-wayland`、描画に`renderer-femtovg-wgpu`を選定対象とします。UIはビルド時にRustへコンパイルし、任意のUIコードを実行時に読み込む仕組みは採用しません。[出典：Slint Rust API 1.18.1](https://docs.rs/slint/1.18.1/slint/)、[Winitバックエンド](https://docs.slint.dev/latest/docs/slint/guide/backends-and-renderers/backend_winit/)
+GPUIはUIをRustのコードとして書き、レイアウトとスタイルをTailwind風のAPIで組み立てます。`.slint`のような別言語のマークアップを挟まず、ビューは`Render`トレイトを実装した`Entity`です。Linuxでは`wayland`と`x11`の機能を明示して有効にします。GPUIはpre-1.0で破壊的変更があるとREADMEが明記しているため、採用時はバージョンを固定します。[出典：GPUIのREADME](https://github.com/zed-industries/zed/blob/main/crates/gpui/README.md)、[gpui 0.2.2のcrates.io](https://crates.io/crates/gpui)
 
-SlintのRoyalty-free LicenseにはSlintの利用表示が必要です。eneはこの方式を採り、アプリ内に表示を設ける方針です。テーマ・配色・配置のカスタマイズと、任意コードのスキン実行は別に扱います。[出典：Slintのライセンス選択](https://github.com/slint-ui/slint/blob/master/LICENSE.md)
+> [!IMPORTANT]
+> **公開版0.2.2とmainの差**:
+> 2026-10-22公開の`gpui` 0.2.2は、`WindowKind`が`Normal`・`PopUp`・`Floating`のみで、Linux描画にbladeを使います。一方、mainではLinux描画がwgpuへ移行し（[PR #46758](https://github.com/zed-industries/zed/pull/46758)）、`WindowKind::LayerShell`が追加されています。eneがlayer-shell常駐を実装する時点で、固定するバージョンがこの2機能を含むかを確認し、含まなければgitリビジョン固定か公開待ちを選びます。[出典：gpui 0.2.2のWindowKind](https://docs.rs/gpui/0.2.2/gpui/enum.WindowKind.html)、[mainのlayer_shellモジュール](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/platform/layer_shell.rs)
+
+GPUIのライセンスはApache-2.0で、Zed本体のGPL-3.0とは別です。eneは`gpui`クレートをApache-2.0のまま利用するため、Slintで必要だった帰属表示の義務や、プロプライエタリ配布時の商用ライセンス選択は発生しません。テーマ・配色・配置のカスタマイズはene側のコードで行います。[出典：gpuiクレートのライセンス](https://crates.io/crates/gpui)、[Zedのライセンス一覧](https://zed.dev/software-overview)
 
 <a id="mvp-runtime"></a>
 
@@ -417,7 +422,7 @@ eneは既存のVRM描画を利用し、独自のVRMレンダラーを一から�
 
 [Bevy 0.19.0のウィンドウハンドル実装](https://github.com/bevyengine/bevy/blob/v0.19.0/crates/bevy_window/src/raw_handle.rs)には、ネイティブハンドルとウィンドウの寿命を保持して描画側へ渡す仕組みがあります。これは独自のWaylandウィンドウを接続する設計の根拠ですが、Smithayのlayer-shellウィンドウとBevyの連携が完成済みであることを示しません。OSごとのスレッド制約とウィンドウの寿命を守る接続、透明描画、入力領域、ドラッグ、DPI・出力変更の実機検証を必要とします。
 
-eneでは通常のSlint画面とキャラクターの常駐ウィンドウを分離し、最初の検証環境をKDE/KWinとします。layer-shellを提供しない環境への対応や、Windows・macOSの常駐APIは別のOSアダプターで扱い、クロスプラットフォームのライブラリを選んだだけで常駐機能も対応済みとはしません。
+eneでは通常のGPUI画面とキャラクターの常駐ウィンドウを分離し、最初の検証環境をKDE/KWinとします。GPUIのmainはWayland向けに`WindowKind::LayerShell`と`LayerShellOptions`を提供し、Overlayレイヤーへの配置、画面端へのアンカー、マージン、キーボード入力の可否を指定できます。公開版0.2.2にはこの変種が無いため、常駐ウィンドウの実装は公開状況の確認を前提とします。layer-shellを提供しない環境への対応や、Windows・macOSの常駐APIは別のOSアダプターで扱い、クロスプラットフォームのライブラリを選んだだけで常駐機能も対応済みとはしません。[出典：GPUIのlayer_shellモジュール](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/platform/layer_shell.rs)、[layer-shellのサンプル](https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/layer_shell.rs)、[gpui 0.2.2のWindowKind](https://docs.rs/gpui/0.2.2/gpui/enum.WindowKind.html)
 
 <a id="mvp-host"></a>
 
