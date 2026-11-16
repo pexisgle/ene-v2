@@ -44,7 +44,8 @@ jobs:
         run: |
           sudo apt-get update
           # clang and lld are required by .cargo/config.toml's Linux linker.
-          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libvulkan-dev mesa-vulkan-drivers libvulkan1
+          # libasound2-dev is required by cpal, which ene-desktop uses for audio.
+          sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libvulkan-dev mesa-vulkan-drivers libvulkan1 libasound2-dev
           cargo fmt --all -- --check
           cargo clippy --profile ci --locked -p ene-plugin -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown -- -D warnings
           cargo check --profile ci --locked -p ene-rpc --target wasm32-unknown-unknown --all-features
