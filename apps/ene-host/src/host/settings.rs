@@ -1,6 +1,7 @@
 //! Connections and settings: LLM, TTS, STT, embedding, MCP and ACP share one
 //! header and differ only in their config oneof (docs/api.md §7).
 use super::error::{Failure, HostError, Result};
+use ene_rpc as w;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,60 +244,37 @@ pub(crate) struct Settings {
     pub(crate) updated_at: String,
 }
 
-/// A field the settings UI shows for a provider adapter.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SettingField {
-    pub(crate) key: String,
-    pub(crate) label: String,
-    pub(crate) kind: String,
-    pub(crate) required: bool,
-    pub(crate) choices: Vec<String>,
-}
-
-/// One built-in LLM provider adapter. TTS/STT/MCP/ACP use connection configs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Provider {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) adapter: String,
-    pub(crate) endpoint: String,
-    pub(crate) settings: Vec<SettingField>,
-    pub(crate) requires_credentials: bool,
-    pub(crate) environment_variable: Option<String>,
-}
-
-fn field(key: &str, label: &str, kind: &str, required: bool) -> SettingField {
-    SettingField {
-        key: key.into(),
-        label: label.into(),
-        kind: kind.into(),
-        required,
-        choices: Vec::new(),
-    }
-}
-
-fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> Provider {
+/// One built-in LLM provider adapter in the contract's own shape. TTS/STT/MCP/ACP
+/// use connection configs. The catalogue is derived, never stored, so there is
+/// no second representation to keep in step with the wire.
+fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> w::LlmProvider {
     let provider = super::model::provider_of(id).expect("built-in provider is registered in Rig");
     let config = provider
         .config("")
         .expect("built-in provider has API-key config");
-    Provider {
+    w::LlmProvider {
         id: id.into(),
         name: name.into(),
         adapter: id.into(),
         endpoint: config.base_url().into(),
         settings: settings
             .iter()
-            .map(|(key, label)| field(key, label, "string", false))
+            .map(|(key, label)| w::SettingField {
+                key: (*key).into(),
+                label: (*label).into(),
+                kind: "string".into(),
+                ..Default::default()
+            })
             .collect(),
         requires_credentials: provider.requires_credential(),
         environment_variable: provider.api_key_envs().first().map(|name| (*name).into()),
+        ..Default::default()
     }
 }
 
 /// The provider catalogue the host can speak to through rig-core. It is a
 /// fixed alpha list; extensions add adapters, not host code paths.
-pub(crate) fn providers() -> Vec<Provider> {
+pub(crate) fn providers() -> Vec<w::LlmProvider> {
     vec![
         catalog_entry(
             "openai",
@@ -317,7 +295,7 @@ pub(crate) fn providers() -> Vec<Provider> {
     ]
 }
 
-pub(crate) fn provider(adapter: &str) -> Option<Provider> {
+pub(crate) fn provider(adapter: &str) -> Option<w::LlmProvider> {
     providers()
         .into_iter()
         .find(|provider| provider.adapter == adapter)

@@ -10,8 +10,8 @@ use super::{
     permission::{Approval, ApprovalStatus, PolicyEffect, PolicyRule},
     settings::{
         AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
-        EmbeddingConnection, Endpoint, LlmConnection, McpConnection, Provider, Settings,
-        SttConnection, TtsConnection,
+        EmbeddingConnection, Endpoint, LlmConnection, McpConnection, Settings, SttConnection,
+        TtsConnection,
     },
     work::{Inquiry, Run, RunState, WorkSession, WorkStatus},
 };
@@ -289,30 +289,6 @@ pub(crate) fn settings(value: &Settings) -> w::Settings {
         revision: value.revision,
         connections: value.connections.iter().map(connection).collect(),
         updated_at: value.updated_at.clone(),
-        ..Default::default()
-    }
-}
-
-pub(crate) fn provider(value: &Provider) -> w::LlmProvider {
-    w::LlmProvider {
-        id: value.id.clone(),
-        name: value.name.clone(),
-        adapter: value.adapter.clone(),
-        endpoint: value.endpoint.clone(),
-        settings: value
-            .settings
-            .iter()
-            .map(|field| w::SettingField {
-                key: field.key.clone(),
-                label: field.label.clone(),
-                kind: field.kind.clone(),
-                required: field.required,
-                choices: field.choices.clone(),
-                ..Default::default()
-            })
-            .collect(),
-        requires_credentials: value.requires_credentials,
-        environment_variable: value.environment_variable.clone(),
         ..Default::default()
     }
 }

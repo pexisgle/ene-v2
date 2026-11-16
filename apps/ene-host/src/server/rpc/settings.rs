@@ -40,7 +40,7 @@ impl w::SettingsService for Services {
         }
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
-            let settings = store.update_settings(expected_revision, &inputs, &[])?;
+            let settings = store.update_settings(expected_revision, &inputs)?;
             let view = wire::settings(&settings);
             notify_settings(app, view.clone());
             Ok(view)
@@ -148,10 +148,7 @@ impl w::SettingsService for Services {
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::LlmProviders> {
         Response::ok(w::LlmProviders {
-            items: settings::providers()
-                .into_iter()
-                .map(|provider| wire::provider(&provider))
-                .collect(),
+            items: settings::providers(),
             ..Default::default()
         })
     }
