@@ -13,6 +13,7 @@
 | パッケージ | 役割 |
 | --- | --- |
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
+| [`ene-desktop`](apps/ene-desktop/) | ホストへ接続し、アバター描画・音声デバイス・知覚を担うデスクトップクライアント |
 | [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
 | [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK |
 | [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | ホストに組み込まれたExtism実行、検証、実行制限 |
@@ -86,5 +87,6 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |
 | `just run-host` | 認証付きホストAPIを起動 |
+| `just run-desktop` | [ホストへ接続するデスクトップクライアント](apps/ene-desktop/README.md)を起動 |
 | `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |
 | `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |

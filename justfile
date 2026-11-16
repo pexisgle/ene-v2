@@ -39,6 +39,10 @@ build-test-plugins:
 run-host:
     cargo run --locked -p ene-host
 
+# Connect to a running host as the desktop client.
+run-desktop:
+    cargo run --locked -p ene-desktop
+
 # Control the transparent renderer using JSON Lines on stdin.
 run-avatar:
     cargo run --release --locked -p ene-avatar
