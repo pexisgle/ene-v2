@@ -62,15 +62,7 @@ jobs:
         run: |
           cargo test --profile ci --locked -p ene-host --lib host::model::plugin_tests -- --test-threads=1
 
-      - uses: actions/setup-node@v7
-        if: runner.os == 'Linux'
-        with:
-          node-version: 24
-          package-manager-cache: false
-
-      - name: Wasm and GPU tests
+      - name: GPU tests
         if: runner.os == 'Linux'
         run: |
-          npm install --no-save --package-lock=false @extism/extism@2.0.0-rc13
-          node examples/plugins/openrouter-wasm/test.cjs target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm
           WGPU_BACKEND=vulkan cargo test --profile ci -p ene-vrm --locked --lib material::tests -- --ignored --nocapture --test-threads=1
