@@ -23,7 +23,7 @@ use std::{
 use tokio::task::JoinSet;
 
 pub(crate) const RELAY_PORT: u16 = 3128;
-pub(crate) const PROXY_VARS: [&str; 2] = ["HTTPS_PROXY", "HTTP_PROXY"];
+pub(crate) const PROXY_VARS: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
 const MAX_ORIGINS: usize = 32;
 const MAX_ADDRESSES: usize = 32;
 const MAX_CONNECTIONS: usize = 64;
