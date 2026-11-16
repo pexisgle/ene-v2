@@ -12,11 +12,12 @@ use crate::limits::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_CHUNK, MAX_HTTP_HEADER
 use ene_plugin::{Failure, HttpChunk, HttpRequest};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 use url::Url;
 
@@ -46,14 +47,26 @@ impl HttpGrants for DenyHttp {
 }
 
 /// One open reply, read back a chunk at a time.
-struct Open {
-    status: u16,
-    headers: BTreeMap<String, String>,
-    /// Buffered under the body cap and exchange timeout before open returns.
-    /// Handles live until read, close, or broker drop; the caller owns that scope.
-    body: Vec<u8>,
-    /// How much of `body` has been handed out.
-    read: usize,
+enum Open {
+    /// The whole body was read under the exchange deadline before open
+    /// returned. Reads split that buffer; no network happens after open.
+    Buffered {
+        status: u16,
+        headers: BTreeMap<String, String>,
+        body: Vec<u8>,
+        /// How much of `body` has been handed out.
+        read: usize,
+    },
+    /// The reply is still arriving. Reads hand out what the network has
+    /// delivered, within the same exchange deadline and body cap.
+    Streaming {
+        status: u16,
+        deadline: Instant,
+        total: usize,
+        /// A network chunk larger than the ABI chunk, split across reads.
+        pending: VecDeque<Vec<u8>>,
+        response: reqwest::Response,
+    },
 }
 
 /// The process's HTTP path for plugins.
@@ -79,8 +92,10 @@ impl HttpBroker {
         })
     }
 
-    /// Buffers the bounded reply under one exchange timeout, then returns a handle.
-    /// Reads split that buffer into ABI-sized chunks, not live network updates.
+    /// Opens a bounded reply. A buffered request reads the whole body under
+    /// the exchange deadline before returning; a streaming request returns as
+    /// soon as the headers arrive and hands out chunks as the network delivers
+    /// them, under the same deadline and body cap.
     pub async fn open(&self, provider: &str, request: HttpRequest) -> Result<HttpChunk, Failure> {
         let url = Url::parse(&request.url).map_err(|_| Failure::new("invalid_url"))?;
         if !self.grants.allows(provider, &url) {
@@ -115,6 +130,45 @@ impl HttpBroker {
         if let Some(body) = body {
             call = call.body(body);
         }
+        let deadline = Instant::now() + HTTP_TIMEOUT;
+        let handle = format!("http-{}", self.next.fetch_add(1, Ordering::Relaxed));
+        if request.stream {
+            let response = tokio::time::timeout(HTTP_TIMEOUT, call.send())
+                .await
+                .map_err(|_| Failure::new("http_timeout"))?
+                .map_err(|error| Failure {
+                    code: "http_failed".into(),
+                    message: error.to_string(),
+                })?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_HTTP_BODY as u64)
+            {
+                return Err(Failure::new("http_body_too_large"));
+            }
+            let status = response.status().as_u16();
+            let headers = copy_headers(response.headers());
+            self.open
+                .lock()
+                .map_err(|_| Failure::new("http_unavailable"))?
+                .insert(
+                    handle.clone(),
+                    Open::Streaming {
+                        status,
+                        deadline,
+                        total: 0,
+                        pending: VecDeque::new(),
+                        response,
+                    },
+                );
+            return Ok(HttpChunk {
+                handle,
+                status,
+                headers,
+                data_base64: String::new(),
+                done: false,
+            });
+        }
         let (status, headers, body) = tokio::time::timeout(HTTP_TIMEOUT, async {
             let response = call.send().await.map_err(|error| Failure {
                 code: "http_failed".into(),
@@ -127,20 +181,18 @@ impl HttpBroker {
         })
         .await
         .map_err(|_| Failure::new("http_timeout"))??;
-        let handle = format!("http-{}", self.next.fetch_add(1, Ordering::Relaxed));
-        let mut open = self
-            .open
+        self.open
             .lock()
-            .map_err(|_| Failure::new("http_unavailable"))?;
-        open.insert(
-            handle.clone(),
-            Open {
-                status,
-                headers,
-                body,
-                read: 0,
-            },
-        );
+            .map_err(|_| Failure::new("http_unavailable"))?
+            .insert(
+                handle.clone(),
+                Open::Buffered {
+                    status,
+                    headers,
+                    body,
+                    read: 0,
+                },
+            );
         Ok(HttpChunk {
             handle,
             status,
@@ -150,40 +202,136 @@ impl HttpBroker {
         })
     }
 
-    /// Hands out the next chunk of `handle`.
-    pub fn read(&self, handle: &str) -> Result<HttpChunk, Failure> {
+    /// Hands out the next chunk of `handle`. A streaming read awaits the next
+    /// network chunk under the exchange deadline; dropping the read future
+    /// drops the response and aborts the exchange.
+    pub async fn read(&self, handle: &str) -> Result<HttpChunk, Failure> {
         use base64::Engine;
 
-        let mut open = self
+        let entry = self
             .open
             .lock()
-            .map_err(|_| Failure::new("http_unavailable"))?;
-        let entry = open
-            .get_mut(handle)
+            .map_err(|_| Failure::new("http_unavailable"))?
+            .remove(handle)
             .ok_or_else(|| Failure::new("unknown_handle"))?;
-        let take = (entry.body.len() - entry.read).min(MAX_HTTP_CHUNK);
-        let start = entry.read;
-        entry.read += take;
-        let done = entry.read >= entry.body.len();
-        // The reply headers ride the first chunk only.
-        let headers = if start == 0 {
-            std::mem::take(&mut entry.headers)
-        } else {
-            BTreeMap::new()
-        };
-        let status = entry.status;
-        let chunk =
-            base64::engine::general_purpose::STANDARD.encode(&entry.body[start..entry.read]);
-        if done {
-            open.remove(handle);
+        match entry {
+            Open::Buffered {
+                status,
+                headers,
+                body,
+                read,
+            } => {
+                let take = (body.len() - read).min(MAX_HTTP_CHUNK);
+                let end = read + take;
+                let done = end >= body.len();
+                // The reply headers ride the first chunk only.
+                let headers = if read == 0 { headers } else { BTreeMap::new() };
+                let chunk = base64::engine::general_purpose::STANDARD.encode(&body[read..end]);
+                if !done {
+                    self.open
+                        .lock()
+                        .map_err(|_| Failure::new("http_unavailable"))?
+                        .insert(
+                            handle.to_owned(),
+                            Open::Buffered {
+                                status,
+                                headers: BTreeMap::new(),
+                                body,
+                                read: end,
+                            },
+                        );
+                }
+                Ok(HttpChunk {
+                    handle: handle.to_owned(),
+                    status,
+                    headers,
+                    data_base64: chunk,
+                    done,
+                })
+            }
+            Open::Streaming {
+                status,
+                deadline,
+                mut total,
+                mut pending,
+                mut response,
+            } => {
+                if let Some(bytes) = pending.pop_front() {
+                    self.open
+                        .lock()
+                        .map_err(|_| Failure::new("http_unavailable"))?
+                        .insert(
+                            handle.to_owned(),
+                            Open::Streaming {
+                                status,
+                                deadline,
+                                total,
+                                pending,
+                                response,
+                            },
+                        );
+                    return Ok(HttpChunk {
+                        handle: handle.to_owned(),
+                        status,
+                        headers: BTreeMap::new(),
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        done: false,
+                    });
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(Failure::new("http_timeout"));
+                }
+                let next = match tokio::time::timeout(remaining, response.chunk()).await {
+                    Err(_) => return Err(Failure::new("http_timeout")),
+                    Ok(Err(error)) => {
+                        return Err(Failure {
+                            code: "http_failed".into(),
+                            message: error.to_string(),
+                        });
+                    }
+                    Ok(Ok(None)) => None,
+                    Ok(Ok(Some(bytes))) => Some(bytes.to_vec()),
+                };
+                let Some(mut bytes) = next else {
+                    return Ok(HttpChunk {
+                        handle: handle.to_owned(),
+                        status,
+                        headers: BTreeMap::new(),
+                        data_base64: String::new(),
+                        done: true,
+                    });
+                };
+                total += bytes.len();
+                if total > MAX_HTTP_BODY {
+                    return Err(Failure::new("http_body_too_large"));
+                }
+                if bytes.len() > MAX_HTTP_CHUNK {
+                    let rest = bytes.split_off(MAX_HTTP_CHUNK);
+                    pending.push_back(rest);
+                }
+                self.open
+                    .lock()
+                    .map_err(|_| Failure::new("http_unavailable"))?
+                    .insert(
+                        handle.to_owned(),
+                        Open::Streaming {
+                            status,
+                            deadline,
+                            total,
+                            pending,
+                            response,
+                        },
+                    );
+                Ok(HttpChunk {
+                    handle: handle.to_owned(),
+                    status,
+                    headers: BTreeMap::new(),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    done: false,
+                })
+            }
         }
-        Ok(HttpChunk {
-            handle: handle.to_owned(),
-            status,
-            headers,
-            data_base64: chunk,
-            done,
-        })
     }
 
     /// Drops `handle` without reading the rest. Closing a handle whose body was
@@ -313,6 +461,7 @@ mod tests {
             url,
             headers: BTreeMap::new(),
             body_base64: None,
+            stream: false,
         }
     }
 
@@ -384,7 +533,7 @@ mod tests {
             .unwrap();
         assert!(!first.done, "the opening chunk carries no body");
         let mut read = Vec::new();
-        let mut chunk = broker.read(&first.handle).unwrap();
+        let mut chunk = broker.read(&first.handle).await.unwrap();
         loop {
             read.extend_from_slice(
                 &base64::engine::general_purpose::STANDARD
@@ -394,12 +543,12 @@ mod tests {
             if chunk.done {
                 break;
             }
-            chunk = broker.read(&first.handle).unwrap();
+            chunk = broker.read(&first.handle).await.unwrap();
         }
         assert_eq!(read, body);
         // The handle is spent once its body is handed out.
         assert_eq!(
-            broker.read(&first.handle).unwrap_err().code,
+            broker.read(&first.handle).await.unwrap_err().code,
             "unknown_handle"
         );
         server.abort();
@@ -428,7 +577,7 @@ mod tests {
             .unwrap();
         broker.close(&opened.handle).unwrap();
         assert_eq!(
-            broker.read(&opened.handle).unwrap_err().code,
+            broker.read(&opened.handle).await.unwrap_err().code,
             "unknown_handle"
         );
         server.abort();

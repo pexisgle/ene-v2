@@ -3,17 +3,19 @@ mod character;
 mod harness;
 mod llm;
 
-use crate::{Error, Result, limits::MAX_STREAM_EVENTS};
+use crate::{
+    Error, Result,
+    limits::{MAX_HTTP_HEADERS, MAX_STREAM_EVENTS},
+};
 use ene_plugin::*;
 
 pub struct Events {
     extension: Extension,
     models: bool,
+    raw: bool,
     terminal: bool,
     harness_pending: bool,
     count: u64,
-    /// Tool calls this reply has asked for.
-    calls: usize,
     character: Option<CharacterTarget>,
 }
 
@@ -22,10 +24,10 @@ impl Events {
         Self {
             extension: operation.extension(),
             models: matches!(operation, Operation::ListModels { .. }),
+            raw: matches!(operation, Operation::GenerateHttp { .. }),
             terminal: false,
             harness_pending: false,
             count: 0,
-            calls: 0,
             character: match operation {
                 Operation::Character { target, .. } => Some(target.clone()),
                 _ => None,
@@ -43,15 +45,37 @@ impl Events {
         {
             return Err(Error::Protocol);
         }
+        if self.raw {
+            match event {
+                Event::Http { chunk } => {
+                    if chunk.handle.len() > 1024
+                        || chunk.headers.len() > 64
+                        || chunk
+                            .headers
+                            .iter()
+                            .map(|(key, value)| key.len().saturating_add(value.len()))
+                            .sum::<usize>()
+                            > MAX_HTTP_HEADERS
+                        || chunk.data_base64.len() > crate::limits::MAX_CHUNK
+                    {
+                        return Err(Error::Protocol);
+                    }
+                    if chunk.done {
+                        self.terminal = true;
+                    }
+                    self.count += 1;
+                    return Ok(());
+                }
+                _ => return Err(Error::Protocol),
+            }
+        }
+        if matches!(event, Event::Http { .. }) {
+            return Err(Error::Protocol);
+        }
         match event {
             Event::Character { target, action } => self.accept_character(target, action)?,
             Event::Harness { event } => self.accept_harness(event)?,
-            // Every LLM event goes through its own check, not only the
-            // terminal ones: a tool call the host cannot answer has to be
-            // refused where it arrives.
-            Event::Finished { .. } | Event::Models { .. } | Event::ToolCall { .. } => {
-                self.accept_llm(event)?;
-            }
+            Event::Models { .. } => self.accept_llm(event)?,
             _ => {}
         }
         self.count += 1;
@@ -72,44 +96,28 @@ mod tests {
 
     #[test]
     fn operation_specific_results_require_the_correct_terminal_event() {
-        let generate = Operation::Generate {
-            request: GenerationRequest {
-                endpoint: String::new(),
-                options: serde_json::json!({}),
-                model: "fixture".into(),
-                preamble: String::new(),
-                messages: vec![],
-                tools: vec![],
-                max_tokens: 1,
-            },
-        };
         let list = Operation::ListModels {
             endpoint: String::new(),
             options: serde_json::json!({}),
         };
-        for (operation, terminal, wrong) in [
-            (
-                generate,
-                Event::Finished {
-                    reason: "stop".into(),
-                },
-                Event::Models { models: vec![] },
-            ),
-            (
-                list,
-                Event::Models { models: vec![] },
-                Event::Delta {
-                    text: "wrong".into(),
-                },
-            ),
-        ] {
-            let mut events = Events::new(&operation);
-            assert!(events.finish().is_err());
-            assert!(events.accept(&wrong).is_err());
-            events.accept(&terminal).unwrap();
-            events.finish().unwrap();
-            assert!(events.accept(&terminal).is_err());
-        }
+        let mut events = Events::new(&list);
+        assert!(events.finish().is_err());
+        assert!(
+            events
+                .accept(&Event::Http {
+                    chunk: ene_plugin::HttpChunk {
+                        handle: String::new(),
+                        status: 200,
+                        headers: Default::default(),
+                        data_base64: String::new(),
+                        done: true,
+                    }
+                })
+                .is_err()
+        );
+        events.accept(&Event::Models { models: vec![] }).unwrap();
+        events.finish().unwrap();
+        assert!(events.accept(&Event::Models { models: vec![] }).is_err());
     }
 
     #[test]
@@ -192,83 +200,5 @@ mod tests {
             assert!(events.accept(&event(other)).is_err());
         }
         events.accept(&event(target)).unwrap();
-    }
-}
-
-#[cfg(test)]
-mod tool_tests {
-    use super::*;
-    use crate::limits::MAX_TOOL_CALLS;
-
-    fn generate() -> Operation {
-        Operation::Generate {
-            request: GenerationRequest {
-                endpoint: String::new(),
-                options: serde_json::json!({}),
-                model: "fixture".into(),
-                preamble: String::new(),
-                messages: vec![],
-                tools: vec![],
-                max_tokens: 1,
-            },
-        }
-    }
-
-    fn call(id: &str, name: &str, arguments: serde_json::Value) -> Event {
-        Event::ToolCall {
-            id: id.into(),
-            name: name.into(),
-            arguments,
-        }
-    }
-
-    #[test]
-    fn a_usable_tool_call_is_accepted_and_the_turn_still_ends() {
-        let mut events = Events::new(&generate());
-        events
-            .accept(&call("call-1", "lookup", serde_json::json!({"q": "x"})))
-            .unwrap();
-        // A call is not terminal: the reply still has to say it finished.
-        assert!(events.finish().is_err());
-        events
-            .accept(&Event::Finished {
-                reason: "tool_calls".into(),
-            })
-            .unwrap();
-        events.finish().unwrap();
-    }
-
-    #[test]
-    fn a_call_the_host_could_not_answer_is_refused() {
-        for bad in [
-            call("", "lookup", serde_json::json!({})),
-            call("call-1", "", serde_json::json!({})),
-            // The arguments must be an object, so a host can hand them to a
-            // tool without reinterpreting them.
-            call("call-1", "lookup", serde_json::json!("not an object")),
-            call("call-1", "lookup", serde_json::json!([1, 2])),
-        ] {
-            let mut events = Events::new(&generate());
-            assert!(events.accept(&bad).is_err(), "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn one_reply_may_not_ask_for_more_calls_than_the_host_answers() {
-        let mut events = Events::new(&generate());
-        for index in 0..MAX_TOOL_CALLS {
-            events
-                .accept(&call(
-                    &format!("call-{index}"),
-                    "lookup",
-                    serde_json::json!({}),
-                ))
-                .unwrap();
-        }
-        assert!(
-            events
-                .accept(&call("one-too-many", "lookup", serde_json::json!({})))
-                .is_err()
-        );
     }
 }

@@ -256,237 +256,6 @@ fn assert_guest_bytes(needle: &str, input: bool, present: bool) -> String {
     )
 }
 
-fn observe_request() -> CompletionRequest {
-    use rig_core::completion::{ToolDefinition, message::ToolName};
-    CompletionRequest::new("hello").tools([ToolDefinition::new(
-        ToolName::new("observe").unwrap(),
-        "Observe the actual guest input",
-        json!({"type":"object"}),
-    )])
-}
-
-fn observe_input() -> String {
-    let prefix = r#"{"type":"tool_call","id":"observed","name":"observe","arguments":{"calls":0,"operation":"#;
-    let suffix = "}}";
-    let mut body = format!(
-        "call $input_length i64.const {} i64.add call $alloc local.set $p ",
-        prefix.len() + suffix.len()
-    );
-    for (offset, byte) in prefix.bytes().enumerate() {
-        body += &format!("local.get $p i64.const {offset} i64.add i32.const {byte} call $store ");
-    }
-    let calls_offset = prefix.find("0,").unwrap();
-    body += &format!(
-        "local.get $p i64.const {calls_offset} i64.add global.get $calls i32.const 48 i32.add call $store
-         i64.const 0 local.set $i
-         block $done loop $copy
-             local.get $i call $input_length i64.ge_u br_if $done
-             local.get $p i64.const {} i64.add local.get $i i64.add
-             local.get $i call $input_byte call $store
-             local.get $i i64.const 1 i64.add local.set $i br $copy
-         end end ",
-        prefix.len()
-    );
-    for (offset, byte) in suffix.bytes().enumerate() {
-        body += &format!(
-            "local.get $p call $input_length i64.add i64.const {} i64.add i32.const {byte} call $store ",
-            prefix.len() + offset
-        );
-    }
-    body += "local.get $p call $emit ";
-    body += &format!(
-        "{} {}",
-        emit(r#"{"type":"finished","reason":"tool_calls"}"#),
-        reply("{}")
-    );
-    body
-}
-
-#[tokio::test]
-async fn p08_plugin_observes_resolved_model_and_preserves_request() {
-    use rig_core::completion::message::ToolChoice;
-    let native = NativeEndpoint::start().await;
-    let root = tempfile::tempdir().unwrap();
-    let connection = connection(ConnectionKind::Llm, &native.base);
-    let store = store(root.path(), &connection);
-    let providers = providers(root.path(), Extension::Llm, &observe_input(), &native.base).await;
-    let model = model::connect(
-        &store,
-        &Credentials::new(true),
-        Catalog::builtin(),
-        &companion(),
-        Role::Companion,
-        &providers,
-    )
-    .unwrap();
-    for (index, (requested, expected)) in [
-        (
-            Some("vendor/family/model:revision"),
-            "vendor/family/model:revision",
-        ),
-        (None, "m"),
-        (Some(""), "m"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let response = model
-            .call(
-                observe_request()
-                    .model::<&str>(requested)
-                    .tool_choice(ToolChoice::Auto)
-                    .max_tokens(37),
-            )
-            .await
-            .unwrap();
-        let observed = &response.tool_calls().next().unwrap().function.arguments;
-        assert_eq!(observed["calls"], index + 1);
-        let operation = &observed["operation"];
-        assert_eq!(operation["type"], "generate");
-        let request = &operation["request"];
-        assert_eq!(request["model"], expected);
-        assert_eq!(request["endpoint"], native.base);
-        assert_eq!(request["options"], json!({"fixture_option":"preserved"}));
-        assert_eq!(request["max_tokens"], 37);
-        assert_eq!(request["tools"][0]["name"], "observe");
-        assert_eq!(
-            request["messages"][0],
-            json!({"kind":"text","role":"user","text":"hello"})
-        );
-    }
-    let first = model.call(observe_request()).await.unwrap();
-    let call = first.tool_calls().next().unwrap();
-    let result = rig_core::completion::Message::tool_result(
-        call.id.clone(),
-        call.function.name.clone(),
-        "tool output",
-    );
-    let second = model
-        .call(
-            observe_request()
-                .messages([
-                    rig_core::completion::Message::user("hello"),
-                    first.message().unwrap(),
-                    result,
-                ])
-                .preamble("system instructions"),
-        )
-        .await
-        .unwrap();
-    let observed = &second.tool_calls().next().unwrap().function.arguments;
-    assert_eq!(observed["calls"], 5);
-    let request = &observed["operation"]["request"];
-    assert_eq!(request["model"], "m");
-    assert_eq!(request["max_tokens"], 4096);
-    let messages = request["messages"].as_array().unwrap();
-    assert_eq!(
-        messages[0],
-        json!({"kind":"text","role":"system","text":"system instructions"})
-    );
-    assert!(messages.contains(&json!({
-        "kind":"tool_calls", "calls":[{
-            "id":"observed", "name":"observe", "arguments":call.function.arguments
-        }]
-    })));
-    assert!(messages.contains(&json!({
-        "kind":"tool_result", "call_id":"observed", "name":"observe",
-        "content":"tool output", "is_error":false
-    })));
-    native.assert_requests(0);
-}
-
-#[tokio::test]
-async fn p08_plugin_rejects_unrepresentable_controls_before_invocation() {
-    use rig_core::completion::message::{ToolChoice, ToolName};
-    let native = NativeEndpoint::start().await;
-    let upstream = NativeEndpoint::start().await;
-    let root = tempfile::tempdir().unwrap();
-    let connection = connection(ConnectionKind::Llm, &native.base);
-    let store = store(root.path(), &connection);
-    let open = json!({"type":"http_open","request":{
-        "method":"GET", "url":upstream.base, "headers":{}
-    }})
-    .to_string();
-    let body = format!(
-        "{} local.get $p call $service drop {}",
-        guest_write(&open),
-        observe_input()
-    );
-    let providers = providers(root.path(), Extension::Llm, &body, &upstream.base).await;
-    let model = model::connect(
-        &store,
-        &Credentials::new(true),
-        Catalog::builtin(),
-        &companion(),
-        Role::Companion,
-        &providers,
-    )
-    .unwrap();
-    let mut additional = observe_request();
-    additional.additional_params = Some(json!({"custom":true}));
-    let mut empty_additional = observe_request();
-    empty_additional.additional_params = Some(json!({}));
-    let mut provider = observe_request();
-    provider.provider_options = serde_json::from_value(json!({
-        "p08-plugin":{"body":{"custom":true}}
-    }))
-    .unwrap();
-    let schema: schemars::Schema = serde_json::from_value(json!({"type":"object"})).unwrap();
-    let mut silently_accepted = Vec::new();
-    for (name, request) in [
-        ("temperature", observe_request().temperature(0.0)),
-        ("temperature", observe_request().temperature(0.7)),
-        (
-            "tool_choice",
-            observe_request().tool_choice(ToolChoice::None),
-        ),
-        (
-            "tool_choice",
-            observe_request().tool_choice(ToolChoice::Required),
-        ),
-        (
-            "tool_choice",
-            observe_request().tool_choice(ToolChoice::Specific {
-                function_names: vec![ToolName::new("observe").unwrap()],
-            }),
-        ),
-        ("output_schema", observe_request().output_schema(schema)),
-        ("additional_params", additional),
-        ("additional_params", empty_additional),
-        ("provider_options", provider),
-        ("seed", observe_request().seed(7)),
-    ] {
-        let error = match model.call(request).await {
-            Ok(_) => {
-                silently_accepted.push(name);
-                continue;
-            }
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains(name), "{name}: {error}");
-        assert!(
-            error.to_string().contains("plugin generation contract"),
-            "{name}: {error}"
-        );
-    }
-    assert!(
-        silently_accepted.is_empty(),
-        "silently accepted {silently_accepted:?}"
-    );
-    upstream.assert_requests(0);
-    native.assert_requests(0);
-    for calls in 1..=2 {
-        let response = model.call(observe_request()).await.unwrap();
-        let observed = &response.tool_calls().next().unwrap().function.arguments;
-        assert_eq!(
-            observed["calls"], calls,
-            "rejected requests must not invoke the guest"
-        );
-        upstream.assert_requests(calls as usize);
-        native.assert_requests(0);
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn p08_completion_construction_failure_never_selects_native() {
     let native = NativeEndpoint::start().await;
@@ -856,126 +625,6 @@ async fn p10_listing_http_failures_never_select_native_or_expand_origins() {
     }
 }
 
-#[tokio::test]
-async fn p10_listing_timeout_and_caller_drop_close_http() {
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for timeout in [false, true] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let root = tempfile::tempdir().unwrap();
-        let connection = connection(ConnectionKind::Llm, &base);
-        let body = format!(
-            "{} {} {}",
-            service(json!({
-                "type":"http_open", "request":{"method":"GET", "url":base, "headers":{}}
-            })),
-            emit(r#"{"type":"models","models":[]}"#),
-            reply("{}")
-        );
-        let providers = providers(root.path(), Extension::Llm, &body, &base).await;
-        let store = store(root.path(), &connection);
-        let credentials = Credentials::new(true);
-        let mut run = Box::pin(model::probe(&store, &credentials, &connection, &providers));
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), async {
-            tokio::select! {
-                result = &mut run => panic!("listing returned before HTTP started: {result:?}"),
-                result = listener.accept() => result.unwrap(),
-            }
-        })
-        .await
-        .unwrap();
-        let mut request = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !request.ends_with(b"\r\n\r\n") {
-                request.push(socket.read_u8().await.unwrap());
-            }
-        })
-        .await
-        .unwrap();
-        assert!(String::from_utf8_lossy(&request).starts_with("GET / HTTP/1.1"));
-        if timeout {
-            let check = run.await;
-            assert!(!check.healthy);
-            assert_eq!(
-                check.failure.unwrap().message,
-                "the plugin did not answer in 15s"
-            );
-        } else {
-            drop(run);
-        }
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let mut byte = [0];
-            assert_eq!(
-                socket.read(&mut byte).await.unwrap(),
-                0,
-                "broker socket outlived listing"
-            );
-        })
-        .await
-        .expect("HTTP socket outlived the listing check");
-        let _ = socket.shutdown().await;
-        let check = tokio::time::timeout(
-            Duration::from_secs(2),
-            model::probe(&store, &credentials, &connection, &providers),
-        )
-        .await
-        .expect("the cancelled invocation kept the provider occupied");
-        assert!(!check.healthy);
-        assert!(check.failure.unwrap().message.contains("unavailable"));
-    }
-}
-
-#[tokio::test]
-async fn p10_bounded_stream_drains_beyond_capacity_and_closes_after_guest_success() {
-    use ene_plugin::{Event, Operation};
-    use std::time::Duration;
-    let root = tempfile::tempdir().unwrap();
-    let body = format!(
-        "{} {} {}",
-        format!("{} ", emit(r#"{"type":"delta","text":"chunk"}"#)).repeat(64),
-        emit(r#"{"type":"finished","reason":"stop"}"#),
-        reply("{}")
-    );
-    let providers = providers(root.path(), Extension::Llm, &body, "https://unused.example").await;
-    let running = providers.running("openrouter", Extension::Llm).unwrap();
-    let broker = http_broker(Arc::new(ene_plugin_runtime::service::DenyHttp)).unwrap();
-    let native = Arc::downgrade(&broker);
-    let services = BrokerServices::new(broker, running.provider().id.clone());
-    let (sender, mut events) = tokio::sync::mpsc::channel(16);
-    assert_eq!(sender.max_capacity(), 16);
-    let operation = Operation::Generate {
-        request: serde_json::from_value(json!({
-            "endpoint":"https://unused.example", "options":{}, "model":"m",
-            "preamble":"", "messages":[], "tools":[], "max_tokens":1
-        }))
-        .unwrap(),
-    };
-    let (result, collected) = tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::join!(
-            running.invoke_streaming(operation, services, sender),
-            async move {
-                let mut collected = Vec::new();
-                while let Some(event) = events.recv().await {
-                    collected.push(event);
-                }
-                collected
-            }
-        )
-    })
-    .await
-    .expect("bounded stream failed to drain or its channel never closed");
-    result.unwrap();
-    assert_eq!(collected.len(), 65);
-    assert!(
-        collected[..64]
-            .iter()
-            .all(|event| matches!(event, Event::Delta { text } if text == "chunk"))
-    );
-    assert!(matches!(&collected[64], Event::Finished { reason } if reason == "stop"));
-    assert!(native.upgrade().is_none());
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn p08_speech_construction_failure_never_selects_native() {
     for (kind, extension) in [
@@ -1000,69 +649,6 @@ async fn p08_speech_construction_failure_never_selects_native() {
             matches!(error, SetupError::Broken(ref message) if message.starts_with("plugin HTTP transport: ")),
             "{error:?}"
         );
-        native.assert_requests(0);
-    }
-}
-
-#[tokio::test]
-async fn p08_plugin_completion_and_listing_win_over_native() {
-    for listing in [false, true] {
-        let native = NativeEndpoint::start().await;
-        let root = tempfile::tempdir().unwrap();
-        let connection = connection(ConnectionKind::Llm, &native.base);
-        let store = store(root.path(), &connection);
-        let events = if listing {
-            emit(r#"{"type":"models","models":[{"id":"plugin-model","name":"Plugin"}]}"#)
-        } else {
-            format!(
-                "{} {}",
-                emit(r#"{"type":"delta","text":"plugin completion"}"#),
-                emit(r#"{"type":"finished","reason":"stop"}"#)
-            )
-        };
-        let providers = providers(
-            root.path(),
-            Extension::Llm,
-            &format!("{events} {}", reply("{}")),
-            &native.base,
-        )
-        .await;
-        let credentials = Credentials::new(true);
-        if listing {
-            let check = model::probe(&store, &credentials, &connection, &providers).await;
-            assert!(check.healthy, "{:?}", check.failure);
-            assert!(check.resources.contains(&"plugin-model".into()));
-            assert!(!check.resources.contains(&"native-model".into()));
-        } else {
-            let model = model::connect(
-                &store,
-                &credentials,
-                Catalog::builtin(),
-                &companion(),
-                Role::Companion,
-                &providers,
-            )
-            .unwrap();
-            let error = model
-                .call(CompletionRequest::new("hello").seed(7))
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("seed"), "{error}");
-            assert!(
-                error.to_string().contains("plugin generation contract"),
-                "{error}"
-            );
-            for _ in 0..2 {
-                assert_eq!(
-                    model
-                        .call(CompletionRequest::new("hello"))
-                        .await
-                        .unwrap()
-                        .text(),
-                    "plugin completion"
-                );
-            }
-        }
         native.assert_requests(0);
     }
 }
@@ -1332,7 +918,7 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
             .open(provider_argument, request(&upstream.base))
             .await
             .unwrap();
-        let chunk = broker.read(&opened.handle).unwrap();
+        let chunk = broker.read(&opened.handle).await.unwrap();
         assert_eq!(chunk.headers["x-safe"], "visible");
         assert!(!chunk.headers.contains_key("authorization"));
         assert!(!chunk.headers.contains_key("set-cookie"));
@@ -1484,13 +1070,19 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
         .await
         .unwrap();
     assert!(old["done"].as_bool().unwrap());
-    assert_eq!(broker.read("http-1").unwrap_err().code, "unknown_handle");
+    assert_eq!(
+        broker.read("http-1").await.unwrap_err().code,
+        "unknown_handle"
+    );
     drop(foreign);
     drop(running);
     drop(providers);
-    assert!(broker.read("http-2").unwrap().done);
+    assert!(broker.read("http-2").await.unwrap().done);
     let separate = http_broker(Arc::new(ene_plugin_runtime::service::DenyHttp)).unwrap();
-    assert_eq!(separate.read("http-2").unwrap_err().code, "unknown_handle");
+    assert_eq!(
+        separate.read("http-2").await.unwrap_err().code,
+        "unknown_handle"
+    );
     let weak = Arc::downgrade(&broker);
     drop(broker);
     assert!(weak.upgrade().is_none());

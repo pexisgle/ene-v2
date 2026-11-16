@@ -72,6 +72,7 @@ impl PluginSpeech {
             let chunk = self
                 .broker
                 .read(handle)
+                .await
                 .map_err(|error| format!("the speech provider's audio: {error}"))?;
             audio.extend_from_slice(
                 &base64::engine::general_purpose::STANDARD

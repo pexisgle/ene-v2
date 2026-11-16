@@ -45,8 +45,10 @@ impl Services for BrokerServices {
                     serde_json::to_value(broker.open(&provider, request).await?)
                         .map_err(|_| Failure::new("serialize"))?
                 }
-                ServiceRequest::HttpRead { handle } => serde_json::to_value(broker.read(&handle)?)
-                    .map_err(|_| Failure::new("serialize"))?,
+                ServiceRequest::HttpRead { handle } => {
+                    serde_json::to_value(broker.read(&handle).await?)
+                        .map_err(|_| Failure::new("serialize"))?
+                }
                 ServiceRequest::HttpClose { handle } => {
                     broker.close(&handle)?;
                     Value::Null

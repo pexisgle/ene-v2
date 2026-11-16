@@ -1,7 +1,7 @@
 //! Shared wire enums for operations, events and service requests.
 use super::{
-    CharacterAction, CharacterEvent, CharacterTarget, EmbeddingRequest, GenerationRequest,
-    HarnessEvent, HarnessInput, HttpRequest, SynthesisRequest, TranscriptionRequest,
+    CharacterAction, CharacterEvent, CharacterTarget, EmbeddingRequest, HarnessEvent, HarnessInput,
+    HttpChunk, HttpRequest, SynthesisRequest, TranscriptionRequest,
 };
 use crate::manifest::{Extension, Service};
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,10 @@ pub enum Operation {
         endpoint: String,
         options: Value,
     },
-    Generate {
-        request: GenerationRequest,
+    /// Forward one OpenAI-compatible exchange to the provider through the
+    /// broker. The guest is a transport, not a protocol decoder.
+    GenerateHttp {
+        request: HttpRequest,
     },
     Embed {
         request: EmbeddingRequest,
@@ -38,7 +40,7 @@ pub enum Operation {
 impl Operation {
     pub fn extension(&self) -> Extension {
         match self {
-            Self::ListModels { .. } | Self::Generate { .. } => Extension::Llm,
+            Self::ListModels { .. } | Self::GenerateHttp { .. } => Extension::Llm,
             Self::Embed { .. } => Extension::Embedding,
             Self::Synthesize { .. } => Extension::Tts,
             Self::Transcribe { .. } => Extension::Stt,
@@ -54,21 +56,13 @@ impl Operation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
-    Delta {
-        text: String,
-    },
-    /// The model asked for a tool call instead of, or before, answering.
-    ToolCall {
-        id: String,
-        name: String,
-        /// The arguments as a JSON object.
-        arguments: Value,
-    },
     Models {
         models: Vec<crate::provider::Model>,
     },
-    Finished {
-        reason: String,
+    /// One brokered HTTP chunk, verbatim. The first carries status and
+    /// headers; the last has `done`.
+    Http {
+        chunk: HttpChunk,
     },
     Character {
         target: CharacterTarget,
@@ -82,10 +76,7 @@ pub enum Event {
 impl Event {
     pub fn extension(&self) -> Extension {
         match self {
-            Self::Delta { .. }
-            | Self::ToolCall { .. }
-            | Self::Models { .. }
-            | Self::Finished { .. } => Extension::Llm,
+            Self::Models { .. } | Self::Http { .. } => Extension::Llm,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
         }
@@ -119,9 +110,6 @@ pub enum ServiceRequest {
     AudioRead {
         handle: String,
     },
-    Models {
-        request: GenerationRequest,
-    },
     Tool {
         name: String,
         arguments: Value,
@@ -136,7 +124,6 @@ impl ServiceRequest {
             Self::StateRead { .. } | Self::StateWrite { .. } => Service::State,
             Self::HttpOpen { .. } | Self::HttpRead { .. } | Self::HttpClose { .. } => Service::Http,
             Self::AudioRead { .. } => Service::Http,
-            Self::Models { .. } => Service::Models,
             Self::Tool { .. } => Service::Tools,
         }
     }

@@ -2,7 +2,7 @@
 //! agent runs on.
 mod plugin;
 #[cfg(test)]
-mod openai_wire_tests;
+mod plugin_tests;
 
 use super::db::{Result, Store};
 use super::error::HostError;

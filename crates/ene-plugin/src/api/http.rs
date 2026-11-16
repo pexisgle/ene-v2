@@ -11,6 +11,9 @@ pub struct HttpRequest {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub body_base64: Option<String>,
+    /// Ask the broker to hand chunks out as the network delivers them.
+    #[serde(default)]
+    pub stream: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

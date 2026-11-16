@@ -268,6 +268,12 @@ impl Instance {
         result
     }
 
+    /// Whether a plugin is still attached. A cancelled or failed call takes
+    /// the plugin out; the owner reloads the instance before the next call.
+    pub fn is_usable(&self) -> bool {
+        self.plugin.is_some()
+    }
+
     /// Run the guest's initialization hook. A provider entry declares its
     /// capabilities here; they are decoded once and the document is dropped.
     pub async fn initialize(&mut self, cancel: &CancellationToken) -> Result<()> {

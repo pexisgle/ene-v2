@@ -228,7 +228,9 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
 /// serves one connection, and a call is short, so this is not a bottleneck.
 pub(crate) struct Running {
     provider: ProviderConfiguration,
-    instance: tokio::sync::Mutex<Instance>,
+    instance: tokio::sync::Mutex<Option<Instance>>,
+    package: Package,
+    entrypoint: String,
     cancel: CancellationToken,
 }
 
@@ -245,8 +247,9 @@ impl Running {
             ))
         })?;
         let (entrypoint, provider) = (entrypoint.to_owned(), provider.clone());
+        let package = loaded.package.clone();
         let cancel = CancellationToken::new();
-        let mut instance = Instance::load(loaded.package.clone(), entrypoint, &cancel)
+        let mut instance = Instance::load(package.clone(), entrypoint.clone(), &cancel)
             .await
             .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
         instance
@@ -255,7 +258,9 @@ impl Running {
             .map_err(|error| HostError::Unavailable(format!("plugin initialize: {error}")))?;
         Ok(Self {
             provider,
-            instance: tokio::sync::Mutex::new(instance),
+            instance: tokio::sync::Mutex::new(Some(instance)),
+            package,
+            entrypoint,
             cancel,
         })
     }
@@ -291,11 +296,42 @@ impl Running {
         services: Arc<dyn ene_plugin_runtime::instance::Services>,
         events: tokio::sync::mpsc::Sender<ene_plugin::Event>,
     ) -> Result<serde_json::Value, HostError> {
-        let mut instance = self.instance.lock().await;
-        instance
+        let mut slot = self.instance.lock().await;
+        if slot.as_ref().is_none_or(|instance| !instance.is_usable()) {
+            // A dropped caller cancelled the previous call before it could
+            // report, leaving the instance without its plugin. Drop it first,
+            // releasing its execution slot, then load a fresh one.
+            *slot = None;
+            *slot = Some(self.reload().await?);
+        }
+        let instance = slot
+            .as_mut()
+            .ok_or_else(|| HostError::Unavailable(("the plugin is not loaded").into()))?;
+        let outcome = instance
             .invoke(operation, services, events, &self.cancel)
+            .await;
+        if outcome.is_err() {
+            // A cancelled or failed guest may be in an unknown state, and the
+            // instance holds one of the runtime's fixed execution slots. Drop
+            // it before loading a replacement so the slot is free even at the
+            // pool's limit.
+            *slot = None;
+            if let Ok(fresh) = self.reload().await {
+                *slot = Some(fresh);
+            }
+        }
+        outcome.map_err(|error| HostError::Unavailable(format!("plugin call: {error}")))
+    }
+
+    async fn reload(&self) -> Result<Instance, HostError> {
+        let mut fresh = Instance::load(self.package.clone(), self.entrypoint.clone(), &self.cancel)
             .await
-            .map_err(|error| HostError::Unavailable(format!("plugin call: {error}")))
+            .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))?;
+        fresh
+            .initialize(&self.cancel)
+            .await
+            .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))?;
+        Ok(fresh)
     }
 
     /// The provider configuration this instance answers under.
