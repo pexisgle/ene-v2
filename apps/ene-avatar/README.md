@@ -79,7 +79,9 @@ cargo run --release --locked -p ene-avatar --example control
 {"id":4,"op":"center","character":"ene","monitor":null}
 {"id":5,"op":"fps","value":60}
 {"id":6,"op":"remove","character":"ene"}
-{"id":7,"op":"quit"}
+{"id":7,"op":"expression","character":"ene","name":"happy"}
+{"op":"lip_sync","character":"ene","rms":0.42}
+{"id":8,"op":"quit"}
 ```
 
 Windowsのパスは`C:/models/model.vrm`のように書けます。
@@ -88,10 +90,12 @@ Windowsのパスは`C:/models/model.vrm`のように書けます。
 | 操作 | 内容 |
 | --- | --- |
 | `add` | IDを登録し、`config`のモデルとモーションを非同期で読み込む |
-| `set` | 設定全体を置き換える。省略した項目は既定値に戻る |
+| `set` | 設定全体を置き換える。省略した項目は既定値に戻る。モデルが同じならシーンを再構築せず、新しいモーションへ300msでフェードする |
 | `get` | キャラクターの状態・設定・再生時刻、モニター一覧、FPS設定を返す |
 | `center` | 指定モニターの既定位置へ戻す。`null`は最初の出力を使う |
 | `fps` | 全体の更新頻度を0～1000で指定する。既定値は60、0は制限なし |
+| `expression` | 表情を指定する。VRMプリセット名（`happy`、`aa`など）かカスタム名。`null`は表情を消す。150〜200msでフェードする |
+| `lip_sync` | 口の開きを0〜1で送る。`id`の無いワンウェイ通知で、応答は返らない。`aa`へ平滑化して反映する |
 | `remove` | 指定キャラクターとその子エンティティを削除する |
 | `quit` | 描画を終了し、受理済みの出力を送信してプロセスを終了する |
 

@@ -1,6 +1,6 @@
 use crate::desktop::Output;
 use bevy::{
-    animation::RepeatAnimation,
+    animation::{RepeatAnimation, transition::AnimationTransitions},
     app::AnimationSystems,
     asset::{LoadState, RecursiveDependencyLoadState, UntypedAssetId},
     camera::visibility::VisibilitySystems,
@@ -8,9 +8,10 @@ use bevy::{
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
-use ene_vrm::{SpringRig, Vrm, VrmSystems};
+use ene_vrm::{ExpressionWeights, SpringRig, Vrm, VrmSystems};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 #[derive(Component, Default)]
 #[require(Transform, Visibility)]
@@ -21,8 +22,27 @@ pub struct Character {
     pub root: Option<Entity>,
     model: Handle<Gltf>,
     motion: Option<Handle<AnimationClip>>,
+    /// A motion the renderer is waiting to load before it fades to it.
+    pub pending: Option<Pending>,
+    /// The graph node of the clip that is the main animation for a fade.
+    main: Option<AnimationNodeIndex>,
+    /// The expression the client asked for, and how far the fade has got.
+    pub expression: Option<String>,
+    pub expression_weight: f32,
+    /// The mouth opening the client asked for (from playback amplitude), and the
+    /// smoothed value the blendshape actually uses.
+    pub lip: f32,
+    pub lip_level: f32,
     spawned: bool,
     retrying: bool,
+}
+
+/// A motion change that waits for its clip to load.
+pub enum Pending {
+    /// The client asked for this clip; it is loaded and faded in when ready.
+    Fade(String),
+    /// The client asked for no clip; the character returns to its rest pose.
+    Rest,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -128,6 +148,14 @@ pub fn setup(app: &mut App) {
                 .before(VisibilitySystems::VisibilityPropagate),
         )
         .add_systems(PostUpdate, notify_finished.after(AnimationSystems))
+        // The mouth and the face are written after the animation reset of the
+        // frame, and before ene-vrm turns weights into morph values.
+        .add_systems(
+            PostUpdate,
+            (start_main, expressions, motion_change)
+                .after(AnimationSystems)
+                .before(VrmSystems::Expressions),
+        )
         .configure_sets(
             PostUpdate,
             VrmSystems::SpringBone.before(VisibilitySystems::CalculateBounds),
@@ -168,6 +196,7 @@ pub fn reload(world: &mut World, entity: Entity) {
     let mut character = world.get_mut::<Character>(entity).unwrap();
     character.model = model;
     character.motion = motion;
+    character.pending = None;
     character.root = None;
     character.spawned = false;
     character.retrying = retrying;
@@ -181,7 +210,7 @@ fn scene_ready(
     parents: Query<&ChildOf>,
     children: Query<&Children>,
     mut characters: Query<&mut Character>,
-    mut players: Query<&mut AnimationPlayer, With<Vrm>>,
+    players: Query<&mut AnimationPlayer, With<Vrm>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut commands: Commands,
 ) {
@@ -200,10 +229,11 @@ fn scene_ready(
     character.root = Some(root);
     if let Some(clip) = &character.motion {
         let (graph, node) = AnimationGraph::from_clip(clip.clone());
-        players.get_mut(root).unwrap().play(node).repeat();
-        commands
-            .entity(root)
-            .insert(AnimationGraphHandle(graphs.add(graph)));
+        commands.entity(root).insert((
+            AnimationTransitions::new(),
+            AnimationGraphHandle(graphs.add(graph)),
+        ));
+        character.main = Some(node);
     }
 }
 
@@ -285,7 +315,10 @@ fn update(
             c.state = next;
             events.write(c.notification());
         }
-        let running = c.config.playing && c.state == AvatarState::Ready;
+        // No configured clip means the character rests: `idle` must not keep the
+        // previous action running.
+        let running =
+            c.config.playing && c.config.motion.is_some() && c.state == AvatarState::Ready;
         let Some((mut player, spring)) = c.root.and_then(|root| players.get_mut(root).ok()) else {
             continue;
         };
@@ -310,6 +343,118 @@ fn update(
     }
 }
 
+/// Starts the configured clip as the main animation of the transitions, so a
+/// later motion change has something to fade out.
+fn start_main(
+    mut characters: Query<&mut Character>,
+    mut roots: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+) {
+    for c in &mut characters {
+        let Some(root) = c.root else { continue };
+        let Some(node) = c.main else { continue };
+        let Ok((mut player, mut transitions)) = roots.get_mut(root) else {
+            continue;
+        };
+        if transitions.get_main_animation().is_some() {
+            continue;
+        }
+        transitions.play(&mut player, node, Duration::ZERO).repeat();
+    }
+}
+/// Fades the mouth toward the amplitude the client sent, and the face toward the
+/// expression it asked for, then hands both to ene-vrm as per-frame weights.
+fn expressions(time: Res<Time>, mut characters: Query<&mut Character>, mut commands: Commands) {
+    let dt = time.delta_secs();
+    for mut c in &mut characters {
+        let Some(root) = c.root else { continue };
+        // The mouth opens faster than it closes. That asymmetry is what makes
+        // lip sync read as speech rather than as a tremolo.
+        let tau = if c.lip > c.lip_level { 0.02 } else { 0.06 };
+        c.lip_level += (c.lip - c.lip_level) * (1. - (-dt / tau).exp());
+        if c.lip_level < 0.002 {
+            c.lip_level = 0.;
+        }
+        let face = if c.expression.is_some() { 1. } else { 0. };
+        if (face - c.expression_weight).abs() > 0.001 {
+            let tau = if face > c.expression_weight {
+                0.15
+            } else {
+                0.2
+            };
+            c.expression_weight += (face - c.expression_weight) * (1. - (-dt / tau).exp());
+        } else {
+            c.expression_weight = face;
+        }
+        let mut weights = Vec::with_capacity(2);
+        if let Some(name) = &c.expression
+            && c.expression_weight > 0.001
+        {
+            weights.push((name.clone(), c.expression_weight));
+        }
+        if c.lip_level > 0.001 {
+            weights.push(("aa".to_owned(), c.lip_level));
+        }
+        // Missing while the scene loads; the next frame tries again.
+        commands.entity(root).try_insert(ExpressionWeights(weights));
+    }
+}
+
+/// Applies a motion change once its clip is loaded, fading over 300 ms instead
+/// of rebuilding the character.
+fn motion_change(
+    server: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut characters: Query<&mut Character>,
+    // The player and its transitions live on the loaded model's root, which is a
+    // child of the entity that carries `Character`.
+    mut roots: Query<(
+        &mut AnimationPlayer,
+        Option<&AnimationGraphHandle>,
+        Option<&mut AnimationTransitions>,
+    )>,
+) {
+    for mut c in &mut characters {
+        let Some(root) = c.root else { continue };
+        let Some(pending) = c.pending.take() else {
+            continue;
+        };
+        let Ok((mut player, Some(handle), Some(mut transitions))) = roots.get_mut(root) else {
+            c.pending = Some(pending);
+            continue;
+        };
+        match pending {
+            Pending::Rest => {
+                player.stop_all();
+                c.motion = None;
+            }
+            Pending::Fade(path) => {
+                let clip = server
+                    .load_builder()
+                    .override_unapproved()
+                    .load(GltfAssetLabel::Animation(0).from_asset(path.clone()));
+                if server
+                    .get_load_states(clip.id())
+                    .is_some_and(|(state, _, _)| matches!(state, LoadState::Failed(_)))
+                {
+                    warn!("the motion {path} did not load");
+                    continue;
+                }
+                if !server.is_loaded_with_dependencies(clip.id()) {
+                    c.pending = Some(Pending::Fade(path));
+                    continue;
+                }
+                let Some(mut graph) = graphs.get_mut(&handle.0) else {
+                    c.pending = Some(Pending::Fade(path));
+                    continue;
+                };
+                let parent = graph.root;
+                let node = graph.add_clip(clip.clone(), 1., parent);
+                transitions.play(&mut player, node, Duration::from_millis(300));
+                c.motion = Some(clip);
+            }
+        }
+    }
+}
 pub fn notify_finished(
     characters: Query<&Character>,
     players: Query<&AnimationPlayer>,

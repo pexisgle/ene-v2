@@ -1,4 +1,4 @@
-use crate::character::{AvatarState, Character, Config, Notification, reload};
+use crate::character::{AvatarState, Character, Config, Notification, Pending, reload};
 use crate::desktop::Output;
 use bevy::{
     app::{AppExit, MainScheduleOrder},
@@ -45,7 +45,7 @@ fn read_request(input: &mut impl BufRead) -> (Result<Request, String>, bool) {
     match (&mut *input).take(65_537).read_line(&mut line) {
         Ok(0) => (
             Ok(Request {
-                id: 0,
+                id: None,
                 command: Command::Quit {},
             }),
             true,
@@ -104,7 +104,9 @@ pub fn setup(app: &mut App) {
 
 #[derive(Deserialize)]
 struct Request {
-    id: u64,
+    /// Absent on one-way notifications such as `lip_sync`.
+    #[serde(default)]
+    id: Option<u64>,
     #[serde(flatten)]
     command: Command,
 }
@@ -131,6 +133,16 @@ enum Command {
     Fps {
         value: u32,
     },
+    Expression {
+        character: String,
+        /// `null` clears the face back to neutral.
+        name: Option<String>,
+    },
+    /// One-way: playback amplitude, sent without an id and never answered.
+    LipSync {
+        character: String,
+        rms: f32,
+    },
     Quit {},
 }
 
@@ -150,14 +162,19 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                 break;
             }
         };
-        let id = request.as_ref().map(|request| request.id).unwrap_or(0);
+        let id = match &request {
+            Ok(request) => request.id,
+            Err(_) => None,
+        };
         let result = request.and_then(|request| {
             let add = matches!(&request.command, Command::Add { .. });
             let target = match &request.command {
                 Command::Add { character, .. }
                 | Command::Set { character, .. }
                 | Command::Remove { character }
-                | Command::Center { character, .. } => {
+                | Command::Center { character, .. }
+                | Command::Expression { character, .. }
+                | Command::LipSync { character, .. } => {
                     avatars.iter_mut(world).find(|(_, c)| c.id == *character)
                 }
                 _ => None,
@@ -173,10 +190,18 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                         (false, None) => return Err("unknown character".into()),
                         (false, Some((entity, mut old))) => {
                             let rebuild = matches!(old.state, AvatarState::Error(_))
-                                || old.config.model != config.model
-                                || old.config.motion != config.motion;
+                                || old.config.model != config.model;
+                            let previous = old.config.motion.clone();
                             old.config = config;
                             if !rebuild {
+                                // The model is staying: fade to the new clip
+                                // instead of despawning and reloading it.
+                                if previous != old.config.motion {
+                                    old.pending = Some(match old.config.motion.clone() {
+                                        Some(path) => Pending::Fade(path),
+                                        None => Pending::Rest,
+                                    });
+                                }
                                 return Ok(Value::Null);
                             }
                             entity
@@ -204,20 +229,46 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                     }
                     world.resource_mut::<Control>().fps = value;
                 }
+                Command::Expression { name, .. } => {
+                    let (_, mut character) = target.ok_or("unknown character")?;
+                    character.expression = match name {
+                        Some(name) if !name.trim().is_empty() && name.len() <= 64 => Some(name),
+                        Some(_) => return Err("invalid expression name".into()),
+                        None => None,
+                    };
+                }
+                Command::LipSync { rms, .. } => {
+                    if !rms.is_finite() {
+                        return Err("lip_sync requires a finite amplitude".into());
+                    }
+                    let (_, mut character) = target.ok_or("unknown character")?;
+                    character.lip = rms.clamp(0., 1.);
+                }
                 Command::Quit {} => {
                     world.write_message(AppExit::Success);
                 }
             }
             Ok(Value::Null)
         });
-        let response = match result {
-            Ok(value) => json!({"id":id, "ok":value}),
-            Err(error) => json!({"id":id, "error":error}),
-        };
-        if let Err(error) = world.resource::<Control>().output.try_send(response) {
-            error!("renderer output unavailable: {error}");
-            world.write_message(AppExit::error());
-            return;
+        // A one-way notification has no id and must not answer, or the client
+        // would have to drain replies it never asked for.
+        match id {
+            Some(id) => {
+                let response = match result {
+                    Ok(value) => json!({"id":id, "ok":value}),
+                    Err(error) => json!({"id":id, "error":error}),
+                };
+                if let Err(error) = world.resource::<Control>().output.try_send(response) {
+                    error!("renderer output unavailable: {error}");
+                    world.write_message(AppExit::error());
+                    return;
+                }
+            }
+            None => {
+                if let Err(error) = result {
+                    warn!("dropped a one-way command: {error}");
+                }
+            }
         }
     }
 }
@@ -245,6 +296,10 @@ fn snapshot(
         let mut actor = character.state.json();
         actor["character"] = json!(character.id);
         actor["config"] = json!(resolved);
+        actor["expression"] = json!(character.expression);
+        actor["lip"] = json!(character.lip);
+        actor["lip_level"] = json!(character.lip_level);
+        actor["expression_weight"] = json!(character.expression_weight);
         actor["animation_times"] = json!(animation_times);
         characters.push(actor);
     }
@@ -416,7 +471,7 @@ mod tests {
             }
             h.input
                 .send(Ok(Request {
-                    id: 1,
+                    id: Some(1),
                     command: Command::Get {},
                 }))
                 .unwrap();
@@ -444,5 +499,42 @@ mod tests {
         tx.send(Value::Null).unwrap();
         drop(tx);
         assert!(write_output(std::io::Cursor::new(&mut [][..]), rx).is_err());
+    }
+    #[test]
+    fn one_way_lip_sync_and_expression_are_visible_in_the_snapshot() {
+        let mut h = Harness::new();
+        let messages = h.batch(&[
+            json!({"id":1,"op":"add","character":"a","config":{"model":"a.vrm"}}),
+            json!({"op":"expression","character":"a","name":"happy"}),
+            json!({"op":"lip_sync","character":"a","rms":0.42}),
+            json!({"id":2,"op":"get"}),
+        ]);
+        // The two one-way lines must not answer. A state notification may also
+        // arrive, so only the id-carrying messages are counted.
+        let replies: Vec<_> = messages
+            .iter()
+            .filter(|message| message.get("id").is_some())
+            .collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["id"], 1);
+        let actor = &replies[1]["ok"]["characters"][0];
+        assert_eq!(actor["expression"], "happy");
+        let lip = actor["lip"].as_f64().unwrap();
+        assert!((lip - 0.42).abs() < 1e-6, "{lip}");
+
+        let messages = h.batch(&[
+            json!({"id":3,"op":"expression","character":"a","name":null}),
+            json!({"op":"lip_sync","character":"a","rms":4.5}),
+            json!({"id":4,"op":"get"}),
+        ]);
+        let replies: Vec<_> = messages
+            .iter()
+            .filter(|message| message.get("id").is_some())
+            .collect();
+        assert_eq!(replies[0], &json!({"id":3,"ok":null}));
+        let actor = &replies[1]["ok"]["characters"][0];
+        assert_eq!(actor["expression"], Value::Null);
+        // The renderer clamps what a client sends.
+        assert_eq!(actor["lip"].as_f64(), Some(1.0));
     }
 }

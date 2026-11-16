@@ -10,6 +10,7 @@ mod runtime;
 mod schema;
 
 use bevy::{app::AnimationSystems, prelude::*, transform::TransformSystems};
+pub use expressions::ExpressionWeights;
 pub use runtime::{SpringJointProps, SpringRig, Vrm};
 pub use vrm_spec::vrmc_vrm_1_0::{HumanBoneName, Meta};
 
