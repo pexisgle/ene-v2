@@ -10,14 +10,15 @@ use crate::host::{
     settings::AcpConnection,
 };
 use agent_client_protocol::{
-    Agent, ByteStreams, Client, on_receive_notification, on_receive_request,
+    Agent, ByteStreams, Client,
     schema::ProtocolVersion,
+    util::MatchDispatch,
     v1::{
-        ConnectionTo,
+        ActiveSession, ConnectionTo, SessionMessage,
         schema::{
-            CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
+            CancelNotification, ContentBlock, InitializeRequest, PromptResponse,
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-            SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+            SessionNotification, SessionUpdate, StopReason,
         },
     },
 };
@@ -352,14 +353,14 @@ async fn run_backend(
         initial_run_id,
         pid,
     } = identity;
-    let shared = Arc::new(SharedRun::default());
-    shared.begin(&initial_run_id);
+    let active = Arc::new(ActiveRun::default());
+    active.begin(&initial_run_id);
     let proxy = if let Some((socket, configured)) = preparation {
         let prepared = tokio::select! {
             biased;
             _ = stop.cancelled() => {
                 let _ = events.send(AcpEvent::Closed {
-                    work_id, run_id: shared.run_id(), error: None, confirmed: true, pids: Vec::new(),
+                    work_id, run_id: active.run_id(), error: None, confirmed: true, pids: Vec::new(),
                 }).await;
                 return;
             }
@@ -374,7 +375,7 @@ async fn run_backend(
                 let _ = events
                     .send(closed(
                         work_id,
-                        shared.run_id(),
+                        active.run_id(),
                         format!("the isolated ACP model proxy could not start: {error}"),
                     ))
                     .await;
@@ -389,7 +390,7 @@ async fn run_backend(
         let _ = events
             .send(AcpEvent::Closed {
                 work_id,
-                run_id: shared.run_id(),
+                run_id: active.run_id(),
                 error: None,
                 confirmed: true,
                 pids: Vec::new(),
@@ -404,7 +405,7 @@ async fn run_backend(
             let _ = events
                 .send(closed(
                     work_id,
-                    shared.run_id(),
+                    active.run_id(),
                     format!("the ACP agent could not start: {error}"),
                 ))
                 .await;
@@ -420,7 +421,7 @@ async fn run_backend(
         let _ = events
             .send(AcpEvent::Closed {
                 work_id,
-                run_id: shared.run_id(),
+                run_id: active.run_id(),
                 error: Some("the ACP agent has no standard input/output".to_owned()),
                 confirmed,
                 pids,
@@ -444,7 +445,7 @@ async fn run_backend(
             cwd,
             events.clone(),
             work_id.clone(),
-            Arc::clone(&shared),
+            Arc::clone(&active),
             commands,
         );
         tokio::pin!(connection);
@@ -465,7 +466,7 @@ async fn run_backend(
     let _ = events
         .send(AcpEvent::Closed {
             work_id,
-            run_id: shared.run_id(),
+            run_id: active.run_id(),
             error,
             confirmed,
             pids,
@@ -480,112 +481,36 @@ async fn connect<T>(
     cwd: PathBuf,
     events: mpsc::Sender<AcpEvent>,
     work_id: String,
-    shared: Arc<SharedRun>,
+    active: Arc<ActiveRun>,
     commands: mpsc::Receiver<Command>,
 ) -> Option<String>
 where
     T: agent_client_protocol::ConnectTo<Client> + 'static,
 {
-    let notify_events = events.clone();
-    let notify_shared = Arc::clone(&shared);
-    let notify_work = work_id;
     Client
         .v1()
         .name("ene-host")
-        .on_receive_notification(
-            async move |notification: SessionNotification, _cx| {
-                if let Some((text, is_message)) = update_text(&notification.update)
-                    && let Some(run_id) = notify_shared.run_id()
-                {
-                    if is_message {
-                        notify_shared.append(&text);
-                    }
-                    let _ = notify_events
-                        .send(AcpEvent::Update {
-                            work_id: notify_work.clone(),
-                            run_id,
-                            text,
-                        })
-                        .await;
-                }
-                Ok(())
-            },
-            on_receive_notification!(),
-        )
-        .on_receive_request(
-            async |_request: RequestPermissionRequest, responder, _cx| {
-                // Alpha has no ACP permission UI; refuse rather than pretend
-                // the user approved an operation she never saw.
-                responder.respond(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Cancelled,
-                ))
-            },
-            on_receive_request!(),
-        )
-        .connect_with(transport, {
-            let events = events.clone();
-            let shared = Arc::clone(&shared);
-            async move |cx: ConnectionTo<Agent>| {
-                session_loop(cx, cwd, events, shared, commands).await
-            }
+        .connect_with(transport, async move |cx| {
+            session_loop(cx, cwd, events, work_id, active, commands).await
         })
         .await
         .err()
         .map(|error| error.to_string())
 }
 
+/// One ACP session and the prompt turns it serves. The session handle owns the
+/// session's message stream, so updates, permission requests and prompt
+/// responses all arrive here in order; the host only decides what they mean.
 async fn session_loop(
     cx: ConnectionTo<Agent>,
     cwd: PathBuf,
     events: mpsc::Sender<AcpEvent>,
-    shared: Arc<SharedRun>,
+    work_id: String,
+    active: Arc<ActiveRun>,
     mut commands: mpsc::Receiver<Command>,
 ) -> Result<(), agent_client_protocol::Error> {
-    let Some((session_id, first)) = open(&cx, &cwd, &shared, &mut commands).await? else {
-        return Ok(());
-    };
-    let mut ready = false;
-    if let Some((run_id, text)) = first {
-        announce(&mut ready, &events, &run_id).await;
-        serve(
-            &cx,
-            &session_id,
-            run_id,
-            text,
-            &events,
-            &shared,
-            &mut commands,
-        )
-        .await?;
-    }
-    let terminated = cx.terminated();
-    tokio::pin!(terminated);
-    loop {
-        tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    return Ok(());
-                };
-                match command {
-                    Command::Prompt { run_id, text } => {
-                        announce(&mut ready, &events, &run_id).await;
-                        serve(&cx, &session_id, run_id, text, &events, &shared, &mut commands).await?;
-                    }
-                    Command::Cancel { .. } => {}
-                    Command::End => return Ok(()),
-                }
-            }
-            _ = &mut terminated => return Ok(()),
-        }
-    }
-}
-
-async fn open(
-    cx: &ConnectionTo<Agent>,
-    cwd: &Path,
-    shared: &SharedRun,
-    commands: &mut mpsc::Receiver<Command>,
-) -> Result<Option<(SessionId, Option<(String, String)>)>, agent_client_protocol::Error> {
+    // A prompt may arrive before the child is ready. The command channel holds
+    // it; these selects keep reading so the first instruction is not lost.
     let initialize = cx
         .send_request(InitializeRequest::new(ProtocolVersion::V1))
         .block_task();
@@ -602,36 +527,195 @@ async fn open(
                     first.get_or_insert((run_id, text));
                 }
                 Some(Command::Cancel { run_id }) => {
-                    if shared.run_id().as_deref() == Some(&run_id) {
-                        return Ok(None);
+                    if active.run_id().as_deref() == Some(&run_id) {
+                        return Ok(());
                     }
                 }
-                Some(Command::End) | None => return Ok(None),
+                Some(Command::End) | None => return Ok(()),
             }
         }
     }
-    let session = cx
-        .send_request(NewSessionRequest::new(cwd.to_path_buf()))
-        .block_task();
+    let session = cx.build_session(&cwd).block_task().start_session();
     tokio::pin!(session);
-    loop {
+    let mut session = loop {
         tokio::select! {
-            result = &mut session => {
-                let session = result?;
-                return Ok(Some((session.session_id, first)));
-            }
+            result = &mut session => break result?.session,
             command = commands.recv() => match command {
                 Some(Command::Prompt { run_id, text }) => {
                     first.get_or_insert((run_id, text));
                 }
                 Some(Command::Cancel { run_id }) => {
-                    if shared.run_id().as_deref() == Some(&run_id) {
-                        return Ok(None);
+                    if active.run_id().as_deref() == Some(&run_id) {
+                        return Ok(());
                     }
                 }
-                Some(Command::End) | None => return Ok(None),
+                Some(Command::End) | None => return Ok(()),
             }
         }
+    };
+    let mut ready = false;
+    let mut running = None;
+    if let Some((run_id, text)) = first {
+        announce(&mut ready, &events, &run_id).await;
+        running = Some(start_prompt(&active, &mut session, run_id, text)?);
+    }
+    let terminated = cx.terminated();
+    tokio::pin!(terminated);
+    loop {
+        tokio::select! {
+            _ = &mut terminated => {
+                // Leave the run bound: `Closed` reports it and settles Failed.
+                return Ok(());
+            }
+            update = session.read_update() => match update? {
+                SessionMessage::Message(dispatch) => {
+                    route(dispatch, &events, &work_id, running.as_mut()).await?;
+                }
+                SessionMessage::PromptResponse(result) => {
+                    let Some(finished) = running.take() else {
+                        continue;
+                    };
+                    active.finish();
+                    let run_id = finished.run_id.clone();
+                    let outcome = finished.outcome(result);
+                    let _ = events
+                        .send(AcpEvent::Finished { run_id, outcome })
+                        .await;
+                }
+                _ => {}
+            },
+            command = commands.recv() => match command {
+                Some(Command::Prompt { run_id, text }) if running.is_none() => {
+                    announce(&mut ready, &events, &run_id).await;
+                    running = Some(start_prompt(&active, &mut session, run_id, text)?);
+                }
+                Some(Command::Cancel { run_id }) => {
+                    if running
+                        .as_ref()
+                        .is_some_and(|running| running.run_id == run_id)
+                    {
+                        session.connection().send_notification(CancelNotification::new(
+                            session.session_id().clone(),
+                        ))?;
+                    }
+                }
+                Some(Command::Prompt { .. }) => {}
+                Some(Command::End) | None => return Ok(()),
+            }
+        }
+    }
+}
+
+fn start_prompt(
+    active: &ActiveRun,
+    session: &mut ActiveSession<'static, Agent>,
+    run_id: String,
+    text: String,
+) -> Result<Running, agent_client_protocol::Error> {
+    active.begin(&run_id);
+    session.send_prompt(text)?;
+    Ok(Running {
+        run_id,
+        summary: String::new(),
+    })
+}
+
+/// Routes one session message. Text chunks become progress reports; a
+/// permission request is refused because Alpha has no approval UI, and
+/// refusing is the only answer that neither approves an unseen operation nor
+/// leaves the agent waiting.
+async fn route(
+    dispatch: agent_client_protocol::v1::Dispatch,
+    events: &mpsc::Sender<AcpEvent>,
+    work_id: &str,
+    running: Option<&mut Running>,
+) -> Result<(), agent_client_protocol::Error> {
+    MatchDispatch::new(dispatch.into_raw())
+        .if_notification(async |notification: SessionNotification| {
+            if let (Some((text, is_message)), Some(running)) =
+                (update_text(&notification.update), running)
+            {
+                if is_message {
+                    running.append(&text);
+                }
+                // Progress is best effort and already rate-limited before it
+                // reaches the parent. Dropping an overflowing report keeps the
+                // session's own unbounded stream drained instead of letting a
+                // chatty child grow host memory through it.
+                let _ = events.try_send(AcpEvent::Update {
+                    work_id: work_id.to_owned(),
+                    run_id: running.run_id.clone(),
+                    text,
+                });
+            }
+            Ok(())
+        })
+        .await
+        .if_request(async |_request: RequestPermissionRequest, responder| {
+            responder.respond(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ))
+        })
+        .await
+        .otherwise_ignore()
+}
+
+/// One prompt turn in flight: which run it serves and the completion report
+/// assembled from its message chunks.
+struct Running {
+    run_id: String,
+    summary: String,
+}
+
+impl Running {
+    /// Keeps the report bounded: a child that streams without end must not grow
+    /// the host's memory through its report.
+    fn append(&mut self, text: &str) {
+        if self.summary.chars().count() < 8_000 {
+            self.summary.push_str(text);
+        }
+    }
+
+    fn outcome(self, result: Result<PromptResponse, agent_client_protocol::Error>) -> TurnOutcome {
+        match result {
+            Ok(response) => match response.stop_reason {
+                StopReason::EndTurn => {
+                    TurnOutcome::Answered(Message::assistant(if self.summary.trim().is_empty() {
+                        "作業が完了しました".to_owned()
+                    } else {
+                        self.summary.trim().to_owned()
+                    }))
+                }
+                StopReason::Cancelled => {
+                    TurnOutcome::Stopped(Some("the ACP agent cancelled the prompt".to_owned()))
+                }
+                other => {
+                    TurnOutcome::Failed(format!("the ACP agent stopped the prompt: {other:?}"))
+                }
+            },
+            Err(error) => TurnOutcome::Failed(format!("the ACP prompt failed: {error}")),
+        }
+    }
+}
+
+/// The run a connection is serving, for the one report its owner must make
+/// after the session loop is gone. The loop is the only writer.
+#[derive(Default)]
+struct ActiveRun {
+    run_id: Mutex<Option<String>>,
+}
+
+impl ActiveRun {
+    fn begin(&self, run_id: &str) {
+        *crate::host::lock(&self.run_id) = Some(run_id.to_owned());
+    }
+
+    fn run_id(&self) -> Option<String> {
+        crate::host::lock(&self.run_id).clone()
+    }
+
+    fn finish(&self) {
+        *crate::host::lock(&self.run_id) = None;
     }
 }
 
@@ -643,104 +727,6 @@ async fn announce(ready: &mut bool, events: &mpsc::Sender<AcpEvent>, run_id: &st
                 run_id: run_id.to_owned(),
             })
             .await;
-    }
-}
-
-async fn serve(
-    cx: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    run_id: String,
-    text: String,
-    events: &mpsc::Sender<AcpEvent>,
-    shared: &SharedRun,
-    commands: &mut mpsc::Receiver<Command>,
-) -> Result<(), agent_client_protocol::Error> {
-    shared.begin(&run_id);
-    let request = PromptRequest::new(
-        session_id.clone(),
-        vec![ContentBlock::Text(TextContent::new(text))],
-    );
-    let prompt = cx.send_request(request).block_task();
-    tokio::pin!(prompt);
-    let terminated = cx.terminated();
-    tokio::pin!(terminated);
-    loop {
-        tokio::select! {
-            _ = &mut terminated => {
-                // Leave the run bound: `Closed` reports it and settles Failed.
-                return Ok(());
-            }
-            result = &mut prompt => {
-                let summary = shared.finish();
-                let outcome = match result {
-                    Ok(response) => match response.stop_reason {
-                        StopReason::EndTurn => TurnOutcome::Answered(Message::assistant(
-                            if summary.trim().is_empty() {
-                                "作業が完了しました".to_owned()
-                            } else {
-                                summary
-                            },
-                        )),
-                        StopReason::Cancelled => TurnOutcome::Stopped(Some(
-                            "the ACP agent cancelled the prompt".to_owned(),
-                        )),
-                        other => TurnOutcome::Failed(format!(
-                            "the ACP agent stopped the prompt: {other:?}"
-                        )),
-                    },
-                    Err(error) => TurnOutcome::Failed(format!("the ACP prompt failed: {error}")),
-                };
-                let _ = events
-                    .send(AcpEvent::Finished { run_id, outcome })
-                    .await;
-                return Ok(());
-            }
-            command = commands.recv() => {
-                match command {
-                    Some(Command::Cancel { run_id: target }) if target == run_id => {
-                        cx.send_notification(CancelNotification::new(session_id.clone()))?;
-                    }
-                    Some(Command::Cancel { .. } | Command::Prompt { .. }) => {}
-                    Some(Command::End) | None => return Ok(()),
-                }
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-struct SharedRun {
-    state: Mutex<RunSlot>,
-}
-
-#[derive(Default)]
-struct RunSlot {
-    run_id: Option<String>,
-    summary: String,
-}
-
-impl SharedRun {
-    fn begin(&self, run_id: &str) {
-        let mut slot = crate::host::lock(&self.state);
-        slot.run_id = Some(run_id.to_owned());
-        slot.summary.clear();
-    }
-
-    fn run_id(&self) -> Option<String> {
-        crate::host::lock(&self.state).run_id.clone()
-    }
-
-    fn append(&self, text: &str) {
-        let mut slot = crate::host::lock(&self.state);
-        if slot.summary.chars().count() < 8_000 {
-            slot.summary.push_str(text);
-        }
-    }
-
-    fn finish(&self) -> String {
-        let mut slot = crate::host::lock(&self.state);
-        slot.run_id = None;
-        std::mem::take(&mut slot.summary).trim().to_owned()
     }
 }
 
@@ -1573,11 +1559,14 @@ mod tests {
             let (read, write) = client.into_split();
             let (commands, receiver) = mpsc::channel(COMMANDS);
             let (events, mut received) = mpsc::channel(QUEUE);
-            let shared = Arc::new(SharedRun::default());
-            shared.begin("first");
+            let active = Arc::new(ActiveRun::default());
+            active.begin("first");
             let session = tokio::spawn(Client.v1().connect_with(
                 ByteStreams::new(write.compat_write(), read.compat()),
-                async move |cx| session_loop(cx, PathBuf::from("/tmp"), events, shared, receiver).await,
+                async move |cx| {
+                    session_loop(cx, PathBuf::from("/tmp"), events, "w1".to_owned(), active, receiver)
+                        .await
+                },
             ));
             commands.send(Command::Prompt { run_id: "first".into(), text: "wait for cancellation".into() }).await.unwrap();
             first_prompt.await.unwrap();
@@ -1863,9 +1852,9 @@ mod session_tests {
         Agent, Channel, on_receive_notification, on_receive_request,
         v1::schema::{
             ContentChunk, InitializeRequest, InitializeResponse, NewSessionRequest,
-            NewSessionResponse, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-            SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallUpdate,
-            ToolCallUpdateFields,
+            NewSessionResponse, PromptRequest, PromptResponse, RequestPermissionOutcome,
+            RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, TextContent,
+            ToolCallUpdate, ToolCallUpdateFields,
         },
     };
     use std::sync::Arc;
@@ -1894,14 +1883,14 @@ mod session_tests {
         transport: Channel,
         commands: mpsc::Receiver<Command>,
         events: mpsc::Sender<AcpEvent>,
-        shared: Arc<SharedRun>,
+        active: Arc<ActiveRun>,
     ) -> Option<String> {
         connect(
             transport,
             PathBuf::from("."),
             events,
             "w1".to_owned(),
-            shared,
+            active,
             commands,
         )
         .await
@@ -2066,9 +2055,9 @@ mod session_tests {
         let (sender, receiver) = commands();
         prompt(&sender, "run-1", "do it").await;
         let (events, receiver_events) = mpsc::channel(16);
-        let shared = Arc::new(SharedRun::default());
-        shared.begin("run-1");
-        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&shared)));
+        let active = Arc::new(ActiveRun::default());
+        active.begin("run-1");
+        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&active)));
 
         let mut events = Events::new(receiver_events);
         events.started().await;
@@ -2137,9 +2126,9 @@ mod session_tests {
         );
         let (sender, receiver) = commands();
         let (events, receiver_events) = mpsc::channel(16);
-        let shared = Arc::new(SharedRun::default());
-        shared.begin("run-1");
-        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&shared)));
+        let active = Arc::new(ActiveRun::default());
+        active.begin("run-1");
+        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&active)));
 
         let mut events = Events::new(receiver_events);
         prompt(&sender, "run-1", "first").await;
@@ -2207,9 +2196,9 @@ mod session_tests {
         );
         let (sender, receiver) = commands();
         let (events, receiver_events) = mpsc::channel(16);
-        let shared = Arc::new(SharedRun::default());
-        shared.begin("run-1");
-        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&shared)));
+        let active = Arc::new(ActiveRun::default());
+        active.begin("run-1");
+        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&active)));
 
         let mut events = Events::new(receiver_events);
         prompt(&sender, "run-1", "touch a file").await;
@@ -2275,9 +2264,9 @@ mod session_tests {
         );
         let (sender, receiver) = commands();
         let (events, receiver_events) = mpsc::channel(16);
-        let shared = Arc::new(SharedRun::default());
-        shared.begin("run-1");
-        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&shared)));
+        let active = Arc::new(ActiveRun::default());
+        active.begin("run-1");
+        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&active)));
 
         let mut events = Events::new(receiver_events);
         prompt(&sender, "run-1", "long task").await;
@@ -2329,9 +2318,9 @@ mod session_tests {
         );
         let (sender, receiver) = commands();
         let (events, receiver_events) = mpsc::channel(16);
-        let shared = Arc::new(SharedRun::default());
-        shared.begin("run-1");
-        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&shared)));
+        let active = Arc::new(ActiveRun::default());
+        active.begin("run-1");
+        let host = tokio::spawn(host(client, receiver, events, Arc::clone(&active)));
 
         let mut events = Events::new(receiver_events);
         prompt(&sender, "run-1", "fail").await;
