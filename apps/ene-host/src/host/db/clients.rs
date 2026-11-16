@@ -1,8 +1,9 @@
 //! Clients, their declared capabilities, activation generations and bound
 //! device operations.
 use super::{Result, Store, enum_name_column, json_column, now, optional_json_column, to_json};
-use crate::host::client::{Activation, CapabilitySpec, Client, DeviceOperation, DeviceStatus};
+use crate::host::client::{CapabilitySpec, Client, DeviceOperation, DeviceStatus};
 use crate::host::error::{Failure, HostError};
+use ene_rpc::Activation;
 use rusqlite::{OptionalExtension, Row, params};
 fn row_to_client(row: &Row<'_>) -> rusqlite::Result<Client> {
     Ok(Client {
@@ -31,6 +32,7 @@ fn row_to_activation(row: &Row<'_>) -> rusqlite::Result<Activation> {
         companion_id: row.get(0)?,
         client_id: row.get(1)?,
         revision: row.get::<_, u64>(2)?,
+        ..Default::default()
     })
 }
 

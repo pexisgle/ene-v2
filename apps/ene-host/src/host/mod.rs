@@ -498,7 +498,7 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
             .iter()
             .map(wire::policy_rule)
             .collect(),
-        activations: activations.iter().map(wire::activation).collect(),
+        activations,
         ..Default::default()
     })
 }

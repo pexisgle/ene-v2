@@ -198,14 +198,6 @@ impl Client {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Activation {
-    pub(crate) companion_id: String,
-    pub(crate) client_id: Option<String>,
-    /// The generation that binds audio, perception and device operations.
-    pub(crate) revision: u64,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeviceStatus {
@@ -599,9 +591,9 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     world.resource_mut::<Notifier>().push(
         Some(&request.companion_id),
         None,
-        w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
+        w::notification::Event::ActivationUpdated(Box::new(activation.clone())),
     );
-    Ok(wire::activation(&activation))
+    Ok(activation)
 }
 
 /// Projects a perception event into the companion's dynamic tail. A stale

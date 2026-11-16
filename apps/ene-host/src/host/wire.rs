@@ -1,8 +1,6 @@
 //! The one boundary between stored domain values and the proto contract.
 use super::{
-    client::{
-        Activation, CapabilityApproval, CapabilitySpec, Client, DeviceOperation, DeviceStatus,
-    },
+    client::{CapabilityApproval, CapabilitySpec, Client, DeviceOperation, DeviceStatus},
     error::{Failure, HostError},
     json::JsonDoc,
     mind::memory::Memory,
@@ -379,8 +377,6 @@ pub(crate) fn client(value: &Client, connected: bool, active: Vec<String>) -> w:
         ..Default::default()
     }
 }
-
-wire_copy!(activation, Activation => w::Activation { companion_id, client_id, revision });
 
 wire_enum!(work_status: WorkStatus => w::WorkStatus {
     Idle, Active, Closed
