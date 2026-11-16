@@ -1534,6 +1534,13 @@ mod tests {
             "the grace ({FORCE_GRACE:?}) must outlast the ACP kill timeout ({:?})",
             acp::KILL_TIMEOUT
         );
+        #[cfg(unix)]
+        assert!(
+            FORCE_GRACE > acp::TERM_GRACE + acp::KILL_TIMEOUT,
+            "the grace ({FORCE_GRACE:?}) must outlast the ACP ask ({:?}) plus kill timeout ({:?})",
+            acp::TERM_GRACE,
+            acp::KILL_TIMEOUT
+        );
         let mut runs = Runs::default();
         runs.begin("run-a");
         let now = Instant::now();

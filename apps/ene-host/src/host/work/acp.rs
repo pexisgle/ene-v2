@@ -53,12 +53,15 @@ const QUEUE: usize = 256;
 /// that it could not be delivered.
 const COMMANDS: usize = 64;
 
-/// How long the child gets to exit after `SIGTERM` before it is killed.
-const TERM_GRACE: Duration = Duration::from_secs(2);
+/// How long the child gets to exit after `SIGTERM` before it is killed. Only
+/// the Unix stop asks first; other targets kill directly.
+#[cfg(unix)]
+pub(super) const TERM_GRACE: Duration = Duration::from_secs(2);
 
 /// Longest a forced kill may take to be reaped; `work::FORCE_GRACE` is the
-/// wait that must outlast [`TERM_GRACE`] plus this before a stop counts as
-/// unconfirmed.
+/// wait that must outlast the whole stop before a stop counts as
+/// unconfirmed. On Unix that is `TERM_GRACE` plus this; elsewhere it is this
+/// alone.
 pub(super) const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) enum AcpEvent {
@@ -759,10 +762,11 @@ async fn observe_exit(child: &mut Box<dyn ChildWrapper>) -> std::io::Result<Stri
 ///
 /// The child leads its own process group (see [`command_wrap`]), and
 /// `ChildWrapper::signal` delivers to that whole group, so a wrapper launcher
-/// cannot leave the real agent behind. `SIGTERM` first gives the agent its
-/// documented chance to flush and exit; whatever is still running after
-/// [`TERM_GRACE`] is killed. `timeout` is the budget for the kill that
-/// follows, so the caller's own grace must outlast `TERM_GRACE + timeout`.
+/// cannot leave the real agent behind. On Unix `SIGTERM` first gives the agent
+/// its documented chance to flush and exit, and whatever is still running
+/// after `TERM_GRACE` is killed; other targets have no such signal and kill
+/// directly. `timeout` is the budget for the kill that follows, so the
+/// caller's own grace must outlast the whole stop.
 async fn terminate(child: &mut Box<dyn ChildWrapper>, timeout: Duration) -> (bool, Vec<u32>) {
     let pids: Vec<u32> = child.id().into_iter().collect();
     #[cfg(unix)]
