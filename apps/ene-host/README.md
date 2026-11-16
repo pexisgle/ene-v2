@@ -39,12 +39,29 @@ cargo run --locked -p ene-host
 - **承認ゲート**: `Stage::Gate`（排他システム）で、ホスト管理ツール以外の端末操作をクライアント世代に束縛し、ポリシーと能力宣言（`AUTO` / `CONFIRM` / 未指定）から `ApprovalRequest` を作るか拒否します。保留は `HoldOf` で表現し、`SettingsService.SubmitApproval` が `Approved` マーカーを付けて解放します。要求の引数ハッシュが変わっていれば承認は失効します。
 - **クライアント能力**: `RegisterClient` / `SetCapabilities` の宣言（能力名・JSON Schema・プリセット・ツール名・承認要否・承認対象テンプレート）を検証し、ホストが許可を決めます。`tool_name` を持つ許可済み能力だけが `world.spawn_tool` で親エージェント向けのツールとして動的に登録され、能力変更・有効化の変更・切断に追随して入れ替わります。`tool_name` のない能力は汎用 `device_request` からのみ呼べます。入力・出力スキーマは `jsonschema` で検証し、承認ハッシュは RFC 8785 の canonical JSON で計算します。能力の許可は操作単位の承認を省略しません。
 - **端末操作**: `ClientService.DeviceStream` 上の `DeviceOperation` として配送します。対象端末はモデルが指定せず、親は受付時のアクティブクライアント、手は `StartWork` 時に保存した `client_id` と `activation_revision` に束縛します。受付後に移動した場合は `client_moved` で失敗させ、旧世代の結果・知覚・承認は破棄します。切断では未応答の操作を `uncertain` とし、再接続時に未配送分だけ再送します。
-- **作業（手）**: `WorkSession`（文脈）と `Run`（1実行）を分け、`RunInfo` は `RunStatus` と `pending_request_id` / `cancellation_*` / `unverified_pids` を返します。WorkSessionごとに1つのエージェントを維持し、複数Runで会話文脈を共有します。内蔵Rigまたは外部ACP（`agent-client-protocol` + `process-wrap`）をバックエンドにでき、`report` ツール（activity / message / question / completed / failed）で質問は `pending_inquiries` と `AnswerInquiry` で解決し、完了・失敗は一人称の報告として親へ配送します。90秒の進捗途絶を1回だけ親へ通知し、`StopWork` は `Cancelling` で協調停止・30秒で強制終了し、`Cancelled` と `CancellationUnconfirmed` を区別します。Linuxで `bwrap` があればACP子プロセスを読み取り専用ルート＋専用の`/tmp`＋PID名前空間で起動し、環境変数はallowlistだけを渡します。ネットワークは既定でホストと共有し、接続オプションで `network` を `host` か `isolated` に明示した場合だけ切り替え、未知の値や不正なJSONは起動エラーにします。`isolated` ではホストが unix ソケット上に HTTP CONNECT プロキシを立ててサンドボックスへ bind し、同じバイナリを `acp-relay` モードで名前空間内に置きます。リレーはループバックで受け、`HTTPS_PROXY` 経由の接続だけをソケットへ流すので、この変数を無視するクライアントは経路を持ちません。ソケットはシステムの一時ディレクトリに置き、長すぎる場合は起動エラーにします（`TMPDIR`を短い場所にしてください）。`bwrap` がない場合は起動せず、接続オプションで明示的に `{"sandbox":"none"}` を選んだ場合だけ非隔離で実行します。
+- **作業（手）**: `WorkSession`（文脈）と `Run`（1実行）を分け、`RunInfo` は `RunStatus` と `pending_request_id` / `cancellation_*` / `unverified_pids` を返します。WorkSessionごとに1つのエージェントを維持し、複数Runで会話文脈を共有します。内蔵Rigまたは外部ACP（`agent-client-protocol` + `process-wrap`）をバックエンドにでき、`report` ツール（activity / message / question / completed / failed）で質問は `pending_inquiries` と `AnswerInquiry` で解決し、完了・失敗は一人称の報告として親へ配送します。90秒の進捗途絶を1回だけ親へ通知し、`StopWork` は `Cancelling` で協調停止・30秒で強制終了し、`Cancelled` と `CancellationUnconfirmed` を区別します。Linuxで `bwrap` があればACP子プロセスを読み取り専用ルート＋専用の`/tmp`＋PID名前空間で起動し、環境変数はallowlistだけを渡します。ネットワークは既定でホストと共有し、接続オプションで `network` を `host` か `isolated` に明示した場合だけ切り替え、未知の値や不正なJSONは起動エラーにします。`isolated` ではホストが unix ソケット上に HTTP CONNECT プロキシを立ててサンドボックスへ bind し、同じバイナリを `acp-relay` モードで名前空間内に置きます。リレーはループバックで受け、`HTTPS_PROXY` 経由の接続だけをソケットへ流すので、この変数を無視するクライアントは経路を持ちません。ソケットはシステムの一時ディレクトリに置き、長すぎる場合は起動エラーにします（`TMPDIR`を短い場所にしてください）。`bwrap` がない場合は非隔離で起動し、隔離不足を通知します。接続オプションの `{"sandbox":"none"}` も明示的な非隔離起動です。
 - **心と記憶**: SQLite（WAL、`busy_timeout=5000`、`synchronous=NORMAL`）に保存します。FTS5 trigram（3文字未満はLIKE）とEmbedding接続によるベクトル検索をRRF（k=60）で融合し、`CompactVectorIndex` でBLOBの再読込を避けます。並び順は `Score = min(1, Importance/0.3) * (0.5*Relevance + 0.3*Importance + 0.2*Recency)` です。忘却は `importance` の引き下げであり、削除や除外フラグではありません。`mind_read` などの明示利用だけが `last_accessed_at` を更新します（引用ガード）。増分Consolidationは単一フライトとカーソル一致コミットで二重処理を防ぎ、`mind_update` は追加・訂正・忘却・`supersedes` を単一トランザクションで適用します。ユーザープロファイルは動的文脈へ注入します。埋め込み・整理のエンドポイントは、loopback以外の平文HTTPやプライベート/リンクローカルIPを拒否します。
 - **設定と接続**: `Connection` は共通ヘッダー（name / enabled / kind / revision / last_check）と種別ごとの config（LLM / TTS / STT / Embedding / MCP / ACP）を持ちます。LLMはrig-coreのカタログからモデル仕様を引き、`ConnectOptions` で資格情報・base URL・HTTPクライアントを渡してエージェントの `Connection` を組み立てます。資格情報はOSキーリング（`ENE_HOST_SESSION_CREDENTIALS` でメモリのみ）に保存し、読み出しAPIは状態だけを返します。
 - **知覚（目）**: `ClientService.ReportPerception` を受信し、アクティブウィンドウ・活動状態・クライアント要約を短い要約にして動的文脈へ渡します。古い `activation_revision` のイベントは破棄します。`set_eye_watch` は `eye.watch` を宣言・許可されたアクティブクライアントがあるときだけ公開され、ルールは解釈せず `DeviceOperation` として配送します。
 - **通知**: 1つのアウトボックスに溜め、フレームごとに起動epochと連番カーソルを付けて配信します。直近512件はカーソル再開用に保持し、`SubscribeRequest.cursor` が同epochで途切れなく続く場合は差分を再送、それ以外は `initial_state` に戻します。`client_id` 宛ての通知は他の購読者へ流しません。取りこぼしでは `resync_required` を送り、保存済み状態が正本です。
 - **音声**: TTS/STT接続が設定されていれば `VoiceService` を提供します。`Stage::Review` の文字片を文単位（`。！？\n`）で切り出して先行合成し、`generation_id`・`sequence_no`・`SentenceSkipped`・`UtteranceFinished` と `ReportPlaybackStatus` の二段階完了、Flushと端末移動時の失効を実装します。WAVは `hound`、24kHz以外のTTS音声の変換は `rubato` に委譲します。最初のマイクフレームで未決承認を1件だけ`request_id`に束縛し、確定した音声の肯定/否定で回答します（曖昧・失効・世代移動は破棄）。音声認識の`transcription_id`単位で`start_work`を原子的に調停し、再生完了の掛け合いはユーザー入力なしで5回までに制限します。接続がなければ各RPCは明示的な `unimplemented` を返します。
+
+## ACPのネットワーク分離
+
+`network: isolated` では、ACP接続の `endpoint.endpoint` または `endpoint.options` の `model_endpoints` 配列に、許可するモデルURLを明示します。エージェント独自の引数や環境変数から許可先を推測しません。既存のエージェント設定は維持し、その接続先をこの許可設定にも記載してください。
+
+```json
+{
+  "network": "isolated",
+  "model_endpoints": ["http://127.0.0.1:11434"]
+}
+```
+
+許可はホスト名とポートの組です。ローカルモデル、独自ポート、IPv6も明示的に許可できます。同じホストの別ポートや、名前解決結果が同じ別名には広がりません。起動時に非同期で名前解決し、そのセッションは固定した数値アドレスだけへ接続します。設定変更は次の起動で反映します。
+
+プロキシはCONNECTと通常のHTTP転送を扱い、要求と応答の本文をストリーミングします。許可先が空、不正、名前解決不能、またはブリッジが起動不能な場合、隔離起動は失敗します。ホストネットワークへの自動降格はしません。`network: host`、`sandbox: none`、`bwrap` 不在時の通知付き非隔離起動は従来どおりです。
+
+CONNECTで保証するのはTCP接続先です。TLS内部のSNI、HTTPパス、モデルIDは検査しません。最初のDNS応答の真正性も保証しません。資格情報はエージェントへ明示的に設定し、ホストのキーリングから自動転送しません。
 
 ## 内部構成
 
@@ -82,7 +99,7 @@ cargo run --locked -p ene-host
 
 ## 現時点で実装していないもの
 
-- Wasmプラグイン（Phase 2）とスキルファイル（`SKILL.md`）は未実装です。MCPサーバーのツール登録は `rig-rmcp` と `McpPlugin` で実装しています。
+- スキルファイル（`SKILL.md`）は未実装です。Wasmプロバイダーはホストへ組み込み済みで、`ene-plugin-runtime` のExtism実行基盤を使用します。MCPサーバーのツール登録は `rig-rmcp` と `ToolServerHandle` を使用します。
 - ハートビートTickは一時エージェントを使わず、保存済み会話＋`ene.summary`＋動的文脈から直接1回のモデル呼び出しとして実行します。発話がないTick・`noop`・ツール呼び出しだけのTickはログへ残しません（Tick中はツールを実行しません）。昇格時は対象コンパニオンに実行中ターンがなく、会話長が開始時から変わっていないことを再確認します。スケジュール発火は`Queue`で親へ直接注入し、`cron_expr`/`run_at`はホストのローカル時刻で評価して`next_run_at`を保持します。
 - 知覚の優先割り込みによる親ターンの自動起床と、AEC参照信号を用いる自動Barge-inは未実装です（音声承認はキーワード判定、Barge-inは明示操作のみ）。
 - クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます。同名ツールは宣言（説明・入力スキーマ）が一致する限り1つの定義を複数コンパニオンで共有し、一致しない宣言は暗黙に切り捨てず明示的な競合エラーにします。親エージェントには組み込みツールと自分のアクティブクライアントが許可した能力ツールだけを公開し、作業エージェント（手）は `report` と `device_request` だけを使えます。

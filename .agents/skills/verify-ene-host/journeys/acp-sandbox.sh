@@ -42,7 +42,7 @@ done
 
 rpc() { ENE_HOST_CONNECTION=$run/cwd/runtime/connection.json python3 "$connect" rpc "$1" "$2" 2>/dev/null; }
 
-rpc ene.host.v1.SettingsService/UpdateSettings "{\"expectedRevision\":\"1\",\"connections\":[{\"id\":\"acp\",\"name\":\"acp\",\"enabled\":true,\"expectedRevision\":\"0\",\"kind\":\"CONNECTION_KIND_ACP\",\"config\":{\"acp\":{\"command\":\"$run/cwd/report.sh\",\"args\":[],\"endpoint\":{\"adapter\":\"acp\",\"options\":\"{\\\"network\\\":\\\"isolated\\\"}\"}}}}]}" >/dev/null
+rpc ene.host.v1.SettingsService/UpdateSettings "{\"expectedRevision\":\"1\",\"connections\":[{\"id\":\"acp\",\"name\":\"acp\",\"enabled\":true,\"expectedRevision\":\"0\",\"kind\":\"CONNECTION_KIND_ACP\",\"config\":{\"acp\":{\"command\":\"$run/cwd/report.sh\",\"args\":[],\"endpoint\":{\"adapter\":\"acp\",\"endpoint\":\"https://example.com\",\"options\":\"{\\\"network\\\":\\\"isolated\\\",\\\"model_endpoints\\\":[\\\"http://example.com\\\"]}\"}}}}]}" >/dev/null
 companion=$(rpc ene.host.v1.HostService/CreateCompanion '{"name":"Mio","mind":"kind","assignments":{"companion":{"connectionId":"acp","modelId":"acp"},"task":{"connectionId":"acp","modelId":"acp"}}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 echo "companion: $companion"
 start=$(rpc ene.host.v1.WorkService/StartWork "{\"companionId\":\"$companion\",\"title\":\"sandbox\",\"instruction\":\"write the report\",\"clientId\":\"\"}")
