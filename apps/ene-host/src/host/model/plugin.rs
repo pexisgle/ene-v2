@@ -69,6 +69,7 @@ type Invocation = Pin<Box<dyn Future<Output = Result<serde_json::Value, HostErro
 struct Exchange {
     invocation: Invocation,
     events: mpsc::Receiver<PluginEvent>,
+    provider: Arc<Running>,
     broker: Arc<HttpBroker>,
     handles: Vec<String>,
     status: Option<StatusCode>,
@@ -76,6 +77,8 @@ struct Exchange {
     pending: VecDeque<Bytes>,
     done: bool,
     invocation_done: bool,
+    completed: bool,
+    failed: bool,
 }
 
 impl Exchange {
@@ -119,6 +122,16 @@ impl Exchange {
     }
 
     async fn next(&mut self) -> Result<Option<Bytes>, HttpError> {
+        let result = self.next_inner().await;
+        match &result {
+            Ok(None) => self.completed = true,
+            Err(_) => self.failed = true,
+            Ok(Some(_)) => {}
+        }
+        result
+    }
+
+    async fn next_inner(&mut self) -> Result<Option<Bytes>, HttpError> {
         loop {
             if let Some(bytes) = self.pending.pop_front() {
                 return Ok(Some(bytes));
@@ -169,17 +182,23 @@ impl Exchange {
                 None => break,
             }
         }
-        let status = self
-            .status
-            .ok_or_else(|| protocol("the plugin sent no response line"))?;
+        let Some(status) = self.status else {
+            self.failed = true;
+            return Err(protocol("the plugin sent no response line"));
+        };
         Ok((status, self.headers.take().unwrap_or_default()))
     }
 }
 
 impl Drop for Exchange {
     /// Dropping the reply cancels the Extism call and closes any broker handle
-    /// it opened. The operation is never retried by this path.
+    /// it opened. The operation is never retried by this path. Only a drop
+    /// before a terminal reply or an error marks the provider for reload; a
+    /// failed call keeps the old policy.
     fn drop(&mut self) {
+        if !self.completed && !self.failed {
+            self.provider.note_cancelled();
+        }
         for handle in &self.handles {
             let _ = self.broker.close(handle);
         }
@@ -226,6 +245,7 @@ impl GuestClient {
         Ok(Exchange {
             invocation,
             events,
+            provider: Arc::clone(&self.provider),
             broker: Arc::clone(&self.broker),
             handles: Vec::new(),
             status: None,
@@ -233,6 +253,8 @@ impl GuestClient {
             pending: VecDeque::new(),
             done: false,
             invocation_done: false,
+            completed: false,
+            failed: false,
         })
     }
 }
@@ -252,6 +274,9 @@ impl HttpClientExt for GuestClient {
         async move {
             let mut exchange = exchange?;
             let (status, headers) = exchange.start().await?;
+            if !status.is_success() {
+                exchange.failed = true;
+            }
             let mut body = Vec::new();
             while let Some(bytes) = exchange.next().await? {
                 body.extend_from_slice(&bytes);
@@ -288,6 +313,9 @@ impl HttpClientExt for GuestClient {
         async move {
             let mut exchange = exchange?;
             let (status, headers) = exchange.start().await?;
+            if !status.is_success() {
+                exchange.failed = true;
+            }
             let stream = async_stream::try_stream! {
                 while let Some(bytes) = exchange.next().await? {
                     yield bytes;

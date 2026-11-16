@@ -268,6 +268,31 @@ async fn serve(
                 .await;
             let _ = stream.write_all(b"data: [DONE]\n\n").await;
         }
+        "test-confirm-tool" => {
+            let arguments = r#"{"capability":"device.files","input":{"path":"/tmp/a"}}"#;
+            if streaming {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                    .await
+                    .unwrap();
+                let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-confirm-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_gate","type":"function","function":{"name":"device_request","arguments":arguments}}]},"finish_reason":"tool_calls"}]});
+                let _ = stream
+                    .write_all(format!("data: {chunk}\n\n").as_bytes())
+                    .await;
+                let _ = stream.write_all(b"data: [DONE]\n\n").await;
+            } else {
+                write_json(
+                    stream,
+                    200,
+                    &json!({
+                        "id":"1","object":"chat.completion","created":1,"model":"test-confirm-tool",
+                        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_gate","type":"function","function":{"name":"device_request","arguments":arguments}}]},"finish_reason":"tool_calls"}],
+                        "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+                    }),
+                )
+                .await;
+            }
+        }
         "test-invalid-tool" => {
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
@@ -381,7 +406,7 @@ impl HttpGrants for Recording {
     }
 }
 
-struct Harness {
+pub(crate) struct Harness {
     fixture: Fixture,
     _temp: TempDir,
     running: Arc<Running>,
@@ -389,7 +414,7 @@ struct Harness {
 }
 
 impl Harness {
-    async fn start(destinations: Option<Vec<String>>) -> Self {
+    pub(crate) async fn start(destinations: Option<Vec<String>>) -> Self {
         let fixture = Fixture::start().await;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("plugins").join("openrouter-test");
@@ -438,6 +463,20 @@ impl Harness {
             running,
             seen: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub(crate) async fn tool_call(&self, model: &str) -> rig_core::completion::message::ToolCall {
+        let completion = self.model(model).call(request()).await.unwrap();
+        completion
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                rig_core::completion::message::AssistantContent::ToolCall(call) => {
+                    Some(call.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no tool call from {model}"))
     }
 
     fn model(&self, model: &str) -> DynModel<Completion> {
@@ -584,6 +623,17 @@ async fn an_invalid_tool_call_is_refused_before_execution() {
     assert!(
         result.is_err(),
         "a tool call without a name must not reach execution"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_call_is_not_restarted_automatically() {
+    let harness = Harness::start(None).await;
+    assert!(harness.model("test-error").call(request()).await.is_err());
+    let after = harness.model("test-normal").call(request()).await;
+    assert!(
+        after.is_err(),
+        "a failure keeps the old policy: the next request is not served by a fresh instance"
     );
 }
 

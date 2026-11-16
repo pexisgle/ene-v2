@@ -30,7 +30,10 @@ type RunningMap = HashMap<(String, Extension), Arc<tokio::sync::OnceCell<Arc<Run
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -232,6 +235,10 @@ pub(crate) struct Running {
     package: Package,
     entrypoint: String,
     cancel: CancellationToken,
+    /// A caller dropped a call before it reported. The next request releases
+    /// the dead instance and reloads; a call that failed on its own keeps the
+    /// old policy and is not restarted automatically.
+    cancelled: AtomicBool,
 }
 
 impl Running {
@@ -262,6 +269,7 @@ impl Running {
             package,
             entrypoint,
             cancel,
+            cancelled: AtomicBool::new(false),
         })
     }
 
@@ -297,31 +305,32 @@ impl Running {
         events: tokio::sync::mpsc::Sender<ene_plugin::Event>,
     ) -> Result<serde_json::Value, HostError> {
         let mut slot = self.instance.lock().await;
-        if slot.as_ref().is_none_or(|instance| !instance.is_usable()) {
+        if self.cancelled.swap(false, Ordering::SeqCst)
+            && slot.as_ref().is_none_or(|instance| !instance.is_usable())
+        {
             // A dropped caller cancelled the previous call before it could
             // report, leaving the instance without its plugin. Drop it first,
-            // releasing its execution slot, then load a fresh one.
+            // releasing its execution slot, then load a fresh instance for the
+            // next, distinct request.
             *slot = None;
             *slot = Some(self.reload().await?);
         }
-        let instance = slot
-            .as_mut()
-            .ok_or_else(|| HostError::Unavailable(("the plugin is not loaded").into()))?;
-        let outcome = instance
+        let Some(instance) = slot.as_mut().filter(|instance| instance.is_usable()) else {
+            return Err(HostError::Unavailable(
+                ("the plugin is unavailable after a failed call; it is not restarted automatically")
+                    .into(),
+            ));
+        };
+        instance
             .invoke(operation, services, events, &self.cancel)
-            .await;
-        if outcome.is_err() {
-            // A cancelled or failed guest may be in an unknown state, and the
-            // instance holds one of the runtime's fixed execution slots. Drop
-            // it before loading a replacement so the slot is free even at the
-            // pool's limit. The failed operation is not replayed; reloading
-            // only restores capacity for the next, distinct request.
-            *slot = None;
-            if let Ok(fresh) = self.reload().await {
-                *slot = Some(fresh);
-            }
-        }
-        outcome.map_err(|error| HostError::Unavailable(format!("plugin call: {error}")))
+            .await
+            .map_err(|error| HostError::Unavailable(format!("plugin call: {error}")))
+    }
+
+    /// Notes that a caller dropped a call before it reported. The next request
+    /// reloads; the dropped operation itself is never replayed.
+    pub(crate) fn note_cancelled(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
     }
 
     async fn reload(&self) -> Result<Instance, HostError> {

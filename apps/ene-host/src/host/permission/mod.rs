@@ -321,11 +321,25 @@ mod tests {
 
 // === Gate =================================================================
 
+/// The most tool calls one model reply may ask for. The old plugin contract
+/// enforced this per reply; the gate is the first post-decode boundary where
+/// the reply's calls are visible together.
+const MAX_REPLY_TOOL_CALLS: usize = 64;
+/// The most bytes an id or name in a tool call may carry.
+const MAX_TOOL_IDENTIFIER_BYTES: usize = 256;
+
+fn within_tool_limits(id: &str, name: &str, reply_calls: usize) -> bool {
+    id.len() <= MAX_TOOL_IDENTIFIER_BYTES
+        && name.len() <= MAX_TOOL_IDENTIFIER_BYTES
+        && reply_calls <= MAX_REPLY_TOOL_CALLS
+}
+
 use super::client::Client;
 use super::db::Store;
 use super::notify::Notifier;
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use rig_core::effect::EffectId;
 use rig_ecs::prelude::*;
 use std::collections::HashMap;
 
@@ -369,18 +383,22 @@ impl Plugin for GatePlugin {
 /// Host-owned tools pass; device capabilities are resolved to a client,
 /// checked against the saved rules and, when needed, held for approval.
 fn gate(world: &mut World) {
-    let calls: Vec<(Entity, String, Value, Entity)> = {
-        let mut query =
-            world.query_filtered::<(Entity, &ToolRequest, &ForAgent), (ReadyToStart, ToolCalls)>();
+    let calls: Vec<(Entity, String, String, Value, Entity, Option<EffectId>)> = {
+        let mut query = world.query_filtered::<
+            (Entity, &ToolRequest, &ForAgent, Option<&Effect>),
+            (ReadyToStart, ToolCalls),
+        >();
         query
             .iter(world)
-            .filter(|(call, _, _)| world.get::<Approved>(*call).is_none())
-            .map(|(call, request, agent)| {
+            .filter(|(call, _, _, _)| world.get::<Approved>(*call).is_none())
+            .map(|(call, request, agent, effect)| {
                 (
                     call,
+                    request.call.id.wire().into_owned(),
                     request.call.function.name.as_str().to_owned(),
                     Value::Object(request.call.function.arguments.clone()),
                     agent.0,
+                    effect.and_then(|effect| effect.parent),
                 )
             })
             .collect()
@@ -388,10 +406,32 @@ fn gate(world: &mut World) {
     if calls.is_empty() {
         return;
     }
+    // Count the calls of each model reply. A reply spawns its calls together,
+    // so every call of the reply sees the same total in this pass.
+    let mut reply_calls: HashMap<EffectId, usize> = HashMap::new();
+    {
+        let mut spawned = world.query::<(&Effect, &ToolRequest)>();
+        for (effect, _) in spawned.iter(world) {
+            if let Some(parent) = effect.parent {
+                *reply_calls.entry(parent).or_default() += 1;
+            }
+        }
+    }
     let store = world.resource::<Store>().clone();
     let rules = store.policy_rules().unwrap_or_default();
     let host_tools = crate::host::mcp::tool_names(world);
-    for (call, tool_name, arguments, agent) in calls {
+    for (call, call_id, tool_name, arguments, agent, parent) in calls {
+        let asked = parent
+            .and_then(|parent| reply_calls.get(&parent).copied())
+            .unwrap_or(0);
+        if !within_tool_limits(&call_id, &tool_name, asked) {
+            refuse(
+                world,
+                call,
+                "a reply exceeded the tool-call count or identifier length limit",
+            );
+            continue;
+        }
         // Built-in host tools and the tools an MCP server contributed belong to
         // the host process; the operator configured them.
         if host_owned(&tool_name, &host_tools) {
@@ -799,4 +839,18 @@ pub(crate) fn invalidate_generation(
 /// sorting serializer of its own.
 fn canonical_json(value: &Value) -> String {
     serde_json_canonicalizer::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+#[cfg(test)]
+mod tool_limit_tests {
+    use super::*;
+
+    #[test]
+    fn the_old_reply_count_and_identifier_lengths_are_preserved() {
+        assert!(within_tool_limits("id", "lookup", 64));
+        assert!(!within_tool_limits("id", "lookup", 65));
+        assert!(within_tool_limits(&"i".repeat(256), &"n".repeat(256), 64));
+        assert!(!within_tool_limits(&"i".repeat(257), "lookup", 1));
+        assert!(!within_tool_limits("id", &"n".repeat(257), 1));
+    }
 }

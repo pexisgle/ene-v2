@@ -2,7 +2,7 @@
 //! agent runs on.
 mod plugin;
 #[cfg(test)]
-mod plugin_tests;
+pub(crate) mod plugin_tests;
 
 use super::db::{Result, Store};
 use super::error::HostError;

@@ -395,6 +395,180 @@ fn a_turn_is_accepted_once_and_answered() {
     );
 }
 
+#[tokio::test]
+async fn a_real_guest_tool_call_is_held_and_denied_by_the_gate() {
+    let plugin = super::model::plugin_tests::Harness::start(None).await;
+    let call = plugin.tool_call("test-confirm-tool").await;
+    let mut harness = Harness::new(Vec::<Vec<MockStreamEvent>>::new());
+    register(harness.app.world_mut(), "c1", files_capability());
+    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    let (_subscription, mut stream) = harness
+        .app
+        .world_mut()
+        .resource::<DeviceHub>()
+        .register("c1");
+    let agent = harness.companion_agent();
+    let call_entity = harness
+        .app
+        .world_mut()
+        .spawn((
+            rig_ecs::tools::ToolRequest { call },
+            rig_ecs::stage::Effect::default(),
+            rig_ecs::stage::ForAgent(agent),
+            rig_ecs::stage::Admitted,
+        ))
+        .id();
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .approvals(permission::ApprovalStatus::Pending)
+            .unwrap()
+            .is_empty()
+    });
+    assert!(
+        stream.try_recv().is_err(),
+        "nothing may be dispatched before approval"
+    );
+    let request = pending_approval(&mut harness);
+    let approval = permission::submit(
+        harness.app.world_mut(),
+        &request.request_id,
+        permission::ApprovalDecision::Deny,
+    )
+    .unwrap();
+    assert_eq!(approval.status, permission::ApprovalStatus::Denied);
+    harness.app.update();
+    assert!(
+        stream.try_recv().is_err(),
+        "a denied call must not be executed"
+    );
+    assert!(
+        harness
+            .app
+            .world()
+            .get::<rig_ecs::stage::Decision>(call_entity)
+            .is_some()
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_reply_over_the_call_count_limit() {
+    use rig_core::completion::message::{CallId, ToolCall, ToolFunction, ToolName};
+    use rig_ecs::stage::Decision;
+
+    let mut harness = Harness::new(Vec::<Vec<MockStreamEvent>>::new());
+    let agent = harness.companion_agent();
+    let parent = harness
+        .app
+        .world_mut()
+        .spawn(rig_ecs::stage::Effect::default())
+        .id();
+    let parent_id = harness
+        .app
+        .world()
+        .get::<rig_ecs::stage::Effect>(parent)
+        .unwrap()
+        .id();
+    let mut calls = Vec::new();
+    for index in 0..65 {
+        let call = ToolCall {
+            id: CallId::from_wire(format!("call-{index}")),
+            function: ToolFunction::new(
+                ToolName::new("device_request").unwrap(),
+                serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}}),
+            ),
+            native: None,
+        };
+        let entity = harness
+            .app
+            .world_mut()
+            .spawn((
+                rig_ecs::tools::ToolRequest { call },
+                rig_ecs::stage::Effect::with_parent_id(Some(parent_id)),
+                rig_ecs::stage::ForAgent(agent),
+                rig_ecs::stage::Admitted,
+            ))
+            .id();
+        calls.push(entity);
+    }
+    harness.app.update();
+    for call in calls {
+        let decision = harness
+            .app
+            .world()
+            .get::<Decision>(call)
+            .expect("the gate decided");
+        let report = decision.get().expect("a decision").0.as_ref().unwrap_err();
+        assert!(report.to_string().contains("tool-call count"), "{report}");
+    }
+    assert!(
+        harness
+            .store()
+            .approvals(permission::ApprovalStatus::Pending)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_gate_refuses_an_identifier_over_the_length_limit() {
+    use rig_core::completion::message::{CallId, ToolCall, ToolFunction, ToolName};
+    use rig_ecs::stage::Decision;
+
+    let mut harness = Harness::new(Vec::<Vec<MockStreamEvent>>::new());
+    let agent = harness.companion_agent();
+    let call = ToolCall {
+        id: CallId::from_wire("x".repeat(257)),
+        function: ToolFunction::new(
+            ToolName::new("device_request").unwrap(),
+            serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}}),
+        ),
+        native: None,
+    };
+    let call = harness
+        .app
+        .world_mut()
+        .spawn((
+            rig_ecs::tools::ToolRequest { call },
+            rig_ecs::stage::Effect::default(),
+            rig_ecs::stage::ForAgent(agent),
+            rig_ecs::stage::Admitted,
+        ))
+        .id();
+    harness.app.update();
+    let decision = harness
+        .app
+        .world()
+        .get::<Decision>(call)
+        .expect("the gate decided");
+    let report = decision.get().expect("a decision").0.as_ref().unwrap_err();
+    assert!(report.to_string().contains("identifier length"), "{report}");
+    assert!(
+        harness
+            .store()
+            .approvals(permission::ApprovalStatus::Pending)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_capability_tool_name_over_64_is_rejected_at_registration() {
+    let mut harness = Harness::new(Vec::<Vec<MockStreamEvent>>::new());
+    let result = client::register(
+        harness.app.world_mut(),
+        w::RegisterClientRequest {
+            id: "c1".into(),
+            name: "c1".into(),
+            platform: "linux".into(),
+            capabilities: vec!["device.files".into()],
+            capability_specs: vec![capability_tool("device.files", &"n".repeat(65))],
+            ..Default::default()
+        },
+    );
+    assert!(result.is_err());
+}
+
 #[test]
 fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     let mut harness = Harness::new([
