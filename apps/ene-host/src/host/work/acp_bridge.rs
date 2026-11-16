@@ -1,36 +1,46 @@
 //! The model proxy and loopback relay owned by one isolated ACP launch.
 
+#[cfg(unix)]
 use bytes::Bytes;
+#[cfg(unix)]
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
+#[cfg(unix)]
 use http_body_util::{BodyExt, Empty, combinators::UnsyncBoxBody};
+#[cfg(unix)]
 use hyper::{
     body::{Body, Incoming},
     service::service_fn,
 };
+#[cfg(unix)]
 use hyper_util::rt::{TokioIo, TokioTimer};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 use std::{
     ffi::OsString,
     io,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     process::Stdio,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
+#[cfg(unix)]
 use tokio::task::JoinSet;
 
 pub(crate) const RELAY_PORT: u16 = 3128;
 pub(crate) const PROXY_VARS: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
 const MAX_ORIGINS: usize = 32;
 const MAX_ADDRESSES: usize = 32;
+#[cfg(unix)]
 const MAX_CONNECTIONS: usize = 64;
+#[cfg(unix)]
 const MAX_HEAD: usize = 16 * 1024;
+#[cfg(unix)]
 const MAX_HEADERS: usize = 64;
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,7 +184,14 @@ impl ConfiguredOrigins {
                 }
                 pinned.push(PinnedOrigin { origin, addresses });
             }
-            Ok(PinnedOrigins(pinned))
+            #[cfg(unix)]
+            {
+                Ok(PinnedOrigins(pinned))
+            }
+            #[cfg(not(unix))]
+            {
+                Ok(PinnedOrigins)
+            }
         }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ACP model endpoint resolution timed out"))?
     }
 }
@@ -185,9 +202,15 @@ struct PinnedOrigin {
     addresses: Vec<SocketAddr>,
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct PinnedOrigins(Vec<PinnedOrigin>);
 
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub(crate) struct PinnedOrigins;
+
+#[cfg(unix)]
 impl PinnedOrigins {
     fn approved(&self, origin: &Origin, ordinary_http: bool) -> Option<&PinnedOrigin> {
         self.0
@@ -196,6 +219,7 @@ impl PinnedOrigins {
     }
 }
 
+#[cfg(unix)]
 impl PinnedOrigin {
     async fn dial(&self) -> io::Result<tokio::net::TcpStream> {
         tokio::time::timeout(DIAL_TIMEOUT, async {
@@ -291,10 +315,14 @@ pub(crate) fn open(
     ))
 }
 
+#[cfg(unix)]
 type ProxyBody = UnsyncBoxBody<Bytes, hyper::Error>;
+#[cfg(unix)]
 type Drivers = Arc<Mutex<JoinSet<()>>>;
+#[cfg(unix)]
 type Tunnel = (hyper::upgrade::OnUpgrade, tokio::net::TcpStream);
 
+#[cfg(unix)]
 fn response(status: StatusCode) -> Response<ProxyBody> {
     let mut response = Response::new(
         Empty::<Bytes>::new()
@@ -305,6 +333,7 @@ fn response(status: StatusCode) -> Response<ProxyBody> {
     response
 }
 
+#[cfg(unix)]
 fn authority(text: &str, default_scheme: Option<&str>) -> Option<Origin> {
     let parsed = text.parse::<http::uri::Authority>().ok()?;
     if parsed.as_str().contains('@') || parsed.host().is_empty() {
@@ -323,6 +352,7 @@ fn authority(text: &str, default_scheme: Option<&str>) -> Option<Origin> {
     Some(origin)
 }
 
+#[cfg(unix)]
 fn destination(request: &Request<Incoming>) -> Result<(Origin, bool), StatusCode> {
     let connect = request.method() == Method::CONNECT;
     let uri = request.uri();
@@ -375,6 +405,7 @@ fn destination(request: &Request<Incoming>) -> Result<(Origin, bool), StatusCode
     Ok((target, !connect))
 }
 
+#[cfg(unix)]
 const HOP_HEADERS: &[&str] = &[
     "connection",
     "keep-alive",
@@ -387,8 +418,10 @@ const HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
+#[cfg(unix)]
 struct HopHeaders(Vec<header::HeaderName>);
 
+#[cfg(unix)]
 impl HopHeaders {
     fn prepare(headers: &mut HeaderMap) -> Self {
         let filter = Self(Self::names(headers, header::CONNECTION));
@@ -459,6 +492,7 @@ impl HopHeaders {
     }
 }
 
+#[cfg(unix)]
 async fn proxy_request(
     mut request: Request<Incoming>,
     policy: Arc<PinnedOrigins>,
