@@ -230,12 +230,14 @@ pub(crate) fn spawn(
         ));
     };
     runtime.spawn(run_backend(
-        work_id.to_owned(),
-        run_id.to_owned(),
+        BackendIdentity {
+            work_id: work_id.to_owned(),
+            initial_run_id: run_id.to_owned(),
+            pid,
+        },
         command_wrap(&program, &args, &cwd, env),
         cwd,
         events,
-        pid,
         receiver,
         preparation,
         stop,
@@ -323,17 +325,26 @@ fn command_wrap(
     wrap
 }
 
-async fn run_backend(
+struct BackendIdentity {
     work_id: String,
     initial_run_id: String,
+    pid: Arc<AtomicU32>,
+}
+
+async fn run_backend(
+    identity: BackendIdentity,
     mut wrap: CommandWrap,
     cwd: PathBuf,
     events: mpsc::Sender<AcpEvent>,
-    pid: Arc<AtomicU32>,
     commands: mpsc::Receiver<Command>,
     preparation: Option<(PathBuf, acp_bridge::ConfiguredOrigins)>,
     stop: tokio_util::sync::CancellationToken,
 ) {
+    let BackendIdentity {
+        work_id,
+        initial_run_id,
+        pid,
+    } = identity;
     let shared = Arc::new(SharedRun::default());
     shared.begin(&initial_run_id);
     let proxy = if let Some((socket, configured)) = preparation {
@@ -1107,8 +1118,11 @@ mod tests {
         let (events, mut receiver) = mpsc::channel(QUEUE);
         let (_sender, commands) = mpsc::channel(COMMANDS);
         run_backend(
-            "work".into(),
-            "accepted-run".into(),
+            BackendIdentity {
+                work_id: "work".into(),
+                initial_run_id: "accepted-run".into(),
+                pid: Arc::new(AtomicU32::new(0)),
+            },
             command_wrap(
                 &which::which("sh").unwrap(),
                 &[
@@ -1122,7 +1136,6 @@ mod tests {
             ),
             root.path().to_owned(),
             events,
-            Arc::new(AtomicU32::new(0)),
             commands,
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -1209,8 +1222,11 @@ mod tests {
             .insert("work".into(), handle);
         let marker = root.path().join("started");
         run_backend(
-            "work".into(),
-            "accepted-run".into(),
+            BackendIdentity {
+                work_id: "work".into(),
+                initial_run_id: "accepted-run".into(),
+                pid,
+            },
             command_wrap(
                 &which::which("sh").unwrap(),
                 &[
@@ -1224,7 +1240,6 @@ mod tests {
             ),
             root.path().to_owned(),
             world.resource::<AcpEvents>().sender(),
-            pid,
             receiver,
             Some((
                 root.path().join("x".repeat(120)),
@@ -1281,8 +1296,11 @@ mod tests {
                 stop: stop.clone(),
             };
             let task = tokio::spawn(run_backend(
-                "work".into(),
-                "run".into(),
+                BackendIdentity {
+                    work_id: "work".into(),
+                    initial_run_id: "run".into(),
+                    pid,
+                },
                 command_wrap(
                     &which::which("sh").unwrap(),
                     &[
@@ -1296,7 +1314,6 @@ mod tests {
                 ),
                 root.path().to_owned(),
                 events,
-                pid,
                 control,
                 Some((socket.clone(), configured)),
                 stop,
@@ -1461,8 +1478,11 @@ mod tests {
         let (events, mut receiver) = mpsc::channel(QUEUE);
         let (_sender, commands) = mpsc::channel(COMMANDS);
         run_backend(
-            "work".into(),
-            "accepted-run".into(),
+            BackendIdentity {
+                work_id: "work".into(),
+                initial_run_id: "accepted-run".into(),
+                pid: Arc::new(AtomicU32::new(0)),
+            },
             command_wrap(
                 &which::which("sh").unwrap(),
                 &[
@@ -1476,7 +1496,6 @@ mod tests {
             ),
             root.path().to_owned(),
             events,
-            Arc::new(AtomicU32::new(0)),
             commands,
             Some((
                 socket.clone(),

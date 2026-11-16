@@ -156,10 +156,8 @@ async fn invoke(frames: &[Value]) -> (ene_plugin_runtime::Result<Value>, Vec<Eve
     let request = services.request.lock().unwrap().take().unwrap();
     assert_eq!(request.method, "POST");
     assert_eq!(request.url, format!("{ENDPOINT}/chat/completions"));
-    let body: Value = serde_json::from_slice(
-        &STANDARD.decode(request.body_base64.unwrap()).unwrap(),
-    )
-    .unwrap();
+    let body: Value =
+        serde_json::from_slice(&STANDARD.decode(request.body_base64.unwrap()).unwrap()).unwrap();
     assert_eq!(body["model"], "fixture");
     assert_eq!(body["stream"], true);
     assert!(*services.read.lock().unwrap() > 0);
@@ -261,8 +259,10 @@ async fn native_openrouter_accepts_64_calls_256_byte_metadata_and_128_byte_reaso
     assert_eq!(result.unwrap(), json!({}));
     assert_eq!(events.len(), 65);
     for (index, event) in events[..64].iter().enumerate() {
-        assert!(matches!(event, Event::ToolCall { id, name: actual_name, arguments }
-            if id == &ids[index] && actual_name == &name && arguments == &json!({"index": index})));
+        assert!(
+            matches!(event, Event::ToolCall { id, name: actual_name, arguments }
+            if id == &ids[index] && actual_name == &name && arguments == &json!({"index": index}))
+        );
     }
     assert!(matches!(&events[64], Event::Finished { reason: actual } if actual == &reason));
 }
@@ -317,7 +317,8 @@ async fn native_openrouter_rejects_129_byte_finish_reason_without_leaking_calls(
 }
 
 fn sized_arguments(event_bytes: usize) -> Value {
-    let event = json!({"type": "tool_call", "id": "second", "name": "lookup", "arguments": {"x": ""}});
+    let event =
+        json!({"type": "tool_call", "id": "second", "name": "lookup", "arguments": {"x": ""}});
     let overhead = serde_json::to_vec(&event).unwrap().len();
     let arguments = json!({"x": "x".repeat(event_bytes - overhead)});
     assert_eq!(
@@ -344,8 +345,10 @@ async fn native_openrouter_accepts_an_exact_128_kib_tool_event() {
     .await;
     assert_eq!(result.unwrap(), json!({}));
     assert_eq!(events.len(), 2);
-    assert!(matches!(&events[0], Event::ToolCall { id, name, arguments: actual }
-        if id == "second" && name == "lookup" && actual == &arguments));
+    assert!(
+        matches!(&events[0], Event::ToolCall { id, name, arguments: actual }
+        if id == "second" && name == "lookup" && actual == &arguments)
+    );
     assert!(matches!(&events[1], Event::Finished { reason } if reason == "tool_calls"));
 }
 

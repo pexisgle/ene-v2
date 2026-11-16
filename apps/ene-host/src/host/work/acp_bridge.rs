@@ -361,17 +361,16 @@ fn destination(request: &Request<Incoming>) -> Result<(Origin, bool), StatusCode
     if request.headers().contains_key(header::UPGRADE) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if let Some(encoding) = request.headers().get(header::TRANSFER_ENCODING) {
-        if request
+    if let Some(encoding) = request.headers().get(header::TRANSFER_ENCODING)
+        && (request
             .headers()
             .get_all(header::TRANSFER_ENCODING)
             .iter()
             .count()
             != 1
-            || !encoding.as_bytes().eq_ignore_ascii_case(b"chunked")
-        {
-            return Err(StatusCode::BAD_REQUEST);
-        }
+            || !encoding.as_bytes().eq_ignore_ascii_case(b"chunked"))
+    {
+        return Err(StatusCode::BAD_REQUEST);
     }
     Ok((target, !connect))
 }
@@ -586,11 +585,11 @@ async fn connect(client: tokio::net::UnixStream, policy: Arc<PinnedOrigins>) {
         .unwrap_or_else(|e| e.into_inner())
         .abort_all();
     let upgraded = tunnel.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some((upgrade, mut upstream)) = upgraded {
-        if let Ok(Ok(upgraded)) = tokio::time::timeout(HEAD_TIMEOUT, upgrade).await {
-            let mut client = TokioIo::new(upgraded);
-            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
-        }
+    if let Some((upgrade, mut upstream)) = upgraded
+        && let Ok(Ok(upgraded)) = tokio::time::timeout(HEAD_TIMEOUT, upgrade).await
+    {
+        let mut client = TokioIo::new(upgraded);
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     }
 }
 
@@ -705,15 +704,12 @@ mod tests {
         client.write_all(request).await.unwrap();
         client.shutdown().await.unwrap();
         let mut answered = Vec::new();
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), client.read_u8()).await {
-                Ok(Ok(byte)) => {
-                    answered.push(byte);
-                    if answered.ends_with(b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                _ => break,
+        while let Ok(Ok(byte)) =
+            tokio::time::timeout(Duration::from_secs(2), client.read_u8()).await
+        {
+            answered.push(byte);
+            if answered.ends_with(b"\r\n\r\n") {
+                break;
             }
         }
         proxy.abort();
@@ -857,7 +853,7 @@ mod tests {
             format!("CONNECT http://{address}/ HTTP/1.1\r\nHost: {address}\r\n\r\n"),
             format!("CONNECT {address}/path HTTP/1.1\r\nHost: {address}\r\n\r\n"),
             format!("CONNECT user@{address} HTTP/1.1\r\nHost: {address}\r\n\r\n"),
-            format!("CONNECT 127.0.0.1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+            "CONNECT 127.0.0.1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_owned(),
             format!(
                 "CONNECT 127.0.0.1:{wrong_port} HTTP/1.1\r\nHost: 127.0.0.1:{wrong_port}\r\n\r\n"
             ),
