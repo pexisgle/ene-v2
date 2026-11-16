@@ -408,7 +408,7 @@ mod tests {
         for field in ["contract_version", "runtime", "code_files"] {
             let mut manifest = current.clone();
             match field {
-                "contract_version" => manifest[field] = 2.into(),
+                "contract_version" => manifest[field] = (ene_plugin::CONTRACT_VERSION - 1).into(),
                 "runtime" => manifest["entrypoints"][0][field] = "extism".into(),
                 _ => manifest[field] = serde_json::json!(["main.wasm"]),
             }

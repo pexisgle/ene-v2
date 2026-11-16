@@ -152,6 +152,7 @@ mod guest {
             streaming_text: true,
             model_list: true,
             tool_calls: true,
+            openai_http: true,
         }))
     }
 

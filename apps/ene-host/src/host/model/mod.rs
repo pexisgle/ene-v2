@@ -348,7 +348,11 @@ pub(crate) async fn probe(
         healthy: true,
         checked_at,
         failure: None,
-        capabilities: vec!["streaming_text".into(), "model_list".into()],
+        capabilities: vec![
+            "streaming_text".into(),
+            "model_list".into(),
+            "openai_http".into(),
+        ],
         resources,
     }
 }

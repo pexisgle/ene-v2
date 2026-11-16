@@ -67,6 +67,7 @@ struct Fixture {
     auth: Arc<Mutex<Vec<Option<String>>>>,
     requests: Arc<AtomicUsize>,
     closed: Arc<Notify>,
+    bodies: Arc<Mutex<Vec<Value>>>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -79,12 +80,14 @@ impl Fixture {
         let auth = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(Notify::new());
+        let bodies = Arc::new(Mutex::new(Vec::new()));
         let cancel = CancellationToken::new();
         let task = {
             let base = base.clone();
             let auth = Arc::clone(&auth);
             let requests = Arc::clone(&requests);
             let closed = Arc::clone(&closed);
+            let bodies = Arc::clone(&bodies);
             let cancel = cancel.clone();
             tokio::spawn(async move {
                 loop {
@@ -94,6 +97,7 @@ impl Fixture {
                     let auth = Arc::clone(&auth);
                     let requests = Arc::clone(&requests);
                     let closed = Arc::clone(&closed);
+                    let bodies = Arc::clone(&bodies);
                     let cancel = cancel.clone();
                     let base = base.clone();
                     tokio::spawn(async move {
@@ -105,7 +109,7 @@ impl Fixture {
                         auth.lock()
                             .unwrap()
                             .push(request.headers.get("authorization").cloned());
-                        serve(&mut stream, &request, &base, &closed, &cancel).await;
+                        serve(&mut stream, &request, &base, &closed, &bodies, &cancel).await;
                     });
                 }
             })
@@ -115,6 +119,7 @@ impl Fixture {
             auth,
             requests,
             closed,
+            bodies,
             cancel,
             task,
         }
@@ -126,6 +131,10 @@ impl Fixture {
 
     fn seen_auth(&self) -> Vec<Option<String>> {
         self.auth.lock().unwrap().clone()
+    }
+
+    fn bodies(&self) -> Vec<Value> {
+        self.bodies.lock().unwrap().clone()
     }
 
     fn request_count(&self) -> usize {
@@ -194,9 +203,11 @@ async fn serve(
     request: &Request,
     base: &str,
     closed: &Notify,
+    bodies: &Mutex<Vec<Value>>,
     cancel: &CancellationToken,
 ) {
     let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+    bodies.lock().unwrap().push(body.clone());
     let model = body["model"].as_str().unwrap_or("test-normal");
     let streaming = body["stream"].as_bool().unwrap_or(false);
     let _ = (request.method.as_str(), request.path.as_str(), base);
@@ -252,6 +263,17 @@ async fn serve(
             let _ = stream.flush().await;
             tokio::time::sleep(Duration::from_millis(400)).await;
             let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-delayed","choices":[{"index":0,"delta":{"content":" second"},"finish_reason":"stop"}]});
+            let _ = stream
+                .write_all(format!("data: {chunk}\n\n").as_bytes())
+                .await;
+            let _ = stream.write_all(b"data: [DONE]\n\n").await;
+        }
+        "test-invalid-tool" => {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                .await
+                .unwrap();
+            let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-invalid-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"","arguments":"{}"}}]},"finish_reason":"tool_calls"}]});
             let _ = stream
                 .write_all(format!("data: {chunk}\n\n").as_bytes())
                 .await;
@@ -519,6 +541,13 @@ async fn split_tool_arguments_are_assembled_by_rig() {
     assert_eq!(call.function.name.to_string(), "lookup");
     assert_eq!(call.function.arguments["x"], 1);
     assert_eq!(reply.finish_reason(), Some(FinishReason::ToolCalls));
+    let body = harness
+        .fixture
+        .bodies()
+        .pop()
+        .expect("the provider received the request");
+    assert_eq!(body["model"], "test-tools");
+    assert_eq!(body["tools"][0]["function"]["name"], "lookup");
 }
 
 #[tokio::test]
@@ -546,6 +575,29 @@ async fn streaming_arrives_before_the_provider_finishes() {
         elapsed < Duration::from_millis(350),
         "the first delta waited for the whole reply: {elapsed:?}"
     );
+}
+
+#[tokio::test]
+async fn an_invalid_tool_call_is_refused_before_execution() {
+    let harness = Harness::start(None).await;
+    let result = harness.model("test-invalid-tool").call(request()).await;
+    assert!(
+        result.is_err(),
+        "a tool call without a name must not reach execution"
+    );
+}
+
+#[tokio::test]
+async fn repeated_cancellation_does_not_accumulate_handles_or_slots() {
+    let harness = Harness::start(None).await;
+    for _ in 0..20 {
+        let mut stream = harness.model("test-slow").stream(request()).unwrap();
+        assert!(stream.next().await.is_some());
+        drop(stream);
+        harness.fixture.closed().await;
+        let reply = harness.model("test-normal").call(request()).await.unwrap();
+        assert_eq!(reply.text(), "Hello world");
+    }
 }
 
 #[tokio::test]

@@ -819,6 +819,23 @@ async fn initialization_decodes_llm_capabilities_as_a_typed_document() {
     ));
 }
 
+#[tokio::test]
+async fn an_llm_provider_must_declare_the_openai_http_capability() {
+    let _one_instance = one_instance_test().await;
+    let (_package, temp) = generation_package();
+    let root = temp.path().join("plugin");
+    write_file(
+        &root.join("main.wasm"),
+        provider_wasm_with("", &json!({"streaming_text": true, "openai_http": false})),
+    );
+    let package = Package::load(&root).unwrap();
+    let cancel = CancellationToken::new();
+    assert!(matches!(
+        Instance::load(package, "main".into(), &cancel).await,
+        Err(ene_plugin_runtime::Error::Unsupported)
+    ));
+}
+
 /// A model-listing plugin: it answers `ListModels` with its `Models` event.
 fn listing_package() -> (Package, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
@@ -908,7 +925,7 @@ async fn a_listing_plugin_answers_with_its_models() {
 fn provider_wasm(body: &str) -> Vec<u8> {
     provider_wasm_with(
         body,
-        &json!({"streaming_text": true, "model_list": true, "tool_calls": true}),
+        &json!({"streaming_text": true, "model_list": true, "tool_calls": true, "openai_http": true}),
     )
 }
 

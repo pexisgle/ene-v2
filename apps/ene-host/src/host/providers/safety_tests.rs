@@ -161,7 +161,8 @@ fn installed_providers(
     auth: serde_json::Value,
 ) -> Providers {
     let path = root.join(PLUGINS_DIR).join("openrouter");
-    let capabilities = r#"{"streaming_text":true,"model_list":true,"tool_calls":true}"#;
+    let capabilities =
+        r#"{"streaming_text":true,"model_list":true,"tool_calls":true,"openai_http":true}"#;
     let wasm = format!(
         r#"(module
         (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))

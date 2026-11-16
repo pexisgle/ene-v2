@@ -4,6 +4,56 @@
 
 ---
 
+## ABI 7 の LLM 生成契約（比較ブランチで実装）
+
+この節は比較ブランチで実装した現在の契約であり、以下の 0 章以降の提案は
+その時点の履歴である。ホストが受け入れる LLM の生成形式は、この 1 つだけである。
+
+### 形式
+
+- 生成は `Operation::GenerateHttp { request: HttpRequest }` だけである。
+- ホストは Rig の OpenAI Chat Completions wire でリクエストを組み立て、
+  プロセス内クライアントから Extism へ渡す。ゲストは本文を解釈せず、
+  そのままブローカーへ転送する。
+- ゲストは応答を `Event::Http { chunk: HttpChunk }` として順に返す。最初の
+  チャンクが status と headers を持ち、最後の `done` が終端である。
+- SSE の復号、ツール呼び出しの組み立て、usage、finish reason はホストの
+  Rig wire が担う。ゲストは SSE を解析しない。
+- `ListModels` と `Models` は従来のままである。モデル一覧は OpenAI 互換の
+  JSON 応答を読む。
+
+### 宣言と拒否
+
+- LLM プロバイダーは `ene_initialize` で `openai_http: true` を返さなければ
+  ならない。返さない場合、ランタイムは `initialize` で拒否する。
+- manifest の `contract_version` は 7 でなければならない。パッケージ読み込み
+  時に旧版は拒否される。
+- `Generate`、`Delta`、`ToolCall`、`Finished`、`GenerationRequest`、
+  `ChatMessage`、`ToolSpec` は ABI 7 に存在しない。旧イベントを返すゲストや
+  旧操作を送るゲストは、復号または契約検証で拒否される。
+- 複数形式を切り替えるフレームワークは持たない。ホストが受け入れるのは
+  OpenAI wire の 1 形式だけであり、旧形式へのフォールバックはない。
+
+### 現在の同梱物
+
+- `examples/plugins/openrouter-wasm`: ABI 7 へ移行済み。生の HTTP 転送、
+  `openai_http: true`、manifest 7。
+- `examples/plugins/reference`: LLM プロバイダーではないため、この生成契約の
+  対象外である。
+- リポジトリ内に他の LLM プロバイダープラグインはない。外部の ABI 6 の LLM
+  プラグインは非対応であり、ホストは拒否する。「全 LLM プラグインの形式を
+  決めた」のではなく、ホストが受け入れる形式が 1 つに定まった、という意味で
+  ある。外部プラグインを移行するかは別途決める。
+
+### 境界
+
+宛先の認可、資格情報の注入、リダイレクト禁止、応答 16 MiB、チャンク 64 KiB、
+交換期限、イベントの上限は、従来どおりブローカーとランタイムが持つ。ゲストは
+資格情報を見ず、宛先を選ばない。ツール呼び出しの認可はホストの既存ゲートが
+担い、プロバイダーは呼び出しを返すだけである。
+
+---
+
 ## 0. 目的と前提
 
 LLM・Embedding・TTS・STT の全プロバイダーを `ene-plugin` / `ene-plugin-runtime` 基盤へ移す。プロバイダー追加をホストの再ビルドから切り離し、認証・宛先・上限の制御を1箇所に集約することが目的である。

@@ -289,7 +289,7 @@ impl Instance {
                     INITIALIZE_TIMEOUT,
                 )
                 .await?;
-            if !capabilities.streaming_text {
+            if !capabilities.streaming_text || !capabilities.openai_http {
                 return Err(Error::Unsupported);
             }
             self.capabilities = Some(capabilities);
