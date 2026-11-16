@@ -60,7 +60,7 @@ jobs:
 
       - name: Native Wasm tool-call regressions
         run: |
-          ENE_OPENROUTER_WASM="$(python -c 'from pathlib import Path; print(Path("target/wasm32-unknown-unknown/release/ene_openrouter_wasm.wasm").resolve())')" cargo test --profile ci --locked -p ene-plugin-runtime --test native_openrouter -- --ignored --test-threads=1
+          cargo test --profile ci --locked -p ene-host --lib host::model::plugin_tests -- --test-threads=1
 
       - uses: actions/setup-node@v7
         if: runner.os == 'Linux'
