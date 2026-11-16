@@ -620,14 +620,16 @@ pub(crate) fn start_run(
         }
         Backend::Acp(connection) => {
             let prompted = match connection {
-                Some(connection) => acp::spawn(world, &session.id, &connection).map(|handle| {
-                    let prompted = handle.prompt(&run.run_id, instruction);
-                    world
-                        .resource_mut::<AcpBackends>()
-                        .0
-                        .insert(session.id.clone(), handle);
-                    prompted
-                }),
+                Some(connection) => {
+                    acp::spawn(world, &session.id, &run.run_id, &connection).map(|handle| {
+                        let prompted = handle.prompt(&run.run_id, instruction);
+                        world
+                            .resource_mut::<AcpBackends>()
+                            .0
+                            .insert(session.id.clone(), handle);
+                        prompted
+                    })
+                }
                 None => Ok(world
                     .resource::<AcpBackends>()
                     .0
@@ -1644,7 +1646,7 @@ mod tests {
             command: "sh".into(),
             args: vec!["-c".into(), "sleep 30".into()],
         };
-        let handle = acp::spawn(&mut world, "w1", &connection).unwrap();
+        let handle = acp::spawn(&mut world, "w1", "run-a", &connection).unwrap();
         assert!(handle.prompt("run-a", "hello"));
         world
             .resource_mut::<AcpBackends>()
@@ -1685,7 +1687,7 @@ mod tests {
             command: "sh".into(),
             args: vec!["-c".into(), "sleep 30".into()],
         };
-        let handle = acp::spawn(&mut world, "w1", &connection).unwrap();
+        let handle = acp::spawn(&mut world, "w1", "run-a", &connection).unwrap();
         assert!(handle.prompt("run-a", "hello"));
         world
             .resource_mut::<AcpBackends>()

@@ -88,8 +88,7 @@ enum Command {
 pub(crate) struct AcpHandle {
     pid: Arc<AtomicU32>,
     commands: mpsc::Sender<Command>,
-    /// The HTTP proxy of a network-isolated launch, closed with the session.
-    proxy: Option<acp_bridge::Proxy>,
+    stop: tokio_util::sync::CancellationToken,
 }
 
 impl AcpHandle {
@@ -116,10 +115,16 @@ impl AcpHandle {
     }
 
     pub(crate) fn end(&self) -> bool {
-        if let Some(proxy) = &self.proxy {
-            proxy.close();
-        }
-        self.commands.try_send(Command::End).is_ok()
+        let accepting = !self.commands.is_closed();
+        self.stop.cancel();
+        let _ = self.commands.try_send(Command::End);
+        accepting
+    }
+}
+
+impl Drop for AcpHandle {
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
 }
 
@@ -156,8 +161,10 @@ impl AcpEvents {
 pub(crate) fn spawn(
     world: &mut World,
     work_id: &str,
+    run_id: &str,
     connection: &AcpConnection,
 ) -> Result<AcpHandle, HostError> {
+    let connection = connection.clone();
     let command = connection.command.trim();
     if command.is_empty() {
         return Err(HostError::Invalid(
@@ -170,7 +177,11 @@ pub(crate) fn spawn(
     // host's: a configured `env.PATH` replaces the inherited one.
     let program = resolve_program(command, &connection.endpoint.options, &cwd)?;
     let bwrap = which::which("bwrap").ok();
-    let (bridge, proxy) = bridge(world, &connection.endpoint.options, bwrap.as_deref());
+    let preparation = bridge(&connection, bwrap.as_deref())?;
+    let bridge = preparation.as_ref().map(|(socket, _)| Bridge {
+        socket: socket.clone(),
+        port: acp_bridge::RELAY_PORT,
+    });
     let Launch {
         program,
         args,
@@ -197,10 +208,11 @@ pub(crate) fn spawn(
     let events = world.resource::<AcpEvents>().sender();
     let pid = Arc::new(AtomicU32::new(0));
     let (commands, receiver) = mpsc::channel(COMMANDS);
+    let stop = tokio_util::sync::CancellationToken::new();
     let handle = AcpHandle {
         pid: Arc::clone(&pid),
         commands,
-        proxy,
+        stop: stop.clone(),
     };
     let mut env = child_env(&connection.endpoint.options, |name: &str| {
         std::env::var_os(name)
@@ -219,11 +231,14 @@ pub(crate) fn spawn(
     };
     runtime.spawn(run_backend(
         work_id.to_owned(),
+        run_id.to_owned(),
         command_wrap(&program, &args, &cwd, env),
         cwd,
         events,
         pid,
         receiver,
+        preparation,
+        stop,
     ));
     Ok(handle)
 }
@@ -275,10 +290,10 @@ pub(crate) fn pump(world: &mut World) {
     }
 }
 
-fn closed(work_id: String, error: String) -> AcpEvent {
+fn closed(work_id: String, run_id: Option<String>, error: String) -> AcpEvent {
     AcpEvent::Closed {
         work_id,
-        run_id: None,
+        run_id,
         error: Some(error),
         confirmed: true,
         pids: Vec::new(),
@@ -310,18 +325,68 @@ fn command_wrap(
 
 async fn run_backend(
     work_id: String,
+    initial_run_id: String,
     mut wrap: CommandWrap,
     cwd: PathBuf,
     events: mpsc::Sender<AcpEvent>,
     pid: Arc<AtomicU32>,
     commands: mpsc::Receiver<Command>,
+    preparation: Option<(PathBuf, acp_bridge::ConfiguredOrigins)>,
+    stop: tokio_util::sync::CancellationToken,
 ) {
+    let shared = Arc::new(SharedRun::default());
+    shared.begin(&initial_run_id);
+    let proxy = if let Some((socket, configured)) = preparation {
+        let prepared = tokio::select! {
+            biased;
+            _ = stop.cancelled() => {
+                let _ = events.send(AcpEvent::Closed {
+                    work_id, run_id: shared.run_id(), error: None, confirmed: true, pids: Vec::new(),
+                }).await;
+                return;
+            }
+            prepared = configured.pin() => prepared,
+        };
+        let proxy = prepared.and_then(|policy| {
+            acp_bridge::open(&tokio::runtime::Handle::current(), socket, policy)
+        });
+        match proxy {
+            Ok(proxy) => Some(proxy),
+            Err(error) => {
+                let _ = events
+                    .send(closed(
+                        work_id,
+                        shared.run_id(),
+                        format!("the isolated ACP model proxy could not start: {error}"),
+                    ))
+                    .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if stop.is_cancelled() {
+        drop(proxy);
+        let _ = events
+            .send(AcpEvent::Closed {
+                work_id,
+                run_id: shared.run_id(),
+                error: None,
+                confirmed: true,
+                pids: Vec::new(),
+            })
+            .await;
+        return;
+    }
     let mut child = match wrap.spawn() {
         Ok(child) => child,
         Err(error) => {
+            drop(proxy);
             let _ = events
                 .send(closed(
                     work_id,
+                    shared.run_id(),
                     format!("the ACP agent could not start: {error}"),
                 ))
                 .await;
@@ -332,16 +397,22 @@ async fn run_backend(
         pid.store(id, Ordering::SeqCst);
     }
     let (Some(stdin), Some(stdout)) = (child.stdin().take(), child.stdout().take()) else {
+        drop(proxy);
+        let (confirmed, pids) = terminate(&mut child, KILL_TIMEOUT).await;
         let _ = events
-            .send(closed(
+            .send(AcpEvent::Closed {
                 work_id,
-                "the ACP agent has no standard input/output".to_owned(),
-            ))
+                run_id: shared.run_id(),
+                error: Some("the ACP agent has no standard input/output".to_owned()),
+                confirmed,
+                pids,
+            })
             .await;
         return;
     };
+    let mut owned = tokio::task::JoinSet::new();
     if let Some(stderr) = child.stderr().take() {
-        tokio::spawn(async move {
+        owned.spawn(async move {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 tracing::debug!(target: "ene_host::acp", %line, "ACP agent stderr");
@@ -349,57 +420,70 @@ async fn run_backend(
         });
     }
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
-    let shared = Arc::new(SharedRun::default());
     let notify_events = events.clone();
     let notify_shared = Arc::clone(&shared);
     let notify_work = work_id.clone();
-    let result = Client
-        .v1()
-        .name("ene-host")
-        .on_receive_notification(
-            async move |notification: SessionNotification, _cx| {
-                if let Some((text, is_message)) = update_text(&notification.update)
-                    && let Some(run_id) = notify_shared.run_id()
-                {
-                    if is_message {
-                        notify_shared.append(&text);
+    let error = {
+        let connection = Client
+            .v1()
+            .name("ene-host")
+            .on_receive_notification(
+                async move |notification: SessionNotification, _cx| {
+                    if let Some((text, is_message)) = update_text(&notification.update)
+                        && let Some(run_id) = notify_shared.run_id()
+                    {
+                        if is_message {
+                            notify_shared.append(&text);
+                        }
+                        let _ = notify_events
+                            .send(AcpEvent::Update {
+                                work_id: notify_work.clone(),
+                                run_id,
+                                text,
+                            })
+                            .await;
                     }
-                    let _ = notify_events
-                        .send(AcpEvent::Update {
-                            work_id: notify_work.clone(),
-                            run_id,
-                            text,
-                        })
-                        .await;
+                    Ok(())
+                },
+                on_receive_notification!(),
+            )
+            .on_receive_request(
+                async |_request: RequestPermissionRequest, responder, _cx| {
+                    // Alpha has no ACP permission UI; refuse rather than pretend
+                    // the user approved an operation she never saw.
+                    responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ))
+                },
+                on_receive_request!(),
+            )
+            .connect_with(transport, {
+                let events = events.clone();
+                let shared = Arc::clone(&shared);
+                async move |cx: ConnectionTo<Agent>| {
+                    session_loop(cx, cwd, events, shared, commands).await
                 }
-                Ok(())
-            },
-            on_receive_notification!(),
-        )
-        .on_receive_request(
-            async |_request: RequestPermissionRequest, responder, _cx| {
-                // Alpha has no ACP permission UI; refuse rather than pretend
-                // the user approved an operation she never saw.
-                responder.respond(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Cancelled,
-                ))
-            },
-            on_receive_request!(),
-        )
-        .connect_with(transport, {
-            let events = events.clone();
-            let shared = Arc::clone(&shared);
-            async move |cx: ConnectionTo<Agent>| {
-                session_loop(cx, cwd, events, shared, commands).await
-            }
-        })
-        .await;
+            });
+        tokio::pin!(connection);
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => None,
+            result = &mut connection => result.err().map(|error| error.to_string()),
+            result = observe_exit(&mut child) => Some(match result {
+                Ok(status) => format!("the ACP agent exited: {status}"),
+                Err(error) => format!("waiting for the ACP agent failed: {error}"),
+            }),
+        }
+    };
+    drop(proxy);
+    owned.abort_all();
+    while owned.join_next().await.is_some() {}
     let (confirmed, pids) = terminate(&mut child, KILL_TIMEOUT).await;
     let _ = events
         .send(AcpEvent::Closed {
             work_id,
             run_id: shared.run_id(),
-            error: result.err().map(|error| error.to_string()),
+            error,
             confirmed,
             pids,
         })
@@ -452,10 +536,6 @@ async fn session_loop(
     }
 }
 
-/// Runs `InitializeRequest` and `NewSessionRequest` while watching the command
-/// channel. A handshake cannot be cancelled through ACP, so a stop request
-/// aborts the connection and the caller force-kills the child. The prompt that
-/// arrived meanwhile is returned to be served after the session exists.
 async fn open(
     cx: &ConnectionTo<Agent>,
     cwd: &Path,
@@ -477,12 +557,12 @@ async fn open(
                 Some(Command::Prompt { run_id, text }) => {
                     first.get_or_insert((run_id, text));
                 }
-                Some(Command::Cancel { .. } | Command::End) | None => {
-                    if let Some((run_id, _)) = &first {
-                        shared.begin(run_id);
+                Some(Command::Cancel { run_id }) => {
+                    if shared.run_id().as_deref() == Some(&run_id) {
+                        return Ok(None);
                     }
-                    return Ok(None);
                 }
+                Some(Command::End) | None => return Ok(None),
             }
         }
     }
@@ -500,12 +580,12 @@ async fn open(
                 Some(Command::Prompt { run_id, text }) => {
                     first.get_or_insert((run_id, text));
                 }
-                Some(Command::Cancel { .. } | Command::End) | None => {
-                    if let Some((run_id, _)) = &first {
-                        shared.begin(run_id);
+                Some(Command::Cancel { run_id }) => {
+                    if shared.run_id().as_deref() == Some(&run_id) {
+                        return Ok(None);
                     }
-                    return Ok(None);
                 }
+                Some(Command::End) | None => return Ok(None),
             }
         }
     }
@@ -632,16 +712,48 @@ fn update_text(update: &SessionUpdate) -> Option<(String, bool)> {
     (!text.text.trim().is_empty()).then(|| (text.text.clone(), is_message))
 }
 
+#[cfg(unix)]
+async fn observe_exit(child: &mut Box<dyn ChildWrapper>) -> std::io::Result<String> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let mut exits = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    let pid = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| std::io::Error::other("the ACP leader is no longer owned"))?;
+    loop {
+        // Keeping the leader waitable reserves its PID/PGID until group kill.
+        if let Some(status) = waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        )? {
+            return Ok(format!("{status:?}"));
+        }
+        if exits.recv().await.is_none() {
+            return Err(std::io::Error::other("the child-exit signal stream ended"));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn observe_exit(child: &mut Box<dyn ChildWrapper>) -> std::io::Result<String> {
+    child.wait().await.map(|status| status.to_string())
+}
+
 async fn terminate(child: &mut Box<dyn ChildWrapper>, timeout: Duration) -> (bool, Vec<u32>) {
     let pids: Vec<u32> = child.id().into_iter().collect();
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return (true, pids);
-    }
-    if child.start_kill().is_err() {
+    #[cfg(unix)]
+    if pids.is_empty() {
         return (matches!(child.try_wait(), Ok(Some(_))), pids);
     }
+    let signalled = match child.start_kill() {
+        Ok(()) => true,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => true,
+        Err(_) => false,
+    };
     let waited = tokio::time::timeout(timeout, child.wait()).await;
-    (matches!(waited, Ok(Ok(_))), pids)
+    (signalled && matches!(waited, Ok(Ok(_))), pids)
 }
 
 // === Child environment ====================================================
@@ -771,32 +883,23 @@ impl Isolation {
 /// requested isolation and bwrap is present: an unisolated child has the host
 /// network and needs no bridge.
 fn bridge(
-    world: &World,
-    options: &str,
+    connection: &AcpConnection,
     bwrap: Option<&Path>,
-) -> (Option<Bridge>, Option<acp_bridge::Proxy>) {
+) -> Result<Option<(PathBuf, acp_bridge::ConfiguredOrigins)>, HostError> {
+    let options = &connection.endpoint.options;
     if sandbox_mode(options).as_deref() == Some("none")
-        || !network_isolated(options).unwrap_or(false)
+        || !network_isolated(options).map_err(HostError::Invalid)?
         || bwrap.is_none()
     {
-        return (None, None);
+        return Ok(None);
     }
-    let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
-        return (None, None);
-    };
-    // Under the system temp directory: a unix socket path has to stay short
-    // enough to bind, and the runtime directory can be deep.
+    let configured = acp_bridge::ConfiguredOrigins::parse(&connection.endpoint.endpoint, options)
+        .map_err(|error| HostError::Invalid(error.to_string()))?;
     let socket = std::env::temp_dir().join(format!(
         "ene-acp-{}.sock",
         &uuid::Uuid::new_v4().simple().to_string()[..12]
     ));
-    match acp_bridge::open(&runtime, socket) {
-        Ok(proxy) => (Some(proxy.bridge.clone()), Some(proxy)),
-        Err(error) => {
-            tracing::warn!(%error, "the ACP proxy did not start");
-            (None, None)
-        }
-    }
+    Ok(Some((socket, configured)))
 }
 
 fn launch(
@@ -996,6 +1099,444 @@ mod tests {
         .expect("the descendant is no longer running");
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_exited_agent_cannot_leave_a_running_descendant() {
+        let root = tempfile::tempdir().unwrap();
+        let descendant_file = root.path().join("descendant");
+        let (events, mut receiver) = mpsc::channel(QUEUE);
+        let (_sender, commands) = mpsc::channel(COMMANDS);
+        run_backend(
+            "work".into(),
+            "accepted-run".into(),
+            command_wrap(
+                &which::which("sh").unwrap(),
+                &[
+                    "-c".into(),
+                    "sleep 30 & echo $! > \"$1\"; exit 0".into(),
+                    "acp-test".into(),
+                    descendant_file.to_str().unwrap().into(),
+                ],
+                root.path(),
+                child_env("", |name| std::env::var_os(name)),
+            ),
+            root.path().to_owned(),
+            events,
+            Arc::new(AtomicU32::new(0)),
+            commands,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let descendant: i32 = std::fs::read_to_string(descendant_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let stopped = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let status = std::fs::read_to_string(format!("/proc/{descendant}/status"));
+                if status.is_err()
+                    || status.is_ok_and(|status| {
+                        status.lines().any(|line| line.starts_with("State:\tZ"))
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !stopped {
+            let pid = rustix::process::Pid::from_raw(descendant).unwrap();
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        assert!(matches!(
+            receiver.recv().await,
+            Some(AcpEvent::Closed {
+                confirmed: true,
+                ..
+            })
+        ));
+        assert!(
+            stopped,
+            "backend closure left its descendant {descendant} running"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_preparation_failure_settles_the_accepted_starting_run() {
+        use super::super::{RunState, Runs, WorkSession, WorkStatus, new_run};
+        use crate::host::agent::WorkReports;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+        store
+            .insert_work_session(&WorkSession {
+                id: "work".into(),
+                companion_id: "ene".into(),
+                title: "task".into(),
+                status: WorkStatus::Active,
+                client_id: None,
+                activation_revision: 0,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap();
+        let run = new_run("accepted-run".into(), "work", "hello", RunState::Starting);
+        store.insert_run(&run).unwrap();
+        let mut world = World::new();
+        world.insert_resource(store.clone());
+        world.insert_resource(Notifier::new());
+        world.insert_resource(WorkReports::default());
+        world.insert_resource(Runs::default());
+        world.insert_resource(AcpBackends::default());
+        world.insert_resource(AcpEvents::default());
+        let (commands, receiver) = mpsc::channel(COMMANDS);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let pid = Arc::new(AtomicU32::new(0));
+        let handle = AcpHandle {
+            pid: Arc::clone(&pid),
+            commands,
+            stop: stop.clone(),
+        };
+        assert!(handle.prompt(&run.run_id, "hello"));
+        world
+            .resource_mut::<AcpBackends>()
+            .0
+            .insert("work".into(), handle);
+        let marker = root.path().join("started");
+        run_backend(
+            "work".into(),
+            "accepted-run".into(),
+            command_wrap(
+                &which::which("sh").unwrap(),
+                &[
+                    "-c".into(),
+                    "touch \"$1\"".into(),
+                    "acp-test".into(),
+                    marker.to_str().unwrap().into(),
+                ],
+                root.path(),
+                child_env("", |name| std::env::var_os(name)),
+            ),
+            root.path().to_owned(),
+            world.resource::<AcpEvents>().sender(),
+            pid,
+            receiver,
+            Some((
+                root.path().join("x".repeat(120)),
+                acp_bridge::ConfiguredOrigins::parse("http://127.0.0.1:1", "").unwrap(),
+            )),
+            stop,
+        )
+        .await;
+        pump(&mut world);
+        assert!(
+            !marker.exists(),
+            "failed preparation must not start the child"
+        );
+        assert!(!world.resource::<AcpBackends>().0.contains_key("work"));
+        let settled = store.run(&run.run_id).unwrap().unwrap();
+        assert_eq!(
+            settled.state,
+            RunState::Failed,
+            "an accepted Starting run must settle after proxy preparation fails"
+        );
+        assert_eq!(
+            store.work_session("work").unwrap().unwrap().status,
+            WorkStatus::Idle
+        );
+        assert!(
+            settled
+                .failure
+                .unwrap()
+                .message
+                .contains("model proxy could not start")
+        );
+        assert!(store.active_run("work").unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ending_dropping_or_exiting_a_backend_closes_its_tunnels() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for mode in ["end", "drop", "exit"] {
+            let root = tempfile::tempdir().unwrap();
+            let socket = root.path().join("proxy.sock");
+            let exit = root.path().join("exit");
+            let model = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = model.local_addr().unwrap();
+            let configured =
+                acp_bridge::ConfiguredOrigins::parse(&format!("https://{address}"), "").unwrap();
+            let (events, mut receiver) = mpsc::channel(QUEUE);
+            let (commands, control) = mpsc::channel(COMMANDS);
+            let pid = Arc::new(AtomicU32::new(0));
+            let stop = tokio_util::sync::CancellationToken::new();
+            let handle = AcpHandle {
+                pid: Arc::clone(&pid),
+                commands,
+                stop: stop.clone(),
+            };
+            let task = tokio::spawn(run_backend(
+                "work".into(),
+                "run".into(),
+                command_wrap(
+                    &which::which("sh").unwrap(),
+                    &[
+                        "-c".into(),
+                        "while [ ! -f \"$1\" ]; do sleep 0.01; done".into(),
+                        "acp-test".into(),
+                        exit.to_str().unwrap().into(),
+                    ],
+                    root.path(),
+                    child_env("", |name| std::env::var_os(name)),
+                ),
+                root.path().to_owned(),
+                events,
+                pid,
+                control,
+                Some((socket.clone(), configured)),
+                stop,
+            ));
+            let mut client = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Ok(client) = tokio::net::UnixStream::connect(&socket).await {
+                        break client;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            client
+                .write_all(
+                    format!("CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut head = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(client.read_u8().await.unwrap());
+                }
+            })
+            .await
+            .unwrap();
+            assert!(head.starts_with(b"HTTP/1.1 200"));
+            let (mut upstream, _) = model.accept().await.unwrap();
+            assert!(handle.cancel("stale-run"));
+            client.write_all(b"alive").await.unwrap();
+            let mut alive = [0; 5];
+            upstream.read_exact(&mut alive).await.unwrap();
+            assert_eq!(&alive, b"alive");
+            match mode {
+                "end" => {
+                    handle.end();
+                    drop(handle);
+                }
+                "drop" => drop(handle),
+                "exit" => {
+                    std::fs::write(&exit, "exit").unwrap();
+                    tokio::time::timeout(Duration::from_secs(2), task)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    drop(handle);
+                    assert!(!socket.exists());
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(2), upstream.read_u8())
+                            .await
+                            .unwrap()
+                            .unwrap_err()
+                            .kind(),
+                        std::io::ErrorKind::UnexpectedEof
+                    );
+                    continue;
+                }
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!socket.exists());
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), upstream.read_u8())
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+            assert!(matches!(
+                receiver.recv().await,
+                Some(AcpEvent::Closed { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_a_ready_session_keeps_it_available_for_the_next_run() {
+        use agent_client_protocol::v1::schema::{
+            InitializeResponse, NewSessionResponse, PromptResponse,
+        };
+        use tokio::io::AsyncWriteExt;
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (client, peer) = tokio::net::UnixStream::pair().unwrap();
+            let (read, mut write) = peer.into_split();
+            let (started, first_prompt) = tokio::sync::oneshot::channel();
+            let fixture = tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(read).lines();
+                let mut started = Some(started);
+                let mut pending = None;
+                let mut counts = [0; 4];
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let (id, result) = match request["method"].as_str().unwrap() {
+                        "initialize" => {
+                            counts[0] += 1;
+                            (request["id"].clone(), serde_json::to_value(InitializeResponse::new(ProtocolVersion::V1)).unwrap())
+                        }
+                        "session/new" => {
+                            counts[1] += 1;
+                            (request["id"].clone(), serde_json::to_value(NewSessionResponse::new("same-session")).unwrap())
+                        }
+                        "session/prompt" => {
+                            counts[2] += 1;
+                            assert_eq!(request["params"]["sessionId"], "same-session");
+                            if let Some(started) = started.take() {
+                                pending = Some(request["id"].clone());
+                                started.send(()).unwrap();
+                                continue;
+                            }
+                            (request["id"].clone(), serde_json::to_value(PromptResponse::new(StopReason::EndTurn)).unwrap())
+                        }
+                        "session/cancel" => {
+                            counts[3] += 1;
+                            (pending.take().unwrap(), serde_json::to_value(PromptResponse::new(StopReason::Cancelled)).unwrap())
+                        }
+                        method => panic!("unexpected ACP method {method}"),
+                    };
+                    let response = serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result});
+                    write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+                counts
+            });
+            let (read, write) = client.into_split();
+            let (commands, receiver) = mpsc::channel(COMMANDS);
+            let (events, mut received) = mpsc::channel(QUEUE);
+            let shared = Arc::new(SharedRun::default());
+            shared.begin("first");
+            let session = tokio::spawn(Client.v1().connect_with(
+                ByteStreams::new(write.compat_write(), read.compat()),
+                async move |cx| session_loop(cx, PathBuf::from("/tmp"), events, shared, receiver).await,
+            ));
+            commands.send(Command::Prompt { run_id: "first".into(), text: "wait for cancellation".into() }).await.unwrap();
+            first_prompt.await.unwrap();
+            assert!(matches!(received.recv().await, Some(AcpEvent::Ready { run_id }) if run_id == "first"));
+            commands.send(Command::Cancel { run_id: "first".into() }).await.unwrap();
+            assert!(matches!(received.recv().await, Some(AcpEvent::Finished { run_id, outcome: TurnOutcome::Stopped(_) }) if run_id == "first"));
+            assert!(!session.is_finished(), "ordinary cancellation must not close a ready session");
+            commands.send(Command::Prompt { run_id: "second".into(), text: "complete on the same session".into() }).await.unwrap();
+            assert!(matches!(received.recv().await, Some(AcpEvent::Finished { run_id, outcome: TurnOutcome::Answered(_) }) if run_id == "second"));
+            commands.send(Command::End).await.unwrap();
+            session.await.unwrap().unwrap();
+            assert_eq!(fixture.await.unwrap(), [1, 1, 2, 1]);
+        }).await.expect("ready ACP session cancellation and reuse must finish");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_preparation_never_starts_a_child_or_proxy() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("started");
+        let socket = root.path().join("proxy.sock");
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        let (events, mut receiver) = mpsc::channel(QUEUE);
+        let (_sender, commands) = mpsc::channel(COMMANDS);
+        run_backend(
+            "work".into(),
+            "accepted-run".into(),
+            command_wrap(
+                &which::which("sh").unwrap(),
+                &[
+                    "-c".into(),
+                    "touch \"$1\"".into(),
+                    "acp-test".into(),
+                    marker.to_str().unwrap().into(),
+                ],
+                root.path(),
+                child_env("", |name| std::env::var_os(name)),
+            ),
+            root.path().to_owned(),
+            events,
+            Arc::new(AtomicU32::new(0)),
+            commands,
+            Some((
+                socket.clone(),
+                acp_bridge::ConfiguredOrigins::parse("https://localhost:443", "").unwrap(),
+            )),
+            stop,
+        )
+        .await;
+        assert!(!marker.exists());
+        assert!(!socket.exists());
+        assert!(matches!(
+            receiver.recv().await,
+            Some(AcpEvent::Closed {
+                confirmed: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn session_end_cannot_be_blocked_by_a_full_command_queue() {
+        let (commands, _receiver) = mpsc::channel(1);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let handle = AcpHandle {
+            pid: Arc::new(AtomicU32::new(0)),
+            commands,
+            stop: stop.clone(),
+        };
+        assert!(handle.prompt("run", "prompt"));
+        assert!(handle.end());
+        assert!(stop.is_cancelled());
+    }
+
+    #[test]
+    fn isolated_policy_is_explicit_and_nonisolated_fallbacks_do_not_require_it() {
+        let mut connection = AcpConnection {
+            endpoint: crate::host::settings::Endpoint {
+                options: r#"{"network":"isolated"}"#.into(),
+                ..Default::default()
+            },
+            command: "agent".into(),
+            args: vec!["https://unapproved.invalid".into()],
+        };
+        let bwrap = Path::new("bwrap");
+        assert!(
+            bridge(&connection, Some(bwrap))
+                .unwrap_err()
+                .to_string()
+                .contains("model endpoint")
+        );
+        assert!(bridge(&connection, None).unwrap().is_none());
+        connection.endpoint.options = r#"{"network":"host"}"#.into();
+        assert!(bridge(&connection, Some(bwrap)).unwrap().is_none());
+        connection.endpoint.options = r#"{"sandbox":"none","network":"isolated"}"#.into();
+        assert!(bridge(&connection, Some(bwrap)).unwrap().is_none());
+        connection.endpoint.options =
+            r#"{"network":"isolated","model_endpoints":["http://localhost:8080"]}"#.into();
+        assert!(bridge(&connection, Some(bwrap)).unwrap().is_some());
+    }
+
     #[test]
     fn a_launch_uses_its_resolved_sandbox_without_changing_fallbacks() {
         let program = Path::new("/agent/bin/agent");
@@ -1011,9 +1552,15 @@ mod tests {
         let plain = launch(program, &[], cwd, options, Some(bwrap), None).unwrap();
         assert_eq!(plain.program, program);
         assert_eq!(plain.isolation, Isolation::None);
-        let world = World::new();
-        let (bridge, proxy) = bridge(&world, options, Some(bwrap));
-        assert!(bridge.is_none() && proxy.is_none());
+        let connection = AcpConnection {
+            endpoint: crate::host::settings::Endpoint {
+                options: options.into(),
+                ..Default::default()
+            },
+            command: "agent".into(),
+            args: Vec::new(),
+        };
+        assert!(bridge(&connection, Some(bwrap)).unwrap().is_none());
     }
 
     #[test]
