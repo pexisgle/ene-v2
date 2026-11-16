@@ -14,7 +14,7 @@
 //! tools: the connection closes and the tool entities despawn.
 use crate::host::{
     db::Store,
-    resources::{HostRuntime, HostToolNames},
+    resources::HostRuntime,
     settings::{ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
@@ -56,9 +56,13 @@ struct Launch {
     owner: String,
 }
 
-struct Projected {
+/// The registration an MCP tool entity came from: the library generation that
+/// keeps a stale refresh from replacing a newer handler, and the server that
+/// owns it. The entity carries this, so no side map has to stay in step.
+#[derive(Component)]
+struct McpTool {
+    server: String,
     key: Key<family::Tool>,
-    entity: Entity,
 }
 
 /// One connected server and the tool entities it owns.
@@ -68,7 +72,6 @@ struct Server {
     registry: ToolServerHandle,
     label: String,
     allowed: Vec<String>,
-    tools: HashMap<String, Projected>,
 }
 
 /// The servers that are up right now, keyed by connection id.
@@ -113,7 +116,6 @@ impl Default for McpEvents {
 
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<McpServers>()
-        .init_resource::<HostToolNames>()
         .init_resource::<Connecting>()
         .init_resource::<McpEvents>()
         .init_resource::<McpSettings>()
@@ -384,7 +386,6 @@ fn attach(
             registry,
             label: want.name.clone(),
             allowed: want.allowed.clone(),
-            tools: HashMap::new(),
         },
     );
 }
@@ -393,22 +394,19 @@ fn project_servers(world: &mut World) {
     let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
     let mut changed = false;
     for id in ids {
-        let mut server = world.resource_mut::<McpServers>().0.remove(&id).unwrap();
+        let Some(server) = world.resource_mut::<McpServers>().0.remove(&id) else {
+            continue;
+        };
         let catalog = server.registry.snapshot();
-        changed |= project(world, &id, &mut server, Some(&catalog));
+        changed |= project(world, &id, &server, Some(&catalog));
         world.resource_mut::<McpServers>().0.insert(id, server);
     }
     if changed {
-        sync_names(world);
+        refresh_access(world);
     }
 }
 
-fn project(
-    world: &mut World,
-    id: &str,
-    server: &mut Server,
-    catalog: Option<&ToolCatalog>,
-) -> bool {
+fn project(world: &mut World, id: &str, server: &Server, catalog: Option<&ToolCatalog>) -> bool {
     let mut desired = HashMap::new();
     for definition in catalog.into_iter().flat_map(ToolCatalog::definitions) {
         let raw = definition.name.as_str();
@@ -426,48 +424,62 @@ fn project(
         definition.name = name;
         desired.insert(exposed, (definition, registration));
     }
+    let mut current: HashMap<String, (Entity, Key<family::Tool>)> = {
+        let mut query = world.query::<(Entity, &ToolDef, &McpTool)>();
+        query
+            .iter(world)
+            .filter(|(_, _, tool)| tool.server == id)
+            .map(|(entity, definition, tool)| {
+                (
+                    definition.0.name.as_str().to_owned(),
+                    (entity, tool.key.clone()),
+                )
+            })
+            .collect()
+    };
     let mut changed = false;
-    server.tools.retain(|name, projected| {
-        let keep = desired
-            .get(name)
-            .is_some_and(|(_, tool)| tool.key() == &projected.key)
-            && world.get_entity(projected.entity).is_ok();
-        if !keep {
-            if let Ok(entity) = world.get_entity_mut(projected.entity) {
+    for (name, (definition, tool)) in desired {
+        let existing = current.remove(&name);
+        if existing.as_ref().is_some_and(|(_, key)| key == tool.key()) {
+            continue;
+        }
+        if let Some((entity, _)) = existing {
+            if let Ok(entity) = world.get_entity_mut(entity) {
                 entity.despawn();
             }
             changed = true;
         }
-        keep
-    });
-    for (name, (definition, tool)) in desired {
-        if server.tools.contains_key(&name) {
-            continue;
-        }
         if let Some(entity) =
             world.spawn_tool(definition, tool.handler().clone(), ToolOptions::default())
         {
-            server.tools.insert(
-                name,
-                Projected {
-                    key: tool.key().clone(),
-                    entity,
-                },
-            );
+            world.entity_mut(entity).insert(McpTool {
+                server: id.to_owned(),
+                key: tool.key().clone(),
+            });
+            changed = true;
+        }
+    }
+    for (_, (entity, _)) in current {
+        if let Ok(entity) = world.get_entity_mut(entity) {
+            entity.despawn();
             changed = true;
         }
     }
     changed
 }
 
-fn sync_names(world: &mut World) {
-    let live = world
-        .resource::<McpServers>()
-        .0
-        .values()
-        .flat_map(|server| server.tools.keys().cloned())
-        .collect();
-    world.resource_mut::<HostToolNames>().0 = live;
+/// The model-facing names MCP servers contribute right now. The tool entities
+/// are the only owner: the gate and the per-agent access read this set instead
+/// of a second table kept in step with them.
+pub(crate) fn tool_names(world: &mut World) -> HashSet<String> {
+    let mut query = world.query::<(&ToolDef, &McpTool)>();
+    query
+        .iter(world)
+        .map(|(definition, _)| definition.0.name.as_str().to_owned())
+        .collect()
+}
+
+fn refresh_access(world: &mut World) {
     if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
         tracing::warn!(%error, "the MCP tools are not offered");
     }
@@ -475,11 +487,11 @@ fn sync_names(world: &mut World) {
 
 /// Closes one server and removes the tools it contributed.
 fn retire_one(world: &mut World, id: &str) {
-    let Some(mut server) = world.resource_mut::<McpServers>().0.remove(id) else {
+    let Some(server) = world.resource_mut::<McpServers>().0.remove(id) else {
         return;
     };
-    if project(world, id, &mut server, None) {
-        sync_names(world);
+    if project(world, id, &server, None) {
+        refresh_access(world);
     }
     // Closing waits for the transport, so it runs off the host thread.
     if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
@@ -882,12 +894,25 @@ mod tests {
         )
     }
 
+    fn tool_entity(world: &mut World, name: &str) -> Option<Entity> {
+        let mut query = world.query::<(Entity, &ToolDef)>();
+        query
+            .iter(world)
+            .find(|(_, definition)| definition.0.name.as_str() == name)
+            .map(|(entity, _)| entity)
+    }
+
+    fn server_tools(world: &mut World, id: &str) -> usize {
+        let mut query = world.query::<&McpTool>();
+        query.iter(world).filter(|tool| tool.server == id).count()
+    }
+
     #[tokio::test]
     async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         let (connection, registry, _, task) = connect_echo(Echo::new()).await;
         let expected = registry.add_managed_tools(vec![local_tool("echo", 1)]);
         let pinned = registry.snapshot();
-        let mut server = Server {
+        let server = Server {
             connection: connection.clone(),
             launch: Launch {
                 revision: 1,
@@ -896,16 +921,15 @@ mod tests {
             registry: registry.clone(),
             label: "notes".into(),
             allowed: Vec::new(),
-            tools: HashMap::new(),
         };
         let mut world = World::new();
-        assert!(project(&mut world, "c1", &mut server, Some(&pinned)));
-        let old_entity = server.tools["mcp_notes_echo"].entity;
+        assert!(project(&mut world, "c1", &server, Some(&pinned)));
+        let old_entity = tool_entity(&mut world, "mcp_notes_echo").unwrap();
         let refreshed =
             registry.reconcile_managed_tools(expected.clone(), vec![local_tool("echo", 2)]);
         let current = registry.snapshot();
-        assert!(project(&mut world, "c1", &mut server, Some(&current)));
-        let entity = server.tools["mcp_notes_echo"].entity;
+        assert!(project(&mut world, "c1", &server, Some(&current)));
+        let entity = tool_entity(&mut world, "mcp_notes_echo").unwrap();
         assert_ne!(old_entity, entity);
         assert!(world.get_entity(old_entity).is_err());
         assert_eq!(
@@ -938,10 +962,10 @@ mod tests {
         assert!(project(
             &mut world,
             "c1",
-            &mut server,
+            &server,
             Some(&registry.snapshot())
         ));
-        assert!(server.tools.is_empty());
+        assert!(tool_entity(&mut world, "mcp_notes_echo").is_none());
         assert!(world.get_entity(entity).is_err());
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let probe = alive.clone();
@@ -952,17 +976,17 @@ mod tests {
         assert!(project(
             &mut world,
             "c1",
-            &mut server,
+            &server,
             Some(&registry.snapshot())
         ));
         alive.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(project(
             &mut world,
             "c1",
-            &mut server,
+            &server,
             Some(&registry.snapshot())
         ));
-        assert!(server.tools.is_empty());
+        assert!(tool_entity(&mut world, "mcp_notes_echo").is_none());
         connection.close().await;
         task.abort();
     }
@@ -975,7 +999,6 @@ mod tests {
         let mut harness = crate::host::tests::Harness::new([]);
         let world = harness.app.world_mut();
         world.init_resource::<McpServers>();
-        world.init_resource::<HostToolNames>();
         world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
         let (definition, handler, _) = local_tool("mcp_notes_echo", 0).into_parts();
         let foreign = world
@@ -995,24 +1018,14 @@ mod tests {
             &desired,
         );
         project_servers(world);
-        assert!(world.resource::<McpServers>().0["c1"].tools.is_empty());
-        assert!(
-            !world
-                .resource::<HostToolNames>()
-                .0
-                .contains("mcp_notes_echo")
-        );
+        assert_eq!(server_tools(world, "c1"), 0);
+        assert!(!tool_names(world).contains("mcp_notes_echo"));
         assert!(world.get_entity(foreign).is_ok());
         world.entity_mut(foreign).despawn();
         project_servers(world);
-        let entity = world.resource::<McpServers>().0["c1"].tools["mcp_notes_echo"].entity;
-        assert!(
-            !world
-                .resource::<HostToolNames>()
-                .0
-                .contains("mcp_notes_other")
-        );
-        assert_eq!(world.resource::<McpServers>().0["c1"].tools.len(), 1);
+        let entity = tool_entity(world, "mcp_notes_echo").unwrap();
+        assert!(!tool_names(world).contains("mcp_notes_other"));
+        assert_eq!(server_tools(world, "c1"), 1);
         attach(
             world,
             "c2",
@@ -1025,18 +1038,13 @@ mod tests {
             &want("notes"),
         );
         project_servers(world);
-        assert!(world.resource::<McpServers>().0["c2"].tools.is_empty());
+        assert_eq!(server_tools(world, "c2"), 0);
         retire_one(world, "c2");
         assert!(world.get_entity(entity).is_ok());
-        assert!(
-            world
-                .resource::<HostToolNames>()
-                .0
-                .contains("mcp_notes_echo")
-        );
+        assert!(tool_names(world).contains("mcp_notes_echo"));
         retire_one(world, "c1");
         assert!(world.get_entity(entity).is_err());
-        assert!(world.resource::<HostToolNames>().0.is_empty());
+        assert!(tool_names(world).is_empty());
         first.closed().await;
         second.closed().await;
         task1.abort();
@@ -1061,7 +1069,6 @@ mod tests {
         let mut harness = crate::host::tests::Harness::new([]);
         let world = harness.app.world_mut();
         world.init_resource::<McpServers>();
-        world.init_resource::<HostToolNames>();
         world.init_resource::<Connecting>();
         let runtime = tokio::runtime::Handle::current();
         world.insert_resource(HostRuntime(runtime.clone()));
@@ -1124,7 +1131,7 @@ mod tests {
         );
         assert!(world.resource::<Connecting>().0.is_empty());
         project_servers(world);
-        let current = world.resource::<McpServers>().0["c1"].tools["mcp_notes_echo"].entity;
+        let current = tool_entity(world, "mcp_notes_echo").unwrap();
         old_generation.store(99, std::sync::atomic::Ordering::SeqCst);
         old_peer.notify_tool_list_changed().await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1150,21 +1157,13 @@ mod tests {
         );
         old_registry.add_managed_tools(vec![local_tool("late", 99)]);
         project_servers(world);
-        assert_eq!(
-            world.resource::<McpServers>().0["c1"].tools["mcp_notes_echo"].entity,
-            current
-        );
-        assert!(
-            !world
-                .resource::<HostToolNames>()
-                .0
-                .contains("mcp_notes_late")
-        );
+        assert_eq!(tool_entity(world, "mcp_notes_echo"), Some(current));
+        assert!(!tool_names(world).contains("mcp_notes_late"));
         retire_one(world, "c1");
         old_registry.add_managed_tools(vec![local_tool("after_retire", 99)]);
         project_servers(world);
         assert!(world.get_entity(current).is_err());
-        assert!(world.resource::<HostToolNames>().0.is_empty());
+        assert!(tool_names(world).is_empty());
         old.closed().await;
         new.closed().await;
         task1.abort();
@@ -1197,7 +1196,6 @@ mod tests {
         ]);
         let world = harness.app.world_mut();
         world.init_resource::<McpServers>();
-        world.init_resource::<HostToolNames>();
         attach(
             world,
             "c1",
@@ -1210,12 +1208,7 @@ mod tests {
             &want("notes"),
         );
         project_servers(world);
-        assert!(
-            world
-                .resource::<HostToolNames>()
-                .0
-                .contains("mcp_notes_echo")
-        );
+        assert!(tool_names(world).contains("mcp_notes_echo"));
 
         harness
             .accept("k1", "ノート読んで")
@@ -1243,15 +1236,14 @@ mod tests {
             1,
             "the model's call reached the MCP server"
         );
-        let old_entity =
-            harness.app.world().resource::<McpServers>().0["c1"].tools["mcp_notes_echo"].entity;
+        let old_entity = tool_entity(harness.app.world_mut(), "mcp_notes_echo").unwrap();
         generation.store(2, std::sync::atomic::Ordering::SeqCst);
         peer.notify_tool_list_changed().await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let world = harness.app.world_mut();
                 project_servers(world);
-                let current = world.resource::<McpServers>().0["c1"].tools["mcp_notes_echo"].entity;
+                let current = tool_entity(world, "mcp_notes_echo").unwrap();
                 if current != old_entity {
                     let definition = &world.get::<ToolDef>(current).unwrap().0;
                     assert_eq!(definition.description, "Echo generation 2");
@@ -1270,11 +1262,7 @@ mod tests {
             loop {
                 let world = harness.app.world_mut();
                 project_servers(world);
-                if !world
-                    .resource::<HostToolNames>()
-                    .0
-                    .contains("mcp_notes_echo")
-                {
+                if !tool_names(world).contains("mcp_notes_echo") {
                     break;
                 }
                 tokio::task::yield_now().await;

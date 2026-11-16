@@ -381,11 +381,9 @@ fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {
             .map(|(entity, agent)| (entity, agent.companion_id.clone()))
             .collect()
     };
+    let host = crate::host::mcp::tool_names(world);
     for (entity, companion) in parents {
         let granted: &[String] = granted.get(&companion).map_or(&[], Vec::as_slice);
-        let host: std::collections::HashSet<String> = world
-            .get_resource::<crate::host::resources::HostToolNames>()
-            .map_or_else(Default::default, |names| names.0.clone());
         let names = parent_names(granted, &host);
         set_access(world, entity, &names);
     }

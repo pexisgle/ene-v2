@@ -390,9 +390,7 @@ fn gate(world: &mut World) {
     }
     let store = world.resource::<Store>().clone();
     let rules = store.policy_rules().unwrap_or_default();
-    let host_tools: std::collections::HashSet<String> = world
-        .get_resource::<crate::host::resources::HostToolNames>()
-        .map_or_else(Default::default, |names| names.0.clone());
+    let host_tools = crate::host::mcp::tool_names(world);
     for (call, tool_name, arguments, agent) in calls {
         // Built-in host tools and the tools an MCP server contributed belong to
         // the host process; the operator configured them.
