@@ -148,6 +148,14 @@ impl Sensor {
 /// The idle threshold the design names for the activity event.
 pub const IDLE_THRESHOLD: u64 = 60;
 
+/// Whether this platform can report the foreground window at all.
+///
+/// A platform without the hook declares no ye.watch, so the host never
+/// publishes a tool this client cannot honour.
+pub fn supported() -> bool {
+    cfg!(windows)
+}
+
 /// Samples the OS once.
 #[cfg(windows)]
 pub fn observe() -> Observation {

@@ -1,80 +1,185 @@
 //! Playback and capture on the client's own devices.
 //!
-//! The host sends 24 kHz / 16-bit signed LE / mono PCM and expects the client
-//! to convert it (`docs/design/voice-avatar.md` §4.3). This module owns that
-//! conversion, the single-playback invariant, and the RMS the avatar uses for
-//! lip sync.
+//! The wire format is fixed by the host: 24 kHz (or 16 kHz) 16-bit signed
+//! little-endian mono PCM (`apps/ene-host/src/host/voice.rs`). The device format
+//! is whatever the device reports, so this module queries it and either opens at
+//! the wire rate directly or converts with `rubato`.
 //!
-//! Two rules shape the code below. Only one utterance may be audible at a time,
-//! so a new utterance or a flush stops the old one before anything else runs.
-//! And a flush invalidates a generation, so a chunk that arrives late for a
-//! flushed generation is dropped rather than played.
+//! Two rules shape the code below.
+//!
+//! - A continuous stream keeps one resampler for its whole life. Rebuilding one
+//!   per chunk restarts the filter and the audio clicks; the `Filter` type here
+//!   owns the `rubato` state and accumulates into the fixed chunk size the
+//!   library requires.
+//! - The audio callback does no I/O, no RPC, no allocation and no blocking lock.
+//!   It pops samples, counts them, and marks sentences as they finish. Capture
+//!   pushes device samples into a pre-filled ring with `try_lock` and lets the
+//!   session thread do the conversion.
+//!
+//! Only one utterance is audible at a time, so a new utterance or a flush stops
+//! the old one before anything else runs.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
 /// The wire format the host and the client agree on.
 pub const WIRE_RATE: u32 = 24_000;
 
-/// What the mixer needs to know about the utterance being played.
+/// The chunk the resampler converts at a time. Small enough to keep latency
+/// under a frame budget, large enough for the FFT filter to be efficient.
+const CHUNK: usize = 480;
+
+/// A streaming sample-rate converter that keeps its state across chunks.
+struct Filter {
+    inner: rubato::Fft<f32>,
+    pending: Vec<f32>,
+    output: Vec<f32>,
+}
+
+impl Filter {
+    fn new(from: u32, to: u32) -> Result<Self, String> {
+        let inner = rubato::Fft::<f32>::new(
+            from as usize,
+            to as usize,
+            CHUNK,
+            1,
+            rubato::FixedSync::Input,
+        )
+        .map_err(|error| format!("the sample rate cannot be converted: {error}"))?;
+        Ok(Self {
+            inner,
+            pending: Vec::with_capacity(CHUNK * 2),
+            output: vec![0.; CHUNK * 4],
+        })
+    }
+
+    /// Converts everything that completes a chunk, keeping the remainder.
+    fn push(&mut self, input: &[f32]) -> Result<Vec<f32>, String> {
+        use rubato::Resampler;
+        self.pending.extend_from_slice(input);
+        let mut out = Vec::new();
+        loop {
+            let want = self.inner.input_frames_next();
+            if self.pending.len() < want {
+                break;
+            }
+            let source = rubato::audioadapter_buffers::direct::InterleavedSlice::new(
+                &self.pending[..want],
+                1,
+                want,
+            )
+            .map_err(|error| error.to_string())?;
+            let frames = self.inner.output_frames_max();
+            if self.output.len() < frames {
+                self.output.resize(frames, 0.);
+            }
+            let mut sink = rubato::audioadapter_buffers::direct::InterleavedSlice::new_mut(
+                &mut self.output[..frames],
+                1,
+                frames,
+            )
+            .map_err(|error| error.to_string())?;
+            let (consumed, produced) = self
+                .inner
+                .process_into_buffer(&source, &mut sink, None)
+                .map_err(|error| format!("the audio was not converted: {error}"))?;
+            out.extend_from_slice(&self.output[..produced]);
+            self.pending.drain(..consumed);
+        }
+        Ok(out)
+    }
+}
+
+/// One sentence still queued for the device.
+struct Sentence {
+    sequence_no: u32,
+    remaining: usize,
+}
+
+/// What the mixer knows about the utterance being played.
 #[derive(Default)]
 struct Deck {
     /// The generation currently allowed to make sound.
     generation: u64,
-    /// The utterance currently playing.
     utterance: String,
     /// Decoded, resampled, device-rate mono samples waiting to be played.
     pending: VecDeque<f32>,
-    /// The RMS of the most recent block, for the avatar's lip sync.
-    rms: f32,
+    /// The sentences those samples belong to, in order.
+    queue: VecDeque<Sentence>,
+    /// Sentence indexes that played to the end. The host emits at most 64
+    /// sentences per utterance, so one word holds every one of them.
+    played: u64,
+    /// Samples written to the device for the current utterance.
+    played_samples: u64,
+    /// Set when the device reported a stream error.
+    failed: bool,
 }
 
-/// The device-side player. Cloning is not allowed: one client owns one deck.
+/// How far the audible stream has actually got.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub utterance: String,
+    pub generation: u64,
+    /// Sentence indexes that played to their end, in order.
+    pub played: Vec<u32>,
+    pub played_samples: u64,
+    /// Whether the queue is empty, which is what "played" means.
+    pub drained: bool,
+    pub failed: bool,
+}
+
+/// The device-side player. One client owns one deck.
 pub struct Player {
     deck: Arc<Mutex<Deck>>,
     rate: u32,
     channels: usize,
+    /// Device rate minus wire rate, when the device does not offer the wire
+    /// rate. The session thread owns this, never the callback.
+    filter: Option<Filter>,
     /// The stream must stay alive for audio to continue; dropping it stops it.
     _stream: cpal::Stream,
     /// The generation the host last invalidated.
     flushed: Arc<AtomicU64>,
+    /// RMS of the buffer the device last played, for lip sync.
+    level: Arc<AtomicU32>,
 }
 
 impl Player {
-    /// Opens the default output device.
+    /// Opens the default output device, preferring a configuration that needs no
+    /// conversion.
     pub fn open() -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or("the machine has no default output device")?;
-        let supported = device
-            .default_output_config()
-            .map_err(|error| format!("the output device has no default config: {error}"))?;
+        let supported = pick_output(&device)?;
         let rate = supported.sample_rate();
         let channels = supported.channels() as usize;
+        if supported.sample_format() != cpal::SampleFormat::F32 {
+            return Err(format!(
+                "the output device uses {} samples, which this client does not convert",
+                supported.sample_format()
+            ));
+        }
         let deck = Arc::new(Mutex::new(Deck::default()));
         let flushed = Arc::new(AtomicU64::new(0));
+        let level = Arc::new(AtomicU32::new(0));
         let sink = deck.clone();
-        let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => device.build_output_stream(
+        let rms = level.clone();
+        let stream = device
+            .build_output_stream(
                 supported.config(),
-                move |output: &mut [f32], _| fill(output, channels, &sink),
+                move |output: &mut [f32], _| fill(output, channels, &sink, &rms),
                 |error| tracing::error!("audio output failed: {error}"),
                 None,
-            ),
-            other => {
-                return Err(format!(
-                    "the output device uses unsupported {other:?} samples"
-                ));
-            }
-        }
-        .map_err(|error| format!("the output stream could not start: {error}"))?;
+            )
+            .map_err(|error| format!("the output stream could not start: {error}"))?;
         stream
             .play()
             .map_err(|error| format!("the output stream could not start: {error}"))?;
@@ -82,93 +187,159 @@ impl Player {
             deck,
             rate,
             channels,
+            filter: (rate != WIRE_RATE)
+                .then(|| Filter::new(WIRE_RATE, rate))
+                .transpose()?,
             _stream: stream,
             flushed,
+            level,
         })
     }
 
-    /// Starts playing `utterance` at `generation`, replacing whatever played.
-    ///
-    /// A new utterance always wins: the old audio is dropped, never mixed.
-    pub fn begin(&self, utterance: &str, generation: u64) {
-        let mut deck = self.deck.lock().unwrap();
-        deck.pending.clear();
-        deck.utterance = utterance.to_owned();
-        deck.generation = generation;
-        deck.rms = 0.;
+    /// The mouth amplitude the device last played, in 0..=1.
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 
     /// Queues one wire chunk. A chunk for a flushed or superseded generation is
     /// dropped, which is what makes a late arrival harmless.
-    pub fn push(&self, utterance: &str, generation: u64, pcm: &[u8]) -> Result<(), String> {
+    pub fn push(
+        &mut self,
+        utterance: &str,
+        generation: u64,
+        sequence_no: u32,
+        pcm: &[u8],
+    ) -> Result<(), String> {
         if generation <= self.flushed.load(Ordering::Relaxed) {
             return Ok(());
         }
         let samples = decode(pcm)?;
-        let resampled = resample(&samples, WIRE_RATE, self.rate)?;
-        let mut deck = self.deck.lock().unwrap();
-        if deck.utterance != utterance || deck.generation != generation {
-            return Ok(());
+        let samples = match self.filter.as_mut() {
+            Some(filter) => filter.push(&samples)?,
+            None => samples,
+        };
+        let mut deck = self
+            .deck
+            .lock()
+            .map_err(|_| "the audio deck was poisoned")?;
+        if deck.generation != generation || deck.utterance != utterance {
+            // A new utterance always wins: the old audio is dropped, never mixed.
+            deck.pending.clear();
+            deck.queue.clear();
+            deck.played = 0;
+            deck.played_samples = 0;
+            deck.failed = false;
+            deck.generation = generation;
+            deck.utterance = utterance.to_owned();
         }
-        deck.pending.extend(resampled);
+        if let Some(last) = deck.queue.back_mut()
+            && last.sequence_no == sequence_no
+        {
+            // Every chunk of one sentence shares its sequence number, so they
+            // extend the same entry instead of looking like duplicates.
+            last.remaining += samples.len();
+        } else {
+            deck.queue.push_back(Sentence {
+                sequence_no,
+                remaining: samples.len(),
+            });
+        }
+        deck.pending.extend(samples);
         Ok(())
     }
 
     /// Stops everything at or below `generation`.
     pub fn flush(&self, generation: u64) {
         self.flushed.fetch_max(generation, Ordering::Relaxed);
-        let mut deck = self.deck.lock().unwrap();
-        if deck.generation <= generation {
+        if let Ok(mut deck) = self.deck.lock()
+            && deck.generation <= generation
+        {
             deck.pending.clear();
+            deck.queue.clear();
             deck.utterance.clear();
-            deck.rms = 0.;
         }
     }
 
     /// Whether audio is still queued for the current utterance.
     pub fn playing(&self) -> bool {
-        !self.deck.lock().unwrap().pending.is_empty()
+        self.deck
+            .lock()
+            .map(|deck| !deck.pending.is_empty())
+            .unwrap_or(false)
     }
 
-    /// The RMS of the last played block, for the avatar's lip sync.
-    pub fn rms(&self) -> f32 {
-        self.deck.lock().unwrap().rms
+    /// What actually reached the device, for `ReportPlaybackStatus`.
+    pub fn progress(&self) -> Progress {
+        let Ok(deck) = self.deck.lock() else {
+            return Progress::default();
+        };
+        Progress {
+            utterance: deck.utterance.clone(),
+            generation: deck.generation,
+            played: (0..64)
+                .filter(|index| deck.played & (1 << index) != 0)
+                .collect(),
+            played_samples: deck.played_samples,
+            drained: deck.pending.is_empty(),
+            failed: deck.failed,
+        }
     }
 
-    /// The device rate the wire audio is converted to.
+    /// The device rate the wire audio is played at.
     pub fn rate(&self) -> u32 {
         self.rate
     }
 
-    /// The channel count the stream writes.
     pub fn channels(&self) -> usize {
         self.channels
     }
 }
 
 /// Fills one device buffer from the deck, duplicating mono into every channel.
-fn fill(output: &mut [f32], channels: usize, deck: &Arc<Mutex<Deck>>) {
-    let mut deck = deck.lock().unwrap();
-    let mut energy = 0f32;
-    let mut counted = 0usize;
+fn fill(output: &mut [f32], channels: usize, deck: &Arc<Mutex<Deck>>, level: &AtomicU32) {
+    let Ok(mut deck) = deck.try_lock() else {
+        // The session thread is queueing; silence one buffer rather than block.
+        output.fill(0.);
+        level.store(0f32.to_bits(), Ordering::Relaxed);
+        return;
+    };
+    let mut energy = 0f64;
+    let mut audible = 0u64;
     for frame in output.chunks_mut(channels) {
         let sample = deck.pending.pop_front().unwrap_or(0.);
         if sample != 0. || !deck.pending.is_empty() {
-            energy += sample * sample;
-            counted += 1;
+            deck.played_samples += 1;
+        }
+        energy += f64::from(sample) * f64::from(sample);
+        if sample != 0. {
+            audible += 1;
+        }
+        if let Some(sentence) = deck.queue.front_mut() {
+            sentence.remaining = sentence.remaining.saturating_sub(1);
+            if sentence.remaining == 0 {
+                let finished = deck.queue.pop_front();
+                if let Some(sentence) = finished
+                    && sentence.sequence_no < 64
+                {
+                    deck.played |= 1 << sentence.sequence_no;
+                }
+            }
         }
         for slot in frame.iter_mut() {
             *slot = sample;
         }
     }
-    if counted > 0 {
-        deck.rms = (energy / counted as f32).sqrt();
+    // The RMS of what this buffer actually sent is the mouth opening. Silence
+    // when nothing played, so a drained deck closes the mouth.
+    let rms = if audible == 0 {
+        0.
     } else {
-        deck.rms = 0.;
-    }
+        (energy / audible as f64).sqrt() as f32
+    };
+    level.store(rms.to_bits(), Ordering::Relaxed);
 }
 
-/// Decodes the wire's 16-bit signed LE mono PCM.
+/// Decodes the wire's 16-bit signed little-endian mono PCM.
 pub fn decode(pcm: &[u8]) -> Result<Vec<f32>, String> {
     if !pcm.len().is_multiple_of(2) {
         return Err("the host sent an odd number of PCM bytes".into());
@@ -181,7 +352,7 @@ pub fn decode(pcm: &[u8]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-/// Encodes device samples back to the wire's 16-bit signed LE mono PCM.
+/// Encodes device samples as the wire's 16-bit signed little-endian mono PCM.
 pub fn encode(samples: &[f32]) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(samples.len() * 2);
     for sample in samples {
@@ -191,40 +362,52 @@ pub fn encode(samples: &[f32]) -> Vec<u8> {
     pcm
 }
 
-/// Resamples mono audio between two rates with the same filter the host uses.
-pub fn resample(samples: &[f32], from: u32, to: u32) -> Result<Vec<f32>, String> {
-    use rubato::{Fft, FixedSync, Resampler};
-    if from == 0 || to == 0 {
-        return Err("a sample rate of zero cannot be converted".into());
+/// Picks the device configuration closest to the wire format, so the common
+/// case needs no conversion at all.
+///
+/// The callback writes `f32`, so a device that only offers another sample format
+/// is refused with a reason instead of being driven with the wrong type. The
+/// first device this client met advertised `u8` as its first range, which is
+/// why the choice prefers `f32` and the wire rate rather than taking the first.
+fn pick_output(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    if let Ok(ranges) = device.supported_output_configs() {
+        let mut best: Option<(u8, cpal::SupportedStreamConfig)> = None;
+        for range in ranges {
+            let config = range.with_sample_rate(range.min_sample_rate());
+            let score = u8::from(config.sample_format() == cpal::SampleFormat::F32) * 2
+                + u8::from(config.sample_rate() == WIRE_RATE);
+            if best.as_ref().is_none_or(|(current, _)| score > *current) {
+                best = Some((score, config));
+            }
+        }
+        if let Some((score, config)) = best {
+            if score < 2 {
+                return Err(format!(
+                    "the output device offers {} at {} Hz, and this client converts only 32-bit float",
+                    config.sample_format(),
+                    config.sample_rate()
+                ));
+            }
+            return Ok(config);
+        }
     }
-    if from == to || samples.is_empty() {
-        return Ok(samples.to_vec());
-    }
-    let expected = ((samples.len() as f64) * f64::from(to) / f64::from(from)).round() as usize;
-    let mut resampler = Fft::<f32>::new(from as usize, to as usize, 1_024, 1, FixedSync::Input)
-        .map_err(|error| format!("the sample rate cannot be converted: {error}"))?;
-    let input =
-        rubato::audioadapter_buffers::direct::InterleavedSlice::new(samples, 1, samples.len())
-            .map_err(|error| format!("the sample rate cannot be converted: {error}"))?;
-    let mut resampled = resampler
-        .process_all(&input, samples.len(), None)
-        .map_err(|error| format!("the sample rate cannot be converted: {error}"))?
-        .take_data();
-    resampled.truncate(expected);
-    Ok(resampled)
+    device
+        .default_output_config()
+        .map_err(|error| format!("the output device has no default config: {error}"))
 }
 
 /// The capture side: microphone frames at the wire rate.
 ///
-/// Capture is opened only when the host has an STT connection; a client that
-/// cannot open a microphone still plays audio.
+/// The callback only copies device samples into a bounded ring. Conversion to
+/// the wire format happens in [`Microphone::take`], on the session thread.
 pub struct Microphone {
     _stream: cpal::Stream,
     frames: Arc<Mutex<VecDeque<f32>>>,
+    filter: Option<Filter>,
 }
 
 impl Microphone {
-    /// Opens the default input device and resamples it to the wire rate.
+    /// Opens the default input device.
     pub fn open() -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
@@ -235,51 +418,60 @@ impl Microphone {
             .map_err(|error| format!("the input device has no default config: {error}"))?;
         let rate = supported.sample_rate();
         let channels = supported.channels() as usize;
-        let frames = Arc::new(Mutex::new(VecDeque::new()));
+        if supported.sample_format() != cpal::SampleFormat::F32 {
+            return Err(format!(
+                "the input device uses {} samples, which this client does not convert",
+                supported.sample_format()
+            ));
+        }
+        // Two seconds of headroom: past that, a stalled reader loses old audio
+        // instead of growing without bound.
+        let capacity = rate as usize * 2;
+        let frames = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
         let sink = frames.clone();
-        let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => device.build_input_stream(
+        let stream = device
+            .build_input_stream(
                 supported.config(),
                 move |input: &[f32], _| {
-                    // The first channel is enough: the wire is mono.
-                    let mono: Vec<f32> = input
-                        .chunks(channels)
-                        .filter_map(<[f32]>::first)
-                        .copied()
-                        .collect();
-                    if let Ok(resampled) = resample(&mono, rate, WIRE_RATE)
-                        && let Ok(mut frames) = sink.lock()
-                    {
-                        frames.extend(resampled);
-                        // A stalled reader must not grow without bound.
-                        while frames.len() > WIRE_RATE as usize * 2 {
-                            frames.pop_front();
+                    let Ok(mut sink) = sink.try_lock() else {
+                        return;
+                    };
+                    for frame in input.chunks(channels) {
+                        if sink.len() >= capacity {
+                            break;
                         }
+                        // Average the channels: the wire is mono and the device
+                        // may route the microphone to any one of them.
+                        let sum: f32 = frame.iter().sum();
+                        sink.push_back(sum / channels as f32);
                     }
                 },
                 |error| tracing::error!("audio input failed: {error}"),
                 None,
-            ),
-            other => {
-                return Err(format!(
-                    "the input device uses unsupported {other:?} samples"
-                ));
-            }
-        }
-        .map_err(|error| format!("the input stream could not start: {error}"))?;
+            )
+            .map_err(|error| format!("the input stream could not start: {error}"))?;
         stream
             .play()
             .map_err(|error| format!("the input stream could not start: {error}"))?;
         Ok(Self {
             _stream: stream,
             frames,
+            filter: (rate != WIRE_RATE)
+                .then(|| Filter::new(rate, WIRE_RATE))
+                .transpose()?,
         })
     }
 
     /// Takes the frames captured since the last call, as wire PCM.
-    pub fn take(&self) -> Vec<u8> {
-        let mut frames = self.frames.lock().unwrap();
-        let samples: Vec<f32> = frames.drain(..).collect();
+    pub fn take(&mut self) -> Vec<u8> {
+        let samples: Vec<f32> = match self.frames.lock() {
+            Ok(mut frames) => frames.drain(..).collect(),
+            Err(_) => return Vec::new(),
+        };
+        let samples = match self.filter.as_mut() {
+            Some(filter) => filter.push(&samples).unwrap_or_default(),
+            None => samples,
+        };
         encode(&samples)
     }
 }
@@ -293,8 +485,7 @@ mod tests {
         let samples = [-1., -0.5, 0., 0.5, 1.];
         let pcm = encode(&samples);
         assert_eq!(pcm.len(), samples.len() * 2);
-        let decoded = decode(&pcm).unwrap();
-        for (got, want) in decoded.iter().zip(samples) {
+        for (got, want) in decode(&pcm).unwrap().iter().zip(samples) {
             assert!((got - want).abs() < 1e-3, "{got} approximates {want}");
         }
     }
@@ -304,26 +495,67 @@ mod tests {
         assert!(decode(&[0, 1, 2]).is_err());
     }
 
+    /// Duration has to survive conversion, which is the property a per-chunk
+    /// resampler would lose at every boundary.
     #[test]
-    fn resampling_preserves_duration() {
-        let samples: Vec<f32> = (0..2_400).map(|i| (i as f32 * 0.01).sin()).collect();
-        let up = resample(&samples, 24_000, 48_000).unwrap();
+    fn a_streamed_conversion_preserves_the_sample_count_across_chunks() {
+        let mut up = Filter::new(WIRE_RATE, 48_000).unwrap();
+        let mut produced = 0usize;
+        let mut fed = 0usize;
+        // Uneven chunks on purpose: the wire delivers arbitrary frame counts.
+        for chunk in [100usize, 500, 37, 900, 480, 211, 300] {
+            let samples: Vec<f32> = (0..chunk)
+                .map(|index| (index as f32 * 0.01).sin())
+                .collect();
+            fed += chunk;
+            produced += up.push(&samples).unwrap().len();
+        }
+        let expected = (fed as f64 * 2.).round() as usize;
+        // The filter holds at most one chunk of input plus its own delay.
         assert!(
-            up.len().abs_diff(4_800) <= 1,
-            "24 kHz to 48 kHz doubles the length, got {}",
-            up.len()
+            produced + CHUNK * 2 >= expected,
+            "produced {produced} against about {expected}"
         );
-        let down = resample(&up, 48_000, 24_000).unwrap();
-        assert!(
-            down.len().abs_diff(2_400) <= 1,
-            "48 kHz to 24 kHz halves it, got {}",
-            down.len()
-        );
+        assert!(produced <= expected, "no more than the input produces");
     }
 
     #[test]
-    fn an_identical_rate_is_passed_through() {
-        let samples = [0.25, -0.25];
-        assert_eq!(resample(&samples, WIRE_RATE, WIRE_RATE).unwrap(), samples);
+    fn a_sentence_keeps_one_queue_entry_across_its_chunks() {
+        let deck = Arc::new(Mutex::new(Deck::default()));
+        {
+            let mut deck = deck.lock().unwrap();
+            deck.utterance = "u".into();
+            deck.generation = 1;
+            for _ in 0..3 {
+                match deck.queue.back_mut() {
+                    Some(last) if last.sequence_no == 7 => last.remaining += 4,
+                    _ => deck.queue.push_back(Sentence {
+                        sequence_no: 7,
+                        remaining: 4,
+                    }),
+                }
+            }
+            assert_eq!(deck.queue.len(), 1, "one sentence, one entry");
+            assert_eq!(deck.queue[0].remaining, 12);
+        }
+    }
+    /// The mouth follows what the device actually played: audible samples raise
+    /// the level, and a drained deck reports silence.
+    #[test]
+    fn the_played_buffer_reports_its_rms_and_silence() {
+        let deck = Arc::new(Mutex::new(Deck::default()));
+        deck.lock()
+            .unwrap()
+            .pending
+            .extend([0.5f32, -0.5, 0.5, -0.5]);
+        let level = AtomicU32::new(0);
+        let mut output = vec![0.; 4];
+        fill(&mut output, 1, &deck, &level);
+        let rms = f32::from_bits(level.load(Ordering::Relaxed));
+        assert!((rms - 0.5).abs() < 1e-6, "{rms}");
+
+        let mut output = vec![0.; 4];
+        fill(&mut output, 1, &deck, &level);
+        assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
     }
 }

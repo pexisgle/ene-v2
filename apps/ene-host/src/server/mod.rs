@@ -21,7 +21,16 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let access = access::Access::acquire(&state, &runtime_path)?;
+    // The directories are the first thing the host touches, and a profile that
+    // refuses them otherwise fails with a bare `PermissionDenied`.
+    let access = access::Access::acquire(&state, &runtime_path).map_err(|error| {
+        std::io::Error::other(format!(
+            "cannot use the state directory {} or the runtime directory {} ({error}); \
+             set ENE_HOST_STATE_DIR and ENE_HOST_RUNTIME_DIR to writable directories",
+            state.display(),
+            runtime_path.display()
+        ))
+    })?;
     let runtime = Runtime::start(&state).await?;
     // Access control is delegated to the OS or a fronting service
     // (docs/design/host-access.md): the bind address is explicit, and the

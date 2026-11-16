@@ -1067,10 +1067,15 @@ pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
         return;
     };
     if !voice.owns(companion) {
+        tracing::debug!(
+            companion,
+            "speech skipped: no client has subscribed to this companion's audio"
+        );
         return;
     }
     if !voice.streaming(companion) {
         let Ok(source) = tts_source(world) else {
+            tracing::debug!(companion, "speech skipped: no TTS engine is configured");
             return;
         };
         if let Some(holder) = voice.floor_holder()
@@ -1090,8 +1095,10 @@ pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
             .and_then(|companion| companion.voice_identifier)
             .unwrap_or_default();
         if !voice.begin(companion, source, voice_name) {
+            tracing::debug!(companion, "speech skipped: the utterance was not opened");
             return;
         }
+        tracing::debug!(companion, "speaking this turn's reply");
     }
     voice.speak(companion, text);
 }

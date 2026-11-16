@@ -35,6 +35,9 @@ bytes = "1"
 buffa = { version = "0.9", features = ["json"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+# Pre-1.0 and explicitly unstable (docs/references.md), so the desktop client
+# pins the exact version its observed API was written against.
+gpui = { version = "=0.2.2", default-features = false }
 http = "1"
 croner = { version = "4", default-features = false, features = ["jiff"] }
 rubato = "5.1"

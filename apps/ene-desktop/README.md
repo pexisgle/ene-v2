@@ -1,11 +1,11 @@
 # ene-desktop
 
-デスクトップクライアントのリファレンス実装です。[デスクトップクライアント設計](../../docs/design/desktop-client.md)が定めるプロセス構成を、実際に動く1つのプロセスとして提供します。
+デスクトップクライアントのリファレンス実装です。[デスクトップクライアント設計](../../docs/design/desktop-client.md)が定めるプロセス構成を、GPUIのウィンドウを1つ持つプロセスとして提供します。
 
-`ene-host` へConnect-RPCで接続し、自身が提供できる能力を宣言して、コンパニオンのアクティブ端末になります。アバター描画は子プロセスの [`ene-avatar`](../ene-avatar/) に委ね、音声デバイスとOSのウィンドウ監視はこのプロセスが所有します。会話・記憶・モデルはホストにあり、このプロセスはそれらを持ちません。
+`ene-host` へConnect-RPCで接続し、自身が提供できる能力を宣言して、コンパニオンのアクティブ端末になります。会話・記憶・モデル・作業のオーケストレーションはホストにあり、このプロセスはそれらを持ちません。アバター描画は子プロセスの [`ene-avatar`](../ene-avatar/) に委ね、音声デバイスとOSのウィンドウ監視はこのプロセスが所有します。
 
 ```text
-[ene-host] ◀── Connect-RPC ──▶ [ene-desktop] ── stdin/stdout JSON Lines ──▶ [ene-avatar]
+[ene-host] ◀── Connect-RPC ──▶ [ene-desktop(GPUIウィンドウ)] ◀── stdin/stdout JSON Lines ──▶ [ene-avatar]
 ```
 
 ## 起動
@@ -18,7 +18,7 @@ just run-host
 cargo run --locked -p ene-desktop
 ```
 
-`ENE_HOST_CONNECTION` を設定しない場合は、ホストの既定のランタイムディレクトリにある `connection.json` を読みます。
+`ENE_HOST_CONNECTION` を設定しない場合は、ホストの既定のランタイムディレクトリにある `connection.json` を読みます。ホストは起動のたびにポートとトークンを書き直すため、このファイルは接続を試みるたびに読み直します。
 
 環境変数:
 
@@ -30,41 +30,93 @@ cargo run --locked -p ene-desktop
 | `ENE_DESKTOP_RENDERER` | `ene-avatar` の実行ファイル。未設定なら描画なしで動く |
 | `ENE_DESKTOP_MODEL` | 表示するVRMモデル。未設定なら `just fetch-assets` が置く既定モデル |
 
-## 宣言する能力
+## 画面
 
-ホストは能力名・入力スキーマ・プリセットだけを保持し、実装を解釈しません。宣言は [`src/capabilities.rs`](src/capabilities.rs) の表がすべてです。
+左のサイドバーにコンパニオンの一覧と「設定」があり、右が会話か設定です。上部の情報欄は置かず、接続状態と端末の状態は下端の1行にまとめます。
 
-| capability | tool_name | 入力 | approval |
-| --- | --- | --- | --- |
-| `body.motion` | `body_motion` | `{motion, expression?}` | `AUTO` |
-| `eye.watch` | `set_eye_watch` | `{target_pattern, match_kind, notify_on, enabled}` | `AUTO` |
+| 面 | 内容 |
+| --- | --- |
+| 会話 | 履歴、途中出力、送信、停止、再送。確定前のプレビューは薄く出し、確定はホストの記録だけ |
+| 確認カード | 承認待ちは会話の中に出す。「capability を実行してもいい？」と正規化済み入力、承認・常に承認・拒否 |
+| 作業 | 実行中は「作業を進めています」の1行と止めるだけ。作業エージェントの名前・ID・実行内容は出さない。質問は会話内のカードで答える |
+| 設定 | コンパニオンの編集、この端末の能力と状態、接続（LLM/TTS）と資格情報、プロバイダの追加、音声合成 |
+| 下端 | 接続状態、アバター・出力・入力の状態 |
 
-ホストが許可した能力だけがモデル向けのツールとして公開され、操作は `ClientService.DeviceStream` の `DeviceOperation` として届きます。許可は `ENE_HOST_ALLOWED_CAPABILITIES` で決まります（未設定なら何も許可されません）。
-
+承認と作業を独立したタブにしないのは、承認カードをコンパニオンの窓口に集約し、内部のエージェントをユーザーに見せない、という設計に合わせるためです。
 ## 構成
 
-- `host.rs`: ディスカバリの読み込みと、生成された各サービスクライアントの構築。
-- `client.rs`: 登録・有効化・世代の保持、届いた操作の適用と結果の報告、知覚の送信、音声の再生。
-- `capabilities.rs`: 宣言する能力と、そのJSON Schema・プリセット。
-- `avatar.rs`: `ene-avatar` の起動とJSON Linesでの操作、口パク振幅の一方向通知。
-- `audio.rs`: `cpal` による入出力、`rubato` による24kHzモノラルとの相互変換、単一再生とFlushの世代破棄。
-- `perception.rs`: 前面ウィンドウとアイドルの観測、`eye.watch` ルールの適用と優先割り込み。
+- `main.rs`: 起動、ディスカバリのパス決定、Tokioランタイムとセッションスレッド、GPUIアプリ、終了時の順序。
+- `session.rs`: 接続、登録、有効化、DeviceStream、音声ストリーム、再生報告、知覚、再接続。ローカル資源（アバター子プロセス、音声デバイス、感知器）の所有者。
+- `state.rs`: ウィンドウが表示する状態と、通知を表示へ畳み込む規則。ホスト状態の表示用コピーはここに1つだけ置く。
+- `ui/`: ウィンドウ。`mod.rs` がシェルとRPCの発行、`chat.rs`・`companion.rs`・`settings.rs`・`work.rs` が各面。
+- `input.rs`: GPUIの `EntityInputHandler` による入力欄。日本語IMEの変換中は送信しません。
+- `capabilities.rs`: この環境で実行できる能力だけを宣言する表。
+- `avatar.rs`: `ene-avatar` の起動とJSON Lines。`set` は設定全体の置換なので、直前の設定を保持して変更分だけ差し替えます。
+- `audio.rs`: 24kHzモノラルのワイヤー形式とデバイス形式の変換。継続ストリームは1つのリサンプラーを保持します。
+- `perception.rs`: 前面ウィンドウとアイドルの観測、`eye.watch` の適用。
+- `host.rs`: ディスカバリの読み込みと生成クライアントの構築。
 
-## 動作の要点
+## 状態とタスクの所有者
 
-- **世代**: 有効化の `revision` を保持し、知覚・音声・操作結果に付与します。別端末へ移動した後の旧世代のデータはホストが破棄します。
-- **単一再生**: 同時に鳴らす発話は常に1件です。新しい発話のチャンクが届いたら旧音声を捨て、`FlushControl` の世代以下を破棄します。
-- **口パク**: 再生中のPCMから求めたRMSを、応答を待たない一方向通知として `ene-avatar` へ送ります。
-- **知覚**: 20秒ごとに前面ウィンドウとアイドルを観測します。`eye.watch` に合致した遷移では、定期サンプルを待たずに優先割り込みを送ります。
-- **縮退**: 描画・音声出力・マイクのいずれかが無い環境でも起動し、残りの能力で動きます。取得できないウィンドウ情報を推測で補いません。
+- ホストが正本: 設定、コンパニオン、承認、作業、クライアント、有効化、カーソル。ウィンドウは `Snapshot` と取得した `WorkView` を表示用に1部だけ持つ。
+- ウィンドウが所有: 選択中のコンパニオン、履歴の表示、確定前のプレビュー、下書き、未送信の入力、通知。
+- セッションが所有: 接続、有効化の世代、購読カーソル、DeviceStream、音声デバイス、アバター子プロセス、感知器、再生報告の状態。
+- 境界を越えるのは2つのチャネルだけ: セッション→ウィンドウの `Update` と、ウィンドウ→セッションの `Command`。ウィンドウ自身の要求は生成クライアントを直接呼ぶ単発のfutureで、結果は同じ `Update` で戻る。
 
+`MessageDelta` はホストの `stream_id` ごとのプレビューとして保持し、確定本文としては保存しません。確定は `MessageCreated` で届く `Message` だけです。
+
+## 音声
+
+- ワイヤー形式はホストの契約どおり 24kHz / 16-bit 符号付きリトルエンディアン / モノラル。デバイス形式は取得した設定から選び、24kHzの32-bit floatを優先します。変換が必要な場合だけ `rubato` を使い、ストリームごとに1つのリサンプラーを保ちます。
+- 音声コールバックはRPC・ファイルI/O・待機構造を呼びません。再生側はサンプルを取り出して文の進捗を数えるだけ、録音側は事前に確保したリングへ `try_lock` で写すだけです。変換はセッションスレッドで行います。
+- 同時に再生する発話は1つです。新しい発話のチャンクは旧発話を捨て、`FlushControl` の世代以下を破棄します。同じ文の複数チャンクは `sequence_no` が同じでも重複ではないため捨てません。
+- `ReportPlaybackStatus` は実際にデバイスへ出た分だけを報告します。受信完了では報告せず、`UtteranceFinished` を受けた発話が実際に空になった時点で `COMPLETED`、Flush では `INTERRUPTED` を送ります。
+- エコーキャンセルは使えないため、マイクの音量による自動バージョインは行いません。停止は停止ボタンと `Esc` の明示操作だけです。再生中に収録した音声には `is_companion_speaking` を立て、ホストが承認の判定から除外できるようにします。
+
+## アバターと知覚
+
+- `ene-avatar` は別プロセスで、標準入出力のJSON Linesだけを使います。標準出力は常に読み続け、標準エラーはログとして扱い、応答とは混同しません。終了時は `quit` を送って待ちます。
+- 知覚はWindowsでのみ有効で、対応しないプラットフォームでは `eye.watch` を宣言しません。取得できないウィンドウ情報を推測で補いません。
+
+## 宣言する能力
+
+実行できるものだけを宣言します。描画プロセスかモデルが無ければ `body.motion` は宣言せず、モーションのアセットが無いプリセットは入力スキーマのenumから外します。`body.motion` の入力は `{motion, expression?}` で、表情のenumには `neutral`（消す）を含みます。`granted_capabilities` は決して送らず、ホストの判断だけを表示します。
+
+検証スクリプトは `verification/avatar-integration`（描画プロセスの契約）と `verification/desktop-generation-binding`（世代束縛の全数検査）。
+## 音声合成（VOICEVOX）
+
+設定タブの「音声合成」から「VOICEVOX を追加」を押すと、ローカルの VOICEVOX ENGINE（`127.0.0.1:50021`、話者3）が TTS 接続として登録されます。エンジンは別途起動してください。
+
+```powershell
+& "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\HiroshibaKazuyuki.VOICEVOX.CPU_Microsoft.Winget.Source_8wekyb3d8bbwe\VOICEVOX\vv-engine\run.exe" --host 127.0.0.1 --port 50021
+```
+
+ホストはアシスタントの発話を文単位でこのエンジンへ送り、24kHz mono PCM に直して購読中のクライアントへ流します。クライアントは実際に再生した分を ReportPlaybackStatus で返し、その報告でホストが発話を閉じます。接続を追加・変更するとセッションは再接続し、音声ストリームを開き直します（開いたままだとフッターの「出力」が利用不可のままになります）。
+
+音声の入出力は 32-bit float のデバイス設定のみ扱います。マイクは常時取得しますが、自動バージョインはせず、停止はボタンと Esc の明示操作だけです。
 ## 検証
 
 ```sh
-cargo test --locked -p ene-desktop
-cargo clippy --locked -p ene-desktop --all-targets --all-features -- -D warnings
+cargo test -p ene-desktop
+cargo clippy -p ene-desktop --all-targets --all-features -- -D warnings
 ```
 
-単体テストは、能力宣言のスキーマ整合、`eye.watch` の一致と遷移、PCMの往復変換とリサンプリング、レンダラの応答と通知の区別を確認します。
+描画プロセスとの契約（表情・口パク・クロスフェード・静止）は `verification/avatar-integration/run.ps1` が実プロセスで検査します。実ホストに対する確認は、隔離したstateで `ene-host` を起動し、スクリプト化したOpenAI互換エンドポイントをモデルとして接続して行います。このクライアントのウィンドウへ実際にキー入力（日本語を含む）を送り、次の経路を確認済みです。
 
-実ホストに対する結合確認は、[ene-hostの検証手順](../../.agents/skills/verify-ene-host/SKILL.md)と同じ形で行います。登録・有効化・`DeviceStream` の開設、モデルが `body_motion` を呼んだ際の操作の受領と `GetOperation` での完了確認までを、実際の `ene-host` とこのバイナリで確認済みです。描画を伴う確認には `ene-avatar` のビルドとVRMアセットが必要です。
+- 登録と有効化、宣言した能力の許可。
+- 送信、モデル呼び出し、`body.motion` の DeviceStream 配送、アバター子プロセスへの `add`／`set`、`COMPLETED` の報告、確定メッセージの受信。
+- ホスト停止からの再接続（1秒・2秒・4秒の待機）と、再起動後の再登録・再有効化。
+- ウィンドウを閉じたときの終了: セッションが停止し、アバターへ `quit` が届き、子プロセスが残らない。
+
+## 既知の制限
+
+- リップシンクは、実際に再生した音声バッファのRMSを約60Hzで `lip_sync` として描画プロセスへ送ります（値が変わらない間は送りません）。`ene-avatar` が `aa` へ平滑化して反映し、再生が止まれば口も閉じます。
+- 表情は `body.motion` の `expression` で指定します。`ene-avatar` の `expression` が `ene-vrm` の表情ウェイトを動かし、150〜200msでフェードします。`neutral` は表情を消します。モデル側が表情を指定しない限り顔は変わりません。
+- 入力欄は1行です。IMEの変換中は送信せず、改行は貼り付け時に空白へ畳みます。長文はホストの上限（32,000文字）まで送れます。
+- 音声出力と入力は32-bit floatのデバイス設定のみを扱います。他のサンプル形式しか無い場合は理由を表示して、その機能だけを無効にします。
+- アバターは実プロセスで確認済みです。起動、`add` の受付、状態イベント、読み込み失敗の報告、終了時の `quit` を確認しました。実際のVRM/VRMAアセットはこの環境に無いため、描画そのものは未確認です。読み込み失敗は操作の失敗として返し、成功としては返しません。
+- `CheckConnection` の結果はホストが通知しないため、接続確認の結果は呼び出した端末だけが表示します。
+
+## 注意
+
+GPUIは `comctl32!TaskDialogIndirect` をインポートします。これはマニフェストで要求したCommon-Controls 6にしか無いため、`build.rs` が `ene-desktop.rc` からアプリケーションマニフェストを埋め込みます。これが無い実行ファイルは `main` より前に `STATUS_ENTRYPOINT_NOT_FOUND` で落ちます。

@@ -36,12 +36,34 @@ verify: fmt-check clippy
 build-test-plugins:
     cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
 
+# The build scratch lives in target/tmp: sccache puts its per-compile directory
+# under the system temp, and when Windows cleanup removes one mid-build rustc
+# fails to write its dep-info. A workspace path is not cleaned by anything.
+[unix]
 run-host:
-    cargo run --locked -p ene-host
+    mkdir -p target/tmp && TMPDIR="$PWD/target/tmp" ENE_HOST_STATE_DIR="$PWD/target/run/host/state" ENE_HOST_RUNTIME_DIR="$PWD/target/run/host/runtime" cargo run --locked -p ene-host
+
+[windows]
+run-host:
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $env:ENE_HOST_STATE_DIR = (Join-Path $PWD 'target\run\host\state'); $env:ENE_HOST_RUNTIME_DIR = (Join-Path $PWD 'target\run\host\runtime'); cargo run --locked -p ene-host
+
+# The renderer the client spawns; release, because a debug Bevy build cannot hold a frame rate.
+[unix]
+avatar:
+    mkdir -p target/tmp && TMPDIR="$PWD/target/tmp" cargo build --release --locked -p ene-avatar --bin ene-avatar
+
+[windows]
+avatar:
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; cargo build --release --locked -p ene-avatar --bin ene-avatar
 
 # Connect to a running host as the desktop client.
-run-desktop:
-    cargo run --locked -p ene-desktop
+[unix]
+run-desktop: avatar
+    mkdir -p target/tmp && TMPDIR="$PWD/target/tmp" ENE_HOST_CONNECTION="$PWD/target/run/host/runtime/connection.json" ENE_DESKTOP_RENDERER="$PWD/target/release/ene-avatar" cargo run --locked -p ene-desktop
+
+[windows]
+run-desktop: avatar
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $env:ENE_HOST_CONNECTION = (Join-Path $PWD 'target\run\host\runtime\connection.json'); $env:ENE_DESKTOP_RENDERER = (Join-Path $PWD 'target\release\ene-avatar.exe'); cargo run --locked -p ene-desktop
 
 # Control the transparent renderer using JSON Lines on stdin.
 run-avatar:

@@ -1,6 +1,6 @@
 [package]
 name = "ene-desktop"
-description = "Desktop client: host connection, avatar control, perception and audio"
+description = "Desktop client: GUI, host connection, avatar control, perception and audio"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,15 +15,24 @@ buffa.workspace = true
 connectrpc.workspace = true
 directories = "6"
 futures-util.workspace = true
+gpui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 cpal = "0.18"
 rubato.workspace = true
 regex = "1"
+unicode-segmentation = "1"
+uuid.workspace = true
+
+# gpui's Linux backends are features, and the workspace pins the crate with
+# default-features off (so its Windows manifest is not embedded twice). A Linux
+# window therefore needs them named here.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -33,6 +42,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[build-dependencies]
+embed-resource = "3"
 
 [dev-dependencies]
 tempfile.workspace = true

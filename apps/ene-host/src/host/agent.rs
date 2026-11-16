@@ -481,10 +481,12 @@ type TurnAgentRows = (
 
 type UnpublishedMessages = Or<(Changed<Conversation>, Added<LastProjectedEntry>)>;
 
-/// Projects every new conversation entry into `MessageCreated` notifications.
+/// Projects every new conversation entry into `MessageCreated` notifications,
+/// and speaks the entries that are a companion's own reply.
 fn publish_messages(
     mut agents: Query<AgentRows, UnpublishedMessages>,
     mut notifier: ResMut<Notifier>,
+    mut commands: Commands,
 ) {
     for (_, conversation, companion, work, mut published) in &mut agents {
         let Some(companion_id) = companion_of(companion, work) else {
@@ -501,6 +503,22 @@ fn publish_messages(
                 continue;
             };
             let message = super::chat::message(companion_id, work_id, &entry, text);
+            // Only a companion's own reply is spoken, and only to the user. A
+            // whole message is what a sentence-level engine like VOICEVOX wants:
+            // the streaming fragments are too small to split into sentences, and
+            // a fragment can arrive after its call settled and be dropped.
+            if companion.is_some() && message.role == w::MessageRole::Assistant {
+                let voice_companion = companion_id.to_owned();
+                let voice_text = message.text.clone();
+                commands.queue(move |world: &mut World| {
+                    super::voice::on_stream_text(world, &voice_companion, &voice_text);
+                    // The reply is complete, so this turn's utterance is too.
+                    // Without this the host never sends `UtteranceFinished`, the
+                    // window never reports playback, and the speech floor stays
+                    // held until the next turn flushes it as cancelled.
+                    super::voice::on_turn_end(world, &voice_companion);
+                });
+            }
             notifier.push(
                 Some(companion_id),
                 None,
@@ -601,12 +619,15 @@ fn turn_settled(
 
 /// Reports text deltas of ordinary conversation turns only: never reasoning,
 /// summaries or child-agent output.
+///
+/// These fragments feed the window's live preview, not speech: a partial can
+/// arrive after its call settled and be dropped, and a fragment is too small to
+/// split into sentences. Speech is driven by the recorded reply instead.
 fn stream_deltas(
     mut deltas: MessageReader<StreamDelta>,
     calls: Query<(), (With<TurnCall>, Without<Settled>)>,
     agents: Query<(&AgentId, Option<&CompanionAgent>)>,
     mut notifier: ResMut<Notifier>,
-    mut commands: Commands,
 ) {
     for delta in deltas.read() {
         if !calls.contains(delta.effect) {
@@ -634,11 +655,6 @@ fn stream_deltas(
                 ..Default::default()
             })),
         );
-        let voice_companion = companion.clone();
-        let voice_text = text.clone();
-        commands.queue(move |world: &mut World| {
-            super::voice::on_stream_text(world, &voice_companion, &voice_text);
-        });
     }
 }
 

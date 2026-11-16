@@ -1,21 +1,21 @@
-//! Starts the desktop client against a running `ene-host`.
+//! Starts the desktop client: one window, one session, one owner per resource.
 //!
-//! The client takes no arguments: like the host, it is configured by the
-//! discovery file it is pointed at and by its environment.
+//! The session runs on its own thread with a single-threaded Tokio runtime,
+//! because the audio streams and the avatar child are not `Send` on every
+//! platform and must stay on one thread. The window is GPUI's, on the main
+//! thread, and it reaches the session only through two channels. Window requests
+//! are `Send` futures spawned on the same runtime, so there is exactly one
+//! runtime in the process.
 
-use ene_desktop::{Client, Discovery, Host, Options};
-use std::{path::PathBuf, time::Duration};
-/// How often the client samples the OS for perception.
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(20);
+use ene_desktop::{Command, Connection, Desktop, Options, Session, bind_actions, focus_chat};
+use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
+use tokio::sync::mpsc::unbounded_channel;
 
-/// How often the client sends the playback amplitude to the avatar.
-const LIP_SYNC_INTERVAL: Duration = Duration::from_millis(33);
-
-/// How often captured microphone audio is sent to the host.
-const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -24,183 +24,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    let discovery = Discovery::read(&discovery_path()?)?;
-    let host = Host::connect(&discovery)?;
-    let mut client = Client::start(host, options()).await?;
-    let companion = client.companion().await?;
-    client.activate(&companion).await?;
-    tracing::info!(
-        companion = %companion,
-        revision = client.activation().revision,
-        granted = ?client.granted(),
-        "the client is the active device"
+    let path = match discovery_path() {
+        Ok(path) => path,
+        Err(reason) => {
+            // Without a runtime directory there is no host to find, so the
+            // window could only repeat this sentence.
+            eprintln!("ene-desktop: {reason}");
+            std::process::exit(1);
+        }
+    };
+    let (updates_tx, updates_rx) = unbounded_channel();
+    let (commands_tx, commands_rx) = unbounded_channel();
+    let connection: Connection = Arc::new(RwLock::new(None));
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("ene-desktop: the async runtime did not start: {error}");
+            std::process::exit(1);
+        }
+    };
+    let handle = runtime.handle().clone();
+    let session = Session::new(
+        path.clone(),
+        options(),
+        connection.clone(),
+        updates_tx.clone(),
+        commands_rx,
     );
-    if client.granted().is_empty() {
-        tracing::warn!(
-            "the host granted no capability; set ENE_HOST_ALLOWED_CAPABILITIES on the host \
-             to let the model call this client's tools"
+    let worker = std::thread::Builder::new()
+        .name("ene-session".into())
+        .spawn(move || {
+            runtime.block_on(session.run());
+        })
+        .expect("the session thread starts");
+
+    let quit = commands_tx.clone();
+    let shown = path.display().to_string();
+    Application::new().run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(1080.), px(760.)), cx);
+        let opened = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(720.), px(480.))),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("ene".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            move |_window, cx| {
+                cx.new(|cx| {
+                    Desktop::new(
+                        cx,
+                        options(),
+                        connection.clone(),
+                        commands_tx.clone(),
+                        updates_tx.clone(),
+                        updates_rx,
+                        handle.clone(),
+                        shown.clone(),
+                    )
+                })
+            },
         );
-    }
-
-    run(&mut client).await;
-    client.shutdown();
-    Ok(())
-}
-
-/// Serves the device stream and the audio stream until the process is asked to
-/// stop.
-async fn run(client: &mut Client) {
-    let mut stream = match client.device_stream().await {
-        Ok(stream) => stream,
-        Err(error) => {
-            tracing::error!("the device stream did not open: {error}");
-            return;
-        }
-    };
-    // A host with no TTS connection answers `unimplemented`; that is a client
-    // without audio, not a failure to start.
-    let mut audio = match client.audio_stream().await {
-        Ok(stream) => Some(stream),
-        Err(error) => {
-            tracing::info!("no audio output stream: {error}");
-            None
-        }
-    };
-    // A host with no STT connection answers `unimplemented`; that is a client
-    // without a microphone, not a failure to start.
-    let mut microphone = match client.microphone_stream().await {
-        Ok(stream) => {
-            client.open_microphone();
-            Some(stream)
-        }
-        Err(error) => {
-            tracing::info!("no microphone stream: {error}");
-            None
-        }
-    };
-    let mut sample = tokio::time::interval(SAMPLE_INTERVAL);
-    let mut lip_sync = tokio::time::interval(LIP_SYNC_INTERVAL);
-    let mut capture = tokio::time::interval(CAPTURE_INTERVAL);
-    loop {
-        tokio::select! {
-            frame = stream.message() => match frame {
-                Ok(Some(message)) => {
-                    let event = message.to_owned_message();
-                    if let Some(event) = event.event {
-                        handle(client, event).await;
+        match opened {
+            Ok(window) => {
+                let view = window.update(cx, |view, window, cx| {
+                    focus_chat(view, window, cx);
+                    cx.entity().downgrade()
+                });
+                match view {
+                    Ok(view) => bind_actions(cx, view),
+                    Err(error) => {
+                        eprintln!("ene-desktop: the window content is unavailable: {error:#}");
                     }
                 }
-                Ok(None) => {
-                    tracing::info!("the host closed the device stream");
-                    return;
-                }
-                Err(error) => {
-                    tracing::error!("the device stream failed: {error}");
-                    return;
-                }
-            },
-            frame = audio_message(&mut audio) => match frame {
-                Some(Ok(event)) => client.play(event),
-                Some(Err(error)) => {
-                    // A host with no TTS connection reports `unimplemented` on
-                    // the first frame. That is a client without audio, not a
-                    // stream that broke.
-                    if error.code == connectrpc::ErrorCode::Unimplemented {
-                        tracing::info!("the host has no audio output: {error}");
-                    } else {
-                        tracing::error!("the audio stream failed: {error}");
+                cx.on_window_closed(|cx| {
+                    if cx.windows().is_empty() {
+                        cx.quit();
                     }
-                    audio = None;
-                }
-                None => audio = None,
-            },
-            Some(chunk) = capture_tick(&mut capture, client) => {
-                if let Some(stream) = microphone.as_mut()
-                    && let Err(error) = stream.send(chunk).await
-                {
-                    // The host closes the microphone stream when it has no use
-                    // for one; that is a client without a microphone, not a
-                    // reason to stop serving the device stream.
-                    tracing::info!("the microphone stream closed: {error}");
-                    microphone = None;
-                }
+                })
+                .detach();
+                cx.activate(true);
             }
-            _ = lip_sync.tick() => {
-                client.lip_sync();
-            }
-            _ = sample.tick() => {
-                if let Err(error) = client.sample().await {
-                    tracing::warn!("perception was not reported: {error}");
-                }
-                for notification in client.drain_notifications() {
-                    tracing::debug!(?notification, "renderer");
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("stopping");
-                return;
+            Err(error) => {
+                eprintln!("ene-desktop: the window did not open: {error:#}");
+                cx.quit();
             }
         }
-    }
-}
+    });
 
-/// One captured block, when the microphone is due and has audio.
-async fn capture_tick(
-    interval: &mut tokio::time::Interval,
-    client: &Client,
-) -> Option<ene_rpc::AudioInputChunk> {
-    interval.tick().await;
-    client.capture()
-}
-
-/// One frame from the audio stream.
-///
-/// An absent stream parks this branch forever instead of returning at once.
-/// Returning `None` immediately would make the `select!` branch permanently
-/// ready and spin a core, which is exactly what a host without TTS caused.
-async fn audio_message(
-    audio: &mut Option<
-        connectrpc::client::ServerStream<
-            <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
-            ene_rpc::__buffa::view::AudioOutputEventView<'static>,
-        >,
-    >,
-) -> Option<Result<ene_rpc::audio_output_event::Event, connectrpc::ConnectError>> {
-    let Some(stream) = audio.as_mut() else {
-        return std::future::pending().await;
-    };
-    match stream.message().await {
-        Ok(Some(message)) => {
-            let event = message.to_owned_message();
-            Some(Ok(event).and_then(|event| {
-                event
-                    .event
-                    .ok_or_else(|| connectrpc::ConnectError::internal("an empty audio event"))
-            }))
-        }
-        Ok(None) => None,
-        Err(error) => Some(Err(error)),
-    }
-}
-
-/// Applies one frame from the host.
-async fn handle(client: &mut Client, event: ene_rpc::device_event::Event) {
-    match event {
-        ene_rpc::device_event::Event::Ready(ready) => {
-            tracing::info!(subscription = %ready.subscription_id, "device stream ready");
-        }
-        ene_rpc::device_event::Event::Operation(operation) => {
-            let result = client.apply(&operation);
-            if let Err(error) = client.complete(result).await {
-                tracing::warn!("the operation result was not reported: {error}");
-            }
-        }
-    }
+    // The window is gone. The session stops serving, kills its child and returns;
+    // joining it is what makes the exit orderly rather than a race.
+    let _ = quit.send(Command::Quit);
+    let _ = worker.join();
 }
 
 /// The discovery file: `ENE_HOST_CONNECTION`, or the host's default runtime
 /// directory.
-fn discovery_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn discovery_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("ENE_HOST_CONNECTION") {
         return Ok(PathBuf::from(path));
     }
