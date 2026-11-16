@@ -177,6 +177,8 @@ impl Exchange {
 }
 
 impl Drop for Exchange {
+    /// Dropping the reply cancels the Extism call and closes any broker handle
+    /// it opened. The operation is never retried by this path.
     fn drop(&mut self) {
         for handle in &self.handles {
             let _ = self.broker.close(handle);

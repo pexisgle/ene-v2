@@ -314,7 +314,8 @@ impl Running {
             // A cancelled or failed guest may be in an unknown state, and the
             // instance holds one of the runtime's fixed execution slots. Drop
             // it before loading a replacement so the slot is free even at the
-            // pool's limit.
+            // pool's limit. The failed operation is not replayed; reloading
+            // only restores capacity for the next, distinct request.
             *slot = None;
             if let Ok(fresh) = self.reload().await {
                 *slot = Some(fresh);
