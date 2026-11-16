@@ -44,15 +44,18 @@ pub(crate) const PLUGINS_DIR_ENV: &str = "ENE_HOST_PLUGINS_DIR";
 /// One loaded provider package.
 pub(crate) struct Loaded {
     pub(crate) package: Package,
-    /// Every entrypoint that serves a provider extension, by extension.
-    entries: HashMap<Extension, String>,
-    pub(crate) provider: ProviderConfiguration,
+    /// Every entrypoint that serves a provider extension, with the provider
+    /// configuration that entrypoint declared. One package may serve several
+    /// extensions with different endpoints and credentials.
+    entries: HashMap<Extension, (String, ProviderConfiguration)>,
 }
 
 impl Loaded {
-    /// The entrypoint that serves `extension`, when this package serves it.
-    pub(crate) fn entry(&self, extension: Extension) -> Option<&str> {
-        self.entries.get(&extension).map(String::as_str)
+    /// The entrypoint that serves `extension` and its provider configuration.
+    pub(crate) fn entry(&self, extension: Extension) -> Option<(&str, &ProviderConfiguration)> {
+        self.entries
+            .get(&extension)
+            .map(|(entrypoint, provider)| (entrypoint.as_str(), provider))
     }
 }
 
@@ -199,30 +202,24 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
         .map_err(|error| HostError::Unavailable(format!("plugin package: {error}")))?;
     let id = package.manifest.id.clone();
     let mut entries = HashMap::new();
-    let mut provider = None;
     for entrypoint in &package.manifest.entrypoints {
         let Some(configuration) = &entrypoint.provider else {
             continue;
         };
         for extension in &entrypoint.provides {
-            if extension.serves_provider()
-                && entries.insert(*extension, entrypoint.id.clone()).is_none()
-            {
-                provider = Some(configuration.clone());
+            if extension.serves_provider() {
+                entries
+                    .entry(*extension)
+                    .or_insert_with(|| (entrypoint.id.clone(), configuration.clone()));
             }
         }
     }
-    let provider = provider.ok_or_else(|| {
-        HostError::Unavailable(format!("the plugin `{id}` serves no provider extension"))
-    })?;
-    Ok((
-        id,
-        Loaded {
-            package,
-            entries,
-            provider,
-        },
-    ))
+    if entries.is_empty() {
+        return Err(HostError::Unavailable(format!(
+            "the plugin `{id}` serves no provider extension"
+        )));
+    }
+    Ok((id, Loaded { package, entries }))
 }
 
 /// One running provider: its loaded package and the instance that answers.
@@ -230,7 +227,7 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
 /// An instance is not `Sync`, so calls serialize behind a mutex. One provider
 /// serves one connection, and a call is short, so this is not a bottleneck.
 pub(crate) struct Running {
-    pub(crate) loaded: Arc<Loaded>,
+    provider: ProviderConfiguration,
     instance: tokio::sync::Mutex<Instance>,
     cancel: CancellationToken,
 }
@@ -241,22 +238,23 @@ impl Running {
         loaded: Arc<Loaded>,
         extension: Extension,
     ) -> Result<Self, HostError> {
-        let entrypoint = loaded.entry(extension).ok_or_else(|| {
+        let (entrypoint, provider) = loaded.entry(extension).ok_or_else(|| {
             HostError::Unavailable(format!(
                 "the plugin `{}` serves no {extension:?}",
                 loaded.package.manifest.id
             ))
         })?;
+        let (entrypoint, provider) = (entrypoint.to_owned(), provider.clone());
         let cancel = CancellationToken::new();
-        let mut instance = Instance::load(loaded.package.clone(), entrypoint.to_owned(), &cancel)
-        .await
-        .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
+        let mut instance = Instance::load(loaded.package.clone(), entrypoint, &cancel)
+            .await
+            .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
         instance
             .initialize(&cancel)
             .await
             .map_err(|error| HostError::Unavailable(format!("plugin initialize: {error}")))?;
         Ok(Self {
-            loaded,
+            provider,
             instance: tokio::sync::Mutex::new(instance),
             cancel,
         })
@@ -302,7 +300,7 @@ impl Running {
 
     /// The provider configuration this instance answers under.
     pub(crate) fn provider(&self) -> &ProviderConfiguration {
-        &self.loaded.provider
+        &self.provider
     }
 }
 
@@ -370,7 +368,11 @@ mod tests {
         adapters.sort_unstable();
         assert_eq!(adapters, ["local-embed", "voicevox"]);
         assert_eq!(
-            providers.get("voicevox").unwrap().entry(Extension::Tts),
+            providers
+                .get("voicevox")
+                .unwrap()
+                .entry(Extension::Tts)
+                .map(|(entrypoint, _)| entrypoint),
             Some("main")
         );
         assert!(
@@ -379,6 +381,58 @@ mod tests {
                 .unwrap()
                 .entry(Extension::Llm)
                 .is_none()
+        );
+    }
+
+    /// One package may serve several provider extensions. Each one keeps the
+    /// configuration its own entrypoint declared: an LLM endpoint must not be
+    /// used for speech, and a second entrypoint must not overwrite the first.
+    #[test]
+    fn each_extension_keeps_its_own_provider_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(PLUGINS_DIR).join("multi");
+        write(root.join("main.wasm"), b"\0asm");
+        write(
+            root.join("manifest.json"),
+            serde_json::json!({
+                "contract_version": ene_plugin::CONTRACT_VERSION,
+                "id": "multi", "name": "multi", "version": "1",
+                "entrypoints": [
+                    {
+                        "id": "llm", "target": "host", "file": "main.wasm",
+                        "provides": ["llm"], "uses": ["http"],
+                        "provider": {
+                            "id": "multi-llm", "endpoint": "http://127.0.0.1:1",
+                            "auth": {"type": "none"},
+                            "destinations": ["http://127.0.0.1:1"],
+                            "extensions": ["llm"]
+                        }
+                    },
+                    {
+                        "id": "speech", "target": "host", "file": "main.wasm",
+                        "provides": ["tts"], "uses": ["http"],
+                        "provider": {
+                            "id": "multi-speech", "endpoint": "http://127.0.0.1:2",
+                            "auth": {"type": "none"},
+                            "destinations": ["http://127.0.0.1:2"],
+                            "extensions": ["tts"]
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        );
+        let providers = Providers::load(temp.path());
+        let loaded = providers.get("multi").unwrap();
+        let (entry, llm) = loaded.entry(Extension::Llm).unwrap();
+        assert_eq!(
+            (entry, llm.endpoint.as_str()),
+            ("llm", "http://127.0.0.1:1")
+        );
+        let (entry, tts) = loaded.entry(Extension::Tts).unwrap();
+        assert_eq!(
+            (entry, tts.endpoint.as_str()),
+            ("speech", "http://127.0.0.1:2")
         );
     }
 
