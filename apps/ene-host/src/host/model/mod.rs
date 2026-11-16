@@ -324,13 +324,12 @@ pub(crate) async fn probe(
             ..Default::default()
         };
     };
-    let secret = connection_secret(connection, Some(credentials));
     // A connection that leaves its endpoint empty calls the provider's own
     // default, which is exactly what the probe has to ask.
     let Some(base) = super::settings::endpoint_of(connection) else {
         return failure("the connection has no endpoint to probe".into());
     };
-    let listed = match list_models(connection, &base, secret, providers).await {
+    let listed = match list_models(connection, &base, credentials, providers).await {
         Ok(models) => models,
         Err(error) => return failure(error),
     };
@@ -358,15 +357,28 @@ pub(crate) async fn probe(
 async fn list_models(
     connection: &Connection,
     base: &str,
-    secret: Option<String>,
+    credentials: &Credentials,
     providers: &super::providers::Providers,
 ) -> std::result::Result<Vec<String>, String> {
     let adapter = connection.endpoint().adapter.as_str();
     // A plugin lists its own models, through the same `ListModels` operation
     // the agent loop would use, so the probe reads what the plugin serves.
-    if let Some(running) = providers.running(adapter, ene_plugin::Extension::Llm) {
-        return plugin_models(running, base).await;
+    if providers.get(adapter).is_some() {
+        return tokio::time::timeout(PROBE_TIMEOUT, async {
+            let running = providers
+                .start(adapter, ene_plugin::Extension::Llm)
+                .await
+                .map_err(|error| error.to_string())?;
+            let grant =
+                super::providers::Grant::new(running.provider(), connection, Some(credentials));
+            let broker = super::providers::http_broker(Arc::new(grant))
+                .map_err(|error| format!("plugin HTTP transport: {error}"))?;
+            plugin_models(running, base, broker).await
+        })
+        .await
+        .map_err(|_| format!("the plugin did not answer in {}s", PROBE_TIMEOUT.as_secs()))?;
     }
+    let secret = connection_secret(connection, Some(credentials));
     let config = provider_config(adapter, base, secret);
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
@@ -393,45 +405,35 @@ async fn list_models(
 /// validates before the host sees it; this reads that event out of the stream
 /// the call produced.
 async fn plugin_models(
-    running: std::sync::Arc<super::providers::Running>,
+    running: Arc<super::providers::Running>,
     base: &str,
+    broker: Arc<ene_plugin_runtime::service::HttpBroker>,
 ) -> std::result::Result<Vec<String>, String> {
     let (sender, mut events) = tokio::sync::mpsc::channel(16);
     let provider = running.provider().id.clone();
     let endpoint = base.to_owned();
     let options = running.provider().options.clone();
-    // A model list is control-plane: the plugin may name models without
-    // reaching the network, so the broker denies any exchange it attempts.
-    let services: std::sync::Arc<dyn ene_plugin_runtime::instance::Services> =
-        super::providers::BrokerServices::new(
-            super::providers::http_broker(std::sync::Arc::new(
-                ene_plugin_runtime::service::DenyHttp,
-            ))
-            .map_err(|error| format!("plugin HTTP transport: {error}"))?,
-            provider,
-        );
-    let collected = tokio::time::timeout(PROBE_TIMEOUT, async move {
-        let mut models = Vec::new();
-        let call = tokio::spawn(async move {
-            running
-                .invoke_streaming(
-                    ene_plugin::Operation::ListModels { endpoint, options },
-                    services,
-                    sender,
-                )
-                .await
-        });
-        while let Some(event) = events.recv().await {
-            if let ene_plugin::Event::Models { models: listed } = event {
-                models = listed.into_iter().map(|model| model.id).collect();
+    let services = super::providers::BrokerServices::new(broker, provider);
+    let (result, models) = tokio::join!(
+        running.invoke_streaming(
+            ene_plugin::Operation::ListModels { endpoint, options },
+            services,
+            sender,
+        ),
+        async move {
+            let mut models = None;
+            while let Some(event) = events.recv().await {
+                if let ene_plugin::Event::Models { models: listed } = event {
+                    models = Some(listed);
+                }
             }
+            models
         }
-        let _ = call.await;
-        models
-    })
-    .await
-    .map_err(|_| format!("the plugin did not answer in {}s", PROBE_TIMEOUT.as_secs()))?;
-    Ok(collected)
+    );
+    result.map_err(|error| error.to_string())?;
+    models
+        .map(|models| models.into_iter().map(|model| model.id).collect())
+        .ok_or_else(|| "the plugin returned no Models event".to_owned())
 }
 #[cfg(test)]
 mod tests {

@@ -24,8 +24,8 @@ pub(crate) use services::{BrokerServices, http_broker};
 
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};
-/// Started instances, keyed by the adapter and extension they serve.
-type RunningMap = HashMap<(String, Extension), Arc<Running>>;
+/// Startup cells, keyed by the adapter and extension they serve.
+type RunningMap = HashMap<(String, Extension), Arc<tokio::sync::OnceCell<Arc<Running>>>>;
 
 use std::{
     collections::HashMap,
@@ -60,8 +60,6 @@ impl Loaded {
 #[derive(Clone, Default, bevy_ecs::prelude::Resource)]
 pub(crate) struct Providers {
     loaded: Arc<HashMap<String, Arc<Loaded>>>,
-    /// Started instances, by adapter and extension. A connection resolves to
-    /// one of these synchronously; the start happens at boot.
     running: Arc<Mutex<RunningMap>>,
 }
 
@@ -119,24 +117,27 @@ impl Providers {
         adapter: &str,
         extension: Extension,
     ) -> Result<Arc<Running>, HostError> {
-        let key = (adapter.to_owned(), extension);
-        if let Some(running) = self
-            .running
-            .lock()
-            .map_err(|_| HostError::Unavailable(("the provider registry is poisoned").into()))?
-            .get(&key)
-        {
-            return Ok(Arc::clone(running));
-        }
         let loaded = self.get(adapter).ok_or_else(|| {
             HostError::Unavailable(format!("no plugin is installed as `{adapter}`"))
         })?;
-        let running = Arc::new(Running::start(Arc::clone(loaded), extension, 1).await?);
-        self.running
-            .lock()
-            .map_err(|_| HostError::Unavailable(("the provider registry is poisoned").into()))?
-            .insert(key, Arc::clone(&running));
-        Ok(running)
+        let cell = {
+            let mut running = self.running.lock().map_err(|_| {
+                HostError::Unavailable(("the provider registry is poisoned").into())
+            })?;
+            Arc::clone(
+                running
+                    .entry((adapter.to_owned(), extension))
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let running = cell
+            .get_or_try_init(|| async {
+                Running::start(Arc::clone(loaded), extension, 1)
+                    .await
+                    .map(Arc::new)
+            })
+            .await?;
+        Ok(Arc::clone(running))
     }
 
     /// The started instance for `adapter` and `extension`, when there is one.
@@ -144,7 +145,8 @@ impl Providers {
         self.running
             .lock()
             .ok()?
-            .get(&(adapter.to_owned(), extension))
+            .get(&(adapter.to_owned(), extension))?
+            .get()
             .map(Arc::clone)
     }
 
