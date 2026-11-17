@@ -12,33 +12,44 @@ mod guest {
         ))
     }
 
-    thread_local! { static STEP: RefCell<Step> = const { RefCell::new(Step::Idle) }; }
+    thread_local! {
+        static STEP: RefCell<Step> = const { RefCell::new(Step::Idle) };
+        static CWD: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    /// The harness session state a real guest derives from the turn inputs:
+    /// `Start` opens (or reopens) the session, `Prompt` continues the live
+    /// one, and a turn parked on a permission request answers `Respond`.
     #[derive(Clone, Copy, PartialEq)]
     enum Step {
+        /// No harness session: only `Start` is valid.
         Idle,
+        /// A session exists with no turn in flight: `Prompt` continues it.
+        Live,
+        /// A turn is parked on the permission request: `Respond` or `Cancel`.
         AwaitingPermission,
     }
 
     const PERMISSION: &str = "permission-1";
 
+    fn text_of(prompt: &[ContentBlock]) -> String {
+        prompt
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     fn harness(input: &HarnessInput) -> Result<HarnessEvent, extism_pdk::Error> {
         Ok(match input {
-            HarnessInput::Start { prompt } => {
-                STEP.with(|step| {
-                    if *step.borrow() != Step::Idle {
-                        return Err(extism_pdk::Error::msg("task already active"));
-                    }
-                    *step.borrow_mut() = Step::AwaitingPermission;
-                    Ok(())
-                })?;
-                let instruction = prompt
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text(text) => Some(text.text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
+            HarnessInput::Start { prompt, cwd } => {
+                // The host opens a session only when it holds none, so a
+                // second `Start` begins a fresh session rather than failing.
+                STEP.with(|step| *step.borrow_mut() = Step::AwaitingPermission);
+                CWD.with(|recorded| *recorded.borrow_mut() = cwd.clone());
+                let instruction = text_of(prompt);
                 emit_update(SessionUpdate::Plan(Plan::new(vec![
                     PlanEntry::new(
                         "参照データを確認する",
@@ -70,6 +81,24 @@ mod guest {
                     ],
                 }
             }
+            HarnessInput::Prompt { prompt } => {
+                STEP.with(|step| {
+                    if *step.borrow() != Step::Live {
+                        return Err(extism_pdk::Error::msg("no harness session"));
+                    }
+                    Ok(())
+                })?;
+                let follow_up = text_of(prompt);
+                let cwd = CWD.with(|recorded| recorded.borrow().clone());
+                let mut chunk = ContentChunk::new(text_block(format!(
+                    "追加指示「{follow_up}」を受け付けました。作業ディレクトリは {cwd} です。"
+                )));
+                chunk.message_id = Some("follow-up".into());
+                emit_update(SessionUpdate::AgentMessageChunk(chunk))?;
+                HarnessEvent::Stop {
+                    stop_reason: StopReason::EndTurn,
+                }
+            }
             HarnessInput::Respond {
                 request_id,
                 outcome,
@@ -81,7 +110,7 @@ mod guest {
                     if request_id != PERMISSION {
                         return Err(extism_pdk::Error::msg("wrong permission request"));
                     }
-                    *step.borrow_mut() = Step::Idle;
+                    *step.borrow_mut() = Step::Live;
                     Ok(())
                 })?;
                 let allowed = matches!(
@@ -115,7 +144,13 @@ mod guest {
                 }
             }
             HarnessInput::Cancel => {
-                STEP.with(|step| *step.borrow_mut() = Step::Idle);
+                // A cancelled turn leaves a live session, as ACP does.
+                STEP.with(|step| {
+                    *step.borrow_mut() = match *step.borrow() {
+                        Step::Idle => Step::Idle,
+                        _ => Step::Live,
+                    };
+                });
                 HarnessEvent::Stop {
                     stop_reason: StopReason::Cancelled,
                 }

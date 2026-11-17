@@ -593,6 +593,7 @@ async fn sdk_guest_preserves_typed_events_and_service_failures() {
             Operation::Harness {
                 input: HarnessInput::Start {
                     prompt: vec![text_block("inspect")],
+                    cwd: "/tmp".into(),
                 },
             },
             Arc::new(DenyServices),

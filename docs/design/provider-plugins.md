@@ -4,7 +4,7 @@
 
 ---
 
-## ABI 7 の LLM 生成契約（比較ブランチで実装）
+## ABI 8 の LLM 生成契約（比較ブランチで実装）
 
 この節は比較ブランチで実装した現在の契約であり、以下の 0 章以降の提案は
 その時点の履歴である。ホストが受け入れる LLM の生成形式は、この 1 つだけである。
@@ -23,26 +23,38 @@
 - `ListModels` と `Models` は従来のままである。モデル一覧は OpenAI 互換の
   JSON 応答を読む。
 
+### ハーネス（ABI 8 の複数ターン契約）
+
+- `HarnessInput::Start { prompt, cwd }` がセッションを作り、最初のターンを
+  始める。`cwd` は ACP `session/new` の cwd に相当し、ホストが自分の作業
+  ディレクトリを渡す。
+- `HarnessInput::Prompt { prompt }` が生存中のセッションへの追加ターン
+  （ACP `session/prompt`）である。セッションは複数ターンを抱える。v7 の
+  「セッションにつきプロンプト 1 回」の契約は廃止された。
+- `RequestPermission` で中断したターンは `Respond` で再開し、停止中のターン
+  には `Cancel` を 1 回の独立呼び出しとして届ける。実行中の呼び出しは
+  ホストが中断し、`Cancel` はゲストに転送されない。
+
 ### 宣言と拒否
 
 - LLM プロバイダーは `ene_initialize` で `openai_http: true` を返さなければ
   ならない。返さない場合、ランタイムは `initialize` で拒否する。
-- manifest の `contract_version` は 7 でなければならない。パッケージ読み込み
+- manifest の `contract_version` は 8 でなければならない。パッケージ読み込み
   時に旧版は拒否される。この検査は entrypoint を選ぶ前に走るため、LLM に
   限らず、embedding、TTS、STT、character、harness を含むすべてのパッケージ
-  に及ぶ。同梱の 2 パッケージも 7 である。
+  に及ぶ。同梱の 2 パッケージも 8 である。
 - `Generate`、`Delta`、`ToolCall`、`Finished`、`GenerationRequest`、
-  `ChatMessage`、`ToolSpec` は ABI 7 に存在しない。旧イベントを返すゲストや
+  `ChatMessage`、`ToolSpec` は ABI 8 に存在しない。旧イベントを返すゲストや
   旧操作を送るゲストは、復号または契約検証で拒否される。
 - 複数形式を切り替えるフレームワークは持たない。ホストが受け入れるのは
   OpenAI wire の 1 形式だけであり、旧形式へのフォールバックはない。
 
 ### 現在の同梱物
 
-- `examples/plugins/openrouter-wasm`: ABI 7 へ移行済み。生の HTTP 転送、
-  `openai_http: true`、manifest 7。
+- `examples/plugins/openrouter-wasm`: ABI 8 へ移行済み。生の HTTP 転送、
+  `openai_http: true`、manifest 8。
 - `examples/plugins/reference`: LLM プロバイダーではないため、この生成契約の
-  対象外である。
+  対象外である。harness 拡張は ABI 8 の複数ターン契約に従う。
 - リポジトリ内に他の LLM プロバイダープラグインはない。外部の ABI 6 の LLM
   プラグインは非対応であり、ホストは拒否する。「全 LLM プラグインの形式を
   決めた」のではなく、ホストが受け入れる形式が 1 つに定まった、という意味で

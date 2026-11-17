@@ -1,9 +1,13 @@
 //! Work sessions and runs: the "hands" of docs/design/work.md.
 //!
-//! A `WorkSession` survives runs and owns one long-lived in-process rig agent; a
-//! `Run` is one instruction turn that rebinds the session agent to its run id.
-//! Only a closed session, a failed start, or a restart retires the agent, never
-//! an ordinary run end.
+//! A `WorkSession` survives runs and owns one backend: the long-lived
+//! in-process rig agent, or the plugin hand (`hand`) a companion's ACP task
+//! assignment picks. A `Run` is one instruction turn that rebinds the rig
+//! agent to its run id. Only a closed session, a failed start, or a restart
+//! retires the agent, never an ordinary run end.
+mod hand;
+#[cfg(test)]
+mod hand_tests;
 mod tools;
 
 use super::{
@@ -268,9 +272,17 @@ fn restore(world: &mut World) {
         }
     }
     for companion in store.companions().unwrap_or_default() {
+        let plugin = hand::selected(world, &companion).is_some();
         for session in store.work_sessions(&companion.id).unwrap_or_default() {
             if let Ok(Some(run)) = store.active_run(&session.id) {
-                world.resource_mut::<Runs>().begin(&run.run_id);
+                if plugin {
+                    // A restart lost the harness guest's session state, so an
+                    // open plugin-hand run settles failed instead of keeping
+                    // a stall clock that can never tick again.
+                    hand::settle_restarts(world, run);
+                } else {
+                    world.resource_mut::<Runs>().begin(&run.run_id);
+                }
             }
         }
     }
@@ -283,8 +295,12 @@ impl Plugin for WorkPlugin {
         tools::register(app);
         app.init_resource::<Runs>()
             .init_resource::<Receipts>()
+            .init_resource::<hand::Hands>()
             .add_systems(Startup, restore)
-            .add_systems(Update, detect_stalls.after(AgentLoop));
+            .add_systems(
+                Update,
+                (hand::collect, detect_stalls).chain().after(AgentLoop),
+            );
     }
 }
 
@@ -379,17 +395,26 @@ pub(crate) fn start_run(
     );
     store.insert_run(&run)?;
     store.set_work_status(&session.id, WorkStatus::Active)?;
-    let agent = ensure(world, &companion, &session.id, &run.run_id, instruction);
-    let failure = match agent::ensure_model(world, agent) {
-        Ok(()) => {
-            world.trigger(Deliver::new(
-                agent,
-                instruction.to_owned(),
-                DeliveryMode::Queue,
-            ));
-            None
+    // The backend pick: a task assignment onto an installed harness plugin
+    // runs the session on the plugin hand; anything else keeps the rig agent.
+    let failure = match hand::selected(world, &companion) {
+        Some((adapter, running)) => {
+            hand::start_run(world, session, &run, instruction, adapter, running).err()
         }
-        Err(error) => Some(error),
+        None => {
+            let agent = ensure(world, &companion, &session.id, &run.run_id, instruction);
+            match agent::ensure_model(world, agent) {
+                Ok(()) => {
+                    world.trigger(Deliver::new(
+                        agent,
+                        instruction.to_owned(),
+                        DeliveryMode::Queue,
+                    ));
+                    None
+                }
+                Err(error) => Some(error),
+            }
+        }
     };
     if let Some(error) = failure {
         let _ = fail_run(&store, &run, &error);
@@ -471,6 +496,13 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     }
     let request_id = uuid::Uuid::new_v4().to_string();
     if let Some(run) = store.active_run(&request.work_id)? {
+        // A plugin hand parks mid-run input and delivers it as the next
+        // prompt turn; the rig agent takes it inside its turn.
+        if hand::owns(world, &request.work_id) {
+            hand::steer(world, &request.work_id, &request.text);
+            world.resource_mut::<Runs>().touch(&run.run_id);
+            return accepted(world, &store, request, &hash, request_id);
+        }
         let Some(agent) = agent else {
             return Err(HostError::Unavailable(
                 ("the work agent is not running").into(),
@@ -593,7 +625,9 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
         return Ok(());
     };
     let reason = reason.unwrap_or("the user stopped the work");
-    if let Some(agent) = agent_of(world, work_id) {
+    if hand::owns(world, work_id) {
+        hand::stop(world, work_id);
+    } else if let Some(agent) = agent_of(world, work_id) {
         world.trigger(StopTurn {
             entity: agent,
             reason: Some(reason.to_owned()),
@@ -613,6 +647,7 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
     if let Ok(Some(session)) = store.work_session(work_id) {
         notify_status(world, &session);
     }
+    hand::release(world, work_id);
     retire(world, work_id);
     Ok(())
 }
@@ -706,6 +741,15 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
 
 fn note_activity(world: &mut World, run_id: &str) {
     world.resource_mut::<Runs>().touch(run_id);
+}
+
+/// Hands one report from a work run to its parent, as the run's own words.
+fn inform(world: &mut World, companion: &str, run_id: &str, text: String, mode: DeliveryMode) {
+    let Some(parent) = agent::agent_of(world, companion) else {
+        return;
+    };
+    let author = Author::agent(agent::work_agent_id(run_id), None);
+    world.trigger(Deliver::new(parent, text, mode).with_author(author));
 }
 
 fn detect_stalls(world: &mut World) {
@@ -844,6 +888,7 @@ mod tests {
         world.insert_resource(Notifier::new());
         world.insert_resource(WorkReports::default());
         world.insert_resource(Runs::default());
+        world.insert_resource(hand::Hands::default());
         world
     }
 

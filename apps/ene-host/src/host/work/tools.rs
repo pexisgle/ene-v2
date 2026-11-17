@@ -1,7 +1,7 @@
 //! Work tools: the parent's commission/stop tools and the hand's report.
 use super::{WorkSession, WorkStatus};
 use crate::host::{
-    agent::{self, CompanionAgent, WorkAgent, WorkReports},
+    agent::{CompanionAgent, WorkAgent, WorkReports},
     db::{Result, Store},
     delegation,
     error::HostError,
@@ -205,7 +205,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
     match args.kind.as_str() {
         "activity" | "message" => {
             super::note_activity(world, &run_id);
-            inform(
+            super::inform(
                 world,
                 &work.companion_id,
                 &run_id,
@@ -232,7 +232,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
                 entity: agent,
                 reason: Some("the hand reported a failure".into()),
             });
-            inform(
+            super::inform(
                 world,
                 &work.companion_id,
                 &run_id,
@@ -243,14 +243,6 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
         }
         other => Err(HostError::Invalid(format!("unknown report kind `{other}`"))),
     }
-}
-
-fn inform(world: &mut World, companion: &str, run_id: &str, text: String, mode: DeliveryMode) {
-    let Some(parent) = agent::agent_of(world, companion) else {
-        return;
-    };
-    let author = Author::agent(agent::work_agent_id(run_id), None);
-    world.trigger(Deliver::new(parent, text, mode).with_author(author));
 }
 
 #[cfg(test)]

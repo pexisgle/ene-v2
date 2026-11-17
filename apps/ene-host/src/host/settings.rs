@@ -142,11 +142,10 @@ impl ConnectionConfig {
                     ));
                 }
             }
-            Self::Acp(config) if config.command.trim().is_empty() => {
-                return Err(HostError::Invalid(
-                    ("ACP connections need a command").into(),
-                ));
-            }
+            // An ACP connection names the harness plugin its `endpoint.adapter`
+            // carries, or falls back to its legacy `command`/`args`; the
+            // common endpoint validation already requires the adapter.
+            Self::Acp(_) => {}
             Self::Mcp(config)
                 if config.command.trim().is_empty()
                     && config.endpoint.endpoint.trim().is_empty() =>
@@ -245,6 +244,10 @@ pub(crate) struct Settings {
     pub(crate) revision: u64,
     pub(crate) connections: Vec<Connection>,
     pub(crate) updated_at: String,
+    /// Free-text policies: settings prose the decision engine reads, never a
+    /// mechanical gate. They ride the settings view, not its revision: their
+    /// own `UpdatePolicyTexts` applies them.
+    pub(crate) policy_texts: Vec<super::permission::PolicyText>,
 }
 
 /// One built-in LLM provider adapter in the contract's own shape. TTS/STT/MCP/ACP

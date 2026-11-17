@@ -374,4 +374,54 @@ mod tests {
         .unwrap();
         assert!(accept(&mut events, update).is_err());
     }
+
+    /// ABI 8: a `Prompt` turn is a first-class operation, and the wire keeps
+    /// refusing fields the contract does not name.
+    #[test]
+    fn harness_inputs_decode_the_contract_shape_and_reject_unknown_fields() {
+        use serde_json::json;
+        let mut events = Events::new(&Operation::Harness {
+            input: HarnessInput::Prompt {
+                prompt: vec![text_block("more")],
+            },
+        });
+        accept(
+            &mut events,
+            HarnessEvent::Update {
+                update: SessionUpdate::Plan(Plan::new(vec![])),
+            },
+        )
+        .unwrap();
+        accept(
+            &mut events,
+            HarnessEvent::Stop {
+                stop_reason: StopReason::EndTurn,
+            },
+        )
+        .unwrap();
+
+        let start: HarnessInput =
+            serde_json::from_value(json!({"type": "start", "prompt": [], "cwd": "/tmp/ene"}))
+                .unwrap();
+        assert_eq!(
+            start,
+            HarnessInput::Start {
+                prompt: vec![],
+                cwd: "/tmp/ene".into(),
+            }
+        );
+        let prompt: HarnessInput =
+            serde_json::from_value(json!({"type": "prompt", "prompt": []})).unwrap();
+        assert_eq!(prompt, HarnessInput::Prompt { prompt: vec![] });
+        for input in [
+            json!({"type": "prompt", "prompt": [], "cwd": "/tmp"}),
+            json!({"type": "start", "prompt": []}),
+            json!({"type": "start", "prompt": [], "cwd": "/tmp", "bogus": 1}),
+        ] {
+            assert!(
+                serde_json::from_value::<HarnessInput>(input.clone()).is_err(),
+                "the input shape stays closed: {input}"
+            );
+        }
+    }
 }

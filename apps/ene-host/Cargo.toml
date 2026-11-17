@@ -68,6 +68,9 @@ bevy_time = "=0.20.0"
 ene-rpc = { workspace = true, features = ["client"] }
 rig-core = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
+# `start_paused` lets the decision-timeout test fire the 15s deadline
+# without waiting it out.
+tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]

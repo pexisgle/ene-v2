@@ -52,6 +52,10 @@ pub(crate) struct Loaded {
     /// configuration that entrypoint declared. One package may serve several
     /// extensions with different endpoints and credentials.
     entries: HashMap<Extension, (String, ProviderConfiguration)>,
+    /// The entrypoint that serves the harness extension. A harness is not a
+    /// provider: it carries no endpoint or credential, so it lives apart from
+    /// `entries` and `Running` holds no provider configuration for it.
+    harness: Option<String>,
 }
 
 impl Loaded {
@@ -60,6 +64,11 @@ impl Loaded {
         self.entries
             .get(&extension)
             .map(|(entrypoint, provider)| (entrypoint.as_str(), provider))
+    }
+
+    /// The entrypoint that serves the harness extension, when one is declared.
+    pub(crate) fn harness_entrypoint(&self) -> Option<&str> {
+        self.harness.as_deref()
     }
 }
 
@@ -177,8 +186,11 @@ impl Providers {
                 crate::host::settings::ConnectionKind::Llm => Extension::Llm,
                 crate::host::settings::ConnectionKind::Tts => Extension::Tts,
                 crate::host::settings::ConnectionKind::Stt => Extension::Stt,
-                // MCP and ACP are transports, not provider plugins.
-                _ => continue,
+                // An ACP connection names a harness plugin through its
+                // endpoint adapter; the hand that drives it starts here with
+                // every other used plugin. MCP is a transport, not a plugin.
+                crate::host::settings::ConnectionKind::Acp => Extension::Harness,
+                crate::host::settings::ConnectionKind::Mcp => continue,
             };
             if !connection.enabled {
                 continue;
@@ -206,7 +218,11 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
         .map_err(|error| HostError::Unavailable(format!("plugin package: {error}")))?;
     let id = package.manifest.id.clone();
     let mut entries = HashMap::new();
+    let mut harness = None;
     for entrypoint in &package.manifest.entrypoints {
+        if entrypoint.provides.contains(&Extension::Harness) {
+            harness.get_or_insert_with(|| entrypoint.id.clone());
+        }
         let Some(configuration) = &entrypoint.provider else {
             continue;
         };
@@ -218,24 +234,35 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
             }
         }
     }
-    if entries.is_empty() {
+    if entries.is_empty() && harness.is_none() {
         return Err(HostError::Unavailable(format!(
-            "the plugin `{id}` serves no provider extension"
+            "the plugin `{id}` serves no provider extension and no harness"
         )));
     }
-    Ok((id, Loaded { package, entries }))
+    Ok((
+        id,
+        Loaded {
+            package,
+            entries,
+            harness,
+        },
+    ))
 }
 
 /// One running provider: its loaded package and the instance that answers.
 ///
 /// An instance is not `Sync`, so calls serialize behind a mutex. One provider
 /// serves one connection, and a call is short, so this is not a bottleneck.
+///
+/// The provider configuration and its catalogue vendor belong to a provider
+/// extension alone; the harness extension serves none, so both stay absent
+/// there and the accessors answer only a provider's callers.
 pub(crate) struct Running {
-    provider: ProviderConfiguration,
+    provider: Option<ProviderConfiguration>,
     /// The catalog vendor this provider's models are filed under. A plugin
     /// serves a provider rig does not ship, so it is declared once here and
     /// every model spec the host builds for it names it.
-    provider_id: ProviderId,
+    provider_id: Option<ProviderId>,
     instance: tokio::sync::Mutex<Option<Instance>>,
     package: Package,
     entrypoint: String,
@@ -252,19 +279,33 @@ impl Running {
         loaded: Arc<Loaded>,
         extension: Extension,
     ) -> Result<Self, HostError> {
-        let (entrypoint, provider) = loaded.entry(extension).ok_or_else(|| {
-            HostError::Unavailable(format!(
-                "the plugin `{}` serves no {extension:?}",
-                loaded.package.manifest.id
-            ))
-        })?;
-        let (entrypoint, provider) = (entrypoint.to_owned(), provider.clone());
-        let provider_id = ProviderId::declare(&provider.id).map_err(|error| {
-            HostError::Unavailable(format!(
-                "the plugin provider id `{}` is not a vendor name: {error}",
-                provider.id
-            ))
-        })?;
+        let (entrypoint, provider, provider_id) = if extension == Extension::Harness {
+            let entrypoint = loaded.harness_entrypoint().ok_or_else(|| {
+                HostError::Unavailable(format!(
+                    "the plugin `{}` serves no harness entrypoint",
+                    loaded.package.manifest.id
+                ))
+            })?;
+            (entrypoint.to_owned(), None, None)
+        } else {
+            let (entrypoint, provider) = loaded.entry(extension).ok_or_else(|| {
+                HostError::Unavailable(format!(
+                    "the plugin `{}` serves no {extension:?}",
+                    loaded.package.manifest.id
+                ))
+            })?;
+            let provider_id = ProviderId::declare(&provider.id).map_err(|error| {
+                HostError::Unavailable(format!(
+                    "the plugin provider id `{}` is not a vendor name: {error}",
+                    provider.id
+                ))
+            })?;
+            (
+                entrypoint.to_owned(),
+                Some(provider.clone()),
+                Some(provider_id),
+            )
+        };
         let package = loaded.package.clone();
         let cancel = CancellationToken::new();
         // `Instance::load` runs the guest's initialization hook, so this is the
@@ -349,14 +390,18 @@ impl Running {
             .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))
     }
 
-    /// The provider configuration this instance answers under.
+    /// The provider configuration this instance answers under. Only a
+    /// provider extension has one; a harness caller never asks.
     pub(crate) fn provider(&self) -> &ProviderConfiguration {
-        &self.provider
+        self.provider
+            .as_ref()
+            .expect("a provider extension serves a configuration")
     }
 
     /// The catalog vendor this provider's models are filed under.
     pub(crate) fn provider_id(&self) -> ProviderId {
         self.provider_id
+            .expect("a provider extension serves a vendor name")
     }
 }
 
