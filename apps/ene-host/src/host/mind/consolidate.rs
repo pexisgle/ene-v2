@@ -321,6 +321,33 @@ fn turn_query(turns: &[Turn]) -> String {
 /// batch travels with the result because it holds the commit input.
 type Reply = (Batch, std::result::Result<Vec<Fact>, String>);
 
+/// The one report a background job makes. A job that panics, or is dropped
+/// before it reports, still sends an error: the companion's slot is released
+/// and the retry delay applies, instead of staying claimed forever.
+struct Report {
+    sender: crossbeam_channel::Sender<Reply>,
+    batch: Batch,
+    sent: bool,
+}
+
+impl Report {
+    fn send(mut self, result: std::result::Result<Vec<Fact>, String>) {
+        self.sent = true;
+        let _ = self.sender.send((self.batch.clone(), result));
+    }
+}
+
+impl Drop for Report {
+    fn drop(&mut self) {
+        if !self.sent {
+            let _ = self.sender.send((
+                self.batch.clone(),
+                Err("the consolidation task stopped before it reported".into()),
+            ));
+        }
+    }
+}
+
 /// The single-flight guard, retry schedule, idle clock and result channel.
 #[derive(Resource)]
 pub(crate) struct Consolidation {
@@ -334,7 +361,10 @@ pub(crate) struct Consolidation {
 
 impl Default for Consolidation {
     fn default() -> Self {
-        let (sender, receiver) = crossbeam_channel::bounded(16);
+        // Unbounded on purpose: the sender runs on a Tokio worker, and a full
+        // bounded channel would block that worker. Single-flight per companion
+        // bounds the outstanding replies, not this channel's capacity.
+        let (sender, receiver) = crossbeam_channel::unbounded();
         Self {
             running: HashSet::new(),
             retry_at: HashMap::new(),
@@ -540,6 +570,11 @@ fn start(
     let store = sources.store.clone();
     let embeddings = sources.embeddings.clone();
     let credentials = sources.credentials.cloned();
+    let report = Report {
+        sender,
+        batch: batch.clone(),
+        sent: false,
+    };
     runtime.spawn(async move {
         let result = async {
             let semantic = embedding::semantic_ids(
@@ -556,7 +591,7 @@ fn start(
         }
         .await
         .map_err(|error: HostError| error.to_string());
-        let _ = sender.send((batch, result));
+        report.send(result);
     });
 }
 
@@ -621,6 +656,30 @@ mod tests {
             context: Vec::new(),
             injected: Vec::new(),
         }
+    }
+
+    /// A background job that panics or is dropped before it reports must not
+    /// leave the companion claimed forever.
+    #[test]
+    fn a_job_that_stops_before_reporting_releases_its_slot() {
+        let mut jobs = Consolidation::default();
+        let now = Instant::now();
+        assert!(jobs.begin("ene", now));
+        assert!(!jobs.begin("ene", now), "one job per companion");
+        drop(Report {
+            sender: jobs.sender(),
+            batch: batch(None, "1"),
+            sent: false,
+        });
+        let (reported, result) = jobs.receiver.try_recv().expect("the guard reports");
+        assert!(result.is_err(), "a missing report is a failure");
+        assert_eq!(reported.companion_id, "ene");
+        jobs.fail(&reported.companion_id, Instant::now());
+        assert!(!jobs.running.contains("ene"), "the slot is free again");
+        assert!(
+            jobs.begin("ene", now + RETRY_DELAY + Duration::from_secs(1)),
+            "the next attempt after the retry delay starts"
+        );
     }
 
     fn new_memory(id: &str, content: &str) -> MemoryRecord {
