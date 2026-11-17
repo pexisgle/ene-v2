@@ -409,6 +409,7 @@ impl HttpGrants for Recording {
 pub(crate) struct Harness {
     fixture: Fixture,
     _temp: TempDir,
+    providers: Providers,
     running: Arc<Running>,
     seen: Arc<Mutex<Vec<HeaderMap>>>,
 }
@@ -460,6 +461,7 @@ impl Harness {
         Self {
             fixture,
             _temp: temp,
+            providers,
             running,
             seen: Arc::new(Mutex::new(Vec::new())),
         }
@@ -687,4 +689,115 @@ async fn a_non_success_status_is_an_error() {
     let harness = Harness::start(None).await;
     let result = harness.model("test-error").call(request()).await;
     assert!(result.is_err(), "a non-2xx reply is a transport failure");
+}
+
+/// The normal binding path, not a direct call: a companion assigned a model
+/// the catalog does not list binds through `ensure_model`, and the bound
+/// handler answers through the real guest.
+#[tokio::test]
+async fn a_plugin_model_binds_through_the_agent_path() {
+    use crate::host::{
+        agent,
+        db::Store,
+        mind,
+        notify::Notifier,
+        settings::{
+            Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
+        },
+    };
+    use rig_core::{
+        completion::CompletionRequest,
+        effect::{Answered, EffectKind},
+        serve::serve_inline,
+    };
+    use rig_ecs::model::{Connection as ModelConnection, Models};
+
+    let harness = Harness::start(None).await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+    store
+        .update_settings(
+            store.settings_revision().unwrap(),
+            &[(
+                Connection {
+                    id: CONNECTION.to_owned(),
+                    name: "fixture".into(),
+                    enabled: true,
+                    kind: ConnectionKind::Llm,
+                    config: ConnectionConfig::Llm(LlmConnection {
+                        endpoint: Endpoint {
+                            adapter: "openrouter-test".into(),
+                            endpoint: harness.fixture.base().to_owned(),
+                            ..Default::default()
+                        },
+                        model_ids: Vec::new(),
+                    }),
+                    credential_state: CredentialState::Registered,
+                    revision: 1,
+                    last_check: None,
+                },
+                0,
+            )],
+        )
+        .unwrap();
+    let credentials = Credentials::new(true);
+    credentials.remember(CONNECTION, SECRET.to_owned());
+    let mut world = bevy_ecs::prelude::World::new();
+    world.insert_resource(store);
+    world.insert_resource(credentials);
+    world.insert_resource(harness.providers.clone());
+    world.insert_resource(super::ModelFactory::default());
+    world.insert_resource(Models::default());
+    world.insert_resource(Notifier::new());
+    let assignment = crate::host::mind::Assignment {
+        connection_id: CONNECTION.into(),
+        model_id: "test-unlisted".into(),
+    };
+    let created = mind::create(
+        &mut world,
+        ene_rpc::CreateCompanionRequest {
+            name: "Mio".into(),
+            mind: "kind".into(),
+            assignments: Some(crate::host::wire::assignments(
+                &crate::host::mind::Assignments {
+                    companion: assignment.clone(),
+                    task: assignment,
+                    ..Default::default()
+                },
+            ))
+            .into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let entity = agent::agent_of(&mut world, &created.id).expect("the companion agent");
+    let spec = world
+        .get::<ModelConnection>(entity)
+        .expect("the plugin model binds instead of failing ensure_model")
+        .spec
+        .clone();
+    assert_eq!(spec.id, "test-unlisted");
+    assert_eq!(spec.provider.vendor(), "openrouter-test");
+    assert!(spec.tools, "an unlisted model is assumed to call tools");
+
+    let handler = world
+        .get::<ModelConnection>(entity)
+        .unwrap()
+        .handler
+        .0
+        .clone();
+    let answer = serve_inline(
+        &handler,
+        EffectKind::Completion {
+            request: CompletionRequest::new("hello").into(),
+            stream: false,
+        },
+    )
+    .await
+    .unwrap();
+    let Answered::Completion(answer) = answer else {
+        panic!("expected a completion")
+    };
+    assert_eq!(answer.text(), "Hello world");
+    assert_eq!(harness.fixture.request_count(), 1);
 }

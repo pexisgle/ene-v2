@@ -24,6 +24,7 @@ pub(crate) use services::{BrokerServices, http_broker};
 
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};
+use rig_core::providers::registry::ProviderId;
 /// Startup cells, keyed by the adapter and extension they serve.
 type RunningMap = HashMap<(String, Extension), Arc<tokio::sync::OnceCell<Arc<Running>>>>;
 
@@ -231,6 +232,10 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
 /// serves one connection, and a call is short, so this is not a bottleneck.
 pub(crate) struct Running {
     provider: ProviderConfiguration,
+    /// The catalog vendor this provider's models are filed under. A plugin
+    /// serves a provider rig does not ship, so it is declared once here and
+    /// every model spec the host builds for it names it.
+    provider_id: ProviderId,
     instance: tokio::sync::Mutex<Option<Instance>>,
     package: Package,
     entrypoint: String,
@@ -254,17 +259,22 @@ impl Running {
             ))
         })?;
         let (entrypoint, provider) = (entrypoint.to_owned(), provider.clone());
+        let provider_id = ProviderId::declare(&provider.id).map_err(|error| {
+            HostError::Unavailable(format!(
+                "the plugin provider id `{}` is not a vendor name: {error}",
+                provider.id
+            ))
+        })?;
         let package = loaded.package.clone();
         let cancel = CancellationToken::new();
-        let mut instance = Instance::load(package.clone(), entrypoint.clone(), &cancel)
+        // `Instance::load` runs the guest's initialization hook, so this is the
+        // one place `ene_initialize` is called for an instance.
+        let instance = Instance::load(package.clone(), entrypoint.clone(), &cancel)
             .await
             .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
-        instance
-            .initialize(&cancel)
-            .await
-            .map_err(|error| HostError::Unavailable(format!("plugin initialize: {error}")))?;
         Ok(Self {
             provider,
+            provider_id,
             instance: tokio::sync::Mutex::new(Some(instance)),
             package,
             entrypoint,
@@ -334,19 +344,19 @@ impl Running {
     }
 
     async fn reload(&self) -> Result<Instance, HostError> {
-        let mut fresh = Instance::load(self.package.clone(), self.entrypoint.clone(), &self.cancel)
+        Instance::load(self.package.clone(), self.entrypoint.clone(), &self.cancel)
             .await
-            .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))?;
-        fresh
-            .initialize(&self.cancel)
-            .await
-            .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))?;
-        Ok(fresh)
+            .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))
     }
 
     /// The provider configuration this instance answers under.
     pub(crate) fn provider(&self) -> &ProviderConfiguration {
         &self.provider
+    }
+
+    /// The catalog vendor this provider's models are filed under.
+    pub(crate) fn provider_id(&self) -> ProviderId {
+        self.provider_id
     }
 }
 

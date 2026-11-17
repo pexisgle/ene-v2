@@ -13,13 +13,17 @@ use ene_plugin::{Event as PluginEvent, HttpChunk, HttpRequest, Operation as Plug
 use ene_plugin_runtime::service::HttpBroker;
 use http::header::HeaderName;
 use rig_core::{
+    catalog::{ModelFacts, ModelSpec},
     driver::DynModel,
     http_client::{
-        BoxedStream, Bytes, Error as HttpError, HeaderMap, HeaderValue, HttpClientExt, LazyBody,
-        MultipartForm, Request, Response, StatusCode, StreamingResponse,
+        BoxedStream, Bytes, DynHttpClient, Error as HttpError, HeaderMap, HeaderValue,
+        HttpClientExt, LazyBody, MultipartForm, Request, Response, StatusCode, StreamingResponse,
     },
     operation::Completion,
-    providers::openai::OpenAIConfig,
+    providers::{
+        openai::{OpenAIConfig, Route},
+        registry::ProviderConfig,
+    },
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -44,17 +48,31 @@ const HOST_OWNED: &[&str] = &[
 ];
 
 /// A plugin-backed completion model, erased to rig's operation.
+///
+/// The plugin serves a provider rig does not ship, so the model is connected
+/// through the registry's declared-vendor path with a spec the host can hand
+/// to the agent: the same facts that price and describe a catalog model. The
+/// chat-completions route is forced because the ABI 7 generation contract is
+/// that wire, not the Responses API an OpenAI config defaults to.
 pub(crate) fn completion(
     provider: Arc<Running>,
     model: String,
     broker: Arc<HttpBroker>,
 ) -> DynModel<Completion> {
     let endpoint = provider.provider().endpoint.clone();
-    OpenAIConfig::new(BROKER_KEY)
-        .with_base_url(endpoint)
-        .connect(GuestClient { provider, broker })
-        .chat(model)
-        .erase()
+    // An unlisted model is assumed to call tools; the host cannot prove
+    // otherwise without a probe. Its limits stay unknown rather than guessed.
+    let spec = ModelSpec::new(provider.provider_id(), model.clone()).with_tools(true);
+    let config = ProviderConfig::OpenAi(
+        OpenAIConfig::new(BROKER_KEY)
+            .with_base_url(endpoint)
+            .with_route(Route::Chat),
+    );
+    config.completion_model(
+        &model,
+        DynHttpClient::new(GuestClient { provider, broker }),
+        ModelFacts::new(spec),
+    )
 }
 
 /// rig's HTTP transport, answered by one Extism invocation.

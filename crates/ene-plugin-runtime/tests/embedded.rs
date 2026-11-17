@@ -945,3 +945,38 @@ fn provider_wasm_with(body: &str, capabilities: &Value) -> Vec<u8> {
         (func (export "ene_invoke") (result i32) (local $p i64) (local $i i32)
             {body} {empty} local.get $p i64.const 2 call $output i32.const 0))"#, declared.len())).unwrap()
 }
+
+/// `Instance::load` owns the guest's initialization hook: it runs exactly
+/// once. This guest traps on a second `ene_initialize`, so a load that
+/// succeeds and answers a call proves the count.
+#[tokio::test]
+async fn load_initializes_the_guest_once() {
+    let _one_instance = one_instance_test().await;
+    let empty = write("{}");
+    let code = wat::parse_str(format!(
+        r#"(module
+            (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+            (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+            (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+            (import "extism:host/user" "ene_service" (func $service (param i64) (result i64)))
+            (import "extism:host/user" "ene_emit" (func $emit (param i64)))
+            (global $calls (mut i32) (i32.const 0))
+            (func (export "ene_initialize") (result i32) (local $p i64)
+                global.get $calls i32.const 1 i32.add global.set $calls
+                global.get $calls i32.const 1 i32.gt_u if unreachable end
+                {empty} local.get $p i64.const 2 call $output i32.const 0)
+            (func (export "ene_invoke") (result i32) (local $p i64)
+                {empty} local.get $p i64.const 2 call $output i32.const 0))"#
+    ))
+    .unwrap();
+    let (package, _temp) = package(&code, Target::Host, &[]);
+    let cancel = CancellationToken::new();
+    let mut instance = Instance::load(package, "main".into(), &cancel)
+        .await
+        .expect("load initializes once");
+    let (tx, _rx) = mpsc::channel(1);
+    let result = instance
+        .invoke(character(), Arc::new(DenyServices), tx, &cancel)
+        .await;
+    assert_eq!(result.unwrap(), json!({}));
+}
