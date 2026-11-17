@@ -359,11 +359,12 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
     }
 }
 
-/// Startup reconciliation: one agent per companion, one per open run, and no
-/// agent whose companion or run is gone.
-pub(crate) fn reconcile(world: &mut World) {
+/// Reconciliation after the first frame: one agent per companion, one per open
+/// run, and no agent whose companion or run is gone. A store failure ends the
+/// start, because read as an empty list it would retire every restored agent.
+pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    let companions = store.companions().unwrap_or_default();
+    let companions = store.companions()?;
     let existing: Vec<Entity> = world
         .query_filtered::<Entity, Or<(With<CompanionAgent>, With<WorkAgent>)>>()
         .iter(world)
@@ -383,7 +384,7 @@ pub(crate) fn reconcile(world: &mut World) {
     }
     // Retire the kernel's default agent and any agent without a role.
     let stray: Vec<Entity> = world
-        .query_filtered::<Entity, (Without<CompanionAgent>, Without<WorkAgent>)>()
+        .query_filtered::<Entity, (With<Agent>, Without<CompanionAgent>, Without<WorkAgent>)>()
         .iter(world)
         .collect();
     for entity in stray {
@@ -426,6 +427,7 @@ pub(crate) fn reconcile(world: &mut World) {
     }
     let mut notifier = world.resource_mut::<Notifier>();
     notifier.notice(None, "host_ready", "the host restored its state");
+    Ok(())
 }
 
 /// The conversation text of one entry, when it belongs in the transcript.
@@ -657,7 +659,7 @@ fn expire_devices(world: &mut World) {
     }
 }
 
-/// The host's agent plugin: reconciliation, projection and device timeouts.
+/// The host's agent plugin: projection and device timeouts.
 pub(crate) struct AgentPlugin;
 
 impl Plugin for AgentPlugin {
@@ -665,7 +667,6 @@ impl Plugin for AgentPlugin {
         app.init_resource::<Connections>()
             .init_resource::<ModelFactory>()
             .init_resource::<WorkReports>()
-            .add_systems(Startup, reconcile)
             .add_systems(
                 Update,
                 (

@@ -405,12 +405,15 @@ fn restore(world: &mut World) -> Result<()> {
     Ok(())
 }
 
-/// Restores what needs a restorable session: the agents and their models.
+/// Restores what needs a restorable session: the agents, their models and the
+/// capability tools. It runs after the first frame, so the kernel's restore and
+/// its startup systems are done before the host adopts or retires an agent.
 fn restore_after_first_frame(world: &mut World) -> Result<()> {
-    let store = world.resource::<Store>().clone();
-    for companion in store.companions()? {
-        agent::sync_companion(world, &companion.id)?;
-    }
+    agent::reconcile(world)?;
+    // The parents exist once the reconciliation has bound them, so publishing
+    // now puts a restored active client's tools on every parent before the
+    // first turn.
+    client::dynamic::init(world);
     Ok(())
 }
 

@@ -401,9 +401,6 @@ impl Plugin for ClientPlugin {
         .insert_resource(dynamic::CapabilityCalls::new(wake))
         .init_resource::<CapabilityPolicy>()
         .init_resource::<CapabilityTools>()
-        // The agents spawn in `Startup` too; publish after them so a restored
-        // active client's tools are on every parent from the first turn.
-        .add_systems(Startup, dynamic::init.after(super::agent::reconcile))
         .add_systems(
             Update,
             (

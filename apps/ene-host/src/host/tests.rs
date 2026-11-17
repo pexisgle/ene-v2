@@ -41,7 +41,7 @@ impl Harness {
     fn with_policy(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>, policy: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let (mut app, wakes) = Self::app(root.path(), turns, policy);
-        app.update();
+        Self::start(&mut app);
         let companion = super::mind::create(
             app.world_mut(),
             w::CreateCompanionRequest {
@@ -110,11 +110,18 @@ impl Harness {
         (app, wakes)
     }
 
+    /// The first frame a start runs, then the reconciliation that has to wait
+    /// for it, in the order `Runtime::start_with` runs them.
+    fn start(app: &mut App) {
+        app.update();
+        super::restore_after_first_frame(app.world_mut()).unwrap();
+    }
+
     /// Stops this app and starts a second one over the same state directory,
     /// as a host restart does.
     pub(crate) fn restart(&mut self, turns: impl IntoIterator<Item = Vec<MockStreamEvent>>) {
         let (mut app, wakes) = Self::app(self.root.path(), turns, "*");
-        app.update();
+        Self::start(&mut app);
         self.app = app;
         self.wakes = wakes;
     }
@@ -150,6 +157,26 @@ impl Harness {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    /// The types of the records in the companion agent's session log, in the
+    /// order it appended them.
+    fn companion_log_types(&self) -> Vec<String> {
+        let name = format!("{}.jsonl", agent::companion_agent_id(&self.companion));
+        let path = self.root.path().join("rig").join("logs").join(&name);
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("the companion's session log {name}: {error}"));
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(|line| {
+                let record: serde_json::Value =
+                    serde_json::from_str(line).expect("a session log record");
+                record["type"]
+                    .as_str()
+                    .expect("every session log record says its type")
+                    .to_owned()
+            })
+            .collect()
     }
 
     pub(crate) fn tick(&mut self) {
@@ -511,6 +538,39 @@ fn a_restart_keeps_an_accepted_input_and_its_acceptance() {
         after.iter().filter(|text| *text == "途中だけど").count(),
         1,
         "the retry does not add a second input"
+    );
+}
+
+/// A restart resumes the restored agent instead of replacing it, so the
+/// companion's session log gains neither a retirement of that agent nor a
+/// reset of its conversation.
+#[test]
+fn a_restart_keeps_the_conversation_and_appends_no_retire_or_reset() {
+    let mut harness = Harness::new([text_turn("おかえり")]);
+    harness.accept("key-1", "行ってきます").unwrap();
+    harness.run_until_text("おかえり");
+
+    harness.restart([]);
+    assert_eq!(
+        history_texts(&mut harness),
+        ["行ってきます", "おかえり"],
+        "a restart keeps both the input and its reply"
+    );
+    // The kernel saves a frame's changes before it writes them, so the frame
+    // after the boot holds whatever the reconciliation appended.
+    harness.tick();
+    let types = harness.companion_log_types();
+    assert!(
+        types.contains(&"push".to_owned()),
+        "the companion's log holds the conversation: {types:?}"
+    );
+    assert!(
+        !types.contains(&"retired".to_owned()),
+        "a restart appends no retired record: {types:?}"
+    );
+    assert!(
+        !types.contains(&"reset".to_owned()),
+        "a restart appends no reset record: {types:?}"
     );
 }
 

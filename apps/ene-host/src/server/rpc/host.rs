@@ -166,6 +166,9 @@ mod tests {
     async fn subscription_replays_and_filters_after_request_body_is_dropped() {
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
+        // The boot's reconciliation queues `host_ready` after the first frame,
+        // so one more frame delivers it; a cursor taken before that replays it.
+        runtime.call(|_| Ok(())).await.unwrap();
         let cursor = runtime
             .read(|app| {
                 app.world()
