@@ -75,7 +75,7 @@ impl Harness {
         app.set_error_handler(bevy_ecs::error::warn)
             .add_plugins(TaskPoolPlugin::default())
             .insert_resource(store)
-            .insert_resource(super::model::Credentials::default())
+            .insert_resource(super::model::Credentials::new(true))
             .insert_resource(client::CapabilityPolicy::parse(policy))
             .insert_resource(DeviceHub::default())
             .insert_resource(super::HostState::default())

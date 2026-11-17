@@ -439,7 +439,7 @@ mod tests {
         world.insert_resource(super::super::acp::AcpBackends::default());
         world.insert_resource(Runs::default());
         world.insert_resource(Notifier::new());
-        world.insert_resource(Credentials::default());
+        world.insert_resource(Credentials::new(true));
         world.init_resource::<rig_ecs::model::Models>();
         world.insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
             Ok(bound(&model))
