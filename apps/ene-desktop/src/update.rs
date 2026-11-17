@@ -47,9 +47,7 @@ pub enum Update {
     },
     /// The host accepted a stop request. The turn itself ends later, and the
     /// window says so.
-    StopRequested {
-        companion_id: String,
-    },
+    StopRequested { companion_id: String },
     /// The conversation the window asked for.
     History {
         companion_id: String,
@@ -59,25 +57,12 @@ pub enum Update {
         companion_id: String,
         message: String,
     },
-    /// The work list for a companion.
-    Works {
-        companion_id: String,
-        items: Vec<w::WorkView>,
-    },
-    WorksFailed {
-        message: String,
-    },
     /// The provider catalog.
     Providers(Vec<w::LlmProvider>),
     /// The declared models of one connection.
     Models {
         connection_id: String,
         models: Vec<w::Model>,
-    },
-    /// A companion's mind.
-    Mind {
-        companion_id: String,
-        view: Box<w::MindView>,
     },
     /// The result of a connection probe.
     Checked {
@@ -88,21 +73,13 @@ pub enum Update {
     Approvals(Vec<w::ApprovalRequest>),
     /// An approval is no longer pending: another device resolved it, or it
     /// expired. The window refetches and stops offering the card.
-    ApprovalStale {
-        message: String,
-    },
+    ApprovalStale { message: String },
     /// An approval was resolved by this window.
-    Resolved {
-        request_id: String,
-    },
+    Resolved { request_id: String },
     /// A companion no longer exists on the host.
-    Gone {
-        companion_id: String,
-    },
+    Gone { companion_id: String },
     /// A connection's credential is registered; the field that held it clears.
-    CredentialRegistered {
-        connection_id: String,
-    },
+    CredentialRegistered { connection_id: String },
     /// The window should refetch the host's whole state.
     Resnapshot,
     /// A companion was created; the window opens it.

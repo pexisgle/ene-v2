@@ -5,63 +5,13 @@
 //! not write memories, and does not choose a model for itself: a model is set by
 //! naming a connection and a model id the host itself listed.
 
-use super::{Desktop, Tone, button, card, decode, line, muted};
+use super::{Desktop, SettingsSection, Tone, button, card, decode, line, muted};
 use crate::update::Update;
 use buffa::view::MessageView;
 use ene_rpc as w;
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, rgb};
 
 impl Desktop {
-    /// Copies the selected companion into the editor the first time it is shown.
-    pub(crate) fn prime_companion(&mut self, cx: &mut Context<Self>) {
-        let Some(companion) = self.model.companion().cloned() else {
-            return;
-        };
-        let name = self.draft(cx, "companion:name", "名前", "TextField");
-        if name.read(cx).is_empty() {
-            name.update(cx, |draft, cx| draft.set(companion.name.clone(), cx));
-        }
-        let persona = self.draft(cx, "companion:persona", "口調・人物像", "TextField");
-        if persona.read(cx).is_empty() {
-            persona.update(cx, |draft, cx| {
-                draft.set(companion.persona.clone().unwrap_or_default(), cx)
-            });
-        }
-        let mind = self.draft(cx, "companion:mind", "心（システム側の設定）", "TextField");
-        if mind.read(cx).is_empty() {
-            mind.update(cx, |draft, cx| draft.set(companion.mind.clone(), cx));
-        }
-    }
-
-    /// Fetches the mind the host publishes for the shown companion.
-    pub(crate) fn load_mind(&mut self, cx: &mut Context<Self>) {
-        let Some(companion_id) = self.model.companion_id().map(str::to_owned) else {
-            return;
-        };
-        let Some(host) = self.host() else {
-            return;
-        };
-        let shown = companion_id.clone();
-        self.request(
-            "心の取得",
-            async move {
-                let response = host
-                    .host
-                    .get_mind(w::Id {
-                        id: companion_id,
-                        ..Default::default()
-                    })
-                    .await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            move |view| Update::Mind {
-                companion_id: shown,
-                view: Box::new(view),
-            },
-        );
-        cx.notify();
-    }
-
     /// Saves the name, persona and mind the operator edited.
     fn save_companion(&mut self, cx: &mut Context<Self>) {
         let Some(companion) = self.model.companion().cloned() else {
@@ -72,20 +22,19 @@ impl Desktop {
         };
         let name = self
             .drafts
-            .get("companion:name")
+            .get(&format!("companion:{}:name", companion.id))
             .map(|draft| draft.read(cx).text().trim().to_owned())
             .unwrap_or_default();
         let persona = self
             .drafts
-            .get("companion:persona")
+            .get(&format!("companion:{}:persona", companion.id))
             .map(|draft| draft.read(cx).text().trim().to_owned())
             .unwrap_or_default();
         let mind = self
             .drafts
-            .get("companion:mind")
+            .get(&format!("companion:{}:mind", companion.id))
             .map(|draft| draft.read(cx).text().trim().to_owned())
             .unwrap_or_default();
-        let id = companion.id.clone();
         self.request(
             "コンパニオンの保存",
             async move {
@@ -105,9 +54,14 @@ impl Desktop {
                     .await?;
                 response.view().to_owned_message().map_err(decode)
             },
-            |companion| Update::Created(companion.id.clone()),
+            |companion| {
+                Update::Notification(Box::new(w::Notification {
+                    kind: "companion".into(),
+                    event: Some(w::notification::Event::Companion(Box::new(companion))),
+                    ..Default::default()
+                }))
+            },
         );
-        let _ = id;
         cx.notify();
     }
 
@@ -278,14 +232,24 @@ impl Desktop {
     /// the host reports, as chips, and the first valid one is pre-selected so the
     /// create button is never dead for want of a click nobody can guess.
     pub(crate) fn render_companion(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.prime_companion(cx);
         let companion = self.model.companion().cloned();
         let mut body: Vec<AnyElement> = Vec::new();
         if let Some(companion) = companion.as_ref() {
-            let name = self.draft(cx, "companion:name", "名前", "TextField");
-            let persona = self.draft(cx, "companion:persona", "口調・人物像", "TextField");
-            let mind = self.draft(cx, "companion:mind", "心（システム側の設定）", "TextField");
-            body.push(section("いま話している相手"));
+            let mut draft = |field, placeholder, value: &str| {
+                self.drafts
+                    .entry(format!("companion:{}:{field}", companion.id))
+                    .or_insert_with(|| {
+                        cx.new(|cx| {
+                            let mut draft = crate::input::Draft::new(cx, placeholder, "TextField");
+                            draft.set(value.to_owned(), cx);
+                            draft
+                        })
+                    })
+                    .clone()
+            };
+            let name = draft("name", "", &companion.name);
+            let persona = draft("persona", "", companion.persona.as_deref().unwrap_or(""));
+            let mind = draft("mind", "", &companion.mind);
             body.push(
                 div()
                     .flex()
@@ -296,36 +260,53 @@ impl Desktop {
                     .bg(card())
                     .border_1()
                     .border_color(line())
-                    .child(field("名前", name, cx))
-                    .child(field("口調・人物像", persona, cx))
-                    .child(field("心", mind, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .child(button(
-                                cx,
-                                "save-companion",
-                                "保存",
-                                Tone::Primary,
-                                self.live(),
-                                |this, _window, cx| this.save_companion(cx),
-                            ))
-                            .child(button(
-                                cx,
-                                "delete-companion",
-                                "削除",
-                                Tone::Danger,
-                                self.live(),
-                                |this, _window, cx| this.delete_companion(cx),
-                            )),
-                    )
+                    .child(field("名前", name))
+                    .child(field("口調・人物像", persona))
+                    .child(div().flex().child(button(
+                        cx,
+                        "companion-details",
+                        if self.companion_details_open {
+                            "▾ 基本指示・削除"
+                        } else {
+                            "▸ 基本指示・削除"
+                        },
+                        Tone::Plain,
+                        true,
+                        |this, _window, cx| {
+                            this.companion_details_open = !this.companion_details_open;
+                            cx.notify();
+                        },
+                    )))
+                    .when(self.companion_details_open, |this| {
+                        this.child(field("基本指示（心）", mind))
+                    })
+                    .child(div().flex().flex_row().gap_2().child(button(
+                        cx,
+                        "save-companion",
+                        "保存",
+                        Tone::Primary,
+                        self.live(),
+                        |this, _window, cx| this.save_companion(cx),
+                    )))
                     .into_any_element(),
             );
-            body.push(self.render_mind(cx));
-            body.push(section("モデル割り当て"));
+            body.push(section("使用するモデル"));
             body.push(self.render_assignments(companion, cx));
+            if self.companion_details_open {
+                body.push(
+                    div()
+                        .flex()
+                        .child(button(
+                            cx,
+                            "delete-companion",
+                            "コンパニオンを削除",
+                            Tone::Danger,
+                            self.live(),
+                            |this, _window, cx| this.delete_companion(cx),
+                        ))
+                        .into_any_element(),
+                );
+            }
         } else {
             body.push(
                 div()
@@ -337,13 +318,14 @@ impl Desktop {
                     .bg(rgb(0xfffbeb))
                     .border_1()
                     .border_color(rgb(0xfde68a))
-                    .child(div().text_sm().child("最初のコンパニオンを作りましょう"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x92400e))
-                            .child("名前とモデルを選ぶだけで始められます。"),
-                    )
+                    .child(div().flex().child(button(
+                        cx,
+                        "settings-create-first",
+                        "コンパニオンを作成",
+                        Tone::Primary,
+                        self.live(),
+                        |this, _window, cx| this.show_settings(SettingsSection::New, cx),
+                    )))
                     .into_any_element(),
             );
         }
@@ -356,16 +338,21 @@ impl Desktop {
     pub(crate) fn render_new_companion(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let choices = self.model_choices();
         let mut body: Vec<AnyElement> = Vec::new();
-        body.push(section("話す相手"));
         let new_name = self.draft(cx, "new:name", "名前（例: ミオ）", "TextField");
-        let new_mind = self.draft(cx, "new:mind", "人物像（任意）", "TextField");
-        body.push(field("名前", new_name.clone(), cx));
-        body.push(field("人物像", new_mind, cx));
+        let new_mind = self.draft(cx, "new:mind", "", "TextField");
+        body.push(field("名前（必須）", new_name.clone()));
+        body.push(field("口調・人物像（任意）", new_mind));
         // Pre-select the first reported choice once, so 作成 starts enabled.
-        if self.new_model.is_none()
-            && let Some((connection_id, model_id, _)) = choices.first()
-        {
-            self.new_model = Some((connection_id.clone(), model_id.clone()));
+        if !choices.iter().any(|(connection, model, _)| {
+            self.new_model
+                .as_ref()
+                .is_some_and(|(picked_connection, picked_model)| {
+                    connection == picked_connection && model == picked_model
+                })
+        }) {
+            self.new_model = choices
+                .first()
+                .map(|(connection, model, _)| (connection.clone(), model.clone()));
         }
         let mut chips: Vec<AnyElement> = Vec::new();
         for (connection_id, model_id, label) in &choices {
@@ -378,7 +365,7 @@ impl Desktop {
                 SharedString::from(format!("create-model-{connection_id}-{model_id}")),
                 label,
                 if selected { Tone::Primary } else { Tone::Plain },
-                self.live() && !selected,
+                self.live(),
                 move |this, _window, cx| {
                     this.new_model = choice.clone();
                     cx.notify();
@@ -390,13 +377,26 @@ impl Desktop {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().text_xs().text_color(muted()).child("モデル"))
+                .child(div().text_xs().text_color(muted()).child("会話モデル"))
                 .children(if chips.is_empty() {
                     vec![
                         div()
                             .text_xs()
                             .text_color(rgb(0x9a3412))
-                            .child("使える LLM 接続がありません。先に「接続とモデル」で追加してください。")
+                            .child("選べる会話モデルがありません。")
+                            .into_any_element(),
+                        div()
+                            .flex()
+                            .child(button(
+                                cx,
+                                "create-open-connections",
+                                "サービス接続を開く",
+                                Tone::Plain,
+                                true,
+                                |this, _window, cx| {
+                                    this.show_settings(SettingsSection::Connections, cx)
+                                },
+                            ))
                             .into_any_element(),
                     ]
                 } else {
@@ -432,22 +432,6 @@ impl Desktop {
                     ready,
                     |this, _window, cx| this.create_companion(cx),
                 ))
-                .when(!named, |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted())
-                            .child("名前を入れてください"),
-                    )
-                })
-                .when(named && choices.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted())
-                            .child("接続を追加すると作成できます"),
-                    )
-                })
                 .into_any_element(),
         );
 
@@ -497,70 +481,6 @@ impl Desktop {
         }
         choices
     }
-    fn render_mind(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        let shown = self
-            .model
-            .companion_id()
-            .zip(self.model.mind.as_ref())
-            .filter(|(id, (mind_id, _))| id == mind_id)
-            .map(|(_, (_, view))| view.clone());
-        let Some(view) = shown else {
-            return div()
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .bg(card())
-                .text_sm()
-                .text_color(muted())
-                .child("心は取得していません")
-                .into_any_element();
-        };
-        let profile = view.profile.as_option();
-        let state = view.state.as_option();
-        let mut lines: Vec<AnyElement> = Vec::new();
-        if let Some(profile) = profile {
-            lines.push(text_line("核", &profile.core));
-            lines.push(text_line("revision", &profile.revision.to_string()));
-            if !profile.facets.is_empty() {
-                lines.push(text_line("側面", &profile.facets.join(" / ")));
-            }
-        }
-        if let Some(state) = state {
-            lines.push(text_line("状態 revision", &state.revision.to_string()));
-            lines.push(text_line("更新", &state.updated_at));
-        }
-        if let Some(index) = view.index.as_option() {
-            lines.push(text_line(
-                "索引",
-                &format!(
-                    "未処理 FTS {} / ベクトル {} ・ {}",
-                    index.pending_fts_count, index.pending_vector_count, index.embedding_model
-                ),
-            ));
-        }
-        if let Some(consolidation) = view.consolidation.as_option() {
-            let error = consolidation.last_error.as_deref().unwrap_or("なし");
-            lines.push(text_line(
-                "記憶整理",
-                &format!(
-                    "完了 {} 件 ・ 最後のエラー: {error}",
-                    consolidation.jobs_completed
-                ),
-            ));
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_3()
-            .rounded_md()
-            .bg(card())
-            .border_1()
-            .border_color(line())
-            .children(lines)
-            .into_any_element()
-    }
-
     fn render_assignments(
         &mut self,
         companion: &w::Companion,
@@ -586,19 +506,20 @@ impl Desktop {
         let mut rows: Vec<AnyElement> = Vec::new();
         for (label, target, assignment) in [
             (
-                "頭（対話）",
+                "会話モデル",
                 AssignTarget::Companion,
                 current.companion.as_option().cloned(),
             ),
             (
-                "手（作業）",
+                "作業モデル",
                 AssignTarget::Task,
                 current.task.as_option().cloned(),
             ),
         ] {
+            let mut selected_listed = false;
             let assigned = assignment
                 .as_ref()
-                .map(|assignment| format!("{} / {}", assignment.connection_id, assignment.model_id))
+                .map(|assignment| format!("{}（使用中）", assignment.model_id))
                 .unwrap_or_else(|| "未設定".into());
             let mut chips: Vec<AnyElement> = Vec::new();
             for connection in &connections {
@@ -614,16 +535,31 @@ impl Desktop {
                     let selected = assignment.as_ref().is_some_and(|assignment| {
                         assignment.connection_id == connection_id && assignment.model_id == model_id
                     });
+                    let name = if model.name.is_empty() {
+                        model_id.clone()
+                    } else {
+                        model.name
+                    };
+                    if selected {
+                        selected_listed = true;
+                        chips.push(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(0xdbeafe))
+                                .text_sm()
+                                .child(format!("{name}（使用中）"))
+                                .into_any_element(),
+                        );
+                        continue;
+                    }
                     chips.push(button(
                         cx,
                         SharedString::from(format!("assign-{label}-{connection_id}-{model_id}")),
-                        if model.name.is_empty() {
-                            model_id.clone()
-                        } else {
-                            model.name
-                        },
-                        if selected { Tone::Primary } else { Tone::Plain },
-                        self.live() && !selected,
+                        name,
+                        Tone::Plain,
+                        self.live(),
                         move |this, _window, cx| this.assign(target, &connection_id, &model_id, cx),
                     ));
                 }
@@ -633,7 +569,10 @@ impl Desktop {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_sm().child(format!("{label}: {assigned}")))
+                    .child(div().text_sm().child(label))
+                    .when(!selected_listed, |this| {
+                        this.child(div().text_xs().text_color(muted()).child(assigned))
+                    })
                     .child(div().flex().flex_row().flex_wrap().gap_1().children(chips))
                     .into_any_element(),
             );
@@ -643,7 +582,14 @@ impl Desktop {
                 div()
                     .text_xs()
                     .text_color(muted())
-                    .child("LLM接続がありません。設定パネルで追加してください。")
+                    .child(button(
+                        cx,
+                        "assign-open-connections",
+                        "サービス接続を開く",
+                        Tone::Plain,
+                        true,
+                        |this, _window, cx| this.show_settings(SettingsSection::Connections, cx),
+                    ))
                     .into_any_element(),
             );
         }
@@ -668,16 +614,12 @@ enum AssignTarget {
 }
 
 /// A labelled text field.
-fn field(
-    label: &str,
-    draft: gpui::Entity<crate::input::Draft>,
-    _cx: &mut Context<Desktop>,
-) -> AnyElement {
+pub(super) fn field(label: &str, draft: gpui::Entity<crate::input::Draft>) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_xs().text_color(muted()).child(label.to_owned()))
+        .child(div().text_sm().child(label.to_owned()))
         .child(draft)
         .into_any_element()
 }
@@ -688,21 +630,6 @@ fn section(title: &str) -> AnyElement {
         .text_sm()
         .text_color(rgb(0x44403c))
         .child(title.to_owned())
-        .into_any_element()
-}
-
-fn text_line(label: &str, value: &str) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .text_color(muted())
-                .child(format!("{label}:")),
-        )
-        .child(div().text_xs().child(value.to_owned()))
         .into_any_element()
 }
 

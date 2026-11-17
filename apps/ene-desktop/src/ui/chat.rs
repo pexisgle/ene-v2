@@ -1,6 +1,6 @@
 //! The conversation panel: history, the live preview, and the composer.
 
-use super::{Desktop, Tone, button, card, decode, line, muted};
+use super::{Desktop, SettingsSection, Tone, button, card, decode, line, muted};
 use crate::{
     state::{Chat, NoticeKind},
     update::Update,
@@ -19,6 +19,7 @@ impl Desktop {
             return;
         }
         self.model.selected = Some(companion_id.to_owned());
+        self.refresh_placeholder(cx);
         self.model.chat = Chat {
             companion_id: companion_id.to_owned(),
             loading: true,
@@ -31,10 +32,20 @@ impl Desktop {
             .commands
             .send(crate::update::Command::Serve(companion_id.to_owned()));
         self.load_history(cx);
-        self.load_mind(cx);
         cx.notify();
     }
 
+    /// Keeps the composer's hint pointed at the companion on screen.
+    pub(crate) fn refresh_placeholder(&mut self, cx: &mut Context<Self>) {
+        let placeholder = match self.model.companion() {
+            Some(companion) if !companion.name.is_empty() => {
+                format!("{}に話しかける", companion.name)
+            }
+            _ => "メッセージを入力（Enterで送信）".to_owned(),
+        };
+        self.chat_input
+            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+    }
     /// Fetches the newest page of the shown conversation.
     pub(crate) fn load_history(&mut self, _cx: &mut Context<Self>) {
         let Some(companion_id) = self.model.companion_id().map(str::to_owned) else {
@@ -90,55 +101,83 @@ impl Desktop {
             log.push(note(&format!("履歴を取得できませんでした: {error}")));
         }
         if !chat.loading && chat.messages.is_empty() && chat.error.is_none() {
-            log.push(note("まだ会話がありません"));
-        }
-        let companion_name = self
-            .model
-            .companion()
-            .map(|companion| companion.name.clone())
-            .unwrap_or_default();
-        for message in &chat.messages {
-            let mine = message.role == w::MessageRole::User;
-            let author = match message.role.as_known() {
-                Some(w::MessageRole::User) => "あなた".to_owned(),
-                Some(w::MessageRole::Assistant) => companion_name.clone(),
-                Some(w::MessageRole::Agent) => "エージェント".to_owned(),
-                _ => "文脈".to_owned(),
+            let (heading, hint) = match self.model.companion() {
+                _ if !self.live() => (
+                    "ホストに接続していません".to_owned(),
+                    "接続状態は「この端末」で確認できます。",
+                ),
+                Some(companion) => (
+                    format!("{} との会話", companion.name),
+                    "下の入力欄から話しかけてみましょう。",
+                ),
+                None => (
+                    "最初のコンパニオンを作りましょう".to_owned(),
+                    "名前と会話に使うモデルを選ぶと、話しかけられます。",
+                ),
+            };
+            let action = if !self.live() {
+                Some(("端末の状態を確認", SettingsSection::Device))
+            } else if self.model.companion().is_none() {
+                Some(("コンパニオンを作成", SettingsSection::New))
+            } else {
+                None
             };
             log.push(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .when(mine, |this| this.items_end())
+                    .items_center()
+                    .gap_3()
+                    .py_8()
                     .child(
                         div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .when(mine, |this| this.flex_row_reverse())
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted())
-                                    .child(SharedString::from(author)),
-                            )
-                            .child(copy_button(cx, message.text.clone())),
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(heading),
                     )
+                    .child(note(hint))
+                    .when_some(action, |this, (label, section)| {
+                        this.child(button(
+                            cx,
+                            "chat-empty-action",
+                            label,
+                            Tone::Plain,
+                            true,
+                            move |this, _window, cx| this.show_settings(section, cx),
+                        ))
+                    })
+                    .into_any_element(),
+            );
+        } else if !self.live() {
+            log.insert(
+                0,
+                button(
+                    cx,
+                    "chat-offline",
+                    "接続状態を確認",
+                    Tone::Plain,
+                    true,
+                    |this, _window, cx| this.show_settings(SettingsSection::Device, cx),
+                ),
+            );
+        }
+        for message in &chat.messages {
+            let mine = message.role == w::MessageRole::User;
+            log.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .when(mine, |this| this.items_end())
+                    .when(!mine, |this| this.items_start())
                     .child(
                         div()
                             .max_w(px(560.))
                             .px_3()
                             .py_2()
                             .rounded_lg()
-                            .when(mine, |this| {
-                                this.bg(rgb(0x1c1917)).text_color(rgb(0xfaf9f7))
-                            })
+                            .when(mine, |this| this.bg(rgb(0xecebe8)))
                             .when(!mine, |this| {
-                                this.bg(rgb(0xffffff))
-                                    .border_1()
-                                    .border_color(rgb(0xecebe8))
+                                this.bg(card()).border_1().border_color(rgb(0xecebe8))
                             })
                             .text_sm()
                             .child(SharedString::from(message.text.clone())),
@@ -160,13 +199,20 @@ impl Desktop {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(card())
-                    .child(div().text_xs().text_color(muted()).child("応答中"))
-                    .child(div().text_sm().text_color(muted()).child(preview))
+                    .items_start()
+                    .child(
+                        div()
+                            .max_w(px(560.))
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(card())
+                            .border_1()
+                            .border_color(rgb(0xecebe8))
+                            .text_sm()
+                            .text_color(muted())
+                            .child(preview),
+                    )
                     .into_any_element(),
             );
         }
@@ -209,30 +255,13 @@ impl Desktop {
             );
         }
 
-        let turn = self
-            .model
-            .chat
-            .turn
-            .as_ref()
-            .map(|turn| match turn.status.as_known() {
-                Some(w::TurnStatus::Streaming) => "応答中".to_owned(),
-                Some(w::TurnStatus::Answered) => "応答が完了しました".to_owned(),
-                Some(w::TurnStatus::Stopped) => "停止しました".to_owned(),
-                Some(w::TurnStatus::Failed) => format!(
-                    "失敗しました: {}",
-                    turn.failure
-                        .as_option()
-                        .map(|failure| failure.message.clone())
-                        .unwrap_or_default()
-                ),
-                _ => "状態不明".to_owned(),
-            });
-        let running = turn.is_some();
-        let stopping = self.model.chat.stop_requested;
         let input = self.chat_input.clone();
         let draft_text = input.read(cx).text().to_owned();
         let too_long = draft_text.chars().count() > MAX_INPUT;
-        let can_send = self.live() && !draft_text.trim().is_empty() && !too_long;
+        let can_send = self.live()
+            && self.model.companion_id().is_some()
+            && !draft_text.trim().is_empty()
+            && !too_long;
 
         let cards = self.inline_cards(cx);
         div()
@@ -280,45 +309,13 @@ impl Desktop {
                             .max_w(px(760.))
                             .mx_auto()
                             .children(unsent)
-                            .child(input)
                             .child(
                                 div()
                                     .flex()
                                     .flex_row()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_xs()
-                                            .text_color(if too_long {
-                                                rgb(0xb91c1c)
-                                            } else {
-                                                muted()
-                                            })
-                                            .child(match (turn, stopping) {
-                                                (_, true) => {
-                                                    "停止を要求しました。ホストの確認待ちです。"
-                                                        .to_owned()
-                                                }
-                                                (Some(turn), false) => turn,
-                                                (None, false) if too_long => format!(
-                                                    "{} 文字を超えています（上限 {MAX_INPUT}）",
-                                                    draft_text.chars().count()
-                                                ),
-                                                (None, false) => String::new(),
-                                            }),
-                                    )
-                                    .when(stopping || running, |this| {
-                                        this.child(button(
-                                            cx,
-                                            "chat-stop",
-                                            "停止",
-                                            Tone::Danger,
-                                            self.live(),
-                                            |this, _window, cx| this.stop(cx),
-                                        ))
-                                    })
+                                    .child(div().flex_1().child(input))
                                     .child(button(
                                         cx,
                                         "chat-send",
@@ -327,7 +324,15 @@ impl Desktop {
                                         can_send,
                                         |this, _window, cx| this.submit(cx),
                                     )),
-                            ),
+                            )
+                            .when(too_long, |this| {
+                                this.child(div().text_xs().text_color(rgb(0xb91c1c)).child(
+                                    format!(
+                                        "{} 文字を超えています（上限 {MAX_INPUT}）",
+                                        draft_text.chars().count()
+                                    ),
+                                ))
+                            }),
                     ),
             )
             .into_any_element()
@@ -381,13 +386,9 @@ impl Desktop {
         self.send(text, cx);
     }
 
-    /// The cards that belong to the conversation itself: a pending confirmation and
-    /// a question a run is waiting on, plus one quiet line while work is running.
-    ///
-    /// The design routes every approval card through the companion's window, and the
-    /// work agents behind it are never named to the user. So these are drawn in the
-    /// transcript, phrased as the companion's own ask, and only as much of the host's
-    /// record as the user needs to decide.
+    /// The one card that belongs to the conversation itself: a pending
+    /// confirmation, drawn as the companion's own ask. Work happens behind the
+    /// dialogue and has no card of its own.
     fn inline_cards(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut cards: Vec<AnyElement> = Vec::new();
         let approvals = self.model.approvals().to_vec();
@@ -409,7 +410,6 @@ impl Desktop {
                 .bg(rgb(0xfffbeb))
                 .border_1()
                 .border_color(rgb(0xfde68a))
-                .child(div().text_xs().text_color(rgb(0x92400e)).child("確認"))
                 .child(
                     div()
                         .text_sm()
@@ -418,11 +418,8 @@ impl Desktop {
             if !approval.normalized_arguments.trim().is_empty() {
                 card = card.child(
                     div()
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(0xfff7ed))
                         .text_xs()
-                        .text_color(rgb(0x78350f))
+                        .text_color(muted())
                         .child(approval.normalized_arguments.replace('\n', " ")),
                 );
             }
@@ -435,7 +432,7 @@ impl Desktop {
                         .child(button(
                             cx,
                             SharedString::from(format!("inline-approve-{approve}")),
-                            "承認",
+                            "いいよ",
                             Tone::Primary,
                             self.live(),
                             move |this, _window, cx| {
@@ -445,7 +442,7 @@ impl Desktop {
                         .child(button(
                             cx,
                             SharedString::from(format!("inline-always-{always}")),
-                            "常に承認",
+                            "いつも許可する",
                             Tone::Plain,
                             self.live(),
                             move |this, _window, cx| {
@@ -455,7 +452,7 @@ impl Desktop {
                         .child(button(
                             cx,
                             SharedString::from(format!("inline-deny-{deny}")),
-                            "拒否",
+                            "やめて",
                             Tone::Danger,
                             self.live(),
                             move |this, _window, cx| {
@@ -466,110 +463,6 @@ impl Desktop {
                 .into_any_element(),
             );
         }
-        let views = self.model.works.clone();
-        for view in &views {
-            for inquiry in &view.pending_inquiries {
-                let request_id = inquiry.request_id.clone();
-                let answer_id = inquiry.request_id.clone();
-                let work_id = view
-                    .session
-                    .as_option()
-                    .map(|session| session.id.clone())
-                    .unwrap_or_default();
-                let draft = self.draft(
-                    cx,
-                    format!("answer:{request_id}"),
-                    "回答を入力",
-                    "TextField",
-                );
-                let choices = if inquiry.choices.is_empty() {
-                    String::new()
-                } else {
-                    format!("（{}）", inquiry.choices.join(" / "))
-                };
-                cards.push(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p_4()
-                        .rounded_lg()
-                        .bg(rgb(0xeff6ff))
-                        .border_1()
-                        .border_color(rgb(0xbfdbfe))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x1d4ed8))
-                                .child("作業からの確認"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(format!("{}{choices}", inquiry.prompt)),
-                        )
-                        .child(draft)
-                        .child(button(
-                            cx,
-                            SharedString::from(format!("inline-answer-{answer_id}")),
-                            "回答",
-                            Tone::Primary,
-                            self.live(),
-                            move |this, _window, cx| {
-                                this.answer(work_id.clone(), answer_id.clone(), cx)
-                            },
-                        ))
-                        .into_any_element(),
-                );
-            }
-        }
-        let running = views.iter().find_map(|view| {
-            let session = view.session.as_option()?;
-            (session.status == w::WorkStatus::Active).then(|| session.id.clone())
-        });
-        if let Some(work_id) = running {
-            cards.push(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_1()
-                    .text_xs()
-                    .text_color(muted())
-                    .child("作業を進めています")
-                    .child(button(
-                        cx,
-                        SharedString::from(format!("inline-stop-work-{work_id}")),
-                        "止める",
-                        Tone::Plain,
-                        self.live(),
-                        move |this, _window, cx| this.stop_work(work_id.clone(), cx),
-                    ))
-                    .into_any_element(),
-            );
-        }
         cards
     }
-}
-
-/// Copies a message's text. The bubbles are plain text, not a selectable
-/// document, so this is the only way to take a reply out of the conversation.
-fn copy_button(cx: &mut Context<Desktop>, text: String) -> AnyElement {
-    let id = SharedString::from(format!("copy-{}", text.len()));
-    div()
-        .id(id)
-        .px_1()
-        .text_xs()
-        .text_color(muted())
-        .cursor_pointer()
-        .hover(|this| this.text_color(rgb(0x1c1917)))
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(move |_this, _: &gpui::MouseDownEvent, _window, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-            }),
-        )
-        .child("コピー")
-        .into_any_element()
 }

@@ -78,6 +78,16 @@ impl Draft {
         }
     }
 
+    /// Updates the hint shown while the field is empty.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     /// The text as it stands, including an open composition.
     pub fn text(&self) -> &str {
         &self.content
@@ -87,10 +97,6 @@ impl Draft {
     /// cut the conversion short, so callers check this first.
     pub fn composing(&self) -> bool {
         self.marked.is_some()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.content.is_empty()
     }
 
     /// The field's focus handle, for focusing it when a panel opens.

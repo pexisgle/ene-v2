@@ -2,8 +2,8 @@
 //!
 //! The host is the authority for every piece of shared state. This module keeps
 //! exactly one display copy of each: the last `Snapshot` for companions,
-//! settings, clients, approvals, policy rules and activations, the fetched
-//! `WorkView`s, and the selected companion's history. Notifications are merged
+//! settings, clients, approvals, policy rules and activations, and the
+//! selected companion's history. Notifications are merged
 //! into those copies, never into a second parallel model, and nothing here is
 //! persisted.
 //!
@@ -113,13 +113,11 @@ pub struct Chat {
     pub stop_requested: bool,
 }
 
-/// Work the window should refetch because a notification invalidated it.
+/// What the window should refetch because a notification invalidated it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Effects {
     pub history: bool,
-    pub works: bool,
     pub approvals: bool,
-    pub mind: bool,
 }
 
 /// Everything the window draws.
@@ -134,18 +132,10 @@ pub struct Model {
     pub streaming: BTreeMap<(String, String), String>,
     pub notices: Vec<Notice>,
     pub devices: Devices,
-    /// Work details by work id, as `ListWorks`/`GetWork` returned them.
-    pub works: Vec<w::WorkView>,
-    /// The companion the fetched work belongs to.
-    pub works_companion: Option<String>,
-    pub works_loading: bool,
-    pub works_error: Option<String>,
     /// The provider catalog, fetched once from the host.
     pub providers: Option<Vec<w::LlmProvider>>,
     /// Declared model ids per connection id.
     pub models: BTreeMap<String, Vec<w::Model>>,
-    /// The selected companion's mind.
-    pub mind: Option<(String, w::MindView)>,
     /// The last connection check per connection id.
     pub checks: BTreeMap<String, w::ConnectionCheck>,
 }
@@ -164,13 +154,8 @@ impl Model {
             streaming: BTreeMap::new(),
             notices: Vec::new(),
             devices: Devices::default(),
-            works: Vec::new(),
-            works_companion: None,
-            works_loading: false,
-            works_error: None,
             providers: None,
             models: BTreeMap::new(),
-            mind: None,
             checks: BTreeMap::new(),
         }
     }
@@ -269,7 +254,6 @@ impl Model {
                     // A replayed stream cannot carry every delta, so the window
                     // refetches what the snapshot does not hold.
                     effects.history = true;
-                    effects.works = true;
                     effects.approvals = true;
                 }
             }
@@ -339,31 +323,13 @@ impl Model {
                     self.chat.error = Some(message);
                 }
             }
-            Update::Works {
-                companion_id,
-                items,
-            } => {
-                if self.works_companion.as_deref() == Some(companion_id.as_str()) {
-                    self.works = items;
-                    self.works_loading = false;
-                    self.works_error = None;
-                }
-            }
-            Update::WorksFailed { message } => {
-                self.works_loading = false;
-                self.works_error = Some(message);
-            }
+
             Update::Providers(providers) => self.providers = Some(providers),
             Update::Models {
                 connection_id,
                 models,
             } => {
                 self.models.insert(connection_id, models);
-            }
-            Update::Mind { companion_id, view } => {
-                if self.companion_id() == Some(companion_id.as_str()) {
-                    self.mind = Some((companion_id, *view));
-                }
             }
             Update::Checked {
                 connection_id,
@@ -420,7 +386,6 @@ impl Model {
 
 /// Merges one host notification into the display copy.
 fn merge_notification(model: &mut Model, notification: w::Notification, effects: &mut Effects) {
-    let companion_id = notification.companion_id.clone().unwrap_or_default();
     match notification.event {
         Some(w::notification::Event::InitialState(snapshot)) => {
             let mut snapshot = *snapshot;
@@ -428,11 +393,6 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
                 .companions
                 .sort_by(|left, right| left.name.cmp(&right.name));
             model.snapshot = Some(snapshot);
-            // The host resends its whole state, so the fetched work belongs to
-            // the previous snapshot and is no longer known to be current.
-            model.works.clear();
-            model.works_companion = None;
-            effects.works = true;
             effects.approvals = false;
         }
         Some(w::notification::Event::Health(health)) => {
@@ -531,17 +491,9 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
                 upsert_activation(&mut snapshot.activations, *activation);
             }
         }
-        Some(w::notification::Event::MindUpdated(updated)) => {
-            if model.companion_id() == Some(updated.companion_id.as_str()) {
-                effects.mind = true;
-            }
-        }
-        Some(w::notification::Event::WorkEvent(event)) => {
-            if model.companion_id() == Some(companion_id.as_str()) {
-                effects.works = true;
-            }
-            let _ = event.work_id;
-        }
+        // Work stays behind the companion's dialogue; the window has no surface
+        // a work event would refresh.
+        Some(w::notification::Event::WorkEvent(_)) => {}
         Some(w::notification::Event::ResyncRequired(_)) => {
             model.streaming.clear();
         }
@@ -557,7 +509,7 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
         // Observation only: execution flows through `ClientService.DeviceStream`.
         Some(w::notification::Event::DeviceOperation(_))
         | Some(w::notification::Event::DeviceOperationResult(_)) => {}
-        None => {}
+        Some(w::notification::Event::MindUpdated(_)) | None => {}
     }
 }
 
@@ -894,6 +846,6 @@ mod tests {
         let effects = model.apply(Update::Link(Box::new(Link::Live {
             version: "1".into(),
         })));
-        assert!(effects.history && effects.works && effects.approvals);
+        assert!(effects.history && effects.approvals);
     }
 }

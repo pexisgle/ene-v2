@@ -13,28 +13,27 @@
 mod chat;
 mod companion;
 mod settings;
-mod work;
 
 use crate::{
     input::{self, Draft},
     session::{Connection, Options},
-    state::{Device, Link, Model, NoticeKind},
+    state::{Link, Model, NoticeKind},
     update::{Command, Update},
 };
 use buffa::view::MessageView;
 use ene_rpc as w;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, Render, SharedString, Task, Window, div,
-    prelude::*, px, rgb,
+    prelude::*, px, rgb, rgba,
 };
 use std::collections::BTreeMap;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 gpui::actions!(ene, [Submit, StopPlayback]);
 
-/// Which surface the window is showing. Approvals and work are not surfaces of
-/// their own: the design consolidates the approval card into the companion's
-/// window, and the user is never shown the work agents behind it.
+/// Which surface the window is showing. The roster is an overlay, and approvals
+/// are not a surface of their own: the design consolidates the approval card
+/// into the companion's window and never shows the agents behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Panel {
     Chat,
@@ -65,8 +64,8 @@ impl SettingsSection {
         match self {
             SettingsSection::Companion => "コンパニオン",
             SettingsSection::New => "新しいコンパニオン",
-            SettingsSection::Connections => "接続とモデル",
-            SettingsSection::Voice => "声",
+            SettingsSection::Connections => "サービス接続",
+            SettingsSection::Voice => "音声読み上げ",
             SettingsSection::Device => "この端末",
         }
     }
@@ -98,7 +97,9 @@ pub struct Desktop {
     updates: UnboundedSender<Update>,
     runtime: tokio::runtime::Handle,
     pub(crate) panel: Panel,
+    pub(crate) roster_open: bool,
     pub(crate) settings_section: SettingsSection,
+    companion_details_open: bool,
     /// The model chosen for a companion that is being created.
     pub(crate) new_model: Option<(String, String)>,
     pub(crate) chat_input: Entity<Draft>,
@@ -139,7 +140,9 @@ impl Desktop {
             updates: updates_tx,
             runtime,
             panel: Panel::Chat,
+            roster_open: false,
             settings_section: SettingsSection::Companion,
+            companion_details_open: false,
             new_model: None,
             chat_input,
             drafts: BTreeMap::new(),
@@ -191,11 +194,25 @@ impl Desktop {
                 )
         );
         let had_companion = self.model.companion_id().is_some();
+        let old_name = self
+            .model
+            .companion()
+            .map(|companion| companion.name.clone());
         let had_approvals = self.model.approvals().len();
         let effects = self.model.apply(update);
         // The link goes live before the snapshot names a companion, so the
         // first fetch can run with nothing selected and never repeat.
         let selected_now = !had_companion && self.model.companion_id().is_some();
+        // The composer's hint follows the companion on screen, not only the
+        // first selection, so a rename in settings is visible immediately.
+        if old_name
+            != self
+                .model
+                .companion()
+                .map(|companion| companion.name.clone())
+        {
+            self.refresh_placeholder(cx);
+        }
         if settings_changed {
             let _ = self.commands.send(Command::Refresh);
         }
@@ -212,14 +229,8 @@ impl Desktop {
         if effects.history || selected_now {
             self.load_history(cx);
         }
-        if effects.works || selected_now {
-            self.load_works(cx);
-        }
         if effects.approvals || selected_now {
             self.load_approvals(cx);
-        }
-        if effects.mind || selected_now {
-            self.load_mind(cx);
         }
         cx.notify();
     }
@@ -412,32 +423,103 @@ impl Render for Desktop {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("shell")
+            .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             .size_full()
             .bg(rgb(0xfaf9f7))
             .text_color(rgb(0x1c1917))
             .font_family("Yu Gothic UI")
-            .child(self.render_sidebar(cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(match self.panel {
-                        Panel::Chat => self.render_chat(cx),
-                        Panel::Settings => self.render_settings(cx),
-                    })
-                    .child(self.render_status(cx)),
-            )
+            .child(self.render_header(cx))
+            .child(match self.panel {
+                Panel::Chat => self.render_chat(cx),
+                Panel::Settings => self.render_settings(cx),
+            })
+            .when(self.roster_open, |this| this.child(self.render_roster(cx)))
     }
 }
 
 impl Desktop {
-    /// The companions and the way between the two surfaces. Everything the
-    /// window offers lives here or in the conversation.
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.panel == Panel::Settings {
+            return div()
+                .flex()
+                .items_center()
+                .gap_4()
+                .h(px(56.))
+                .flex_none()
+                .px_4()
+                .border_b_1()
+                .border_color(line())
+                .bg(card())
+                .child(button(
+                    cx,
+                    "settings-back",
+                    "← 会話に戻る",
+                    Tone::Plain,
+                    true,
+                    |this, window, cx| this.return_to_chat(window, cx),
+                ))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("設定"),
+                )
+                .into_any_element();
+        }
+        let name = self
+            .model
+            .companion()
+            .map(|companion| companion.name.clone())
+            .unwrap_or_else(|| "コンパニオン".to_owned());
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(56.))
+            .flex_none()
+            .px_4()
+            .gap_3()
+            .justify_between()
+            .border_b_1()
+            .border_color(line())
+            .bg(card())
+            .child(
+                div()
+                    .id("open-roster")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(0xf0efec)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.roster_open = true;
+                        cx.notify();
+                    }))
+                    .child(portrait(24.))
+                    .child(div().text_sm().truncate().child(name))
+                    .child(div().text_xs().text_color(muted()).child("▾")),
+            )
+            .child(button(
+                cx,
+                "open-settings",
+                "設定",
+                Tone::Plain,
+                true,
+                |this, _window, cx| this.show_settings(SettingsSection::Companion, cx),
+            ))
+            .into_any_element()
+    }
+
+    /// The companions as a team list: face, name, and the one line that says
+    /// what this one is for.
+    fn render_roster(&self, cx: &mut Context<Self>) -> AnyElement {
         let companions = self
             .model
             .snapshot()
@@ -446,29 +528,49 @@ impl Desktop {
         let selected = self.model.companion_id().map(str::to_owned);
         let mut rows: Vec<AnyElement> = Vec::new();
         for companion in companions {
-            let is_selected =
-                selected.as_deref() == Some(companion.id.as_str()) && self.panel == Panel::Chat;
             let id = companion.id.clone();
+            let active = selected.as_deref() == Some(id.as_str());
+            let line = one_line(companion.persona.as_deref().unwrap_or(""));
             rows.push(
                 div()
-                    .id(SharedString::from(format!("companion-{}", companion.id)))
+                    .id(SharedString::from(format!("roster-{}", companion.id)))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .text_sm()
-                    .when(is_selected, |this| {
-                        this.bg(rgb(0x1c1917)).text_color(rgb(0xfaf9f7))
-                    })
-                    .when(!is_selected, |this| {
-                        this.text_color(rgb(0x44403c))
-                            .hover(|this| this.bg(rgb(0xecebe8)))
-                    })
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.panel = Panel::Chat;
+                    .when(active, |this| this.bg(rgb(0xf0efec)))
+                    .when(!active, |this| this.hover(|this| this.bg(rgb(0xf5f5f4))))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.select(&id, cx);
+                        this.return_to_chat(window, cx);
                     }))
-                    .child(companion.name)
+                    .child(portrait(34.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(div().text_sm().child(companion.name))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted())
+                                    .child(SharedString::from(line)),
+                            ),
+                    )
+                    .when(active, |this| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(muted())
+                                .child("会話中"),
+                        )
+                    })
                     .into_any_element(),
             );
         }
@@ -477,87 +579,88 @@ impl Desktop {
                 div()
                     .px_3()
                     .py_2()
-                    .text_xs()
+                    .text_sm()
                     .text_color(muted())
                     .child("コンパニオンがいません")
                     .into_any_element(),
             );
         }
-        let settings_selected = self.panel == Panel::Settings;
-        div()
+        let panel = div()
             .flex()
             .flex_col()
-            .w(px(196.))
+            .w(px(300.))
             .h_full()
+            .bg(rgb(0xffffff))
             .border_r_1()
             .border_color(rgb(0xecebe8))
-            .bg(rgb(0xffffff))
-            .p_2()
-            .gap_1()
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(muted())
-                    .child("コンパニオン"),
+                    .pt_4()
+                    .pb_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(muted())
+                            .child("コンパニオン"),
+                    )
+                    .child(button(
+                        cx,
+                        "close-roster",
+                        "閉じる",
+                        Tone::Plain,
+                        true,
+                        |this, window, cx| this.return_to_chat(window, cx),
+                    )),
             )
-            .children(rows)
             .child(
                 div()
-                    .id("new-companion")
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .text_sm()
-                    .text_color(rgb(0x2563eb))
-                    .cursor_pointer()
-                    .hover(|this| this.bg(rgb(0xf5f5f4)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.panel = Panel::Settings;
-                        this.settings_section = SettingsSection::New;
-                        this.open_panel(cx);
-                        cx.notify();
-                    }))
-                    .child("＋ 新しいコンパニオン"),
+                    .id("roster-list")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .gap_1()
+                    .p_2()
+                    .children(rows),
             )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("open-settings")
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .text_sm()
-                    .when(settings_selected, |this| {
-                        this.bg(rgb(0xecebe8)).text_color(rgb(0x1c1917))
-                    })
-                    .when(!settings_selected, |this| {
-                        this.text_color(rgb(0x57534e))
-                            .hover(|this| this.bg(rgb(0xf5f5f4)))
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.panel = if this.panel == Panel::Settings {
-                            Panel::Chat
-                        } else {
-                            Panel::Settings
-                        };
-                        this.open_panel(cx);
-                        cx.notify();
-                    }))
-                    .child(if settings_selected {
-                        "会話へ戻る"
-                    } else {
-                        "設定"
-                    }),
-            )
+            .child(div().p_3().border_t_1().border_color(line()).child(button(
+                cx,
+                "roster-new",
+                "＋ 新しいコンパニオン",
+                Tone::Plain,
+                true,
+                |this, _window, cx| this.show_settings(SettingsSection::New, cx),
+            )));
+        let scrim = div()
+            .id("roster-scrim")
+            .flex_1()
+            .h_full()
+            .bg(rgba(0x1c191740))
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.roster_open = false;
+                cx.notify();
+            }));
+        div()
+            .id("roster-overlay")
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .w_full()
+            .h_full()
+            .flex()
+            .flex_row()
+            .child(panel)
+            .child(scrim)
             .into_any_element()
     }
 
-    /// One short line: whether the host is reachable, and what this terminal can
-    /// do right now. The rest of the host's record belongs to settings.
-    fn render_status(&self, _cx: &mut Context<Self>) -> AnyElement {
+    /// Whether the host is reachable.
+    pub(crate) fn render_link(&self) -> AnyElement {
         let (dot, note) = match &self.model.link {
             Link::Live { .. } => (rgb(0x15803d), "接続中".to_owned()),
             Link::Connecting { .. } => (rgb(0xb45309), "接続しています".to_owned()),
@@ -565,48 +668,102 @@ impl Desktop {
             Link::Unset { .. } => (rgb(0xb91c1c), "接続情報がありません".to_owned()),
             Link::Unusable { .. } => (rgb(0xb91c1c), "設定が不正です".to_owned()),
         };
-        let devices = &self.model.devices;
-        let state = |device: &Device| match device {
-            Device::Off => "停止",
-            Device::Ready(_) => "利用可",
-            Device::Unavailable(_) => "利用不可",
-        };
         div()
             .flex()
-            .flex_row()
-            .items_center()
+            .flex_col()
             .gap_2()
-            .px_4()
-            .py_1()
-            .border_t_1()
-            .border_color(rgb(0xecebe8))
-            .bg(rgb(0xffffff))
-            .text_xs()
-            .text_color(muted())
-            .child(div().size(px(7.)).rounded_full().bg(dot))
-            .child(note)
-            .child(div().flex_1())
-            .child(format!("アバター {}", state(&devices.avatar)))
-            .child(format!("出力 {}", state(&devices.output)))
-            .child(format!("入力 {}", state(&devices.input)))
+            .p_4()
+            .rounded_lg()
+            .bg(card())
+            .border_1()
+            .border_color(line())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().size(px(7.)).rounded_full().bg(dot))
+                    .child(div().text_sm().child(format!("ホスト接続　{note}"))),
+            )
             .into_any_element()
     }
+
+    fn show_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.roster_open = false;
+        self.panel = Panel::Settings;
+        self.settings_section = section;
+        self.open_panel(cx);
+        cx.notify();
+    }
+
+    fn return_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.roster_open = false;
+        self.panel = Panel::Chat;
+        focus_chat(self, window, cx);
+        cx.notify();
+    }
+
     fn open_panel(&mut self, cx: &mut Context<Self>) {
         match self.panel {
             Panel::Chat => {
                 self.load_history(cx);
                 self.load_approvals(cx);
-                self.load_works(cx);
             }
             Panel::Settings => {
                 self.load_providers(cx);
                 self.load_models(cx);
-                self.load_mind(cx);
             }
         }
     }
 }
 
+/// A companion's face: a head and shoulders cut out of a disc.
+fn portrait(size: f32) -> AnyElement {
+    div()
+        .relative()
+        .flex_none()
+        .w(px(size))
+        .h(px(size))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(rgb(0xe7e5e4))
+        .child(
+            div()
+                .absolute()
+                .top(px(size * 0.22))
+                .left(px(size * 0.34))
+                .size(px(size * 0.32))
+                .rounded_full()
+                .bg(rgb(0x1c1917)),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom(px(-size * 0.18))
+                .left(px(size * 0.11))
+                .w(px(size * 0.78))
+                .h(px(size * 0.55))
+                .rounded_full()
+                .bg(rgb(0x1c1917)),
+        )
+        .into_any_element()
+}
+
+/// The one line a companion list shows under the name.
+fn one_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    let mut chars = line.chars();
+    let mut out: String = chars.by_ref().take(30).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    if out.is_empty() {
+        "話す相手".to_owned()
+    } else {
+        out
+    }
+}
 /// A control. A disabled control says it is disabled instead of doing nothing.
 pub(crate) fn button<F>(
     cx: &mut Context<Desktop>,
@@ -621,7 +778,7 @@ where
 {
     let (background, foreground) = match (tone, enabled) {
         (Tone::Primary, true) => (rgb(0x2563eb), rgb(0xffffff)),
-        (Tone::Primary, false) => (rgb(0xbfdbfe), rgb(0xffffff)),
+        (Tone::Primary, false) => (rgb(0xe7e5e4), rgb(0x6b625d)),
         (Tone::Plain, true) => (rgb(0xe7e5e4), rgb(0x1c1917)),
         (Tone::Plain, false) => (rgb(0xf5f5f4), rgb(0xa8a29e)),
         (Tone::Danger, true) => (rgb(0xfee2e2), rgb(0x991b1b)),
@@ -629,8 +786,9 @@ where
     };
     let element = div()
         .id(id)
-        .px_2()
-        .py_1()
+        .flex_none()
+        .px_3()
+        .py_2()
         .rounded_md()
         .bg(background)
         .text_color(foreground)
@@ -642,6 +800,12 @@ where
         // back to the same element to commit.
         element
             .cursor_pointer()
+            .hover(|this| {
+                this.bg(gpui::Rgba {
+                    a: 0.78,
+                    ..background
+                })
+            })
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
@@ -691,7 +855,16 @@ pub fn bind(cx: &mut App, view: gpui::WeakEntity<Desktop>) {
         let _ = submitted.update(cx, |this, cx| this.submit(cx));
     });
     cx.on_action(move |_: &StopPlayback, cx: &mut App| {
-        let _ = view.update(cx, |this, cx| this.stop(cx));
+        let _ = view.update(cx, |this, cx| {
+            // Escape dismisses the roster first; only a conversation-level
+            // Escape reaches the turn.
+            if this.roster_open {
+                this.roster_open = false;
+                cx.notify();
+            } else {
+                this.stop(cx);
+            }
+        });
     });
 }
 
@@ -700,21 +873,6 @@ pub(crate) fn card() -> gpui::Rgba {
     rgb(0xffffff)
 }
 
-/// A page heading with one line of plain explanation under it.
-pub(crate) fn page_title(title: &str, subtitle: &str) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().text_lg().child(title.to_owned()))
-        .child(
-            div()
-                .text_sm()
-                .text_color(muted())
-                .child(subtitle.to_owned()),
-        )
-        .into_any_element()
-}
 /// Border colour for a card or a divider.
 pub(crate) fn line() -> gpui::Rgba {
     rgb(0xe7e5e4)
@@ -722,7 +880,7 @@ pub(crate) fn line() -> gpui::Rgba {
 
 /// Muted text.
 pub(crate) fn muted() -> gpui::Rgba {
-    rgb(0x78716c)
+    rgb(0x6b625d)
 }
 
 /// Puts the caret in the message field when the window opens, so typing works

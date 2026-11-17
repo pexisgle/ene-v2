@@ -4,10 +4,11 @@
 //! The window never holds a credential beyond the field that collected it: it is
 //! sent with `RegisterCredentials` and the field is cleared. Connections are
 //! edited with the revision they were read at, and an edit wipes the host's
-//! recorded credential state, which the panel says out loud.
+//! recorded credential state.
 
-use super::{Desktop, Tone, button, card, decode, failure, line, muted, page_title};
-use crate::{capabilities, update::Update};
+use super::companion::field;
+use super::{Desktop, Tone, button, card, decode, failure, line, muted};
+use crate::update::Update;
 use buffa::view::MessageView;
 use ene_rpc as w;
 use gpui::{AnyElement, ClickEvent, Context, SharedString, div, prelude::*, px, rgb};
@@ -297,7 +298,7 @@ impl Desktop {
 
     /// The VOICEVOX speaker this window is configured for.
     fn speaker(&mut self, cx: &mut Context<Self>) -> u32 {
-        self.draft(cx, "tts:speaker", "話者番号", "TextField")
+        self.draft(cx, "tts:speaker", "3（既定）", "TextField")
             .read(cx)
             .text()
             .trim()
@@ -437,7 +438,7 @@ impl Desktop {
 
     /// The speech setup: the TTS connection and the voice it uses.
     fn render_voice(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let speaker = self.draft(cx, "tts:speaker", "話者番号", "TextField");
+        let speaker = self.draft(cx, "tts:speaker", "3（既定）", "TextField");
         let connection = self.model.settings().and_then(|settings| {
             settings
                 .connections
@@ -445,21 +446,9 @@ impl Desktop {
                 .find(|connection| connection.kind == w::ConnectionKind::Tts)
                 .cloned()
         });
-        let mut body: Vec<AnyElement> = vec![speaker.into_any_element()];
+        let mut body = vec![field("話者番号", speaker)];
         match connection {
             Some(connection) => {
-                let endpoint = connection
-                    .config
-                    .as_option()
-                    .and_then(|config| config.config.as_ref())
-                    .and_then(|config| match config {
-                        w::connection_config::Config::Tts(tts) => tts
-                            .endpoint
-                            .as_option()
-                            .map(|endpoint| endpoint.endpoint.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
                 body.push(
                     div()
                         .text_xs()
@@ -475,40 +464,41 @@ impl Desktop {
                         ))
                         .into_any_element(),
                 );
-                body.push(
-                    div()
-                        .text_xs()
-                        .text_color(muted())
-                        .child(endpoint)
-                        .into_any_element(),
-                );
                 let chosen = connection.clone();
                 let value = self.speaker(cx);
-                body.push(button(
-                    cx,
-                    "voicevox-speaker",
-                    "話者を変更",
-                    Tone::Plain,
-                    self.live(),
-                    move |this, _window, cx| this.set_speaker(chosen.clone(), value, cx),
-                ));
+                body.push(
+                    div()
+                        .flex()
+                        .child(button(
+                            cx,
+                            "voicevox-speaker",
+                            "話者を変更",
+                            Tone::Plain,
+                            self.live(),
+                            move |this, _window, cx| this.set_speaker(chosen.clone(), value, cx),
+                        ))
+                        .into_any_element(),
+                );
             }
             None => {
-                let value = self.speaker(cx);
-                body.push(button(
-                    cx,
-                    "voicevox-add",
-                    "VOICEVOX を追加",
-                    Tone::Primary,
-                    self.live(),
-                    move |this, _window, cx| this.add_voicevox(cx),
-                ));
-                let _ = value;
+                body.push(
+                    div()
+                        .flex()
+                        .child(button(
+                            cx,
+                            "voicevox-add",
+                            "VOICEVOX を追加",
+                            Tone::Primary,
+                            self.live(),
+                            move |this, _window, cx| this.add_voicevox(cx),
+                        ))
+                        .into_any_element(),
+                );
                 body.push(
                     div()
                         .text_xs()
                         .text_color(muted())
-                        .child("ローカルの VOICEVOX ENGINE（既定は 127.0.0.1:50021）を話者として使います。")
+                        .child("読み上げには VOICEVOX ENGINE の起動が必要です。")
                         .into_any_element(),
                 );
             }
@@ -526,8 +516,7 @@ impl Desktop {
             .into_any_element()
     }
 
-    /// Settings is its own two-pane surface: a short list of what can be changed,
-    /// and one page per area. The conversation is one click away in the sidebar.
+    /// The settings categories and the selected page.
     pub(crate) fn render_settings(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let mut nav: Vec<AnyElement> = Vec::new();
         for section in super::SettingsSection::ALL {
@@ -540,7 +529,9 @@ impl Desktop {
                     .rounded_md()
                     .text_sm()
                     .when(selected, |this| {
-                        this.bg(rgb(0xecebe8)).text_color(rgb(0x1c1917))
+                        this.bg(rgb(0xe7e5e4))
+                            .text_color(rgb(0x1c1917))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                     })
                     .when(!selected, |this| {
                         this.text_color(rgb(0x57534e))
@@ -548,9 +539,7 @@ impl Desktop {
                     })
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.settings_section = section;
-                        this.open_panel(cx);
-                        cx.notify();
+                        this.show_settings(section, cx);
                     }))
                     .child(section.label())
                     .into_any_element(),
@@ -565,32 +554,28 @@ impl Desktop {
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(180.))
+                    .w(px(172.))
+                    .flex_none()
                     .h_full()
                     .gap_1()
                     .p_2()
                     .border_r_1()
                     .border_color(line())
                     .bg(rgb(0xfaf9f7))
-                    .child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_xs()
-                            .text_color(muted())
-                            .child("設定"),
-                    )
                     .children(nav),
             )
             .child(
                 div()
-                    .id("settings-pane")
+                    .id(SharedString::from(format!(
+                        "pane-{}",
+                        self.settings_section.key()
+                    )))
                     .flex()
                     .flex_col()
                     .flex_1()
                     .gap_3()
-                    .px_6()
-                    .py_4()
+                    .px_5()
+                    .py_5()
                     .overflow_y_scroll()
                     .child(self.render_settings_page(cx)),
             )
@@ -636,64 +621,41 @@ impl Desktop {
             .into_any_element()
     }
     fn render_settings_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mut body: Vec<AnyElement> = Vec::new();
+        use super::SettingsSection::*;
+        let title = match self.settings_section {
+            Companion => self
+                .model
+                .companion()
+                .map_or("コンパニオン", |c| c.name.as_str()),
+            section => section.label(),
+        };
+        let mut body = vec![
+            div()
+                .text_lg()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title.to_owned())
+                .into_any_element(),
+        ];
         match self.settings_section {
-            super::SettingsSection::Companion => {
-                body.push(page_title(
-                    "コンパニオン",
-                    "話す相手です。名前と人物像を決め、使うモデルを選びます。",
-                ));
-                body.push(self.render_companion(cx));
-            }
-            super::SettingsSection::New => {
-                body.push(page_title(
-                    "新しいコンパニオン",
-                    "名前と、話すときに使うモデルを選びます。あとから「コンパニオン」で変えられます。",
-                ));
-                body.push(self.render_new_companion(cx));
-            }
-            super::SettingsSection::Connections => {
-                body.push(page_title(
-                    "接続とモデル",
-                    "コンパニオンが使う LLM と、声のエンジンの接続です。鍵はこの端末からホストへ送られ、ここには残りません。",
-                ));
+            Companion => body.push(self.render_companion(cx)),
+            New => body.push(self.render_new_companion(cx)),
+            Connections => {
                 let connections: Vec<w::Connection> = self
                     .model
                     .settings()
                     .map(|settings| settings.connections.clone())
                     .unwrap_or_default();
-                if connections.is_empty() {
-                    body.push(
-                        div()
-                            .p_3()
-                            .rounded_md()
-                            .bg(card())
-                            .text_sm()
-                            .text_color(muted())
-                            .child("まだ接続がありません。下から追加してください。")
-                            .into_any_element(),
-                    );
-                }
                 for connection in connections {
                     body.push(self.render_connection(connection, cx));
                 }
                 body.push(section("接続を追加"));
                 body.push(self.render_providers(cx));
             }
-            super::SettingsSection::Voice => {
-                body.push(page_title(
-                    "声",
-                    "コンパニオンがどう話すかです。VOICEVOX ENGINE をこの端末で起動しておくと、返答を読み上げます。",
-                ));
-                body.push(self.render_voice(cx));
-            }
-            super::SettingsSection::Device => {
-                body.push(page_title(
-                    "この端末",
-                    "この窓がホストに見せる能力と、実際に使える状態です。",
-                ));
+            Voice => body.push(self.render_voice(cx)),
+            Device => {
+                body.push(self.render_link());
                 body.push(self.render_activation(cx));
-                body.push(self.render_device_card(cx));
+                body.push(self.render_device_card());
             }
         }
         div()
@@ -705,62 +667,35 @@ impl Desktop {
             .children(body)
             .into_any_element()
     }
-    fn render_device_card(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        // The declaration this machine actually sends, not a fixed list.
-        let declared = capabilities::names(
-            &capabilities::Declaration::probe(
-                self.options.renderer.as_deref(),
-                self.options.model.as_deref(),
-            )
-            .specs(),
-        );
+    fn render_device_card(&self) -> AnyElement {
         let devices = &self.model.devices;
-        let row = |label: &str, value: String| {
+        let row = |label: &str, value: &'static str| {
             div()
                 .flex()
                 .flex_row()
-                .gap_2()
-                .child(div().text_xs().text_color(muted()).child(label.to_owned()))
-                .child(div().text_xs().child(value))
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(88.))
+                        .flex_none()
+                        .text_sm()
+                        .child(label.to_owned()),
+                )
+                .child(div().text_sm().text_color(muted()).child(value))
                 .into_any_element()
         };
         div()
             .flex()
             .flex_col()
-            .gap_1()
-            .p_3()
+            .gap_2()
+            .p_4()
             .rounded_md()
             .bg(card())
             .border_1()
             .border_color(line())
-            .child(row("端末ID", self.options.id.clone()))
-            .child(row("プラットフォーム", self.options.platform.clone()))
-            .child(row(
-                "宣言した能力",
-                if declared.is_empty() {
-                    "なし".into()
-                } else {
-                    declared.join(", ")
-                },
-            ))
-            .child(row(
-                "許可された能力",
-                self.model
-                    .snapshot()
-                    .and_then(|snapshot| {
-                        snapshot
-                            .clients
-                            .iter()
-                            .find(|client| client.id == self.options.id)
-                    })
-                    .map(|client| client.granted_capabilities.clone())
-                    .filter(|granted| !granted.is_empty())
-                    .map(|granted| granted.join(", "))
-                    .unwrap_or_else(|| "なし（ホストが許可していません）".into()),
-            ))
-            .child(row("アバター", device_detail(&devices.avatar)))
-            .child(row("音声出力", device_detail(&devices.output)))
-            .child(row("マイク", device_detail(&devices.input)))
+            .child(row("アバター", device_status(&devices.avatar)))
+            .child(row("音声出力", device_status(&devices.output)))
+            .child(row("マイク", device_status(&devices.input)))
             .into_any_element()
     }
 
@@ -770,12 +705,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = connection.id.clone();
-        let secret = self.draft(
-            cx,
-            format!("secret:{id}"),
-            "資格情報（保存されません）",
-            "TextField",
-        );
+        let secret = self.draft(cx, format!("secret:{id}"), "", "TextField");
         let enabled = connection.enabled;
         let toggle_label = if enabled {
             "無効にする"
@@ -784,27 +714,10 @@ impl Desktop {
         };
         let toggled = connection.clone();
         let checked = self.model.checks.get(&id).cloned();
-        let endpoint = connection
-            .config
-            .as_option()
-            .and_then(|config| match config.config.as_ref() {
-                Some(w::connection_config::Config::Llm(llm)) => llm.endpoint.as_option(),
-                Some(w::connection_config::Config::Tts(tts)) => tts.endpoint.as_option(),
-                Some(w::connection_config::Config::Stt(stt)) => stt.endpoint.as_option(),
-                Some(w::connection_config::Config::Embedding(embedding)) => {
-                    embedding.endpoint.as_option()
-                }
-                Some(w::connection_config::Config::Mcp(mcp)) => mcp.endpoint.as_option(),
-                Some(w::connection_config::Config::Acp(acp)) => acp.endpoint.as_option(),
-                None => None,
-            })
-            .cloned()
-            .unwrap_or_default();
-        let models = self.model.models.get(&id).cloned().unwrap_or_default();
         let kind = match connection.kind.as_known() {
-            Some(w::ConnectionKind::Llm) => "LLM",
-            Some(w::ConnectionKind::Tts) => "TTS",
-            Some(w::ConnectionKind::Stt) => "STT",
+            Some(w::ConnectionKind::Llm) => "会話・作業",
+            Some(w::ConnectionKind::Tts) => "読み上げ",
+            Some(w::ConnectionKind::Stt) => "音声認識",
             Some(w::ConnectionKind::Embedding) => "埋め込み",
             Some(w::ConnectionKind::Mcp) => "MCP",
             Some(w::ConnectionKind::Acp) => "ACP",
@@ -837,26 +750,15 @@ impl Desktop {
             })
             .unwrap_or_else(|| "未確認".to_owned());
 
+        let credential = match connection.credential_state.as_str() {
+            "registered" => "登録済み",
+            "environment" => "環境変数を使用",
+            "absent" => "未登録",
+            _ => "状態不明",
+        };
         let check_id = id.clone();
         let register_id = id.clone();
         let revoke_id = id.clone();
-        let mut model_chips: Vec<AnyElement> = Vec::new();
-        for model in models {
-            model_chips.push(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgb(0xf5f5f4))
-                    .text_xs()
-                    .child(if model.name.is_empty() {
-                        model.id
-                    } else {
-                        format!("{} ({})", model.name, model.id)
-                    })
-                    .into_any_element(),
-            );
-        }
         div()
             .flex()
             .flex_col()
@@ -878,17 +780,9 @@ impl Desktop {
                             .flex_col()
                             .child(div().text_sm().child(connection.name.clone()))
                             .child(div().text_xs().text_color(muted()).child(format!(
-                                "{kind} ・ {} ・ revision {} ・ 資格情報 {}",
-                                if enabled { "有効" } else { "無効" },
-                                connection.revision,
-                                connection.credential_state
+                                "{kind} ・ {} ・ 資格情報 {credential}",
+                                if enabled { "有効" } else { "無効" }
                             )))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted())
-                                    .child(format!("{} / {}", endpoint.adapter, endpoint.endpoint)),
-                            )
                             .child(div().text_xs().text_color(muted()).child(last)),
                     )
                     .child(
@@ -920,9 +814,9 @@ impl Desktop {
                 div()
                     .flex()
                     .flex_row()
-                    .items_center()
+                    .items_end()
                     .gap_2()
-                    .child(div().flex_1().child(secret))
+                    .child(div().flex_1().child(field("資格情報", secret)))
                     .child(button(
                         cx,
                         SharedString::from(format!("register-{id}")),
@@ -934,25 +828,17 @@ impl Desktop {
                     .child(button(
                         cx,
                         SharedString::from(format!("revoke-{id}")),
-                        "解除",
+                        "資格情報を解除",
                         Tone::Danger,
                         self.live(),
                         move |this, _window, cx| this.revoke_secret(revoke_id.clone(), cx),
                     )),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(model_chips),
-            )
             .into_any_element()
     }
 
     fn render_providers(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let models = self.draft(cx, "new:models", "モデルID（カンマ区切り）", "TextField");
+        let models = self.draft(cx, "new:models", "", "TextField");
         let providers = self.model.providers.clone();
         let mut buttons: Vec<AnyElement> = Vec::new();
         match providers {
@@ -998,7 +884,7 @@ impl Desktop {
             .bg(card())
             .border_1()
             .border_color(line())
-            .child(models)
+            .child(field("モデルID（任意、カンマ区切り）", models))
             .child(
                 div()
                     .flex()
@@ -1006,13 +892,6 @@ impl Desktop {
                     .flex_wrap()
                     .gap_1()
                     .children(buttons),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted())
-                    .child("接続を編集すると、ホストは資格情報の状態と前回の確認をリセットします。")
-                    .into_any_element(),
             )
             .into_any_element()
     }
@@ -1066,10 +945,10 @@ fn section(title: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn device_detail(device: &crate::state::Device) -> String {
+fn device_status(device: &crate::state::Device) -> &'static str {
     match device {
-        crate::state::Device::Off => "停止".into(),
-        crate::state::Device::Ready(detail) => format!("利用可 ({detail})"),
-        crate::state::Device::Unavailable(reason) => format!("利用不可 ({reason})"),
+        crate::state::Device::Off => "停止",
+        crate::state::Device::Ready(_) => "利用可能",
+        crate::state::Device::Unavailable(_) => "利用不可",
     }
 }
