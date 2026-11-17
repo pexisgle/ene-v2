@@ -41,16 +41,36 @@ impl Store {
             std::fs::create_dir_all(parent)
                 .map_err(|error| HostError::Storage(format!("state directory: {error}")))?;
         }
-        let connection = open_connection(path)?;
+        let mut connection = open_connection(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > VERSION {
             return Err(HostError::Storage(format!(
                 "state database version {version} is newer than this host ({VERSION})"
             )));
         }
+        if version < VERSION {
+            // Only an empty database is initialized as this baseline. One with
+            // tables is from an older development schema, which this alpha
+            // does not migrate in place: refusing is honest, treating its
+            // tables as current would fail later with a corrupt-state error.
+            let tables: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )?;
+            if tables > 0 {
+                return Err(HostError::Storage(format!(
+                    "state database version {version} predates this host's baseline; it is not migrated in place"
+                )));
+            }
+        }
         configure_connection(&connection)?;
-        connection.execute_batch(include_str!("schema.sql"))?;
-        connection.pragma_update(None, "user_version", VERSION)?;
+        // The tables and the version commit together, so a crash cannot leave
+        // a current schema that the next start refuses as an old one.
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("schema.sql"))?;
+        transaction.pragma_update(None, "user_version", VERSION)?;
+        transaction.commit()?;
         Ok(Self(Arc::new(Mutex::new(connection))))
     }
 
@@ -448,6 +468,26 @@ mod tests {
             .write_one(insert, ["third"], |row| row.get(0))
             .unwrap();
         assert_eq!(id, 3);
+    }
+
+    /// A database from before the baseline is refused instead of being read
+    /// as the current schema, and an empty one is initialized.
+    #[test]
+    fn an_older_schema_is_refused_instead_of_being_read_as_current() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("host.sqlite3");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch("CREATE TABLE companions (id TEXT PRIMARY KEY, name TEXT)")
+                .unwrap();
+        }
+        assert!(
+            Store::open(&path).is_err(),
+            "a version-0 database with tables is not the current baseline"
+        );
+        let fresh = temp.path().join("fresh.sqlite3");
+        Store::open(&fresh).unwrap();
     }
 
     #[test]
