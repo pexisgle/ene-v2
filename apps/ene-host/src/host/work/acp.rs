@@ -720,25 +720,29 @@ impl ActiveRun {
     }
 }
 
-/// Forwards the agent's diagnostics until the pipe ends or a line exceeds
-/// [`MAX_STDERR_LINE`]. Reading stops there on purpose: the capped reader
-/// closes the pipe, so the agent sees a failed write rather than a full pipe
-/// and the host never buffers an unbounded line.
+/// Forwards the agent's diagnostics until the pipe ends. A line over
+/// [`MAX_STDERR_LINE`] stops the diagnostics but not the read: `FramedRead`
+/// ends its stream after a decoder error, so the rest of the pipe is drained
+/// through a sink. The agent's writes keep succeeding, it can finish its ACP
+/// session, and the host never retains the over-long line.
 async fn drain_stderr(stderr: impl tokio::io::AsyncRead + Unpin) {
     let mut lines = FramedRead::new(stderr, LinesCodec::new_with_max_length(MAX_STDERR_LINE));
-    while let Some(line) = lines.next().await {
-        match line {
-            Ok(line) => tracing::debug!(target: "ene_host::acp", %line, "ACP agent stderr"),
-            Err(error) => {
+    loop {
+        match lines.next().await {
+            Some(Ok(line)) => tracing::debug!(target: "ene_host::acp", %line, "ACP agent stderr"),
+            Some(Err(error)) => {
                 tracing::debug!(
                     target: "ene_host::acp",
                     %error,
-                    "an ACP agent stderr line exceeded the cap; its diagnostics are no longer read"
+                    "an ACP agent stderr line exceeded the cap; diagnostics stop and the pipe keeps draining"
                 );
-                return;
+                break;
             }
+            None => return,
         }
     }
+    let mut rest = lines.into_parts().io;
+    let _ = tokio::io::copy(&mut rest, &mut tokio::io::sink()).await;
 }
 
 async fn announce(ready: &mut bool, events: &mpsc::Sender<AcpEvent>, run_id: &str) {
@@ -1125,20 +1129,102 @@ mod tests {
     /// A line that never ends must stop the reader at the cap instead of
     /// growing the host's memory with the agent's output.
     #[tokio::test]
-    async fn an_unterminated_stderr_line_stops_at_the_cap() {
+    async fn an_over_long_stderr_line_does_not_close_the_pipe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let (mut writer, reader) = tokio::io::duplex(1024);
+        let written = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&written);
         let feed = tokio::spawn(async move {
-            let chunk = vec![b'x'; 4_096];
-            loop {
-                if writer.write_all(&chunk).await.is_err() {
-                    break;
-                }
+            let long = vec![b'x'; MAX_STDERR_LINE + 1_024];
+            if writer.write_all(&long).await.is_ok() {
+                counter.fetch_add(long.len(), Ordering::SeqCst);
+            }
+            if writer.write_all(b"\n").await.is_ok() {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            // A line after the over-long one must still reach the pipe.
+            let after = b"after the long line\n";
+            if writer.write_all(after).await.is_ok() {
+                counter.fetch_add(after.len(), Ordering::SeqCst);
             }
         });
         tokio::time::timeout(Duration::from_secs(5), drain_stderr(reader))
             .await
-            .expect("the reader stops at the cap instead of buffering forever");
-        feed.abort();
+            .expect("the reader drains the pipe instead of closing it");
+        feed.await.unwrap();
+        assert_eq!(
+            written.load(Ordering::SeqCst),
+            MAX_STDERR_LINE + 1_024 + 1 + b"after the long line\n".len(),
+            "every write after the over-long line still succeeds"
+        );
+    }
+
+    /// A child that writes an over-long stderr line keeps its stderr pipe
+    /// drained: it still answers the ACP session and exits normally.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_logs_an_over_long_line_still_finishes_its_session() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("agent.sh");
+        std::fs::write(
+            &script,
+            r#"set -e
+head -c 70000 /dev/zero | tr '\0' x >&2
+printf '\n' >&2
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | grep -o '"id":[^,}]*' | head -n 1 | cut -d: -f2)
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{}}}\n' "$id" ;;
+    *'"method":"session/new"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"fixture-session"}}\n' "$id" ;;
+    *'"method":"session/prompt"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"; sleep 0.5; exit 0 ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (events, mut receiver) = mpsc::channel(QUEUE);
+        let (commands, command_rx) = mpsc::channel(COMMANDS);
+        commands
+            .try_send(Command::Prompt {
+                run_id: "run-1".into(),
+                text: "hello".into(),
+            })
+            .unwrap();
+        run_backend(
+            BackendIdentity {
+                work_id: "work".into(),
+                initial_run_id: "run-1".into(),
+                pid: Arc::new(AtomicU32::new(0)),
+            },
+            command_wrap(
+                &which::which("sh").unwrap(),
+                &[script.to_str().unwrap().into()],
+                root.path(),
+                child_env("", |name| std::env::var_os(name)),
+            ),
+            root.path().to_owned(),
+            events,
+            command_rx,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut finished = None;
+        let mut closed = false;
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                AcpEvent::Finished { outcome, .. } => finished = Some(outcome),
+                AcpEvent::Closed { .. } => closed = true,
+                _ => {}
+            }
+        }
+        assert!(closed, "the backend reports the child's exit");
+        assert!(
+            matches!(finished, Some(TurnOutcome::Answered(_))),
+            "the child answered the prompt after the over-long line"
+        );
     }
 
     /// A child that handles `SIGTERM` must be asked before it is killed: a
