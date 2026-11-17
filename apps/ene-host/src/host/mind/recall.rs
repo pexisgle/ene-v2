@@ -112,11 +112,13 @@ fn inject_tail(
         let tail = if let Some(tail) = cached {
             tail.0.clone()
         } else {
-            let Some((companion, conversation)) = agent_view(&agents, &conversations, agent) else {
+            let Some(view) = agent_view(&agents, &conversations, agent) else {
                 continue;
             };
-            let query = conversation.and_then(|conversation| recall_query(conversation));
-            let turn_id = turn.start.get();
+            let query = view
+                .conversation
+                .and_then(|conversation| recall_query(conversation));
+            let turn_id = view.is_companion.then(|| turn.start.get());
             if let Some(runtime) = runtime.as_deref() {
                 let store = store.clone();
                 let perception = Perception {
@@ -124,6 +126,7 @@ fn inject_tail(
                 };
                 let embeddings = embeddings.clone();
                 let credentials = credentials.as_deref().cloned();
+                let companion = view.companion;
                 let task = background::spawn(&runtime.0, wake.as_deref(), async move {
                     dynamic_tail(
                         &store,
@@ -132,7 +135,7 @@ fn inject_tail(
                         query.as_deref(),
                         &embeddings,
                         credentials.as_ref(),
-                        Some(turn_id),
+                        turn_id,
                     )
                     .await
                 });
@@ -149,10 +152,10 @@ fn inject_tail(
             let tail = render_tail(
                 &store,
                 &perception,
-                &companion,
+                &view.companion,
                 query.as_deref(),
                 &[],
-                Some(turn_id),
+                turn_id,
             );
             commands.entity(of.0).insert(DynamicTail(tail.clone()));
             tail
@@ -195,8 +198,9 @@ fn opening() -> String {
 /// the companion's state, pinned memories and automatic recall. It is injected
 /// into the request view only and never saved with the conversation, so a call
 /// that is not a kernel turn (a heartbeat tick) attaches the same tail an
-/// ordinary turn would get. `turn` is the turn the automatic recall is recorded
-/// under; a call that is not a turn passes `None` and records nothing.
+/// ordinary turn would get. `turn` is the companion turn the automatic recall is
+/// recorded under; a work run or a call that is not a turn passes `None` and
+/// records nothing.
 pub(crate) async fn dynamic_tail(
     store: &Store,
     perception: &Perception,
@@ -290,16 +294,28 @@ fn render_tail(
     crate::host::db::truncate(&tail, 6_000)
 }
 
+struct AgentView<'a> {
+    companion: String,
+    is_companion: bool,
+    conversation: Option<&'a Conversation>,
+}
+
 fn agent_view<'a>(
     agents: &'a Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversations: &'a Query<&Conversation>,
     agent: Entity,
-) -> Option<(String, Option<&'a Conversation>)> {
+) -> Option<AgentView<'a>> {
     let (companion, work) = agents.get(agent).ok()?;
-    let companion = companion
-        .map(|agent| agent.companion_id.clone())
-        .or_else(|| work.map(|agent| agent.companion_id.clone()))?;
-    Some((companion, conversations.get(agent).ok()))
+    let (companion, is_companion) = match (companion, work) {
+        (Some(agent), _) => (agent.companion_id.clone(), true),
+        (None, Some(agent)) => (agent.companion_id.clone(), false),
+        (None, None) => return None,
+    };
+    Some(AgentView {
+        companion,
+        is_companion,
+        conversation: conversations.get(agent).ok(),
+    })
 }
 
 /// The text automatic recall searches with: the newest message the user typed.
@@ -514,5 +530,123 @@ mod tests {
         .await
         .expect("the admitted model call resumes after recall");
         endpoint.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections() {
+        use crate::host::db::memories::MemoryRecord;
+        use crate::host::tests::{Harness, bound, text_turn};
+
+        for with_runtime in [false, true] {
+            let model = MockCompletionModel::from_stream_turns([
+                text_turn("head reply"),
+                text_turn("work reply"),
+            ]);
+            let probe = model.clone();
+            let mut harness = Harness::new([]);
+            harness
+                .app
+                .insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
+                    Ok(bound(&model))
+                })));
+            if with_runtime {
+                harness
+                    .app
+                    .insert_resource(HostRuntime(tokio::runtime::Handle::current()));
+            }
+            let store = harness.store();
+            store
+                .insert_memory(MemoryRecord {
+                    id: "m-head".into(),
+                    scope: harness.companion.clone(),
+                    content: "コンパニオン用の紅茶の記憶".into(),
+                    importance: 7,
+                    occurred_at: None,
+                    source_context: serde_json::json!({}),
+                })
+                .unwrap();
+            store
+                .insert_memory(MemoryRecord {
+                    id: "m-work".into(),
+                    scope: harness.companion.clone(),
+                    content: "作業エージェント用のフォルダ整理手順".into(),
+                    importance: 7,
+                    occurred_at: None,
+                    source_context: serde_json::json!({}),
+                })
+                .unwrap();
+
+            let head_entity = harness.companion_agent();
+            harness
+                .accept("k-head", "紅茶の記憶 について教えて")
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    harness.tick();
+                    let answered = harness
+                        .conversation(head_entity)
+                        .entries()
+                        .any(|entry| matches!(entry.message, Message::Assistant(_)));
+                    if probe.requests().len() == 1 && answered {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the companion turn finishes");
+
+            assert_eq!(
+                store
+                    .injected_between(&harness.companion, None, u64::MAX)
+                    .unwrap(),
+                vec!["m-head".to_owned()],
+            );
+
+            let companion = store.companion(&harness.companion).unwrap().unwrap();
+            let work_entity = agent::spawn_work_agent(
+                harness.app.world_mut(),
+                &companion,
+                "work-1",
+                "run-1",
+                "task",
+            );
+            assert!(agent::deliver(
+                harness.app.world_mut(),
+                work_entity,
+                &harness.companion,
+                "フォルダ整理手順 に従って進めて".into(),
+                DeliveryMode::Queue,
+                Author::user(),
+            ));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    harness.tick();
+                    let answered = harness
+                        .conversation(work_entity)
+                        .entries()
+                        .any(|entry| matches!(entry.message, Message::Assistant(_)));
+                    if probe.requests().len() == 2 && answered {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the work turn finishes");
+
+            let work_request = format!("{:?}", probe.requests()[1]);
+            assert!(
+                work_request.contains("作業エージェント用のフォルダ整理手順"),
+                "work agent still receives recalled memories in its dynamic tail: {work_request}"
+            );
+            assert_eq!(
+                store
+                    .injected_between(&harness.companion, None, u64::MAX)
+                    .unwrap(),
+                vec!["m-head".to_owned()],
+                "work agent turns must not pollute companion memory_injections"
+            );
+        }
     }
 }

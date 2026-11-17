@@ -487,7 +487,9 @@ fn publish_messages(
     mut notifier: ResMut<Notifier>,
 ) {
     for (_, conversation, companion, work, mut published) in &mut agents {
-        let companion_id = companion_of(companion, work).unwrap_or_default();
+        let Some(companion_id) = companion_of(companion, work) else {
+            continue;
+        };
         let work_id = work.map(|agent| agent.work_id.as_str()).unwrap_or_default();
         let start = conversation
             .entries()
@@ -511,23 +513,21 @@ fn publish_messages(
     }
 }
 
-/// Reports a turn that appeared this frame as streaming.
+/// Reports a companion turn that appeared this frame as streaming.
 fn turn_started(
-    turns: Query<(&Turn, &TurnOf, Option<&ForAgent>), Added<TurnOf>>,
-    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
+    turns: Query<(&Turn, &TurnOf), Added<TurnOf>>,
+    agents: Query<&CompanionAgent>,
     mut notifier: ResMut<Notifier>,
 ) {
-    for (turn, of, _) in &turns {
-        let companion = agents
-            .get(of.0)
-            .ok()
-            .and_then(|(_, agent)| agent.map(|agent| agent.companion_id.clone()))
-            .unwrap_or_default();
+    for (turn, of) in &turns {
+        let Ok(agent) = agents.get(of.0) else {
+            continue;
+        };
         notifier.push(
-            Some(companion.as_str()),
+            Some(agent.companion_id.as_str()),
             None,
             w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
-                companion_id: companion.clone(),
+                companion_id: agent.companion_id.clone(),
                 turn_id: turn.start.get().to_string(),
                 status: w::TurnStatus::Streaming.into(),
                 failure: None.into(),
@@ -537,7 +537,8 @@ fn turn_started(
     }
 }
 
-/// Publishes the final turn event once a turn settles.
+/// Publishes the final turn event once a companion turn settles, and settles
+/// the run when a work agent's turn finishes.
 fn turn_settled(
     mut commands: Commands,
     settled: Query<(Entity, &TurnOutcome, &ForAgent), Added<Settled>>,
@@ -549,36 +550,35 @@ fn turn_settled(
         let Ok((id, companion, work)) = agents.get(of.0) else {
             continue;
         };
-        let companion_id = companion_of(companion, work).unwrap_or_default();
-        let turn_id = turns
-            .get(turn_entity)
-            .map(|turn| turn.start.get().to_string())
-            .unwrap_or_else(|_| id.0.clone());
-        let (status, failure) = match outcome {
-            TurnOutcome::Answered(_) => (w::TurnStatus::Answered, None),
-            TurnOutcome::Stopped(_) => (w::TurnStatus::Stopped, None),
-            TurnOutcome::Failed(why) => (
-                w::TurnStatus::Failed,
-                Some(w::Failure {
-                    code: "turn_failed".into(),
-                    message: crate::host::db::truncate(why, 500),
-                    ..Default::default()
-                }),
-            ),
-        };
-        notifier.push(
-            Some(companion_id),
-            None,
-            w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
-                companion_id: companion_id.to_owned(),
-                turn_id,
-                status: status.into(),
-                failure: failure.into(),
-                ..Default::default()
-            })),
-        );
         if let Some(companion) = companion {
             let companion_id = companion.companion_id.clone();
+            let turn_id = turns
+                .get(turn_entity)
+                .map(|turn| turn.start.get().to_string())
+                .unwrap_or_else(|_| id.0.clone());
+            let (status, failure) = match outcome {
+                TurnOutcome::Answered(_) => (w::TurnStatus::Answered, None),
+                TurnOutcome::Stopped(_) => (w::TurnStatus::Stopped, None),
+                TurnOutcome::Failed(why) => (
+                    w::TurnStatus::Failed,
+                    Some(w::Failure {
+                        code: "turn_failed".into(),
+                        message: crate::host::db::truncate(why, 500),
+                        ..Default::default()
+                    }),
+                ),
+            };
+            notifier.push(
+                Some(companion_id.as_str()),
+                None,
+                w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
+                    companion_id: companion_id.clone(),
+                    turn_id,
+                    status: status.into(),
+                    failure: failure.into(),
+                    ..Default::default()
+                })),
+            );
             // A stopped or failed turn must not speak its flushed remainder.
             let answered = matches!(outcome, TurnOutcome::Answered(_));
             commands.queue(move |world: &mut World| {
@@ -870,5 +870,112 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["next", "new answer"]);
+    }
+
+    #[test]
+    fn turn_events_publish_for_companion_turns_only() {
+        use crate::host::tests::{Harness, text_turn};
+
+        let mut harness = Harness::new([text_turn("work answer"), text_turn("companion answer")]);
+        let companion = harness
+            .store()
+            .companion(&harness.companion)
+            .unwrap()
+            .unwrap();
+        let work_entity = spawn_work_agent(
+            harness.app.world_mut(),
+            &companion,
+            "work-1",
+            "run-1",
+            "do task",
+        );
+        let before_work = harness.app.world().resource::<Notifier>().cursor();
+        assert!(deliver(
+            harness.app.world_mut(),
+            work_entity,
+            &harness.companion,
+            "start".into(),
+            DeliveryMode::Queue,
+            Author::user(),
+        ));
+        harness.run_until(|world| {
+            world
+                .get::<Conversation>(work_entity)
+                .is_some_and(|conversation| {
+                    conversation
+                        .entries()
+                        .any(|entry| entry_text(&entry).as_deref() == Some("work answer"))
+                })
+        });
+        harness.tick();
+
+        let work_events = harness
+            .app
+            .world()
+            .resource::<Notifier>()
+            .replay(&before_work)
+            .expect("work events stay in the replay ring");
+        assert!(
+            !work_events.iter().any(|event| {
+                matches!(
+                    event.event.as_ref(),
+                    Some(
+                        w::notification::Event::TurnEvent(_)
+                            | w::notification::Event::MessageDelta(_)
+                    )
+                )
+            }),
+            "work agent turns must not emit TurnEvent or MessageDelta: {work_events:?}"
+        );
+        assert!(
+            work_events.iter().any(|event| {
+                matches!(
+                    event.event.as_ref(),
+                    Some(w::notification::Event::MessageCreated(created))
+                        if created.message.as_option().is_some_and(|message| {
+                            message.companion_id == harness.companion && message.work_id == "work-1"
+                        })
+                )
+            }),
+            "work agent transcript messages still carry companion_id and work_id: {work_events:?}"
+        );
+
+        let before_chat = harness.app.world().resource::<Notifier>().cursor();
+        harness.accept("k1", "hello").unwrap();
+        let head_entity = harness.companion_agent();
+        harness.run_until(|world| {
+            world
+                .get::<Conversation>(head_entity)
+                .is_some_and(|conversation| {
+                    conversation
+                        .entries()
+                        .any(|entry| entry_text(&entry).as_deref() == Some("companion answer"))
+                })
+        });
+        harness.tick();
+
+        let chat_events = harness
+            .app
+            .world()
+            .resource::<Notifier>()
+            .replay(&before_chat)
+            .expect("chat events stay in the replay ring");
+        let turns: Vec<_> = chat_events
+            .iter()
+            .filter_map(|event| match event.event.as_ref()? {
+                w::notification::Event::TurnEvent(turn) => {
+                    Some((event.companion_id.as_deref(), turn))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(turns.len(), 2, "expected Streaming and Answered: {turns:?}");
+        assert_eq!(turns[0].1.status, w::TurnStatus::Streaming);
+        assert_eq!(turns[1].1.status, w::TurnStatus::Answered);
+        for (notification_companion, turn) in turns {
+            assert_eq!(notification_companion, Some(harness.companion.as_str()));
+            assert_eq!(turn.companion_id, harness.companion);
+            assert_eq!(turn.turn_id, "0");
+        }
     }
 }
