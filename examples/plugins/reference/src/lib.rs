@@ -146,10 +146,10 @@ mod guest {
             HarnessInput::Cancel => {
                 // A cancelled turn leaves a live session, as ACP does.
                 STEP.with(|step| {
-                    *step.borrow_mut() = match *step.borrow() {
-                        Step::Idle => Step::Idle,
-                        _ => Step::Live,
-                    };
+                    let mut step = step.borrow_mut();
+                    if *step != Step::Idle {
+                        *step = Step::Live;
+                    }
                 });
                 HarnessEvent::Stop {
                     stop_reason: StopReason::Cancelled,
