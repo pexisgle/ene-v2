@@ -11,7 +11,7 @@
 | **データベース** | **`rusqlite` (bundled, WAL mode) ＋ FTS5 trigram ＋ Rustコサイン類似度** | C言語SQLiteを同梱（bundled）して静的コンパイル・リンクし、外部DBデーモン不要で単一SQLiteファイル（`host.sqlite3`）で完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。記憶整理や埋め込み生成等の重い非同期処理のみバックグラウンドタスクへ分離 |
 | **会話ログ・要約正本** | **`rig_memory::DirStore` (`rig-memory` feature `fs`)** | 公式の `rig-ecs` がネイティブに要求する同期ファイルストア。プロセス間ファイルロック、破損末尾行の自動退避、画像Blob管理を公式実装に委譲し、アダプタ実装ゼロ行で完結。受理レシート（`request_key`）も `Conversation::add_aside` でセッションログ内に記録するため、SQLiteとの2相不整合は原理的に発生しない |
 | **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ `rig-rmcp` ＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と `rig-rmcp` による公式MCPブリッジ動的登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
-| **OSサンドボックス** | **`process-wrap` ＋ `bwrap`（任意）＋ `cap-std`** | 全OSでプロセスツリーを管理し、Linuxでは `bwrap` があれば読み取り専用ルート・専用 `/tmp`・名前空間で隔離。`bwrap` が無ければ通知付きで非隔離実行（`landlock` / `AppContainer` / `Seatbelt` / 代理プロキシは後続フェーズ） |
+| **プロセス管理** | **`process-wrap`** | 全OSで子プロセスのプロセスツリー管理と `kill-on-drop` を統一（OSネイティブSandboxは持たない） |
 | **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` + `rubato` (音声I/O・リサンプリング) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlint（Royalty-free規約遵守）による軽快な設定・承認UI、cpal＋rubatoによる低遅延・高精度リサンプリング音声キャプチャ・再生、OSフックによる知覚センシング（目） |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産をそのまま活用。透過デスクトップウィンドウ（Wayland layer-shell / Windows Win32 layered）、VRM 1.0モデルロード・アニメーション（`ene-vrm`）、RMS音量によるローカル即時口パク、標準入出力JSON Lines IPC制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
@@ -63,7 +63,7 @@
   ```
 - **スキーマ定義とハイブリッド検索（Rust）**:
   ```rust
-  // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ + 整理カーソル + 承認状態 + スケジュール）
+  // 初期化スキーマ（FTS5 trigram + 記憶テーブル + エッジ + 承認状態 + スケジュール）
   // 全コネクションでビジータイムアウトと同期モードを必須設定
   conn.execute_batch(r#"
       PRAGMA journal_mode = WAL;
@@ -74,8 +74,8 @@
       CREATE TABLE IF NOT EXISTS memories (
           rowid INTEGER PRIMARY KEY,
           id TEXT NOT NULL UNIQUE,
-          owner TEXT NOT NULL,
-          audiences TEXT NOT NULL, -- JSON array
+          -- 'shared' または companion_id。同じ列が想起範囲を決めるため、別の公開先リストは持たない
+          scope TEXT NOT NULL,
           content TEXT NOT NULL,
           importance INTEGER NOT NULL CHECK (importance >= 0 AND importance <= 10),
           occurred_at TEXT,
@@ -84,7 +84,7 @@
           memory_revision INTEGER NOT NULL DEFAULT 1,
           content_revision INTEGER NOT NULL DEFAULT 1,
           emotion TEXT,
-          source_context TEXT,     -- JSON object
+          source_context TEXT NOT NULL DEFAULT '{}',
           embedding BLOB,          -- f32 array bytes
           embedding_model TEXT,    -- 埋め込み空間複合識別子: "<model_name>:<dimensions>:<prep_version>"
           embedding_dimensions INTEGER,
@@ -119,24 +119,20 @@
           PRIMARY KEY (from_id, relation, to_id)
       );
 
-      -- 自動記憶整理（Consolidation）の進行状態永続化テーブル
-      CREATE TABLE IF NOT EXISTS consolidation_state (
-          companion_id TEXT PRIMARY KEY,
-          last_processed_turn_id TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-      );
-
       -- 権限承認要求永続化テーブル
       CREATE TABLE IF NOT EXISTS approval_requests (
           request_id TEXT PRIMARY KEY,
           session_id TEXT NOT NULL,
           run_id TEXT NOT NULL,
+          work_id TEXT,             -- 手からの要求の場合のWorkSession。頭からの要求ではNULL
           action_payload_hash BLOB NOT NULL,
           tool_name TEXT NOT NULL,
           normalized_arguments TEXT NOT NULL,
-          status TEXT NOT NULL, -- 'pending', 'approved', 'denied', 'expired'
+          status TEXT NOT NULL,     -- 'pending', 'approved', 'denied', 'expired'
           created_at TEXT NOT NULL,
-          resolved_at TEXT
+          resolved_at TEXT,
+          client_id TEXT,           -- 承認を束縛したクライアント。移動しても失効しない
+          capability TEXT
       );
 
       -- スケジュール・自律リマインド永続化テーブル
@@ -166,13 +162,13 @@
 CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` 等）や `rig-mcp-client` は採用せず、純粋な `rig-ecs` プリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と動的ツール登録で最小構成を実現する。MCPサーバーは `rig-rmcp` の `McpConnection` で開き、得たツールを同じ動的ツール登録に載せる。
 
 > [!NOTE]
-> **単発サイドコールの位置づけ**: 要約（compaction）、記憶統合（consolidation）、ハートビート（staged）のモデル呼び出しは、ターンを持たない単発の問い合わせであり、`AgentPass` のライフサイクルには載せない。ECSスレッドを塞がないよう `HostRuntime` 上で実行し、`rig-core` のエフェクトを直接ハンドラへ渡す（`model::unary`）ことで完結させる。これらをターンとして扱う必要が生じた時点で、`Effect` へ移行する。
+> **単発サイドコールの位置づけ**: 要約（compaction）、記憶統合（consolidation）のモデル呼び出しは、ターンを持たない単発の問い合わせであり、`AgentPass` のライフサイクルには載せない。ECSスレッドを塞がないよう `HostRuntime` 上で実行し、`rig-core` のエフェクトを直接ハンドラへ渡す（`model::unary`）ことで完結させる。これらをターンとして扱う必要が生じた時点で、`Effect` へ移行する。
 
 ```text
   ┌────────────────────────────────────────────────────────┐
   │ 【ホスト外部I/O・RPCサーバー】（Tokio 非同期ランタイム） │
   │  ・Connect-RPC 受付（ChatService / WorkService / etc.） │
-  │  ・外部ACPエージェントプロセスの標準入出力監視          │
+  │  ・MCPサーバー（stdio）の起動と標準入出力の監視            │
   │  ・マイク音声入力 / TTSエンジンへのHTTP・ストリーム送受信│
   │  ・バックグラウンド記憶整理・埋め込み生成タスク        │
   └───────────────────────────┬────────────────────────────┘
@@ -234,10 +230,8 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
         handler: Handler(handler),
     });
     ```
-- **自律tickターンの段階的昇格方式（Staged PromotionによるSessionLog保護）**:
-  - `rig-ecs` の `SessionLogPlugin` は `Deliver` が呼ばれたフレーム末尾で即座にディスク上のファイル（`DirStore`）へ Incoming メッセージを追記する。`DirStore` は追記専用であるため、後から `Conversation` の末尾エントリを消してもディスク上のログを巻き戻すことはできない。
-  - したがって、自律tickや見守り判定の推論は、最初からメインの `Conversation` に `Deliver` せず、現在の `Conversation` の一時ビュー（またはクローン）を用いて推論を実行する。
-  - モデルが `noop()` 以外（ユーザーへの発話テキスト、または `start_work` 等の実アクション）を返した場合にのみ、そのターン（入力＋発話／アクション）をメインの `Conversation` 正本へ `Deliver` / 記録する。これにより、ディスクI/Oとセッションログの不要な肥大化を根本から防ぐ。
+- **「目」エージェントによる知覚フィルタリング**:
+  - ユーザー入力や時間経過の監視は軽量モデル（「目」）が常時行い、価値があると判断した通知だけを親の `Conversation` へ注入するため、不要な空ターンによる `SessionLog` の肥大化を防ぐ。
 
 #### 実装例・一次情報
 - [`rig-core` GitHub (0xPlaygrounds/rig)](https://github.com/0xPlaygrounds/rig)
@@ -247,22 +241,14 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
 
 ---
 
-### C. OSサンドボックス：Alpha最小構成
-
-Alphaは、全OSで確実に効く境界だけを持ち、後続フェーズで強化する。
+### C. 子プロセス管理
 
 | クレート / 機構 | 担当責務 | 適用対象 |
 | :--- | :--- | :--- |
-| **`process-wrap`** | 子プロセスの生成、プロセスツリー/Job Object管理、kill-on-drop | 全OS共通（プロセスライフサイクルとタイムアウト強制終了） |
-| **`bwrap`** | 読み取り専用ルート、専用 `/tmp`、PID名前空間、`network: isolated` 時のネットワーク名前空間 | Linux（`bwrap` がある場合のみ） |
-| **`cap-std`** | ホスト（Rust）コード自身のファイル操作におけるパストラバーサル（`../`）防止 | 全OS共通（ホスト自身の安全なファイルI/O） |
-
-`bwrap` が無い環境でもACPは起動し、`acp_sandbox_unavailable` の通知とともに非隔離で実行する。`landlock`、Windows `AppContainer`、macOS `Seatbelt`、およびホスト名単位の通信制限を担う代理プロキシは後続フェーズの分離強化であり、Alphaの構成には含めない（[権限・Sandbox](permissions.md) §2）。
+| **`process-wrap`** | 子プロセスの生成、プロセスツリー/Job Object管理、kill-on-drop | 全OS共通 |
 
 #### 実装例・一次情報
-- [`cap-std` Docs.rs](https://docs.rs/cap-std/latest/cap_std/)（オープンディレクトリをルートとする安全なファイル操作）
 - [`process-wrap` Docs.rs](https://docs.rs/process-wrap/latest/process_wrap/)（Unix process-group、Windows Job Object、kill-on-dropのマルチプラットフォーム対応）
-- [bubblewrap](https://github.com/containers/bubblewrap)（非特権ユーザー名前空間によるサンドボックス）
 ### D. 音声パイプライン（STT / TTS）：プラガブル設計
 
 エンジンの通信仕様（文単位REST API / ストリーミング / 双方向Live API）に合わせて柔軟に動作する抽象インターフェース。
@@ -326,9 +312,10 @@ pub trait TtsEngine: Send + Sync {
 
 ---
 
-### G. 外部ACPエージェント接続と Connect-RPC サーバー設定
+### G. 外部ACPエージェント接続（プラグイン側）と Connect-RPC サーバー設定
 
 - **ACP外部ハーネス接続の最小イディオム**:
+  - ホストはACPプロセスを起動しない。ACPはプラグインが包み、ホストは`CONNECTION_KIND_ACP`の接続設定（`command` / `args`）だけを保持してプラグインへ渡す。以下はプラグイン実装側の最小構成。
   - `agent-client-protocol = "5.2.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
     - 例外は Wasm ゲストSDK（`crates/ene-plugin`）のみ。ACP SDK は `wasm32-unknown-unknown` 向けにビルドできない（`uuid` の乱数源が未指定になる）ため、型定義だけを提供する `agent-client-protocol-schema` に直接依存する。その際もバージョンはキャレット要件（`"1.15.1"`）とし、SDK 側のピンが 1.x 内で動いても解決が壊れないようにする。ホスト側はこの例外を使わない。
   - `process-wrap` の `TokioCommandWrap` で起動した子プロセスの標準入出力を `Client::v1()` トランスポートへ接続する最小構成：
@@ -356,7 +343,7 @@ pub trait TtsEngine: Send + Sync {
         .name("ene-host")
         .connect_with(ByteStreams::new(stdin, stdout), async |cx| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
-            // WorkSession (cx.build_session_cwd() 等) を維持して prompt / cancel を実行
+            // プラグインがセッション (cx.build_session_cwd() 等) を維持して prompt / cancel を実行
             Ok(())
         })
         .await?;

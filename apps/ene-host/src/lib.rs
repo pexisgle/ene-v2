@@ -4,12 +4,8 @@ mod cli;
 mod host;
 pub(crate) mod server;
 
-pub use cli::{Invocation, parse as invocation};
+pub use cli::parse;
 pub use server::run;
-
-/// Runs the sandbox relay when this process was started for one, so the same
-/// binary can live inside a network-isolated ACP sandbox.
-pub use host::work::acp_bridge::relay;
 
 /// State and runtime directories, with explicit environment overrides.
 pub fn paths() -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {

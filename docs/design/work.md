@@ -23,20 +23,16 @@
 
 | 概念 | 責務 | ライフサイクル |
 | :--- | :--- | :--- |
-| **BackendProfile** | モデル割当、認証情報、実行環境（ローカルRig / 外部ACP、WasmはPhase 2）、Sandbox設定 | 静的設定 |
-| **WorkSession** | 親コンパニオンに属する、特定のタスク文脈・作業ディレクトリ・状態を保持する枠組み（ACP Sessionに1:1対応） | 複数Runにわたり継続 |
-| **Run** | ユーザーや親からの1回の指示・追加入力によって開始される単一の実行ターン（ACPの `session/prompt` に対応） | 指示受付から完了/失敗まで |
+| **BackendProfile** | モデル割当、認証情報、実行環境（ホスト内Rig） | 静的設定 |
+| **WorkSession** | 親コンパニオンに属する、特定のタスク文脈・状態を保持する枠組み。ワークエージェントを1体だけ保持する | 複数Runにわたり継続 |
+| **Run** | ユーザーや親からの1回の指示・追加入力によって開始される単一の実行ターン | 指示受付から完了/失敗まで |
 
-### 2.1 バックエンド別の実行モデル（ACPと内蔵Rigの適正化）
-- **外部ACPエージェント（Agent Client Protocol）**:
-  - `agent-client-protocol = "5.2.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
-  - `WorkSession ≒ ACP Session`: 外部ACPプロセスとの接続はWorkSession単位で維持され、複数Runにわたってエージェントの会話文脈が継続する。
-  - `Run ≒ ACP prompt turn`: 1回の指示実行は `session/prompt` に対応する。
-  - **中断の扱い**: 通常のRun中断は ACP 標準の `session/cancel` を送信して安全に行う。外部プロセス自体の終了は、WorkSession自体の破棄時、またはセッション全体がハングして応答しない場合のみ実行する。文脈を保持するACPセッションでは、Run終了後もOSプロセスは生存する。
+### 2.1 実行モデル（プラグインAPI経由での統一）
+- **ACPエージェント（Agent Client Protocol）**: ホストはACPプロセスを起動しない。ACPはプラグインが包み、ホストは`CONNECTION_KIND_ACP`の接続設定だけを保持してプラグインへ渡す。接続の維持と`session/prompt`・`session/cancel`の対応はプラグインの内側で完結し、ホストのWorkSessionとRunの状態機械には現れない。
 - **内蔵Rigエージェント**:
-  - **ライフサイクルと停止伝播の分離**: Rig v0.46.0 において `StopTurn` は `SpawnedBy` 配下の子エージェントへ停止を自動伝播させる。ユーザーが音声対話を「ちょっと話止めて。作業は続けて！」と割り込み（Barge-in）した際に作業まで道連れで強制終了されるのを防ぐため、**継続稼働する `WorkSession` は `SpawnedBy(parent_entity)` ではなく、独立したエージェントエンティティ（`WorkSessionOf(companion_id)`）としてWorld内に生成する**（`SpawnedBy` はそのターンと運命を共にする一時的なサブタスクにのみ限定）。
-  - ツール権限を `ToolAccess::Only(...)` で制限し、Run開始は `world.trigger(Deliver::new(work_entity, instruction, DeliveryMode::Queue))`、作業の中断は明示的な `world.trigger(StopTurn::new(work_entity))`、完了報告は `ConversationChanged`（または `ActiveTurn` コンポーネント除去）の検知Observerから親へ通知することで、同一World内で最小限のオーバーヘッドで実行する。コマンド実行子プロセスのみを `process-wrap` で安全に管理する。
-  - 新規Runの開始は `Queue` とし、実行中セッションへの追加指示（`send_work`）や未決質問への回答（`AnswerInquiry`）は §4.2 の `Steer` を使い分ける。
+  - **WorkSessionごとに1体**: WorkSessionごとにホスト内でワークエージェントを1体だけ生成し、Runを開始するたびにそのrun_idを束縛し直す。エージェントを引退させるのはセッションのクローズ、開始失敗、ホスト再起動だけで、通常のRun終了では残す。
+  - **停止伝播の分離**: ワークエージェントは親のターンに連なる子ではなく、独立したエージェントエンティティとしてWorld内に生成する。ユーザーが音声対話を「ちょっと話止めて。作業は続けて！」と割り込んでも、親のターンの停止が作業のターンへ伝播しない。
+  - ツール権限は `ToolAccess::Only(["report", "device_request"])` に限る。Runの開始は `DeliveryMode::Queue` の `Deliver`、中断は `StopTurn`、終了はターン結果を受け取るObserverが `settle_run` で確定する。コマンド実行子プロセスのみを `process-wrap` で管理する。
 
 > [!IMPORTANT]
 > **WorkSession と Run の厳格な分離**:
@@ -49,221 +45,158 @@
 ### 3.1 セッションとRunの状態定義
 
 ```rust
-use std::time::Instant;
-use serde::{Deserialize, Serialize};
-
-/// WorkSession（文脈の器）の公開状態（実体から導出され、二重管理による不整合を防ぐ）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkSessionStatus {
+/// WorkSession（文脈の器）の公開状態
+pub enum WorkStatus {
     /// 待機中（実行中のRunなし）
     Idle,
     /// Runが実行中
-    Active { current_run_id: String },
+    Active,
     /// セッション終了・破棄済み
     Closed,
 }
 
 /// 単一Run（実行ターン）の状態
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunStatus {
+pub enum RunState {
     Starting,
     Running,
-    /// 子からの質問待ち（WorkInquiry）または権限承認待ち（ApprovalRequest）
-    WaitingInput {
-        request_id: String,
-    },
-    /// 中断要求を受け、後片付け・停止処理中
-    Cancelling { requested_at: chrono::DateTime<chrono::Utc> },
+    /// 承認待ち。承認はターン内で待つため、実運用では Running のまま
+    WaitingInput,
     /// 正常完了
     Completed,
-    /// 停止が完全に確認された中断
+    /// 停止が確定した中断
     Cancelled,
-    /// 強制終了要求後に停止がOSレベルで完全に確認できなかった場合、または外部処理の停止状態が不明な場合
-    CancellationUnconfirmed {
-        reason: String,
-        unverified_pids: Vec<u32>,
-    },
     /// 失敗
-    Failed { error_code: String, message: String },
+    Failed,
+}
+
+pub struct WorkSession {
+    pub id: String,
+    pub companion_id: String,
+    pub title: String,
+    pub status: WorkStatus,
+    /// 発注元クライアント。発注時にアクティブクライアントがなければ空
+    pub client_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct Run {
+    pub run_id: String,
+    pub work_id: String,
+    pub instruction: String,
+    pub state: RunState,
+    /// WaitingInput 中の承認要求
+    pub pending_request_id: Option<String>,
+    pub failure: Option<Failure>,
+    pub started_at: String,
+    pub updated_at: String,
+}
+
+/// 途絶検知のランタイム状態（Run行とは別に保持し、状態を二重管理しない）
+struct Live {
+    last: Instant,
+    warned: bool,
 }
 ```
 
-プロトコルでは`RunInfo.state`と`WorkRunFinished.state`を`RunStatus` enumで表し、`WaitingInput`の`request_id`、`Cancelling`の`requested_at`、`CancellationUnconfirmed`の`reason`/`unverified_pids`は対応フィールドに載せる。`Failed`の`error_code`/`message`は`Failure`に載せる。`TurnStatus`は会話ターン専用であり、Run状態には使わない。
+プロトコルでは`RunInfo.state`と`WorkRunFinished.state`を`RunStatus` enumで表す。承認要求は`pending_request_id`、失敗の理由は`Failure`に載せる。旧ビルドが保存した`cancelling`と`cancellation_unconfirmed`の行は、読み込み時に`Cancelled`として解釈する。
 
 ### 3.2 状態遷移契約（State Machine Transitions）
 
 | 現在の状態 | イベント / トリガー | 次の状態 | 確定点とホストの動作 |
 | :--- | :--- | :--- | :--- |
-| `Starting` | プロセス起動・タスク着手 | `Running` | Run専用のプロセスグループ/Job Objectを生成 |
-| `Running` | 子からの質問（`WorkInquiry`） | `WaitingInput` | ユーザーまたは親の回答待ち。`WorkView.pending_inquiries` へ登録 |
-| `Running` | 権限・Sandbox外操作の保留 | `WaitingInput` | `Stage::Gate` で `commands.spawn(HoldOf(call_entity))` を投入し、`approval_requests` テーブルへ登録。未決承認リスト（`pending_approvals`）へ追加 |
-| `WaitingInput` | 承認回答受信（`SettingsService.SubmitApproval`） | `Running` | 承認時はホスト定義の `Approved` マーカーを付与し、拒否時は `Decider::Person` で `Outcome::refused(...)` を確定し、`HoldOf` を解除して処理再開 |
-| `WaitingInput` | 質問回答受信（`SendWork` with `request_id` または `AnswerInquiry`） | `Running` | 未決質問 `request_id` に回答テキストを束縛して子へ渡し処理再開 |
-| `Running` / `WaitingInput` | `StopWork` 受信（中断要求） | `Cancelling` | **即座に新規ツール実行受付を遮断**し、ACPへ `session/cancel` 送信（未決permissionはcancel応答）、最大30秒クリーンアップ待機 |
-| `Cancelling` | ACP `cancelled` 応答 または Rigターン停止確認 | `Cancelled` | 正常中断確定（ACPプロセスはセッション維持のため生存） |
-| `Cancelling` | 30秒超過 ➔ 強制終了後、プロセス終了未確認 | `CancellationUnconfirmed` | 停止未確認として記録 |
-| `Running` | タスク正常完了 | `Completed` | 成果物を親へ返却 |
-| `Running` / `Cancelling` | 回復不能エラー発生 | `Failed` | エラー報告 |
+| （なし） | `start_work` / `StartWork` によるRun開始 | `Running` | run行を`Running`で作り、セッションを`Active`にして`RunStarted`を配信する。開始に失敗したら`Failed`へ落とし、セッションを`Idle`へ戻す |
+| `Running` | ターンが回答で終了 | `Completed` | `report(kind=completed)`の内容、なければ最終返答を親へ渡す |
+| `Running` | `report(kind=failed)` またはターン失敗 | `Failed` | `Failure`を保存し、親へ失敗を渡す |
+| `Running` | `stop_work` / `StopWork` | `Cancelled` | ワークエージェントへ`StopTurn`を送り、その場で`Cancelled`を保存する（§5） |
+| `Completed` / `Cancelled` / `Failed` | 再度の停止・遅延到着した報告 | 変化なし | 終端。状態を書き換えない |
+
+`Starting`はRun行の作成前を表す予約値で、ホストは`Running`で行を作る。`WaitingInput`も予約で、承認待ちは`Running`のままターン内で待つ。
+
+### 3.2 共通イベント包み（WorkEvent）
+
+子（手）の報告は`report`ツールが受け取り、ホストがセッションとRunを束縛して親へ渡す。UI向けの`WorkEvent`は状態とRunの変化だけを運ぶ。
 
 ```rust
-/// 子（手）からのユーザー確認・質問（WorkInquiry: protobuf WorkInquiry と 1:1 対応）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkInquiry {
-    pub request_id: String,
-    pub prompt: String,
-    pub choices: Vec<String>,
-}
-
-/// セッションの管理構造体（状態の正本は active_run と closed のみとし、公開statusは導出）
-pub struct ActiveWorkSession {
-    pub session_id: String,
-    pub companion_id: String,
-    pub active_run: Option<ActiveRunTracker>,
-    pub closed: bool,
-}
-
-impl ActiveWorkSession {
-    pub fn status(&self) -> WorkSessionStatus {
-        if self.closed {
-            WorkSessionStatus::Closed
-        } else if let Some(run) = &self.active_run {
-            WorkSessionStatus::Active {
-                current_run_id: run.run_id.clone(),
-            }
-        } else {
-            WorkSessionStatus::Idle
-        }
-    }
-}
-
-/// 実行中Runのトラッキング
-pub struct ActiveRunTracker {
+pub struct WorkEvent {
+    pub work_id: String,
     pub run_id: String,
-    pub instruction: String,
-    pub status: RunStatus,
-    pub started_at: Instant,
-    pub last_activity_at: Instant,
-    pub stall_warned: bool,
+    pub kind: WorkEventKind,
+    pub detail: Detail,
+}
+
+pub enum WorkEventKind {
+    StatusChanged,
+    RunStarted,
+    RunFinished,
+}
+
+pub enum Detail {
+    StatusChanged(WorkStatusChanged),
+    RunStarted(WorkRunStarted),
+    RunFinished(WorkRunFinished),
+}
+
+/// `report` ツール。`session_id`と`run_id`はホストが実行中のRunから束縛する
+pub struct ReportArgs {
+    /// activity | message | completed | failed
+    pub kind: String,
+    pub content: String,
 }
 ```
 
-### 3.2 共通イベント包み（WorkEventEnvelope）
-
-すべての子（手）からのイベントは、対象セッションとRunを不変に識別する共通ヘッダーで包まれる。
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkEventEnvelope {
-    pub session_id: String,
-    pub run_id: String,
-    pub sequence_no: u64,
-    pub timestamp_ms: u64,
-    pub payload: WorkEventPayload,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WorkEventPayload {
-    /// 実行中の詳細活動ログ（例: "Cargo test実行中..."）
-    Activity { message: String },
-    /// 親へ伝えるべき意味のある進捗メッセージ
-    Message { content: String },
-    /// ユーザーへの確認・質問要求（WorkInquiry）
-    Inquiry {
-        request_id: String,
-        inquiry: WorkInquiry,
-    },
-    /// Runの正常完了報告
-    Completed {
-        summary: String,
-        artifacts: Vec<String>,
-    },
-    /// 中断完了報告
-    CancellationReport {
-        progress_summary: String,
-        local_cleanup_done: bool,
-        /// 物理的に取り消せない外部副作用（例: 送信済みメール、Push済みコミット）
-        irreversible_effects: Vec<String>,
-        /// 成否が確認できなかった外部操作
-        uncertain_effects: Vec<String>,
-        forced_killed: bool,
-    },
-    /// Runの失敗報告
-    Failed { error_code: String, message: String },
-}
-```
+`WorkEvent.kind`は`oneof detail`の種別と一致させる。
 
 ---
 
 ## 4. 進捗途絶検知と割り込み処理
 
-作業が長時間に及ぶ場合、「手」は困ったときだけでなく、数十秒〜数分間隔で定期的に進捗（`Activity` または `Message`）を報告する。
+作業が長時間に及ぶ場合、「手」は困ったときだけでなく、数十秒〜数分間隔で定期的に進捗（`report(kind=activity)` または `report(kind=message)`）を報告する。
 
 ### 4.1 途絶検知と親へのプロンプト注入
 - 子からの活動報告が閾値（デフォルト: **90秒**）を超えて途絶した場合、ホストは親（頭）へ**コンテキスト注入イベント（Prompt Injection / `DeliveryMode::Inform`）**を行う。
-- **通知と返答要求の区別**: `DeliveryMode::Inform` は返答を強制しない非ブロッキング通知である。途絶通知は親のコンテキストに事実情報として追加され、親が対話中であれば次ターンの思考材料となる。即時に親からユーザーへ声かけを行わせる必要がある緊急ケースでは、ホストが `DeliveryMode::Queue` で能動的な確認ターンをディスパッチする。
+- **通知と返答要求の区別**: `DeliveryMode::Inform` は返答を強制しない非ブロッキング通知である。途絶通知は親のコンテキストに事実情報として追加され、親が対話中であれば次ターンの思考材料となる。
 - **1回のみの警告（`stall_warned`）**:
   - `now - last_activity_at > 90s` かつ `stall_warned == false` のときに限り、ホストは通知を1回だけ送出し、`stall_warned = true` に設定する。これにより、親エージェントへの通知スパムを防止する。
-  - 子から新たな活動報告（`Activity` や `Message`）が到着した時点で `last_activity_at` は更新され、`stall_warned = false` にリセットされる。
+  - 子から新たな活動報告が到着した時点で `last_activity_at` は更新され、`stall_warned = false` にリセットされる。
   ```text
   [System Notification: 作業「手」(run_id: run_123) からの報告が90秒間途絶しています。現在の状況を確認してください。]
   ```
 - 親（頭）はこの通知を受けて、ユーザーに「ちょっと様子を見てみるね」と声をかけたり、子に進捗確認メッセージを送出できる。
 
-### 4.2 実行中の追加入力の配送（Steer / Queue / Reject）
-Runが実行中にユーザーや親から追加指示が届いた場合、バックエンドの能力に応じてホストが以下のように制御する：
-1. **Steer（実行中注入）**: 外部ハーネスやローカルRigが実行中入力の割り込み注入をサポートしている場合、待機中のターミナル等を安全に中断して現在のRunへ新指示を注入。
-2. **Queue（キューイング）**: 実行中割り込みが非対応の場合、現在のRunが完了した直後に開始される次期Runとしてキューへ保持。
-3. **Reject（非対応通知）**: キューイングも不可な場合、待機するか現在のRunを中断するかを親（頭）が選択。
+### 4.2 実行中の追加入力の配送
+
+`send_work`は常にワークエージェントへ`DeliveryMode::Queue`で入力を渡す。実行中なら現在のターンに続けて届き、実行がなければ同じ`work_id`で新しいRunを開始する。注入・保留・拒否の分岐は持たない。
+
+同じ`request_key`の再送は、内容が同じなら元の受付（`request_id`）を返し、内容が異なれば競合として拒否する。受付レシートはワークエージェントの会話ログ（`ene.work_accepted` Aside）に残すため、再起動後も照合できる。
 
 ---
 
 ## 5. 安全な中断プロトコル（Cancellation Protocol）
 
-### 5.1 中断シーケンスと停止確認（Cancelled vs CancellationUnconfirmed）
+### 5.1 中断シーケンス
 
 ```text
-[ユーザー / 親] ──→ stop_work(session_id, run_id)
-                           │
-                           ▼
-                 RunStatus を Cancelling へ更新
-                 ホスト ──→ 子へ CancellationRequested を送信
-                           │
-                           ├─────────────────────────────────────────┐
-                           ▼ (< 30秒以内)                             ▼ (30秒経過・ハング)
-                    [子が協調的に後片付け]                      [外部プロセス応答なし]
-                    ・一時ファイル削除                                │
-                    ・ローカルロック解放                              ▼
-                           │                                   ホストがプロセス群を強制終了
-                           ▼                                   (Linux: kill(-pgid, SIGKILL)
-                    CancellationReport 送信                    Windows: TerminateJobObject)
-                           │                                          │
-                           ▼                                          ▼
-                    【停止の完全確認】                          【停止が確認できたか？】
-                    RunStatus: Cancelled                         ├─ 完了確認 ➔ Cancelled
-                                                                 └─ 未確認・不明 ➔ CancellationUnconfirmed
+[ユーザー / 親] ──→ stop_work(work_id) / StopWork(work_id)
+                            │
+                            ▼
+                  ホスト ──→ ワークエージェントへ StopTurn
+                            │
+                            ▼
+                  同じパスで run を Cancelled に確定
+                  ・pending_request_id を消す
+                  ・セッションを Idle に戻す
+                  ・親へ中断報告を Queue で渡す
 ```
 
-1. **協調的中断要求と新規副作用の即時遮断**:
-   - ホストは子へ中断を通知（ACPエージェントへは `session/cancel`、内蔵Rigへはタスク中断シグナル）し、`RunStatus` を `Cancelling` へ更新する。
-   - **`Cancelling` 移行と同時に、ホストはそのRunからの新規ツール実行要求（ファイル書き込み、外部通信等）を即座に遮断（Reject）**し、クリーンアップ以外の新たな副作用の発生を防止する。
-2. **プロセス終了と中断の責務分離（停止確認の3分類）**:
-   - **内蔵RigのRun停止**: 対象ターンの `StopTurn` とホスト管理下の関連タスク停止を確認（`RunStatus::Cancelled`）。
-   - **ACPのRun停止**: `session/cancel` を送信し、対応する `session/prompt` の `cancelled` 終了応答（および未決のpermission requestへのcancel回答）を受信した時点で中断を確定（`RunStatus::Cancelled`）。ACPエージェントのOSプロセスは会話文脈を維持するため生存させる。
-   - **OSプロセスの強制終了**: 強制終了（`kill(-pgid, SIGKILL)` や `TerminateJobObject`）の対象は、**そのRunが直接起動して応答しないシェルコマンド子プロセス**、または**WorkSession破棄時（`CloseWork`）に30秒経過しても終了しないエージェントプロセス**に限定する。
-3. **寛大な猶予期間（30秒タイムアウト）**:
-   - サブプロセスやビルド処理が正常に一時ファイルを片付ける猶予として、最大 **30秒** 待機する。
-4. **プロセス群の強制終了と停止確認**:
-   - 30秒経過しても応答しない場合、ホストは対象プロセス群を強制終了する。
-   - **状態の厳格な区分**:
-     - プロセス群の完全終了またはACPのキャンセル応答が正常に確認された場合: `RunStatus::Cancelled`
-     - プロセスの残存が疑われる場合や外部クラウド処理の停止が確認できない場合: **`RunStatus::CancellationUnconfirmed`（停止未確認 / 結果不明）** として記録し、ユーザーにも「処理を完全に停止できたか確認できませんでした」と誠実に通知する。
-5. **過去Runの遅延イベントの扱い**:
-   - Run Aの中断後に開始されたRun Bの実行中に、遅れてRun Aのイベントが到着した場合、**Run Bのアクティブ状態を破壊・上書きしない**。ただし、Run A自身の過去の監査記録としては正確に追記保存する。
+1. **停止は即時に確定する**: `stop_work`と`StopWork`は同じ経路を通る。ホストはワークエージェントへ`StopTurn`を送り、その場でrunを`Cancelled`として保存し、親へ「作業を中断しました」（理由があればその理由）を渡す。エージェントのターンが片付くのを待たない。
+2. **待機も強制終了もしない**: `Cancelling`の待機状態、30秒の猶予、プロセス群の強制終了、停止未確認の区分は持たない。コマンド実行子プロセスの管理は`process-wrap`に閉じる。
+3. **二重停止とクローズ**: 停止済みのrunへの再度の`stop_work`は何もしない。`CloseWork`は停止の後にセッションを`Closed`にし、ワークエージェントを引退させる。
+4. **過去Runの遅延イベントの扱い**: Run Aの中断後に開始されたRun Bの実行中に、遅れてRun Aの報告が届いても、**Run Bのアクティブ状態を破壊・上書きしない**。Run Aの報告はRun A自身の監査記録としてのみ残す。
 
 ### 5.2 外部副作用の現実的な扱い（Undoの限界の明示）
-- 一時ファイルの削除などのローカルな後片付けは `local_cleanup_done: true` として処理する。
-- 一方、**「送信済みメール」「外部APIで作成したクラウド資源」「リモートGit Push」などの物理的に巻き戻せない外部操作**については、「安全にUndoできる」とは偽らない。
-- `CancellationReport.irreversible_effects` に「送信済みメールは取り消せません」のように明示記録し、親がユーザーへ正確な顛末を報告する。成否不明な外部操作は自動再送しない。
+- ホストは中断時にローカルの後片付けを保証しない。ワークエージェントのターン停止だけを行い、成果物の巻き戻しは約束しない。
+- **「送信済みメール」「外部APIで作成したクラウド資源」「リモートGit Push」などの物理的に巻き戻せない外部操作**については、「安全にUndoできる」と偽らない。親（頭）はユーザーへ正確な顛末を報告する。成否不明な外部操作は自動再送しない。
 
 ---
 
@@ -275,19 +208,18 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
-| **`start_work`** | `instruction: String`<br>`work_id: Option<String>` | 「手」に実務を委託。`work_id` 未指定時は新規WorkSessionを作成し、指定時は既存セッションを継続してRunを開始 |
-| **`send_work`** | `work_id: String`<br>`text: String`<br>`request_id: Option<String>` | 「手」に対する追加指示や未決質問（`WorkInquiry`）への回答を送信（アクティブRunをホストが自動特定） |
-| **`stop_work`** | `work_id: String`<br>`reason: Option<String>` | 実行中のタスクに対する中断要求を発行（アクティブRunをホストが自動特定） |
-| **`list_works`** | なし | 実行中および直近のWorkSession・Runの状態一覧を取得 |
+| **`start_work`** | `instruction: String`<br>`work_id: Option<String>` | 「手」に実務を委託。`work_id` 未指定時は新規WorkSessionを作成し、指定時は既存セッションで次のRunを開始。音声入力の文字起こしIDを委託キーとし、同じ発話では最初に実行したコンパニオンだけが着手する |
+| **`send_work`** | `work_id: String`<br>`text: String` | 「手」に対する追加指示や方針変更を送信。常にキューイングし、実行中のRunがなければ同じセッションで開始する |
+| **`stop_work`** | `work_id: String`<br>`reason: Option<String>` | 実行中のRunを停止し、その場で`Cancelled`として記録する（アクティブRunをホストが自動特定） |
 
 ### 6.2 子（手）向け報告ツール（内蔵Rig / カスタムエージェント用）
 
 | ツール | 引数 | 役割 |
 | :--- | :--- | :--- |
-| **`report`** | `kind: String`（`activity` / `message` / `question` / `completed` / `failed`）<br>`content: String`<br>`artifacts: Option<Vec<String>>` | ホストおよび親へ進捗、質問、または完了/失敗を通知。**`session_id` と `run_id` はホスト実行環境がコンテキストから自動束縛**し、LLMに引数として書かせない。ACP外部プロセスの場合は `agent_client_protocol::v1::schema` の通知へ相互変換される |
-| **`device_request`** | `capability: String`<br>`input: Object` | 端末の機能を実行する。対象端末はLLMが指定せず、ホストがWorkSessionの`client_id`と`activation_revision`へ束縛する。ホストが許可済みcapability、`ClientCapabilitySpec.input_schema`、`Stage::Gate`を照合し、結果は後続のモデル呼び出しで返る |
+| **`report`** | `kind: String`（`activity` / `message` / `completed` / `failed`）<br>`content: String` | ホストおよび親へ進捗、または完了/失敗を通知。**`session_id` と `run_id` はホスト実行環境がコンテキストから自動束縛**し、LLMに引数として書かせない。報告は状態の正本である実行中Runに照合し、終了済みのRunからの報告は状態を変えない |
+| **`device_request`** | `capability: String`<br>`input: Object` | アクティブな端末の機能を実行する。ホストが許可済みcapabilityと判定パイプラインを照合する |
 
-`device_request`の対象端末はLLMが引数で指定しない。`StartWork`時に受け取った`client_id`と`activation_revision`をWorkSessionに保存し、手からの操作はその端末にだけ束縛する。`client_id`が空の場合は、その時点のアクティブクライアントを解決して保存する。どちらも得られない場合、`device_request`は`no_active_client`で失敗する。受付後にユーザーが別端末へ移動した場合、操作は新しい端末へ追従せず`client_moved`として失敗する。端末能力の許可は操作単位の承認を省略せず、必要な操作は`Stage::Gate`と`ApprovalRequest`を通す。
+`device_request`の対象端末はLLMが引数で指定せず、現在アクティブなクライアントに対して実行する。端末能力の実行にも判定パイプラインを通す。
 
 ---
 
@@ -295,12 +227,12 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 
 ### 7.1 クライアント向けRPCと親（頭）内部ツールの責務分離
 - **通常のユーザー対話（親エージェント経由）**:
-  ユーザーはチャット（`ChatService.SendMessage`）や音声入力（`VoiceService`）を通じて親コンパニオンへ実務や調査を依頼する。親エージェント（頭）が文脈を解釈し、内部ツール（`start_work`, `send_work`, `stop_work`, `list_works`）を実行して自律的に進行する。クライアント自身が親のオーケストレーションを肩代わりすることはない。
+  ユーザーはチャット（`ChatService.SendMessage`）や音声入力（`VoiceService`）を通じて親コンパニオンへ実務や調査を依頼する。親エージェント（頭）が文脈を解釈し、内部ツール（`start_work`, `send_work`, `stop_work`）を実行して自律的に進行する。クライアント自身が親のオーケストレーションを肩代わりすることはない。
 - **Connect-RPC `WorkService` の用途区分**:
   1. **UI一覧表示・状態取得（通常利用）**:
      - `ListWorks`: 実行中および直近の WorkSession 一覧取得（UIサイドバーやタスクパネル表示用）。
-     - `GetWork`: 特定 WorkSession の詳細状態（`WorkSession`）、実行履歴（`runs`）、未決要求（`pending_inquiries`）、および成果物の取得。再接続時に未決の承認要求や質問を再取得できる。
-     - **単一イベントストリームへの統合**: 個別のストリーム（`SubscribeWorkEvents`）は設けず、リアルタイムの作業進捗ログ・質問・完了イベントはすべて `HostService.Subscribe`（単一の `HostEvent` ストリーム）内の `HostEvent::WorkEvent`（`WorkEventEnvelope`）として集約配信される。
+     - `GetWork`: 特定 WorkSession の詳細状態（`WorkSession`）、実行履歴（`runs`）、`WaitingInput`中の承認要求（`pending_request_id`）の取得。再接続時に未決の承認要求を再取得できる。
+     - **単一イベントストリームへの統合**: 個別のストリーム（`SubscribeWorkEvents`）は設けず、リアルタイムの作業状態とRunのイベントはすべて `HostService.Subscribe`（単一の `HostEvent` ストリーム）内の `WorkEvent` として集約配信される。
   2. **ユーザー主導の緊急直接停止（即時制御）**:
      - `StopWork`: ユーザーがクライアントUI上の「作業中断」ボタンを押下した際、親LLMの思考待ちを介さず即座に停止要求を発行する。
      - `CloseWork`: 完了・中断済みセッションの明示的クローズ。
@@ -309,8 +241,8 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 
 > [!NOTE]
 > **カノニカル RPC 定義**:
-> `WorkService` の完全な Protobuf サービス定義およびメッセージ（`WorkSession`, `WorkInquiry`, `WorkView`, `SendWorkRequest` 等）は、[ホストAPI設計 カノニカル Protobuf 定義](../api.md#7-カノニカル-protobuf-定義-hostproto) を正本とする。重複する定義は保守しない。
-> プロトコル上の`WorkEvent`はUI向けの状態・Run・質問イベントを`WorkEventKind`と型付き`oneof detail`で表す。`WorkEventEnvelope`の`Activity`/`Message`/`Completed`等はホスト内の報告パイプラインで処理し、必要に応じて親へのメッセージや上記のイベントへ変換する。
+> `WorkService` の完全な Protobuf サービス定義は、[ホストAPI設計 カノニカル Protobuf 定義](../api.md#7-カノニカル-protobuf-定義-hostproto) を正本とする。
+> プロトコル上の`WorkEvent`はUI向けの状態とRunのイベントを`WorkEventKind`と型付き`oneof detail`で表す。`report`が受けた進捗・完了・失敗はホスト内の報告パイプラインで処理し、必要に応じて親へのメッセージや上記のイベントへ変換する。
 
 ---
 
@@ -320,7 +252,8 @@ Runが実行中にユーザーや親から追加指示が届いた場合、バ�
 | :--- | :--- | :--- |
 | **同一ペルソナ一人称対話** | 「手」の作業報告を受けた親の会話出力を検査 | 「裏で作業者が〜」等の第三者表現が排除され、一人称（「私が今〜したよ」）で報告されること |
 | **Run完了の独立性** | Run A中断後にRun Bを開始し、遅れてRun Aの完了イベントをシミュレート到着 | Run Bのアクティブ状態が破壊・上書きされず、遅延到着したRun AのイベントはRun A自身の過去監査記録へ安全に反映されること |
-| **ACPプロンプト中断とプロセス生存** | 実行中Runに対して中断要求を発行 | ACPの `session/cancel` が送信され、promptの `cancelled` 応答でRunが `Cancelled` になり、エージェントプロセス自体はセッション維持のため生存すること |
-| **強制終了タイムアウトと停止確認** | 中断要求に応答しないモック外部プロセスを起動 | 30秒後にホストがプロセス群を強制終了し、停止を確認できた場合は `Cancelled`、停止が確認できない場合は `CancellationUnconfirmed`（停止未確認）として記録・報告されること |
-| **非可逆操作の誠実な報告** | 外部送信済み操作を含むRunを中断 | 「Undo完了」と偽らず、`irreversible_effects` に記録されてユーザーへ報告されること |
-| **途絶検知プロンプト注入** | 子の活動報告を90秒間意図的に停止 | 親エージェントへ進捗確認プロンプトが自律注入され、親が状況確認を試みること |
+| **停止の即時確定** | 実行中Runに対して`stop_work`または`StopWork`を発行 | エージェントのターン終了を待たずにrunが`Cancelled`として保存され、セッションが`Idle`に戻り、親へ中断報告が届くこと |
+| **受付の冪等性** | 同じ`request_key`と同じ内容で`send_work`を再送 | 同じ`request_id`が返り、ワークエージェントへ二重配送されないこと |
+| **再起動後の復元** | 実行中Runを残してホストを再起動 | 開いているセッションごとにワークエージェントが1体だけ残り、途絶の計時が再開されること |
+| **非可逆操作の誠実な報告** | 外部送信済み操作を含むRunを中断 | 「Undo完了」と偽らず、巻き戻せない外部操作をユーザーへ報告すること |
+| **途絶検知プロンプト注入** | 子の活動報告を90秒間意図的に停止 | 親エージェントへ進捗確認プロンプトが1回だけ注入され、親が状況確認を試みること |

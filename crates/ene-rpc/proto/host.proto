@@ -171,20 +171,11 @@ message MindIndexStatus {
   uint64 total_tokens = 5;
 }
 
-message MindConsolidationStatus {
-  string last_processed_turn_id = 1;
-  uint64 jobs_completed = 2;
-  uint64 model_calls = 3;
-  uint64 input_chars = 4;
-  optional string last_error = 5;
-}
-
 message MindView {
   string companion_id = 1;
   MindProfile profile = 2;
   MindState state = 3;
   optional MindIndexStatus index = 4;
-  optional MindConsolidationStatus consolidation = 5;
 }
 message MindUpdated {
   string companion_id = 1;
@@ -212,7 +203,7 @@ message MemoryControlRequest {
 message MemoryControlResult {
   string memory_id = 1;
   uint32 importance = 2;
-  repeated string audiences = 3;
+  string scope = 3;                 // 保存スコープ ('shared' または コンパニオンID)
   uint64 revision = 4;
 }
 
@@ -223,8 +214,7 @@ message ListMemoriesRequest {
 }
 message MemoryItem {
   string id = 1;
-  string owner = 2;
-  repeated string audiences = 3;
+  string scope = 3;                 // 保存スコープ ('shared' または コンパニオンID)
   string content = 4;
   uint32 importance = 5;
   optional string occurred_at = 6;
@@ -299,11 +289,9 @@ enum RunStatus {
   RUN_STATUS_UNSPECIFIED = 0;
   RUN_STATUS_STARTING = 1;
   RUN_STATUS_RUNNING = 2;
-  RUN_STATUS_WAITING_INPUT = 3;              // WorkInquiry または ApprovalRequest 待ち
-  RUN_STATUS_CANCELLING = 4;
+  RUN_STATUS_WAITING_INPUT = 3;              // ApprovalRequest 待ち
   RUN_STATUS_COMPLETED = 5;
   RUN_STATUS_CANCELLED = 6;
-  RUN_STATUS_CANCELLATION_UNCONFIRMED = 7;   // 停止未確認・結果不明
   RUN_STATUS_FAILED = 8;
 }
 enum WorkStatus {
@@ -317,7 +305,6 @@ enum WorkEventKind {
   WORK_EVENT_KIND_STATUS_CHANGED = 1;
   WORK_EVENT_KIND_RUN_STARTED = 2;
   WORK_EVENT_KIND_RUN_FINISHED = 3;
-  WORK_EVENT_KIND_INQUIRY_CREATED = 4;
 }
 message WorkSession {
   string id = 1;
@@ -327,27 +314,17 @@ message WorkSession {
   string created_at = 5;
   string updated_at = 6;
   string client_id = 7;             // 発注元クライアント
-  uint64 activation_revision = 8;   // 発注時の有効化revision
 }
 message RunInfo {
   string run_id = 1;
   string work_id = 2;
   RunStatus state = 3;
   Failure failure = 4;
-  optional string pending_request_id = 5;        // WAITING_INPUT の質問・承認要求
-  optional string cancellation_requested_at = 6; // CANCELLING の開始時刻
-  optional string cancellation_reason = 7;       // CANCELLATION_UNCONFIRMED の理由
-  repeated uint32 unverified_pids = 8;           // CANCELLATION_UNCONFIRMED の残存プロセス
-}
-message WorkInquiry {
-  string request_id = 1;
-  string prompt = 2;
-  repeated string choices = 3;
+  optional string pending_request_id = 5;        // WAITING_INPUT の承認要求
 }
 message WorkView {
   WorkSession session = 1;
   repeated RunInfo runs = 2;
-  repeated WorkInquiry pending_inquiries = 3;
 }
 message WorkViews { repeated WorkView items = 1; }
 message ListWorksRequest { string companion_id = 1; }
@@ -363,13 +340,6 @@ message SendWorkRequest {
   string request_key = 2;
   string text = 3;
   string client_id = 4;
-  optional string request_id = 5; // 質問への回答束縛用 (会話ツール経由等)
-}
-message AnswerInquiryRequest {
-  string work_id = 1;
-  string request_id = 2; // WorkInquiry.request_id
-  string answer = 3;     // ユーザーの回答テキスト
-  string client_id = 4;
 }
 message WorkAcceptance { string request_id = 1; }
 message StopWorkRequest { string work_id = 1; }
@@ -381,7 +351,6 @@ message WorkEvent {
     WorkStatusChanged status_changed = 4;
     WorkRunStarted run_started = 5;
     WorkRunFinished run_finished = 6;
-    WorkInquiryCreated inquiry_created = 7;
   }
 }
 message WorkStatusChanged { WorkStatus status = 1; }
@@ -390,11 +359,7 @@ message WorkRunFinished {
   RunStatus state = 1;
   optional Failure failure = 2;
   optional string pending_request_id = 3;
-  optional string cancellation_requested_at = 4;
-  optional string cancellation_reason = 5;
-  repeated uint32 unverified_pids = 6;
 }
-message WorkInquiryCreated { WorkInquiry inquiry = 1; }
 
 // Permissions and Approvals ------------------------------------------------
 
@@ -427,7 +392,6 @@ message ApprovalRequest {
   ApprovalStatus status = 7;
   string created_at = 8;
   optional string client_id = 9;             // 承認を束縛したクライアント（音声・端末能力）
-  optional uint64 activation_revision = 10;  // 束縛時の有効化revision
   optional string capability = 11;           // device_request の場合の能力名
 }
 message PendingApprovals { repeated ApprovalRequest items = 1; }
@@ -623,7 +587,6 @@ message AudioInputChunk {
   bytes pcm_data = 2; // 24kHz / 16kHz 16-bit mono PCM
   uint32 sample_rate = 3;
   bool is_companion_speaking = 4;
-  uint64 activation_revision = 5; // 送信時の有効化revision
 }
 message TranscriptionEvent {
   string transcription_id = 1;
@@ -633,13 +596,11 @@ message TranscriptionEvent {
 }
 message SubscribeAudioRequest {
   string client_id = 1;
-  uint64 activation_revision = 2; // 購読時の有効化revision
 }
 message AudioOutputEvent {
   oneof event {
     AudioChunkEnvelope chunk = 1;
     FlushControl flush = 2;
-    SentenceSkipped skipped = 3;
     UtteranceFinished finished = 4;
   }
 }
@@ -662,35 +623,11 @@ message FlushControl {
   uint64 flush_generation_id = 2;
   FlushReason reason = 3;
 }
-message SentenceSkipped {
-  string utterance_id = 1;
-  uint64 generation_id = 2;
-  uint32 sequence_no = 3;
-  string reason = 4;
-}
 message UtteranceFinished {
   string utterance_id = 1;
   uint64 generation_id = 2;
   uint32 total_sentences = 3;
 }
-message PlaybackStatusReport {
-  string utterance_id = 1;
-  uint64 generation_id = 2;
-  enum Status {
-    STATUS_UNSPECIFIED = 0;
-    PLAYBACK_COMPLETED = 1;
-    PLAYBACK_INTERRUPTED = 2;
-    PLAYBACK_FAILED = 3;
-  }
-  Status status = 3;
-  uint32 completed_sentence_count = 4;
-  repeated uint32 played_sequence_nos = 5;
-  repeated uint32 skipped_sequence_nos = 6;
-  uint64 completed_pcm_bytes = 7;
-  string client_id = 8;
-  uint64 activation_revision = 9; // 報告対象の発話を所有した有効化revision
-}
-message ReportPlaybackStatusResponse { bool acknowledged = 1; }
 
 // Client Service -----------------------------------------------------------
 
@@ -740,13 +677,11 @@ message SetCapabilitiesRequest {
 message ActivationRequest {
   string companion_id = 1;
   string client_id = 2;
-  uint64 expected_revision = 3;
   bool release = 4;
 }
 message Activation {
   string companion_id = 1;
   optional string client_id = 2;
-  uint64 revision = 3; // 新しいactivation_revision
 }
 message ClientUpdated { Client client = 1; }
 enum DeviceOperationStatus {
@@ -763,7 +698,6 @@ message DeviceOperation {
   string input = 3;         // input_schema に適合する JSON object text
   string subscription_id = 4;
   string client_id = 5;             // 受付時に束縛した対象クライアント
-  uint64 activation_revision = 6;   // 受付時の有効化revision
   optional string work_id = 7;      // 手からの操作の場合のWorkSession
 }
 message DeviceReady { string subscription_id = 1; }
@@ -779,7 +713,6 @@ message DeviceOperationResult {
   bool success = 3;
   string output = 4; // output_schema に適合する JSON object text
   optional Failure failure = 5;
-  uint64 activation_revision = 6; // 結果を返すクライアントの有効化revision
 }
 message DeviceOperationState {
   string operation_id = 1;
@@ -797,7 +730,6 @@ message HostEvent {
 message PerceptionEvent {
   string client_id = 1;
   string timestamp = 2;
-  uint64 activation_revision = 6; // 送信時の有効化revision
   oneof event {
     ActiveWindowChanged active_window = 3;
     UserActivityState user_activity = 4;
@@ -864,10 +796,9 @@ service SettingsService {
 service WorkService {
   rpc ListWorks(ListWorksRequest) returns (WorkViews);
   rpc GetWork(WorkRequest) returns (WorkView);
-  // StartWork時のclient_idとactivation_revisionをWorkSessionへ束縛する。
+  // StartWorkは現在のアクティブクライアントを対象端末として束縛する。
   rpc StartWork(StartWorkRequest) returns (WorkSession);
   rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
-  rpc AnswerInquiry(AnswerInquiryRequest) returns (WorkAcceptance);
   rpc StopWork(StopWorkRequest) returns (Empty);
   rpc CloseWork(WorkRequest) returns (Empty);
 }
@@ -875,7 +806,6 @@ service WorkService {
 service VoiceService {
   rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent); // HTTP/2
   rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
-  rpc ReportPlaybackStatus(PlaybackStatusReport) returns (ReportPlaybackStatusResponse);
 }
 
 service ClientService {

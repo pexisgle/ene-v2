@@ -394,16 +394,14 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
         })
         .await
         .expect("a client");
-    let activation = clients
+    clients
         .activate(ene_rpc::ActivationRequest {
             companion_id: companion,
             client_id: "c1".into(),
             ..Default::default()
         })
         .await
-        .expect("the client becomes active")
-        .view()
-        .revision;
+        .expect("the client becomes active");
     let mut call = voice
         .stream_audio_input()
         .await
@@ -412,7 +410,6 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
         client_id: "c1".into(),
         pcm_data: vec![0; 1_024],
         sample_rate: 24_000,
-        activation_revision: activation,
         ..Default::default()
     })
     .await

@@ -23,7 +23,6 @@ pub(crate) mod permission;
 pub(crate) mod providers;
 pub(crate) mod resources;
 pub(crate) mod settings;
-pub(crate) mod staged;
 pub(crate) mod tools;
 pub(crate) mod voice;
 
@@ -176,7 +175,6 @@ impl Runtime {
                         mind::MindPlugin,
                         mcp::McpPlugin,
                         autonomy::AutonomyPlugin,
-                        staged::StagedPlugin,
                         compaction::CompactionPlugin,
                         voice::VoicePlugin,
                     ));

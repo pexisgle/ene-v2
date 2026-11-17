@@ -35,7 +35,7 @@ for _ in $(seq 1 200); do
 done
 
 rpc ene.host.v1.SettingsService/UpdateSettings "{\"expectedRevision\":\"1\",\"connections\":[\
-{\"id\":\"openrouter\",\"name\":\"llm\",\"enabled\":true,\"expectedRevision\":\"0\",\"kind\":\"CONNECTION_KIND_LLM\",\"config\":{\"llm\":{\"endpoint\":{\"adapter\":\"openrouter\",\"endpoint\":\"https://openrouter.ai/api/v1\"},\"modelIds\":[\"$model\"]}}}}]}" >/dev/null
+{\"id\":\"openrouter\",\"name\":\"llm\",\"enabled\":true,\"expectedRevision\":\"0\",\"kind\":\"CONNECTION_KIND_LLM\",\"config\":{\"llm\":{\"endpoint\":{\"adapter\":\"openrouter\",\"endpoint\":\"https://openrouter.ai/api/v1\"},\"modelIds\":[\"$model\"]}}}]}" >/dev/null
 companion=$(rpc ene.host.v1.HostService/CreateCompanion "{\"name\":\"Mio\",\"mind\":\"kind\",\"assignments\":{\"companion\":{\"connectionId\":\"openrouter\",\"modelId\":\"$model\"},\"task\":{\"connectionId\":\"openrouter\",\"modelId\":\"$model\"}}}" | field 'd["id"]')
 echo "companion: $companion"
 
@@ -50,24 +50,16 @@ done
 [ -n "$memory" ]; check 'the model stored a memory through mind_update' $?
 rpc ene.host.v1.HostService/ControlMemory "{\"companionId\":\"$companion\",\"memoryId\":\"$memory\",\"action\":\"MEMORY_ACTION_FORGET\"}" | grep -q "$memory"; check 'ControlMemory forgets it' $?
 
-echo '=== a work run that asks a question'
-work=$(rpc ene.host.v1.WorkService/StartWork "{\"companionId\":\"$companion\",\"title\":\"inquiry\",\"instruction\":\"最初に report ツールで kind='question', content='好きな色は？' を送ってください。回答が届いたら kind='completed', content='回答は<色>です' で完了を報告してください。\",\"clientId\":\"\"}" | field 'd["id"]')
+echo '=== a work run that reports completion'
+work=$(rpc ene.host.v1.WorkService/StartWork "{\"companionId\":\"$companion\",\"title\":\"report\",\"instruction\":\"report ツールで kind='completed', content='終わりました' を送ってください。\",\"clientId\":\"\"}" | field 'd["id"]')
 [ -n "$work" ]; check 'StartWork creates a session' $?
-request=''
-for _ in $(seq 1 90); do
-  request=$(rpc ene.host.v1.WorkService/GetWork "{\"workId\":\"$work\"}" | field 'd["pendingInquiries"][0]["requestId"] if d.get("pendingInquiries") else ""')
-  [ -n "$request" ] && break
-  sleep 1
-done
-[ -n "$request" ]; check 'the hand asks a question' $?
-ok ene.host.v1.WorkService/AnswerInquiry "{\"workId\":\"$work\",\"requestId\":\"$request\",\"answer\":\"青です\",\"clientId\":\"\"}"; check 'AnswerInquiry answers it' $?
 state=''
 for _ in $(seq 1 90); do
   state=$(rpc ene.host.v1.WorkService/GetWork "{\"workId\":\"$work\"}" | field '(d.get("runs") or [{}])[-1].get("state","")')
   [ "$state" = "RUN_STATUS_COMPLETED" ] && break
   sleep 1
 done
-[ "$state" = "RUN_STATUS_COMPLETED" ]; check 'the run completes after the answer' $? "($state)"
+[ "$state" = "RUN_STATUS_COMPLETED" ]; check 'the run completes through report' $? "($state)"
 rpc ene.host.v1.WorkService/ListWorks "{\"companionId\":\"$companion\"}" | grep -q "$work"; check 'ListWorks shows the session' $?
 sent=$(rpc ene.host.v1.WorkService/SendWork "{\"workId\":\"$work\",\"requestKey\":\"send-1\",\"text\":\"追加の指示です。report で kind='completed', content='追加も完了' を送ってください。\",\"clientId\":\"\"}")
 follow=$(echo "$sent" | field 'd["requestId"]')
@@ -82,7 +74,7 @@ ok ene.host.v1.WorkService/CloseWork "{\"workId\":\"$other\"}"; check 'CloseWork
 
 echo '=== a confirm-gated device operation'
 rpc ene.host.v1.ClientService/RegisterClient '{"id":"c1","name":"desk","platform":"linux","capabilities":["body.motion"],"capabilitySpecs":[{"name":"body.motion","toolName":"body_motion","description":"Move the body.","inputSchema":"{\"type\":\"object\",\"required\":[\"motion\"],\"properties\":{\"motion\":{\"type\":\"string\"}}}","approval":"CAPABILITY_APPROVAL_CONFIRM"}]}' >/dev/null
-activation=$(rpc ene.host.v1.ClientService/Activate "{\"companionId\":\"$companion\",\"clientId\":\"c1\"}" | field 'd["revision"]')
+activation=$(rpc ene.host.v1.ClientService/Activate "{\"companionId\":\"$companion\",\"clientId\":\"c1\"}" | field 'd["clientId"]')
 [ -n "$activation" ]; check 'the device becomes active' $?
 stream ene.host.v1.ClientService/DeviceStream '{"id":"c1"}' --count 100 --timeout 150 >"$run/evidence/frames.jsonl" &
 reader=$!
@@ -103,8 +95,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [ -n "$operation" ]; check 'the device receives the operation' $?
-revision=$(grep -o '"activationRevision":"[^"]*"' "$run/evidence/frames.jsonl" 2>/dev/null | head -1 | cut -d'"' -f4)
-ok ene.host.v1.ClientService/CompleteOperation "{\"clientId\":\"c1\",\"operationId\":\"$operation\",\"success\":true,\"output\":\"{}\",\"activationRevision\":\"$revision\"}"; check 'CompleteOperation reports the result' $?
+ok ene.host.v1.ClientService/CompleteOperation "{\"clientId\":\"c1\",\"operationId\":\"$operation\",\"success\":true,\"output\":\"{}\"}"; check 'CompleteOperation reports the result' $?
 rpc ene.host.v1.ClientService/GetOperation "{\"id\":\"$operation\"}" | grep -q 'DEVICE_OPERATION_STATUS_COMPLETED'; check 'the operation is completed' $?
 kill -TERM "$reader" 2>/dev/null
 

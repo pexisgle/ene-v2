@@ -19,7 +19,7 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │ 【クライアント層】                                                          │
   │   ・表現（Body）: クライアント固有の描画・モーション・リップシンク         │
   │   ・知覚（Eyes）: プラットフォーム固有のイベント収集と知覚イベント送信     │
-  │   ・音声入出力: クライアント所有のマイク・スピーカーと再生進捗報告         │
+  │   ・音声入出力: クライアント所有のマイク・スピーカーと発話の再生           │
   │   ・能力宣言: RegisterClient / capability_specs による自己申告             │
   └──────────────────────────────┬─────────────────────────────────────────────┘
                                  │ Connect-RPC（能力宣言・DeviceStream・音声）
@@ -37,22 +37,23 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   │                   │                                    │                   │
   │                   ▼ start_work / send_work             ▼ 記憶・設定アクセス │
   │   ┌──────────────────────────────┐     ┌───────────────────────────────┐   │
-  │   │ 「手」（Hands / 作業相手）    │     │ データベース（SQLite）         │   │
-  │   │   ・WorkSession と Run の分離│     │   ・rusqlite bundled (WAL)    │   │
-  │   │   ・親子停止伝播の非結合     │     │   ・ECSスレッド直接同期アクセス│   │
-  │   │   ・同一キャラクター一人称対話│    │   ・FTS5 + BLOBコサイン (RRF) │   │
-  │   │   ・定期進捗報告と途絶検知   │     │   ・記憶関係（memory_edges）  │   │
-  │   │   ・30秒タイムアウト強制終了 │     │   ・ACIDリレーショナル永続化  │   │
+  │   │ 「手」（Hands / 作業）       │     │ データベース（SQLite）        │   │
+  │   │ ・WorkSessionごとに1体       │     │ ・rusqlite bundled (WAL)      │   │
+  │   │ ・ホスト内のRigエージェント  │     │ ・ECSスレッド直接同期アクセス │   │
+  │   │ ・ACPはプラグイン側でラップ  │     │ ・FTS5 + BLOBコサイン (RRF)   │   │
+  │   │ ・reportで進捗と完了を報告   │     │ ・記憶関係（memory_edges）    │   │
+  │   │ ・Hermes方式スキル蓄積       │     │ ・ACIDリレーショナル永続化    │   │
+  │   │ ・同一キャラクター一人称     │     │                               │   │
   │   └───────────────┬──────────────┘     └───────────────────────────────┘   │
   │                   │                                                        │
-  │                   ▼ サンドボックス実行                                      │
+  │                   ▼ 判定パイプライン                                        │
   │   ┌────────────────────────────────────────────────────────────┐           │
   │   │ セキュリティ・実行境界                                      │           │
-  │   │   ・OSネイティブ隔離（Linux Landlock/bwrap, Windows App-   │           │
-  │   │     Container/Job, macOS Seatbelt, cap-std）               │           │
-  │   │   ・非対応環境での明示的警告・承認による縮退実行           │           │
-  │   │   ・多層判定パイプライン（機械的ルール照合 ➔ AI補助判定）   │           │
-  │   │   ・マルチモーダル承認（音声承認は同時1件限定 / 画面カード） │           │
+  │   │   ・3段階判定（機械的許可 ➔ Decision API＋自由文ポリシー） │           │
+  │   │     Sandbox非必須・自由文ポリシー基準で判定                │           │
+  │   │   ・承認の最小化（会話から「頭」が代理承認可能）           │           │
+  │   │   ・機械的ルール ➔ Decision API ➔ ユーザー承認の3段階   │           │
+  │   │   ・画面承認カード＋「頭」による代理承認ツール              │           │
   │   └────────────────────────────────────────────────────────────┘           │
   └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -63,9 +64,9 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 
 | 境界 | 主な構成要素 | 責務と役割 |
 | :--- | :--- | :--- |
-| **「頭」<br>(Brain / 親)** | `rig-ecs` Bevy ECS 単一ループ<br>（`SessionLogPlugin` ＋ `DirStore`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・クライアントが宣言した能力に応じたツール公開（例: `body_motion`, `set_eye_watch`, クライアント固有ツール）<br>・`device_request`による端末能力の実行委譲<br>・実務タスクの「手」への自然言語委託（`start_work`, `send_work`, `list_works`, `stop_work`）<br>・自律スケジュール管理（`schedule_create`, `schedule_list`, `schedule_cancel`） |
-| **「手」<br>(Hands / 子)** | WorkSession / Run<br>MCP（`rig-rmcp`） / ACP<br>（WasmはPhase 2） | ・自然言語指示に基づく実務タスクの自律遂行（軽量調査〜重い開発）<br>・同一キャラクターとしての一人称報告（「私が今〜しているよ」）<br>・定期的な状況報告（Activity）と進捗途絶時の自己通知<br>・中断要求（`CancellationRequested`）を受けたクリーンアップと30秒タイムアウト強制終了 |
-| **「目」<br>(Eyes / 知覚)** | クライアントセンサー<br>知覚要約生成器 | ・プラットフォーム固有イベント（フォーカス切替、ファイル保存等）の収集（デスクトップ実装例: OSネイティブフック）<br>・無操作時のアイドルサンプリング（15〜30秒間隔）<br>・知覚イベントを簡潔なPerception Summaryへ要約<br>・動的Watcher条件合致時の優先割り込み通知（Priority Interrupt） |
+| **「頭」<br>(Brain / 親)** | `rig-ecs` Bevy ECS 単一ループ<br>（`SessionLogPlugin` ＋ `DirStore`） | ・ユーザーとの会話、ロールプレイ、感情・関係性の維持<br>・プラガブル音声パイプライン（先行並行合成、割り込み停止）<br>・クライアントが宣言した能力に応じたツール公開（例: `body_motion`, クライアント固有ツール）<br>・`device_request`による端末能力の実行委譲<br>・実務タスクの「手」（WorkSession）への自然言語委託（`start_work`, `send_work`, `stop_work`）<br>・自律スケジュール管理（`schedule_create`, `schedule_list`, `schedule_cancel`） |
+| **「手」<br>(Hands / ワークエージェント)** | ホスト内のRigエージェント（`WorkSession`ごとに1体）<br>MCP（`rig-rmcp`）<br>（ACPはプラグイン側でラップ） | ・`WorkSession`ごとの実務タスクの非同期実行<br>・`report`による途中報告・完了報告（ホストがセッションとRunを束縛）<br>・Hermes方式（`SKILL.md`）による手順学習 |
+| **「目」<br>(Eyes / 知覚評価)** | 軽量高速モデル<br>＋クライアントセンサー | ・入力状況・ウィンドウ情報・時間経過の常時観測<br>・価値のある変化だけを選別して「頭」へ通知 |
 | **「体」<br>(Body / 表現)** | クライアント表現エンジン<br>（デスクトップ実装例: `apps/ene-avatar`）<br>音声ストリーミング | ・クライアント固有の表現エンジンによるアバター描画（デスクトップ実装例: 透過ウィンドウ + Bevy + VRM）<br>・クライアント側PCM音量（RMS）によるゼロ遅延口パク（リップシンク）<br>・文単位またはストリーミングTTS再生と、割り込み時の旧世代バッファ即時破棄（Flush） |
 
 > [!NOTE]
@@ -79,19 +80,19 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 | | `mind_read(memory_id: String)` | 特定記憶の詳細と由来コンテキストを閲覧 |
 | | `mind_update(action: MindUpdateAction)` | 記憶の追加・訂正・忘却（想起優先度の引き下げ） |
 | **作業委譲 (Hands)** | `start_work(instruction: String, work_id: Option<String>)` | 「手」（WorkSession）へ実務タスクを発注（新規または既存継続） |
-| | `send_work(work_id: String, text: String, request_id: Option<String>)` | 進行中タスクへの追加入力や未決質問（`WorkInquiry`）への回答 |
-| | `list_works()` | 担当するWorkSessionの一覧・進捗状況を取得 |
-| | `stop_work(work_id: String, reason: Option<String>)` | 進行中タスクの中断を要求 |
+| | `send_work(work_id: String, text: String)` | 進行中タスクへの追加入力や方針変更の伝達 |
+| | `stop_work(work_id: String)` | 進行中タスクの中断を要求 |
+| **承認 (Approval)** | `resolve_approval(request_id: String, decision: String)` | ユーザーの発言から「頭」が代理で承認を確定 |
 | **端末・身体・知覚 (Client capabilities)** | `device_request(capability: String, input: Object)` | 宣言・許可された端末能力を実行する。対象端末はホストが受付時に束縛し、操作単位の`Stage::Gate`と承認を通す。結果は後続のモデル呼び出しで受け取る |
 | | `body_motion(motion: String, expression: Option<String>)` | `body.motion`を宣言し許可されたアクティブクライアントの表現を指示（スキーマとプリセットはクライアントが定義） |
-| | `set_eye_watch(target_pattern: String, match_kind: String, notify_on: String, enabled: bool)` | `eye.watch`を宣言し許可されたアクティブクライアントの知覚センサーに監視ルールを設定（スキーマはクライアントが定義） |
-| **共通** | `noop()` | 何も行動しない（沈黙・見守り。自律tickの空ターンはログから自動巻き戻し） |
+
+| **共通** | `noop()` | 何も行動しない（沈黙・見守り） |
 | **自律スケジュール** | `schedule_create(title: String, instruction: String, run_at: Option<String>, cron_expr: Option<String>)` | タイマーや定期リマインドを登録 |
 | | `schedule_list()` | 登録済みスケジュール一覧を取得 |
 | | `schedule_cancel(schedule_id: String)` | スケジュールを解除 |
 
 > [!NOTE]
-> `device_request`は汎用の能力ディスパッチャとして常時登録される。`body_motion`、`set_eye_watch`、および`window_perch`のようなクライアント固有ツールは、ホストが固定で持つものではない。アクティブクライアントが`RegisterClient` / `SetCapabilities`で宣言した`capability_specs`（`tool_name`、`input_schema`、`presets`）に基づいて動的に登録・解除され、宣言または許可がないクライアントではモデルへ公開されない。ホストは能力名・スキーマ・プリセットだけを保持し、描画・OSフック・ギミックの実装詳細を解釈しない。親（頭）は会話中の軽量な端末参照、手（WorkSession）は実務上の端末操作に使い、どちらも対象端末を引数で指定しない。
+> `device_request`は汎用の能力ディスパッチャとして常時登録される。`body_motion`等のクライアント固有ツールは、アクティブクライアントが`RegisterClient`で宣言した`capability_specs`に基づいて動的に登録・解除される。ホストはクライアント実装の詳細を知らず、現在アクティブな端末へ配送する。
 
 > [!NOTE]
 > 現在日時は `PrepareSystems::Edit` により毎ターン最新が Dynamic Tail としてインメモリ注入されるためツール呼び出しは不要。また、外部Web検索は「手」（WorkSession）のツールまたは外部MCPサーバーへ委譲する。
@@ -107,14 +108,14 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
     - 先行TTS: `Stage::Review`（AgentPass 内）で `MessageReader<StreamDelta>` を購読し、`Query<(&Effect, &CallOf), With<TurnCall>>` により通常ターン呼び出しをフィルタし、`matches!(delta.event, StreamEvent::Text { .. })` で思考トークン（Reasoning）を除外した上で、親コンパニオンの発話テキストのみを文単位（`。`、`！`、`？`、改行）で合成キューへ送出
     - 承認待機: `Stage::Gate` でポリシー判定し、要確認操作には `commands.spawn(HoldOf(call_entity))` を投入してReActループを保留。RPC（`SettingsService.SubmitApproval`）でユーザー回答を受け取り、承認時はホスト定義の `Approved` マーカーを付与し、拒否時は `Decider::Person` で `Outcome::refused` を確定し、`HoldOf` を解除して処理再開。承認結果は `host.sqlite3` の `approval_requests` テーブルへ保存
   - 会話ログの正本は `SessionLogPlugin` ＋ `DirStore`（`<state_dir>/rig/`）によりディスクに保存。
-  - 外側タスクは音声ストリーミング入出力、無操作アイドル監視、複数コンパニオン調停、ACP WorkSession接続維持を担当。
+  - 外側タスクは音声ストリーミング入出力、途絶検知、複数コンパニオン調停を担当。
 - **追記型線形ログ ＋ `rig-memory` によるCompaction**:
   - 会話の生ログおよび要約スナップショット（Aside `ene.summary`）、受理レシート（`Conversation::add_aside`）は公式の `DirStore`（`SessionLogPlugin`）に完全保存。長期エピソード記憶および心は SQLite（`host.sqlite3`）に永続化し、2相復旧を原理的に排除。
-  - アイドル検知（ユーザー無操作60秒以上、独り言は除外）でバックグラウンドCompactionを実行。
-  - Compaction中にユーザー発話があった場合、Compaction完了を待たず直前のSnapshotから即座に応答を返し、実行中だった要約タスクは安全にキャンセル・破棄して次回アイドル時へ延期。ハード強制閾値到達時も同期要約による会話停止は避け、緊急窓切り詰めを優先適用して応答テンポを維持。
-- **作業エージェントのセッション接続維持とライフサイクル分離**:
-  - `WorkSession ≒ ACP Session` としてプロセス接続を維持。Run（指示ごとの実行）の中断はACP標準の `session/cancel` で行い、プロセス強制終了はセッション終了時や暴走時のみ実施。
-  - **停止伝播の非結合**: 継続稼働する `WorkSession` は親の `SpawnedBy` ではなく独立エンティティとしてWorld内に生成し、ユーザーの音声割り込み（Barge-in）による会話ターンの停止が作業セッションへ伝播して道連れ終了する事故を防止。
+  - トークン使用率が閾値を超えたタイミング（ターン境界・区切り）でバックグラウンドCompactionを実行し、同時に記憶整理・関係性更新・感情/成長の振り返りをまとめて処理する。
+- **作業エージェントのライフサイクルと停止の分離**:
+  - `WorkSession`ごとにホスト内でワークエージェントを1体だけ生成し、Runのたびにrun_idを束縛し直す。エージェントを引退させるのはセッションのクローズ、開始失敗、ホスト再起動だけ。
+  - 停止は`StopTurn`を送り、その場でrunを`Cancelled`として記録する。待機状態やプロセス群の強制終了は持たない。
+  - **停止伝播の非結合**: ワークエージェントは親の子ではなく独立エンティティとしてWorld内に生成し、ユーザーの音声割り込み（Barge-in）による会話ターンの停止が作業セッションへ伝播して道連れ終了する事故を防止。
 - **安全マージンを設けたコンテキスト上限検証と縮退**:
   - 送信直前に `next_request_tokens + OUTPUT_MARGIN <= Context Window` を安全マージンを考慮して機械的に検証。
   - 要約失敗時は古いログをアクティブプロンプト窓から一時的に切り詰めて対話を継続。
@@ -127,10 +128,10 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
   - C言語SQLiteを静的リンクして単一ファイル完結。ECSループスレッドで同期接続を直接保持し、1ms未満のPK検索・FTS5・BLOBコサイン類似度・ルール照合を遅延なく実行。重い記憶整理や埋め込み生成のみTokioバックグラウンドタスクへ分離。
 - **エピソード記憶（`MemoryRecord`）**:
   - `rowid` を明示的 INTEGER PRIMARY KEY とし、FTS5外部コンテンツテーブルとの整数参照関係を不変に保証。
-  - `owner`（作成者コンパニオン不変保持）、`audiences`（共有リスト）、`importance`（0〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`content_revision`、`embedding` を格納。
+  - `scope`（共有スコープまたはコンパニオンID）、`importance`（0〜10: 想起優先度）、`occurred_at`、`last_accessed_at`（未引用時はnull）、`memory_revision`、`content_revision`、`embedding` を格納。
   - 1つの発話から複数事実を独立レコードとして分割保存。忘却時は物理削除や除外フラグではなく想起優先度（`importance`）の引き下げとして扱い、想起スコアを自然に低下させる（過去ログの客観記録は保持）。
   - ハイブリッド検索: FTS5 BM25（部分トークンOR結合）と ベクトル検索（Rust内スライスコサイン類似度）をRust側でReciprocal Rank Fusion（RRF, $k=60$）統合し、スコアを $0.0 \sim 1.0$ に正規化。`embedding_model` 複合識別子により適合する埋め込み空間のみを照合。
-  - **増分自動整理**: 単一フライトガード（高々1件）のもと、`consolidation_state.last_processed_turn_id` より後の新規ターンのみを単一方向パイプラインで増分走査し、既存記憶の照合（更新 vs 新規分割作成）と開始カーソル一致検証（`WHERE last_processed_turn_id = :job_start_turn_id`）を伴う原子的コミットにより、同一ターン範囲の二重コミットを完全に排除。
+  - **Compaction連動の自動整理**: Compaction実行時に同じ会話ログを振り返り、エピソード記憶の抽出・統合、`memory_edges` の更新、感情・成長の更新を一括で処理する。
   - 想起スコア計算式：$\text{Score} = \min(1.0, \text{Importance}/0.3) \times (0.5 \cdot \text{Relevance} + 0.3 \cdot \text{Importance} + 0.2 \cdot e^{-0.05 \Delta t})$（$\text{Importance} = \text{importance}/10.0$、$\Delta t$ は `COALESCE(last_accessed_at, occurred_at, recorded_at)` からの経過日数。自動想起は `importance >= 2` フィルタと連動）
   - **引用ガード**: 単に検索されただけでは `last_accessed_at` を更新せず、明示操作（`cited_in`）または整理モデル抽出後にホストがプロンプト注入実績と照合検証した推定利用（`estimated_cited_in`）の場合に限り `last_accessed_at` を更新し、想起自己汚染を低減。
   - **Pinned Memory制約**: 重要度10であっても、訂正状態や優先度引き下げ状態を必ず検証し、専用トークン予算（1,000トークン）内で注入。
@@ -138,17 +139,16 @@ eneは、デスクトップに常駐するキャラクターとの対話から�
 ### 3. 音声対話パイプライン
 - **プラガブルエンジン適応**:
   - VOICEVOX等の文単位HTTP API（文ごとに非同期合成し再生キューへ投入）、ストリーミングエンジン、双方向Live APIの各特性に合わせたアダプター構成。標準音声形式は 24kHz 16-bit mono PCM。
-- **世代管理と順序保証**:
-  - `generation_id` による割り込み時の旧世代チャンク破棄（FlushBuffer）。
-  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止、実再生進捗報告による未伝達部分の記録整合、再生中音声フレーム除外と再生停止後新規発話束縛によるエコー誤承認防止）。
-  - 文単位TTSの並行合成時における `sequence_no` 整列再生、合成失敗時の明示的 `SentenceSkipped` 通知による待機解除、および発話送信完了（`UtteranceFinished`）とクライアント再生完了（`ReportPlaybackStatus(COMPLETED)`）の二段階完了契約による再生途中打ち切り・ハング防止。
+- **世代管理と送出順序**:
+  - `generation_id` による割り込み時の旧世代チャンク破棄（`FlushControl`）。
+  - クライアント側での単一音声ストリーム物理保証（新発話チャンク受信時の旧音声即時停止、旧発話IDの完全失効による逆戻り防止）。
+  - `UtteranceFinished`を発話の最後の音声イベントとし、ターン終了と全文章の確定後に送る。クライアントは再生完了を報告しない。
 - **複数コンパニオン調停**:
   - 全員同報配信 ＋ 自律該当性判断。日常対話の譲り合いはLLM自律協調。
-  - 不可逆操作を伴う同一タスクの作業委託（`start_work`）は、ホストの原子的受付登録（`try_claim_delegation`）により先着1件のみが実行権を獲得し、多重実行を決定論的に防止。
-  - 音声フロアはホスト上での発話テキスト生成（文ストリーム）先着順。会話リレー（`speech_completed`）は最大5往復で自動打ち切り。クライアント再生完了（`ReportPlaybackStatus`）またはタイムアウトによる安全なフロア解放（遅延完了報告は破棄）。
+  - 不可逆操作を伴う同一タスクの作業委託（`start_work`）は、ホストの原子的受付登録（`delegation::try_claim`）により先着1件のみが実行権を獲得し、多重実行を決定論的に防止。
+  - 音声フロアはホスト上での発話生成先着順とし、ターン終了で解放する。複数コンパニオンが同一画面に常駐して自然に掛け合う。
 
-### 4. セキュリティとSandbox
-- **OSネイティブ隔離**: Linux（Landlock/bwrap）、Windows（AppContainer/Job Objects）、macOS（Seatbelt）によるプロセス隔離。
-- **非対応環境の縮退**: Sandboxが使えない環境では、非隔離実行である旨を警告・ユーザー承認を得てから実行。
-- **判定パイプライン**: ハード禁止/毎回確認 ➔ 機械的ルール照合 ➔ LLM補助判定 ➔ ユーザー承認 ➔ 実行直前検証の多層防御。
-- **承認要求の不変束縛**: 引数ハッシュを束縛し、引数改変時は承認失効。音声承認は同時に1件のみ有効。
+### 4. セキュリティと承認
+- **3段階判定**: 機械的な許可ルール ➔ Decision API（安全確認＋自由文ポリシー判定）➔ ユーザーの承認、の順でユーザー承認を最小限に抑える。
+- **「頭」による代理承認**: 会話文脈でユーザーが許可したと「頭」が判断した場合、`resolve_approval` ツールで承認を確定できる。
+- **OSネイティブSandboxは持たない**: `process-wrap`は子プロセスの起動・終了とプロセスグループの管理だけを行い、隔離境界を持たない。安全性は判定パイプラインと承認で担保する。

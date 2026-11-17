@@ -4,17 +4,18 @@
 //! ordinary tool registered with [`World::spawn_tool`]. Several companions can
 //! share one tool definition: the definition is published once when every
 //! declaration of the name agrees on the model-facing description and input
-//! schema, and each active companion keeps its own binding (its client
-//! generation and capability) behind that name. A declaration that disagrees
-//! is an explicit conflict, never a silently chosen winner.
+//! schema, and each active companion keeps its own binding (its active client
+//! and capability) behind that name. A declaration that disagrees is an
+//! explicit conflict, never a silently chosen winner.
 //!
 //! The handler runs off the host thread and has no access to the ECS world, so
 //! it forwards only the effect id, the tool name and the input. The host thread
 //! drains those calls in `Update`: it finds the call's gate binding, resolves
 //! the calling companion from the call entity (`ForAgent` plus
-//! `CompanionAgent`), revalidates the client generation, and answers the
-//! handler through a oneshot. A call whose binding is missing, whose agent is a
-//! hand, or whose client generation moved is refused instead of dispatched.
+//! `CompanionAgent`), revalidates the bound client, and answers the handler
+//! through a oneshot. A call whose binding is missing, whose agent is a hand,
+//! or whose bound client no longer declares the capability is refused instead
+//! of dispatched.
 //!
 //! Waiting follows the documented distinction (`docs/api.md` §クライアント能力):
 //! `device_request` is result-waiting and keeps its [`Waiting`] entry until the
@@ -50,12 +51,11 @@ const QUEUE: usize = 64;
 
 const WORK_AGENT_TOOLS: &[&str] = &["device_request", "report"];
 
-/// One active companion/client generation a shared tool dispatches for.
+/// One active companion/client a shared tool dispatches for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CapabilityBinding {
     pub(crate) companion_id: String,
     pub(crate) client_id: String,
-    pub(crate) activation_revision: u64,
     /// The capability this client declares for the shared tool name.
     pub(crate) capability: String,
 }
@@ -68,7 +68,7 @@ pub(crate) struct CapabilityBinding {
 pub(crate) struct CapabilityTool {
     /// The declaration the definition was built from.
     pub(crate) spec: CapabilitySpec,
-    /// Every active companion/client generation this definition serves.
+    /// Every active companion/client this definition serves.
     pub(crate) bindings: Vec<CapabilityBinding>,
 }
 
@@ -199,7 +199,6 @@ fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
             let binding = CapabilityBinding {
                 companion_id: activation.companion_id.clone(),
                 client_id: client_id.clone(),
-                activation_revision: activation.revision,
                 capability: spec.name.clone(),
             };
             match by_name.get(&name) {
@@ -450,13 +449,12 @@ pub(crate) fn drain(world: &mut World) {
 }
 
 /// The declaration a calling parent's bound client carries for `tool_name`,
-/// when the tool is published for that exact client generation. The gate uses
-/// this before it binds a capability tool call; the dispatcher uses it again
-/// before accepting the operation.
+/// when the tool is published for that client. The gate uses this before it
+/// binds a capability tool call; the dispatcher uses it again before accepting
+/// the operation.
 pub(crate) fn tool_spec_for(
     world: &mut World,
     client: &Client,
-    activation_revision: u64,
     tool_name: &str,
 ) -> Result<Option<CapabilitySpec>> {
     let published = {
@@ -469,11 +467,13 @@ pub(crate) fn tool_spec_for(
     let Some((definition, tool)) = published else {
         return Ok(None);
     };
-    if !tool.bindings.iter().any(|binding| {
-        binding.client_id == client.id && binding.activation_revision == activation_revision
-    }) {
+    if !tool
+        .bindings
+        .iter()
+        .any(|binding| binding.client_id == client.id)
+    {
         return Err(HostError::Conflict(
-            ("client_moved: the capability tool is not published for the bound generation").into(),
+            ("the capability tool is not published for the bound client").into(),
         ));
     }
     let Some(spec) = client
@@ -513,33 +513,19 @@ fn forward(world: &mut World, request: &CapabilityCall) -> std::result::Result<S
     // A capability tool is offered to the parent; a hand can only use the
     // generic `device_request` dispatcher. The calling companion comes from
     // the call's agent, not from the publication that served several
-    // companions; its bound client must still be the one the gate bound.
-    let Some(companion) = world.get::<CompanionAgent>(agent) else {
+    // companions; its bound client must still be the client holding the tool.
+    if world.get::<CompanionAgent>(agent).is_none() {
         return Err("capability tools are offered to the parent only".into());
-    };
-    let companion_id = companion.companion_id.clone();
-    let store = world.resource::<Store>().clone();
-    let current = store
-        .target(&companion_id, None)
-        .map_err(|error| error.to_string())?;
-    if current.as_ref() != Some(&(binding.client_id.clone(), binding.activation_revision)) {
-        return Err(
-            "client_moved: the active client changed before the operation was dispatched".into(),
-        );
     }
+    let store = world.resource::<Store>().clone();
     let Some(client) = store
         .client(&binding.client_id)
         .map_err(|error| error.to_string())?
     else {
         return Err("the bound client is not registered".into());
     };
-    let Some(spec) = tool_spec_for(
-        world,
-        &client,
-        binding.activation_revision,
-        &request.tool_name,
-    )
-    .map_err(|error| error.to_string())?
+    let Some(spec) =
+        tool_spec_for(world, &client, &request.tool_name).map_err(|error| error.to_string())?
     else {
         return Err(format!(
             "capability `{}` is no longer declared",
@@ -549,8 +535,8 @@ fn forward(world: &mut World, request: &CapabilityCall) -> std::result::Result<S
     if spec.name != binding.capability {
         return Err("the capability no longer matches the accepted operation".into());
     }
-    // Revalidates the calling companion's generation against the binding
-    // right before dispatch: a moved client never receives this operation.
+    // The dispatch target is the client the gate bound; a later move does not
+    // change it.
     device::accept(world, call, agent, Some(&spec), request.input.clone())
         .map(|(_, answer)| answer)
         .map_err(|error| error.to_string())

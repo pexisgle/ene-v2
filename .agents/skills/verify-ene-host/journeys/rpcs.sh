@@ -83,11 +83,10 @@ ok ene.host.v1.ChatService/Stop "{\"companionId\":\"$companion\"}"; check 'Stop 
 echo '=== clients, perception, approval'
 ok ene.host.v1.ClientService/RegisterClient '{"id":"c1","name":"desk","platform":"linux","capabilities":["body.motion"],"capabilitySpecs":[{"name":"body.motion","toolName":"body_motion","description":"Move the body.","inputSchema":"{\"type\":\"object\",\"required\":[\"motion\"],\"properties\":{\"motion\":{\"type\":\"string\"}}}","approval":"CAPABILITY_APPROVAL_CONFIRM"}]}'; check 'RegisterClient stores a device' $?
 rpc ene.host.v1.ClientService/List '{}' | grep -q '"id":"c1"'; check 'List shows it' $?
-ok ene.host.v1.ClientService/SetCapabilities '{"clientId":"c1","revision":"1","capabilities":["body.motion","eye.watch"],"capabilitySpecs":[{"name":"body.motion","toolName":"body_motion","description":"Move the body.","inputSchema":"{\"type\":\"object\"}","approval":"CAPABILITY_APPROVAL_CONFIRM"},{"name":"eye.watch","description":"Watch.","inputSchema":"{\"type\":\"object\"}","approval":"CAPABILITY_APPROVAL_AUTO"}]}'; check 'SetCapabilities replaces the declaration' $?
-activation=$(rpc ene.host.v1.ClientService/Activate "{\"companionId\":\"$companion\",\"clientId\":\"c1\"}" | field 'd["revision"]')
+ok ene.host.v1.ClientService/SetCapabilities '{"clientId":"c1","revision":"1","capabilities":["body.motion","app.focus"],"capabilitySpecs":[{"name":"body.motion","toolName":"body_motion","description":"Move the body.","inputSchema":"{\"type\":\"object\"}","approval":"CAPABILITY_APPROVAL_CONFIRM"},{"name":"app.focus","description":"Focus the app.","inputSchema":"{\"type\":\"object\"}","approval":"CAPABILITY_APPROVAL_AUTO"}]}'; check 'SetCapabilities replaces the declaration' $?
+activation=$(rpc ene.host.v1.ClientService/Activate "{\"companionId\":\"$companion\",\"clientId\":\"c1\"}" | field 'd["clientId"]')
 [ -n "$activation" ]; check 'Activate binds the client' $?
-ok ene.host.v1.ClientService/ReportPerception "{\"clientId\":\"c1\",\"timestamp\":\"2026-11-15T00:00:00Z\",\"activationRevision\":\"$activation\",\"activeWindow\":{\"title\":\"editor\",\"appId\":\"code\"}}"; check 'ReportPerception accepts an event' $?
-ok ene.host.v1.ClientService/ReportPlaybackStatus '{"utteranceId":"unknown","generationId":"1","status":"PLAYBACK_COMPLETED"}'; st=$?; [ $st -eq 0 ] && check 'ReportPlaybackStatus answers' $? || note 'ReportPlaybackStatus needs a TTS connection (by design)'
+ok ene.host.v1.ClientService/ReportPerception "{\"clientId\":\"c1\",\"timestamp\":\"2026-11-15T00:00:00Z\",\"activeWindow\":{\"title\":\"editor\",\"appId\":\"code\"}}"; check 'ReportPerception accepts an event' $?
 
 echo "=== $pass passed, $fail failed, $notes notes"
 [ "$fail" -eq 0 ]

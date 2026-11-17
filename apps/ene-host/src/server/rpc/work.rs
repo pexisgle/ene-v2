@@ -34,12 +34,6 @@ impl w::WorkService for Services {
 
     request!(start_work, w::StartWorkRequest, w::WorkSession, work::start);
     request!(send_work, w::SendWorkRequest, w::WorkAcceptance, work::send);
-    request!(
-        answer_inquiry,
-        w::AnswerInquiryRequest,
-        w::WorkAcceptance,
-        work::answer_inquiry
-    );
     discard_id!(stop_work, w::StopWorkRequest, work_id, work::stop);
     discard_id!(close_work, w::WorkRequest, work_id, work::close);
 }

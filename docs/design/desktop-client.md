@@ -22,7 +22,7 @@
 - **デスクトップクライアント（Desktop Client）**:
   - Connect-RPC クライアントとして`ene-host`と通信する。
   - `RegisterClient`で`body.motion`、`eye.watch`、`body.window_perch`等の能力と入力スキーマを宣言する。
-  - ホストから受け取った`Activation.revision`を保持し、音声入力・再生完了報告・知覚イベント・操作結果に付与する。再接続時は`GetSnapshot.activations`または`activation_updated`で現在のrevisionへ更新する。
+  - ホストから受け取った`Activation.client_id`（アクティブクライアント）を保持し、音声入力・知覚イベント・操作結果に自分の`client_id`を付与する。世代（revision）は持たない。再接続時は`GetSnapshot.activations`または`activation_updated`で現在のアクティブ状態を取得する。
   - ローカルサウンドデバイス（`cpal` + `rubato`）によるマイク録音・スピーカー再生を担当する。
   - 再生PCMデータからリアルタイムにRMS（実効値振幅）を算出し、子プロセスへ伝達する。
 - **`apps/ene-avatar`（アバター描画プロセス）**:
@@ -130,8 +130,8 @@ OSウィンドウ監視で取得できるのは表層情報に限られるため
 
 - デスクトップクライアントは`cpal`でマイク入力とスピーカー出力を開き、音声デバイスを排他所有する。
 - 同時に再生する音声ストリームは常に1件とする。新しい発話のチャンクまたは`FlushControl`を受信したら、旧音声を即座に停止・フェードアウトする。
-- 再生完了・中断・失敗は`ReportPlaybackStatus`でホストへ報告する。新旧の発話が混在しないよう、`utterance_id`と`generation_id`で再生状態を管理する。音声入力・再生完了報告・知覚イベントには、保持している`activation_revision`を付与する。
-- ホストから`FlushControl { reason: FLUSH_REASON_CLIENT_MOVED }`を受信したら、旧発話の再生を即座に停止し、以降の旧発話チャンクと再生完了報告を破棄する。別端末へ移動した後は、旧端末の状態を新しい端末へ引き継がない。
+- 新旧の発話が混在しないよう、`utterance_id`と`generation_id`で再生状態を管理し、割り込み時はクライアント側で速やかに旧音声を停止する。
+- ホストから`FlushControl { reason: FLUSH_REASON_CLIENT_MOVED }`を受信したら、旧発話の再生を即座に停止し、以降の旧発話チャンクを破棄する。別端末へ移動した後は、旧端末の状態を新しい端末へ引き継がない。
 
 ### 4.2 `cpal` / `rubato`によるリサンプリング
 
@@ -143,7 +143,7 @@ OSウィンドウ監視で取得できるのは表層情報に限られるため
 
 - 参照信号AECを利用できる環境では、再生PCMを参照信号としてエコーを減算し、残差からユーザーの割り込みを検出する。
 - AECを利用できない、または検証できないスピーカー環境では、マイク入力による自動Barge-inを無効化し、GUIの停止ボタン、Escキー、プッシュ・トゥ・トーク等の明示操作に限定する。
-- `AudioInputChunk.is_companion_speaking`は再生状態のソフトウェアフラグであり、音響的静寂を保証しない。再生中に収録した音声フレームは音声承認の判定対象から破棄する。
+- `AudioInputChunk.is_companion_speaking`は再生状態のソフトウェアフラグであり、音響的静寂を保証しない。権限承認は画面カードまたは「頭」の`resolve_approval`で行い、音声入力から承認を確定しない。
 
 ---
 
@@ -154,7 +154,6 @@ OSウィンドウ監視で取得できるのは表層情報に限られるため
 | capability | tool_name | input_schemaの概要 | presetsの例 | approval |
 | :--- | :--- | :--- | :--- | :--- |
 | `body.motion` | `body_motion` | `{motion: string, expression?: string}` | `idle`, `nod`, `tilt_head`, `stretch` | `AUTO` |
-| `eye.watch` | `set_eye_watch` | `{target_pattern: string, match_kind: "title" \| "app_id", notify_on: "focus" \| "blur" \| "title_change", enabled: boolean}` | - | `AUTO` |
 | `body.window_perch` | `window_perch` | `{window: string, edge: "top" \| "bottom" \| "left" \| "right", enabled: boolean}` | `screen_edge`, `active_window` | `AUTO` |
 | `device.files` | （なし） | ファイル読み書きの入力スキーマ | - | `CONFIRM` |
 | `device.screen` | （なし） | 画面キャプチャの入力スキーマ | - | `CONFIRM` |

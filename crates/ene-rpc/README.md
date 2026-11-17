@@ -21,7 +21,7 @@
 - `Snapshot` はコンパニオン・端末・設定・作業セッション・承認・ポリシー・healthを持ち、会話履歴は含めません。履歴は `GetHistory` でページングします。
 - 任意JSONはラッパー型ではなくJSON textの `string` で運びます。ホストは境界で1回だけparseし、保存するのはドメイン型です。
 - `UpdateCompanionRequest` は `companion` / `task` / `perception` / `compaction` / `consolidation` / `decision` / `embedding` の7 assignment patchと `persona` / `voice_identifier` を持ちます。`optional string` の未指定は変更なし、空文字は `{}` へのクリアです。
-- `MemoryControlResult` は `importance`（0〜10）と `audiences`（共有先IDの配列）を返します。
+- `MemoryControlResult` は `importance`（0〜10）と `scope`（`'shared'` またはコンパニオンID）を返します。
 - 旧 `JsonDocument` / `JsonDocumentPatch`、`Grant` / `Consent` / `Availability`、`Target` などは削除済みです。旧クライアントとは互換性がありません。
 
 ネイティブのクライアントは `connect(endpoint, token)` でループバックHTTP/2のBearer設定を作り、生成クライアントへ渡します。Wasmではメッセージ型だけを生成し、Connectのブラウザーruntimeを含めません。

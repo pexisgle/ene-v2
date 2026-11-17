@@ -1,7 +1,7 @@
-//! Voice service: microphone input (STT), synthesized speech output (TTS) and
-//! playback reports. The host owns generations, the audio-owning client and the
-//! speech floor (docs/design/voice-avatar.md §4–§6). `StreamAudioInput` binds
-//! the stream to the client's activation and recognizes each finished utterance;
+//! Voice service: microphone input (STT) and synthesized speech output (TTS).
+//! The host owns generations, the audio-owning client and the speech floor
+//! (docs/design/voice-avatar.md §4–§6). `StreamAudioInput` binds the stream to
+//! the client that opened it and recognizes each finished utterance;
 //! `SubscribeAudioOutput` only pumps the host's generation-gated channel.
 use super::Services;
 use crate::host::{
@@ -53,7 +53,7 @@ impl w::VoiceService for Services {
                                 match runtime
                                     .read(move |app| {
                                         let chunk = candidate.view();
-                                        Ok(voice::bind_input(app.world(), chunk.client_id, chunk.activation_revision))
+                                        Ok(voice::bind_input(app.world(), chunk.client_id))
                                     })
                                     .await
                                     .map_err(ConnectError::from)?
@@ -69,7 +69,7 @@ impl w::VoiceService for Services {
                             if !recognition
                                 .binding
                                 .as_ref()
-                                .is_some_and(|binding| binding.accepts(chunk.client_id, chunk.activation_revision))
+                                .is_some_and(|binding| binding.accepts(chunk.client_id))
                             {
                                 continue;
                             }
@@ -77,9 +77,6 @@ impl w::VoiceService for Services {
                                 recognition.pending.clear();
                                 recognition.speaking = false;
                                 recognition.transcription_id.clear();
-                                // Playback echo never binds an approval
-                                // (permissions.md §4.2).
-                                recognition.approval = None;
                                 continue;
                             }
                             if chunk.sample_rate != 0 {
@@ -109,19 +106,6 @@ impl w::VoiceService for Services {
                                     if recognition.transcription_id.is_empty() {
                                         recognition.transcription_id =
                                             uuid::Uuid::new_v4().to_string();
-                                    }
-                                    // Bind the one pending approval of this
-                                    // client generation when the capture
-                                    // starts, not when the transcript lands:
-                                    // a delayed STT result may only answer
-                                    // the request that was pending then.
-                                    if let Some(binding) = recognition.binding.clone() {
-                                        recognition.approval = runtime
-                                            .read(move |app| {
-                                                Ok(voice::bind_speech_start(app.world(), &binding))
-                                            })
-                                            .await
-                                            .map_err(ConnectError::from)?;
                                     }
                                     yield Ok(w::TranscriptionEvent {
                                         transcription_id: recognition.transcription_id.clone(),
@@ -178,11 +162,7 @@ impl w::VoiceService for Services {
             .runtime
             .read(move |app| {
                 let request = request.reborrow();
-                let subscription = voice::subscribe_audio(
-                    app.world_mut(),
-                    request.client_id,
-                    request.activation_revision,
-                )?;
+                let subscription = voice::subscribe_audio(app.world_mut(), request.client_id)?;
                 Ok((subscription, request.client_id.to_owned()))
             })
             .await
@@ -206,30 +186,6 @@ impl w::VoiceService for Services {
         .take_until(self.shutdown.clone().cancelled_owned());
         Response::stream_ok(stream)
     }
-
-    async fn report_playback_status(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::PlaybackStatusReport>,
-    ) -> ServiceResult<w::ReportPlaybackStatusResponse> {
-        match self
-            .runtime
-            .read(|app| {
-                Ok(voice::configured(
-                    app.world(),
-                    crate::host::settings::ConnectionKind::Tts,
-                ))
-            })
-            .await
-            .map_err(ConnectError::from)?
-        {
-            Ok(()) | Err(SetupError::Broken(_)) | Err(SetupError::Unsupported(_)) => {}
-            Err(error) => return Err(setup_error(error)),
-        }
-        let report = request.to_owned_message();
-        self.call(move |app| voice::report_playback(app.world_mut(), report))
-            .await
-    }
 }
 
 fn setup_error(error: SetupError) -> ConnectError {
@@ -245,8 +201,6 @@ fn setup_error(error: SetupError) -> ConnectError {
 #[derive(Default)]
 struct Recognition {
     binding: Option<InputBinding>,
-    /// The approval bound at this capture's start, if it was unambiguous.
-    approval: Option<voice::SpeechBinding>,
     pending: Vec<u8>,
     sample_rate: u32,
     transcription_id: String,
@@ -262,17 +216,12 @@ impl Recognition {
         self.speaking = false;
         if self.pending.len() < voice::MIN_STT_BYTES {
             self.pending.clear();
-            self.approval = None;
             return Ok(None);
         }
         let pcm = std::mem::take(&mut self.pending);
         let Some(binding) = self.binding.clone() else {
-            self.approval = None;
             return Ok(None);
         };
-        // The binding belongs to this capture only: consume it however the
-        // rest of the flush goes.
-        let speech = self.approval.take();
         let active = runtime
             .read({
                 let binding = binding.clone();
@@ -300,15 +249,7 @@ impl Recognition {
             .call({
                 let id = transcription_id.clone();
                 let text = text.clone();
-                move |app| {
-                    voice::accept_transcription(
-                        app.world_mut(),
-                        &id,
-                        &text,
-                        &binding,
-                        speech.as_ref(),
-                    )
-                }
+                move |app| voice::accept_transcription(app.world_mut(), &id, &text, &binding)
             })
             .await
             .map_err(ConnectError::from)?;
@@ -394,7 +335,7 @@ mod tests {
                     specs: &[],
                     expected_revision: 0,
                 })?;
-                store.activate("ene", Some("c1"), 0)?;
+                store.activate("ene", Some("c1"))?;
                 app.world_mut().insert_resource(voice::Engines {
                     stt: Some(Arc::new(recording)),
                     ..Default::default()
@@ -403,10 +344,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let chunk = |client: &str, revision, rate, sample: i16, speaking| {
+        let chunk = |client: &str, rate, sample: i16, speaking| {
             StreamMessage::from_message(&w::AudioInputChunk {
                 client_id: client.into(),
-                activation_revision: revision,
                 sample_rate: rate,
                 pcm_data: sample.to_le_bytes().repeat(1_600),
                 is_companion_speaking: speaking,
@@ -414,12 +354,14 @@ mod tests {
             })
         };
         let messages = vec![
-            chunk("c1", 1, 24_000, 1, false),
-            chunk("other", 1, 24_000, 2, false),
-            chunk("c1", 2, 24_000, 3, false),
-            chunk("", 0, 0, 4, true),
-            chunk("", 0, 16_000, 5, false),
-            chunk("", 0, 24_000, 6, false),
+            chunk("c1", 24_000, 1, false),
+            // A frame that names another client never joins this stream.
+            chunk("other", 24_000, 2, false),
+            chunk("c1", 24_000, 3, false),
+            // Playback echo discards the capture in progress.
+            chunk("", 0, 4, true),
+            chunk("", 16_000, 5, false),
+            chunk("", 24_000, 6, false),
             StreamMessage::from_message(&w::AudioInputChunk::default()),
         ];
         let service = Services {
@@ -468,21 +410,18 @@ mod tests {
                     specs: &[],
                     expected_revision: 0,
                 })?;
-                store.activate("ene", Some("c1"), 0)?;
+                store.activate("ene", Some("c1"))?;
                 Ok(())
             })
             .await
             .unwrap();
         let request = || w::SubscribeAudioRequest {
             client_id: "c1".into(),
-            activation_revision: 1,
             ..Default::default()
         };
         let first = request();
         let old = runtime
-            .read(move |app| {
-                voice::subscribe_audio(app.world_mut(), &first.client_id, first.activation_revision)
-            })
+            .read(move |app| voice::subscribe_audio(app.world_mut(), &first.client_id))
             .await
             .unwrap();
         let old_guard = StreamGuard {
@@ -492,13 +431,7 @@ mod tests {
         };
         let second = request();
         let mut current = runtime
-            .read(move |app| {
-                voice::subscribe_audio(
-                    app.world_mut(),
-                    &second.client_id,
-                    second.activation_revision,
-                )
-            })
+            .read(move |app| voice::subscribe_audio(app.world_mut(), &second.client_id))
             .await
             .unwrap();
         let current_guard = StreamGuard {

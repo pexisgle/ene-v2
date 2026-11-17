@@ -1,5 +1,5 @@
-//! Work tools: the parent's commission/steer/stop tools and the hand's report.
-use super::{Inquiry, RunState, WorkSession, WorkStatus};
+//! Work tools: the parent's commission/stop tools and the hand's report.
+use super::{WorkSession, WorkStatus};
 use crate::host::{
     agent::{self, CompanionAgent, WorkAgent, WorkReports},
     db::{Result, Store},
@@ -28,13 +28,7 @@ pub(crate) struct StartArgs {
 pub(crate) struct SendArgs {
     pub(crate) work_id: String,
     pub(crate) text: String,
-    /// The pending inquiry this text answers.
-    #[serde(default)]
-    pub(crate) request_id: Option<String>,
 }
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ListArgs {}
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -47,7 +41,7 @@ pub(crate) struct StopArgs {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReportArgs {
-    /// activity | message | question | completed | failed
+    /// activity | message | completed | failed
     pub(crate) kind: String,
     pub(crate) content: String,
 }
@@ -61,15 +55,9 @@ pub(crate) fn register(app: &mut App) {
     )
     .add_open_tool::<SendArgs, _>(
         "send_work",
-        "Send more input to a running task, or answer a pending question.",
+        "Send more input to a running task.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| send(world, agent, args)),
-    )
-    .add_open_tool::<ListArgs, _>(
-        "list_works",
-        "List the work sessions you own and their runs.",
-        ToolOptions::default(),
-        run_tool(|world, agent, _, args| list(world, agent, args)),
     )
     .add_open_tool::<StopArgs, _>(
         "stop_work",
@@ -79,7 +67,7 @@ pub(crate) fn register(app: &mut App) {
     )
     .add_open_tool::<ReportArgs, _>(
         "report",
-        "Report progress, ask the user a question, or report completion or failure. \
+        "Report progress, or report completion or failure. \
          The host binds the session and run.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| report(world, agent, args)),
@@ -175,31 +163,10 @@ fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
             work_id: args.work_id,
             request_key: uuid::Uuid::new_v4().to_string(),
             text: args.text,
-            request_id: Some(args.request_id.unwrap_or_default()),
             ..Default::default()
         },
     )?;
     Ok(json!({"request_id": acceptance.request_id}).to_string())
-}
-
-fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
-    let mut sessions = Vec::new();
-    for session in store.work_sessions(&companion)? {
-        let runs: Vec<String> = store
-            .runs(&session.id)?
-            .iter()
-            .map(|run| format!("{} ({})", run.run_id, run.state.as_str()))
-            .collect();
-        sessions.push(json!({
-            "work_id": session.id,
-            "title": session.title,
-            "status": session.status.as_str(),
-            "runs": runs,
-        }));
-    }
-    Ok(json!({"sessions": sessions}).to_string())
 }
 
 fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
@@ -235,12 +202,8 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
         return Err(HostError::Invalid(("report content is required").into()));
     }
     let run_id = run.run_id.clone();
-    let cancelling = run.state == RunState::Cancelling;
     match args.kind.as_str() {
         "activity" | "message" => {
-            if cancelling {
-                return cancelled();
-            }
             super::note_activity(world, &run_id);
             inform(
                 world,
@@ -251,56 +214,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             );
             Ok(json!({"accepted": true}).to_string())
         }
-        "question" => {
-            if cancelling {
-                return cancelled();
-            }
-            let request_id = uuid::Uuid::new_v4().to_string();
-            store.insert_inquiry(&Inquiry {
-                request_id: request_id.clone(),
-                work_id: work.work_id.clone(),
-                run_id: run_id.clone(),
-                prompt: args.content.clone(),
-                choices: Vec::new(),
-                answer: None,
-                created_at: String::new(),
-                resolved_at: None,
-            })?;
-            let mut waiting = run.clone();
-            waiting.state = RunState::WaitingInput;
-            waiting.pending_request_id = Some(request_id.clone());
-            store.update_run(&waiting)?;
-            let session = store
-                .work_session(&work.work_id)?
-                .ok_or_else(|| HostError::NotFound(("work session not found").into()))?;
-            super::notify_event(
-                world,
-                &session,
-                w::WorkEventKind::InquiryCreated,
-                w::work_event::Detail::InquiryCreated(Box::new(w::WorkInquiryCreated {
-                    inquiry: Some(w::WorkInquiry {
-                        request_id: request_id.clone(),
-                        prompt: args.content.clone(),
-                        choices: Vec::new(),
-                        ..Default::default()
-                    })
-                    .into(),
-                    ..Default::default()
-                })),
-            );
-            inform(
-                world,
-                &work.companion_id,
-                &run_id,
-                format!("[作業からの質問 request_id={request_id}] {}", args.content),
-                DeliveryMode::Queue,
-            );
-            Ok(json!({"accepted": true, "request_id": request_id}).to_string())
-        }
         "completed" => {
-            if cancelling {
-                return cancelled();
-            }
             super::note_activity(world, &run_id);
             world
                 .resource_mut::<WorkReports>()
@@ -331,10 +245,6 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
     }
 }
 
-fn cancelled() -> Result<String> {
-    Ok(json!({"accepted": false, "reason": "the run is cancelling"}).to_string())
-}
-
 fn inform(world: &mut World, companion: &str, run_id: &str, text: String, mode: DeliveryMode) {
     let Some(parent) = agent::agent_of(world, companion) else {
         return;
@@ -351,7 +261,7 @@ mod tests {
     use crate::host::model::{Credentials, ModelFactory};
     use crate::host::notify::Notifier;
     use crate::host::tests::bound;
-    use crate::host::work::{Runs, new_run};
+    use crate::host::work::{RunState, Runs, new_run};
     use rig_core::completion::Message;
     use rig_core::conversation::{Entry, RequestId};
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -368,7 +278,6 @@ mod tests {
                 title: "task".into(),
                 status: WorkStatus::Active,
                 client_id: None,
-                activation_revision: 0,
                 created_at: String::new(),
                 updated_at: String::new(),
             })
@@ -436,7 +345,6 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(store);
         world.insert_resource(DeliveredClaims::default());
-        world.insert_resource(super::super::acp::AcpBackends::default());
         world.insert_resource(Runs::default());
         world.insert_resource(Notifier::new());
         world.insert_resource(Credentials::new(true));

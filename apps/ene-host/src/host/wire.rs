@@ -11,7 +11,7 @@ use super::{
         EmbeddingConnection, Endpoint, LlmConnection, McpConnection, Settings, SttConnection,
         TtsConnection,
     },
-    work::{Inquiry, Run, RunState, WorkSession, WorkStatus},
+    work::{Run, RunState, WorkSession, WorkStatus},
 };
 use ene_rpc as w;
 use serde_json::Value;
@@ -228,8 +228,7 @@ pub(crate) fn mind_state(value: &Companion) -> w::MindState {
 pub(crate) fn memory(value: &Memory) -> w::MemoryItem {
     w::MemoryItem {
         id: value.id.clone(),
-        owner: value.owner.clone(),
-        audiences: value.audiences.clone(),
+        scope: value.scope.clone(),
         content: value.content.clone(),
         importance: u32::from(value.importance),
         occurred_at: value.occurred_at.clone(),
@@ -306,7 +305,6 @@ pub(crate) fn approval(value: &Approval) -> w::ApprovalRequest {
         status: approval_status(value.status).into(),
         created_at: value.created_at.clone(),
         client_id: value.client_id.clone(),
-        activation_revision: value.activation_revision,
         capability: value.capability.clone(),
         ..Default::default()
     }
@@ -383,8 +381,7 @@ wire_enum!(work_status: WorkStatus => w::WorkStatus {
 });
 
 wire_enum!(run_state: RunState => w::RunStatus {
-    Starting, Running, WaitingInput, Cancelling, Completed, Cancelled,
-    CancellationUnconfirmed, Failed
+    Starting, Running, WaitingInput, Completed, Cancelled, Failed
 });
 
 pub(crate) fn work_session(value: &WorkSession) -> w::WorkSession {
@@ -396,7 +393,6 @@ pub(crate) fn work_session(value: &WorkSession) -> w::WorkSession {
         created_at: value.created_at.clone(),
         updated_at: value.updated_at.clone(),
         client_id: value.client_id.clone().unwrap_or_default(),
-        activation_revision: value.activation_revision,
         ..Default::default()
     }
 }
@@ -404,15 +400,11 @@ pub(crate) fn work_session(value: &WorkSession) -> w::WorkSession {
 /// The contract shape of a run's shared detail fields.
 macro_rules! run_wire {
     ($type:ident, $value:expr, { $($extra:ident: $extra_value:expr),* $(,)? }) => {{
-        let detail = $value.detail();
         w::$type {
             $($extra: $extra_value,)*
             state: run_state($value.state).into(),
-            failure: detail.failure.map(failure).into(),
-            pending_request_id: detail.pending_request_id.map(ToOwned::to_owned),
-            cancellation_requested_at: detail.cancellation_requested_at.map(ToOwned::to_owned),
-            cancellation_reason: detail.cancellation_reason.map(ToOwned::to_owned),
-            unverified_pids: detail.unverified_pids.to_vec(),
+            failure: $value.failure.as_ref().map(failure).into(),
+            pending_request_id: $value.pending_request_id.clone(),
             ..Default::default()
         }
     }};
@@ -425,13 +417,10 @@ pub(crate) fn run_info(value: &Run) -> w::RunInfo {
     })
 }
 
-wire_copy!(inquiry, Inquiry => w::WorkInquiry { request_id, prompt, choices });
-
-pub(crate) fn work_view(session: &WorkSession, runs: &[Run], inquiries: &[Inquiry]) -> w::WorkView {
+pub(crate) fn work_view(session: &WorkSession, runs: &[Run]) -> w::WorkView {
     w::WorkView {
         session: Some(work_session(session)).into(),
         runs: runs.iter().map(run_info).collect(),
-        pending_inquiries: inquiries.iter().map(inquiry).collect(),
         ..Default::default()
     }
 }
@@ -464,7 +453,6 @@ pub(crate) fn device_operation(value: &DeviceOperation, subscription: &str) -> w
         input: value.input.to_string(),
         subscription_id: subscription.into(),
         client_id: value.client_id.clone(),
-        activation_revision: value.activation_revision,
         work_id: value.work_id.clone(),
         ..Default::default()
     }
@@ -481,7 +469,6 @@ pub(crate) fn device_result(value: &DeviceOperation) -> w::DeviceOperationResult
             .map(ToString::to_string)
             .unwrap_or_default(),
         failure: value.failure.as_ref().map(failure).into(),
-        activation_revision: value.activation_revision,
         ..Default::default()
     }
 }

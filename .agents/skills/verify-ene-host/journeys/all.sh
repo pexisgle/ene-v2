@@ -29,7 +29,6 @@ run chat
 run schedule
 run device
 run mcp
-run acp-sandbox
 run restart
 
 echo

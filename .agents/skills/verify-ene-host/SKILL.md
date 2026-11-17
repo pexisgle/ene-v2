@@ -144,7 +144,7 @@ the whole directory with `VERIFY_RUN_DIR`.
 
 [journeys/](journeys/README.md) holds end-to-end runs that need a real binary,
 real providers and network: contract coverage, work runs and approvals, a chat
-turn, schedule delivery, the device stream, MCP, TTS, STT, the ACP sandbox and
+turn, schedule delivery, the device stream, MCP, TTS and STT behaviour and
 restart behaviour. Run `journeys/all.sh` for the whole set, or one file for the
 feature you touched. Each run writes its log to `target/verify-ene-host/`.
 
@@ -152,8 +152,8 @@ feature you touched. Each run writes its log to `target/verify-ene-host/`.
 
 - Mind consolidation and compaction against a real provider. The unit tests
   drive them with rig's mock model; the journeys do not.
-- The avatar renderer and the ACP protocol against a real external agent. The
-  journeys use a reporting child for the sandbox and a scripted client for the
+- The avatar renderer and an external ACP agent wrapped as a plugin. The
+  journeys use a scripted client for the
   device stream.
 - Long-run behaviour: leaks, load and multi-day uptime.
 

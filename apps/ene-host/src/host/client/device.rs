@@ -1,9 +1,10 @@
 //! Device operations over `ClientService.DeviceStream`.
 //!
-//! A capability tool call is accepted against a client generation. The host
-//! writes the operation first, then tries to deliver it; a client that is
-//! offline leaves it `pending` until it reconnects. A delivered operation
-//! whose result never arrives is `uncertain`, never a success.
+//! A capability tool call is dispatched to the client bound when the gate
+//! accepted it. The host writes the operation first, then tries to deliver it;
+//! a client that is offline leaves it `pending` until it reconnects. A
+//! delivered operation whose result never arrives is `uncertain`, never a
+//! success.
 use super::DeviceRequestArgs;
 use crate::host::{
     agent::{CompanionAgent, WorkAgent},
@@ -66,7 +67,7 @@ fn refuse_error(world: &mut World, call: Entity, error: HostError) {
     }
 }
 
-/// Accepts one capability operation against the bound client generation.
+/// Accepts one capability operation against the client the call is bound to.
 ///
 /// `wait_for_result` is the documented split (`docs/api.md` §クライアント能力):
 /// `device_request` passes `true` and the call stays open — a [`Waiting`]
@@ -95,8 +96,8 @@ pub(crate) fn execute(
 /// tool answer. The answer reports the status dispatch reached: `dispatched`
 /// when the client stream accepted the operation, `pending` when no live
 /// stream has it yet. It never reports completion.
-/// The generation is revalidated immediately before dispatch: a moved client
-/// never receives an operation accepted for the old one.
+/// The operation goes to the client the gate bound the call to; a client that
+/// moved since then does not void it.
 pub(crate) fn accept(
     world: &mut World,
     call: Entity,
@@ -109,14 +110,8 @@ pub(crate) fn accept(
         .get::<CallBinding>(call)
         .cloned()
         .ok_or_else(|| HostError::Internal(("a device call without a binding").into()))?;
-    let (companion_id, work_id) = agent_context(world, agent)
+    let work_id = agent_context(world, agent)
         .ok_or_else(|| HostError::Internal(("a device call without an agent").into()))?;
-    let current = store.target(&companion_id, work_id.as_deref())?;
-    if current.as_ref() != Some(&(binding.client_id.clone(), binding.activation_revision)) {
-        return Err(HostError::Conflict(
-            ("client_moved: the active client changed before the operation was dispatched").into(),
-        ));
-    }
     let client = store
         .client(&binding.client_id)?
         .ok_or_else(|| HostError::Conflict(("the bound client is no longer registered").into()))?;
@@ -142,11 +137,12 @@ pub(crate) fn accept(
         }
         super::validate_input(spec, &input)?;
     }
+    // The work session is recorded with the operation; the dispatch target is
+    // the bound client.
     let operation_id = uuid::Uuid::new_v4().to_string();
     let operation = DeviceOperation {
         id: operation_id.clone(),
         client_id: binding.client_id.clone(),
-        activation_revision: binding.activation_revision,
         capability: binding.capability.clone(),
         input,
         work_id: work_id.clone(),
@@ -162,13 +158,16 @@ pub(crate) fn accept(
     Ok((operation_id, answer))
 }
 
-fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>)> {
-    if let Some(companion) = world.get::<CompanionAgent>(agent) {
-        return Some((companion.companion_id.clone(), None));
+/// The work session an agent serves: `Some(None)` for a companion agent,
+/// `Some(Some(work))` for a hand, and `None` for an entity that serves
+/// neither.
+fn agent_context(world: &World, agent: Entity) -> Option<Option<String>> {
+    if world.get::<CompanionAgent>(agent).is_some() {
+        return Some(None);
     }
     world
         .get::<WorkAgent>(agent)
-        .map(|work| (work.companion_id.clone(), Some(work.work_id.clone())))
+        .map(|work| Some(work.work_id.clone()))
 }
 
 /// Writes the operation to the client's live stream. A missing stream leaves
@@ -207,14 +206,14 @@ fn dispatch(world: &mut World, operation: &DeviceOperation) -> Result<DeviceStat
 /// Replays operations that were never delivered after a client reconnects.
 pub(crate) fn resend(world: &mut World, client: &str) {
     let store = world.resource::<Store>().clone();
-    let Ok(Some((_companion, revision))) = store.activation_for_client(client) else {
+    if !matches!(store.activation_for_client(client), Ok(Some(_))) {
         return;
-    };
+    }
     let Ok(operations) = store.outstanding_operations(client) else {
         return;
     };
     for operation in operations {
-        if operation.status != DeviceStatus::Pending || operation.activation_revision != revision {
+        if operation.status != DeviceStatus::Pending {
             continue;
         }
         let _ = dispatch(world, &operation);
@@ -234,7 +233,8 @@ pub(crate) fn disconnected(world: &mut World, client: &str) {
     }
 }
 
-/// Records a client's result and answers the waiting tool call.
+/// Records a client's result and answers the waiting tool call. The result is
+/// matched to its operation by id; the client id it carries is the record.
 pub(crate) fn complete(
     world: &mut World,
     result: w::DeviceOperationResult,
@@ -243,12 +243,6 @@ pub(crate) fn complete(
     let Some(operation) = store.operation(&result.operation_id)? else {
         return Err(HostError::NotFound(("device operation not found").into()));
     };
-    if result.activation_revision != operation.activation_revision
-        || result.client_id != operation.client_id
-    {
-        // A late result from a previous generation is discarded.
-        return Ok(wire::device_state(&operation));
-    }
     if operation.status.is_terminal() {
         return Ok(wire::device_state(&operation));
     }
@@ -373,39 +367,4 @@ pub(crate) fn wait(world: &mut World, call: Entity, operation: &str, deadline: I
 /// The default deadline for a device operation.
 pub(crate) fn deadline(world: &World) -> Instant {
     Instant::now() + world.resource::<DeviceTimeout>().0
-}
-
-/// A move invalidates the calls that were waiting for the old generation's
-/// operation results.
-pub(crate) fn invalidate(world: &mut World, client: &str, revision: u64) {
-    let store = world.resource::<Store>().clone();
-    let waiting: Vec<String> = world
-        .resource::<Waiting>()
-        .by_operation
-        .keys()
-        .cloned()
-        .collect();
-    for operation in waiting {
-        let moved = store
-            .operation(&operation)
-            .ok()
-            .flatten()
-            .is_some_and(|operation| {
-                operation.client_id == client && operation.activation_revision == revision
-            });
-        if !moved {
-            continue;
-        }
-        let waiter = world
-            .resource_mut::<Waiting>()
-            .by_operation
-            .remove(&operation);
-        if let Some(waiter) = waiter {
-            permission::refuse(
-                world,
-                waiter.call,
-                "client_moved: the active client moved before the result arrived",
-            );
-        }
-    }
 }

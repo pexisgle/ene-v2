@@ -6,8 +6,8 @@ use crate::host::json::JsonDoc;
 use crate::host::mind::consolidate::{Batch, Commit, Fact, MemoryContext, validate_citations};
 use crate::host::mind::embedding::{PendingEmbedding, dimensions_of_space};
 use crate::host::mind::memory::{
-    MAX_IMPORTANCE, Memory, PINNED_BUDGET_CHARS, RecallMode, SHARED_AUDIENCE, Scored, fuse, score,
-    tokens,
+    MAX_IMPORTANCE, Memory, PINNED_BUDGET_CHARS, RecallMode, SHARED_SCOPE, Scored, fuse, in_scope,
+    score, tokens,
 };
 use rusqlite::{OptionalExtension, Row, params};
 use schemars::JsonSchema;
@@ -21,30 +21,27 @@ const MAX_INJECTED: usize = 64;
 /// The newest turns whose injection records stay in the database.
 const KEEP_INJECTED_TURNS: usize = 64;
 
-const FIELDS: &str = "id, owner, audiences, content, importance, occurred_at, recorded_at, \
+const FIELDS: &str = "id, scope, content, importance, occurred_at, recorded_at, \
      last_accessed_at, memory_revision, content_revision, emotion, source_context";
 
-const COLUMNS: &str = "rowid, id, owner, audiences, content, importance, occurred_at, \
+const COLUMNS: &str = "rowid, id, scope, content, importance, occurred_at, \
      recorded_at, last_accessed_at, memory_revision, content_revision, emotion, source_context";
 
 /// `COLUMNS` qualified with the `m` alias for the FTS join, where `content`
 /// and `rowid` otherwise collide with the external-content table.
-const JOINED_COLUMNS: &str = "m.rowid, m.id, m.owner, m.audiences, m.content, m.importance, \
+const JOINED_COLUMNS: &str = "m.rowid, m.id, m.scope, m.content, m.importance, \
      m.occurred_at, m.recorded_at, m.last_accessed_at, m.memory_revision, \
      m.content_revision, m.emotion, m.source_context";
 
-/// The visibility predicate shared by the lexical and semantic candidates.
-/// The owner is never rewritten to `"shared"` (docs/design/mind.md §3.3):
-/// sharing adds an id to `audiences`, so no owner check may widen visibility.
-const VISIBLE: &str = "(m.owner = ?1 \
-     OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = ?2) \
-     OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = '*'))";
+/// The visibility predicate every read path shares: the reader's own scope or
+/// the shared pool (docs/design/mind.md §3.3). `scope` holds `'shared'` or a
+/// companion id, so no value other than the literal widens visibility.
+const VISIBLE: &str = "(m.scope = ?1 OR m.scope = 'shared')";
 
 fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: row.get("id")?,
-        owner: row.get("owner")?,
-        audiences: json_column(row, "audiences", "stored memory audiences are corrupt")?,
+        scope: row.get("scope")?,
         content: row.get("content")?,
         importance: row.get("importance")?,
         occurred_at: row.get("occurred_at")?,
@@ -64,8 +61,7 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
 /// What a caller may write when a memory is first recorded.
 pub(crate) struct MemoryRecord {
     pub(crate) id: String,
-    pub(crate) owner: String,
-    pub(crate) audiences: Vec<String>,
+    pub(crate) scope: String,
     pub(crate) content: String,
     pub(crate) importance: u8,
     pub(crate) occurred_at: Option<String>,
@@ -85,9 +81,6 @@ pub(crate) struct NewMemory {
     /// 0-10; 10 is injected every turn, 0-1 are effectively forgotten.
     #[serde(default)]
     pub(crate) importance: Option<u8>,
-    /// Share with these companions ("*" for every companion).
-    #[serde(default)]
-    pub(crate) audiences: Vec<String>,
     #[serde(default)]
     pub(crate) occurred_at: Option<String>,
     /// The revision that was read; a stale value is a conflict.
@@ -106,12 +99,17 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The mind state patch of a `mind_update`; each part is a schema'd document.
+/// A part the caller leaves out keeps its stored value.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StateUpdate {
+    #[serde(default)]
     pub(crate) emotion: Option<Value>,
+    #[serde(default)]
     pub(crate) relationships: Option<Value>,
+    #[serde(default)]
     pub(crate) tendencies: Option<Value>,
+    #[serde(default)]
     pub(crate) concerns: Option<Value>,
 }
 
@@ -172,16 +170,15 @@ fn insert_row(
     check_content(&memory.content)?;
     check_importance(memory.importance)?;
     let sql = format!(
-        "INSERT INTO memories (id, owner, audiences, content, importance, occurred_at, \
-         recorded_at, source_context) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING {FIELDS}"
+        "INSERT INTO memories (id, scope, content, importance, occurred_at, \
+         recorded_at, source_context) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING {FIELDS}"
     );
     connection
         .prepare_cached(&sql)?
         .query_row(
             params![
                 memory.id,
-                memory.owner,
-                to_json(&memory.audiences)?,
+                memory.scope,
                 memory.content,
                 memory.importance,
                 memory.occurred_at,
@@ -211,7 +208,7 @@ fn add_edge(
 }
 
 struct StoredMemory {
-    owner: String,
+    scope: String,
     content: String,
     importance: u8,
     memory_revision: u64,
@@ -223,12 +220,12 @@ fn read_memory_tx(
 ) -> Result<Option<StoredMemory>> {
     transaction
         .prepare_cached(
-            "SELECT owner, content, importance, memory_revision \
+            "SELECT scope, content, importance, memory_revision \
              FROM memories WHERE id = ?1",
         )?
         .query_row([id], |row| {
             Ok(StoredMemory {
-                owner: row.get(0)?,
+                scope: row.get(0)?,
                 content: row.get(1)?,
                 importance: row.get(2)?,
                 memory_revision: row.get(3)?,
@@ -238,8 +235,8 @@ fn read_memory_tx(
         .map_err(Into::into)
 }
 
-/// Adds a `supersedes` edge only when the old memory belongs to the same
-/// companion, then lowers it out of the pinned band.
+/// Adds a `supersedes` edge only when the old memory is in the companion's
+/// scope, then lowers it out of the pinned band.
 fn supersede_tx(
     transaction: &rusqlite::Transaction<'_>,
     companion_id: &str,
@@ -251,8 +248,8 @@ fn supersede_tx(
         return Ok(());
     }
     let exists = transaction
-        .prepare_cached("SELECT 1 FROM memories WHERE id = ?1 AND owner = ?2")?
-        .query_row(params![old_id, companion_id], |_| Ok(()))
+        .prepare_cached("SELECT 1 FROM memories WHERE id = ?1 AND (scope = ?2 OR scope = ?3)")?
+        .query_row(params![old_id, companion_id, SHARED_SCOPE], |_| Ok(()))
         .optional()?
         .is_some();
     if !exists {
@@ -276,9 +273,10 @@ fn lower_superseded_tx(
     transaction
         .prepare_cached(
             "UPDATE memories SET importance = MIN(importance, 2), \
-         memory_revision = memory_revision + 1 WHERE id = ?1 AND owner = ?2",
+         memory_revision = memory_revision + 1 \
+         WHERE id = ?1 AND (scope = ?2 OR scope = ?3)",
         )?
-        .execute(params![old_id, companion_id])?;
+        .execute(params![old_id, companion_id, SHARED_SCOPE])?;
     Ok(())
 }
 
@@ -298,51 +296,37 @@ impl Store {
         Ok(memory)
     }
 
-    /// `ControlMemory`: forget lowers importance, remember raises it, share and
-    /// unshare edit the audience list. The owner's content is never changed.
+    /// `ControlMemory`: forget lowers importance, remember raises it, share
+    /// moves the scope to the shared pool and unshare returns it to
+    /// `companion`. The memory's content is never changed, and an action that
+    /// changes nothing does not bump the revision.
     pub(crate) fn control_memory(
         &self,
         id: &str,
         action: MemoryActionKind,
-        audience: Option<&str>,
+        companion: &str,
     ) -> Result<Memory> {
         let memory = self
             .memory(id)?
             .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
-        let (importance, audiences) = match action {
-            MemoryActionKind::Forget => (0u8, memory.audiences.clone()),
-            MemoryActionKind::Remember => (memory.importance.max(3), memory.audiences.clone()),
-            MemoryActionKind::Share => {
-                let audience = audience.unwrap_or(SHARED_AUDIENCE);
-                let mut audiences = memory.audiences.clone();
-                if !audiences.iter().any(|item| item == audience) {
-                    audiences.push(audience.to_owned());
-                }
-                (memory.importance, audiences)
-            }
-            MemoryActionKind::Unshare => {
-                let audience = audience.unwrap_or(SHARED_AUDIENCE);
-                let audiences = memory
-                    .audiences
-                    .iter()
-                    .filter(|item| item.as_str() != audience)
-                    .cloned()
-                    .collect();
-                (memory.importance, audiences)
-            }
+        let (importance, scope) = match action {
+            MemoryActionKind::Forget => (0u8, memory.scope.clone()),
+            MemoryActionKind::Remember => (memory.importance.max(3), memory.scope.clone()),
+            MemoryActionKind::Share => (memory.importance, SHARED_SCOPE.to_owned()),
+            MemoryActionKind::Unshare => (memory.importance, companion.to_owned()),
         };
-        if importance == memory.importance && audiences == memory.audiences {
+        if importance == memory.importance && scope == memory.scope {
             return Ok(memory);
         }
         let updated = self
             .conn()?
             .prepare_cached(&format!(
-                "UPDATE memories SET importance = ?2, audiences = ?3, \
+                "UPDATE memories SET importance = ?2, scope = ?3, \
                      memory_revision = memory_revision + 1 \
                      WHERE id = ?1 AND memory_revision = ?4 RETURNING {FIELDS}"
             ))?
             .query_row(
-                params![id, importance, to_json(&audiences)?, memory.memory_revision],
+                params![id, importance, scope, memory.memory_revision],
                 row_to_memory,
             )
             .optional()?;
@@ -461,13 +445,11 @@ impl Store {
         let minimum = mode.minimum_importance();
         let connection = self.conn()?;
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?3 \
-             AND m.id IN (SELECT value FROM json_each(?4))"
+            "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
+             AND m.id IN (SELECT value FROM json_each(?3))"
         ))?;
-        let rows = statement.query_map(
-            params![companion, companion, minimum, to_json(&ids)?],
-            row_to_memory,
-        )?;
+        let rows =
+            statement.query_map(params![companion, minimum, to_json(&ids)?], row_to_memory)?;
         let mut found: HashMap<String, Memory> = HashMap::new();
         for memory in rows {
             let memory = memory?;
@@ -479,13 +461,13 @@ impl Store {
             .collect())
     }
 
-    /// The pinned core memories (`importance == 10`) within the documented
-    /// character budget, newest first.
+    /// The pinned core memories (`importance == 10`) the companion recalls,
+    /// within the documented character budget, newest first.
     pub(crate) fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {
         let connection = self.conn()?;
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories WHERE owner = ?1 AND importance = 10 \
-             ORDER BY COALESCE(last_accessed_at, recorded_at) DESC, rowid DESC"
+            "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance = 10 \
+             ORDER BY COALESCE(m.last_accessed_at, m.recorded_at) DESC, m.rowid DESC"
         ))?;
         let rows = statement.query_map([companion], row_to_memory)?;
         let mut budget = PINNED_BUDGET_CHARS;
@@ -502,7 +484,7 @@ impl Store {
         Ok(pinned)
     }
 
-    /// One page of the companion's own memories, newest first.
+    /// One page of the memories the companion recalls, newest first.
     pub(crate) fn list_memories(
         &self,
         companion: &str,
@@ -511,8 +493,8 @@ impl Store {
     ) -> Result<(Vec<Memory>, Option<i64>)> {
         let connection = self.conn()?;
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories WHERE owner = ?1 AND rowid > ?2 \
-             ORDER BY rowid LIMIT ?3"
+            "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.rowid > ?2 \
+             ORDER BY m.rowid LIMIT ?3"
         ))?;
         let rows = statement.query_map(
             params![companion, cursor.unwrap_or(0), (limit + 1) as i64],
@@ -550,14 +532,11 @@ impl Store {
                     .replace('_', "\\_")
             );
             let mut statement = connection.prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?3 \
-                 AND m.content LIKE ?4 ESCAPE '\\' ORDER BY m.importance DESC, m.rowid DESC \
+                "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
+                 AND m.content LIKE ?3 ESCAPE '\\' ORDER BY m.importance DESC, m.rowid DESC \
                  LIMIT 20"
             ))?;
-            let rows = statement.query_map(
-                params![companion, companion, minimum, pattern],
-                row_to_memory,
-            )?;
+            let rows = statement.query_map(params![companion, minimum, pattern], row_to_memory)?;
             for row in rows {
                 memories.push(row?);
             }
@@ -566,29 +545,14 @@ impl Store {
         let expression = terms.join(" OR ");
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {JOINED_COLUMNS} FROM memories m JOIN memories_fts f ON m.rowid = f.rowid \
-             WHERE {VISIBLE} AND m.importance >= ?3 AND memories_fts MATCH ?4 \
+             WHERE {VISIBLE} AND m.importance >= ?2 AND memories_fts MATCH ?3 \
              ORDER BY bm25(memories_fts) ASC LIMIT 20"
         ))?;
-        let rows = statement.query_map(
-            params![companion, companion, minimum, expression],
-            row_to_memory,
-        )?;
+        let rows = statement.query_map(params![companion, minimum, expression], row_to_memory)?;
         for row in rows {
             memories.push(row?);
         }
         Ok(memories)
-    }
-
-    /// The consolidation cursor: the turn the next job starts after.
-    pub(crate) fn consolidation_cursor(&self, companion: &str) -> Result<Option<String>> {
-        let connection = self.conn()?;
-        let cursor = connection
-            .prepare_cached(
-                "SELECT last_processed_turn_id FROM consolidation_state WHERE companion_id = ?1",
-            )?
-            .query_row([companion], |row| row.get(0))
-            .optional()?;
-        Ok(cursor)
     }
 
     /// Records the memory ids the host injected into `turn_id`, one row each,
@@ -611,8 +575,8 @@ impl Store {
                 )?
                 .execute(params![companion, turn_id, id, now()])?;
         }
-        // Keep the ledger bounded: only the newest turns can still be
-        // consolidated, and a job reads at most MAX_TURNS of them.
+        // Keep the ledger bounded: a citation whose injection record is gone is
+        // dropped by the guard, which is the safe side of the guard.
         transaction
             .prepare_cached(
                 "DELETE FROM memory_injections WHERE companion_id = ?1 AND turn_id NOT IN (\
@@ -624,17 +588,15 @@ impl Store {
         Ok(())
     }
 
-    /// The ids injected into turns after `after` (exclusive) through
-    /// `through` (inclusive), in injection order. A turn number the ledger
-    /// cannot read is skipped rather than guessed at.
+    /// The ids injected into the turns of the window `(after, through]`, in
+    /// injection order: what the citation guard may accept for that interval.
+    /// A turn id the ledger cannot read is skipped rather than guessed at.
     pub(crate) fn injected_between(
         &self,
         companion: &str,
-        after: Option<&str>,
-        through: &str,
+        after: Option<u64>,
+        through: u64,
     ) -> Result<Vec<String>> {
-        let lower = after.and_then(|after| after.parse::<u64>().ok());
-        let upper = through.parse::<u64>().ok();
         let connection = self.conn()?;
         let mut statement = connection.prepare_cached(
             "SELECT turn_id, memory_id FROM memory_injections \
@@ -650,10 +612,7 @@ impl Store {
             let Ok(turn) = turn.parse::<u64>() else {
                 continue;
             };
-            if upper.is_some_and(|upper| turn > upper) {
-                continue;
-            }
-            if lower.is_some_and(|lower| turn <= lower) {
+            if turn > through || after.is_some_and(|after| turn <= after) {
                 continue;
             }
             if seen.insert(id.clone()) {
@@ -730,8 +689,7 @@ impl Store {
                     &transaction,
                     &MemoryRecord {
                         id: id.clone(),
-                        owner: update.companion_id.clone(),
-                        audiences: memory.audiences.clone(),
+                        scope: update.companion_id.clone(),
                         content: memory.content.clone(),
                         importance: memory.importance.unwrap_or(3).min(10),
                         occurred_at: memory.occurred_at.clone(),
@@ -815,26 +773,27 @@ impl Store {
         Ok(connection)
     }
 
-    /// The `(id, memory_revision)` signature of one owner's embedding space,
-    /// used to decide whether the flat index needs a rebuild. Only rows whose
-    /// embedding still matches their content revision are listed, and only
-    /// the owner's: another companion's vectors are another key space.
+    /// The `(id, memory_revision)` signature of one companion's embedding
+    /// space, used to decide whether the flat index needs a rebuild. Only rows
+    /// whose embedding still matches their content revision are listed, and
+    /// only the ones that companion recalls: the shared pool belongs to every
+    /// companion's space, another companion's scope does not.
     pub(crate) fn embedding_revisions(
         &self,
         space: &str,
-        owner: &str,
+        companion: &str,
     ) -> Result<Vec<(String, u64)>> {
         let Some(dimensions) = dimensions_of_space(space) else {
             return Ok(Vec::new());
         };
         let connection = self.conn()?;
-        let mut statement = connection.prepare_cached(
-            "SELECT id, memory_revision FROM memories WHERE owner = ?3 \
-             AND embedding_model = ?1 AND embedding_dimensions = ?2 \
-             AND embedding IS NOT NULL AND embedding_content_revision = content_revision \
-             ORDER BY rowid",
-        )?;
-        let rows = statement.query_map(params![space, dimensions as i64, owner], |row| {
+        let mut statement = connection.prepare_cached(&format!(
+            "SELECT m.id, m.memory_revision FROM memories m \
+             WHERE {VISIBLE} AND m.embedding_model = ?2 AND m.embedding_dimensions = ?3 \
+             AND m.embedding IS NOT NULL AND m.embedding_content_revision = m.content_revision \
+             ORDER BY m.rowid"
+        ))?;
+        let rows = statement.query_map(params![companion, space, dimensions as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -870,12 +829,12 @@ impl Store {
         missing_embeddings(&connection, space, limit)
     }
 
-    /// The candidate memories shown to the consolidation model: the owner's
-    /// memories that the job's turns actually retrieve, by FTS5 and by vector
-    /// similarity (`semantic` ids from `CompactVectorIndex`), then pinned and
-    /// important memories only to fill the remaining slots. Forgotten
-    /// memories are included when their topic matches, so the model can see
-    /// that the user asked to forget them instead of re-creating them.
+    /// The candidate memories shown to the consolidation model: the memories
+    /// the companion recalls that the job's turns actually retrieve, by FTS5
+    /// and by vector similarity (`semantic` ids from `CompactVectorIndex`),
+    /// then pinned and important memories only to fill the remaining slots.
+    /// Forgotten memories are included when their topic matches, so the model
+    /// can see that the user asked to forget them instead of re-creating them.
     pub(crate) fn consolidation_context(
         &self,
         companion: &str,
@@ -889,7 +848,7 @@ impl Store {
         let mut seen = HashSet::new();
         let mut contexts = Vec::new();
         let mut push = |memory: &Memory, contexts: &mut Vec<MemoryContext>| {
-            if memory.owner != companion || !seen.insert(memory.id.clone()) {
+            if !memory.visible_to(companion) || !seen.insert(memory.id.clone()) {
                 return;
             }
             contexts.push(MemoryContext {
@@ -919,10 +878,10 @@ impl Store {
         // still the material a merge can cite.
         let connection = self.conn()?;
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories \
-             WHERE owner = ?1 AND importance >= 2 \
-             ORDER BY importance DESC, COALESCE(last_accessed_at, recorded_at) DESC, rowid DESC \
-             LIMIT ?2"
+            "SELECT {COLUMNS} FROM memories m \
+             WHERE {VISIBLE} AND m.importance >= 2 \
+             ORDER BY m.importance DESC, COALESCE(m.last_accessed_at, m.recorded_at) DESC, \
+             m.rowid DESC LIMIT ?2"
         ))?;
         let rows = statement.query_map(params![companion, limit as i64], row_to_memory)?;
         for memory in rows {
@@ -934,11 +893,11 @@ impl Store {
         Ok(contexts)
     }
 
-    /// Commits one consolidation job. The expected cursor and the memory
-    /// revisions captured at job start are checked inside the transaction;
-    /// any mismatch rolls back every memory, edge and cursor change.
+    /// Commits one consolidation pass. The memory revisions captured before the
+    /// model ran are checked inside the transaction; any mismatch rolls back
+    /// every memory and edge the pass would have written.
     pub(crate) fn consolidate(&self, batch: &Batch, facts: &[Fact]) -> Result<Commit> {
-        if batch.companion_id.trim().is_empty() || batch.new_cursor.trim().is_empty() {
+        if batch.companion_id.trim().is_empty() {
             return Err(HostError::Invalid(
                 ("consolidation batch is incomplete").into(),
             ));
@@ -977,12 +936,11 @@ impl Store {
             let importance = fact.importance.unwrap_or(3).min(10);
             // Resurrection guard (docs/design/mind.md §5.2): a superseded
             // memory the user asked to forget (`importance <= 1`) must not be
-            // brought back at a higher priority by a late consolidation job.
-            // The fact is dropped, and the cursor still advances so the same
-            // turn is not processed forever.
+            // brought back at a higher priority by a late consolidation pass.
+            // The fact is dropped, and the rest of the window still commits.
             if let Some(old) = fact.supersedes.as_deref()
                 && let Some(current) = read_memory_tx(&transaction, old)?
-                && current.owner == batch.companion_id
+                && in_scope(&current.scope, &batch.companion_id)
                 && current.importance <= 1
                 && importance > 1
             {
@@ -1002,9 +960,9 @@ impl Store {
             if let Some((id, revision)) = merge {
                 let current = read_memory_tx(&transaction, &id)?
                     .ok_or_else(|| HostError::Conflict(("the superseded memory is gone").into()))?;
-                if current.owner != batch.companion_id {
+                if !in_scope(&current.scope, &batch.companion_id) {
                     return Err(HostError::Permission(
-                        ("consolidation cannot merge another companion's memory").into(),
+                        ("consolidation cannot merge a memory outside its scope").into(),
                     ));
                 }
                 if current.memory_revision != revision {
@@ -1030,23 +988,24 @@ impl Store {
                 updated += 1;
             } else {
                 let id = uuid::Uuid::new_v4().to_string();
-                let audiences = match fact.audience.as_deref() {
-                    None => Vec::new(),
-                    Some("*") => vec![SHARED_AUDIENCE.to_owned()],
-                    Some(audience) => vec![audience.to_owned()],
+                // A fact lands in the companion's own scope unless the model
+                // asked for the shared pool: one scope column holds one value.
+                let scope = if fact.scope.as_deref() == Some(SHARED_SCOPE) {
+                    SHARED_SCOPE.to_owned()
+                } else {
+                    batch.companion_id.clone()
                 };
                 insert_row(
                     &transaction,
                     &MemoryRecord {
                         id: id.clone(),
-                        owner: batch.companion_id.clone(),
-                        audiences,
+                        scope,
                         content: content.to_owned(),
                         importance,
                         occurred_at: None,
                         source_context: value!({
                             "source": "consolidation",
-                            "turn_id": batch.new_cursor,
+                            "turn_id": batch.through.to_string(),
                         }),
                     },
                     &stamp,
@@ -1071,24 +1030,13 @@ impl Store {
                     &transaction,
                     id,
                     "estimated_cited_in",
-                    &batch.new_cursor,
+                    &batch.through.to_string(),
                     &stamp,
                 )?;
             }
         }
-        advance_consolidation_cursor_tx(
-            &transaction,
-            &batch.companion_id,
-            batch.job_start.as_deref(),
-            &batch.new_cursor,
-            &stamp,
-        )?;
         transaction.commit()?;
-        Ok(Commit {
-            inserted,
-            updated,
-            cursor: batch.new_cursor.clone(),
-        })
+        Ok(Commit { inserted, updated })
     }
 
     pub(crate) fn memory_edges(&self, id: &str) -> Result<Vec<(String, String)>> {
@@ -1167,9 +1115,9 @@ fn forget_memory_tx(
 ) -> Result<()> {
     let current = read_memory_tx(transaction, id)?
         .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
-    if current.owner != update.companion_id {
+    if !in_scope(&current.scope, &update.companion_id) {
         return Err(HostError::Permission(
-            ("only the owner may forget a memory").into(),
+            ("this memory is outside the companion's scope").into(),
         ));
     }
     let expected = expected_revision.unwrap_or(current.memory_revision);
@@ -1202,9 +1150,9 @@ fn correct_memory_tx(
 ) -> Result<()> {
     let current = read_memory_tx(transaction, id)?
         .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
-    if current.owner != update.companion_id {
+    if !in_scope(&current.scope, &update.companion_id) {
         return Err(HostError::Permission(
-            ("only the owner may correct a memory").into(),
+            ("this memory is outside the companion's scope").into(),
         ));
     }
     let expected = memory.expected_revision.unwrap_or(current.memory_revision);
@@ -1253,37 +1201,6 @@ fn correct_memory_tx(
     }
     if let Some(old) = &memory.supersedes {
         supersede_tx(transaction, &update.companion_id, id, old, stamp)?;
-    }
-    Ok(())
-}
-
-/// The documented cursor-match check: an update that no longer sees the
-/// cursor the job started with aborts the whole transaction.
-fn advance_consolidation_cursor_tx(
-    transaction: &rusqlite::Transaction<'_>,
-    companion_id: &str,
-    expected: Option<&str>,
-    next: &str,
-    stamp: &str,
-) -> Result<()> {
-    let changed = match expected {
-        Some(expected) => transaction
-            .prepare_cached(
-                "UPDATE consolidation_state SET last_processed_turn_id = ?3, updated_at = ?4 \
-             WHERE companion_id = ?1 AND last_processed_turn_id = ?2",
-            )?
-            .execute(params![companion_id, expected, next, stamp])?,
-        None => transaction
-            .prepare_cached(
-                "INSERT OR IGNORE INTO consolidation_state \
-             (companion_id, last_processed_turn_id, updated_at) VALUES (?1, ?2, ?3)",
-            )?
-            .execute(params![companion_id, next, stamp])?,
-    };
-    if changed == 0 {
-        return Err(HostError::Conflict(
-            ("the consolidation cursor moved before the commit").into(),
-        ));
     }
     Ok(())
 }
@@ -1347,8 +1264,7 @@ pub(crate) enum MemoryActionKind {
 pub(crate) fn detail(memory: &Memory, relations: &[(String, String)]) -> Value {
     value!({
         "id": memory.id,
-        "owner": memory.owner,
-        "audiences": memory.audiences,
+        "scope": memory.scope,
         "content": memory.content,
         "importance": memory.importance,
         "occurred_at": memory.occurred_at,
@@ -1375,8 +1291,7 @@ mod tests {
     fn new_memory(content: &str, importance: u8) -> MemoryRecord {
         MemoryRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            owner: "ene".into(),
-            audiences: Vec::new(),
+            scope: "ene".into(),
             content: content.into(),
             importance,
             occurred_at: None,
@@ -1545,7 +1460,7 @@ mod tests {
         assert_eq!(lexical_only.items.len(), 1);
 
         store
-            .control_memory(&lexical.id, MemoryActionKind::Forget, None)
+            .control_memory(&lexical.id, MemoryActionKind::Forget, "ene")
             .unwrap();
         assert_eq!(store.memory(&lexical.id).unwrap().unwrap().importance, 0);
         // Auto recall drops the forgotten memory from both halves.
@@ -1692,32 +1607,14 @@ mod tests {
     }
 
     #[test]
-    fn another_owners_memory_is_invisible_without_an_audience() {
+    fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
         let store = store();
         let mut other = new_memory("other companion's secret", 8);
-        other.owner = "other".into();
+        other.scope = "other".into();
         let other = store.insert_memory(other).unwrap();
-        let mut literal = new_memory("a row owned by shared", 8);
-        literal.owner = "shared".into();
-        let literal = store.insert_memory(literal).unwrap();
-        // The owner is never rewritten to "shared", so neither row is visible
-        // without an audience (finding: no `OR m.owner = 'shared'`).
-        let outcome = store
-            .recall_hybrid(
-                "ene",
-                "secret",
-                RecallMode::Explicit,
-                &[other.id.clone(), literal.id.clone()],
-                8,
-            )
-            .unwrap();
-        assert!(outcome.items.is_empty());
-        // Sharing adds the audience instead of rewriting the owner.
-        store
-            .control_memory(&other.id, MemoryActionKind::Share, Some("ene"))
-            .unwrap();
-        assert_eq!(store.memory(&other.id).unwrap().unwrap().owner, "other");
-        let shared = store
+        // A scope only one companion names keeps the row out of every other
+        // companion's lexical and semantic candidates.
+        let private = store
             .recall_hybrid(
                 "ene",
                 "secret",
@@ -1726,15 +1623,69 @@ mod tests {
                 8,
             )
             .unwrap();
-        assert_eq!(shared.items.len(), 1);
-        assert_eq!(shared.items[0].memory.id, other.id);
+        assert!(private.items.is_empty());
+        // Sharing rewrites the scope to the shared pool instead of adding an id.
+        let shared = store
+            .control_memory(&other.id, MemoryActionKind::Share, "other")
+            .unwrap();
+        assert_eq!(shared.scope, SHARED_SCOPE);
+        assert_eq!(shared.memory_revision, 2);
+        // Sharing again changes nothing, so it is not a revision bump.
+        assert_eq!(
+            store
+                .control_memory(&other.id, MemoryActionKind::Share, "other")
+                .unwrap()
+                .memory_revision,
+            2
+        );
+        let recalled = store
+            .recall_hybrid(
+                "ene",
+                "secret",
+                RecallMode::Explicit,
+                std::slice::from_ref(&other.id),
+                8,
+            )
+            .unwrap();
+        assert_eq!(recalled.items.len(), 1);
+        assert_eq!(recalled.items[0].memory.id, other.id);
+        // Unsharing returns the row to that companion's own scope.
+        let unshared = store
+            .control_memory(&other.id, MemoryActionKind::Unshare, "other")
+            .unwrap();
+        assert_eq!(unshared.scope, "other");
+        assert_eq!(unshared.memory_revision, 3);
+        assert!(
+            store
+                .recall_hybrid("ene", "secret", RecallMode::Explicit, &[], 8)
+                .unwrap()
+                .items
+                .is_empty()
+        );
     }
 
-    fn batch(cursor: Option<&str>, next: &str, context: Vec<MemoryContext>) -> Batch {
+    #[test]
+    fn a_shared_pinned_memory_is_injected_for_every_companion() {
+        let store = store();
+        let memory = store
+            .insert_memory(new_memory("the user's name is A", 10))
+            .unwrap();
+        assert_eq!(store.pinned("ene").unwrap().len(), 1);
+        assert!(store.pinned("other").unwrap().is_empty());
+        // Sharing must not unpin the memory for anyone: the shared pool is one
+        // scope, so every companion injects and lists it.
+        store
+            .control_memory(&memory.id, MemoryActionKind::Share, "ene")
+            .unwrap();
+        assert_eq!(store.pinned("ene").unwrap().len(), 1);
+        assert_eq!(store.pinned("other").unwrap().len(), 1);
+        assert_eq!(store.list_memories("other", None, 10).unwrap().0.len(), 1);
+    }
+
+    fn batch(through: u64, context: Vec<MemoryContext>) -> Batch {
         Batch {
             companion_id: "ene".into(),
-            job_start: cursor.map(ToOwned::to_owned),
-            new_cursor: next.into(),
+            through,
             context,
             injected: Vec::new(),
         }
@@ -1771,12 +1722,9 @@ mod tests {
     #[test]
     fn consolidation_does_not_resurrect_a_forgotten_memory() {
         let store = store();
-        store
-            .consolidate(&batch(None, "5", Vec::new()), &[])
-            .unwrap();
         let memory = store.insert_memory(new_memory("coffee", 5)).unwrap();
         store
-            .control_memory(&memory.id, MemoryActionKind::Forget, None)
+            .control_memory(&memory.id, MemoryActionKind::Forget, "ene")
             .unwrap();
         let forgotten = store.memory(&memory.id).unwrap().unwrap();
         assert_eq!(forgotten.importance, 0);
@@ -1793,21 +1741,18 @@ mod tests {
             importance: forgotten.importance,
             content: forgotten.content.clone(),
         }];
-        let commit = store
-            .consolidate(&batch(Some("5"), "7", context), &[fact])
-            .unwrap();
+        let commit = store.consolidate(&batch(7, context), &[fact]).unwrap();
         assert_eq!(commit.inserted, 0);
         assert_eq!(commit.updated, 0);
         let after = store.memory(&memory.id).unwrap().unwrap();
         assert_eq!(after.importance, 0, "the forgotten row stays forgotten");
         assert_eq!(after.content, "coffee");
-        assert_eq!(store.consolidation_cursor("ene").unwrap(), Some("7".into()));
 
         // A supersede of a forgotten id that is no longer a candidate is
         // dropped as well: it cannot be re-created as a new memory.
         let commit = store
             .consolidate(
-                &batch(Some("7"), "9", Vec::new()),
+                &batch(9, Vec::new()),
                 &[Fact {
                     content: "A drinks coffee every morning".into(),
                     importance: Some(9),
@@ -1837,23 +1782,23 @@ mod tests {
         // A new host process reads the verified injection set back.
         let store = Store::open(&path).unwrap();
         assert_eq!(
-            store.injected_between("ene", Some("5"), "7").unwrap(),
+            store.injected_between("ene", Some(5), 7).unwrap(),
             vec!["m3".to_owned()]
         );
         assert_eq!(
-            store.injected_between("ene", None, "7").unwrap(),
+            store.injected_between("ene", None, 7).unwrap(),
             vec!["m1".to_owned(), "m2".to_owned(), "m3".to_owned()]
         );
         assert!(
             store
-                .injected_between("ene", Some("5"), "5")
+                .injected_between("ene", Some(5), 5)
                 .unwrap()
                 .is_empty(),
             "after is exclusive, so an empty range has no ids"
         );
         // Another companion's records are not part of this ledger.
         assert_eq!(
-            store.injected_between("other", None, "5").unwrap(),
+            store.injected_between("other", None, 5).unwrap(),
             vec!["m9".to_owned()]
         );
     }

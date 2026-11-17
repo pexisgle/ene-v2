@@ -19,7 +19,7 @@ use std::{
 
 /// A baseline schema version. Databases with another version are refused, as
 /// this alpha has no in-place migration path.
-pub(crate) const VERSION: i64 = 1;
+pub(crate) const VERSION: i64 = 5;
 
 fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;
@@ -356,12 +356,27 @@ mod tests {
             RunState::Starting,
             RunState::Running,
             RunState::WaitingInput,
-            RunState::Cancelling,
             RunState::Completed,
             RunState::Cancelled,
-            RunState::CancellationUnconfirmed,
             RunState::Failed,
         ]);
+    }
+
+    /// A run stopped by an older host still opens: its state reads as the one a
+    /// stop reaches now instead of failing the row.
+    #[test]
+    fn a_stop_state_this_host_no_longer_writes_decodes_as_cancelled() {
+        use crate::host::work::RunState;
+
+        let connection = Connection::open_in_memory().unwrap();
+        for name in ["cancelling", "cancellation_unconfirmed"] {
+            let state: RunState = connection
+                .query_row("SELECT ?1 AS name", [name], |row| {
+                    enum_name_column(row, "name", "unknown run state")
+                })
+                .unwrap();
+            assert_eq!(state, RunState::Cancelled, "{name}");
+        }
     }
 
     #[test]

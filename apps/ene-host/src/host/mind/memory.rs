@@ -1,15 +1,22 @@
-//! Episodic memory: ownership, sharing, recall scoring and the semantics of
-//! forgetting (docs/design/mind.md §3-§4).
+//! Episodic memory: scope, recall scoring and the semantics of forgetting
+//! (docs/design/mind.md §3-§4).
 //!
 //! Forgetting is never a delete or a boolean flag: it lowers `importance` and
 //! lets the scoring function make the memory rarer on its own.
 use super::super::db::epoch;
 
-/// A memory owned by another companion and shared with every companion.
-pub(crate) const SHARED_AUDIENCE: &str = "*";
+/// The scope every companion recalls. A memory's `scope` is either this value
+/// or a companion id, so no other value can widen visibility.
+pub(crate) const SHARED_SCOPE: &str = "shared";
 pub(crate) const MAX_IMPORTANCE: u8 = 10;
 /// Pinned memories (`importance == 10`) are injected within this budget.
 pub(crate) const PINNED_BUDGET_CHARS: usize = 3_000;
+
+/// The one visibility rule: a memory is visible when it lives in the reader's
+/// own scope or in the shared pool (docs/design/mind.md §3.3).
+pub(crate) fn in_scope(scope: &str, companion: &str) -> bool {
+    scope == companion || scope == SHARED_SCOPE
+}
 
 /// Why a recall runs. Automatic recall skips what the user asked to forget;
 /// an explicit question about the past may reach everything.
@@ -32,8 +39,7 @@ impl RecallMode {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Memory {
     pub(crate) id: String,
-    pub(crate) owner: String,
-    pub(crate) audiences: Vec<String>,
+    pub(crate) scope: String,
     pub(crate) content: String,
     pub(crate) importance: u8,
     pub(crate) occurred_at: Option<String>,
@@ -46,13 +52,9 @@ pub(crate) struct Memory {
 }
 
 impl Memory {
-    /// Whether `companion` may recall this memory. The owner always may.
+    /// Whether `companion` may recall this memory.
     pub(crate) fn visible_to(&self, companion: &str) -> bool {
-        self.owner == companion
-            || self
-                .audiences
-                .iter()
-                .any(|audience| audience == SHARED_AUDIENCE || audience == companion)
+        in_scope(&self.scope, companion)
     }
 }
 

@@ -1,5 +1,5 @@
-//! Clients, their declared capabilities, activation generations and bound
-//! device operations.
+//! Clients, their declared capabilities, the active client per companion and
+//! bound device operations.
 use super::{Result, Store, enum_name_column, json_column, now, optional_json_column, to_json};
 use crate::host::client::{CapabilitySpec, Client, DeviceOperation, DeviceStatus};
 use crate::host::error::{Failure, HostError};
@@ -25,13 +25,12 @@ fn row_to_client(row: &Row<'_>) -> rusqlite::Result<Client> {
 const CLIENT_COLUMNS: &str = "id, name, platform, capabilities, granted_capabilities, \
      capability_specs, revision, last_seen";
 
-const ACTIVATION_COLUMNS: &str = "companion_id, client_id, revision";
+const ACTIVATION_COLUMNS: &str = "companion_id, client_id";
 
 fn row_to_activation(row: &Row<'_>) -> rusqlite::Result<Activation> {
     Ok(Activation {
         companion_id: row.get(0)?,
         client_id: row.get(1)?,
-        revision: row.get::<_, u64>(2)?,
         ..Default::default()
     })
 }
@@ -184,71 +183,47 @@ impl Store {
         )
     }
 
-    /// Moves or releases the active client and returns the new generation.
-    /// `expected` must be the revision the caller last saw (0 for a companion
-    /// that was never activated).
-    pub(crate) fn activate(
-        &self,
-        companion: &str,
-        client: Option<&str>,
-        expected: u64,
-    ) -> Result<Activation> {
-        let current = self.activation(companion)?;
-        let revision = current.as_ref().map_or(0, |activation| activation.revision);
-        if expected != revision {
-            return Err(HostError::Conflict(
-                ("activation changed since it was read").into(),
-            ));
-        }
-        let next = revision + 1;
+    /// Moves or releases the active client. The latest write wins: a companion
+    /// has exactly one active client row, with no generation to compare.
+    pub(crate) fn activate(&self, companion: &str, client: Option<&str>) -> Result<Activation> {
         self.fetch(
             &format!(
-                "INSERT INTO activations (companion_id, client_id, revision, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4) \
+                "INSERT INTO activations (companion_id, client_id, updated_at) \
+                 VALUES (?1, ?2, ?3) \
                  ON CONFLICT(companion_id) DO UPDATE SET client_id = excluded.client_id, \
-                 revision = excluded.revision, updated_at = excluded.updated_at \
-                 WHERE activations.revision = ?5 RETURNING {ACTIVATION_COLUMNS}"
+                 updated_at = excluded.updated_at RETURNING {ACTIVATION_COLUMNS}"
             ),
-            params![companion, client, next, now(), expected],
+            params![companion, client, now()],
             row_to_activation,
         )?
-        .ok_or_else(|| HostError::Conflict(("activation changed since it was read").into()))
+        .ok_or_else(|| HostError::Storage(("the activation did not persist").into()))
     }
 
-    /// The client generation an agent's calls must target: the active client
-    /// for a companion, or the client the run's work session is bound to.
-    pub(crate) fn target(
-        &self,
-        companion: &str,
-        work: Option<&str>,
-    ) -> Result<Option<(String, u64)>> {
+    /// The client an agent's calls are dispatched to: the client the run's work
+    /// session is bound to, else the companion's active client.
+    pub(crate) fn target(&self, companion: &str, work: Option<&str>) -> Result<Option<String>> {
         if let Some(work) = work {
             let session = self
                 .work_session(work)?
                 .ok_or_else(|| HostError::NotFound(("work session not found").into()))?;
-            return Ok(session
-                .client_id
-                .map(|client| (client, session.activation_revision)));
+            return Ok(session.client_id);
         }
-        Ok(self.activation(companion)?.and_then(|activation| {
-            activation
-                .client_id
-                .map(|client| (client, activation.revision))
-        }))
+        Ok(self
+            .activation(companion)?
+            .and_then(|activation| activation.client_id))
     }
 
     pub(crate) fn insert_operation(&self, operation: &DeviceOperation) -> Result<()> {
         let stamp = now();
         self.conn()?
             .prepare_cached(
-                "INSERT INTO device_operations (operation_id, client_id, activation_revision, \
+                "INSERT INTO device_operations (operation_id, client_id, \
              capability, input, work_id, status, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?
             .execute(params![
                 operation.id,
                 operation.client_id,
-                operation.activation_revision,
                 operation.capability,
                 to_json(&operation.input)?,
                 operation.work_id,
@@ -335,21 +310,6 @@ impl Store {
         )
     }
 
-    /// A generation ended: every open operation bound to it fails as
-    /// `client_moved` and is never re-dispatched anywhere.
-    pub(crate) fn fail_operations_of(&self, client: &str, revision: u64) -> Result<usize> {
-        let failure = Failure::new("client_moved", "the active client moved");
-        let changed = self
-            .conn()?
-            .prepare_cached(
-                "UPDATE device_operations SET status = 'failed', failure = ?3, updated_at = ?4 \
-             WHERE client_id = ?1 AND activation_revision = ?2 \
-             AND status IN ('pending','dispatched')",
-            )?
-            .execute(params![client, revision, to_json(&failure)?, now()])?;
-        Ok(changed)
-    }
-
     /// Startup: dispatched operations whose result never arrived are no
     /// longer trusted. Pending ones wait for the client to reconnect.
     pub(crate) fn mark_unanswered_operations_uncertain(&self) -> Result<usize> {
@@ -364,7 +324,7 @@ impl Store {
     }
 }
 
-const OPERATION_COLUMNS: &str = "operation_id, client_id, activation_revision, capability, input, \
+const OPERATION_COLUMNS: &str = "operation_id, client_id, capability, input, \
      work_id, status, output, failure, created_at, updated_at";
 
 fn row_to_operation(row: &Row<'_>) -> rusqlite::Result<DeviceOperation> {
@@ -372,7 +332,6 @@ fn row_to_operation(row: &Row<'_>) -> rusqlite::Result<DeviceOperation> {
     Ok(DeviceOperation {
         id: row.get("operation_id")?,
         client_id: row.get("client_id")?,
-        activation_revision: row.get::<_, u64>("activation_revision")?,
         capability: row.get("capability")?,
         input: json_column(row, "input", "stored operation JSON is corrupt")?,
         work_id: row.get("work_id")?,
@@ -385,9 +344,8 @@ fn row_to_operation(row: &Row<'_>) -> rusqlite::Result<DeviceOperation> {
 }
 
 impl Store {
-    /// The activation a client currently holds, with its companion and
-    /// generation.
-    pub(crate) fn activation_for_client(&self, client: &str) -> Result<Option<(String, u64)>> {
+    /// The companion a client is currently the active client of, if any.
+    pub(crate) fn activation_for_client(&self, client: &str) -> Result<Option<String>> {
         Ok(self
             .fetch(
                 &format!(
@@ -397,7 +355,7 @@ impl Store {
                 [client],
                 row_to_activation,
             )?
-            .map(|activation| (activation.companion_id, activation.revision)))
+            .map(|activation| activation.companion_id))
     }
 }
 
@@ -434,15 +392,16 @@ impl Store {
     /// Restores an activation row exactly, for rolling back a move whose tool
     /// publication failed.
     pub(crate) fn restore_activation(&self, activation: &Activation) -> Result<()> {
-        self.conn()?.prepare_cached("INSERT OR REPLACE INTO activations (companion_id, client_id, revision, updated_at) \
-             VALUES (?1, ?2, ?3, ?4)")?.execute(
-            params![
+        self.conn()?
+            .prepare_cached(
+                "INSERT OR REPLACE INTO activations (companion_id, client_id, updated_at) \
+             VALUES (?1, ?2, ?3)",
+            )?
+            .execute(params![
                 activation.companion_id,
                 activation.client_id,
-                activation.revision,
                 super::now(),
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -459,13 +418,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn operations_are_idempotent_and_generation_bound() {
+    fn operations_are_idempotent_and_bound_to_one_client() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         let operation = DeviceOperation {
             id: "op1".into(),
             client_id: "c1".into(),
-            activation_revision: 1,
             capability: "body.motion".into(),
             input: serde_json::json!({"motion": "nod"}),
             work_id: None,
@@ -491,14 +449,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(again.status, DeviceStatus::Completed);
-        // A moved generation fails open operations and nothing is re-sent.
+        // A result is matched to its operation by id, and the operation keeps
+        // the client it was dispatched to for the record.
+        assert_eq!(
+            store.operation("op1").unwrap().unwrap().client_id.as_str(),
+            "c1"
+        );
         let other = DeviceOperation {
             id: "op2".into(),
-            activation_revision: 1,
+            client_id: "c2".into(),
             ..operation.clone()
         };
         store.insert_operation(&other).unwrap();
-        assert_eq!(store.fail_operations_of("c1", 1).unwrap(), 1);
-        assert!(store.outstanding_operations("c1").unwrap().is_empty());
+        assert_eq!(store.outstanding_operations("c1").unwrap().len(), 0);
+        assert_eq!(store.outstanding_operations("c2").unwrap().len(), 1);
     }
 }

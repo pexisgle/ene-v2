@@ -41,8 +41,9 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
-    owner TEXT NOT NULL,
-    audiences TEXT NOT NULL DEFAULT '[]',
+    -- 'shared' or a companion id (docs/design/mind.md §3.3): the same column
+    -- decides who recalls the row, so there is no separate audience list.
+    scope TEXT NOT NULL,
     content TEXT NOT NULL,
     importance INTEGER NOT NULL CHECK (importance >= 0 AND importance <= 10),
     occurred_at TEXT,
@@ -92,12 +93,6 @@ CREATE TABLE IF NOT EXISTS memory_injections (
     memory_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (companion_id, turn_id, memory_id)
-);
-
-CREATE TABLE IF NOT EXISTS consolidation_state (
-    companion_id TEXT PRIMARY KEY,
-    last_processed_turn_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL
 );
 
 -- Idempotency of mind_update: one row per tool operation.
@@ -167,8 +162,8 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     resolved_at TEXT,
+    -- The client the approval is bound to; a move does not void it.
     client_id TEXT,
-    activation_revision INTEGER,
     capability TEXT
 );
 
@@ -186,12 +181,12 @@ CREATE TABLE IF NOT EXISTS clients (
     last_seen TEXT NOT NULL
 );
 
--- One activation row per companion: the active client and the revision that
--- binds audio, perception, approvals and device operations to a generation.
+-- One activation row per companion: the active client. The latest Activate
+-- wins; audio, perception, approvals and device operations bind to a client
+-- id, never to a generation.
 CREATE TABLE IF NOT EXISTS activations (
     companion_id TEXT PRIMARY KEY,
     client_id TEXT,
-    revision INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
 
@@ -201,7 +196,6 @@ CREATE TABLE IF NOT EXISTS work_sessions (
     title TEXT NOT NULL,
     status TEXT NOT NULL,
     client_id TEXT,
-    activation_revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -213,33 +207,18 @@ CREATE TABLE IF NOT EXISTS work_runs (
     state TEXT NOT NULL,
     pending_request_id TEXT,
     failure TEXT,
-    cancellation_requested_at TEXT,
-    cancellation_reason TEXT,
-    unverified_pids TEXT NOT NULL DEFAULT '[]',
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS work_inquiries (
-    request_id TEXT PRIMARY KEY,
-    work_id TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    choices TEXT NOT NULL DEFAULT '[]',
-    answer TEXT,
-    created_at TEXT NOT NULL,
-    resolved_at TEXT
-);
-
 CREATE INDEX IF NOT EXISTS idx_runs_work ON work_runs(work_id, state);
-CREATE INDEX IF NOT EXISTS idx_inquiries_work ON work_inquiries(work_id, resolved_at);
 
--- Device operations: the idempotency key, the bound client generation and the
--- terminal state the host can answer again after a reconnect.
+-- Device operations: the idempotency key, the client the host dispatched to and
+-- the terminal state the host can answer again after a reconnect. A result is
+-- matched to its operation by id.
 CREATE TABLE IF NOT EXISTS device_operations (
     operation_id TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
-    activation_revision INTEGER NOT NULL,
     capability TEXT NOT NULL,
     input TEXT NOT NULL,
     work_id TEXT,
@@ -252,15 +231,16 @@ CREATE TABLE IF NOT EXISTS device_operations (
 
 CREATE INDEX IF NOT EXISTS idx_operations_client ON device_operations(client_id, status);
 
-CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
--- Recall lists one owner's recent page.
-CREATE INDEX IF NOT EXISTS idx_memories_owner_rowid ON memories(owner, rowid);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_importance ON memories(scope, importance);
+-- Recall lists one scope's recent page.
+CREATE INDEX IF NOT EXISTS idx_memories_scope_rowid ON memories(scope, rowid);
 -- The embedding backfill looks for valid vectors of one space.
 CREATE INDEX IF NOT EXISTS idx_memories_embedding_space
     ON memories(embedding_model, embedding_content_revision);
--- The vector index keeps one owner's key space, so it reads one owner only.
-CREATE INDEX IF NOT EXISTS idx_memories_embedding_owner
-    ON memories(owner, embedding_model, embedding_content_revision);
+-- The vector index mirrors the rows one companion can recall, so it reads
+-- that companion's scope and the shared pool only.
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_scope
+    ON memories(scope, embedding_model, embedding_content_revision);
 -- The citation guard reads the newest injection records of one companion.
 CREATE INDEX IF NOT EXISTS idx_memory_injections_turn
     ON memory_injections(companion_id, turn_id);

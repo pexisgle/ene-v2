@@ -65,6 +65,8 @@ check 'the host starts on an empty state dir' $?
 cursor=$(rpc ene.host.v1.HostService/GetSnapshot '{}')
 epoch=$(field '["cursor"]["epoch"]' "$cursor")
 seq=$(field '["cursor"]["seq"]' "$cursor")
+# The host omits a zero-valued `seq`, so an empty extraction means "from 0".
+[ -n "$seq" ] || seq=0
 
 create=$(rpc ene.host.v1.HostService/CreateCompanion '{"name":"Mio","mind":"kind"}')
 code=$?

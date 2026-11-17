@@ -1,10 +1,14 @@
-//! Context compaction: the idle rolling summary and the one-pass request fit
-//! (docs/design/compaction.md).
+//! Context compaction: the rolling summary at a turn boundary and the one-pass
+//! request fit (docs/design/compaction.md).
 use super::{
     agent::CompanionAgent,
     background::{self, AbortOnDropHandle},
     db::Store,
-    mind::Role,
+    mind::{
+        Role,
+        consolidate::{self, Commit, Services},
+        embedding::Embeddings,
+    },
     model::{self, Credentials},
     resources::{HostRuntime, HostState},
 };
@@ -22,62 +26,18 @@ use rig_memory::{
     SummaryState, estimate_tokens, next_request_tokens,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-const IDLE: Duration = Duration::from_secs(60);
+/// The share of its model's input limit a conversation may reach before a turn
+/// boundary starts a rolling summary (doc §3.1). It is the only trigger: no
+/// user action starts, resets or cancels one.
+const THRESHOLD_RATIO: f64 = 0.75;
 /// A provider that never answers must not block every companion's summaries.
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
-const SOFT_RATIO: f64 = 0.70;
-const HARD_RATIO: f64 = 0.85;
-const RETRY: Duration = Duration::from_secs(60);
 const SUMMARY: &str = "ene.summary";
 const NOTICE: &str = "[System Notice: 過去の一部ログを一時的に省略して対話を継続しています]";
 const SUMMARY_HEAD: &str =
     "Earlier messages of this conversation were compacted into the summary below.";
-
-/// The strict user idle clock (doc §3.1): only an explicit user action resets
-/// it; companion output never does.
-#[derive(Resource, Clone, Debug)]
-pub(crate) struct InactivityTracker {
-    pub(crate) last_user_interaction_at: Instant,
-}
-
-impl Default for InactivityTracker {
-    fn default() -> Self {
-        Self {
-            last_user_interaction_at: Instant::now(),
-        }
-    }
-}
-
-impl InactivityTracker {
-    pub(crate) fn on_user_activity(&mut self) {
-        self.last_user_interaction_at = Instant::now();
-    }
-
-    pub(crate) fn idle_duration(&self) -> Duration {
-        self.last_user_interaction_at.elapsed()
-    }
-}
-
-/// Resets the idle clock and aborts a running summary, which is requeued for
-/// the next idle window. Call it from user actions, never for companion output.
-pub(crate) fn note_user_activity(world: &mut World) {
-    if let Some(mut tracker) = world.get_resource_mut::<InactivityTracker>() {
-        tracker.on_user_activity();
-    }
-    if let Some(mut state) = world.get_resource_mut::<CompactionState>() {
-        let cancelled = state.cancel_running();
-        let at = Instant::now() + RETRY;
-        for companion in cancelled {
-            state.defer(&companion, at);
-        }
-    }
-}
 
 /// The rolling summary snapshot kept as the newest `ene.summary` aside.
 ///
@@ -220,18 +180,28 @@ fn last_turn(history: &History) -> usize {
     })
 }
 
-type Outcome = std::result::Result<Summary, String>;
+type Outcome = std::result::Result<Collected, String>;
 
-/// One companion's summary slot: the call in flight and its own retry clock.
+/// What one job produced: the summary the aside keeps, and the memories the
+/// pass committed for the same window when it succeeded.
+struct Collected {
+    summary: Summary,
+    memories: crate::host::db::Result<Commit>,
+}
+
+/// One companion's summary slot: the call in flight and the newest message the
+/// last attempt was made for.
 #[derive(Default)]
 struct CompanionSummary {
     running: Option<AbortOnDropHandle<Outcome>>,
-    retry_after: Option<Instant>,
+    tried_at: Option<u64>,
 }
 
-/// Background summary state keyed by companion. A failure or an interruption
-/// only delays the companion it belongs to, and each companion has at most one
-/// summary in flight; the shared runtime still runs one summary at a time.
+/// Background summary state keyed by companion: at most one summary per
+/// companion and one on the shared runtime at a time. Each turn boundary is
+/// tried once, so a failed summary waits for the next turn instead of retrying
+/// on a clock, and a published one cannot restart itself on the stale context
+/// figure the provider reported before it.
 #[derive(Resource, Default)]
 pub(crate) struct CompactionState {
     companions: HashMap<String, CompanionSummary>,
@@ -245,33 +215,28 @@ impl CompactionState {
             .any(|state| state.running.is_some())
     }
 
-    /// Whether `companion` may start a summary at `now`: it has no task in
-    /// flight and its own cooldown has elapsed.
-    fn may_start(&self, companion: &str, now: Instant) -> bool {
+    /// Whether `companion` is due at a boundary whose newest message is
+    /// `newest`: it has no task in flight, and it has not tried at this
+    /// boundary already.
+    fn may_start(&self, companion: &str, newest: u64) -> bool {
         self.companions.get(companion).is_none_or(|state| {
-            state.running.is_none() && state.retry_after.is_none_or(|after| now >= after)
+            state.running.is_none() && state.tried_at.is_none_or(|tried| newest > tried)
         })
     }
 
-    fn start(&mut self, companion: &str, running: AbortOnDropHandle<Outcome>) {
-        debug_assert!(
-            self.companions
-                .get(companion)
-                .is_none_or(|state| state.running.is_none()),
-            "one summary per companion"
-        );
+    /// Spends this boundary, so the next attempt waits for the conversation to
+    /// grow: a failure is retried at the next turn, never on the same one.
+    fn note_attempt(&mut self, companion: &str, newest: u64) {
         self.companions
             .entry(companion.to_owned())
             .or_default()
-            .running = Some(running);
+            .tried_at = Some(newest);
     }
 
-    /// Delays this companion's next summary without touching any other.
-    fn defer(&mut self, companion: &str, until: Instant) {
-        self.companions
-            .entry(companion.to_owned())
-            .or_default()
-            .retry_after = Some(until);
+    fn start(&mut self, companion: &str, running: AbortOnDropHandle<Outcome>) {
+        let slot = self.companions.entry(companion.to_owned()).or_default();
+        debug_assert!(slot.running.is_none(), "one summary per companion");
+        slot.running = Some(running);
     }
 
     /// Takes the one finished task, with the companion it belongs to.
@@ -289,50 +254,42 @@ impl CompactionState {
             .and_then(|state| state.running.take())?;
         Some((companion, running))
     }
-
-    /// Aborts every running summary and returns the companions it aborted.
-    fn cancel_running(&mut self) -> Vec<String> {
-        let mut cancelled = Vec::new();
-        for (companion, state) in &mut self.companions {
-            if let Some(running) = state.running.take() {
-                running.abort();
-                cancelled.push(companion.clone());
-            }
-        }
-        cancelled
-    }
 }
 
 pub(crate) struct CompactionPlugin;
 
 impl Plugin for CompactionPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<InactivityTracker>()
-            .init_resource::<CompactionState>()
-            .add_systems(
-                Update,
-                (summarize_when_idle, collect_summaries)
-                    .chain()
-                    .after(AgentLoop),
-            );
+        app.init_resource::<CompactionState>().add_systems(
+            Update,
+            (summarize_at_turn_boundary, collect_summaries)
+                .chain()
+                .after(AgentLoop),
+        );
     }
 }
 
-/// Dispatches a background summary on the soft condition (ratio >= 70% and 60s
-/// of user idle) or the hard one (ratio >= 85%).
+/// The agent rows a summary start reads: its conversation, the model it is
+/// connected to and what that model last reported, and whether it has a turn in
+/// flight.
+type SummaryRows = (
+    &'static Conversation,
+    &'static CompanionAgent,
+    Option<&'static Connection>,
+    Option<&'static LastUsage>,
+    Has<ActiveTurn>,
+);
+
+/// Starts one background summary for a companion over [`THRESHOLD_RATIO`] once
+/// it has no turn in flight, which is the turn boundary (doc §3.1).
 #[allow(clippy::too_many_arguments)]
-fn summarize_when_idle(
-    tracker: Res<InactivityTracker>,
+fn summarize_at_turn_boundary(
     mut state: ResMut<CompactionState>,
-    agents: Query<(
-        &Conversation,
-        &CompanionAgent,
-        Option<&Connection>,
-        Option<&LastUsage>,
-    )>,
+    agents: Query<SummaryRows>,
     store: Option<Res<Store>>,
     credentials: Option<Res<Credentials>>,
     models: Option<Res<Models>>,
+    embeddings: Option<Res<Embeddings>>,
     host: Option<Res<HostState>>,
     runtime: Option<Res<HostRuntime>>,
     wake: Option<Res<Wake>>,
@@ -341,14 +298,25 @@ fn summarize_when_idle(
     if state.is_running() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
         return;
     }
-    let now = Instant::now();
-    let (Some(store), Some(credentials), Some(models), Some(runtime)) =
-        (store, credentials, models, runtime)
+    let (Some(store), Some(credentials), Some(models), Some(embeddings), Some(runtime)) =
+        (store, credentials, models, embeddings, runtime)
     else {
         return;
     };
-    let idle = tracker.idle_duration();
-    for (conversation, agent, connection, usage) in &agents {
+    // The pass shares the compaction job's services, so it resolves the
+    // companion's own `Consolidation` model and recall's vector cache.
+    let services = Services {
+        store: (*store).clone(),
+        embeddings: (*embeddings).clone(),
+        credentials: Some((*credentials).clone()),
+        models: (*models).clone(),
+        providers: providers.as_deref().cloned().unwrap_or_default(),
+    };
+    for (conversation, agent, connection, usage, busy) in &agents {
+        // A turn in flight is not a boundary; the next one is.
+        if busy {
+            continue;
+        }
         let Some(connection) = connection else {
             continue;
         };
@@ -359,12 +327,14 @@ fn summarize_when_idle(
             .and_then(LastUsage::context)
             .unwrap_or_else(|| estimate_tokens(conversation.messages()));
         let ratio = tokens as f64 / f64::from(limit);
-        if ratio < HARD_RATIO && !(ratio >= SOFT_RATIO && idle >= IDLE) {
+        let newest = conversation
+            .entries()
+            .next_back()
+            .map_or(0, |entry| entry.id.get());
+        if ratio < THRESHOLD_RATIO || !state.may_start(&agent.companion_id, newest) {
             continue;
         }
-        if !state.may_start(&agent.companion_id, now) {
-            continue;
-        }
+        state.note_attempt(&agent.companion_id, newest);
         let Ok(Some(companion)) = store.companion(&agent.companion_id) else {
             continue;
         };
@@ -374,30 +344,40 @@ fn summarize_when_idle(
             models.0.catalog(),
             &companion,
             Role::Compaction,
-            providers
-                .as_deref()
-                .unwrap_or(&crate::host::providers::Providers::none()),
+            &services.providers,
         ) else {
             tracing::warn!(companion = %agent.companion_id, "no compaction model is assigned");
-            state.defer(&agent.companion_id, now + RETRY);
             continue;
         };
+        // One snapshot serves both halves of the job: the summary reads it, and
+        // the pass reads the same messages the summary stands for.
         let history = conversation.0.clone();
-        let previous = summary_of(&history).map_or_else(String::new, |summary| summary.text);
+        let previous = summary_of(&history);
         let Some(spec) = bound.spec().cloned() else {
             continue;
         };
         let task = background::spawn(
             &runtime.0,
             wake.as_deref(),
-            generate(history, previous, Arc::new(spec), bound),
+            run(
+                history,
+                previous,
+                Arc::new(spec),
+                bound,
+                services.clone(),
+                agent.companion_id.clone(),
+            ),
         );
         state.start(&agent.companion_id, task);
         return;
     }
 }
 
-/// Saves a finished summary as the newest `ene.summary` aside.
+/// Saves a finished summary as the newest `ene.summary` aside. The aside is the
+/// position the next job starts from, so it is written only once the memories,
+/// edges and reflection of the same window committed (docs/design/mind.md
+/// §5.2): a failed pass leaves the stored summary alone, and the range it could
+/// not consolidate waits for the next compaction instead of a queue or a cursor.
 fn collect_summaries(
     mut state: ResMut<CompactionState>,
     mut agents: Query<(&CompanionAgent, &mut Conversation)>,
@@ -405,22 +385,29 @@ fn collect_summaries(
     let Some((companion, running)) = state.take_finished() else {
         return;
     };
-    state.defer(&companion, Instant::now() + RETRY);
     let outcome = background::take(running)
-        .unwrap_or_else(|| Err("the summary task was cancelled".to_owned()));
+        .unwrap_or_else(|| Err("the summary task ended without a result".to_owned()));
     match outcome {
-        Ok(summary) => {
+        Ok(collected) => {
+            if let Err(error) = collected.memories {
+                tracing::warn!(
+                    companion = %companion,
+                    %error,
+                    "the consolidation pass failed; its range stays pending"
+                );
+                return;
+            }
             let Some(mut conversation) = agents.iter_mut().find_map(|(agent, conversation)| {
                 (agent.companion_id == companion).then_some(conversation)
             }) else {
                 return;
             };
-            if summary_of(&conversation)
-                .is_some_and(|current| current.through_message_id >= summary.through_message_id)
-            {
+            if summary_of(&conversation).is_some_and(|current| {
+                current.through_message_id >= collected.summary.through_message_id
+            }) {
                 return;
             }
-            let value = serde_json::to_value(&summary).unwrap_or_default();
+            let value = serde_json::to_value(&collected.summary).unwrap_or_default();
             conversation.add_aside(Aside::new(SUMMARY, Author::plugin("ene-host"), value));
         }
         Err(why) => {
@@ -429,23 +416,49 @@ fn collect_summaries(
     }
 }
 
-/// Asks for the summary on the shared background runtime; dropping the future
-/// (as `abort` does) drops the request in flight.
-async fn generate(
+/// One job: the summary, then the memory pass over the window that summary
+/// stands for. The summary runs first because its `through_message_id` is the
+/// window's end, so a failed summary commits nothing.
+async fn run(
     history: History,
+    previous: Option<Summary>,
+    spec: Arc<ModelSpec>,
+    model: DynModel<Completion>,
+    services: Services,
+    companion: String,
+) -> Outcome {
+    let (text, after) = previous.map_or_else(
+        || (String::new(), None),
+        |previous| (previous.text, Some(previous.through_message_id)),
+    );
+    let summary = summarize(&history, text, spec, model).await?;
+    let memories = consolidate::pass(
+        &services,
+        &companion,
+        &history,
+        after,
+        summary.through_message_id,
+    )
+    .await;
+    Ok(Collected { summary, memories })
+}
+
+/// Asks for the summary on the shared background runtime.
+async fn summarize(
+    history: &History,
     previous: String,
     spec: Arc<ModelSpec>,
     model: DynModel<Completion>,
-) -> Outcome {
+) -> std::result::Result<Summary, String> {
     let state = SummaryState {
         summary: previous,
         tracked: Vec::new(),
     };
     let plan = policy()
-        .plan_summary(&history, &state, &CompactReason::Threshold, &spec)
+        .plan_summary(history, &state, &CompactReason::Threshold, &spec)
         .map_err(|refusal| refusal.to_string())?
         .ok_or_else(|| "the conversation is too short to summarize".to_owned())?;
-    let through = through_message_id(&history, plan.keep_from)
+    let through = through_message_id(history, plan.keep_from)
         .ok_or_else(|| "there is nothing new to summarize".to_owned())?;
     let response = tokio::time::timeout(SUMMARY_TIMEOUT, model.call(plan.request))
         .await
@@ -481,8 +494,17 @@ fn policy() -> CompactionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::{
+        json::JsonDoc,
+        mind::{Assignment, Assignments, Companion, Profile, State},
+    };
+    use rig_core::catalog::{Catalog, Connector, ModelSpec};
     use rig_core::completion::{AssistantContent, AssistantMessage};
+    use rig_core::conversation::TurnEnd;
     use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
+    use rig_core::providers::registry::ProviderId;
+    use rig_core::serve::{ErasedHandler, adapters::ModelAdapter};
+    use rig_core::test_utils::{MockCompletionModel, MockTurn};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn tool_turn(history: &mut History, call: &str, output: String) {
@@ -817,39 +839,535 @@ mod tests {
         );
     }
 
+    /// One companion holding `conversation`, and the resources a job reads.
+    struct SummaryWorld {
+        app: App,
+        agent: Entity,
+        companion: String,
+        /// Kept alive: the state directory and the runtime the summary runs on.
+        _root: tempfile::TempDir,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl SummaryWorld {
+        /// A world whose model endpoint is closed, so a summary that did run
+        /// never reaches the network. Only the start runs: the threshold tests
+        /// read the slot it fills.
+        fn new(conversation: History, context_window: u32) -> Self {
+            Self::at(
+                conversation,
+                context_window,
+                context_window,
+                "http://127.0.0.1:9",
+            )
+        }
+
+        /// `threshold_window` is the room the agent's own model reports, which
+        /// is what the trigger measures the conversation against;
+        /// `summary_window` is the room the summarizer's keep window is
+        /// measured in, so a test can cut the conversation where it wants.
+        fn at(
+            conversation: History,
+            threshold_window: u32,
+            summary_window: u32,
+            base: &str,
+        ) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+            store
+                .update_settings(
+                    store.settings_revision().unwrap(),
+                    &[(connection_row(base), 0)],
+                )
+                .unwrap();
+            let companion = companion();
+            store.insert_companion(&companion).unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let credentials = Credentials::new(true);
+            credentials.remember("c1", "test-key".into());
+            let mut app = App::new();
+            app.insert_resource(store)
+                .insert_resource(credentials)
+                .insert_resource(models(summary_window))
+                .insert_resource(Embeddings::default())
+                .insert_resource(HostRuntime(runtime.handle().clone()))
+                .init_resource::<CompactionState>()
+                .add_systems(Update, summarize_at_turn_boundary);
+            let agent = app
+                .world_mut()
+                .spawn((
+                    CompanionAgent {
+                        companion_id: companion.id.clone(),
+                    },
+                    Conversation(conversation),
+                    tiny_model(threshold_window),
+                ))
+                .id();
+            Self {
+                app,
+                agent,
+                companion: companion.id,
+                _root: root,
+                _runtime: runtime,
+            }
+        }
+
+        /// Runs the whole job, both halves, until its slot is free again: the
+        /// memories are committed and the summary is either saved or left out.
+        fn run(&mut self) {
+            self.app
+                .add_systems(Update, collect_summaries.after(summarize_at_turn_boundary));
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut free = 0;
+            while std::time::Instant::now() < deadline {
+                self.app.update();
+                if self.app.world().resource::<CompactionState>().is_running() {
+                    free = 0;
+                } else {
+                    free += 1;
+                    if free >= 2 {
+                        return;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the job did not settle");
+        }
+
+        /// The share of the companion's input limit its conversation holds.
+        fn ratio(&self) -> f64 {
+            let world = self.app.world();
+            let conversation = world.get::<Conversation>(self.agent).unwrap();
+            let limit = world
+                .get::<Connection>(self.agent)
+                .unwrap()
+                .spec
+                .input_limit()
+                .unwrap();
+            estimate_tokens(conversation.0.messages()) as f64 / f64::from(limit)
+        }
+
+        /// Whether a summary is in this companion's slot.
+        fn summarizing(&self) -> bool {
+            self.app
+                .world()
+                .resource::<CompactionState>()
+                .companions
+                .get(&self.companion)
+                .is_some_and(|slot| slot.running.is_some())
+        }
+    }
+
+    /// The catalog the summary and the pass resolve through: the connection's
+    /// model with `context_window` tokens of room, so the summarizer's keep
+    /// window is measured in the fixture's own tokens.
+    fn models(context_window: u32) -> Models {
+        let provider = ProviderId::catalog("openrouter").unwrap();
+        let mut catalog = Catalog::builtin().clone();
+        catalog.insert(ModelSpec::new(provider, "gpt-4o-mini").with_context_window(context_window));
+        Models(Connector::new(catalog))
+    }
+
+    /// The agent's own model: a mocked handler with `context_window` tokens of
+    /// room, so the threshold needs no conversation of that size.
+    fn tiny_model(context_window: u32) -> Connection {
+        let provider = ProviderId::catalog("openai").unwrap();
+        let spec =
+            Arc::new(ModelSpec::new(provider, "test/tiny").with_context_window(context_window));
+        let model: DynModel<Completion> =
+            MockCompletionModel::from_turns([MockTurn::text("unused")]).into();
+        let handler = rig_ecs::effects::Handler(ErasedHandler::new(
+            ModelAdapter::<Completion>::new(spec.reference(), model),
+        ));
+        Connection { spec, handler }
+    }
+
+    /// The settings row the job connects through: an OpenAI adapter aimed at
+    /// `endpoint`.
+    fn connection_row(endpoint: &str) -> crate::host::settings::Connection {
+        use crate::host::settings::{
+            ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
+        };
+        crate::host::settings::Connection {
+            id: "c1".into(),
+            name: "main".into(),
+            enabled: true,
+            kind: ConnectionKind::Llm,
+            config: ConnectionConfig::Llm(LlmConnection {
+                endpoint: Endpoint {
+                    adapter: "openrouter".into(),
+                    endpoint: endpoint.into(),
+                    options_schema: String::new(),
+                    options: "{}".into(),
+                },
+                model_ids: vec!["gpt-4o-mini".into()],
+            }),
+            credential_state: CredentialState::Absent,
+            revision: 1,
+            last_check: None,
+        }
+    }
+
+    fn companion() -> Companion {
+        let now = crate::host::db::now();
+        Companion {
+            id: "ene".into(),
+            name: "ene".into(),
+            mind: "kind".into(),
+            profile: Profile::default(),
+            profile_revision: 1,
+            state: State::default(),
+            state_revision: 1,
+            body: JsonDoc::empty(),
+            voice: JsonDoc::empty(),
+            assignments: Assignments {
+                compaction: Some(Assignment {
+                    connection_id: "c1".into(),
+                    model_id: "gpt-4o-mini".into(),
+                }),
+                consolidation: Some(Assignment {
+                    connection_id: "c1".into(),
+                    model_id: "gpt-4o-mini".into(),
+                }),
+                ..Default::default()
+            },
+            persona: None,
+            voice_identifier: None,
+            revision: 1,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
     #[test]
-    fn user_activity_aborts_only_the_running_companions_summary() {
+    fn a_companion_over_the_threshold_at_a_turn_boundary_starts_a_summary() {
+        let mut world = SummaryWorld::new(conversation(4), 400);
+        assert!(
+            world.ratio() >= THRESHOLD_RATIO,
+            "the fixture is over the threshold: {}",
+            world.ratio()
+        );
+        world.app.update();
+        assert!(
+            world.summarizing(),
+            "the threshold with no turn in flight starts a summary"
+        );
+    }
+
+    #[test]
+    fn a_companion_under_the_threshold_at_a_turn_boundary_does_not_start_a_summary() {
+        let mut world = SummaryWorld::new(conversation(4), 4_000);
+        assert!(
+            world.ratio() < THRESHOLD_RATIO,
+            "the fixture is under the threshold: {}",
+            world.ratio()
+        );
+        world.app.update();
+        assert!(!world.summarizing(), "a turn boundary alone starts nothing");
+    }
+
+    #[test]
+    fn a_companion_over_the_threshold_mid_turn_does_not_start_a_summary() {
+        let mut world = SummaryWorld::new(conversation(4), 400);
+        assert!(
+            world.ratio() >= THRESHOLD_RATIO,
+            "the fixture is over the threshold: {}",
+            world.ratio()
+        );
+        let agent = world.agent;
+        world.app.world_mut().spawn(TurnOf(agent));
+        assert!(
+            world.app.world().get::<ActiveTurn>(agent).is_some(),
+            "the turn in flight is the signal the summary waits for"
+        );
+        world.app.update();
+        assert!(
+            !world.summarizing(),
+            "a turn in flight is not a turn boundary"
+        );
+    }
+
+    #[test]
+    fn a_turn_boundary_is_tried_once_until_the_conversation_grows() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let guard = Dropped(Arc::clone(&dropped));
-        let task = background::spawn(runtime.handle(), None, async move {
-            let _guard = guard;
-            std::future::pending::<Outcome>().await
-        });
         let mut state = CompactionState::default();
+        assert!(state.may_start("ene", 7));
+        state.note_attempt("ene", 7);
+        let task = background::spawn(runtime.handle(), None, std::future::pending::<Outcome>());
         state.start("ene", task);
-        let kuro_retry = Instant::now() + RETRY;
-        state.defer("kuro", kuro_retry);
-        let mut world = World::new();
-        world.insert_resource(InactivityTracker::default());
-        world.insert_resource(state);
 
-        note_user_activity(&mut world);
-        let state = world.resource::<CompactionState>();
-        assert!(state.companions["ene"].running.is_none());
-        assert!(state.companions["ene"].retry_after.is_some());
-        assert_eq!(
-            state.companions["kuro"].retry_after,
-            Some(kuro_retry),
-            "another companion's cooldown is untouched"
-        );
-        runtime.block_on(tokio::task::yield_now());
+        // The call is collected without a new turn: the same boundary again.
+        state.companions.get_mut("ene").unwrap().running = None;
         assert!(
-            dropped.load(Ordering::Relaxed),
-            "cancellation drops the in-flight request, not only a flag"
+            !state.may_start("ene", 7),
+            "a standing boundary is not retried"
         );
+        assert!(state.may_start("ene", 8), "the next turn is a new boundary");
+    }
+
+    // === One job, one range: the summary and the memories it commits ===
+
+    /// `turns` answered turns with a tool call each, the way a real
+    /// conversation has them, so a summary has something to keep and the
+    /// memory pass has answered turns to read.
+    fn answered(turns: usize) -> History {
+        let mut history = History::new();
+        for turn in 0..turns {
+            history.push(Message::user(format!("question {turn} {}", "x".repeat(40))));
+            history.open_turn();
+            tool_turn(&mut history, &format!("call-{turn}"), "z".repeat(400));
+            history.push(Message::assistant(format!(
+                "answer {turn} {}",
+                "y".repeat(40)
+            )));
+            history.end_turn(TurnEnd::Answered { answer: None });
+        }
+        history
+    }
+
+    fn fact() -> serde_json::Value {
+        serde_json::json!([{
+            "content": "A keeps the tea in the cupboard",
+            "importance": 7,
+            "scope": "",
+            "supersedes": null,
+            "cited_memory_ids": []
+        }])
+    }
+
+    /// A local OpenAI-compatible endpoint that answers both halves of a job:
+    /// the extraction call with `output`, every other call with `summary`. The
+    /// request bodies are kept, so a test can read what each model was asked.
+    struct Provider {
+        base: String,
+        bodies: Arc<std::sync::Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn serve(summary: &'static str, output: serde_json::Value) -> Provider {
+        serve_with(summary, Some(output)).await
+    }
+
+    /// `output` `None` makes the extraction call fail: the model answers with
+    /// text instead of the `submit` tool call the extractor requires.
+    async fn serve_with(summary: &'static str, output: Option<serde_json::Value>) -> Provider {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&bodies);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let body = loop {
+                    let Ok(read) = socket.read(&mut chunk).await else {
+                        break None;
+                    };
+                    if read == 0 {
+                        break None;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buffer[..end]);
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if buffer.len() >= end + 4 + length {
+                        break Some(String::from_utf8_lossy(&buffer[end + 4..]).to_string());
+                    }
+                };
+                let Some(body) = body else {
+                    return;
+                };
+                let extraction = body.contains("\"submit\"");
+                seen.lock().unwrap().push(body);
+                let answer = match (&output, extraction) {
+                    (Some(output), true) => tool_call(output.clone()),
+                    _ => text(summary),
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    answer.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(answer.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        Provider { base, bodies, task }
+    }
+
+    fn text(text: &str) -> String {
+        serde_json::json!({
+            "id": "chatcmpl-summary",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": text },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        })
+        .to_string()
+    }
+
+    fn tool_call(output: serde_json::Value) -> String {
+        serde_json::json!({
+            "id": "chatcmpl-extraction",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": { "name": "submit", "arguments": output.to_string() }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        })
+        .to_string()
+    }
+
+    /// One compaction job covers one range. The summary it writes stands for a
+    /// message window, and the memories it commits come from exactly the turns
+    /// in that window, stamped with the same window end; the aside is written
+    /// after the commit, so a job that committed memories has its summary.
+    #[test]
+    fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let provider = runtime.block_on(serve(
+            "既存の紅茶の話",
+            serde_json::json!({ "facts": fact() }),
+        ));
+        let history = answered(4);
+        // The trigger is over its ratio at 400 tokens of room; the summarizer
+        // keeps 300 of the 1,200 the catalog reports, which cuts before the
+        // newest turns.
+        let mut world = SummaryWorld::at(history.clone(), 400, 1_200, &provider.base);
+        assert!(
+            world.ratio() >= THRESHOLD_RATIO,
+            "the fixture is over the threshold: {}",
+            world.ratio()
+        );
+        world.run();
+
+        let conversation = world.app.world().get::<Conversation>(world.agent);
+        let conversation = conversation.expect("the companion's conversation");
+        let summary = summary_of(&conversation.0).expect("the summary aside was written");
+        assert_eq!(summary.text, "既存の紅茶の話");
+
+        // The turns the summary stands for, and the ones it does not.
+        let window: Vec<String> =
+            consolidate::pending_turns(&history, None, summary.through_message_id)
+                .into_iter()
+                .map(|turn| turn.turn_id)
+                .collect();
+        let all: Vec<String> = consolidate::pending_turns(&history, None, u64::MAX)
+            .into_iter()
+            .map(|turn| turn.turn_id)
+            .collect();
+        let outside: Vec<&String> = all.iter().filter(|id| !window.contains(id)).collect();
+        assert!(
+            !window.is_empty() && !outside.is_empty(),
+            "the fixture must leave turns on both sides: {window:?} of {all:?}"
+        );
+
+        let bodies = provider.bodies.lock().unwrap().clone();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "one job: one summary call and one extraction call"
+        );
+        let extraction = bodies
+            .iter()
+            .find(|body| body.contains("\"submit\""))
+            .expect("the pass asked the extraction model");
+        for id in &window {
+            assert!(
+                extraction.contains(&format!("[turn {id}]")),
+                "turn {id} is inside the window: {extraction}"
+            );
+        }
+        for id in outside {
+            assert!(
+                !extraction.contains(&format!("[turn {id}]")),
+                "turn {id} is outside the window: {extraction}"
+            );
+        }
+
+        let store = world.app.world().resource::<Store>();
+        let (memories, _) = store.list_memories("ene", None, 50).unwrap();
+        assert_eq!(memories.len(), 1, "the job committed its one fact");
+        assert_eq!(memories[0].content, "A keeps the tea in the cupboard");
+        assert_eq!(
+            memories[0].source_context["turn_id"],
+            serde_json::json!(summary.through_message_id.to_string()),
+            "the memory is stamped with the same end of the window"
+        );
+        provider.task.abort();
+    }
+
+    /// The aside is the position the next job starts from, so a pass that
+    /// commits nothing leaves it unwritten: the stored summary stays the one
+    /// the range is measured from, and the next compaction covers the range
+    /// again. No queue and no cursor is involved.
+    #[test]
+    fn a_failed_pass_leaves_the_summary_unwritten_and_the_range_pending() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // The extraction answers with text instead of the `submit` call, so the
+        // pass cannot produce facts.
+        let provider = runtime.block_on(serve_with("既存の紅茶の話", None));
+        let mut world = SummaryWorld::at(answered(4), 400, 1_200, &provider.base);
+        world.run();
+
+        let conversation = world.app.world().get::<Conversation>(world.agent);
+        assert!(
+            summary_of(&conversation.expect("the companion's conversation").0).is_none(),
+            "a failed pass does not advance the stored summary"
+        );
+        let bodies = provider.bodies.lock().unwrap().clone();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "the summary ran, then the pass asked the extraction model"
+        );
+        assert!(
+            !bodies[0].contains("\"submit\""),
+            "the summary call is the first one"
+        );
+        assert!(
+            bodies[1].contains("\"submit\""),
+            "the extraction call is the one that failed"
+        );
+        let store = world.app.world().resource::<Store>();
+        let (memories, _) = store.list_memories("ene", None, 50).unwrap();
+        assert!(memories.is_empty(), "a failed pass commits nothing");
+        provider.task.abort();
     }
 }

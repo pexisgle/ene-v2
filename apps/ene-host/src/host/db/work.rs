@@ -1,10 +1,9 @@
-//! Work sessions, runs and inquiries.
+//! Work sessions and runs.
 use super::{
-    Result, Store, enum_name_column, json_column, now, optional_json_column, or_stamp,
-    require_found, to_json,
+    Result, Store, enum_name_column, now, optional_json_column, or_stamp, require_found, to_json,
 };
 use crate::host::error::{Failure, HostError};
-use crate::host::work::{Inquiry, Run, RunState, WorkSession, WorkStatus};
+use crate::host::work::{Run, RunState, WorkSession, WorkStatus};
 use rusqlite::{Row, params};
 
 fn row_to_session(row: &Row<'_>) -> rusqlite::Result<WorkSession> {
@@ -14,14 +13,12 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<WorkSession> {
         title: row.get("title")?,
         status: enum_name_column(row, "status", "unknown work status")?,
         client_id: row.get("client_id")?,
-        activation_revision: row.get::<_, u64>("activation_revision")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
 }
 
-const SESSION_COLUMNS: &str =
-    "id, companion_id, title, status, client_id, activation_revision, created_at, updated_at";
+const SESSION_COLUMNS: &str = "id, companion_id, title, status, client_id, created_at, updated_at";
 
 fn row_to_run(row: &Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
@@ -31,38 +28,19 @@ fn row_to_run(row: &Row<'_>) -> rusqlite::Result<Run> {
         state: enum_name_column(row, "state", "unknown run state")?,
         pending_request_id: row.get("pending_request_id")?,
         failure: optional_json_column::<Failure>(row, "failure", "stored failure is corrupt")?,
-        cancellation_requested_at: row.get("cancellation_requested_at")?,
-        cancellation_reason: row.get("cancellation_reason")?,
-        unverified_pids: json_column(row, "unverified_pids", "stored pid list is corrupt")?,
         started_at: row.get("started_at")?,
         updated_at: row.get("updated_at")?,
     })
 }
 
-const RUN_COLUMNS: &str = "run_id, work_id, instruction, state, pending_request_id, failure, \
-     cancellation_requested_at, cancellation_reason, unverified_pids, started_at, updated_at";
-
-const INQUIRY_COLUMNS: &str =
-    "request_id, work_id, run_id, prompt, choices, answer, created_at, resolved_at";
-
-fn row_to_inquiry(row: &Row<'_>) -> rusqlite::Result<Inquiry> {
-    Ok(Inquiry {
-        request_id: row.get("request_id")?,
-        work_id: row.get("work_id")?,
-        run_id: row.get("run_id")?,
-        prompt: row.get("prompt")?,
-        choices: json_column(row, "choices", "stored inquiry choices are corrupt")?,
-        answer: row.get("answer")?,
-        created_at: row.get("created_at")?,
-        resolved_at: row.get("resolved_at")?,
-    })
-}
+const RUN_COLUMNS: &str =
+    "run_id, work_id, instruction, state, pending_request_id, failure, started_at, updated_at";
 
 /// A run is open while it can still produce events.
 pub(crate) fn open_state(state: RunState) -> bool {
     matches!(
         state,
-        RunState::Starting | RunState::Running | RunState::WaitingInput | RunState::Cancelling
+        RunState::Starting | RunState::Running | RunState::WaitingInput
     )
 }
 
@@ -88,20 +66,19 @@ impl Store {
 
     pub(crate) fn insert_work_session(&self, session: &WorkSession) -> Result<()> {
         let stamp = now();
-        self.conn()?.prepare_cached(&format!(
-                "INSERT INTO work_sessions ({SESSION_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-            ))?.execute(
-            params![
+        self.conn()?
+            .prepare_cached(&format!(
+                "INSERT INTO work_sessions ({SESSION_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            ))?
+            .execute(params![
                 session.id,
                 session.companion_id,
                 session.title,
                 session.status.as_str(),
                 session.client_id,
-                session.activation_revision,
                 or_stamp(&session.created_at, &stamp),
                 or_stamp(&session.updated_at, &stamp),
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -147,7 +124,7 @@ impl Store {
         self.fetch(
             &format!(
                 "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 \
-                 AND state IN ('starting','running','waiting_input','cancelling') \
+                 AND state IN ('starting','running','waiting_input') \
                  ORDER BY started_at DESC LIMIT 1"
             ),
             [work],
@@ -157,23 +134,20 @@ impl Store {
 
     pub(crate) fn insert_run(&self, run: &Run) -> Result<()> {
         let stamp = now();
-        self.conn()?.prepare_cached(&format!(
-                "INSERT INTO work_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-            ))?.execute(
-            params![
+        self.conn()?
+            .prepare_cached(&format!(
+                "INSERT INTO work_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ))?
+            .execute(params![
                 run.run_id,
                 run.work_id,
                 run.instruction,
                 run.state.as_str(),
                 run.pending_request_id,
                 run.failure.as_ref().map(to_json).transpose()?,
-                run.cancellation_requested_at,
-                run.cancellation_reason,
-                to_json(&run.unverified_pids)?,
                 or_stamp(&run.started_at, &stamp),
                 stamp,
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -182,81 +156,15 @@ impl Store {
             .conn()?
             .prepare_cached(
                 "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
-             cancellation_requested_at = ?5, cancellation_reason = ?6, unverified_pids = ?7, \
-             updated_at = ?8 WHERE run_id = ?1",
+             updated_at = ?5 WHERE run_id = ?1",
             )?
             .execute(params![
                 run.run_id,
                 run.state.as_str(),
                 run.pending_request_id,
                 run.failure.as_ref().map(to_json).transpose()?,
-                run.cancellation_requested_at,
-                run.cancellation_reason,
-                to_json(&run.unverified_pids)?,
                 now(),
             ])?;
         require_found(changed, "run not found")
-    }
-
-    pub(crate) fn inquiries(&self, work: &str) -> Result<Vec<Inquiry>> {
-        self.fetch_all(
-            &format!(
-                "SELECT {INQUIRY_COLUMNS} FROM work_inquiries WHERE work_id = ?1 ORDER BY created_at"
-            ),
-            [work],
-            row_to_inquiry,
-        )
-    }
-
-    pub(crate) fn pending_inquiries(&self, work: &str) -> Result<Vec<Inquiry>> {
-        Ok(self
-            .inquiries(work)?
-            .into_iter()
-            .filter(Inquiry::is_pending)
-            .collect())
-    }
-
-    pub(crate) fn inquiry(&self, request_id: &str) -> Result<Option<Inquiry>> {
-        self.fetch(
-            &format!("SELECT {INQUIRY_COLUMNS} FROM work_inquiries WHERE request_id = ?1"),
-            [request_id],
-            row_to_inquiry,
-        )
-    }
-
-    pub(crate) fn insert_inquiry(&self, inquiry: &Inquiry) -> Result<()> {
-        self.conn()?
-            .prepare_cached(
-                "INSERT INTO work_inquiries (request_id, work_id, run_id, prompt, choices, answer, \
-             created_at, resolved_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL)",
-            )?
-            .execute(params![
-                inquiry.request_id,
-                inquiry.work_id,
-                inquiry.run_id,
-                inquiry.prompt,
-                to_json(&inquiry.choices)?,
-                or_stamp(&inquiry.created_at, &now()),
-            ])?;
-        Ok(())
-    }
-
-    /// Answers one pending inquiry. A second answer is a conflict, so the same
-    /// question cannot be answered twice.
-    pub(crate) fn resolve_inquiry(&self, request_id: &str, answer: &str) -> Result<Inquiry> {
-        if answer.trim().is_empty() || answer.chars().count() > 16_000 {
-            return Err(HostError::Invalid(
-                ("answer must be 1-16000 characters").into(),
-            ));
-        }
-        self.fetch(
-            &format!(
-                "UPDATE work_inquiries SET answer = ?2, resolved_at = ?3 \
-                 WHERE request_id = ?1 AND resolved_at IS NULL RETURNING {INQUIRY_COLUMNS}"
-            ),
-            params![request_id, answer, now()],
-            row_to_inquiry,
-        )?
-        .ok_or_else(|| HostError::Conflict(("inquiry is missing or already answered").into()))
     }
 }

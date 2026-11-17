@@ -78,7 +78,6 @@ pub(crate) struct Approval {
     pub(crate) created_at: String,
     pub(crate) resolved_at: Option<String>,
     pub(crate) client_id: Option<String>,
-    pub(crate) activation_revision: Option<u64>,
     pub(crate) capability: Option<String>,
 }
 
@@ -337,30 +336,39 @@ fn within_tool_limits(id: &str, name: &str, reply_calls: usize) -> bool {
 use super::client::Client;
 use super::db::Store;
 use super::notify::Notifier;
+use super::tools::run_tool;
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use rig_core::effect::EffectId;
 use rig_ecs::prelude::*;
+use schemars::JsonSchema;
 use std::collections::HashMap;
+
+/// The arguments of the head's `resolve_approval` tool
+/// (docs/design/permissions.md §4.2).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct ResolveApprovalArgs {
+    /// The `request_id` of a pending approval of this companion.
+    pub(crate) request_id: String,
+    /// `approve` or `deny`.
+    pub(crate) decision: String,
+}
 
 /// The marker the host inserts on a call whose approval was granted.
 #[derive(Component)]
 pub(crate) struct Approved;
 
-/// What the call was accepted against. The device executor revalidates it.
+/// What the call was accepted against. The device executor dispatches to it.
 #[derive(Component, Clone, Debug)]
 pub(crate) struct CallBinding {
     pub(crate) client_id: String,
-    pub(crate) activation_revision: u64,
     pub(crate) capability: String,
 }
 
-/// A held tool call and the request that released it.
+/// A held tool call and the marker that keeps it from running.
 pub(crate) struct Hold {
     pub(crate) call: Entity,
     pub(crate) hold: Entity,
-    /// The approval the hold released, kept for generation checks.
-    pub(crate) approval: Approval,
 }
 
 /// The approvals that are currently attached to a live tool call.
@@ -375,7 +383,15 @@ pub(crate) struct GatePlugin;
 impl Plugin for GatePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(AgentPass, gate.in_set(Stage::Gate))
-            .add_systems(Update, expire_orphaned_approvals.after(AgentLoop));
+            .add_systems(Update, expire_orphaned_approvals.after(AgentLoop))
+            .add_open_tool::<ResolveApprovalArgs, _>(
+                "resolve_approval",
+                "Approve or deny one pending approval request of this companion. Call it when \
+                 the user has agreed or refused in conversation to the operation the approval \
+                 card names. Arguments: request_id, decision (`approve` or `deny`).",
+                ToolOptions::default(),
+                run_tool(resolve_approval),
+            );
     }
 }
 
@@ -438,9 +454,7 @@ fn gate(world: &mut World) {
             continue;
         }
         let (companion_id, work_id, run_id) = binding_of(world, agent);
-        let Some((client_id, activation_revision)) =
-            target_client(&companion_id, &store, work_id.as_deref())
-        else {
+        let Some(client_id) = target_client(&companion_id, &store, work_id.as_deref()) else {
             refuse(
                 world,
                 call,
@@ -454,14 +468,7 @@ fn gate(world: &mut World) {
         };
         // A tool that is neither a host tool nor a declared capability is
         // refused: a future tool must opt into one of the two paths.
-        let resolved = match resolve_capability(
-            world,
-            agent,
-            &client,
-            activation_revision,
-            &tool_name,
-            &arguments,
-        ) {
+        let resolved = match resolve_capability(world, agent, &client, &tool_name, &arguments) {
             Ok(resolved) => resolved,
             Err(error) => {
                 refuse(world, call, error.message());
@@ -483,7 +490,6 @@ fn gate(world: &mut World) {
         let verdict = decide_capability(&rules, spec.as_ref(), &capability, &tool_name, &input);
         world.entity_mut(call).insert(CallBinding {
             client_id: client_id.clone(),
-            activation_revision,
             capability: capability.clone(),
         });
         match verdict {
@@ -505,21 +511,16 @@ fn gate(world: &mut World) {
                     created_at: super::db::now(),
                     resolved_at: None,
                     client_id: Some(client_id.clone()),
-                    activation_revision: Some(activation_revision),
                     capability: Some(capability.clone()),
                 };
                 if let Err(error) = store.insert_approval(&approval) {
                     super::fail(world, error.to_string());
                     return;
                 }
-                world.resource_mut::<Approvals>().by_request.insert(
-                    request_id,
-                    Hold {
-                        call,
-                        hold,
-                        approval: approval.clone(),
-                    },
-                );
+                world
+                    .resource_mut::<Approvals>()
+                    .by_request
+                    .insert(request_id, Hold { call, hold });
                 let mut notifier = world.resource_mut::<Notifier>();
                 notifier.push(
                     Some(&companion_id),
@@ -557,17 +558,16 @@ fn binding_of(world: &World, agent: Entity) -> (String, Option<String>, String) 
 
 /// The capability a device tool call names, with its input and declaration.
 /// The client is already resolved, so the hand resolves against the client it
-/// is bound to, not against the companion's current activation. A capability
-/// tool is parent-only and must be published for the calling companion's
-/// bound generation; `client::dynamic::tool_spec_for` resolves that binding
-/// per agent, so one published definition can serve several companions. A
-/// call that no longer matches is refused with a reason instead of being
-/// treated as an unknown tool.
+/// is bound to, not against the companion's active client. A capability tool
+/// is parent-only and must be published for the calling agent's bound client;
+/// `client::dynamic::tool_spec_for` resolves that binding per agent, so one
+/// published definition can serve several companions. A call that no longer
+/// matches is refused with a reason instead of being treated as an unknown
+/// tool.
 fn resolve_capability(
     world: &mut World,
     agent: Entity,
     client: &Client,
-    activation_revision: u64,
     tool_name: &str,
     arguments: &Value,
 ) -> Result<Option<(String, Value, Option<CapabilitySpec>)>> {
@@ -595,20 +595,14 @@ fn resolve_capability(
             ("capability tools are offered to the parent only").into(),
         ));
     }
-    let Some(spec) =
-        super::client::dynamic::tool_spec_for(world, client, activation_revision, tool_name)?
-    else {
+    let Some(spec) = super::client::dynamic::tool_spec_for(world, client, tool_name)? else {
         return Ok(None);
     };
     Ok(Some((spec.name.clone(), arguments.clone(), Some(spec))))
 }
 
-/// The client and generation the call must be sent to.
-fn target_client(
-    companion_id: &str,
-    store: &Store,
-    work_id: Option<&str>,
-) -> Option<(String, u64)> {
+/// The client the call must be sent to.
+fn target_client(companion_id: &str, store: &Store, work_id: Option<&str>) -> Option<String> {
     store.target(companion_id, work_id).ok().flatten()
 }
 
@@ -644,11 +638,10 @@ fn release(world: &mut World, request: &str) -> Option<Hold> {
     Some(hold)
 }
 
-/// The client generation an approval is bound to. The head follows the
-/// companion's activation. The hand follows the work session stored with the
-/// approval; only an approval row from before the column existed (or one
-/// inserted without it) is resolved through its run.
-fn bound_generation(store: &Store, approval: &Approval) -> Result<Option<(String, u64)>> {
+/// The client an approval is bound to. The head follows the companion's active
+/// client; the hand follows the work session stored with the approval, or its
+/// run. A move never voids the approval.
+fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
     if let Some(work_id) = approval.work_id.as_deref().filter(|id| !id.is_empty()) {
         let Some(session) = store.work_session(work_id)? else {
             return Ok(None);
@@ -656,18 +649,12 @@ fn bound_generation(store: &Store, approval: &Approval) -> Result<Option<(String
         if session.companion_id != approval.session_id {
             return Ok(None);
         }
-        return Ok(session
-            .client_id
-            .map(|client| (client, session.activation_revision)));
+        return Ok(session.client_id);
     }
     if approval.run_id.is_empty() {
         return Ok(store
             .activation(&approval.session_id)?
-            .and_then(|activation| {
-                activation
-                    .client_id
-                    .map(|client| (client, activation.revision))
-            }));
+            .and_then(|activation| activation.client_id));
     }
     let Some(run) = store.run(&approval.run_id)? else {
         return Ok(None);
@@ -678,9 +665,7 @@ fn bound_generation(store: &Store, approval: &Approval) -> Result<Option<(String
     if session.companion_id != approval.session_id {
         return Ok(None);
     }
-    Ok(session
-        .client_id
-        .map(|client| (client, session.activation_revision)))
+    Ok(session.client_id)
 }
 
 /// Approves or denies a pending request. The caller must still have a live
@@ -698,25 +683,6 @@ pub(crate) fn submit(
         return Err(HostError::Conflict(
             ("approval is no longer pending").into(),
         ));
-    }
-    super::compaction::note_user_activity(world);
-    // A device approval is bound to the client generation it was issued for:
-    // a move voids it instead of applying it to the new client. A work
-    // approval is bound to the work session's generation, which does not
-    // follow the companion's activation.
-    if let (Some(client), Some(revision)) =
-        (approval.client_id.as_deref(), approval.activation_revision)
-    {
-        let current = bound_generation(&store, &approval)?;
-        if current.as_ref() != Some(&(client.to_owned(), revision)) {
-            store.resolve_approval(request_id, ApprovalStatus::Expired)?;
-            if let Some(hold) = release(world, request_id) {
-                refuse(world, hold.call, "client_moved: the active client moved");
-            }
-            return Err(HostError::Conflict(
-                ("client_moved: the approval is bound to an old client generation").into(),
-            ));
-        }
     }
     let Some(hold) = release(world, request_id) else {
         store.resolve_approval(request_id, ApprovalStatus::Expired)?;
@@ -747,6 +713,16 @@ pub(crate) fn submit(
     }
     match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
+            // The approved operation runs on the client the approval is bound
+            // to: the hand's work-session client, else the companion's active
+            // client. A client that moved since the card was shown does not
+            // void the approval; the held call is re-pointed so that its
+            // operation goes to the bound client.
+            if let Some(client_id) = bound_client(&store, &approval)?
+                && let Some(mut binding) = world.get_mut::<CallBinding>(hold.call)
+            {
+                binding.client_id = client_id;
+            }
             world.entity_mut(hold.call).insert(Approved);
             let approval = store.resolve_approval(request_id, ApprovalStatus::Approved)?;
             notify_resolved(world, &approval);
@@ -770,6 +746,46 @@ fn notify_resolved(world: &mut World, approval: &Approval) {
     );
 }
 
+/// The head's `resolve_approval` tool: it answers one pending approval of its
+/// own companion from the conversation, instead of the user clicking the card
+/// (docs/design/permissions.md §4.2). Another companion's request and an
+/// already-resolved one are refused.
+pub(crate) fn resolve_approval(
+    world: &mut World,
+    agent: Entity,
+    _call_id: &str,
+    args: ResolveApprovalArgs,
+) -> Result<String> {
+    let companion_id = world
+        .get::<super::agent::CompanionAgent>(agent)
+        .map(|companion| companion.companion_id.clone())
+        .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))?;
+    let decision = match args.decision.trim() {
+        "approve" => ApprovalDecision::Approve,
+        "deny" => ApprovalDecision::Deny,
+        other => {
+            return Err(HostError::Invalid(format!(
+                "decision must be `approve` or `deny`, not `{other}`"
+            )));
+        }
+    };
+    let store = world.resource::<Store>().clone();
+    let approval = store
+        .approval(&args.request_id)?
+        .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
+    if approval.session_id != companion_id {
+        return Err(HostError::Permission(
+            ("this approval belongs to another companion").into(),
+        ));
+    }
+    let approval = submit(world, &args.request_id, decision)?;
+    Ok(serde_json::json!({
+        "request_id": approval.request_id,
+        "status": approval.status.as_str(),
+    })
+    .to_string())
+}
+
 /// A stopped turn takes its held calls with it; the approval must not become
 /// reusable.
 fn expire_orphaned_approvals(world: &mut World) {
@@ -788,47 +804,6 @@ fn expire_orphaned_approvals(world: &mut World) {
             && store.is_some_and(|approval| approval.status == ApprovalStatus::Pending)
         {
             let store = world.resource::<Store>().clone();
-            let _ = store.resolve_approval(&request, ApprovalStatus::Expired);
-        }
-    }
-}
-
-/// A move invalidates approvals bound to the old client generation: the held
-/// calls are refused with `client_moved` instead of waiting forever.
-pub(crate) fn invalidate_generation(
-    world: &mut World,
-    companion: &str,
-    client: &str,
-    revision: u64,
-) {
-    let requests: Vec<String> = {
-        let approvals = world.resource::<Approvals>();
-        approvals
-            .by_request
-            .iter()
-            .filter(|(_, hold)| {
-                hold.approval.session_id == companion
-                    && hold.approval.client_id.as_deref() == Some(client)
-                    && hold.approval.activation_revision == Some(revision)
-            })
-            .map(|(request, _)| request.clone())
-            .collect()
-    };
-    for request in requests {
-        if let Some(hold) = release(world, &request) {
-            refuse(
-                world,
-                hold.call,
-                "client_moved: the active client moved before the approval was answered",
-            );
-        }
-        let store = world.resource::<Store>().clone();
-        if store
-            .approval(&request)
-            .ok()
-            .flatten()
-            .is_some_and(|approval| approval.status == ApprovalStatus::Pending)
-        {
             let _ = store.resolve_approval(&request, ApprovalStatus::Expired);
         }
     }

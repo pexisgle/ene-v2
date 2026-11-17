@@ -1,44 +1,34 @@
-//! Incremental consolidation: answered turns are read after the stored
-//! cursor, a background model extracts structured facts, the host validates
-//! citations and commits memories, edges and the new cursor in one SQLite
-//! transaction (docs/design/mind.md §5.2).
+//! Compaction's memory pass: the turns one summary stands for are read once, a
+//! side model extracts the facts and the mind that interval moved, and the host
+//! validates citations and commits memories, edges and the reflection
+//! (docs/design/compaction.md §3.2, docs/design/mind.md §5.2).
 //!
-//! Only the model call runs on the background task owned by `mind::embedding`;
-//! its result comes back to the ECS thread and is committed there.
+//! The pass is one async function the compaction job awaits. Nothing schedules
+//! it and nothing stores where it stands: its range is the message window
+//! between the previous summary and the new one, so the newest `ene.summary`
+//! aside is the only position (docs/design/compaction.md §2.1).
 use super::{
-    Companion, Role,
+    Companion, Role, State,
     embedding::{self, Embeddings},
 };
 use crate::host::{
-    agent::CompanionAgent,
-    db::{Result, Store},
+    db::{
+        Result, Store,
+        memories::{MindStateChange, MindUpdate, StateUpdate},
+    },
     error::HostError,
     model::{self, Credentials},
-    notify::Notifier,
 };
-use bevy_ecs::prelude::*;
 use rig_agent::extractor::ExtractorBuilder;
 use rig_core::completion::Message;
 use rig_core::conversation::{Conversation as CoreConversation, TurnEnd};
 use rig_core::{DynModel, operation::Completion};
 use rig_ecs::model::Models;
-use rig_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    time::{Duration, Instant},
-};
+use std::collections::HashSet;
 
-/// How many answered turns one job consumes.
-const MAX_TURNS: usize = 20;
-/// Unprocessed turns that force a job without waiting for idle.
-const TURN_THRESHOLD: usize = 5;
-/// How long the conversation must be quiet before an idle job runs.
-const IDLE_WINDOW: Duration = Duration::from_secs(60);
-/// Failed jobs wait this long before the next settle or idle retries them.
-const RETRY_DELAY: Duration = Duration::from_secs(30);
-const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_FACTS: usize = 32;
+/// How many candidate memories the extraction model may merge into.
 const MAX_CONTEXT: usize = 20;
 const MAX_CITATIONS: usize = 64;
 /// The longest turn text used as the retrieval query for merge candidates.
@@ -46,8 +36,8 @@ const MAX_QUERY_CHARS: usize = 2_000;
 /// How many newest turns are joined into that query.
 const QUERY_TURNS: usize = 4;
 
-/// One answered turn as data: the id the host advances the cursor to and the
-/// text the extraction model reads.
+/// One answered turn as data: the id its window position is measured in, and
+/// the text the extraction model reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Turn {
     pub(crate) turn_id: String,
@@ -64,22 +54,28 @@ pub(crate) struct MemoryContext {
     pub(crate) content: String,
 }
 
-/// Everything one commit needs, captured when the job started. The turns are
-/// already consumed by the prompt.
+/// The window one pass commits, with the material its commit needs. The turns
+/// are already consumed by the prompt.
 #[derive(Clone, Debug)]
 pub(crate) struct Batch {
     pub(crate) companion_id: String,
-    /// The cursor read at job start; `None` when no cursor row exists yet.
-    pub(crate) job_start: Option<String>,
-    /// The cursor this commit advances to.
-    pub(crate) new_cursor: String,
+    /// The newest message the summary this pass runs beside stands for: the id
+    /// every memory and edge of the window is stamped with.
+    pub(crate) through: u64,
     pub(crate) context: Vec<MemoryContext>,
     /// Memory ids the host actually injected into those turns.
     pub(crate) injected: Vec<String>,
 }
 
-/// One extracted fact. `audience` is `""` (private), `"*"` (every
-/// companion) or another companion id.
+/// The result of one committed pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Commit {
+    pub(crate) inserted: usize,
+    pub(crate) updated: usize,
+}
+
+/// One extracted fact. `scope` is empty (the recording companion's own scope)
+/// or `"shared"` (every companion).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[schemars(inline, deny_unknown_fields)]
 pub(crate) struct Fact {
@@ -90,7 +86,7 @@ pub(crate) struct Fact {
     pub(crate) importance: Option<u8>,
     #[serde(default)]
     #[schemars(length(max = 128))]
-    pub(crate) audience: Option<String>,
+    pub(crate) scope: Option<String>,
     #[serde(default)]
     #[schemars(length(max = 128))]
     pub(crate) supersedes: Option<String>,
@@ -99,44 +95,35 @@ pub(crate) struct Fact {
     pub(crate) cited_memory_ids: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+/// Everything one extraction returns: the facts of the interval, and the mind
+/// the interval moved (a part is absent when nothing changed it).
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct Extraction {
+    #[serde(default)]
     facts: Vec<Fact>,
+    #[serde(default)]
+    state: Option<StateUpdate>,
 }
 
-/// The result of one committed job.
-pub(crate) struct Commit {
-    pub(crate) inserted: usize,
-    pub(crate) updated: usize,
-    pub(crate) cursor: String,
-}
-
-/// The answered turns after `cursor`, in conversation order.
+/// The turns inside the message-id window `(after, through]`, in conversation
+/// order: exactly the turns the summary this pass runs beside stands for.
+///
+/// Message ids start at 0, so "no earlier summary" is `None`: a number cannot
+/// also mean "nothing yet" without skipping the first turn.
 pub(crate) fn pending_turns(
     conversation: &CoreConversation,
-    cursor: Option<&str>,
-    limit: usize,
+    after: Option<u64>,
+    through: u64,
 ) -> Vec<Turn> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let cursor = match cursor {
-        Some(cursor) => match cursor.parse::<u64>() {
-            Ok(cursor) => Some(cursor),
-            // An unreadable cursor must not make the host replay everything.
-            Err(_) => return Vec::new(),
-        },
-        None => None,
-    };
     let records: Vec<_> = conversation.turns().collect();
     let mut turns = Vec::new();
     for (position, (_, record)) in records.iter().enumerate() {
-        if !matches!(record.end, Some(TurnEnd::Answered { .. })) {
+        let start = record.start.get();
+        if start > through || after.is_some_and(|after| start <= after) {
             continue;
         }
-        let start = record.start.get();
-        if cursor.is_some_and(|cursor| start <= cursor) {
+        if !matches!(record.end, Some(TurnEnd::Answered { .. })) {
             continue;
         }
         let from = conversation.start_of(record.start);
@@ -176,9 +163,6 @@ pub(crate) fn pending_turns(
             turn_id: start.to_string(),
             text,
         });
-        if turns.len() >= limit {
-            break;
-        }
     }
     turns
 }
@@ -195,40 +179,157 @@ pub(crate) fn validate_citations(cited: &[String], injected: &[String]) -> Vec<S
         .collect()
 }
 
+/// The host services one pass reads. Cloned into the compaction job, so the
+/// pass owns what it needs instead of borrowing the world.
+#[derive(Clone)]
+pub(crate) struct Services {
+    pub(crate) store: Store,
+    pub(crate) embeddings: Embeddings,
+    pub(crate) credentials: Option<Credentials>,
+    pub(crate) models: Models,
+    pub(crate) providers: crate::host::providers::Providers,
+}
+
+/// Runs the one consolidation pass over the window `(after, through]` and
+/// commits it. A pass that fails commits nothing.
+pub(crate) async fn pass(
+    services: &Services,
+    companion_id: &str,
+    conversation: &CoreConversation,
+    after: Option<u64>,
+    through: u64,
+) -> Result<Commit> {
+    let turns = pending_turns(conversation, after, through);
+    if turns.is_empty() {
+        return Ok(Commit::default());
+    }
+    let companion = services
+        .store
+        .companion(companion_id)?
+        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
+    let target = target(services, &companion)?;
+    // Merge candidates come from the same hybrid retrieval recall uses: FTS5
+    // over the newest turns plus vector similarity, with pinned and important
+    // memories only as a fallback. Forgotten memories surface when the topic
+    // matches, so the model sees that the user asked to forget them.
+    let query = turn_query(&turns);
+    let semantic = embedding::semantic_ids(
+        &services.store,
+        &services.embeddings,
+        services.credentials.as_ref(),
+        companion_id,
+        &query,
+    )
+    .await;
+    let context =
+        services
+            .store
+            .consolidation_context(companion_id, &query, &semantic, MAX_CONTEXT)?;
+    let injected = services
+        .store
+        .injected_between(companion_id, after, through)?;
+    let extraction = extract(
+        &target,
+        prompt(&turns, &context, &injected, &companion.state),
+    )
+    .await?;
+    let batch = Batch {
+        companion_id: companion_id.to_owned(),
+        through,
+        context,
+        injected,
+    };
+    let commit = services.store.consolidate(&batch, &extraction.facts)?;
+    reflect(services, &companion, through, extraction.state)?;
+    Ok(commit)
+}
+
 /// Resolves the companion's `Consolidation` assignment (or its documented
 /// companion fallback) to a connected model.
-fn target(
-    store: &Store,
-    credentials: Option<&Credentials>,
-    models: &Models,
-    companion: &Companion,
-    providers: &crate::host::providers::Providers,
-) -> Option<DynModel<Completion>> {
-    let credentials = credentials?;
+fn target(services: &Services, companion: &Companion) -> Result<DynModel<Completion>> {
+    let credentials = services.credentials.as_ref().ok_or_else(|| {
+        HostError::Unavailable(("no credentials are loaded for consolidation").into())
+    })?;
     model::connect(
-        store,
+        &services.store,
         credentials,
-        models.0.catalog(),
+        services.models.0.catalog(),
         companion,
         Role::Consolidation,
-        providers,
+        &services.providers,
     )
-    .ok()
+}
+
+/// Applies the emotion and growth the interval left through the same path
+/// `mind_update` uses: one `mind_operations` receipt per window, and the mind
+/// document it read as the revision the write has to match.
+fn reflect(
+    services: &Services,
+    companion: &Companion,
+    through: u64,
+    patch: Option<StateUpdate>,
+) -> Result<()> {
+    let Some(patch) = patch else {
+        return Ok(());
+    };
+    let mut next = companion.state.clone();
+    patch.apply(&mut next);
+    let state = serde_json::to_string(&next)
+        .map_err(|error| HostError::Internal(format!("companion state: {error}")))?;
+    let operation_id = format!("consolidate:{}:{through}", companion.id);
+    let request = serde_json::json!({
+        "operation_id": &operation_id,
+        "memories": [],
+        "state": &patch,
+    });
+    let request_hash = services.store.mind_hash(&request);
+    let applied = services.store.apply_mind_update(&MindUpdate {
+        operation_id,
+        companion_id: companion.id.clone(),
+        request_hash,
+        memories: Vec::new(),
+        state: Some(MindStateChange {
+            expected_revision: companion.state_revision,
+            state,
+        }),
+    });
+    match applied {
+        Ok(_) => Ok(()),
+        // A mind edit that landed while the pass ran wins: the reflection of
+        // this window is discarded, and the rest of the pass still counts
+        // (docs/design/mind.md §5.2).
+        Err(HostError::Conflict(why)) => {
+            tracing::debug!(
+                companion = %companion.id,
+                %why,
+                "the mind moved while consolidation ran; its reflection was discarded"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The extraction system prompt: facts only, separate records, never revive
-/// something the user asked to forget.
+/// something the user asked to forget, and never invent a change of mind.
 const SYSTEM_PROMPT: &str = "あなたはコンパニオンの経験記憶を整理する抽出器です。\
 会話から長期記憶として残す価値のある事実だけを抽出します。\
 推測・願望・ロールプレイ上の虚構を事実として保存してはいけません。\
 既存記憶と同一の事実は新規作成せず、supersedes に既存IDを指定します。\
 importance 1以下（忘却済み）の既存記憶を高重要度で復活させてはいけません。\
 cited_memory_ids には、提示された「注入済み記憶ID」に含まれるIDだけを書きます。\
+心境や成長が実際に動いた場合だけ state に、現在の心の該当部分を更新した完全な形で書きます。\
 出力は指定されたJSONスキーマのみです。";
 
 /// Renders the extraction prompt. It carries the transcript, the candidate
-/// memories with their revisions, and the ids the host injected.
-pub(crate) fn prompt(turns: &[Turn], context: &[MemoryContext], injected: &[String]) -> String {
+/// memories with their revisions, the ids the host injected and the mind the
+/// interval may move.
+pub(crate) fn prompt(
+    turns: &[Turn],
+    context: &[MemoryContext],
+    injected: &[String],
+    mind: &State,
+) -> String {
     let mut prompt = String::from("以下から長期記憶にする事実を抽出してください。\n\n");
     prompt.push_str("既存記憶（id / revision / importance / 内容）:\n");
     if context.is_empty() {
@@ -247,29 +348,33 @@ pub(crate) fn prompt(turns: &[Turn], context: &[MemoryContext], injected: &[Stri
     for id in injected {
         prompt.push_str(&format!("- {id}\n"));
     }
+    prompt.push_str(&format!(
+        "\n現在の心（state を書くときはこの形に合わせる）: 感情={} 関係={} 傾向={} 懸念={}\n",
+        mind.emotion.json, mind.relationships.json, mind.tendencies.json, mind.concerns.json
+    ));
     prompt.push_str("\n会話（確定済みターン）:\n");
     for turn in turns {
         prompt.push_str(&format!("[turn {}]\n{}", turn.turn_id, turn.text));
     }
     prompt.push_str(
-        "\n各 fact は内容ごとに分割してください。audience は非公開なら空文字、\
-共有なら \"*\"、特定の相手ならそのIDです。",
+        "\n各 fact は内容ごとに分割してください。scope は非公開なら空文字、\
+共有なら \"shared\" です。心境や成長が動いていない区間では state を省略してください。",
     );
     prompt
 }
 
-fn normalize(extraction: Extraction) -> Vec<Fact> {
-    let mut facts = Vec::new();
-    for mut fact in extraction.facts {
+fn normalize(facts: Vec<Fact>) -> Vec<Fact> {
+    let mut normalized = Vec::new();
+    for mut fact in facts {
         fact.content = fact.content.trim().to_owned();
         if fact.content.is_empty() || fact.content.chars().count() > 4_000 {
             continue;
         }
         fact.importance = Some(fact.importance.unwrap_or(3).min(10));
-        fact.audience = fact
-            .audience
-            .map(|audience| audience.trim().chars().take(128).collect())
-            .filter(|audience: &String| !audience.is_empty());
+        fact.scope = fact
+            .scope
+            .map(|scope| scope.trim().chars().take(128).collect())
+            .filter(|scope: &String| !scope.is_empty());
         fact.supersedes = fact
             .supersedes
             .map(|id| id.trim().to_owned())
@@ -280,16 +385,16 @@ fn normalize(extraction: Extraction) -> Vec<Fact> {
             .filter(|id| !id.trim().is_empty())
             .take(MAX_CITATIONS)
             .collect();
-        facts.push(fact);
-        if facts.len() >= MAX_FACTS {
+        normalized.push(fact);
+        if normalized.len() >= MAX_FACTS {
             break;
         }
     }
-    facts
+    normalized
 }
 
 /// The provider must submit typed facts. Text and fenced JSON are not accepted.
-async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Vec<Fact>> {
+async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Extraction> {
     let options = model
         .spec()
         .map(|spec| spec.default_options(None))
@@ -302,10 +407,13 @@ async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Vec<Fac
         .options(options)
         .await
         .map_err(|error| HostError::Unavailable(format!("consolidation output: {error}")))?;
-    Ok(normalize(extraction.output))
+    Ok(Extraction {
+        facts: normalize(extraction.output.facts),
+        state: extraction.output.state,
+    })
 }
 
-/// The retrieval query for a job's merge candidates: the newest turns' text,
+/// The retrieval query for a pass's merge candidates: the newest turns' text,
 /// bounded so a long transcript cannot become an unbounded FTS expression.
 fn turn_query(turns: &[Turn]) -> String {
     let from = turns.len().saturating_sub(QUERY_TURNS);
@@ -317,346 +425,11 @@ fn turn_query(turns: &[Turn]) -> String {
     crate::host::db::truncate(&query, MAX_QUERY_CHARS)
 }
 
-/// What the background extraction task posts back to the ECS thread.
-///
-/// The batch is the one the task filled in, and it is present only when the
-/// task reached its result. A task that stopped early has no commit input,
-/// only the companion whose slot it held.
-struct Reply {
-    companion: String,
-    batch: Option<Batch>,
-    result: std::result::Result<Vec<Fact>, String>,
-}
-
-/// The one report a background job makes. A job that panics, or is dropped
-/// before it reports, still sends a failure: the companion's slot is released
-/// and the retry delay applies, instead of staying claimed forever.
-struct Report {
-    sender: crossbeam_channel::Sender<Reply>,
-    companion: String,
-    sent: bool,
-}
-
-impl Report {
-    /// Reports the batch the task filled in, together with its result. The
-    /// caller moves the batch here, so the commit reads the same value the
-    /// extraction wrote its context into.
-    fn send(mut self, batch: Batch, result: std::result::Result<Vec<Fact>, String>) {
-        self.sent = true;
-        let _ = self.sender.send(Reply {
-            companion: self.companion.clone(),
-            batch: Some(batch),
-            result,
-        });
-    }
-}
-
-impl Drop for Report {
-    fn drop(&mut self) {
-        if !self.sent {
-            let _ = self.sender.send(Reply {
-                companion: self.companion.clone(),
-                batch: None,
-                result: Err("the consolidation task stopped before it reported".into()),
-            });
-        }
-    }
-}
-
-/// The single-flight guard, retry schedule, idle clock and result channel.
-#[derive(Resource)]
-pub(crate) struct Consolidation {
-    running: HashSet<String>,
-    retry_at: HashMap<String, Instant>,
-    settled_at: HashMap<String, Instant>,
-    scanned_at: Option<Instant>,
-    sender: crossbeam_channel::Sender<Reply>,
-    receiver: crossbeam_channel::Receiver<Reply>,
-}
-
-impl Default for Consolidation {
-    fn default() -> Self {
-        // Unbounded on purpose: the sender runs on a Tokio worker, and a full
-        // bounded channel would block that worker. Single-flight per companion
-        // bounds the outstanding replies, not this channel's capacity.
-        let (sender, receiver) = crossbeam_channel::unbounded();
-        Self {
-            running: HashSet::new(),
-            retry_at: HashMap::new(),
-            settled_at: HashMap::new(),
-            scanned_at: None,
-            sender,
-            receiver,
-        }
-    }
-}
-
-impl Consolidation {
-    /// Claims the companion's only slot. `false` means a job is still running
-    /// or a failure is in its retry delay.
-    fn begin(&mut self, companion: &str, now: Instant) -> bool {
-        if self.running.contains(companion)
-            || self
-                .retry_at
-                .get(companion)
-                .is_some_and(|retry| *retry > now)
-        {
-            return false;
-        }
-        self.running.insert(companion.to_owned());
-        true
-    }
-
-    fn finish(&mut self, companion: &str) {
-        self.running.remove(companion);
-    }
-
-    fn fail(&mut self, companion: &str, now: Instant) {
-        self.running.remove(companion);
-        self.retry_at
-            .insert(companion.to_owned(), now + RETRY_DELAY);
-    }
-
-    fn succeed(&mut self, companion: &str) {
-        self.running.remove(companion);
-        self.retry_at.remove(companion);
-    }
-
-    fn sender(&self) -> crossbeam_channel::Sender<Reply> {
-        self.sender.clone()
-    }
-}
-
-/// Registers the guard and the two background systems.
-pub(crate) fn register(app: &mut App) {
-    app.init_resource::<Consolidation>().add_systems(
-        Update,
-        (schedule_consolidation, drain_consolidation)
-            .chain()
-            .after(AgentLoop),
-    );
-}
-
-/// The sources one job reads; bundled so `start` stays a normal function.
-struct Sources<'a> {
-    store: &'a Store,
-    runtime: Option<&'a tokio::runtime::Handle>,
-    embeddings: &'a Embeddings,
-    credentials: Option<&'a Credentials>,
-    models: &'a Models,
-    providers: &'a crate::host::providers::Providers,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn schedule_consolidation(
-    settled: Query<(&TurnOutcome, &ForAgent), Added<Settled>>,
-    agents: Query<(&CompanionAgent, &Conversation)>,
-    store: Res<Store>,
-    runtime: Option<Res<crate::host::resources::HostRuntime>>,
-    embeddings: Res<Embeddings>,
-    credentials: Option<Res<Credentials>>,
-    models: Res<Models>,
-    providers: Res<crate::host::providers::Providers>,
-    mut jobs: ResMut<Consolidation>,
-) {
-    let now = Instant::now();
-    let mut sources = Sources {
-        store: &store,
-        runtime: runtime.as_deref().map(|rt| &rt.0),
-        embeddings: &embeddings,
-        credentials: credentials.as_deref(),
-        models: &models,
-        providers: &providers,
-    };
-    let mut answered: HashSet<String> = HashSet::new();
-    for (outcome, of) in &settled {
-        let TurnOutcome::Answered(_) = outcome else {
-            continue;
-        };
-        let Ok((agent, conversation)) = agents.get(of.0) else {
-            continue;
-        };
-        let companion = agent.companion_id.clone();
-        jobs.settled_at.insert(companion.clone(), now);
-        answered.insert(companion.clone());
-        let Ok(cursor) = store.consolidation_cursor(&companion) else {
-            continue;
-        };
-        let pending = pending_turns(conversation, cursor.as_deref(), MAX_TURNS);
-        if pending.len() >= TURN_THRESHOLD {
-            start(&mut sources, &mut jobs, &companion, cursor, pending, now);
-        }
-    }
-    if jobs
-        .scanned_at
-        .is_some_and(|last| now.duration_since(last) < SCAN_INTERVAL)
-    {
-        return;
-    }
-    jobs.scanned_at = Some(now);
-    for (agent, conversation) in &agents {
-        let companion = &agent.companion_id;
-        if answered.contains(companion) || jobs.running.contains(companion) {
-            continue;
-        }
-        let idle = jobs
-            .settled_at
-            .get(companion)
-            .is_none_or(|settled| now.duration_since(*settled) >= IDLE_WINDOW);
-        if !idle {
-            continue;
-        }
-        let Ok(cursor) = store.consolidation_cursor(companion) else {
-            continue;
-        };
-        let pending = pending_turns(conversation, cursor.as_deref(), MAX_TURNS);
-        if pending.is_empty() {
-            continue;
-        }
-        start(&mut sources, &mut jobs, companion, cursor, pending, now);
-    }
-}
-
-fn start(
-    sources: &mut Sources<'_>,
-    jobs: &mut Consolidation,
-    companion_id: &str,
-    job_start: Option<String>,
-    pending: Vec<Turn>,
-    now: Instant,
-) {
-    let Some(new_cursor) = pending.last().map(|turn| turn.turn_id.clone()) else {
-        return;
-    };
-    if !jobs.begin(companion_id, now) {
-        return;
-    }
-    let companion = match sources.store.companion(companion_id) {
-        Ok(Some(companion)) => companion,
-        Ok(None) => {
-            jobs.finish(companion_id);
-            return;
-        }
-        Err(_) => {
-            jobs.fail(companion_id, now);
-            return;
-        }
-    };
-    let Some(target) = target(
-        sources.store,
-        sources.credentials,
-        sources.models,
-        &companion,
-        sources.providers,
-    ) else {
-        jobs.fail(companion_id, now);
-        return;
-    };
-    // Merge candidates come from the same hybrid retrieval recall uses: FTS5
-    // over the newest turns plus vector similarity, with pinned and important
-    // memories only as a fallback. Forgotten memories surface when the topic
-    // matches, so the model sees that the user asked to forget them.
-    let query = turn_query(&pending);
-    let injected =
-        match sources
-            .store
-            .injected_between(companion_id, job_start.as_deref(), &new_cursor)
-        {
-            Ok(ids) => ids,
-            Err(_) => {
-                jobs.fail(companion_id, now);
-                return;
-            }
-        };
-    let mut batch = Batch {
-        companion_id: companion_id.to_owned(),
-        job_start,
-        new_cursor,
-        context: Vec::new(),
-        injected,
-    };
-    let sender = jobs.sender();
-    // A world with no host runtime cannot run the extraction; the job fails
-    // the same way an explicit defer would, so the next turn retries it.
-    let Some(runtime) = sources.runtime else {
-        jobs.fail(companion_id, now);
-        return;
-    };
-    let store = sources.store.clone();
-    let embeddings = sources.embeddings.clone();
-    let credentials = sources.credentials.cloned();
-    let report = Report {
-        sender,
-        companion: companion_id.to_owned(),
-        sent: false,
-    };
-    runtime.spawn(async move {
-        let result = async {
-            let semantic = embedding::semantic_ids(
-                &store,
-                &embeddings,
-                credentials.as_ref(),
-                &batch.companion_id,
-                &query,
-            )
-            .await;
-            batch.context =
-                store.consolidation_context(&batch.companion_id, &query, &semantic, MAX_CONTEXT)?;
-            extract(&target, prompt(&pending, &batch.context, &batch.injected)).await
-        }
-        .await
-        .map_err(|error: HostError| error.to_string());
-        report.send(batch, result);
-    });
-}
-
-fn drain_consolidation(
-    store: Res<Store>,
-    mut jobs: ResMut<Consolidation>,
-    mut notifier: Option<ResMut<Notifier>>,
-) {
-    while let Ok(reply) = jobs.receiver.try_recv() {
-        let Reply {
-            companion,
-            batch,
-            result,
-        } = reply;
-        let message = match (batch, result) {
-            (Some(batch), Ok(facts)) => match store.consolidate(&batch, &facts) {
-                Ok(commit) => {
-                    jobs.succeed(&companion);
-                    tracing::debug!(
-                        companion = %companion,
-                        inserted = commit.inserted,
-                        updated = commit.updated,
-                        cursor = %commit.cursor,
-                        "consolidation committed"
-                    );
-                    continue;
-                }
-                Err(error) => error.to_string(),
-            },
-            (_, Err(error)) => error,
-            // The sender only reports facts with the batch it filled in.
-            (None, Ok(_)) => ("the consolidation task reported facts without its batch").into(),
-        };
-        jobs.fail(&companion, Instant::now());
-        if let Some(notifier) = notifier.as_mut() {
-            notifier.notice(
-                Some(&companion),
-                "consolidation_failed",
-                &crate::host::db::truncate(&message, 300),
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host::db::memories::MemoryRecord;
     use rig_core::conversation::MessageId;
-    use std::sync::Arc;
 
     fn answer(conversation: &mut CoreConversation, user: &str, reply: &str) -> MessageId {
         let start = conversation.push(Message::user(user));
@@ -666,50 +439,168 @@ mod tests {
         start
     }
 
+    /// The newest message id of `conversation`: the end of the window a pass
+    /// over the whole log would cover.
+    fn newest(conversation: &CoreConversation) -> u64 {
+        conversation
+            .entries()
+            .next_back()
+            .map_or(0, |entry| entry.id.get())
+    }
+
     fn store() -> Store {
         let temp = tempfile::tempdir().unwrap();
         Store::open(&temp.path().join("host.sqlite3")).unwrap()
     }
 
-    fn batch(cursor: Option<&str>, next: &str) -> Batch {
+    fn batch(through: u64, context: Vec<MemoryContext>) -> Batch {
         Batch {
             companion_id: "ene".into(),
-            job_start: cursor.map(ToOwned::to_owned),
-            new_cursor: next.into(),
-            context: Vec::new(),
+            through,
+            context,
             injected: Vec::new(),
         }
     }
 
-    /// A background job that panics or is dropped before it reports must not
-    /// leave the companion claimed forever.
+    fn new_memory(id: &str, content: &str) -> MemoryRecord {
+        MemoryRecord {
+            id: id.into(),
+            scope: "ene".into(),
+            content: content.into(),
+            importance: 5,
+            occurred_at: None,
+            source_context: serde_json::json!({}),
+        }
+    }
+
+    fn context(memory: &crate::host::mind::memory::Memory) -> MemoryContext {
+        MemoryContext {
+            id: memory.id.clone(),
+            revision: memory.memory_revision,
+            importance: memory.importance,
+            content: memory.content.clone(),
+        }
+    }
+
+    fn fact() -> serde_json::Value {
+        serde_json::json!([{
+            "content": "紅茶の店は新宿にある",
+            "importance": 7,
+            "scope": "",
+            "supersedes": "m1",
+            "cited_memory_ids": []
+        }])
+    }
+
+    /// The window rule: only answered turns whose start lies inside
+    /// `(after, through]` are read, and the first turn is not lost.
     #[test]
-    fn a_job_that_stops_before_reporting_releases_its_slot() {
-        let mut jobs = Consolidation::default();
-        let now = Instant::now();
-        assert!(jobs.begin("ene", now));
-        assert!(!jobs.begin("ene", now), "one job per companion");
-        drop(Report {
-            sender: jobs.sender(),
-            companion: "ene".into(),
-            sent: false,
-        });
-        let reported = jobs.receiver.try_recv().expect("the guard reports");
-        assert!(reported.result.is_err(), "a missing report is a failure");
-        assert!(
-            reported.batch.is_none(),
-            "an early stop has no commit input to report"
+    fn pending_turns_reads_only_answered_turns_inside_the_window() {
+        let mut conversation = CoreConversation::new();
+        let first = answer(&mut conversation, "hello", "hi");
+        let second = answer(&mut conversation, "my name is A", "noted");
+        let third = answer(&mut conversation, "and B", "noted");
+        // A turn that never ended is not consolidated.
+        conversation.push(Message::user("unfinished"));
+        conversation.open_turn();
+        conversation.push(Message::assistant("cut off"));
+
+        let turns = pending_turns(&conversation, None, newest(&conversation));
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].turn_id, first.get().to_string());
+        assert_eq!(turns[1].turn_id, second.get().to_string());
+        assert_eq!(turns[2].turn_id, third.get().to_string());
+        assert!(turns[1].text.contains("my name is A"));
+        assert!(!turns[1].text.contains("and B"), "a turn holds its own log");
+
+        let only_first = pending_turns(&conversation, None, first.get() + 1);
+        assert_eq!(only_first.len(), 1);
+        assert_eq!(
+            only_first[0].turn_id,
+            first.get().to_string(),
+            "the first turn starts at message 0, so no summary yet reads it"
         );
-        assert_eq!(reported.companion, "ene");
-        jobs.fail(&reported.companion, Instant::now());
-        assert!(!jobs.running.contains("ene"), "the slot is free again");
+        let after_first = pending_turns(&conversation, Some(first.get() + 1), third.get() + 1);
+        assert_eq!(after_first.len(), 2, "the window is (after, through]");
+        assert_eq!(after_first[0].turn_id, second.get().to_string());
         assert!(
-            jobs.begin("ene", now + RETRY_DELAY + Duration::from_secs(1)),
-            "the next attempt after the retry delay starts"
+            pending_turns(&conversation, Some(second.get() + 1), second.get() + 1).is_empty(),
+            "an empty window reads nothing"
         );
     }
 
-    // === The job path end to end: start -> extraction -> Report -> drain ===
+    #[test]
+    fn a_stale_memory_revision_aborts_the_whole_commit() {
+        let store = store();
+        let memory = store.insert_memory(new_memory("m1", "tea")).unwrap();
+        let batch = batch(9, vec![context(&memory)]);
+        // A concurrent correction moves the revision the pass captured.
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET memory_revision = memory_revision + 1 WHERE id = 'm1'",
+                [],
+            )
+            .unwrap();
+        let facts = vec![Fact {
+            content: "green tea".into(),
+            importance: Some(7),
+            supersedes: Some("m1".into()),
+            ..Fact::default()
+        }];
+        assert!(matches!(
+            store.consolidate(&batch, &facts),
+            Err(HostError::Conflict(_))
+        ));
+        assert_eq!(store.memory("m1").unwrap().unwrap().content, "tea");
+        let count: i64 = store
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "the conflict rolled the whole pass back");
+    }
+
+    #[test]
+    fn a_pass_merges_cites_and_writes_the_edges() {
+        let store = store();
+        let memory = store.insert_memory(new_memory("m2", "coffee")).unwrap();
+        let mut batch = batch(8, vec![context(&memory)]);
+        batch.injected = vec!["m2".into()];
+        let facts = vec![Fact {
+            content: "A prefers coffee".into(),
+            importance: Some(7),
+            supersedes: Some("m2".into()),
+            cited_memory_ids: vec!["m2".into(), "ghost".into()],
+            ..Fact::default()
+        }];
+        let commit = store.consolidate(&batch, &facts).unwrap();
+        assert_eq!((commit.inserted, commit.updated), (0, 1));
+        let updated = store.memory("m2").unwrap().unwrap();
+        assert_eq!(updated.content, "A prefers coffee");
+        assert_eq!(updated.importance, 7);
+        assert!(
+            store
+                .memory_edges("m2")
+                .unwrap()
+                .iter()
+                .any(|(relation, to)| relation == "estimated_cited_in" && to == "8"),
+            "an accepted citation is filed against the window's newest message"
+        );
+        let citations: i64 = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edges WHERE relation = 'estimated_cited_in'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(citations, 1, "the ghost citation had no injected row");
+    }
+
+    // === The pass end to end: retrieval, extraction, guard and commit ===
 
     fn companion() -> crate::host::mind::Companion {
         use crate::host::json::JsonDoc;
@@ -743,7 +634,7 @@ mod tests {
     }
 
     /// A store with one LLM connection and the companion's consolidation
-    /// assignment, which is what `start` resolves its model through.
+    /// assignment, which is what the pass resolves its model through.
     fn configured(base: &str) -> Store {
         use crate::host::settings::{
             Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
@@ -801,35 +692,29 @@ mod tests {
         }
     }
 
-    fn sources<'a>(setup: &'a Setup, runtime: Option<&'a tokio::runtime::Handle>) -> Sources<'a> {
-        Sources {
-            store: &setup.store,
-            runtime,
-            embeddings: &setup.embeddings,
-            credentials: Some(&setup.credentials),
-            models: &setup.models,
-            providers: &setup.providers,
+    fn services(setup: &Setup) -> Services {
+        Services {
+            store: setup.store.clone(),
+            embeddings: setup.embeddings.clone(),
+            credentials: Some(setup.credentials.clone()),
+            models: setup.models.clone(),
+            providers: setup.providers.clone(),
         }
     }
 
     /// A local OpenAI-compatible endpoint that answers one extraction call
-    /// with `facts`. `hold` keeps the answer back until the test releases it.
+    /// with `output`.
     struct ExtractionServer {
         base: String,
-        requested: tokio::sync::oneshot::Receiver<()>,
-        release: Arc<tokio::sync::Notify>,
         task: tokio::task::JoinHandle<()>,
     }
 
-    async fn serve_extraction(facts: serde_json::Value, hold: bool) -> ExtractionServer {
+    async fn serve_extraction(output: serde_json::Value) -> ExtractionServer {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let (requested, received) = tokio::sync::oneshot::channel();
-        let release = Arc::new(tokio::sync::Notify::new());
-        let server_release = Arc::clone(&release);
         let task = tokio::spawn(async move {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
@@ -860,15 +745,7 @@ mod tests {
                     break;
                 }
             }
-            eprintln!(
-                "SERVER REQUEST: {}",
-                String::from_utf8_lossy(&buffer[..buffer.len().min(400)])
-            );
-            let _ = requested.send(());
-            if hold {
-                server_release.notified().await;
-            }
-            let arguments = serde_json::json!({ "facts": facts }).to_string();
+            let arguments = output.to_string();
             let body = serde_json::json!({
                 "id": "chatcmpl-test",
                 "object": "chat.completion",
@@ -898,104 +775,35 @@ mod tests {
             let _ = socket.write_all(body.as_bytes()).await;
             let _ = socket.flush().await;
         });
-        ExtractionServer {
-            base,
-            requested: received,
-            release,
-            task,
-        }
+        ExtractionServer { base, task }
     }
 
-    /// Runs the drain exactly as the host's Update schedule does, until the
-    /// companion's slot is released by a real reply.
-    async fn drain_until_settled(app: &mut App) {
-        let started = Instant::now();
-        loop {
-            app.update();
-            if app.world().resource::<Consolidation>().running.is_empty() {
-                return;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the job did not settle"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    fn drain_app(store: &Store, jobs: Consolidation) -> App {
-        let mut app = App::new();
-        app.insert_resource(store.clone())
-            .insert_resource(jobs)
-            .insert_resource(Notifier::new())
-            .add_systems(Update, drain_consolidation);
-        app
-    }
-
-    fn notices(notifier: &mut Notifier) -> Vec<String> {
-        notifier.flush();
-        let cursor = notifier.cursor();
-        let start = ene_rpc::Cursor {
-            epoch: cursor.epoch,
-            seq: 0,
-            ..Default::default()
-        };
-        notifier
-            .replay(&start)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|event| match event.event.as_ref()? {
-                ene_rpc::notification::Event::Generic(host) => {
-                    host.payload.as_option().map(|payload| payload.json.clone())
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn turn() -> Vec<Turn> {
-        vec![Turn {
-            turn_id: "5".into(),
-            text: "ユーザー: 紅茶の店はどこ\n".into(),
-        }]
-    }
-
-    fn fact() -> serde_json::Value {
-        serde_json::json!([{
-            "content": "紅茶の店は新宿にある",
-            "importance": 7,
-            "audience": "",
-            "supersedes": "m1",
-            "cited_memory_ids": []
-        }])
-    }
-
-    /// The normal path: the job retrieves a non-empty context, the model
-    /// supersedes the existing memory, and the drain commits the batch the
-    /// task filled in. An empty context would insert a second row instead.
+    /// The normal path: the pass retrieves a non-empty context, the model
+    /// supersedes the existing memory, and the commit stamps the window. An
+    /// empty context would insert a second row instead.
     #[tokio::test]
-    async fn a_job_commits_the_context_it_retrieved_and_updates_the_memory() {
-        let server = serve_extraction(fact(), false).await;
+    async fn the_pass_commits_the_context_it_retrieved_and_updates_the_memory() {
+        let server = serve_extraction(serde_json::json!({ "facts": fact() })).await;
         let setup = setup(&server.base);
         let existing = setup
             .store
             .insert_memory(new_memory("m1", "東京都の紅茶の店"))
             .unwrap();
-        let mut jobs = Consolidation::default();
-        {
-            let runtime = tokio::runtime::Handle::current();
-            let mut sources = sources(&setup, Some(&runtime));
-            start(&mut sources, &mut jobs, "ene", None, turn(), Instant::now());
-        }
-        let mut app = drain_app(&setup.store, jobs);
-        drain_until_settled(&mut app).await;
+        let mut conversation = CoreConversation::new();
+        answer(&mut conversation, "紅茶の店はどこ", "新宿にある");
+        let commit = pass(
+            &services(&setup),
+            "ene",
+            &conversation,
+            None,
+            newest(&conversation),
+        )
+        .await
+        .unwrap();
+        assert_eq!((commit.inserted, commit.updated), (0, 1));
         let updated = setup.store.memory(&existing.id).unwrap().unwrap();
         assert_eq!(updated.content, "紅茶の店は新宿にある");
         assert_eq!(updated.importance, 7);
-        assert_eq!(
-            setup.store.consolidation_cursor("ene").unwrap(),
-            Some("5".into())
-        );
         let count: i64 = setup
             .store
             .conn()
@@ -1006,142 +814,91 @@ mod tests {
             count, 1,
             "the superseded memory is updated, not inserted again"
         );
-        assert!(app.world().resource::<Consolidation>().running.is_empty());
         server.task.abort();
     }
 
-    /// The revision the batch captured is checked at commit time: a memory
-    /// changed while the model ran turns into a conflict, and neither the
-    /// memory nor the cursor moves.
+    /// The reflection the interval left lands in the companion through the
+    /// mind-update path, and the parts it does not name are untouched.
     #[tokio::test]
-    async fn a_job_that_loses_the_revision_conflict_rolls_back_memory_and_cursor() {
-        let server = serve_extraction(fact(), true).await;
+    async fn the_pass_applies_the_emotion_and_growth_the_interval_moved() {
+        let server = serve_extraction(serde_json::json!({
+            "facts": [],
+            "state": { "emotion": { "mood": "gentle" } }
+        }))
+        .await;
         let setup = setup(&server.base);
-        let existing = setup
-            .store
-            .insert_memory(new_memory("m1", "東京都の紅茶の店"))
-            .unwrap();
-        let mut jobs = Consolidation::default();
-        {
-            let runtime = tokio::runtime::Handle::current();
-            let mut sources = sources(&setup, Some(&runtime));
-            start(&mut sources, &mut jobs, "ene", None, turn(), Instant::now());
-        }
-        tokio::time::timeout(Duration::from_secs(10), server.requested)
-            .await
-            .expect("the extraction starts")
-            .unwrap();
-        // The memory changes while the model is still reading its context.
-        setup
-            .store
-            .control_memory(
-                &existing.id,
-                crate::host::db::memories::MemoryActionKind::Share,
-                Some("other"),
-            )
-            .unwrap();
-        let changed = setup.store.memory(&existing.id).unwrap().unwrap();
-        assert_ne!(changed.memory_revision, existing.memory_revision);
-        server.release.notify_one();
-        let mut app = drain_app(&setup.store, jobs);
-        drain_until_settled(&mut app).await;
-        let after = setup.store.memory(&existing.id).unwrap().unwrap();
-        assert_eq!(after.content, existing.content, "the update rolled back");
-        assert_eq!(after.memory_revision, changed.memory_revision);
-        assert_eq!(
-            setup.store.consolidation_cursor("ene").unwrap(),
+        let mut conversation = CoreConversation::new();
+        answer(&mut conversation, "一緒に紅茶を飲もう", "いいね");
+        let commit = pass(
+            &services(&setup),
+            "ene",
+            &conversation,
             None,
-            "the cursor did not advance"
-        );
-        let jobs = app.world().resource::<Consolidation>();
-        assert!(jobs.retry_at.contains_key("ene"), "the failure is retried");
-        assert!(jobs.running.is_empty());
-        let mut app = app;
-        let mut notifier = app.world_mut().resource_mut::<Notifier>();
-        let notices = notices(&mut notifier);
-        assert!(
-            notices
-                .iter()
-                .any(|notice| notice.contains("memory changed while consolidation was running")),
-            "{notices:?}"
-        );
-        server.task.abort();
-    }
-
-    /// A task dropped before it reports (the owner went away) still frees the
-    /// slot through the drop guard and reports a failure the drain records.
-    #[tokio::test]
-    async fn a_job_dropped_before_it_reports_releases_the_slot_and_retries() {
-        let server = serve_extraction(serde_json::json!([]), true).await;
-        let setup = setup(&server.base);
-        let mut jobs = Consolidation::default();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        {
-            let handle = runtime.handle().clone();
-            let mut sources = sources(&setup, Some(&handle));
-            start(&mut sources, &mut jobs, "ene", None, turn(), Instant::now());
-        }
-        tokio::task::spawn_blocking(move || {
-            runtime.block_on(async {
-                tokio::time::timeout(Duration::from_secs(10), server.requested)
-                    .await
-                    .expect("the extraction starts")
-                    .unwrap();
-            });
-            // The owner goes away while the task is waiting for the provider.
-            runtime.shutdown_timeout(Duration::from_millis(100));
-        })
+            newest(&conversation),
+        )
         .await
         .unwrap();
-        let mut app = drain_app(&setup.store, jobs);
-        drain_until_settled(&mut app).await;
-        {
-            let jobs = app.world().resource::<Consolidation>();
-            assert!(!jobs.running.contains("ene"), "the slot is released");
-            assert!(jobs.retry_at.contains_key("ene"));
-        }
-        {
-            let mut notifier = app.world_mut().resource_mut::<Notifier>();
-            let notices = notices(&mut notifier);
-            assert!(
-                notices
-                    .iter()
-                    .any(|notice| notice
-                        .contains("the consolidation task stopped before it reported")),
-                "{notices:?}"
-            );
-        }
-        assert!(
-            app.world_mut()
-                .resource_mut::<Consolidation>()
-                .begin("ene", Instant::now() + RETRY_DELAY + Duration::from_secs(1)),
-            "a retry can start after the delay"
+        assert_eq!((commit.inserted, commit.updated), (0, 0));
+        let after = setup.store.companion("ene").unwrap().unwrap();
+        assert_eq!(
+            after.state.emotion.json,
+            serde_json::json!({ "mood": "gentle" })
+        );
+        assert_eq!(
+            after.state_revision, 2,
+            "the reflection moved the mind once"
+        );
+        assert_eq!(
+            after.state.relationships.json,
+            serde_json::json!([]),
+            "a part the reflection did not name keeps its value"
         );
         server.task.abort();
     }
 
-    fn new_memory(id: &str, content: &str) -> MemoryRecord {
-        MemoryRecord {
-            id: id.into(),
-            owner: "ene".into(),
-            audiences: Vec::new(),
-            content: content.into(),
-            importance: 5,
-            occurred_at: None,
-            source_context: serde_json::json!({}),
-        }
-    }
-
-    fn context(memory: &crate::host::mind::memory::Memory) -> MemoryContext {
-        MemoryContext {
-            id: memory.id.clone(),
-            revision: memory.memory_revision,
-            importance: memory.importance,
-            content: memory.content.clone(),
-        }
+    /// A mind edit that landed while the pass ran wins: the reflection of the
+    /// window is discarded instead of overwriting it, and no receipt claims it
+    /// was applied.
+    #[test]
+    fn a_concurrent_mind_edit_wins_over_the_reflection() {
+        let setup = setup("http://127.0.0.1:9");
+        let stale = setup.store.companion("ene").unwrap().unwrap();
+        setup
+            .store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE companions SET state_revision = state_revision + 1 WHERE id = 'ene'",
+                [],
+            )
+            .unwrap();
+        let moved = setup.store.companion("ene").unwrap().unwrap();
+        assert_ne!(moved.state_revision, stale.state_revision);
+        reflect(
+            &services(&setup),
+            &stale,
+            9,
+            Some(StateUpdate {
+                emotion: Some(serde_json::json!({ "mood": "warm" })),
+                relationships: None,
+                tendencies: None,
+                concerns: None,
+            }),
+        )
+        .unwrap();
+        let after = setup.store.companion("ene").unwrap().unwrap();
+        assert_eq!(
+            after.state_revision, moved.state_revision,
+            "the concurrent edit keeps its revision"
+        );
+        assert_eq!(after.state, moved.state, "the reflection was discarded");
+        let receipts: i64 = setup
+            .store
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM mind_operations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(receipts, 0, "a discarded reflection leaves no receipt");
     }
 
     #[tokio::test]
@@ -1175,6 +932,7 @@ mod tests {
             extract(&model, "The user prefers tea.".into())
                 .await
                 .unwrap()
+                .facts
                 .is_empty()
         );
         let requests = mock.requests();
@@ -1193,163 +951,28 @@ mod tests {
     async fn extraction_submits_bounded_facts_and_rejects_free_text() {
         use rig_core::test_utils::{MockCompletionModel, MockTurn};
         let model: DynModel<Completion> = MockCompletionModel::from_turns([
-            MockTurn::tool_call("facts", "submit", serde_json::json!({
-                "facts": [{"content": "  prefers tea  ", "importance": 7,
-                    "audience": "", "supersedes": null, "cited_memory_ids": ["injected", "ghost"]}]
-            })),
+            MockTurn::tool_call(
+                "facts",
+                "submit",
+                serde_json::json!({
+                    "facts": [{"content": "  prefers tea  ", "importance": 7,
+                        "scope": "", "supersedes": null, "cited_memory_ids": ["injected", "ghost"]}]
+                }),
+            ),
             MockTurn::text("```json\n{\"facts\": []}\n```"),
-        ]).into();
-        let facts = extract(&model, "The user prefers tea.".into())
+        ])
+        .into();
+        let extraction = extract(&model, "The user prefers tea.".into())
             .await
             .unwrap();
+        let facts = extraction.facts;
         assert_eq!(facts[0].content, "prefers tea");
         assert_eq!(facts[0].importance, Some(7));
         assert_eq!(
             validate_citations(&facts[0].cited_memory_ids, &["injected".into()]),
             ["injected"]
         );
+        assert!(extraction.state.is_none(), "nothing moved the mind");
         assert!(extract(&model, "No facts.".into()).await.is_err());
-    }
-
-    #[test]
-    fn failed_jobs_keep_the_durable_range_pending_and_retry_only_their_companion() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("host.sqlite3");
-        let store = Store::open(&path).unwrap();
-        let mut conversation = CoreConversation::new();
-        let first = answer(&mut conversation, "first", "answered");
-        let next = answer(&mut conversation, "next", "answered");
-        store
-            .consolidate(&batch(None, &first.get().to_string()), &[])
-            .unwrap();
-        let now = Instant::now();
-        let mut jobs = Consolidation::default();
-        assert!(jobs.begin("ene", now));
-        assert!(!jobs.begin("ene", now));
-        assert!(jobs.begin("other", now));
-        jobs.fail("ene", now);
-        assert!(!jobs.begin("ene", now + RETRY_DELAY - Duration::from_nanos(1)));
-        assert!(jobs.running.contains("other"));
-        assert!(jobs.begin("ene", now + RETRY_DELAY));
-        drop(jobs);
-        drop(store);
-
-        let store = Store::open(&path).unwrap();
-        let mut restarted = Consolidation::default();
-        assert!(restarted.begin("ene", now));
-        let cursor = store.consolidation_cursor("ene").unwrap();
-        let pending = pending_turns(&conversation, cursor.as_deref(), MAX_TURNS);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].turn_id, next.get().to_string());
-    }
-
-    #[test]
-    fn pending_turns_reads_only_answered_turns_after_the_cursor() {
-        let mut conversation = CoreConversation::new();
-        let first = answer(&mut conversation, "hello", "hi");
-        let second = answer(&mut conversation, "my name is A", "noted");
-        // A turn that never ended is not consolidated.
-        conversation.push(Message::user("unfinished"));
-        conversation.open_turn();
-        conversation.push(Message::assistant("cut off"));
-
-        let turns = pending_turns(&conversation, None, 8);
-        assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].turn_id, first.get().to_string());
-        assert_eq!(turns[1].turn_id, second.get().to_string());
-        assert!(turns[1].text.contains("my name is A"));
-        let after = pending_turns(&conversation, Some(&first.get().to_string()), 8);
-        assert_eq!(after.len(), 1);
-        assert!(pending_turns(&conversation, Some("not-a-turn"), 8).is_empty());
-    }
-
-    #[test]
-    fn a_stale_cursor_or_memory_revision_aborts_the_whole_commit() {
-        let store = store();
-        store.consolidate(&batch(None, "5"), &[]).unwrap();
-        assert!(
-            matches!(
-                store.consolidate(&batch(None, "5"), &[]),
-                Err(HostError::Conflict(_))
-            ),
-            "a second first commit must not duplicate the range"
-        );
-        store.consolidate(&batch(Some("5"), "7"), &[]).unwrap();
-        assert!(matches!(
-            store.consolidate(&batch(Some("5"), "9"), &[]),
-            Err(HostError::Conflict(_))
-        ));
-        assert_eq!(
-            store.consolidation_cursor("ene").unwrap(),
-            Some("7".to_owned())
-        );
-
-        let memory = store.insert_memory(new_memory("m1", "tea")).unwrap();
-        let mut batch = batch(Some("7"), "9");
-        batch.context = vec![context(&memory)];
-        // A concurrent correction moves the revision the job captured.
-        store
-            .conn()
-            .unwrap()
-            .execute(
-                "UPDATE memories SET memory_revision = memory_revision + 1 WHERE id = 'm1'",
-                [],
-            )
-            .unwrap();
-        let facts = vec![Fact {
-            content: "green tea".into(),
-            importance: Some(7),
-            supersedes: Some("m1".into()),
-            ..Fact::default()
-        }];
-        assert!(matches!(
-            store.consolidate(&batch, &facts),
-            Err(HostError::Conflict(_))
-        ));
-        assert_eq!(
-            store.consolidation_cursor("ene").unwrap(),
-            Some("7".to_owned())
-        );
-        assert_eq!(store.memory("m1").unwrap().unwrap().content, "tea");
-    }
-
-    #[test]
-    fn a_valid_job_merges_cites_and_advances_the_cursor() {
-        let store = store();
-        let memory = store.insert_memory(new_memory("m2", "coffee")).unwrap();
-        let mut batch = batch(None, "8");
-        batch.context = vec![context(&memory)];
-        batch.injected = vec!["m2".into()];
-        let facts = vec![Fact {
-            content: "A prefers coffee".into(),
-            importance: Some(7),
-            supersedes: Some("m2".into()),
-            cited_memory_ids: vec!["m2".into(), "ghost".into()],
-            ..Fact::default()
-        }];
-        let commit = store.consolidate(&batch, &facts).unwrap();
-        assert_eq!(commit.updated, 1);
-        let updated = store.memory("m2").unwrap().unwrap();
-        assert_eq!(updated.content, "A prefers coffee");
-        assert_eq!(updated.importance, 7);
-        assert_eq!(store.consolidation_cursor("ene").unwrap(), Some("8".into()));
-        assert!(
-            store
-                .memory_edges("m2")
-                .unwrap()
-                .iter()
-                .any(|(relation, to)| relation == "estimated_cited_in" && to == "8")
-        );
-        // The ghost citation had no injected row to update.
-        let citations: i64 = store
-            .conn()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM memory_edges WHERE relation = 'estimated_cited_in'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(citations, 1);
     }
 }

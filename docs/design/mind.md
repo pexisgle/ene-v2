@@ -68,8 +68,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
-    owner TEXT NOT NULL,              -- 不変の原所有者コンパニオンID
-    audiences TEXT NOT NULL,          -- JSON array: 共有先コンパニオンID一覧
+    scope TEXT NOT NULL,              -- 保存スコープ ('shared' または コンパニオンID)
     content TEXT NOT NULL,            -- 記憶の要約・事実・手順本文
     importance INTEGER NOT NULL CHECK (importance >= 0 AND importance <= 10), -- 想起優先度（0〜10: 忘却時は0または1へ引き下げ）
     occurred_at TEXT,                 -- 出来事の発生日時（ISO 8601、不明時はnull）
@@ -115,12 +114,7 @@ CREATE TABLE IF NOT EXISTS memory_edges (
     PRIMARY KEY (from_id, relation, to_id)
 );
 
--- 6. 増分自動整理の進行状態永続化テーブル
-CREATE TABLE IF NOT EXISTS consolidation_state (
-    companion_id TEXT PRIMARY KEY,
-    last_processed_turn_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
+-- 6. Compaction・振り返りの進行位置は SessionLog の Aside (ene.summary) と共有し、重複管理を持たない
 
 -- 7. スケジュール・自律リマインド永続化テーブル
 CREATE TABLE IF NOT EXISTS schedules (
@@ -136,7 +130,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 );
 
 -- 検索インデックス
-CREATE INDEX IF NOT EXISTS idx_memories_owner_importance ON memories(owner, importance);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_importance ON memories(scope, importance);
 CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companion_id, enabled);
 ```
 
@@ -154,10 +148,8 @@ CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companio
   - 記憶整理（Consolidation）のLLM呼び出しや埋め込みベクトル生成（Embedding API）などの長時間非同期処理のみ、専用のTokioバックグラウンドタスクおよび別コネクションへ分離する。
   - 埋め込みのバックフィルは、`Store` のDBパスから開いた読み書き用の副接続（同じ WAL / `busy_timeout = 5000` / `synchronous = NORMAL` 設定）をタスクごとに使う。ECS スレッドの `Mutex<Connection>` はバックフィルの書き込み中に保持しない。
 
-### 3.3 所有権と共有（Privacy & Sharing）
-- **原所有者（`owner`）の不変性**: 記憶の `owner` は作成したコンパニオンのIDを常に保持する。他コンパニオンへ共有する場合も `owner = "shared"` で上書きせず、`audiences` JSON配列に対象コンパニオンIDを追加する。
-- **共有解除**: `audiences` から対象IDを削除することで、共有先コンパニオンの検索クエリから即座に不可視化される（原所有者の記憶としては残る）。
-- **私的根拠の非漏洩**: 共有先が参照できるのは `content`, `importance`, `occurred_at` のみであり、プライベートな会話ログ全文や個人的感情メモは共有先へ露出させない。
+### 3.3 共有記憶プール（スコープ分離）
+- 共有記憶プールは通常の記憶と完全に同じテーブル・同じ検索・同じ埋め込みシステムを利用し、保存スコープ（`scope = 'shared'` か `scope = <companion_id>` か）だけを切り替えて扱う。
 
 ---
 
@@ -200,7 +192,7 @@ let lexical_matches = if !tokens.is_empty() {
         SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, bm25(memories_fts) AS rank
         FROM memories m
         JOIN memories_fts f ON m.rowid = f.rowid
-        WHERE (m.owner = ?1 OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = ?2))
+        WHERE (m.scope = ?1 OR m.scope = 'shared')
           AND (?4 = false OR m.importance >= 2) -- 自動想起時は >= 2、明示的想起は全件
           AND memories_fts MATCH ?3
         ORDER BY rank ASC
@@ -213,7 +205,7 @@ let lexical_matches = if !tokens.is_empty() {
     let mut stmt = conn.prepare(r#"
         SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, 0.0 AS rank
         FROM memories m
-        WHERE (m.owner = ?1 OR EXISTS (SELECT 1 FROM json_each(m.audiences) WHERE value = ?2))
+        WHERE (m.scope = ?1 OR m.scope = 'shared')
           AND (?4 = false OR m.importance >= 2)
           AND m.content LIKE ?3 ESCAPE '\'
         ORDER BY m.importance DESC
@@ -299,22 +291,19 @@ for candidate in &mut fused_candidates {
 - `schedule_list() -> Vec<ScheduleItem>`: 登録中スケジュールの一覧
 - `schedule_cancel(schedule_id: String) -> bool`: スケジュールの解除
 
-### 5.2 自動整理（Consolidation）の単一方向パイプラインと重複防止
-対話ログからの長期記憶形成は、**Compaction（要約）の発生を必須条件とせず、独立してバックグラウンド実行**される。
-- **起動契機**: ユーザー対話が途切れたアイドル時（60秒以上）、または未整理の確定ターン数が閾値（例: 5ターン）に達した時点。
-- **単一フライト実行ガード（Single-Flight Consolidation Guard）**:
-  - コンパニオンごとに同時に稼働する自動整理ジョブは**常に高々1件**に制限する（ホスト側インメモリの `is_consolidating` フラグまたは排他ガード）。
-  - 先行ジョブの処理中に新たなアイドルやターン蓄積が発生しても、多重に並行ジョブを走らせず、スキップまたは次回アイドル時へ安全に遅延させる。
-- **物理的再実行の確実な重複排除と意味的統合の境界**:
-  - **同一会話ターン範囲の二重コミットの排除（No Duplicate Commit of the Same Turn Range）**: 確定ログのターンIDおよび `consolidation_state.last_processed_turn_id` のカーソル管理により、同一会話ターン範囲を二重にコミットする事故を決定論的に防止する。
-  - **意味的な統合提案（Heuristic Consolidation）**: 会話から抽出された知識候補が既存記憶と同一・類似であるかの判定は、FTS5およびベクトル類似検索を参考にした整理モデルの意味的推論（統合提案）として扱う。
-    - 既存記憶の更新と判断された場合：`memory_revision` と `content_revision` をインクリメントして内容・重要度を更新し、古い埋め込みを無効化（再計算対象にマーキング）。
-    - 忘却済み記憶（`importance <= 1`）の復活防止：出所ターンや既存エッジ（`supersedes` 等）を照合し、同一主題の過去記憶が忘却されている場合は、安易に高優先度の新規レコードとして再生成しないよう整理プロンプトの制約を課す。
-- **単一方向パイプライン（Single-Direction Consolidation Pipeline）**:
-  1. **確定済みログの読み込みと開始カーソルの束縛**:
-     - ジョブ開始時に `consolidation_state` から現在の `job_start_turn_id` を読み込み束縛する。
-     - `SessionLog`（追記型ディスク正本）から、`job_start_turn_id` より後の確定ターン（最新の未完了ターンを除く安定範囲）を読み込む。Compaction後のプロンプト用Viewではなく、客観的な会話生ログを正本入力とする。
-  2. **事実抽出と既存記憶の照合**: 整理モデルが会話から抽出した知識候補について、ホストがFTS5およびベクトル検索を用いて既存記憶との類似候補を取得・照合する。
+### 5.2 自動整理（Consolidation）の1パスと重複防止
+対話ログからの長期記憶形成は、[Compaction](compaction.md)の要約ジョブに組み込んだ1パスとして実行する。整理専用のカーソル表もスケジューラも持たない。
+
+- **起動契機**: 要約と同じターン境界で、トークン比が閾値（`THRESHOLD_RATIO = 0.75`）以上のときだけ始まる。アイドル時間やターン数の窓では起動しない。
+- **対象区間**: その要約が受け持つメッセージ窓と同一で、`(直前の ene.summary の through_message_id, 新しい through_message_id]`。区間の位置は最新の `ene.summary` Asideだけが持つ。
+- **単一フライト**: コンパニオンごとに要約も整理も同時に1件だけ。実行中は新しい境界を始めない。同じ境界は一度だけ試し、失敗しても会話が伸びるまで再試行しない。
+- **物理的な重複排除**: 処理区間が要約の窓と一致するため、同じターン範囲を二重に整理しない。処理位置を別に持たないので、カーソル照合によるロールバックも要らない。
+- **意味的な統合提案（Heuristic Consolidation）**: 会話から抽出された知識候補が既存記憶と同一・類似であるかの判定は、FTS5およびベクトル類似検索を参考にした整理モデルの意味的推論（統合提案）として扱う。
+  - 既存記憶の更新と判断された場合：`memory_revision` と `content_revision` をインクリメントして内容・重要度を更新し、古い埋め込みを無効化（再計算対象にマーキング）。
+  - 忘却済み記憶（`importance <= 1`）の復活防止：出所ターンや既存エッジ（`supersedes` 等）を照合し、同一主題の過去記憶が忘却されている場合は、安易に高優先度の新規レコードとして再生成しないよう整理プロンプトの制約を課す。
+- **1パスの中身**:
+  1. **確定済みログの読み込み**: `SessionLog`（追記型ディスク正本）から区間の確定ターンを読む。Compaction後のプロンプト用Viewではなく、客観的な会話生ログを正本入力とする。
+  2. **事実抽出と既存記憶の照合**: 整理モデルが会話から抽出した知識候補について、ホストがFTS5およびベクトル検索を用いて既存記憶の候補を取得し、注入済み記憶IDの一覧とともに渡す。
   3. **更新（Merge）と新規作成（Insert）の適用**:
      - **既存記憶のCAS原子的更新（CAS Update by memory_revision）**:
        既存の記憶と同一事実または更新である場合、必ず直前の `memory_revision` を条件としたCAS（Compare-And-Swap）更新を実行する：
@@ -325,22 +314,15 @@ for candidate in &mut fused_candidates {
            last_accessed_at = :now
        WHERE id = :id AND memory_revision = :expected_memory_revision;
        ```
-       もし更新行数が 0 行（整理ジョブ実行中にユーザーが対話で `mind_update` により優先度変更・訂正を行っていた場合）なら、古い整理ジョブによる上書きを直ちに検知してスキップ・破棄する。
+       もし更新行数が 0 行（整理の実行中にユーザーが対話で `mind_update` により優先度変更・訂正を行っていた場合）なら、古い整理結果による上書きを直ちに検知し、そのコミットを破棄する。
      - 新規の独立した事実である場合：新しい `MemoryRecord` を採番して作成。1つの発話から複数事実が抽出された場合は、内容ごとに独立したレコードとして分割保存する。
-  4. **原子的コミットとカーソル整合性の検証（Atomic Commit with Cursor Match）**:
-     - 記憶の変更・エッジ（`estimated_cited_in` 等）の追加・およびカーソル更新を、同一のSQLiteトランザクション内で実行する。
-     - トランザクション内で以下の更新条件を検証する：
-       ```sql
-       UPDATE consolidation_state
-       SET last_processed_turn_id = :new_cursor, updated_at = :now
-       WHERE companion_id = :companion_id AND last_processed_turn_id = :job_start_turn_id;
-       ```
-     - もし更新行数が 0 行（コミット直前に他処理によるカーソル前進や不整合が生じた場合）であった場合は、**トランザクション全体を直ちにロールバック（アボート）**し、重複挿入・誤コミットを完全に防止する。
+  4. **心境・成長の反映**: `mind_update`と同じ経路で、整理が読んだ `state_revision` を条件に感情・関係・傾向を書き換える。並行する編集が先に進んでいれば、その編集を残して整理側を破棄する。
+  5. **要約の保存**: 記憶・エッジのコミットは1つのトランザクションで行い、途中で失敗したら何も書き込まない。`ene.summary` Asideは、記憶・エッジ・心境の反映がすべて成功した後に保存する。
 
 ```text
 SessionLog（追記型確定生ログ）
   │
-  ├─ job_start_turn_id より後の安定ターンを読み出し (Single-Flight)
+  ├─ 要約の窓 (前回の ene.summary, 今回の through_message_id] を読み出し
   ▼
 整理モデルによる経験・事実の抽出
   │
@@ -352,8 +334,8 @@ SessionLog（追記型確定生ログ）
   ▼
 SQLite トランザクション (Atomic Commit)
   ├─ memories / memory_edges のコミット
-  └─ consolidation_state 更新 (WHERE last_processed_turn_id = job_start_turn_id)
-     └─ 一致時: コミット完了 / 不一致時: ロールバック破棄
+  ├─ 心境・成長の反映 (state_revision のCAS)
+  └─ ここまで成功したら ene.summary を保存
 ```
 
 ### 5.3 「忘却」のセマンティクス（想起優先度の引き下げ）と境界
@@ -402,7 +384,7 @@ SQLite トランザクション (Atomic Commit)
 | 不変条件 | 検証方法 | 合格基準 |
 | :--- | :--- | :--- |
 | **忘却のセマンティクス** | 記憶の想起優先度（`importance`）を引き下げた後、想起スコアおよびPinned枠を検証 | 他の条件が同じなら想起スコアが低下し、重要度10のPinned枠から外れること。再整理ジョブによって古い優先度へ巻き戻らないこと（過去ログの客観記録は保持されること） |
-| **遅延整理・並行コミットの競合排除** | 記憶変更後またはカーソル前進後に、変更前の古い文脈から生成した整理結果をコミット試行 | `last_processed_turn_id` 不一致または版不一致（Conflict）としてトランザクションがロールバックされ、同一ターン範囲の二重コミットや古い状態の上書きが完全に排除されること |
+| **遅延整理・並行コミットの競合排除** | 記憶変更の後、変更前の文脈から生成した整理結果をコミット試行 | `memory_revision` 不一致（Conflict）としてそのコミットが破棄され、古い状態の上書きが排除されること |
 | **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、応答内で明示操作または推定引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、明示操作（`cited_in`）またはホスト照合を通過した推定引用（`estimated_cited_in`）の場合のみ更新されること |
 | **Pinned予算制限** | 重要度10の記憶を多数作成し、プロンプト生成を実行 | 予算上限（例: 1,000トークン）を超過せず、文脈窓を圧迫しないこと |
 | **埋め込み空間の隔離** | 異なる埋め込みモデル名・次元数・前処理バージョンの複合キー（`embedding_model`）を持つベクトルを登録して検索 | 次元不一致や前処理違いのベクトルが混入せず、一致する空間複合キーのみで類似度計算が行われること |

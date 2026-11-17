@@ -101,7 +101,6 @@ impl Harness {
                 super::mind::MindPlugin,
                 super::compaction::CompactionPlugin,
                 super::autonomy::AutonomyPlugin,
-                super::staged::StagedPlugin,
             ));
         app.finish();
         if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
@@ -144,19 +143,6 @@ impl Harness {
             .world()
             .get::<Conversation>(agent)
             .expect("an agent conversation")
-    }
-
-    pub(crate) fn log_names(&self) -> Vec<String> {
-        let dir = self.root.path().join("rig").join("logs");
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .map(|entries| {
-                entries
-                    .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort();
-        names
     }
 
     /// The types of the records in the companion agent's session log, in the
@@ -324,17 +310,17 @@ fn capability_tool(capability: &str, tool: &str) -> w::ClientCapabilitySpec {
     }
 }
 
-/// The client and generation a single-companion capability tool serves.
-fn published_tool(world: &mut World, tool: &str) -> Option<(String, u64)> {
+/// The client a single-companion capability tool is published for.
+fn published_tool(world: &mut World, tool: &str) -> Option<String> {
     let mut query = world.query::<(&rig_ecs::tools::ToolDef, &client::dynamic::CapabilityTool)>();
     query
         .iter(world)
         .find(|(definition, _)| definition.0.name.as_str() == tool)
         .and_then(|(_, published)| published.bindings.first())
-        .map(|binding| (binding.client_id.clone(), binding.activation_revision))
+        .map(|binding| binding.client_id.clone())
 }
 
-/// Every active companion/client generation a published tool dispatches for.
+/// Every active companion/client a published tool dispatches for.
 fn published_bindings(world: &mut World, tool: &str) -> Vec<client::dynamic::CapabilityBinding> {
     let mut query = world.query::<(&rig_ecs::tools::ToolDef, &client::dynamic::CapabilityTool)>();
     query
@@ -403,18 +389,12 @@ fn register(world: &mut World, id: &str, spec: w::ClientCapabilitySpec) -> w::Cl
     .unwrap()
 }
 
-fn activate(
-    world: &mut World,
-    companion: &str,
-    client: &str,
-    expected_revision: u64,
-) -> w::Activation {
+fn activate(world: &mut World, companion: &str, client: &str) -> w::Activation {
     client::activate(
         world,
         w::ActivationRequest {
             companion_id: companion.into(),
             client_id: client.into(),
-            expected_revision,
             ..Default::default()
         },
     )
@@ -596,7 +576,7 @@ async fn a_real_guest_tool_call_is_held_and_denied_by_the_gate() {
     let call = plugin.tool_call("test-confirm-tool").await;
     let mut harness = Harness::new(Vec::<Vec<MockStreamEvent>>::new());
     register(harness.app.world_mut(), "c1", files_capability());
-    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     let (_subscription, mut stream) = harness
         .app
         .world_mut()
@@ -778,7 +758,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
         text_turn("書いたよ"),
     ]);
     register(harness.app.world_mut(), "c1", files_capability());
-    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     let (subscription, mut stream) = harness
         .app
         .world_mut()
@@ -841,7 +821,6 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
             operation_id: operation.operation_id.clone(),
             success: true,
             output: r#"{"ok":true}"#.into(),
-            activation_revision: operation.activation_revision,
             ..Default::default()
         },
     )
@@ -873,10 +852,10 @@ fn a_client_is_granted_only_what_the_host_policy_allows() {
     // A declaration alone publishes nothing; only a granted capability of the
     // active client becomes a tool.
     assert_eq!(published_tool(harness.app.world_mut(), "body_motion"), None);
-    let activation = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     assert_eq!(
         published_tool(harness.app.world_mut(), "body_motion"),
-        Some(("c1".into(), activation.revision))
+        Some("c1".into())
     );
     assert_eq!(
         published_tool(harness.app.world_mut(), "device_files"),
@@ -890,22 +869,15 @@ fn a_work_approval_is_bound_to_the_work_session_not_the_head_activation() {
     for id in ["c1", "c2"] {
         register(harness.app.world_mut(), id, files_capability());
     }
-    let first = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     let session = start_work(&mut harness);
-    // The hand stays bound to c1/rev1; only the head moves to c2.
-    let second = activate(
-        harness.app.world_mut(),
-        &harness.companion,
-        "c2",
-        first.revision,
-    );
-    assert_eq!(second.revision, first.revision + 1);
+    // The hand stays bound to c1; only the head moves to c2.
+    activate(harness.app.world_mut(), &harness.companion, "c2");
     let request = pending_approval(&mut harness);
     let run = harness.store().runs(&session.id).unwrap()[0].run_id.clone();
     assert_eq!(request.run_id, run);
     assert_eq!(request.work_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(request.client_id.as_deref(), Some("c1"));
-    assert_eq!(request.activation_revision, Some(first.revision));
     let approval = permission::submit(
         harness.app.world_mut(),
         &request.request_id,
@@ -927,7 +899,7 @@ fn a_work_approval_is_bound_to_the_work_session_not_the_head_activation() {
 fn a_work_approval_without_a_stored_work_id_falls_back_to_its_run() {
     let mut harness = Harness::new(work_device_turns());
     register(harness.app.world_mut(), "c1", files_capability());
-    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     let session = start_work(&mut harness);
     let request = pending_approval(&mut harness);
     assert_eq!(request.work_id.as_deref(), Some(session.id.as_str()));
@@ -957,14 +929,15 @@ fn a_work_approval_without_a_stored_work_id_falls_back_to_its_run() {
 }
 
 #[test]
-fn a_stored_work_id_is_validated_before_the_run_lookup() {
+fn an_approval_whose_stored_session_is_gone_still_runs_on_its_client() {
     let mut harness = Harness::new(work_device_turns());
     register(harness.app.world_mut(), "c1", files_capability());
-    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
-    let _session = start_work(&mut harness);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
+    start_work(&mut harness);
     let request = pending_approval(&mut harness);
-    // The stored work session is authoritative: a run that would still
-    // resolve is not followed when the column names a session that does not.
+    // The stored work session names a session that does not exist. The
+    // approval is still the user's: it runs on the client the call was
+    // accepted for instead of being refused or sent elsewhere.
     harness
         .store()
         .conn()
@@ -974,23 +947,200 @@ fn a_stored_work_id_is_validated_before_the_run_lookup() {
             [&request.request_id],
         )
         .unwrap();
-    let error = permission::submit(
+    permission::submit(
         harness.app.world_mut(),
         &request.request_id,
         permission::ApprovalDecision::Approve,
     )
-    .unwrap_err();
-    assert!(matches!(error, super::error::HostError::Conflict(_)));
-    let expired = harness
-        .store()
-        .approval(&request.request_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(expired.status, permission::ApprovalStatus::Expired);
+    .unwrap();
+    assert_eq!(
+        harness
+            .store()
+            .approval(&request.request_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        permission::ApprovalStatus::Approved
+    );
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .outstanding_operations("c1")
+            .unwrap()
+            .is_empty()
+    });
 }
 
 #[test]
-fn moving_the_active_client_invalidates_the_old_generation() {
+fn the_head_resolves_its_own_pending_approval_with_the_tool() {
+    let mut harness = Harness::new([
+        vec![
+            MockStreamEvent::tool_call(
+                "call-1",
+                "device_request",
+                serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}}),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        text_turn("書いたよ"),
+    ]);
+    register(harness.app.world_mut(), "c1", files_capability());
+    activate(harness.app.world_mut(), &harness.companion, "c1");
+    let agent = harness.companion_agent();
+    // The tool is registered and offered to the head; it is a host tool, not a
+    // client capability, so a declaration cannot shadow it.
+    let registered = {
+        let mut query = harness.app.world_mut().query::<&rig_ecs::tools::ToolDef>();
+        query
+            .iter(harness.app.world())
+            .any(|definition| definition.0.name.as_str() == "resolve_approval")
+    };
+    assert!(registered, "resolve_approval is registered");
+    assert!(
+        access_of(harness.app.world_mut(), &harness.companion).allows("resolve_approval"),
+        "the head is offered resolve_approval"
+    );
+    assert!(client::BUILTIN_TOOLS.contains(&"resolve_approval"));
+    harness.accept("key-1", "ファイルに書いて").unwrap();
+    let request = pending_approval(&mut harness);
+    let answer = permission::resolve_approval(
+        harness.app.world_mut(),
+        agent,
+        "call-resolve",
+        permission::ResolveApprovalArgs {
+            request_id: request.request_id.clone(),
+            decision: "approve".into(),
+        },
+    )
+    .unwrap();
+    assert!(answer.contains("approved"), "{answer}");
+    assert_eq!(
+        harness
+            .store()
+            .approval(&request.request_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        permission::ApprovalStatus::Approved
+    );
+    // The approved call runs and its operation reaches the bound client.
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .outstanding_operations("c1")
+            .unwrap()
+            .is_empty()
+    });
+    harness.run_until_text("書いたよ");
+}
+
+#[test]
+fn the_head_cannot_resolve_another_companions_approval() {
+    let mut harness = Harness::new([]);
+    // A card of another companion, stored as the gate would store it.
+    harness
+        .store()
+        .insert_approval(&permission::Approval {
+            request_id: "a1".into(),
+            session_id: "other".into(),
+            run_id: String::new(),
+            work_id: None,
+            action_payload_hash: vec![1, 2, 3],
+            tool_name: "device_request".into(),
+            normalized_arguments: r#"{"capability":"device.files"}"#.into(),
+            status: permission::ApprovalStatus::Pending,
+            created_at: super::db::now(),
+            resolved_at: None,
+            client_id: Some("c2".into()),
+            capability: Some("device.files".into()),
+        })
+        .unwrap();
+    let agent = harness.companion_agent();
+    let resolve = |harness: &mut Harness, agent, decision: &str| {
+        permission::resolve_approval(
+            harness.app.world_mut(),
+            agent,
+            "call-resolve",
+            permission::ResolveApprovalArgs {
+                request_id: "a1".into(),
+                decision: decision.into(),
+            },
+        )
+    };
+    // Another companion's request is refused.
+    assert!(matches!(
+        resolve(&mut harness, agent, "approve"),
+        Err(super::error::HostError::Permission(_))
+    ));
+    // Anything but approve/deny is refused.
+    assert!(matches!(
+        resolve(&mut harness, agent, "maybe"),
+        Err(super::error::HostError::Invalid(_))
+    ));
+    assert_eq!(
+        harness.store().approval("a1").unwrap().unwrap().status,
+        permission::ApprovalStatus::Pending,
+        "a refused resolution leaves the card pending"
+    );
+}
+
+#[test]
+fn a_moved_client_keeps_a_held_approval_and_serves_the_new_active_client() {
+    let mut harness = Harness::new([
+        vec![
+            MockStreamEvent::tool_call(
+                "call-1",
+                "device_request",
+                serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}}),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        text_turn("書いたよ"),
+    ]);
+    for id in ["c1", "c2"] {
+        register(harness.app.world_mut(), id, files_capability());
+    }
+    activate(harness.app.world_mut(), &harness.companion, "c1");
+    harness.accept("key-1", "ファイルに書いて").unwrap();
+    let request = pending_approval(&mut harness);
+    // The head moves while the card is pending: the hold survives the move.
+    activate(harness.app.world_mut(), &harness.companion, "c2");
+    assert_eq!(
+        harness
+            .store()
+            .approval(&request.request_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        permission::ApprovalStatus::Pending,
+        "a move does not expire the card"
+    );
+    permission::submit(
+        harness.app.world_mut(),
+        &request.request_id,
+        permission::ApprovalDecision::Approve,
+    )
+    .unwrap();
+    // The approved operation runs on the head's active client, and the client
+    // the call was accepted for receives nothing.
+    harness.run_until(|world| {
+        !world
+            .resource::<Store>()
+            .outstanding_operations("c2")
+            .unwrap()
+            .is_empty()
+    });
+    assert!(
+        harness
+            .store()
+            .outstanding_operations("c1")
+            .unwrap()
+            .is_empty()
+    );
+    harness.run_until_text("書いたよ");
+}
+#[test]
+fn moving_the_active_client_moves_the_published_tools() {
     let mut harness = Harness::new([]);
     for id in ["c1", "c2"] {
         register(
@@ -1003,11 +1153,11 @@ fn moving_the_active_client_invalidates_the_old_generation() {
             },
         );
     }
-    let first = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
-    // The declared tool is a spawned tool published for the active generation.
+    activate(harness.app.world_mut(), &harness.companion, "c1");
+    // The declared tool is a spawned tool published for the active client.
     assert_eq!(
         published_tool(harness.app.world_mut(), "body_motion"),
-        Some(("c1".into(), first.revision))
+        Some("c1".into())
     );
     assert!(
         !harness
@@ -1019,17 +1169,11 @@ fn moving_the_active_client_invalidates_the_old_generation() {
             .any(|name| name.starts_with("ene_cap_")),
         "the fixed capability slots are gone"
     );
-    let second = activate(
-        harness.app.world_mut(),
-        &harness.companion,
-        "c2",
-        first.revision,
-    );
-    assert_eq!(second.revision, first.revision + 1);
+    activate(harness.app.world_mut(), &harness.companion, "c2");
     // The tool moved with the active client instead of staying bound to c1.
     assert_eq!(
         published_tool(harness.app.world_mut(), "body_motion"),
-        Some(("c2".into(), second.revision))
+        Some("c2".into())
     );
     let activation = harness
         .store()
@@ -1037,12 +1181,11 @@ fn moving_the_active_client_invalidates_the_old_generation() {
         .unwrap()
         .unwrap();
     assert_eq!(activation.client_id.as_deref(), Some("c2"));
-    // A perception event from the old generation is discarded.
+    // A perception event from a client that is no longer active is discarded.
     client::report_perception(
         harness.app.world_mut(),
         w::PerceptionEvent {
             client_id: "c1".into(),
-            activation_revision: first.revision,
             event: Some(w::perception_event::Event::ActiveWindow(Box::new(
                 w::ActiveWindowChanged {
                     title: "old".into(),
@@ -1068,7 +1211,6 @@ fn moving_the_active_client_invalidates_the_old_generation() {
         w::ActivationRequest {
             companion_id: harness.companion.clone(),
             release: true,
-            expected_revision: second.revision,
             ..Default::default()
         },
     )
@@ -1105,7 +1247,7 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
             ..files_capability()
         },
     );
-    let activation = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     harness.accept("key-1", "ファイルに書いて").unwrap();
     let request = pending_approval(&mut harness);
     // The card names the spawned tool and its capability; a head call has no
@@ -1141,7 +1283,7 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
     });
     let operation = harness.store().outstanding_operations("c1").unwrap()[0].clone();
     assert_eq!(operation.capability, "device.files");
-    assert_eq!(operation.activation_revision, activation.revision);
+    assert_eq!(operation.client_id, "c1");
     device::complete(
         harness.app.world_mut(),
         w::DeviceOperationResult {
@@ -1149,7 +1291,6 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
             operation_id: operation.id.clone(),
             success: true,
             output: r#"{}"#.into(),
-            activation_revision: operation.activation_revision,
             ..Default::default()
         },
     )
@@ -1175,7 +1316,7 @@ fn an_auto_capability_tool_becomes_a_device_operation() {
         "c1",
         capability_tool("body.motion", "body_motion"),
     );
-    let activation = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     harness.accept("key-1", "うなずいて").unwrap();
     harness.run_until(|world| {
         !world
@@ -1186,7 +1327,7 @@ fn an_auto_capability_tool_becomes_a_device_operation() {
     });
     let operation = harness.store().outstanding_operations("c1").unwrap()[0].clone();
     assert_eq!(operation.capability, "body.motion");
-    assert_eq!(operation.activation_revision, activation.revision);
+    assert_eq!(operation.client_id, "c1");
     assert_eq!(operation.input, serde_json::json!({"motion": "nod"}));
     assert!(
         harness
@@ -1230,10 +1371,10 @@ fn a_shared_capability_tool_serves_each_companion_that_declares_it() {
             id: "c1".into(),
             name: "c1".into(),
             platform: "linux".into(),
-            capabilities: vec!["body.motion".into(), "eye.watch".into()],
+            capabilities: vec!["body.motion".into(), "app.focus".into()],
             capability_specs: vec![
                 capability_tool("body.motion", "body_motion"),
-                capability_tool("eye.watch", "set_eye_watch"),
+                capability_tool("app.focus", "focus_app"),
             ],
             ..Default::default()
         },
@@ -1244,34 +1385,31 @@ fn a_shared_capability_tool_serves_each_companion_that_declares_it() {
         "c2",
         capability_tool("body.motion", "body_motion"),
     );
-    let first = activate(harness.app.world_mut(), &harness.companion, "c1", 0);
-    let second = activate(harness.app.world_mut(), &other, "c2", 0);
-    // One model-facing definition, one binding per companion generation.
+    activate(harness.app.world_mut(), &harness.companion, "c1");
+    activate(harness.app.world_mut(), &other, "c2");
+    // One model-facing definition, one binding per active companion client.
     let bindings = published_bindings(harness.app.world_mut(), "body_motion");
     assert_eq!(bindings.len(), 2);
-    for (companion, client, revision) in [
-        (&harness.companion, "c1", first.revision),
-        (&other, "c2", second.revision),
-    ] {
-        assert!(bindings.iter().any(|binding| {
-            binding.companion_id == *companion
-                && binding.client_id == client
-                && binding.activation_revision == revision
-        }));
+    for (companion, client) in [(&harness.companion, "c1"), (&other, "c2")] {
+        assert!(
+            bindings.iter().any(|binding| {
+                binding.companion_id == *companion && binding.client_id == client
+            })
+        );
     }
     // Both parents see the shared name; each sees only its own companion's
     // capability tools.
     let access_a = access_of(harness.app.world_mut(), &harness.companion);
     assert!(access_a.allows("body_motion"));
-    assert!(access_a.allows("set_eye_watch"));
+    assert!(access_a.allows("focus_app"));
     let access_b = access_of(harness.app.world_mut(), &other);
     assert!(access_b.allows("body_motion"));
     assert!(
-        !access_b.allows("set_eye_watch"),
+        !access_b.allows("focus_app"),
         "another companion's capability tool must not be offered"
     );
     assert_eq!(
-        published_bindings(harness.app.world_mut(), "set_eye_watch").len(),
+        published_bindings(harness.app.world_mut(), "focus_app").len(),
         1
     );
     // A's call is dispatched to A's active client.
@@ -1314,12 +1452,12 @@ fn a_shared_capability_tool_serves_each_companion_that_declares_it() {
     let a_operations = harness.store().outstanding_operations("c1").unwrap();
     assert_eq!(a_operations.len(), 1);
     assert_eq!(a_operations[0].capability, "body.motion");
-    assert_eq!(a_operations[0].activation_revision, first.revision);
+    assert_eq!(a_operations[0].client_id, "c1");
     assert_eq!(a_operations[0].input, serde_json::json!({"motion": "nod"}));
     let b_operations = harness.store().outstanding_operations("c2").unwrap();
     assert_eq!(b_operations.len(), 1);
     assert_eq!(b_operations[0].capability, "body.motion");
-    assert_eq!(b_operations[0].activation_revision, second.revision);
+    assert_eq!(b_operations[0].client_id, "c2");
     assert_eq!(b_operations[0].input, serde_json::json!({"motion": "wave"}));
     // A hand never sees a capability tool.
     let companion = harness
@@ -1370,13 +1508,12 @@ fn a_shared_tool_name_with_different_declarations_is_a_conflict() {
             ..spec("body.motion")
         },
     );
-    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     let error = client::activate(
         harness.app.world_mut(),
         w::ActivationRequest {
             companion_id: other,
             client_id: "c2".into(),
-            expected_revision: 0,
             ..Default::default()
         },
     )
@@ -1409,7 +1546,7 @@ fn only_device_request_waits_for_the_client_result() {
         "c1",
         capability_tool("body.motion", "body_motion"),
     );
-    activate(harness.app.world_mut(), &harness.companion, "c1", 0);
+    activate(harness.app.world_mut(), &harness.companion, "c1");
     // Keep the result-waiting deadline out of the assertion window.
     harness
         .app

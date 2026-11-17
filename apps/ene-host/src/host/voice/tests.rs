@@ -1,8 +1,5 @@
 use super::*;
 use crate::host::db::clients::ClientDeclaration;
-use crate::host::permission::{self, Approval, ApprovalDecision, ApprovalStatus, Approved};
-use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
-use rig_ecs::tools::ToolRequest;
 
 struct FakeTts {
     fail: bool,
@@ -104,73 +101,16 @@ fn store_with_client() -> (tempfile::TempDir, Store) {
             expected_revision: 0,
         })
         .unwrap();
-    store.activate("ene", Some("c1"), 0).unwrap();
+    store.activate("ene", Some("c1")).unwrap();
     (root, store)
 }
 
-/// The world an approval-binding test needs: the store, the live call map and
-/// the notification outbox.
+/// The world a voice test needs: the store and the notification outbox.
 fn voice_world(store: &Store) -> World {
     let mut world = test_world();
     world.insert_resource(store.clone());
-    world.insert_resource(permission::Approvals::default());
     world.insert_resource(Notifier::new());
     world
-}
-
-fn client_binding(world: &World) -> InputBinding {
-    bind_input(world, "c1", 1).unwrap()
-}
-
-/// A pending device approval, as the gate issues it for `c1`, revision 1.
-fn pending_approval(request_id: &str) -> Approval {
-    let arguments = serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}});
-    Approval {
-        request_id: request_id.into(),
-        session_id: "ene".into(),
-        run_id: String::new(),
-        work_id: None,
-        action_payload_hash: permission::canonicalise("device_request", &arguments).1,
-        tool_name: "device_request".into(),
-        normalized_arguments: arguments.to_string(),
-        status: ApprovalStatus::Pending,
-        created_at: crate::host::db::now(),
-        resolved_at: None,
-        client_id: Some("c1".into()),
-        activation_revision: Some(1),
-        capability: Some("device.files".into()),
-    }
-}
-
-/// Registers the live call that `submit` releases, as the gate would.
-fn hold_approval(world: &mut World, approval: &Approval) -> Entity {
-    let call = world
-        .spawn(ToolRequest {
-            call: ToolCall::new(
-                CallId::from_wire("call-1"),
-                ToolFunction::new(
-                    ToolName::new("device_request").unwrap(),
-                    serde_json::json!({
-                        "capability": "device.files",
-                        "input": {"path": "/tmp/a"},
-                    }),
-                ),
-            ),
-        })
-        .id();
-    let marker = world.spawn(()).id();
-    world
-        .resource_mut::<permission::Approvals>()
-        .by_request
-        .insert(
-            approval.request_id.clone(),
-            permission::Hold {
-                call,
-                hold: marker,
-                approval: approval.clone(),
-            },
-        );
-    call
 }
 
 fn chunks(events: &[w::AudioOutputEvent]) -> Vec<u32> {
@@ -188,6 +128,17 @@ fn finished(events: &[w::AudioOutputEvent]) -> Option<u32> {
         Some(w::audio_output_event::Event::Finished(finished)) => Some(finished.total_sentences),
         _ => None,
     })
+}
+
+/// Waits until the synthesis tasks have drained, so the audio queue is final.
+async fn settle(voice: &Voice) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !voice.lock().works.is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the synthesis work drains");
 }
 
 #[test]
@@ -215,31 +166,154 @@ fn sentences_split_on_the_design_terminators() {
 }
 
 #[tokio::test]
-async fn skipped_sentences_still_finish_the_utterance() {
+async fn failed_sentences_add_no_audio_and_the_utterance_still_finishes() {
     let voice = Voice::new(tokio::runtime::Handle::current());
     let mut events = voice.register("c1").receiver;
-    voice.publish("ene", "c1", 1);
+    voice.publish("ene", "c1");
     voice.begin("ene", Arc::new(FakeTts { fail: true }), String::new());
     voice.speak("ene", "first。second。");
     voice.end_turn("ene");
-    for sequence in 0..2 {
-        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(event.event, Some(w::audio_output_event::Event::Skipped(skipped)) if skipped.sequence_no == sequence)
-        );
-    }
+    // The turn end frees the floor at once; the finished event waits only for
+    // the two failed sentences to resolve, and no client report gates either.
     let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(finished(&[event]), Some(2));
+    assert_eq!(finished(std::slice::from_ref(&event)), Some(2));
+    assert!(voice.floor_holder().is_none());
+    // Neither failed sentence contributes audio, and the utterance is forgotten
+    // once its tasks drain.
+    settle(&voice).await;
+    assert!(events.try_recv().is_err());
+}
+
+/// The finished event is the last audio event of the utterance: a client may
+/// read it as "the host is done", so no chunk may follow it.
+#[tokio::test]
+async fn the_finished_event_is_the_last_audio_event_of_the_utterance() {
+    struct HeldTts {
+        started: Notify,
+        release: Notify,
+    }
+    impl TtsEngine for HeldTts {
+        fn synthesize<'a>(
+            &'a self,
+            text: String,
+            _: String,
+        ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
+            Box::pin(async move {
+                if text.starts_with("held") {
+                    self.started.notify_one();
+                    self.release.notified().await;
+                }
+                Ok((pcm_bytes([100; 32]), SAMPLE_RATE))
+            })
+        }
+    }
+    let voice = Voice::new(tokio::runtime::Handle::current());
+    let mut events = voice.register("c1").receiver;
+    voice.publish("ene", "c1");
+    let engine = Arc::new(HeldTts {
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    voice.begin("ene", engine.clone(), String::new());
+    voice.speak("ene", "held。free。");
+    tokio::time::timeout(Duration::from_secs(5), engine.started.notified())
+        .await
+        .unwrap();
+    voice.end_turn("ene");
+    // The turn is over and the floor is free, but the utterance still owes
+    // audio, so the client has nothing to see yet.
+    assert!(voice.floor_holder().is_none());
+    assert!(events.try_recv().is_err());
+    engine.release.notify_one();
+    let collected = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut collected = Vec::new();
+        loop {
+            collected.push(events.recv().await.unwrap());
+            if finished(&collected).is_some() {
+                break collected;
+            }
+        }
+    })
+    .await
+    .expect("the utterance still announces its end");
+    // Both chunks precede the single finished event, which closes the utterance.
+    assert_eq!(chunks(&collected), [0, 1]);
+    assert_eq!(finished(&collected), Some(2));
+    let announces = collected
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.event,
+                Some(w::audio_output_event::Event::Finished(_))
+            )
+        })
+        .count();
+    assert_eq!(announces, 1);
+    assert!(
+        matches!(
+            collected.last().map(|event| &event.event),
+            Some(Some(w::audio_output_event::Event::Finished(_)))
+        ),
+        "the utterance finishes last"
+    );
+    settle(&voice).await;
+    assert!(events.try_recv().is_err());
+}
+
+/// A sentence that fails contributes no audio and still releases its hold, so
+/// the utterance finishes after the audio of the sentences that did synthesize.
+#[tokio::test]
+async fn a_failed_sentence_finishes_the_utterance_after_its_audio() {
+    struct PartialTts;
+    impl TtsEngine for PartialTts {
+        fn synthesize<'a>(
+            &'a self,
+            text: String,
+            _: String,
+        ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
+            Box::pin(async move {
+                if text.starts_with("bad") {
+                    return Err("mock tts failed".into());
+                }
+                Ok((pcm_bytes([100; 32]), SAMPLE_RATE))
+            })
+        }
+    }
+    let voice = Voice::new(tokio::runtime::Handle::current());
+    let mut events = voice.register("c1").receiver;
+    voice.publish("ene", "c1");
+    voice.begin("ene", Arc::new(PartialTts), String::new());
+    voice.speak("ene", "bad。good。");
+    voice.end_turn("ene");
+    let collected = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut collected = Vec::new();
+        loop {
+            collected.push(events.recv().await.unwrap());
+            if finished(&collected).is_some() {
+                break collected;
+            }
+        }
+    })
+    .await
+    .expect("the utterance finishes without the failed sentence");
+    assert_eq!(chunks(&collected), [1]);
+    assert_eq!(finished(&collected), Some(2));
+    assert!(
+        matches!(
+            collected.last().map(|event| &event.event),
+            Some(Some(w::audio_output_event::Event::Finished(_)))
+        ),
+        "the utterance finishes last"
+    );
+    settle(&voice).await;
+    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn normalization_errors_skip_sentences_without_losing_order() {
+async fn normalization_failures_add_no_audio_and_the_utterance_still_finishes() {
     struct InvalidTts;
     impl TtsEngine for InvalidTts {
         fn synthesize<'a>(
@@ -262,33 +336,27 @@ async fn normalization_errors_skip_sentences_without_losing_order() {
     }
     let voice = Voice::new(tokio::runtime::Handle::current());
     let mut events = voice.register("c1").receiver;
-    voice.publish("ene", "c1", 1);
+    voice.publish("ene", "c1");
     voice.begin("ene", Arc::new(InvalidTts), String::new());
     voice.speak("ene", "odd。zero。empty。valid。");
     voice.end_turn("ene");
+    // Only the last sentence reaches the wire; the three that fail to
+    // normalize add nothing, and the finished event still counts all four.
     let collected = tokio::time::timeout(Duration::from_secs(5), async {
         let mut collected = Vec::new();
         loop {
-            let event = events.recv().await.unwrap();
-            let done = finished(std::slice::from_ref(&event)) == Some(4);
-            collected.push(event);
-            if done {
+            collected.push(events.recv().await.unwrap());
+            if finished(&collected) == Some(4) && chunks(&collected) == [3] {
                 break collected;
             }
         }
     })
     .await
-    .unwrap();
-    let skipped: Vec<_> = collected
-        .iter()
-        .filter_map(|event| match &event.event {
-            Some(w::audio_output_event::Event::Skipped(skipped)) => Some(skipped.sequence_no),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(skipped, [0, 1]);
+    .expect("only the valid sentence is spoken");
     assert_eq!(chunks(&collected), [3]);
     assert_eq!(finished(&collected), Some(4));
+    settle(&voice).await;
+    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -312,7 +380,7 @@ async fn a_flushed_inflight_synthesis_cannot_emit_into_the_next_generation() {
     }
     let voice = Voice::new(tokio::runtime::Handle::current());
     let mut events = voice.register("c1").receiver;
-    voice.publish("ene", "c1", 1);
+    voice.publish("ene", "c1");
     let engine = Arc::new(BlockedTts {
         started: Notify::new(),
         release: Notify::new(),
@@ -328,20 +396,31 @@ async fn a_flushed_inflight_synthesis_cannot_emit_into_the_next_generation() {
     voice.end_turn("ene");
     let generation = voice.lock().owners["ene"].generation_id;
     engine.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let event = events.recv().await.unwrap();
-        match event.event {
-            Some(w::audio_output_event::Event::Chunk(chunk)) => {
-                assert_eq!(chunk.generation_id, generation);
-                assert_eq!(chunk.pcm_data, pcm_bytes("new。".bytes().map(i16::from)));
+    let collected = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut collected = Vec::new();
+        loop {
+            collected.push(events.recv().await.unwrap());
+            if finished(&collected) == Some(1) && !chunks(&collected).is_empty() {
+                break collected;
             }
-            other => panic!("expected current audio, got {other:?}"),
         }
-        let event = events.recv().await.unwrap();
-        assert_eq!(finished(&[event]), Some(1));
     })
     .await
     .unwrap();
+    // The flushed generation never reaches the wire; the new one plays its
+    // sentence and finishes.
+    let audio: Vec<_> = collected
+        .iter()
+        .filter_map(|event| match &event.event {
+            Some(w::audio_output_event::Event::Chunk(chunk)) => Some(chunk),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(audio.len(), 1);
+    assert_eq!(audio[0].generation_id, generation);
+    assert_eq!(audio[0].pcm_data, pcm_bytes("new。".bytes().map(i16::from)));
+    assert_eq!(finished(&collected), Some(1));
+    settle(&voice).await;
     assert!(events.try_recv().is_err());
 }
 
@@ -351,7 +430,7 @@ async fn a_flush_invalidates_the_older_generation() {
     let subscription = world.resource::<Voice>().register("c1");
     let mut events = subscription.control;
     let _audio = subscription.receiver;
-    world.resource::<Voice>().publish("ene", "c1", 1);
+    world.resource::<Voice>().publish("ene", "c1");
     on_stream_text(&mut world, "ene", "ひとつめ。");
     let first = current_owner(&world, "ene").generation_id;
     assert_eq!(first, 1);
@@ -395,283 +474,72 @@ async fn a_flush_invalidates_the_older_generation() {
 }
 
 #[test]
-fn a_stale_playback_report_is_ignored() {
+fn turn_end_releases_the_floor_and_relays_the_utterance() {
     let (_root, store) = store_with_client();
-    let mut world = test_world();
-    world.insert_resource(store.clone());
-    world.insert_resource(Notifier::new());
-    world.resource::<Voice>().publish("ene", "c1", 1);
+    let mut world = voice_world(&store);
+    world.resource::<Voice>().publish("ene", "c1");
+    let mut events = world.resource::<Notifier>().subscribe();
     on_stream_text(&mut world, "ene", "こんにちは。");
     on_turn_end(&mut world, "ene");
-    let owner = current_owner(&world, "ene");
-    let utterance = owner.utterance.clone().unwrap();
-    assert_eq!(utterance.total_sentences, 1);
-    assert!(utterance.deadline.is_some());
-
-    let report = |generation_id| w::PlaybackStatusReport {
-        utterance_id: utterance.id.clone(),
-        generation_id,
-        status: w::playback_status_report::Status::PLAYBACK_COMPLETED.into(),
-        completed_sentence_count: 1,
-        client_id: "c1".into(),
-        activation_revision: 1,
-        ..Default::default()
-    };
-    // A stale generation is refused and leaves the utterance owning the floor.
-    assert!(
-        !report_playback(&mut world, report(owner.generation_id + 1))
-            .unwrap()
-            .acknowledged
-    );
-    assert!(current_owner(&world, "ene").utterance.is_some());
-
-    // The current generation is acknowledged and releases the floor; the host
-    // keeps no separate report row, only the RPC-visible acknowledgement.
-    let mut events = world.resource::<Notifier>().subscribe();
-    assert!(
-        report_playback(&mut world, report(owner.generation_id))
-            .unwrap()
-            .acknowledged
-    );
-    assert!(current_owner(&world, "ene").utterance.is_none());
+    // The host owns the floor release: it happens when the turn ends, with no
+    // client playback report in the loop.
     assert!(world.resource::<Voice>().floor_holder().is_none());
     world.resource_mut::<Notifier>().flush();
-    assert!(matches!(
-        events.try_recv().expect("speech_completed is broadcast").event,
-        Some(w::notification::Event::Generic(event)) if event.kind == "speech_completed"
-    ));
-}
-
-#[test]
-fn a_voice_affirmative_answers_the_bound_approval() {
-    let (_root, store) = store_with_client();
-    let approval = pending_approval("a1");
-    store.insert_approval(&approval).unwrap();
-    let mut world = voice_world(&store);
-    let call = hold_approval(&mut world, &approval);
-
-    let binding = client_binding(&world);
-    let speech = bind_speech_start(&world, &binding).expect("one pending approval is bound");
-    assert_eq!(speech.speech_start_request_id, "a1");
-    assert_eq!(speech.generation, 1);
-
-    assert!(
-        accept_transcription(
-            &mut world,
-            "t1",
-            "はい、お願いします",
-            &binding,
-            Some(&speech)
-        )
-        .unwrap()
-    );
-    assert_eq!(
-        store.approval("a1").unwrap().unwrap().status,
-        ApprovalStatus::Approved
-    );
-    assert!(world.get::<Approved>(call).is_some());
-    // The transcript is recorded normally, and the delegation claim is keyed
-    // by its id.
-    assert!(
-        world
-            .resource::<Voice>()
-            .lock()
-            .transcriptions
-            .contains(&"t1".to_owned())
-    );
-    assert!(delegation::try_claim(&mut world, "t1", "ene"));
-    assert!(!delegation::try_claim(&mut world, "t1", "kuro"));
-}
-
-#[test]
-fn a_delayed_transcript_does_not_answer_a_later_approval() {
-    let (_root, store) = store_with_client();
-    let first = pending_approval("a1");
-    store.insert_approval(&first).unwrap();
-    let mut world = voice_world(&store);
-    hold_approval(&mut world, &first);
-    let binding = client_binding(&world);
-    let speech = bind_speech_start(&world, &binding).unwrap();
-
-    // The card resolved A while the STT ran, and B was issued afterwards.
-    store
-        .resolve_approval("a1", ApprovalStatus::Denied)
-        .unwrap();
-    let second = pending_approval("a2");
-    store.insert_approval(&second).unwrap();
-    hold_approval(&mut world, &second);
-
-    // The delayed "はい" carries A's binding and must not answer B.
-    assert!(accept_transcription(&mut world, "t1", "はい", &binding, Some(&speech)).unwrap());
-    assert_eq!(
-        store.approval("a1").unwrap().unwrap().status,
-        ApprovalStatus::Denied
-    );
-    assert_eq!(
-        store.approval("a2").unwrap().unwrap().status,
-        ApprovalStatus::Pending
-    );
-}
-
-#[test]
-fn a_moved_generation_discards_the_bound_approval() {
-    let (_root, store) = store_with_client();
-    let approval = pending_approval("a1");
-    store.insert_approval(&approval).unwrap();
-    let mut world = voice_world(&store);
-    hold_approval(&mut world, &approval);
-    let binding = client_binding(&world);
-    let speech = bind_speech_start(&world, &binding).unwrap();
-
-    // The companion moved to a new generation while the STT ran.
-    store.activate("ene", Some("c1"), 1).unwrap();
-    assert!(!accept_transcription(&mut world, "t1", "はい", &binding, Some(&speech)).unwrap());
-    assert_eq!(
-        store.approval("a1").unwrap().unwrap().status,
-        ApprovalStatus::Pending
-    );
-}
-
-#[test]
-fn two_pending_approvals_disarm_voice_approval() {
-    let (_root, store) = store_with_client();
-    store.insert_approval(&pending_approval("a1")).unwrap();
-    store.insert_approval(&pending_approval("a2")).unwrap();
-    let mut world = voice_world(&store);
-    let binding = client_binding(&world);
-
-    // Two pending requests are ambiguous: the screen card must choose.
-    assert!(bind_speech_start(&world, &binding).is_none());
-    assert!(accept_transcription(&mut world, "t1", "はい", &binding, None).unwrap());
-    for request in ["a1", "a2"] {
-        assert_eq!(
-            store.approval(request).unwrap().unwrap().status,
-            ApprovalStatus::Pending
-        );
-    }
-}
-
-#[test]
-fn ambiguous_speech_never_grants_approval() {
-    assert_eq!(
-        approval_intent("いや、いいえ、いいです"),
-        Some(ApprovalDecision::Deny)
-    );
-    assert_eq!(approval_intent("not now"), None);
-    assert_eq!(approval_intent("そうですね"), None);
-}
-
-fn complete_playback(world: &mut World) -> bool {
-    on_stream_text(world, "ene", "こんにちは。");
-    on_turn_end(world, "ene");
-    let utterance = current_owner(world, "ene").utterance.clone().unwrap();
-    let report = w::PlaybackStatusReport {
-        utterance_id: utterance.id,
-        generation_id: utterance.generation_id,
-        status: w::playback_status_report::Status::PLAYBACK_COMPLETED.into(),
-        completed_sentence_count: utterance.total_sentences,
-        client_id: "c1".into(),
-        activation_revision: 1,
-        ..Default::default()
+    let notification = events.try_recv().expect("speech_completed is broadcast");
+    let Some(w::notification::Event::Generic(event)) = notification.event else {
+        panic!("expected a generic host event");
     };
-    let acknowledged = report_playback(world, report).unwrap().acknowledged;
-    world.resource_mut::<Notifier>().flush();
-    acknowledged
-}
-
-fn relayed(events: &mut tokio::sync::broadcast::Receiver<w::Notification>) -> usize {
-    let mut count = 0;
-    while let Ok(notification) = events.try_recv() {
-        if matches!(
-            notification.event,
-            Some(w::notification::Event::Generic(event)) if event.kind == "speech_completed"
-        ) {
-            count += 1;
-        }
-    }
-    count
-}
-
-#[test]
-fn the_autonomous_relay_stops_after_five_completions() {
-    let (_root, store) = store_with_client();
-    let mut world = voice_world(&store);
-    world.resource::<Voice>().publish("ene", "c1", 1);
-    let mut events = world.resource::<Notifier>().subscribe();
-
-    for _ in 0..MAX_RELAY + 1 {
-        assert!(complete_playback(&mut world));
-    }
-    // Five peer prompts are relayed; the sixth completed utterance releases
-    // the floor but no longer invites a peer to answer.
-    assert_eq!(relayed(&mut events), MAX_RELAY as usize);
-
-    // An explicit user turn opens the budget again.
-    note_user_input(&world);
-    for _ in 0..2 {
-        assert!(complete_playback(&mut world));
-    }
-    assert_eq!(relayed(&mut events), 2);
+    assert_eq!(event.kind, "speech_completed");
+    let payload = event
+        .payload
+        .as_option()
+        .expect("the event names the utterance");
+    let payload: serde_json::Value = serde_json::from_str(&payload.json).unwrap();
+    assert_eq!(payload["companion_id"], "ene");
+    assert_eq!(payload["client_id"], "c1");
+    assert_eq!(payload["total_sentences"], 1);
+    assert!(
+        payload["utterance_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert!(
+        payload["generation_id"]
+            .as_u64()
+            .is_some_and(|generation| generation > 0)
+    );
 }
 
 #[test]
 fn input_binding_validates_first_metadata_and_allows_omitted_followups() {
     let (_root, store) = store_with_client();
+    store
+        .register_client(&ClientDeclaration {
+            id: "c2",
+            name: "handheld",
+            platform: "android",
+            capabilities: &[],
+            specs: &[],
+            expected_revision: 0,
+        })
+        .unwrap();
     let world = voice_world(&store);
+    assert!(matches!(bind_input(&world, ""), Err(HostError::Invalid(_))));
     assert!(matches!(
-        bind_input(&world, "", 1),
-        Err(HostError::Invalid(_))
-    ));
-    assert!(matches!(
-        bind_input(&world, "missing", 1),
+        bind_input(&world, "missing"),
         Err(HostError::NotFound(_))
     ));
+    // A registered client that is not a companion's active client has nothing
+    // the head may answer.
     assert!(matches!(
-        bind_input(&world, "c1", 0),
+        bind_input(&world, "c2"),
         Err(HostError::Conflict(_))
     ));
-    let binding = bind_input(&world, "c1", 1).unwrap();
-    assert!(binding.accepts("c1", 1));
-    assert!(binding.accepts("", 0));
-    assert!(!binding.accepts("other", 1));
-    assert!(!binding.accepts("c1", 2));
-}
-
-#[test]
-fn a_moved_activation_discards_the_transcription() {
-    let (_root, store) = store_with_client();
-    let mut world = test_world();
-    world.insert_resource(store.clone());
-    let binding = bind_input(&world, "c1", 1).unwrap();
-    assert!(accept_transcription(&mut world, "t1", "こんにちは", &binding, None).unwrap());
-    assert!(
-        world
-            .resource::<Voice>()
-            .lock()
-            .transcriptions
-            .contains(&"t1".to_owned())
-    );
-
-    // The HTTP call happened before the move; acceptance must revalidate.
-    store.activate("ene", Some("c1"), 1).unwrap();
-    assert!(!accept_transcription(&mut world, "t2", "さようなら", &binding, None).unwrap());
-    assert!(
-        !world
-            .resource::<Voice>()
-            .lock()
-            .transcriptions
-            .contains(&"t2".to_owned())
-    );
-
-    let moved = bind_input(&world, "c1", 2).unwrap();
-    assert!(accept_transcription(&mut world, "t3", "ただいま", &moved, None).unwrap());
-    assert!(
-        world
-            .resource::<Voice>()
-            .lock()
-            .transcriptions
-            .contains(&"t3".to_owned())
-    );
+    let binding = bind_input(&world, "c1").unwrap();
+    assert!(binding.accepts("c1"));
+    // A follow-up frame of the same stream may omit the metadata.
+    assert!(binding.accepts(""));
+    assert!(!binding.accepts("c2"));
 }
 
 fn pcm_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {
@@ -734,7 +602,7 @@ fn reused_resamplers_match_cold_bytes_without_leaking_between_clips() {
 async fn the_worker_orders_audio_and_finishes_the_utterance() {
     let voice = Voice::new(tokio::runtime::Handle::current());
     let mut events = voice.register("c1").receiver;
-    voice.publish("ene", "c1", 1);
+    voice.publish("ene", "c1");
     struct DelayedTts(Notify);
     impl TtsEngine for DelayedTts {
         fn synthesize<'a>(
@@ -762,12 +630,8 @@ async fn the_worker_orders_audio_and_finishes_the_utterance() {
     voice.end_turn("ene");
     let collected = tokio::time::timeout(Duration::from_secs(5), async {
         let mut collected = Vec::new();
-        while let Some(event) = events.recv().await {
-            let done = finished(std::slice::from_ref(&event)) == Some(2);
-            collected.push(event);
-            if done {
-                break;
-            }
+        while collected.len() < 3 {
+            collected.push(events.recv().await.unwrap());
         }
         collected
     })
@@ -784,6 +648,8 @@ async fn the_worker_orders_audio_and_finishes_the_utterance() {
             assert_eq!(chunk.pcm_data, wire_pcm(pcm, rate, &mut None).unwrap());
         }
     }
+    settle(&voice).await;
+    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -793,24 +659,21 @@ async fn a_stalled_owner_does_not_block_another() {
     let mut slow_control = slow.control;
     let _slow_audio = slow.receiver; // never drained: the owner is stalled
     let mut fast = voice.register("c2").receiver;
-    voice.publish("ene", "c1", 1);
-    voice.publish("kuro", "c2", 1);
+    voice.publish("ene", "c1");
+    voice.publish("kuro", "c2");
     voice.begin("ene", Arc::new(BigTts), String::new());
     voice.speak("ene", "slow。");
     voice.end_turn("ene");
+    // The stalled owner released the floor at its turn end, so the other
+    // companion claims it and finishes.
     voice.begin("kuro", Arc::new(BigTts), String::new());
     voice.speak("kuro", "fast。");
-    voice.lock().floor = Some("kuro".into());
     voice.end_turn("kuro");
 
     let collected = tokio::time::timeout(Duration::from_secs(5), async {
         let mut collected = Vec::new();
-        while let Some(event) = fast.recv().await {
-            let done = finished(std::slice::from_ref(&event)) == Some(1);
-            collected.push(event);
-            if done {
-                break;
-            }
+        while collected.len() < 2 {
+            collected.push(fast.recv().await.unwrap());
         }
         collected
     })

@@ -13,7 +13,7 @@ Prerequisites:
   Load them with `set -a; . ./.env; set +a` before a run.
 - `direnv` so the dev shell provides `python3` for `scripts/connect.py`.
 - Network access to OpenRouter and OpenAI.
-- `bubblewrap`, which `acp-sandbox.sh` fetches from nixpkgs.
+- `mcp-server.py` needs `python3` from the dev shell.
 
 Run one, or all of them:
 
@@ -34,7 +34,6 @@ a failing journey's log is at `target/verify-ene-host/<journey>.log`.
 | `schedule.sh` | A due schedule records its firing and starts no turn when the model cannot be bound, and the client is told. |
 | `device.sh` | A registered and activated client takes the model's `body_motion` over `DeviceStream` and reports the result. |
 | `mcp.sh` | A stdio MCP server (`mcp-server.py`) becomes a tool the model calls, and its output returns to the reply. |
-| `acp-sandbox.sh` | A `network: isolated` ACP child has no direct route, reaches the network only through the host's proxy, and the proxy refuses anything but CONNECT. |
 | `restart.sh` | A companion created without a model, and one whose connection is later disabled, do not stop the next start. |
 
 Speech journeys are not here: `VoiceService` answers only through an installed

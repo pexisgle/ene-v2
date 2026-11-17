@@ -163,7 +163,6 @@ mod tests {
                     store.insert_operation(&DeviceOperation {
                         id: id.into(),
                         client_id: "c1".into(),
-                        activation_revision: 1,
                         capability: "device.files".into(),
                         input: serde_json::json!({}),
                         work_id: None,

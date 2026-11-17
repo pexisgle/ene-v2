@@ -18,19 +18,17 @@ fn row_to_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
         created_at: row.get("created_at")?,
         resolved_at: row.get("resolved_at")?,
         client_id: row.get("client_id")?,
-        activation_revision: row.get::<_, Option<u64>>("activation_revision")?,
         capability: row.get("capability")?,
     })
 }
 
 const COLUMNS: &str = "request_id, session_id, run_id, work_id, action_payload_hash, tool_name, \
-     normalized_arguments, status, created_at, resolved_at, client_id, activation_revision, \
-     capability";
+     normalized_arguments, status, created_at, resolved_at, client_id, capability";
 
 impl Store {
     pub(crate) fn insert_approval(&self, approval: &Approval) -> Result<()> {
         self.conn()?.prepare_cached(&format!(
-                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
             ))?.execute(
             params![
                 approval.request_id,
@@ -44,7 +42,6 @@ impl Store {
                 approval.created_at,
                 approval.resolved_at,
                 approval.client_id,
-                approval.activation_revision,
                 approval.capability,
             ],
         )?;
@@ -100,18 +97,6 @@ impl Store {
             .execute([now()])?;
         Ok(expired)
     }
-
-    /// Expires only the pending approvals of one companion.
-    pub(crate) fn expire_approvals_for(&self, companion: &str) -> Result<usize> {
-        let expired = self
-            .conn()?
-            .prepare_cached(
-                "UPDATE approval_requests SET status = 'expired', resolved_at = ?2 \
-             WHERE status = 'pending' AND session_id = ?1",
-            )?
-            .execute(params![companion, now()])?;
-        Ok(expired)
-    }
 }
 
 #[cfg(test)]
@@ -132,7 +117,6 @@ mod tests {
             created_at: now(),
             resolved_at: None,
             client_id: Some("c1".into()),
-            activation_revision: Some(4),
             capability: Some("device.x".into()),
         }
     }

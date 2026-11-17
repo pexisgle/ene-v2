@@ -25,8 +25,8 @@ perception.
 
 The user installs/opens the desktop client on a second machine; it registers,
 then becomes the active device for the companion, and the character is drawn
-there. Moving the active client invalidates the previous generation's open
-operations.
+there. Moving the active client sends the old device a flush and the
+operations it already received.
 
 ## Driving it with connect.py
 

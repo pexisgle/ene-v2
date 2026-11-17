@@ -1,5 +1,5 @@
-//! The domain of a declared client: capabilities, grants, activation
-//! generations and device operations.
+//! The domain of a declared client: capabilities, grants, the active client
+//! and device operations.
 
 use super::error::{Failure, HostError, Result};
 use super::json;
@@ -12,9 +12,9 @@ pub(crate) const BUILTIN_TOOLS: &[&str] = &[
     "mind_update",
     "start_work",
     "send_work",
-    "list_works",
     "stop_work",
     "device_request",
+    "resolve_approval",
     "noop",
     "schedule_create",
     "schedule_list",
@@ -228,8 +228,8 @@ impl DeviceStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DeviceOperation {
     pub(crate) id: String,
+    /// The client the host dispatched to, kept for the record.
     pub(crate) client_id: String,
-    pub(crate) activation_revision: u64,
     pub(crate) capability: String,
     pub(crate) input: serde_json::Value,
     pub(crate) work_id: Option<String>,
@@ -286,7 +286,7 @@ pub(crate) fn approval_target(spec: &CapabilitySpec, input: &serde_json::Value) 
 fn summarise(input: &serde_json::Value) -> String {
     super::db::truncate(&input.to_string(), 200)
 }
-// Clients: capability declarations, activation generations and perception.
+// Clients: capability declarations, the active client and perception.
 //
 // The host stores capability names, JSON Schema, presets and approval
 // declarations only. A declared capability with a `tool_name` becomes a tool
@@ -528,9 +528,10 @@ fn notify_client(world: &mut World, client: &w::Client) {
     );
 }
 
-/// Moves or releases the active client. A move invalidates the old generation:
-/// its open operations fail as `client_moved`, its perception is dropped and
-/// its approvals are expired.
+/// Moves or releases the active client. The latest write wins: the moved-to
+/// client is the active one, and work already accepted by the old client keeps
+/// running there. Its audio output is flushed, its perception summary is
+/// dropped and its tools are unpublished.
 pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Result<w::Activation> {
     let store = world.resource::<Store>().clone();
     store
@@ -544,9 +545,9 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     }
     let previous = store.activation(&request.companion_id)?;
     let client = (!request.release).then_some(request.client_id.as_str());
-    let activation = store.activate(&request.companion_id, client, request.expected_revision)?;
-    // Publish the new generation first: a conflicting tool declaration must
-    // roll the move back before any invalidation or notification is visible.
+    let activation = store.activate(&request.companion_id, client)?;
+    // Publish the new active client first: a conflicting tool declaration must
+    // roll the move back before any notification is visible.
     if let Err(error) = dynamic::sync_tools(world) {
         if let Some(previous) = previous.as_ref() {
             let _ = store.restore_activation(previous);
@@ -558,20 +559,9 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     }
     if let Some(previous) = previous.clone()
         && let Some(old_client) = previous.client_id
-        && (client != Some(old_client.as_str()) || previous.revision != activation.revision)
+        && client != Some(old_client.as_str())
     {
-        store.fail_operations_of(&old_client, previous.revision)?;
-        store.expire_approvals_for(&request.companion_id)?;
-        // The ECS holds and waiting calls of the old generation must be
-        // released too, or their turns would wait forever.
-        super::permission::invalidate_generation(
-            world,
-            &request.companion_id,
-            &old_client,
-            previous.revision,
-        );
-        device::invalidate(world, &old_client, previous.revision);
-        super::voice::on_client_moved(world, &request.companion_id, &old_client, previous.revision);
+        super::voice::on_client_moved(world, &request.companion_id, &old_client);
         world
             .resource_mut::<Perception>()
             .events
@@ -593,22 +583,19 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     Ok(activation)
 }
 
-/// Projects a perception event into the companion's dynamic tail. A stale
-/// generation is discarded.
+/// Projects a perception event into the companion's dynamic tail. An event
+/// from a client that is not the active one is discarded.
 pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
     let store = world.resource::<Store>().clone();
     super::db::validate_id(&event.client_id)?;
     store
         .client(&event.client_id)?
         .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
-    let Some((companion_id, revision)) = store.activation_for_client(&event.client_id)? else {
+    let Some(companion_id) = store.activation_for_client(&event.client_id)? else {
         // A connected client that is not active produces nothing the head may
         // act on. Not an error: the event is simply discarded.
         return Ok(());
     };
-    if event.activation_revision != revision {
-        return Ok(());
-    }
     let Some(summary) = perception_summary(&event) else {
         return Ok(());
     };

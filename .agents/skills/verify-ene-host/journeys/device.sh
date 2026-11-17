@@ -58,15 +58,15 @@ for line in open(sys.argv[1]):
     event=json.loads(line)
     if "operation" in event: op=event["operation"]
 if op is None: sys.exit(1)
-print(op["operationId"], op.get("activationRevision","0"), op.get("input","{}").replace(" ",""))
+print(op["operationId"], op.get("input","{}").replace(" ",""))
 PY
 )
-read -r op_id revision op_input <<<"$operation"
-echo "operation: $op_id revision=$revision input=$op_input"
+read -r op_id op_input <<<"$operation"
+echo "operation: $op_id input=$op_input"
 [ -n "${op_id:-}" ] || { echo 'FAIL  the model did not reach the device'; exit 1; }
 
 echo '=== report the result from the client ==='
-rpc ene.host.v1.ClientService/CompleteOperation "{\"clientId\":\"c1\",\"operationId\":\"$op_id\",\"success\":true,\"output\":\"{}\",\"activationRevision\":\"$revision\"}" | head -c 200; echo
+rpc ene.host.v1.ClientService/CompleteOperation "{\"clientId\":\"c1\",\"operationId\":\"$op_id\",\"success\":true,\"output\":\"{}\"}" | head -c 200; echo
 
 echo '=== wait for the turn to finish ==='
 reply=''

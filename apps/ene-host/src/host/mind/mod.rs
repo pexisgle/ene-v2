@@ -198,10 +198,8 @@ impl Plugin for MindPlugin {
     fn build(&self, app: &mut App) {
         tools::register(app);
         app.add_plugins(recall::RecallPlugin);
-        // The vector cache and its HTTP source, then the consolidation
-        // scheduler that posts model results back to this thread.
+        // The vector cache and its HTTP source.
         embedding::register(app);
-        consolidate::register(app);
     }
 }
 
@@ -374,18 +372,10 @@ pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
     let companion = store
         .companion(id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
-    let cursor = store.consolidation_cursor(id)?;
     Ok(w::MindView {
         companion_id: id.to_owned(),
         profile: Some(wire::mind_profile(&companion)).into(),
         state: Some(wire::mind_state(&companion)).into(),
-        index: None.into(),
-        consolidation: cursor
-            .map(|cursor| w::MindConsolidationStatus {
-                last_processed_turn_id: cursor,
-                ..Default::default()
-            })
-            .into(),
         ..Default::default()
     })
 }
@@ -425,17 +415,17 @@ pub(crate) fn control_memory(
     let memory = store
         .memory(&request.memory_id)?
         .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
-    if memory.owner != request.companion_id {
+    if !memory.visible_to(&request.companion_id) {
         return Err(HostError::Permission(
-            ("only the owner may change a memory's importance or audience").into(),
+            ("this memory is outside the companion's scope").into(),
         ));
     }
-    let memory = store.control_memory(&request.memory_id, action, None)?;
+    let memory = store.control_memory(&request.memory_id, action, &request.companion_id)?;
     notify_mind(world, &request.companion_id);
     Ok(w::MemoryControlResult {
         memory_id: memory.id,
         importance: u32::from(memory.importance),
-        audiences: memory.audiences,
+        scope: memory.scope,
         revision: memory.memory_revision,
         ..Default::default()
     })

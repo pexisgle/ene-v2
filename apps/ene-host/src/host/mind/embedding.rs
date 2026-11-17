@@ -326,21 +326,22 @@ impl Space {
     }
 }
 
-/// The ECS cache of the canonical vectors. Each `(owner, space)` keeps one
+/// The ECS cache of the canonical vectors. Each `(companion, space)` keeps one
 /// flat `Vec<f32>`, so another companion's vectors can never take the top-k
-/// slots of the owner's ranking; `ranked` keeps only the best `limit` without
-/// sorting or allocating for the rest.
+/// slots of that companion's ranking; `ranked` keeps only the best `limit`
+/// without sorting or allocating for the rest.
 #[derive(Resource, Default)]
 pub(crate) struct CompactVectorIndex {
     spaces: HashMap<(String, String), Space>,
 }
 
 impl CompactVectorIndex {
-    /// Mirrors one owner's space from SQLite. Vectors whose content revision
-    /// still matches are reused, so an unchanged space reads no BLOB column.
-    pub(crate) fn sync(&mut self, store: &Store, owner: &str, space: &str) -> Result<()> {
-        let rows = store.embedding_revisions(space, owner)?;
-        let key = (owner.to_owned(), space.to_owned());
+    /// Mirrors one companion's space from SQLite. Vectors whose content
+    /// revision still matches are reused, so an unchanged space reads no BLOB
+    /// column.
+    pub(crate) fn sync(&mut self, store: &Store, companion: &str, space: &str) -> Result<()> {
+        let rows = store.embedding_revisions(space, companion)?;
+        let key = (companion.to_owned(), space.to_owned());
         if self
             .spaces
             .get(&key)
@@ -388,17 +389,17 @@ impl CompactVectorIndex {
         Ok(())
     }
 
-    /// The cosine ranking of one owner's space, highest first. Only the best
-    /// `limit` candidates are kept, so the scan neither sorts the whole space
-    /// nor allocates an entry per memory.
+    /// The cosine ranking of one companion's space, highest first. Only the
+    /// best `limit` candidates are kept, so the scan neither sorts the whole
+    /// space nor allocates an entry per memory.
     pub(crate) fn ranked(
         &self,
-        owner: &str,
+        companion: &str,
         space: &str,
         query: &[f32],
         limit: usize,
     ) -> Vec<(String, f32)> {
-        let Some(current) = self.spaces.get(&(owner.to_owned(), space.to_owned())) else {
+        let Some(current) = self.spaces.get(&(companion.to_owned(), space.to_owned())) else {
             return Vec::new();
         };
         if query.len() != current.dimensions || limit == 0 {
@@ -831,7 +832,7 @@ mod tests {
         let pending = MAX_EMBED_BATCH * 2 + 1;
         for index in 0..pending {
             let mut record = memory(&format!("memory {index}"));
-            record.owner = companion.id.clone();
+            record.scope = companion.id.clone();
             store.insert_memory(record).unwrap();
         }
         assert_eq!(
@@ -875,8 +876,7 @@ mod tests {
     fn memory(content: &str) -> MemoryRecord {
         MemoryRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            owner: "ene".into(),
-            audiences: Vec::new(),
+            scope: "ene".into(),
             content: content.into(),
             importance: 5,
             occurred_at: None,
@@ -943,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn another_owners_vectors_cannot_take_the_owners_top_k() {
+    fn another_companions_vectors_cannot_take_the_companions_top_k() {
         let store = store();
         let space = space_id("fake", 2);
         let mine = store.insert_memory(memory("mine")).unwrap();
@@ -952,7 +952,7 @@ mod tests {
         let mut others = Vec::new();
         for index in 0..5 {
             let mut other = memory(&format!("other {index}"));
-            other.owner = format!("other-{index}");
+            other.scope = format!("other-{index}");
             let other = store.insert_memory(other).unwrap();
             embed(&store, &other, &space, 2, &[1.0, 0.0]);
             others.push(other);
@@ -961,8 +961,11 @@ mod tests {
         index.sync(&store, "ene", &space).unwrap();
         let ranked = index.ranked("ene", &space, &[1.0, 0.0], 1);
         assert_eq!(ranked.len(), 1);
-        assert_eq!(ranked[0].0, mine.id, "the owner's top-k is not crowded out");
-        // Each owner has its own key space: syncing one does not expose
+        assert_eq!(
+            ranked[0].0, mine.id,
+            "the companion's top-k is not crowded out"
+        );
+        // Each companion has its own key space: syncing one does not expose
         // another's memories in its ranking.
         index.sync(&store, "other-0", &space).unwrap();
         let theirs = index.ranked("other-0", &space, &[1.0, 0.0], 10);
@@ -970,7 +973,7 @@ mod tests {
         assert_eq!(theirs[0].0, others[0].id);
         assert!(
             theirs.iter().all(|(id, _)| id != &mine.id),
-            "another owner's vector is never in this owner's space"
+            "another companion's vector is never in this companion's space"
         );
     }
 

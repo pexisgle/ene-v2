@@ -18,7 +18,7 @@ ene固有の概念や定義については [用語集](../terms.md) を参照し
 | [Task](task/README.md) | 「頭」で考えたことを実行に移す「手」（作業エージェント）の管理と連携 |
 | [Autonomy](autonomy/README.md) | 許可された範囲で自律的に行う、キャラクターからの声かけやスケジュール実行 |
 | [Hosting](hosting/README.md) | ホストの配置・稼働と、複数クライアント（端末）からの接続・同期 |
-| [Settings](settings/README.md) | 接続先ホストや利用モデルの管理、sandbox と自動判定、危険時の承認、ポリシーの設定 |
+| [Settings](settings/README.md) | 接続先ホストや利用モデルの管理、自動判定、危険時の承認、ポリシーの設定 |
 | [Extensions](extensions/README.md) | 手・目・体の全方位を強化するプラグインの追加と差し替え（Everything is a plugin） |
 
 ## ドキュメントの記述方針

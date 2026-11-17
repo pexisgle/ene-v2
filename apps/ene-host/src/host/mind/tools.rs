@@ -77,7 +77,7 @@ pub(crate) fn register(app: &mut App) {
     .add_open_tool::<UpdateArgs, _>(
         "mind_update",
         "Record, correct or forget memories and update the current mind. \
-         The host binds the owner and commits everything atomically.",
+         The host binds the scope and commits everything atomically.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| update(world, agent, args)),
     )
@@ -207,9 +207,10 @@ fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
     }
     // Reading with the tool is an explicit use, so the recall recency moves.
     store.cite_memory(&args.id, &format!("{companion}:{}", now()), false)?;
-    if memory.owner != companion {
+    if memory.scope != companion {
         // A shared memory exposes the facts only: its private origin, emotion
-        // and relations stay with the owner (docs/design/mind.md §3.3).
+        // and relations stay with the companion that recorded it
+        // (docs/design/mind.md §3.3).
         return Ok(json!({
             "id": memory.id,
             "content": memory.content,

@@ -1,7 +1,15 @@
 //! Host-side voice pipeline: recognition input, sentence-level synthesis
-//! output, playback ownership and the speech floor (docs/design/voice-avatar.md
-//! §4–§5, docs/api.md §6–§7). Recognition runs in the Connect layer; synthesis
-//! tasks run on the host runtime and release audio in `sequence_no` order.
+//! output and the speech floor (docs/design/voice-avatar.md §4–§5,
+//! docs/api.md §6–§7). Recognition runs in the Connect layer; synthesis tasks
+//! run on the host runtime and release audio in `sequence_no` order.
+//!
+//! A turn streams text sentence by sentence while the host synthesizes up to
+//! [`MAX_SYNTHESIS_SENTENCES`] ahead. The host releases the speech floor when
+//! the turn ends and emits `UtteranceFinished` only once every sentence queued
+//! for the utterance has resolved, so the event stays the last audio event of
+//! the utterance. A sentence whose synthesis fails adds no audio and nothing
+//! waits for it. `generation_id` and `FlushControl` drop the chunks of an older
+//! generation after a barge-in; `sequence_no` only carries the enqueue order.
 use super::{
     agent,
     db::{self, Result, Store},
@@ -9,7 +17,6 @@ use super::{
     error::HostError,
     model::Credentials,
     notify::Notifier,
-    permission::{self, ApprovalDecision, ApprovalStatus},
     resources::HostRuntime,
     settings::{Connection, ConnectionKind},
 };
@@ -23,7 +30,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{Notify, mpsc};
 use tokio_util::task::AbortOnDropHandle;
@@ -38,13 +45,9 @@ const MAX_SENTENCE_CHARS: usize = 240;
 pub(crate) const STT_SILENCE_WINDOW: Duration = Duration::from_millis(700);
 pub(crate) const MIN_STT_BYTES: usize = 3_200;
 pub(crate) const MAX_STT_BYTES: usize = 48_000 * 20;
-const PLAYBACK_GRACE: Duration = Duration::from_secs(3);
 const TRANSCRIPTION_MEMORY: usize = 128;
 const MAX_SENTENCES: u32 = 64;
 const AUDIO_QUEUE: usize = 32;
-/// Completed companion utterances the host relays to the peers without a new
-/// user input before it stops the autonomous chain (voice-avatar.md §5.3).
-const MAX_RELAY: u32 = 5;
 
 pub(crate) const VOICE_UNAVAILABLE: &str = "voice requires a configured TTS/STT connection";
 
@@ -131,13 +134,6 @@ fn plugin_engine(
         world.get_resource::<Credentials>(),
         kind,
     )
-}
-
-pub(crate) fn configured(
-    world: &World,
-    kind: ConnectionKind,
-) -> std::result::Result<(), SetupError> {
-    voice_connection(world, kind).map(|_| ())
 }
 
 fn voice_connection(
@@ -244,19 +240,15 @@ struct Utterance {
     id: String,
     generation_id: u64,
     next_sequence: u32,
-    chars: u32,
     finished: bool,
     voice: String,
     source: Arc<dyn TtsEngine>,
     buffer: String,
-    total_sentences: u32,
-    deadline: Option<Instant>,
 }
 
 #[derive(Clone, Default)]
 struct Owner {
     client_id: String,
-    activation_revision: u64,
     generation_id: u64,
     utterance: Option<Utterance>,
 }
@@ -264,22 +256,33 @@ struct Owner {
 struct Work {
     companion: String,
     generation_id: u64,
-    emitter: Emitter,
     pending: VecDeque<Sentence>,
+    /// Sentences enqueued for this utterance that synthesis has not resolved.
+    outstanding: u32,
+    /// `Some(total_sentences)` once the turn ended and named the count.
+    ended: Option<u32>,
     notify: Arc<Notify>,
     task: Option<AbortOnDropHandle<()>>,
 }
 
 impl Work {
-    fn new(companion: &str, utterance_id: &str, generation_id: u64) -> Self {
+    fn new(companion: &str, generation_id: u64) -> Self {
         Self {
             companion: companion.to_owned(),
             generation_id,
-            emitter: Emitter::new(utterance_id.to_owned(), generation_id),
             pending: VecDeque::new(),
+            outstanding: 0,
+            ended: None,
             notify: Arc::new(Notify::new()),
             task: None,
         }
+    }
+
+    /// Queues sentences for synthesis. Each one keeps the utterance open until
+    /// its synthesis resolves, so the count never drifts from the queue.
+    fn enqueue(&mut self, jobs: Vec<Sentence>) {
+        self.outstanding += jobs.len() as u32;
+        self.pending.extend(jobs);
     }
 }
 
@@ -291,14 +294,20 @@ struct State {
     owners: HashMap<String, Owner>,
     works: HashMap<String, Work>,
     transcriptions: VecDeque<String>,
-    /// Completed companion utterances broadcast since the last user input.
-    relay: u32,
 }
 
 impl State {
     fn cancel(&mut self, utterance_id: &str) {
         self.works.remove(utterance_id);
     }
+}
+
+/// A finished utterance the host relays to the peers (voice-avatar.md §5.3).
+struct EndedUtterance {
+    client_id: String,
+    utterance_id: String,
+    generation_id: u64,
+    total_sentences: u32,
 }
 
 #[derive(Clone, Resource)]
@@ -347,21 +356,11 @@ impl Voice {
         }
     }
 
-    fn publish(&self, companion: &str, client: &str, revision: u64) {
+    /// The client that owns this companion's audio output.
+    fn publish(&self, companion: &str, client: &str) {
         let mut state = self.lock();
         let owner = state.owners.entry(companion.to_owned()).or_default();
         owner.client_id = client.to_owned();
-        owner.activation_revision = revision;
-    }
-
-    fn owner_of(&self, utterance_id: &str) -> Option<(String, Owner)> {
-        self.lock().owners.iter().find_map(|(companion, owner)| {
-            owner
-                .utterance
-                .as_ref()
-                .is_some_and(|utterance| utterance.id == utterance_id)
-                .then(|| (companion.clone(), owner.clone()))
-        })
     }
 
     fn owns(&self, companion: &str) -> bool {
@@ -398,17 +397,14 @@ impl Voice {
             id: id.clone(),
             generation_id,
             next_sequence: 0,
-            chars: 0,
             finished: false,
             voice,
             source,
             buffer: String::new(),
-            total_sentences: 0,
-            deadline: None,
         });
         state
             .works
-            .insert(id.clone(), Work::new(companion, &id, generation_id));
+            .insert(id.clone(), Work::new(companion, generation_id));
         if state
             .floor
             .as_deref()
@@ -441,7 +437,6 @@ impl Voice {
                 }
                 let sequence_no = utterance.next_sequence;
                 utterance.next_sequence += 1;
-                utterance.chars += text.chars().count() as u32;
                 jobs.push(sentence(utterance, sequence_no, text));
             }
         }
@@ -450,15 +445,19 @@ impl Voice {
             return;
         }
         if let Some(work) = state.works.get_mut(&utterance_id) {
-            work.pending.extend(jobs);
+            work.enqueue(jobs);
         }
         self.pump(&mut state, &utterance_id);
     }
 
-    fn end_turn(&self, companion: &str) {
+    /// Ends the turn: the buffered tail becomes the last sentence and the floor
+    /// is released. `UtteranceFinished` waits for the audio still in flight, so
+    /// it stays the last audio event of the utterance. Returns the finished
+    /// utterance when the host may relay it to the peers.
+    fn end_turn(&self, companion: &str) -> Option<EndedUtterance> {
         let mut state = self.lock();
         if state.floor.as_deref() != Some(companion) {
-            return;
+            return None;
         }
         let Some(utterance_id) = state
             .owners
@@ -467,21 +466,18 @@ impl Voice {
             .map(|utterance| utterance.id.clone())
         else {
             finish(&mut state, companion, None);
-            return;
+            return None;
         };
         let mut jobs = Vec::new();
         let mut overflow = false;
         let total;
         {
-            let Some(utterance) = state
+            let utterance = state
                 .owners
                 .get_mut(companion)
-                .and_then(|owner| owner.utterance.as_mut())
-            else {
-                return;
-            };
+                .and_then(|owner| owner.utterance.as_mut())?;
             if utterance.finished {
-                return;
+                return None;
             }
             if let Some(text) = flush_sentences(&mut utterance.buffer) {
                 if utterance.next_sequence >= MAX_SENTENCES {
@@ -489,37 +485,67 @@ impl Voice {
                 } else {
                     let sequence_no = utterance.next_sequence;
                     utterance.next_sequence += 1;
-                    utterance.chars += text.chars().count() as u32;
                     jobs.push(sentence(utterance, sequence_no, text));
                 }
             }
             total = utterance.next_sequence;
             if !overflow {
                 utterance.finished = true;
-                if total > 0 {
-                    utterance.total_sentences = total;
-                    let speech =
-                        Duration::from_secs_f64((f64::from(utterance.chars) * 0.18).min(600.0));
-                    utterance.deadline = Some(Instant::now() + speech + PLAYBACK_GRACE);
-                }
             }
         }
         if overflow {
             finish(&mut state, companion, Some(w::FlushReason::Cancelled));
-            return;
+            return None;
         }
+        let work = state.works.get_mut(&utterance_id)?;
+        let generation_id = work.generation_id;
+        work.enqueue(jobs);
+        work.ended = Some(total);
+        if state.floor.as_deref() == Some(companion) {
+            state.floor = None;
+        }
+        let client_id = state
+            .owners
+            .get(companion)
+            .map(|owner| owner.client_id.clone())?;
+        // A turn whose sentences are all resolved already finishes here; the
+        // rest are announced by the completion that resolves the last one.
+        self.announce(&mut state, &utterance_id);
         if total == 0 {
             finish(&mut state, companion, None);
-            return;
+            return None;
         }
-        let Some(work) = state.works.get_mut(&utterance_id) else {
+        self.pump(&mut state, &utterance_id);
+        Some(EndedUtterance {
+            client_id,
+            utterance_id,
+            generation_id,
+            total_sentences: total,
+        })
+    }
+
+    /// Emits `UtteranceFinished` when the turn has ended and every sentence
+    /// queued for the utterance has resolved. Nothing may follow it, so a
+    /// client reads it as "the host is done with this utterance".
+    fn announce(&self, state: &mut State, utterance_id: &str) {
+        let Some(work) = state.works.get_mut(utterance_id) else {
             return;
         };
-        work.pending.extend(jobs);
+        if work.outstanding > 0 {
+            return;
+        }
+        let Some(total) = work.ended.take() else {
+            return;
+        };
+        let companion = work.companion.clone();
         let generation_id = work.generation_id;
-        let events = work.emitter.finish(total);
-        self.send(&mut state, companion, generation_id, events, &utterance_id);
-        self.pump(&mut state, &utterance_id);
+        self.send(
+            state,
+            &companion,
+            generation_id,
+            vec![finished_event(utterance_id, generation_id, total)],
+            utterance_id,
+        );
     }
 
     fn flush(&self, companion: &str, reason: w::FlushReason) -> Result<()> {
@@ -533,21 +559,17 @@ impl Voice {
         Ok(())
     }
 
-    fn client_moved(&self, companion: &str, client: &str, revision: u64) {
+    fn client_moved(&self, companion: &str, client: &str) {
         let mut state = self.lock();
-        let owns = state.owners.get(companion).is_some_and(|owner| {
-            owner.client_id == client && owner.activation_revision == revision
-        });
+        let owns = state
+            .owners
+            .get(companion)
+            .is_some_and(|owner| owner.client_id == client);
         if !owns {
             return;
         }
         finish(&mut state, companion, Some(w::FlushReason::ClientMoved));
         state.owners.remove(companion);
-    }
-
-    fn release(&self, companion: &str) {
-        let mut state = self.lock();
-        finish(&mut state, companion, None);
     }
 
     fn pump(&self, state: &mut State, utterance_id: &str) {
@@ -566,7 +588,7 @@ impl Voice {
             let mut pending =
                 FuturesOrdered::<BoxFuture<'static, (u32, HttpResult<(Vec<u8>, u32)>)>>::new();
             loop {
-                {
+                let drained = {
                     let mut state = runner.lock();
                     let Some(work) = state.works.get_mut(&id) else {
                         return;
@@ -581,10 +603,15 @@ impl Voice {
                             (sentence.sequence_no, outcome)
                         }));
                     }
-                    if pending.is_empty() {
+                    let drained = pending.is_empty();
+                    if drained {
                         work.task.take();
-                        return;
+                        retire(&mut state, &id);
                     }
+                    drained
+                };
+                if drained {
+                    return;
                 }
                 tokio::select! {
                     _ = notify.notified() => {},
@@ -599,17 +626,28 @@ impl Voice {
 
     fn complete(&self, utterance_id: &str, sequence_no: u32, outcome: HttpResult<Vec<u8>>) {
         let mut state = self.lock();
+        let Some(work) = state.works.get(utterance_id) else {
+            return;
+        };
+        let companion = work.companion.clone();
+        let generation_id = work.generation_id;
+        // A sentence that fails to synthesize contributes no audio and releases
+        // its hold on the utterance like any other resolution.
+        let events = match outcome {
+            Ok(pcm) => audio_events(utterance_id, generation_id, sequence_no, &pcm),
+            Err(reason) => {
+                tracing::debug!(%sequence_no, %reason, "sentence synthesis failed; the utterance continues without it");
+                Vec::new()
+            }
+        };
+        self.send(&mut state, &companion, generation_id, events, utterance_id);
+        // A stalled or stale delivery cancels the utterance; nothing is left to
+        // announce then.
         let Some(work) = state.works.get_mut(utterance_id) else {
             return;
         };
-        let events = work.emitter.offer(sequence_no, outcome);
-        let companion = work.companion.clone();
-        let generation_id = work.generation_id;
-        let finished = work.emitter.sent_finished;
-        self.send(&mut state, &companion, generation_id, events, utterance_id);
-        if finished {
-            state.cancel(utterance_id);
-        }
+        work.outstanding -= 1;
+        self.announce(&mut state, utterance_id);
     }
 
     fn send(
@@ -654,26 +692,6 @@ impl Voice {
         }
         true
     }
-
-    /// Counts one more relayed companion utterance. After [`MAX_RELAY`] the
-    /// autonomous chain pauses: the completed speech still releases the floor
-    /// and the head still answers an explicit user turn, but no
-    /// `speech_completed` event is broadcast, so no peer is prompted to answer
-    /// itself again (voice-avatar.md §5.3, the cap is on user-input-free
-    /// relay turns).
-    fn relay_open(&self) -> bool {
-        let mut state = self.lock();
-        if state.relay >= MAX_RELAY {
-            return false;
-        }
-        state.relay += 1;
-        true
-    }
-
-    /// An accepted user input opens a new relay budget.
-    fn note_user_input(&self) {
-        self.lock().relay = 0;
-    }
 }
 
 fn finish(state: &mut State, companion: &str, reason: Option<w::FlushReason>) {
@@ -703,6 +721,31 @@ fn fail_owner(state: &mut State, companion: &str) {
     if state.floor.as_deref() == Some(companion) {
         state.floor = None;
     }
+}
+
+/// Forgets a finished utterance once its audio has drained. The utterance stays
+/// on the owner until then, so a straggling chunk still passes the generation
+/// gate; an utterance that drains mid-turn keeps its work for the next sentence.
+fn retire(state: &mut State, utterance_id: &str) {
+    let Some(companion) = state
+        .works
+        .get(utterance_id)
+        .map(|work| work.companion.clone())
+    else {
+        return;
+    };
+    let Some(owner) = state.owners.get_mut(&companion) else {
+        return;
+    };
+    if owner
+        .utterance
+        .as_ref()
+        .is_none_or(|utterance| utterance.id != utterance_id || !utterance.finished)
+    {
+        return;
+    }
+    owner.utterance = None;
+    state.works.remove(utterance_id);
 }
 
 fn split_sentences(buffer: &mut String) -> Vec<String> {
@@ -759,89 +802,43 @@ fn sentence(utterance: &Utterance, sequence_no: u32, text: String) -> Sentence {
     }
 }
 
-struct Emitter {
-    utterance_id: String,
+fn audio_events(
+    utterance_id: &str,
     generation_id: u64,
-    next: u32,
-    finished: Option<u32>,
-    sent_finished: bool,
-}
-
-impl Emitter {
-    fn new(utterance_id: String, generation_id: u64) -> Self {
-        Self {
-            utterance_id,
-            generation_id,
-            next: 0,
-            finished: None,
-            sent_finished: false,
-        }
+    sequence_no: u32,
+    pcm: &[u8],
+) -> Vec<w::AudioOutputEvent> {
+    if pcm.is_empty() {
+        return Vec::new();
     }
-
-    fn offer(
-        &mut self,
-        sequence_no: u32,
-        outcome: HttpResult<Vec<u8>>,
-    ) -> Vec<w::AudioOutputEvent> {
-        if self.sent_finished {
-            return Vec::new();
-        }
-        let mut emitted = Vec::new();
-        self.next += 1;
-        match outcome {
-            Ok(pcm) => self.emit_audio(sequence_no, pcm, &mut emitted),
-            Err(reason) => emitted.push(skipped_event(
-                &self.utterance_id,
-                self.generation_id,
-                sequence_no,
-                reason,
-            )),
-        }
-        self.emit_finished(&mut emitted);
-        emitted
-    }
-
-    fn finish(&mut self, total_sentences: u32) -> Vec<w::AudioOutputEvent> {
-        self.finished = Some(total_sentences);
-        let mut emitted = Vec::new();
-        self.emit_finished(&mut emitted);
-        emitted
-    }
-
-    fn emit_audio(&self, sequence_no: u32, pcm: Vec<u8>, emitted: &mut Vec<w::AudioOutputEvent>) {
-        if pcm.is_empty() {
-            return;
-        }
-        let chunks = pcm.chunks(AUDIO_CHUNK_BYTES);
-        let total = chunks.len();
-        for (index, chunk) in chunks.enumerate() {
-            emitted.push(audio_event(w::AudioChunkEnvelope {
-                utterance_id: self.utterance_id.clone(),
-                generation_id: self.generation_id,
+    let total = pcm.len().div_ceil(AUDIO_CHUNK_BYTES);
+    pcm.chunks(AUDIO_CHUNK_BYTES)
+        .enumerate()
+        .map(|(index, chunk)| {
+            audio_event(w::AudioChunkEnvelope {
+                utterance_id: utterance_id.to_owned(),
+                generation_id,
                 sequence_no,
                 pcm_data: chunk.to_vec(),
                 sample_rate: SAMPLE_RATE,
                 is_final_chunk: index + 1 == total,
                 ..Default::default()
-            }));
-        }
-    }
+            })
+        })
+        .collect()
+}
 
-    fn emit_finished(&mut self, emitted: &mut Vec<w::AudioOutputEvent>) {
-        let Some(total_sentences) = self.finished else {
-            return;
-        };
-        if self.sent_finished || self.next < total_sentences {
-            return;
-        }
-        self.sent_finished = true;
-        emitted.push(audio_event(w::UtteranceFinished {
-            utterance_id: self.utterance_id.clone(),
-            generation_id: self.generation_id,
-            total_sentences,
-            ..Default::default()
-        }));
-    }
+fn finished_event(
+    utterance_id: &str,
+    generation_id: u64,
+    total_sentences: u32,
+) -> w::AudioOutputEvent {
+    audio_event(w::UtteranceFinished {
+        utterance_id: utterance_id.to_owned(),
+        generation_id,
+        total_sentences,
+        ..Default::default()
+    })
 }
 
 enum Dispatch {
@@ -895,21 +892,6 @@ fn audio_event(message: impl Into<w::audio_output_event::Event>) -> w::AudioOutp
     }
 }
 
-fn skipped_event(
-    utterance_id: &str,
-    generation_id: u64,
-    sequence_no: u32,
-    reason: impl Into<String>,
-) -> w::AudioOutputEvent {
-    audio_event(w::SentenceSkipped {
-        utterance_id: utterance_id.to_owned(),
-        generation_id,
-        sequence_no,
-        reason: reason.into(),
-        ..Default::default()
-    })
-}
-
 fn flush_event(
     utterance_id: &str,
     flush_generation_id: u64,
@@ -926,21 +908,18 @@ fn flush_event(
 #[derive(Clone, Debug)]
 pub(crate) struct InputBinding {
     pub(crate) client_id: String,
-    pub(crate) activation_revision: u64,
 }
 
 impl InputBinding {
-    pub(crate) fn accepts(&self, client_id: &str, activation_revision: u64) -> bool {
-        (client_id.is_empty() || client_id == self.client_id)
-            && (activation_revision == 0 || activation_revision == self.activation_revision)
+    pub(crate) fn accepts(&self, client_id: &str) -> bool {
+        client_id.is_empty() || client_id == self.client_id
     }
 }
 
-pub(crate) fn bind_input(
-    world: &World,
-    client_id: &str,
-    activation_revision: u64,
-) -> Result<InputBinding> {
+/// Binds an audio input stream to the client that opened it. Only the active
+/// client of a companion may capture: a client that is not active has nothing
+/// the head may answer.
+pub(crate) fn bind_input(world: &World, client_id: &str) -> Result<InputBinding> {
     if client_id.is_empty() {
         return Err(HostError::Invalid(
             ("client_id is required for audio input").into(),
@@ -949,33 +928,19 @@ pub(crate) fn bind_input(
     db::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>() else {
         return Err(HostError::Unavailable(
-            ("the host state is not available").into(),
+            "the host state is not available".into(),
         ));
     };
     if store.client(client_id)?.is_none() {
         return Err(HostError::NotFound(("client not found").into()));
     }
-    let activations = store.activations()?;
-    let active = activations
-        .iter()
-        .any(|activation| activation.client_id.as_deref() == Some(client_id));
-    let matched = activations.iter().any(|activation| {
-        activation.client_id.as_deref() == Some(client_id)
-            && activation.revision == activation_revision
-    });
-    if !active {
+    if store.activation_for_client(client_id)?.is_none() {
         return Err(HostError::Conflict(
             ("the client is not the active client of any companion").into(),
         ));
     }
-    if !matched {
-        return Err(HostError::Conflict(
-            ("client_moved: the activation revision is stale").into(),
-        ));
-    }
     Ok(InputBinding {
         client_id: client_id.to_owned(),
-        activation_revision,
     })
 }
 
@@ -983,122 +948,9 @@ pub(crate) fn is_still_active(world: &World, binding: &InputBinding) -> bool {
     let Some(store) = world.get_resource::<Store>() else {
         return false;
     };
-    store.activations().is_ok_and(|activations| {
-        activations.iter().any(|activation| {
-            activation.client_id.as_deref() == Some(binding.client_id.as_str())
-                && activation.revision == binding.activation_revision
-        })
-    })
-}
-
-/// The approval a speech capture is bound to at its start
-/// (docs/design/permissions.md §4.2). The final transcript may answer only
-/// this request, and only while it is still pending for the same client
-/// generation; a delayed STT result must never apply to a later request.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SpeechBinding {
-    /// The `approval_requests.request_id` captured when the capture started.
-    pub(crate) speech_start_request_id: String,
-    pub(crate) client_id: String,
-    /// The activation revision the approval was bound to.
-    pub(crate) generation: u64,
-}
-
-/// Binds the capture to the one pending approval of this client generation.
-/// Two or more pending approvals are ambiguous, so voice stays out and the
-/// screen card decides (permissions.md §4.2 "同時に1件のみ").
-pub(crate) fn bind_speech_start(world: &World, binding: &InputBinding) -> Option<SpeechBinding> {
-    let store = world.get_resource::<Store>()?;
-    let pending = store.approvals(ApprovalStatus::Pending).ok()?;
-    let mut candidates = pending.into_iter().filter(|approval| {
-        approval.client_id.as_deref() == Some(binding.client_id.as_str())
-            && approval.activation_revision == Some(binding.activation_revision)
-    });
-    let approval = candidates.next()?;
-    if candidates.next().is_some() {
-        return None;
-    }
-    Some(SpeechBinding {
-        speech_start_request_id: approval.request_id,
-        client_id: binding.client_id.clone(),
-        generation: binding.activation_revision,
-    })
-}
-
-const AFFIRMATIVE_JAPANESE: [&str; 6] =
-    ["はい", "いいよ", "いいです", "お願い", "実行して", "どうぞ"];
-const NEGATIVE_JAPANESE: [&str; 5] = ["いいえ", "だめ", "やめて", "やらない", "キャンセル"];
-const AFFIRMATIVE_ENGLISH: [&str; 4] = ["yes", "approve", "approved", "ok"];
-const NEGATIVE_ENGLISH: [&str; 4] = ["no", "deny", "denied", "cancel"];
-
-/// A conservative keyword intent for a voice approval (permissions.md §4.2).
-///
-/// This is an approximation, not natural-language understanding: a Japanese
-/// word matches as a substring, an English word must match a whole token (so
-/// "no" does not fire inside "not"), and a negative word wins when both kinds
-/// appear. Anything else is discarded, because an ambiguous utterance must not
-/// approve an irreversible operation.
-fn approval_intent(text: &str) -> Option<ApprovalDecision> {
-    let lower = text.trim().to_lowercase();
-    let negative = NEGATIVE_JAPANESE.iter().any(|word| lower.contains(word))
-        || english_tokens(&lower).any(|word| NEGATIVE_ENGLISH.contains(&word));
-    if negative {
-        return Some(ApprovalDecision::Deny);
-    }
-    let affirmative = AFFIRMATIVE_JAPANESE.iter().any(|word| lower.contains(word))
-        || english_tokens(&lower).any(|word| AFFIRMATIVE_ENGLISH.contains(&word));
-    affirmative.then_some(ApprovalDecision::Approve)
-}
-
-fn english_tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-}
-
-/// Answers the approval bound when the capture started, if the final
-/// transcript carries an unambiguous intent and the request survived until
-/// now. A stale request, a moved generation or a non-matching binding is
-/// discarded; the transcript itself was already recorded as an ordinary
-/// utterance.
-fn submit_voice_approval(
-    world: &mut World,
-    text: &str,
-    binding: &InputBinding,
-    speech: &SpeechBinding,
-) {
-    let Some(decision) = approval_intent(text) else {
-        return;
-    };
-    if speech.client_id != binding.client_id || speech.generation != binding.activation_revision {
-        return;
-    }
-    let Some(store) = world.get_resource::<Store>().cloned() else {
-        return;
-    };
-    let Ok(Some(approval)) = store.approval(&speech.speech_start_request_id) else {
-        return;
-    };
-    // A screen click, a stop or a client move may have resolved the request
-    // while the STT ran: the delayed text must not answer anything else.
-    if approval.status != ApprovalStatus::Pending
-        || approval.client_id.as_deref() != Some(binding.client_id.as_str())
-        || approval.activation_revision != Some(binding.activation_revision)
-        || !is_still_active(world, binding)
-    {
-        return;
-    }
-    match permission::submit(world, &speech.speech_start_request_id, decision) {
-        Ok(approval) => tracing::debug!(
-            request = %approval.request_id,
-            status = approval.status.as_str(),
-            "a voice transcript answered an approval"
-        ),
-        Err(error) => tracing::debug!(
-            request = %speech.speech_start_request_id,
-            %error,
-            "a voice approval was discarded"
-        ),
-    }
+    store
+        .activation_for_client(&binding.client_id)
+        .is_ok_and(|activation| activation.is_some())
 }
 
 pub(crate) struct AudioSubscription {
@@ -1107,43 +959,30 @@ pub(crate) struct AudioSubscription {
     pub(crate) control: mpsc::UnboundedReceiver<w::AudioOutputEvent>,
 }
 
-pub(crate) fn subscribe_audio(
-    world: &mut World,
-    client_id: &str,
-    activation_revision: u64,
-) -> Result<AudioSubscription> {
+/// Binds an audio output stream to the client that opened it and makes it the
+/// owner of every companion it is the active client of.
+pub(crate) fn subscribe_audio(world: &mut World, client_id: &str) -> Result<AudioSubscription> {
     if client_id.is_empty() {
         return Err(HostError::Invalid(("client_id is required").into()));
     }
     db::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return Err(HostError::Unavailable(
-            ("the host state is not available").into(),
+            "the host state is not available".into(),
         ));
     };
     if store.client(client_id)?.is_none() {
         return Err(HostError::NotFound(("client not found").into()));
     }
-    let activations = store.activations()?;
-    if !activations
-        .iter()
-        .any(|activation| activation.client_id.as_deref() == Some(client_id))
-    {
-        return Err(HostError::Conflict(
-            ("the client is not the active client of any companion").into(),
-        ));
-    }
-    let owned: Vec<String> = activations
-        .iter()
-        .filter(|activation| {
-            activation.client_id.as_deref() == Some(client_id)
-                && activation.revision == activation_revision
-        })
-        .map(|activation| activation.companion_id.clone())
+    let owned: Vec<String> = store
+        .activations()?
+        .into_iter()
+        .filter(|activation| activation.client_id.as_deref() == Some(client_id))
+        .map(|activation| activation.companion_id)
         .collect();
     if owned.is_empty() {
         return Err(HostError::Conflict(
-            ("client_moved: the activation revision is stale").into(),
+            ("the client is not the active client of any companion").into(),
         ));
     }
     let Some(voice) = world.get_resource::<Voice>().cloned() else {
@@ -1153,7 +992,7 @@ pub(crate) fn subscribe_audio(
     };
     let subscription = voice.register(client_id);
     for companion_id in owned {
-        voice.publish(&companion_id, client_id, activation_revision);
+        voice.publish(&companion_id, client_id);
     }
     Ok(subscription)
 }
@@ -1164,114 +1003,20 @@ pub(crate) fn unsubscribe_audio(world: &World, client: &str, subscription: &str)
     }
 }
 
-pub(crate) fn report_playback(
-    world: &mut World,
-    report: w::PlaybackStatusReport,
-) -> Result<w::ReportPlaybackStatusResponse> {
-    let response = |acknowledged| w::ReportPlaybackStatusResponse {
-        acknowledged,
-        ..Default::default()
-    };
-    let Some(store) = world.get_resource::<Store>().cloned() else {
-        return Ok(response(false));
-    };
-    db::validate_id(&report.client_id)?;
-    if store.client(&report.client_id)?.is_none() {
-        return Err(HostError::NotFound(("client not found").into()));
-    }
-    let Some(voice) = world.get_resource::<Voice>().cloned() else {
-        return Ok(response(false));
-    };
-    let Some((companion, owner)) = voice.owner_of(&report.utterance_id) else {
-        return Ok(response(false));
-    };
-    if owner.client_id != report.client_id
-        || owner.activation_revision != report.activation_revision
-        || owner.generation_id != report.generation_id
-    {
-        return Ok(response(false));
-    }
-    let current = store
-        .activation(&companion)?
-        .map_or(0, |activation| activation.revision);
-    if current != owner.activation_revision {
-        return Ok(response(false));
-    }
-    let status = report.status.as_known();
-    let completed = status == Some(w::playback_status_report::Status::PLAYBACK_COMPLETED);
-    let ended = completed
-        || matches!(
-            status,
-            Some(
-                w::playback_status_report::Status::PLAYBACK_INTERRUPTED
-                    | w::playback_status_report::Status::PLAYBACK_FAILED
-            )
-        );
-    if !ended {
-        return Ok(response(false));
-    }
-    // The report passed the generation, client and activation checks; a stale
-    // position was refused above and never reaches the floor release.
-    let total_sentences = owner
-        .utterance
-        .as_ref()
-        .map(|utterance| utterance.total_sentences);
-    voice.release(&companion);
-    if completed && voice.relay_open() {
-        broadcast_speech_completed(world, &companion, &report, total_sentences);
-    }
-    Ok(response(true))
-}
-
-fn broadcast_speech_completed(
-    world: &mut World,
-    companion: &str,
-    report: &w::PlaybackStatusReport,
-    total_sentences: Option<u32>,
-) {
-    let document = w::JsonDocument {
-        schema: "ene.speech_completed.v1".into(),
-        json: serde_json::json!({
-            "companion_id": companion, "client_id": report.client_id,
-            "utterance_id": report.utterance_id, "generation_id": report.generation_id,
-            "total_sentences": total_sentences, "completed_sentence_count": report.completed_sentence_count,
-            "completed_pcm_bytes": report.completed_pcm_bytes, "played_sequence_nos": report.played_sequence_nos,
-            "skipped_sequence_nos": report.skipped_sequence_nos,
-        })
-        .to_string(),
-        ..Default::default()
-    };
-    let Some(mut notifier) = world.get_resource_mut::<Notifier>() else {
-        return;
-    };
-    notifier.push(
-        Some(companion),
-        None,
-        w::notification::Event::Generic(Box::new(w::HostEvent {
-            kind: "speech_completed".into(),
-            payload: Some(document).into(),
-            ..Default::default()
-        })),
-    );
-}
-
 pub(crate) fn accept_transcription(
     world: &mut World,
     transcription_id: &str,
     text: &str,
     binding: &InputBinding,
-    speech: Option<&SpeechBinding>,
 ) -> Result<bool> {
     let text = text.trim();
     if text.is_empty() || !is_still_active(world, binding) {
         return Ok(false);
     }
-    if let Some(voice) = world.get_resource::<Voice>() {
-        if !voice.accept_transcription(transcription_id) {
-            return Ok(false);
-        }
-        // A new user turn ends the autonomous relay chain (§5.3).
-        voice.note_user_input();
+    if let Some(voice) = world.get_resource::<Voice>()
+        && !voice.accept_transcription(transcription_id)
+    {
+        return Ok(false);
     }
     // The delegation claim of `start_work` is keyed by this transcription id.
     delegation::record(world, transcription_id);
@@ -1311,21 +1056,7 @@ pub(crate) fn accept_transcription(
             author.clone(),
         );
     }
-    // The transcript is recorded above whatever the approval outcome is: an
-    // ambiguous or stale voice answer never stops the utterance from reaching
-    // the companions.
-    if let Some(speech) = speech {
-        submit_voice_approval(world, text, binding, speech);
-    }
     Ok(true)
-}
-
-/// An accepted chat message opens a new autonomous relay budget, exactly like
-/// an accepted transcription.
-pub(crate) fn note_user_input(world: &World) {
-    if let Some(voice) = world.get_resource::<Voice>() {
-        voice.note_user_input();
-    }
 }
 
 pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
@@ -1365,10 +1096,39 @@ pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
     voice.speak(companion, text);
 }
 
+/// Ends the speaking turn and announces it, so a peer can pick up the
+/// conversation without a new user input (voice-avatar.md §5.3).
 pub(crate) fn on_turn_end(world: &mut World, companion: &str) {
-    if let Some(voice) = world.get_resource::<Voice>() {
-        voice.end_turn(companion);
-    }
+    let Some(voice) = world.get_resource::<Voice>().cloned() else {
+        return;
+    };
+    let Some(ended) = voice.end_turn(companion) else {
+        return;
+    };
+    let document = w::JsonDocument {
+        schema: "ene.speech_completed.v1".into(),
+        json: serde_json::json!({
+            "companion_id": companion,
+            "client_id": ended.client_id,
+            "utterance_id": ended.utterance_id,
+            "generation_id": ended.generation_id,
+            "total_sentences": ended.total_sentences,
+        })
+        .to_string(),
+        ..Default::default()
+    };
+    let Some(mut notifier) = world.get_resource_mut::<Notifier>() else {
+        return;
+    };
+    notifier.push(
+        Some(companion),
+        None,
+        w::notification::Event::Generic(Box::new(w::HostEvent {
+            kind: "speech_completed".into(),
+            payload: Some(document).into(),
+            ..Default::default()
+        })),
+    );
 }
 
 pub(crate) fn flush(world: &mut World, companion: &str, reason: w::FlushReason) -> Result<()> {
@@ -1380,35 +1140,9 @@ pub(crate) fn flush(world: &mut World, companion: &str, reason: w::FlushReason) 
     voice.flush(companion, reason)
 }
 
-pub(crate) fn on_client_moved(world: &mut World, companion: &str, client: &str, revision: u64) {
+pub(crate) fn on_client_moved(world: &mut World, companion: &str, client: &str) {
     if let Some(voice) = world.get_resource::<Voice>().cloned() {
-        voice.client_moved(companion, client, revision);
-    }
-}
-
-fn expire_playback(world: &mut World) {
-    let Some(voice) = world.get_resource::<Voice>().cloned() else {
-        return;
-    };
-    let now = Instant::now();
-    let expired: Vec<String> = {
-        let state = voice.lock();
-        state
-            .owners
-            .iter()
-            .filter(|(_, owner)| {
-                owner
-                    .utterance
-                    .as_ref()
-                    .and_then(|utterance| utterance.deadline)
-                    .is_some_and(|deadline| deadline <= now)
-            })
-            .map(|(companion, _)| companion.clone())
-            .collect()
-    };
-    for companion in expired {
-        tracing::debug!(%companion, "playback did not report; releasing the speech floor");
-        voice.release(&companion);
+        voice.client_moved(companion, client);
     }
 }
 
@@ -1418,8 +1152,7 @@ impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
         let runtime = app.world().resource::<HostRuntime>().0.clone();
         app.init_resource::<delegation::DeliveredClaims>()
-            .insert_resource(Voice::new(runtime))
-            .add_systems(Update, expire_playback);
+            .insert_resource(Voice::new(runtime));
     }
 }
 

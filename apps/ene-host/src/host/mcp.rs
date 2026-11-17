@@ -338,8 +338,8 @@ async fn open(want: &Desired, registry: ToolServerHandle) -> Result<McpConnectio
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped());
             });
-        // The same lifecycle the ACP child gets: one process group, killed on
-        // drop, so a host that exits does not orphan the server.
+        // One process group, killed on drop, so a host that exits does not
+        // orphan the server.
         #[cfg(unix)]
         wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
