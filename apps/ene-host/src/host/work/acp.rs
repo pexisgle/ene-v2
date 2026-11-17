@@ -1008,11 +1008,13 @@ fn launch(
 /// tmpfs so agents can write temporary files without touching the host's.
 ///
 /// Network isolation is opt-in: `--unshare-net` is passed only for an explicit
-/// `network: isolated` (or `network: none`), because there is no proxy bridge
-/// that would let a network-isolated child reach its model or tools. Without
-/// it the child shares the host network and the launch is
-/// [`Isolation::Partial`]. Without bwrap the child cannot be isolated at all,
-/// so it runs unisolated as [`Isolation::Missing`] and the host says so.
+/// `network: isolated`, because an isolated child reaches only the origins the
+/// connection declares in `model_endpoints`. The host does not guess those from
+/// the agent's own arguments or environment, so the default keeps the host
+/// network and the launch is [`Isolation::Partial`]. When isolation is asked
+/// for, the host binds a relay socket and the child's only route out is
+/// [`acp_bridge`]'s CONNECT proxy. Without bwrap the child cannot be isolated
+/// at all, so it runs unisolated as [`Isolation::Missing`] and the host says so.
 fn plan(
     program: &Path,
     args: &[String],
