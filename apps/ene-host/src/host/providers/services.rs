@@ -14,12 +14,31 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub(crate) fn http_broker(grants: Arc<dyn HttpGrants>) -> Result<Arc<HttpBroker>, reqwest::Error> {
+    broker(grants, None)
+}
+
+/// A broker whose exchange may take `deadline`, for a path that legitimately
+/// streams longer than the transport default.
+pub(crate) fn http_broker_with_deadline(
+    grants: Arc<dyn HttpGrants>,
+    deadline: std::time::Duration,
+) -> Result<Arc<HttpBroker>, reqwest::Error> {
+    broker(grants, Some(deadline))
+}
+
+fn broker(
+    grants: Arc<dyn HttpGrants>,
+    deadline: Option<std::time::Duration>,
+) -> Result<Arc<HttpBroker>, reqwest::Error> {
     #[cfg(test)]
     if construction_failure::active() {
         // A real builder error without depending on TLS or process-wide state.
         reqwest::Client::builder().user_agent("\n").build()?;
     }
-    HttpBroker::new(grants).map(Arc::new)
+    match deadline {
+        Some(deadline) => HttpBroker::with_deadline(grants, deadline).map(Arc::new),
+        None => HttpBroker::new(grants).map(Arc::new),
+    }
 }
 
 /// The services a provider call declares: the broker, and nothing else.

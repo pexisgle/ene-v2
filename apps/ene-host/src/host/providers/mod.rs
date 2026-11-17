@@ -20,7 +20,7 @@ mod services;
 pub(crate) use grant::Grant;
 #[cfg(test)]
 pub(crate) use services::construction_failure;
-pub(crate) use services::{BrokerServices, http_broker};
+pub(crate) use services::{BrokerServices, http_broker, http_broker_with_deadline};
 
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};

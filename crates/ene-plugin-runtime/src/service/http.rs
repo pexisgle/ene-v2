@@ -17,7 +17,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use url::Url;
 
@@ -75,12 +75,24 @@ pub struct HttpBroker {
     client: reqwest::Client,
     open: Mutex<HashMap<String, Open>>,
     next: AtomicU64,
+    /// How long one exchange may take, end to end.
+    deadline: Duration,
 }
 
 impl HttpBroker {
     /// A broker that authorizes through `grants`. Redirects stay off so a
     /// checked destination cannot bounce the request elsewhere.
     pub fn new(grants: Arc<dyn HttpGrants>) -> Result<Self, reqwest::Error> {
+        Self::with_deadline(grants, HTTP_TIMEOUT)
+    }
+
+    /// [`Self::new`] with a whole-exchange budget of `deadline`. A streamed
+    /// generation may legitimately outlast the short transport budget, while
+    /// every exchange still has a bound.
+    pub fn with_deadline(
+        grants: Arc<dyn HttpGrants>,
+        deadline: Duration,
+    ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
@@ -89,6 +101,7 @@ impl HttpBroker {
             client,
             open: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
+            deadline,
         })
     }
 
@@ -130,10 +143,10 @@ impl HttpBroker {
         if let Some(body) = body {
             call = call.body(body);
         }
-        let deadline = Instant::now() + HTTP_TIMEOUT;
+        let deadline = Instant::now() + self.deadline;
         let handle = format!("http-{}", self.next.fetch_add(1, Ordering::Relaxed));
         if request.stream {
-            let response = tokio::time::timeout(HTTP_TIMEOUT, call.send())
+            let response = tokio::time::timeout(self.deadline, call.send())
                 .await
                 .map_err(|_| Failure::new("http_timeout"))?
                 .map_err(|error| Failure {
@@ -169,7 +182,7 @@ impl HttpBroker {
                 done: false,
             });
         }
-        let (status, headers, body) = tokio::time::timeout(HTTP_TIMEOUT, async {
+        let (status, headers, body) = tokio::time::timeout(self.deadline, async {
             let response = call.send().await.map_err(|error| Failure {
                 code: "http_failed".into(),
                 message: error.to_string(),
@@ -631,6 +644,37 @@ mod tests {
         server.abort();
         assert_eq!(result.unwrap().unwrap_err().code, "http_timeout");
         assert!(broker.open.lock().unwrap().is_empty());
+    }
+
+    /// A caller that streams a long generation sets its own whole-exchange
+    /// budget; the bound stays, only its length changes.
+    #[tokio::test]
+    async fn a_caller_can_set_the_exchange_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(socket.read(&mut request).await.unwrap(), 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let broker =
+            HttpBroker::with_deadline(Arc::new(Allow(origin.clone())), Duration::from_millis(100))
+                .unwrap();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            broker.open("provider", request(origin)),
+        )
+        .await;
+        server.abort();
+        assert_eq!(result.unwrap().unwrap_err().code, "http_timeout");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[tokio::test]

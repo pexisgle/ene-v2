@@ -11,7 +11,7 @@ use http_body_util::{BodyExt, LengthLimitError, Limited};
 use std::{sync::OnceLock, time::Duration};
 
 /// How long one model call may take end to end.
-const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn build(timeout: Option<Duration>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());

@@ -250,8 +250,13 @@ pub(crate) fn connect(
     if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
         let grant =
             super::providers::Grant::new(running.provider(), &connection, Some(credentials))?;
-        let broker = super::providers::http_broker(Arc::new(grant))
-            .map_err(|error| HostError::Unavailable(format!("plugin HTTP transport: {error}")))?;
+        // A streamed generation may outlast the short transport budget; the
+        // model call gets the same end-to-end deadline as a built-in one.
+        let broker =
+            super::providers::http_broker_with_deadline(Arc::new(grant), super::net::MODEL_TIMEOUT)
+                .map_err(|error| {
+                    HostError::Unavailable(format!("plugin HTTP transport: {error}"))
+                })?;
         return Ok(plugin_completion(
             running,
             assignment.model_id.clone(),
@@ -400,8 +405,11 @@ async fn list_models(
             let grant =
                 super::providers::Grant::new(running.provider(), connection, Some(credentials))
                     .map_err(|error| error.to_string())?;
-            let broker = super::providers::http_broker(Arc::new(grant))
-                .map_err(|error| format!("plugin HTTP transport: {error}"))?;
+            let broker = super::providers::http_broker_with_deadline(
+                Arc::new(grant),
+                super::net::MODEL_TIMEOUT,
+            )
+            .map_err(|error| format!("plugin HTTP transport: {error}"))?;
             plugin_models(running, base, broker).await
         })
         .await
