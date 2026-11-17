@@ -83,6 +83,28 @@ pub(crate) fn work_agent_of(world: &mut World, run: &str) -> Option<Entity> {
         .map(|(entity, _)| entity)
 }
 
+/// The entity the kernel restored under `id`, which carries the saved
+/// conversation but none of the host's role components.
+fn restored_agent(world: &mut World, id: &str) -> Option<Entity> {
+    let mut query = world.query::<(Entity, &AgentId)>();
+    query
+        .iter(world)
+        .find(|(_, agent)| agent.0 == id)
+        .map(|(entity, _)| entity)
+}
+
+/// The kernel's saved component that says which entries were published, set
+/// to the restored conversation's last entry so a restart does not republish
+/// the transcript as new messages.
+fn published_through(world: &World, entity: Entity) -> LastProjectedEntry {
+    LastProjectedEntry(world.get::<Conversation>(entity).and_then(|conversation| {
+        conversation
+            .entries()
+            .next_back()
+            .map(|entry| entry.id.get())
+    }))
+}
+
 /// The companion an agent belongs to, whichever role it serves.
 fn companion_of<'a>(
     companion: Option<&'a CompanionAgent>,
@@ -139,23 +161,33 @@ pub(crate) fn work_prompt(companion: &Companion, instruction: &str) -> String {
     )
 }
 
-/// Spawns the agent of a companion if it does not exist yet.
+/// Spawns the agent of a companion if it does not exist yet, or adopts the
+/// one the kernel restored under the companion's stable id.
 pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entity {
     if let Some(entity) = agent_of(world, &companion.id) {
         return entity;
     }
-    world
-        .spawn((
-            Name::new(format!("companion:{}", companion.id)),
-            Agent,
-            AgentId(companion_agent_id(&companion.id)),
-            CompanionAgent {
-                companion_id: companion.id.clone(),
-            },
-            SystemPrompt(system_prompt(companion)),
-            crate::host::client::parent_tool_access(),
-        ))
-        .id()
+    let id = companion_agent_id(&companion.id);
+    let entity = match restored_agent(world, &id) {
+        Some(entity) => entity,
+        None => world
+            .spawn((
+                Name::new(format!("companion:{}", companion.id)),
+                Agent,
+                AgentId(id),
+            ))
+            .id(),
+    };
+    let published = published_through(world, entity);
+    world.entity_mut(entity).insert((
+        CompanionAgent {
+            companion_id: companion.id.clone(),
+        },
+        SystemPrompt(system_prompt(companion)),
+        crate::host::client::parent_tool_access(),
+    ));
+    world.entity_mut(entity).insert(published);
+    entity
 }
 
 pub(crate) fn spawn_work_agent(
@@ -168,20 +200,25 @@ pub(crate) fn spawn_work_agent(
     if let Some(entity) = work_agent_of(world, run_id) {
         return entity;
     }
-    world
-        .spawn((
-            Name::new(format!("work:{run_id}")),
-            Agent,
-            AgentId(work_agent_id(run_id)),
-            WorkAgent {
-                work_id: work_id.to_owned(),
-                run_id: run_id.to_owned(),
-                companion_id: companion.id.clone(),
-            },
-            SystemPrompt(work_prompt(companion, instruction)),
-            ToolAccess::Only(vec!["report".into(), "device_request".into()]),
-        ))
-        .id()
+    let id = work_agent_id(run_id);
+    let entity = match restored_agent(world, &id) {
+        Some(entity) => entity,
+        None => world
+            .spawn((Name::new(format!("work:{run_id}")), Agent, AgentId(id)))
+            .id(),
+    };
+    let published = published_through(world, entity);
+    world.entity_mut(entity).insert((
+        WorkAgent {
+            work_id: work_id.to_owned(),
+            run_id: run_id.to_owned(),
+            companion_id: companion.id.clone(),
+        },
+        SystemPrompt(work_prompt(companion, instruction)),
+        ToolAccess::Only(vec!["report".into(), "device_request".into()]),
+    ));
+    world.entity_mut(entity).insert(published);
+    entity
 }
 
 /// Binds the agent's model when its assignment or the settings changed.

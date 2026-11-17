@@ -40,8 +40,34 @@ impl Harness {
     /// policy passes the exact `ENE_HOST_ALLOWED_CAPABILITIES` value instead.
     fn with_policy(turns: impl IntoIterator<Item = Vec<MockStreamEvent>>, policy: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
+        let (mut app, wakes) = Self::app(root.path(), turns, policy);
+        app.update();
+        let companion = super::mind::create(
+            app.world_mut(),
+            w::CreateCompanionRequest {
+                name: "ene".into(),
+                mind: "kind".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id;
+        app.update();
+        Self {
+            app,
+            companion,
+            wakes,
+            root,
+        }
+    }
+
+    /// A headless app over `state`, the same construction a real start uses.
+    fn app(
+        state: &std::path::Path,
+        turns: impl IntoIterator<Item = Vec<MockStreamEvent>>,
+        policy: &str,
+    ) -> (App, mpsc::Receiver<()>) {
         let model = MockCompletionModel::from_stream_turns(turns);
-        let state = root.path();
         let store = Store::open(&state.join("host.sqlite3")).unwrap();
         let logs = DirStore::open(state.join("rig")).unwrap();
         let (sender, wakes) = mpsc::channel();
@@ -81,24 +107,16 @@ impl Harness {
         if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
             time.set_max_delta(Duration::from_secs(60));
         }
+        (app, wakes)
+    }
+
+    /// Stops this app and starts a second one over the same state directory,
+    /// as a host restart does.
+    pub(crate) fn restart(&mut self, turns: impl IntoIterator<Item = Vec<MockStreamEvent>>) {
+        let (mut app, wakes) = Self::app(self.root.path(), turns, "*");
         app.update();
-        let companion = super::mind::create(
-            app.world_mut(),
-            w::CreateCompanionRequest {
-                name: "ene".into(),
-                mind: "kind".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .id;
-        app.update();
-        Self {
-            app,
-            companion,
-            wakes,
-            root,
-        }
+        self.app = app;
+        self.wakes = wakes;
     }
 
     pub(crate) fn with_clock(
@@ -393,6 +411,61 @@ fn a_turn_is_accepted_once_and_answered() {
             .iter()
             .any(|item| item.text == "hi" && item.role == w::MessageRole::User)
     );
+}
+
+#[test]
+fn a_restart_restores_the_conversation_and_its_acceptance() {
+    let mut harness = Harness::new([text_turn("おかえり")]);
+    let accepted = harness.accept("key-1", "行ってきます").unwrap();
+    harness.run_until_text("おかえり");
+    assert_eq!(history_texts(&mut harness), ["行ってきます", "おかえり"]);
+
+    harness.restart([]);
+    assert_eq!(
+        history_texts(&mut harness),
+        ["行ってきます", "おかえり"],
+        "the restored agent keeps its conversation"
+    );
+    assert_eq!(
+        harness.accept("key-1", "行ってきます").unwrap(),
+        accepted,
+        "a retry binds to the restored acceptance instead of running again"
+    );
+    assert_eq!(history_texts(&mut harness), ["行ってきます", "おかえり"]);
+    assert!(
+        !published_kinds(&harness).contains(&"message_created".to_owned()),
+        "a restart does not republish the restored transcript as new messages"
+    );
+}
+
+#[test]
+fn a_restart_stops_an_unfinished_turn_but_keeps_its_input() {
+    let mut harness = Harness::new([text_turn("never delivered")]);
+    let accepted = harness.accept("key-2", "途中だけど").unwrap();
+    harness.restart([]);
+    assert_eq!(
+        history_texts(&mut harness),
+        ["途中だけど"],
+        "the accepted input survives a restart before the reply"
+    );
+    assert_eq!(harness.accept("key-2", "途中だけど").unwrap(), accepted);
+    assert_eq!(history_texts(&mut harness), ["途中だけど"]);
+}
+
+/// The kinds of every notification this boot flushed.
+fn published_kinds(harness: &Harness) -> Vec<String> {
+    let notifier = harness.app.world().resource::<super::notify::Notifier>();
+    let cursor = w::Cursor {
+        epoch: notifier.cursor().epoch.clone(),
+        seq: 0,
+        ..Default::default()
+    };
+    notifier
+        .replay(&cursor)
+        .unwrap_or_default()
+        .iter()
+        .map(|event| event.kind.clone())
+        .collect()
 }
 
 #[tokio::test]
