@@ -109,7 +109,11 @@ impl Runtime {
         options: Options,
     ) -> std::result::Result<Self, StartError> {
         let store = Store::open(&state.join("host.sqlite3")).map_err(boxed)?;
-        let session_only = std::env::var_os("ENE_HOST_SESSION_CREDENTIALS").is_some();
+        // A unit test has no operator to ask for a keyring, and the machine it
+        // runs on may have none. Keeping the store in memory there makes the
+        // tests independent of the platform backend; the binary still reads
+        // the environment.
+        let session_only = cfg!(test) || std::env::var_os("ENE_HOST_SESSION_CREDENTIALS").is_some();
         let credentials = Credentials::new(session_only);
         let logs = DirStore::open(state.join("rig")).map_err(boxed)?;
         let (commands, command_rx) = crossbeam_channel::bounded::<Job>(QUEUE);

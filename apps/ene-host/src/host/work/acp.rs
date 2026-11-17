@@ -1118,7 +1118,9 @@ fn network_isolated(options: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    #[cfg(unix)]
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
 
     /// A line that never ends must stop the reader at the cap instead of
     /// growing the host's memory with the agent's output.
