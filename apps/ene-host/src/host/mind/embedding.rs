@@ -136,20 +136,18 @@ fn connect(
     secret: Option<String>,
     model_id: &str,
     dimensions: usize,
-    providers: Option<&crate::host::providers::Providers>,
+    providers: &crate::host::providers::Providers,
 ) -> Result<DynModel<Embedding>> {
     // A plugin provider answers through the host's broker, not through rig's
     // HTTP client, so it is resolved before the catalog is consulted.
-    if let Some(running) =
-        providers.and_then(|providers| providers.running(adapter, ene_plugin::Extension::Embedding))
-    {
+    if let Some(running) = providers.running(adapter, ene_plugin::Extension::Embedding) {
         return Ok(super::plugin::embedding(
             running,
             model_id.to_owned(),
             dimensions,
         ));
     }
-    let config = crate::host::model::provider_config(adapter, endpoint, secret);
+    let config = crate::host::model::provider_config(adapter, endpoint, secret, providers);
     let http = rig_reqwest::ReqwestClient::from(net::client().map_err(HostError::Unavailable)?);
     // `Embedding` is the provider-neutral operation both clients erase into, so
     // the call below is the same whichever adapter answered.
@@ -202,7 +200,8 @@ fn target(
     if model_id.is_empty() || dimensions == 0 || dimensions > MAX_DIMENSIONS {
         return Ok(None);
     }
-    let Some(endpoint) = crate::host::settings::endpoint_of(&connection) else {
+    let Some(endpoint) = crate::host::settings::endpoint_of(&connection, &embeddings.providers)
+    else {
         return Ok(None);
     };
     let revision = store.settings_revision()?;
@@ -217,14 +216,15 @@ fn target(
     if let Some(target) = models.targets.get(&key) {
         return Ok(Some(target.clone()));
     }
-    let secret = crate::host::model::connection_secret(&connection, credentials)?;
+    let secret =
+        crate::host::model::connection_secret(&connection, credentials, &embeddings.providers)?;
     let model = connect(
         &connection.endpoint().adapter,
         &endpoint,
         secret,
         model_id,
         dimensions,
-        Some(&embeddings.providers),
+        &embeddings.providers,
     )?;
     let target = Target {
         model,

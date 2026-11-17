@@ -6,6 +6,7 @@
 //! forward it, and the host compares the destination against the origins the
 //! operator installed rather than against anything the plugin sends at call
 //! time.
+use super::Providers;
 use crate::host::{model::Credentials, settings::Connection};
 use ene_plugin::{Failure, ProviderConfiguration, provider::AuthProfile};
 use ene_plugin_runtime::service::HttpGrants;
@@ -28,6 +29,7 @@ impl Grant {
         provider: &ProviderConfiguration,
         connection: &Connection,
         credentials: Option<&Credentials>,
+        loaded: &Providers,
     ) -> crate::host::error::Result<Self> {
         Ok(Self {
             origins: provider
@@ -36,7 +38,7 @@ impl Grant {
                 .filter_map(|destination| origin_of(destination))
                 .collect(),
             auth: provider.auth.clone(),
-            secret: crate::host::model::connection_secret(connection, credentials)?,
+            secret: crate::host::model::connection_secret(connection, credentials, loaded)?,
         })
     }
 }

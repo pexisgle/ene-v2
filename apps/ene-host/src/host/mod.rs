@@ -445,6 +445,11 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
         .filter(|session| seen.insert(session.id.clone()))
         .collect();
     let clients = client::clients(&store, hub)?;
+    let loaded = app
+        .world()
+        .get_resource::<providers::Providers>()
+        .cloned()
+        .unwrap_or_default();
     Ok(w::Snapshot {
         server_version: env!("CARGO_PKG_VERSION").into(),
         health: w::HostHealth {
@@ -481,7 +486,7 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
             .into_iter()
             .map(Into::into)
             .collect(),
-            adapters: settings::providers()
+            adapters: settings::providers(&loaded)
                 .into_iter()
                 .map(|provider| provider.adapter)
                 .collect(),

@@ -11,6 +11,7 @@ use super::{
     net,
     notify::Notifier,
     permission::{self, ApprovalDecision, ApprovalStatus},
+    providers::Providers,
     resources::HostRuntime,
     settings::{Connection, ConnectionConfig, ConnectionKind, Endpoint},
 };
@@ -475,7 +476,9 @@ fn credential(
     let Some(credentials) = credentials else {
         return Ok(None);
     };
-    model::connection_secret(connection, Some(credentials))
+    // The built-in adapters answer for this path. A connection a plugin serves
+    // was resolved before the native engine was built.
+    model::connection_secret(connection, Some(credentials), &Providers::none())
         .map_err(|error| SetupError::Broken(error.to_string()))
 }
 

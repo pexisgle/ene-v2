@@ -46,7 +46,7 @@ impl PluginSpeech {
         let Some(running) = providers.running(&adapter, extension) else {
             return Ok(None);
         };
-        let grant = Grant::new(running.provider(), connection, credentials)
+        let grant = Grant::new(running.provider(), connection, credentials, providers)
             .map_err(|error| SetupError::Broken(error.to_string()))?;
         Ok(Some(Self {
             running,

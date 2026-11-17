@@ -501,7 +501,13 @@ impl Harness {
             revision: 1,
             last_check: None,
         };
-        let grant = Grant::new(self.running.provider(), &connection, Some(&credentials)).unwrap();
+        let grant = Grant::new(
+            self.running.provider(),
+            &connection,
+            Some(&credentials),
+            &self.providers,
+        )
+        .unwrap();
         let recording = Arc::new(Recording {
             inner: grant,
             seen: Arc::clone(&self.seen),

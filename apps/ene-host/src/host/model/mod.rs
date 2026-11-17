@@ -148,12 +148,13 @@ pub(crate) fn delete_secret(credentials: &Credentials, connection: &str) -> Resu
 pub(crate) fn credential_state(
     connection: &Connection,
     credentials: &Credentials,
+    loaded: &super::providers::Providers,
 ) -> Result<CredentialState> {
     if credentials.secret(&connection.id)?.is_some() {
         return Ok(CredentialState::Registered);
     }
     if connection
-        .environment_variable()
+        .environment_variable(loaded)
         .is_some_and(|name| std::env::var_os(name).is_some())
     {
         return Ok(CredentialState::Environment);
@@ -164,6 +165,7 @@ pub(crate) fn credential_state(
 pub(crate) fn connection_secret(
     connection: &Connection,
     credentials: Option<&Credentials>,
+    loaded: &super::providers::Providers,
 ) -> Result<Option<String>> {
     if let Some(credentials) = credentials
         && let Some(secret) = credentials.secret(&connection.id)?
@@ -171,7 +173,7 @@ pub(crate) fn connection_secret(
         return Ok(Some(secret));
     }
     Ok(connection
-        .environment_variable()
+        .environment_variable(loaded)
         .and_then(|name| std::env::var(name).ok())
         .filter(|secret| !secret.is_empty()))
 }
@@ -189,9 +191,15 @@ pub(crate) fn provider_of(adapter: &str) -> Option<ProviderId> {
 
 /// Registry configuration for listing and embedding, including the host's
 /// OpenAI-compatible fallback for adapters without a registered wire.
-pub(crate) fn provider_config(adapter: &str, base: &str, secret: Option<String>) -> ProviderConfig {
+pub(crate) fn provider_config(
+    adapter: &str,
+    base: &str,
+    secret: Option<String>,
+    loaded: &super::providers::Providers,
+) -> ProviderConfig {
     let secret = secret.unwrap_or_default();
-    let default = super::settings::provider(adapter).map_or_else(String::new, |p| p.endpoint);
+    let default =
+        super::settings::provider(adapter, loaded).map_or_else(String::new, |p| p.endpoint);
     match provider_of(adapter).and_then(|provider| provider.config(secret.clone())) {
         Some(config) if base != default => config.with_base_url(base),
         Some(config) => config,
@@ -248,8 +256,12 @@ pub(crate) fn connect(
     // A plugin that serves this connection's adapter answers instead of the
     // catalog, so a provider rig does not ship needs no host change.
     if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
-        let grant =
-            super::providers::Grant::new(running.provider(), &connection, Some(credentials))?;
+        let grant = super::providers::Grant::new(
+            running.provider(),
+            &connection,
+            Some(credentials),
+            providers,
+        )?;
         // A streamed generation may outlast the short transport budget; the
         // model call gets the same end-to-end deadline as a built-in one.
         let broker =
@@ -279,10 +291,10 @@ pub(crate) fn connect(
             Arc::new(spec)
         }
     };
-    let secret = connection_secret(&connection, Some(credentials))?;
-    let default =
-        super::settings::provider(&endpoint.adapter).map_or_else(String::new, |p| p.endpoint);
-    let base = super::settings::endpoint_of(&connection)
+    let secret = connection_secret(&connection, Some(credentials), providers)?;
+    let default = super::settings::provider(&endpoint.adapter, providers)
+        .map_or_else(String::new, |p| p.endpoint);
+    let base = super::settings::endpoint_of(&connection, providers)
         .ok_or_else(|| HostError::Unavailable(("the connection has no endpoint to call").into()))?;
     // Rig builds the model requests, so their deadline sits on the model
     // client; every other host request shares the unbounded one.
@@ -355,7 +367,7 @@ pub(crate) async fn probe(
     };
     // A connection that leaves its endpoint empty calls the provider's own
     // default, which is exactly what the probe has to ask.
-    let Some(base) = super::settings::endpoint_of(connection) else {
+    let Some(base) = super::settings::endpoint_of(connection, providers) else {
         return failure("the connection has no endpoint to probe".into());
     };
     let listed = match list_models(connection, &base, credentials, providers).await {
@@ -402,9 +414,13 @@ async fn list_models(
                 .start(adapter, ene_plugin::Extension::Llm)
                 .await
                 .map_err(|error| error.to_string())?;
-            let grant =
-                super::providers::Grant::new(running.provider(), connection, Some(credentials))
-                    .map_err(|error| error.to_string())?;
+            let grant = super::providers::Grant::new(
+                running.provider(),
+                connection,
+                Some(credentials),
+                providers,
+            )
+            .map_err(|error| error.to_string())?;
             let broker = super::providers::http_broker_with_deadline(
                 Arc::new(grant),
                 super::net::MODEL_TIMEOUT,
@@ -415,9 +431,9 @@ async fn list_models(
         .await
         .map_err(|_| format!("the plugin did not answer in {}s", PROBE_TIMEOUT.as_secs()))?;
     }
-    let secret =
-        connection_secret(connection, Some(credentials)).map_err(|error| error.to_string())?;
-    let config = provider_config(adapter, base, secret);
+    let secret = connection_secret(connection, Some(credentials), providers)
+        .map_err(|error| error.to_string())?;
+    let config = provider_config(adapter, base, secret, providers);
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
         match &config {
@@ -512,22 +528,31 @@ mod tests {
         let credentials = Credentials::new(false);
         credentials.make_unreadable();
         let connection = connection_for("openai", "http://127.0.0.1:1234");
+        let providers = super::super::providers::Providers::none();
         assert!(matches!(
             credentials.secret(&connection.id),
             Err(HostError::Unavailable(_))
         ));
-        assert!(connection_secret(&connection, Some(&credentials)).is_err());
-        assert!(credential_state(&connection, &credentials).is_err());
+        assert!(connection_secret(&connection, Some(&credentials), &providers).is_err());
+        assert!(credential_state(&connection, &credentials, &providers).is_err());
     }
 
     #[test]
     fn registry_configs_keep_native_defaults_and_custom_endpoints() {
+        let providers = super::super::providers::Providers::none();
         for adapter in ["openai", "openrouter", "anthropic", "gemini"] {
-            let base = super::super::settings::provider(adapter).unwrap().endpoint;
+            let base = super::super::settings::provider(adapter, &providers)
+                .unwrap()
+                .endpoint;
             let preset = provider_of(adapter).unwrap().config("key").unwrap();
-            let config = provider_config(adapter, &base, Some("key".into()));
+            let config = provider_config(adapter, &base, Some("key".into()), &providers);
             assert_eq!(config, preset, "{adapter}");
-            let custom = provider_config(adapter, "http://127.0.0.1:1234", Some("key".into()));
+            let custom = provider_config(
+                adapter,
+                "http://127.0.0.1:1234",
+                Some("key".into()),
+                &providers,
+            );
             assert_eq!(
                 custom,
                 preset.with_base_url("http://127.0.0.1:1234"),
@@ -535,7 +560,7 @@ mod tests {
             );
         }
         assert_eq!(
-            provider_config("custom", "http://127.0.0.1:1234", None),
+            provider_config("custom", "http://127.0.0.1:1234", None, &providers),
             ProviderConfig::OpenAi(OpenAIConfig::new("").with_base_url("http://127.0.0.1:1234"))
         );
     }

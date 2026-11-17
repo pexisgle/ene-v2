@@ -6,8 +6,8 @@ use crate::host::{
     mind::{Assignment, Assignments, Companion, Profile, Role, State},
     model::{self, Credentials},
     settings::{
-        Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
-        SttConnection, TtsConnection,
+        self, Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint,
+        LlmConnection, SttConnection, TtsConnection,
     },
     voice::{self, SetupError},
 };
@@ -196,6 +196,7 @@ fn installed_providers(
                 "provider": {
                     "id": "p08-plugin", "endpoint": destination,
                     "auth": auth, "destinations": [destination],
+                    "environment_variable": "ENE_P08_KEY",
                     "options": {"fixture_option": "preserved"}
                 }
             }]
@@ -756,6 +757,7 @@ fn p08_actual_grant_binds_origins_and_secret_at_construction() {
     use ene_plugin_runtime::service::HttpGrants;
     let connection = connection(ConnectionKind::Llm, "https://connection.example");
     let credentials = Credentials::new(true);
+    let providers = Providers::none();
     model::save_secret(&credentials, &connection.id, "host-secret").unwrap();
     let provider: ProviderConfiguration = serde_json::from_value(json!({
         "id":"owner", "endpoint":"https://api.example",
@@ -763,7 +765,7 @@ fn p08_actual_grant_binds_origins_and_secret_at_construction() {
         "destinations":["https://api.example/path", "https://api.example:8443", "not a URL"]
     }))
     .unwrap();
-    let grant = Grant::new(&provider, &connection, Some(&credentials)).unwrap();
+    let grant = Grant::new(&provider, &connection, Some(&credentials), &providers).unwrap();
     for provider_argument in ["owner", "another-provider"] {
         for allowed in [
             "https://api.example/other",
@@ -873,6 +875,7 @@ fn request(url: &str) -> ene_plugin::HttpRequest {
 async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() {
     let upstream = NativeEndpoint::start().await;
     let denied = NativeEndpoint::start().await;
+    let providers = Providers::none();
     let connection = connection(ConnectionKind::Llm, &denied.base);
     let credentials = Credentials::new(true);
     model::save_secret(&credentials, &connection.id, "original-secret").unwrap();
@@ -882,7 +885,7 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
     }))
     .unwrap();
     let broker = http_broker(Arc::new(
-        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+        Grant::new(&provider, &connection, Some(&credentials), &providers).unwrap(),
     ))
     .unwrap();
     assert_eq!(
@@ -927,7 +930,7 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
         );
     }
     let fresh = http_broker(Arc::new(
-        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+        Grant::new(&provider, &connection, Some(&credentials), &providers).unwrap(),
     ))
     .unwrap();
     fresh.open("owner", request(&upstream.base)).await.unwrap();
@@ -950,6 +953,7 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
     let upstream = NativeEndpoint::start().await;
     let connection = connection(ConnectionKind::Llm, &upstream.base);
     let credentials = Credentials::new(true);
+    let providers = Providers::none();
     model::save_secret(&credentials, &connection.id, "host-secret").unwrap();
     let mut provider: ProviderConfiguration = serde_json::from_value(json!({
         "id":"owner", "endpoint":upstream.base,
@@ -957,7 +961,7 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
     }))
     .unwrap();
     let broker = http_broker(Arc::new(
-        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+        Grant::new(&provider, &connection, Some(&credentials), &providers).unwrap(),
     ))
     .unwrap();
     let mut call = request(&upstream.base);
@@ -977,7 +981,7 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
     ] {
         provider.auth = serde_json::from_value(auth).unwrap();
         let broker = http_broker(Arc::new(
-            Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+            Grant::new(&provider, &connection, Some(&credentials), &providers).unwrap(),
         ))
         .unwrap();
         assert_eq!(
@@ -992,7 +996,7 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
     provider.auth = serde_json::from_value(json!({"type":"bearer"})).unwrap();
     model::save_secret(&credentials, &connection.id, "bad\nsecret").unwrap();
     let broker = http_broker(Arc::new(
-        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+        Grant::new(&provider, &connection, Some(&credentials), &providers).unwrap(),
     ))
     .unwrap();
     assert_eq!(
@@ -1026,7 +1030,7 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
     let providers = providers(root.path(), Extension::Llm, &body, &upstream.base).await;
     let running = providers.running("openrouter", Extension::Llm).unwrap();
     let broker = http_broker(Arc::new(
-        Grant::new(running.provider(), &connection, None).unwrap(),
+        Grant::new(running.provider(), &connection, None, &providers).unwrap(),
     ))
     .unwrap();
     for _ in 0..2 {
@@ -1081,4 +1085,54 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
     drop(broker);
     assert!(weak.upgrade().is_none());
     upstream.assert_requests(2);
+}
+
+/// A plugin the operator installed has to be visible in the catalogue and has
+/// to answer for its own defaults, or a connection that names it can never be
+/// filled in from the settings screen.
+#[test]
+fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
+    let root = tempfile::tempdir().unwrap();
+    let providers = installed_providers(
+        root.path(),
+        Extension::Llm,
+        &reply("{}"),
+        "https://plugin.example",
+        json!({"type":"none"}),
+    );
+    let listed = settings::providers(&providers);
+    assert_eq!(listed.len(), 4);
+    let mut shadowing: Vec<_> = listed
+        .iter()
+        .filter(|provider| provider.adapter == "openrouter")
+        .collect();
+    assert_eq!(
+        shadowing.len(),
+        1,
+        "the plugin must replace the built-in it shadows"
+    );
+    let plugin = shadowing.remove(0);
+    assert_eq!(plugin.id, "p08-plugin");
+    assert_eq!(plugin.endpoint, "https://plugin.example");
+    assert_eq!(plugin.environment_variable.as_deref(), Some("ENE_P08_KEY"));
+    for adapter in ["anthropic", "gemini", "openai"] {
+        assert!(
+            listed.iter().any(|provider| provider.adapter == adapter),
+            "{adapter}"
+        );
+    }
+    let empty = connection(ConnectionKind::Llm, "");
+    assert_eq!(
+        settings::endpoint_of(&empty, &providers).as_deref(),
+        Some("https://plugin.example")
+    );
+    assert_eq!(
+        empty.environment_variable(&providers).as_deref(),
+        Some("ENE_P08_KEY")
+    );
+    let configured = connection(ConnectionKind::Llm, "https://operator.example/");
+    assert_eq!(
+        settings::endpoint_of(&configured, &providers).as_deref(),
+        Some("https://operator.example")
+    );
 }

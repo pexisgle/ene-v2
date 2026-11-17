@@ -38,14 +38,25 @@ impl w::SettingsService for Services {
             let expected = input.expected_revision;
             inputs.push((wire::connection_from(input)?, expected));
         }
-        self.call(move |app| {
-            let store = app.world().resource::<Store>().clone();
-            let settings = store.update_settings(expected_revision, &inputs)?;
-            let view = wire::settings(&settings);
-            notify_settings(app, view.clone());
-            Ok(view)
-        })
-        .await
+        let view = self
+            .call(move |app| {
+                let store = app.world().resource::<Store>().clone();
+                let settings = store.update_settings(expected_revision, &inputs)?;
+                let view = wire::settings(&settings);
+                notify_settings(app, view.clone());
+                Ok(view)
+            })
+            .await?;
+        // The save lands first. A plugin starts because a stored connection
+        // names it. `start_used` logs a plugin that will not start and carries
+        // on, the same policy as startup, so the save still succeeds.
+        let store = self
+            .runtime
+            .read(|app| Ok(app.world().resource::<Store>().clone()))
+            .await
+            .map_err(ConnectError::from)?;
+        self.runtime.providers().start_used(&store).await;
+        Ok(view)
     }
 
     async fn list_pending_approvals(
@@ -148,7 +159,7 @@ impl w::SettingsService for Services {
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::LlmProviders> {
         Response::ok(w::LlmProviders {
-            items: settings::providers(),
+            items: settings::providers(&self.runtime.providers()),
             ..Default::default()
         })
     }
@@ -217,8 +228,8 @@ impl w::SettingsService for Services {
                 .map_err(|_| ConnectError::internal("credential store task failed"))?
                 .map_err(ConnectError::from)?;
         }
-        let state =
-            model::credential_state(&connection, &credentials).map_err(ConnectError::from)?;
+        let state = model::credential_state(&connection, &credentials, &self.runtime.providers())
+            .map_err(ConnectError::from)?;
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
             store.set_credential_state(&id, state)?;

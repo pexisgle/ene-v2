@@ -1,6 +1,8 @@
 //! Connections and settings: LLM, TTS, STT, embedding, MCP and ACP share one
 //! header and differ only in their config oneof (docs/api.md §7).
 use super::error::{Failure, HostError, Result};
+use super::providers::Providers;
+use ene_plugin::{Extension, provider::AuthProfile};
 use ene_rpc as w;
 use serde::{Deserialize, Serialize};
 
@@ -232,8 +234,9 @@ impl Connection {
         self.config.endpoint()
     }
 
-    pub(crate) fn environment_variable(&self) -> Option<String> {
-        provider(&self.endpoint().adapter).and_then(|provider| provider.environment_variable)
+    pub(crate) fn environment_variable(&self, loaded: &Providers) -> Option<String> {
+        provider(&self.endpoint().adapter, loaded)
+            .and_then(|provider| provider.environment_variable)
     }
 }
 
@@ -274,7 +277,7 @@ fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> w::LlmProvi
 
 /// The provider catalogue the host can speak to through rig-core. It is a
 /// fixed alpha list; extensions add adapters, not host code paths.
-pub(crate) fn providers() -> Vec<w::LlmProvider> {
+fn builtin_providers() -> Vec<w::LlmProvider> {
     vec![
         catalog_entry(
             "openai",
@@ -295,20 +298,68 @@ pub(crate) fn providers() -> Vec<w::LlmProvider> {
     ]
 }
 
-pub(crate) fn provider(adapter: &str) -> Option<w::LlmProvider> {
-    providers()
+/// Every provider a connection can name: the built-ins no loaded plugin
+/// shadows, then one entry per loaded plugin that serves LLM connections.
+///
+/// A package named like a built-in replaces that built-in, because a running
+/// plugin already answers for the adapter name the connection carries.
+pub(crate) fn providers(loaded: &Providers) -> Vec<w::LlmProvider> {
+    let mut adapters: Vec<&str> = loaded.adapters().collect();
+    // The registry is a hash map; sorting keeps the catalogue the same on
+    // every read, in this process and the next.
+    adapters.sort_unstable();
+    let plugins: Vec<w::LlmProvider> = adapters
         .into_iter()
-        .find(|provider| provider.adapter == adapter)
+        .filter_map(|adapter| plugin_entry(adapter, loaded))
+        .collect();
+    let mut entries: Vec<w::LlmProvider> = builtin_providers()
+        .into_iter()
+        .filter(|builtin| {
+            !plugins
+                .iter()
+                .any(|plugin| plugin.adapter == builtin.adapter)
+        })
+        .collect();
+    entries.extend(plugins);
+    entries
+}
+
+/// One loaded plugin in the contract's own shape, when it serves LLM
+/// connections.
+fn plugin_entry(adapter: &str, loaded: &Providers) -> Option<w::LlmProvider> {
+    let plugin = loaded.get(adapter)?;
+    let (_, provider) = plugin.entry(Extension::Llm)?;
+    Some(w::LlmProvider {
+        id: provider.id.clone(),
+        name: plugin.package.manifest.name.clone(),
+        adapter: adapter.into(),
+        endpoint: provider.endpoint.clone(),
+        settings: provider.settings.clone(),
+        requires_credentials: !matches!(&provider.auth, AuthProfile::None),
+        environment_variable: provider
+            .environment_variable
+            .clone()
+            .filter(|name| !name.is_empty()),
+        ..Default::default()
+    })
+}
+
+pub(crate) fn provider(adapter: &str, loaded: &Providers) -> Option<w::LlmProvider> {
+    plugin_entry(adapter, loaded).or_else(|| {
+        builtin_providers()
+            .into_iter()
+            .find(|provider| provider.adapter == adapter)
+    })
 }
 
 /// The endpoint a connection calls: its configured one without a trailing
 /// slash, or the provider's default when the configuration leaves it empty.
-pub(crate) fn endpoint_of(connection: &Connection) -> Option<String> {
+pub(crate) fn endpoint_of(connection: &Connection, loaded: &Providers) -> Option<String> {
     let configured = connection.endpoint().endpoint.trim().trim_end_matches('/');
     if !configured.is_empty() {
         return Some(configured.to_owned());
     }
-    provider(&connection.endpoint().adapter)
+    provider(&connection.endpoint().adapter, loaded)
         .map(|provider| provider.endpoint)
         .filter(|endpoint| !endpoint.is_empty())
 }
