@@ -413,6 +413,59 @@ fn a_turn_is_accepted_once_and_answered() {
     );
 }
 
+/// The replay and the receiver are read at one boundary: everything after
+/// the cursor is in the replay, the snapshot is at its end, and the receiver
+/// carries only later events.
+#[test]
+fn a_subscription_resumes_from_its_cursor_without_a_gap_or_a_duplicate() {
+    use crate::host::notify::Notifier;
+    let event = |kind: &str| {
+        w::notification::Event::Generic(Box::new(w::HostEvent {
+            kind: kind.into(),
+            ..Default::default()
+        }))
+    };
+    fn host_event(notification: &w::Notification) -> String {
+        match notification.event.as_ref() {
+            Some(w::notification::Event::Generic(event)) => event.kind.clone(),
+            _ => panic!("a host event"),
+        }
+    }
+    let mut harness = Harness::new([]);
+    harness.tick();
+    let before = harness.app.world().resource::<Notifier>().cursor();
+    harness
+        .app
+        .world_mut()
+        .resource_mut::<Notifier>()
+        .push(None, None, event("one"));
+    harness.tick();
+    let (snapshot, mut receiver, replayed) =
+        super::subscribe(&mut harness.app, None, Some(&before)).unwrap();
+    let replayed = replayed.expect("a cursor from this epoch is resumable");
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(host_event(&replayed[0]), "one");
+    let seq = replayed[0].cursor.as_option().unwrap().seq;
+    assert_eq!(
+        snapshot.cursor.as_option().unwrap().seq,
+        seq,
+        "the snapshot is at the replay's end"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "the receiver starts after the replayed events"
+    );
+    harness
+        .app
+        .world_mut()
+        .resource_mut::<Notifier>()
+        .push(None, None, event("two"));
+    harness.tick();
+    let next = receiver.try_recv().expect("the live event arrives");
+    assert_eq!(host_event(&next), "two");
+    assert_eq!(next.cursor.as_option().unwrap().seq, seq + 1);
+}
+
 #[test]
 fn a_restart_restores_the_conversation_and_its_acceptance() {
     let mut harness = Harness::new([text_turn("おかえり")]);

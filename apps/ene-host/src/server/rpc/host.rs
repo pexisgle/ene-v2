@@ -30,23 +30,12 @@ impl w::HostService for Services {
             ..Default::default()
         });
         // A cursor from this epoch resumes from the replay ring; an unknown or
-        // stale cursor (or a gap) falls back to a fresh snapshot.
-        let replayed = match cursor {
-            Some(cursor) => self
-                .runtime
-                .read(move |app| {
-                    Ok(app
-                        .world()
-                        .resource::<crate::host::notify::Notifier>()
-                        .replay(&cursor))
-                })
-                .await
-                .map_err(ConnectError::from)?,
-            None => None,
-        };
-        let (snapshot, mut events) = self
+        // stale cursor (or a gap) falls back to a fresh snapshot. The replay
+        // and the receiver come from one host operation, so a tick cannot slip
+        // an event between them.
+        let (snapshot, mut events, replayed) = self
             .runtime
-            .read(move |app| host::subscribe(app, subscriber.as_deref()))
+            .read(move |app| host::subscribe(app, subscriber.as_deref(), cursor.as_ref()))
             .await
             .map_err(ConnectError::from)?;
         let target_cursor = snapshot.cursor.clone();

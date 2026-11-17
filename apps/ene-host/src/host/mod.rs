@@ -503,19 +503,36 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
     })
 }
 
+/// The state a subscriber starts from: the snapshot, the live receiver and,
+/// when the cursor is resumable, the events after it.
+///
+/// The replay and the receiver are read in one host operation. Two operations
+/// would let a tick flush between them, and an event flushed there would be in
+/// neither the replay nor the receiver.
 pub(crate) fn subscribe(
     app: &mut App,
     client_id: Option<&str>,
-) -> Result<(w::Snapshot, broadcast::Receiver<w::Notification>)> {
+    cursor: Option<&w::Cursor>,
+) -> Result<(
+    w::Snapshot,
+    broadcast::Receiver<w::Notification>,
+    Option<Vec<w::Notification>>,
+)> {
     let store = app.world().resource::<Store>().clone();
     if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
         db::validate_id(client_id)?;
         if store.client(client_id)?.is_none() {
-            return Err(HostError::NotFound(("client not found").into()));
+            return Err(HostError::NotFound("client not found".into()));
         }
     }
-    let receiver = app.world().resource::<Notifier>().subscribe();
-    Ok((snapshot(app)?, receiver))
+    let (receiver, replayed) = {
+        let notifier = app.world().resource::<Notifier>();
+        (
+            notifier.subscribe(),
+            cursor.and_then(|cursor| notifier.replay(cursor)),
+        )
+    };
+    Ok((snapshot(app)?, receiver, replayed))
 }
 
 #[cfg(test)]
