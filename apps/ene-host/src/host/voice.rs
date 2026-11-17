@@ -420,7 +420,6 @@ fn plugin_engine(
         world.get_resource::<Credentials>(),
         kind,
     )
-    .map_err(|error| SetupError::Broken(format!("plugin HTTP transport: {error}")))
 }
 
 pub(crate) fn configured(
@@ -473,7 +472,11 @@ fn credential(
     _base: &str,
     _label: &str,
 ) -> std::result::Result<Option<String>, SetupError> {
-    Ok(credentials.and_then(|credentials| model::connection_secret(connection, Some(credentials))))
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
+    model::connection_secret(connection, Some(credentials))
+        .map_err(|error| SetupError::Broken(error.to_string()))
 }
 
 type ResamplerCache = Option<(u32, u32, rubato::Fft<f32>)>;

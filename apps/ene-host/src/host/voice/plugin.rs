@@ -5,7 +5,7 @@
 //! engine is therefore the same shape as the built-in one: it asks the plugin
 //! for the work, and the plugin reaches its endpoint through the host's
 //! broker, so no credential ever enters the guest.
-use super::{BoxFuture, HttpResult, SAMPLE_RATE, SttEngine, TtsEngine};
+use super::{BoxFuture, HttpResult, SAMPLE_RATE, SetupError, SttEngine, TtsEngine};
 use crate::host::{
     error::HostError,
     model::Credentials,
@@ -38,7 +38,7 @@ impl PluginSpeech {
         connection: &Connection,
         credentials: Option<&Credentials>,
         kind: ConnectionKind,
-    ) -> Result<Option<Self>, reqwest::Error> {
+    ) -> Result<Option<Self>, SetupError> {
         let extension = match kind {
             ConnectionKind::Tts => Extension::Tts,
             ConnectionKind::Stt => Extension::Stt,
@@ -48,10 +48,12 @@ impl PluginSpeech {
         let Some(running) = providers.running(&adapter, extension) else {
             return Ok(None);
         };
-        let grant = Grant::new(running.provider(), connection, credentials);
+        let grant = Grant::new(running.provider(), connection, credentials)
+            .map_err(|error| SetupError::Broken(error.to_string()))?;
         Ok(Some(Self {
             running,
-            broker: crate::host::providers::http_broker(Arc::new(grant))?,
+            broker: crate::host::providers::http_broker(Arc::new(grant))
+                .map_err(|error| SetupError::Broken(format!("plugin HTTP transport: {error}")))?,
             connection: connection.clone(),
         }))
     }

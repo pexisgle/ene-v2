@@ -748,6 +748,8 @@ mod tests {
             .insert_resource(ModelFactory(Arc::new(move |_, credentials, _, _, _, _| {
                 let text = credentials
                     .secret("credential-model")
+                    .ok()
+                    .flatten()
                     .unwrap_or_else(|| "absent".into());
                 Ok(
                     MockCompletionModel::from_turns((0..8).map(|_| MockTurn::text(text.clone())))

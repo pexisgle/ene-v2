@@ -28,16 +28,16 @@ impl Grant {
         provider: &ProviderConfiguration,
         connection: &Connection,
         credentials: Option<&Credentials>,
-    ) -> Self {
-        Self {
+    ) -> crate::host::error::Result<Self> {
+        Ok(Self {
             origins: provider
                 .destinations
                 .iter()
                 .filter_map(|destination| origin_of(destination))
                 .collect(),
             auth: provider.auth.clone(),
-            secret: crate::host::model::connection_secret(connection, credentials),
-        }
+            secret: crate::host::model::connection_secret(connection, credentials)?,
+        })
     }
 }
 

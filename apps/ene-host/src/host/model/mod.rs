@@ -37,6 +37,10 @@ pub(crate) struct Credentials {
     session_secrets: Arc<Mutex<HashMap<String, String>>>,
     generation: Arc<AtomicU64>,
     session_only: bool,
+    /// Test-only: makes the credential store unreadable, so a test can check
+    /// that the failure is reported instead of becoming "no credential".
+    #[cfg(test)]
+    unreadable: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Credentials {
@@ -69,12 +73,26 @@ impl Credentials {
         self.invalidate();
     }
 
-    pub(crate) fn secret(&self, connection: &str) -> Option<String> {
+    /// The registered secret, `None` when none is registered. An unreadable
+    /// credential store is an error, not "no credential": a request must not
+    /// go out unauthenticated because the store could not be read.
+    pub(crate) fn secret(&self, connection: &str) -> Result<Option<String>> {
         if self.session_only {
-            self.session_secrets().get(connection).cloned()
-        } else {
-            read_keyring(connection).ok().flatten()
+            return Ok(self.session_secrets().get(connection).cloned());
         }
+        #[cfg(test)]
+        if self.unreadable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(HostError::Unavailable(
+                "credential store: unreadable".into(),
+            ));
+        }
+        read_keyring(connection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn make_unreadable(&self) {
+        self.unreadable
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn session_only(&self) -> bool {
@@ -130,28 +148,32 @@ pub(crate) fn delete_secret(credentials: &Credentials, connection: &str) -> Resu
 pub(crate) fn credential_state(
     connection: &Connection,
     credentials: &Credentials,
-) -> CredentialState {
-    if credentials.secret(&connection.id).is_some() {
-        return CredentialState::Registered;
+) -> Result<CredentialState> {
+    if credentials.secret(&connection.id)?.is_some() {
+        return Ok(CredentialState::Registered);
     }
     if connection
         .environment_variable()
         .is_some_and(|name| std::env::var_os(name).is_some())
     {
-        return CredentialState::Environment;
+        return Ok(CredentialState::Environment);
     }
-    CredentialState::Absent
+    Ok(CredentialState::Absent)
 }
 
 pub(crate) fn connection_secret(
     connection: &Connection,
     credentials: Option<&Credentials>,
-) -> Option<String> {
-    if let Some(secret) = credentials.and_then(|credentials| credentials.secret(&connection.id)) {
-        return Some(secret);
+) -> Result<Option<String>> {
+    if let Some(credentials) = credentials
+        && let Some(secret) = credentials.secret(&connection.id)?
+    {
+        return Ok(Some(secret));
     }
-    let name = connection.environment_variable()?;
-    std::env::var(name).ok().filter(|secret| !secret.is_empty())
+    Ok(connection
+        .environment_variable()
+        .and_then(|name| std::env::var(name).ok())
+        .filter(|secret| !secret.is_empty()))
 }
 
 /// The rig provider a host adapter names.
@@ -227,7 +249,7 @@ pub(crate) fn connect(
     // catalog, so a provider rig does not ship needs no host change.
     if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
         let grant =
-            super::providers::Grant::new(running.provider(), &connection, Some(credentials));
+            super::providers::Grant::new(running.provider(), &connection, Some(credentials))?;
         let broker = super::providers::http_broker(Arc::new(grant))
             .map_err(|error| HostError::Unavailable(format!("plugin HTTP transport: {error}")))?;
         return Ok(plugin_completion(
@@ -252,7 +274,7 @@ pub(crate) fn connect(
             Arc::new(spec)
         }
     };
-    let secret = connection_secret(&connection, Some(credentials));
+    let secret = connection_secret(&connection, Some(credentials))?;
     let default =
         super::settings::provider(&endpoint.adapter).map_or_else(String::new, |p| p.endpoint);
     let base = super::settings::endpoint_of(&connection)
@@ -376,7 +398,8 @@ async fn list_models(
                 .await
                 .map_err(|error| error.to_string())?;
             let grant =
-                super::providers::Grant::new(running.provider(), connection, Some(credentials));
+                super::providers::Grant::new(running.provider(), connection, Some(credentials))
+                    .map_err(|error| error.to_string())?;
             let broker = super::providers::http_broker(Arc::new(grant))
                 .map_err(|error| format!("plugin HTTP transport: {error}"))?;
             plugin_models(running, base, broker).await
@@ -384,7 +407,8 @@ async fn list_models(
         .await
         .map_err(|_| format!("the plugin did not answer in {}s", PROBE_TIMEOUT.as_secs()))?;
     }
-    let secret = connection_secret(connection, Some(credentials));
+    let secret =
+        connection_secret(connection, Some(credentials)).map_err(|error| error.to_string())?;
     let config = provider_config(adapter, base, secret);
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
@@ -470,6 +494,22 @@ mod tests {
 
     fn connection_for(adapter: &str, endpoint: &str) -> Connection {
         llm_connection(adapter, endpoint, &["gpt-5-mini"])
+    }
+
+    /// A store that cannot be read must not look like a connection with no
+    /// credential: the request path has to report the failure instead of
+    /// sending an unauthenticated request or falling back to the environment.
+    #[test]
+    fn an_unreadable_credential_store_is_not_an_absent_credential() {
+        let credentials = Credentials::new(false);
+        credentials.make_unreadable();
+        let connection = connection_for("openai", "http://127.0.0.1:1234");
+        assert!(matches!(
+            credentials.secret(&connection.id),
+            Err(HostError::Unavailable(_))
+        ));
+        assert!(connection_secret(&connection, Some(&credentials)).is_err());
+        assert!(credential_state(&connection, &credentials).is_err());
     }
 
     #[test]
@@ -598,34 +638,46 @@ mod tests {
         let second_clone = second.clone();
         let connection = "same-connection";
 
-        assert_eq!(first.secret(connection), None);
-        assert_eq!(second.secret(connection), None);
+        assert_eq!(first.secret(connection).unwrap(), None);
+        assert_eq!(second.secret(connection).unwrap(), None);
 
         save_secret(&first, connection, "first-secret").unwrap();
-        assert_eq!(first.secret(connection).as_deref(), Some("first-secret"));
         assert_eq!(
-            first_clone.secret(connection).as_deref(),
+            first.secret(connection).unwrap().as_deref(),
             Some("first-secret")
         );
-        assert_eq!(second.secret(connection), None);
-        assert_eq!(second_clone.secret(connection), None);
+        assert_eq!(
+            first_clone.secret(connection).unwrap().as_deref(),
+            Some("first-secret")
+        );
+        assert_eq!(second.secret(connection).unwrap(), None);
+        assert_eq!(second_clone.secret(connection).unwrap(), None);
 
         save_secret(&second_clone, connection, "second-secret").unwrap();
-        assert_eq!(second.secret(connection).as_deref(), Some("second-secret"));
-        assert_eq!(first.secret(connection).as_deref(), Some("first-secret"));
+        assert_eq!(
+            second.secret(connection).unwrap().as_deref(),
+            Some("second-secret")
+        );
+        assert_eq!(
+            first.secret(connection).unwrap().as_deref(),
+            Some("first-secret")
+        );
 
         delete_secret(&first_clone, connection).unwrap();
-        assert_eq!(first.secret(connection), None);
-        assert_eq!(first_clone.secret(connection), None);
-        assert_eq!(second.secret(connection).as_deref(), Some("second-secret"));
+        assert_eq!(first.secret(connection).unwrap(), None);
+        assert_eq!(first_clone.secret(connection).unwrap(), None);
         assert_eq!(
-            second_clone.secret(connection).as_deref(),
+            second.secret(connection).unwrap().as_deref(),
+            Some("second-secret")
+        );
+        assert_eq!(
+            second_clone.secret(connection).unwrap().as_deref(),
             Some("second-secret")
         );
 
         delete_secret(&second_clone, connection).unwrap();
-        assert_eq!(second.secret(connection), None);
-        assert_eq!(second_clone.secret(connection), None);
+        assert_eq!(second.secret(connection).unwrap(), None);
+        assert_eq!(second_clone.secret(connection).unwrap(), None);
     }
 
     /// The probe lists models through the configured endpoint whichever

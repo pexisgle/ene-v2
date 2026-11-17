@@ -217,7 +217,8 @@ impl w::SettingsService for Services {
                 .map_err(|_| ConnectError::internal("credential store task failed"))?
                 .map_err(ConnectError::from)?;
         }
-        let state = model::credential_state(&connection, &credentials);
+        let state =
+            model::credential_state(&connection, &credentials).map_err(ConnectError::from)?;
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
             store.set_credential_state(&id, state)?;

@@ -217,7 +217,7 @@ fn target(
     if let Some(target) = models.targets.get(&key) {
         return Ok(Some(target.clone()));
     }
-    let secret = crate::host::model::connection_secret(&connection, credentials);
+    let secret = crate::host::model::connection_secret(&connection, credentials)?;
     let model = connect(
         &connection.endpoint().adapter,
         &endpoint,

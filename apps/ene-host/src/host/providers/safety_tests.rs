@@ -763,7 +763,7 @@ fn p08_actual_grant_binds_origins_and_secret_at_construction() {
         "destinations":["https://api.example/path", "https://api.example:8443", "not a URL"]
     }))
     .unwrap();
-    let grant = Grant::new(&provider, &connection, Some(&credentials));
+    let grant = Grant::new(&provider, &connection, Some(&credentials)).unwrap();
     for provider_argument in ["owner", "another-provider"] {
         for allowed in [
             "https://api.example/other",
@@ -881,11 +881,9 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
         "auth":{"type":"bearer"}, "destinations":[upstream.base]
     }))
     .unwrap();
-    let broker = http_broker(Arc::new(Grant::new(
-        &provider,
-        &connection,
-        Some(&credentials),
-    )))
+    let broker = http_broker(Arc::new(
+        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+    ))
     .unwrap();
     assert_eq!(
         broker
@@ -928,11 +926,9 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
             "Bearer original-secret"
         );
     }
-    let fresh = http_broker(Arc::new(Grant::new(
-        &provider,
-        &connection,
-        Some(&credentials),
-    )))
+    let fresh = http_broker(Arc::new(
+        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+    ))
     .unwrap();
     fresh.open("owner", request(&upstream.base)).await.unwrap();
     assert_eq!(
@@ -960,11 +956,9 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
         "auth":{"type":"header", "name":"x-api-key"}, "destinations":[upstream.base]
     }))
     .unwrap();
-    let broker = http_broker(Arc::new(Grant::new(
-        &provider,
-        &connection,
-        Some(&credentials),
-    )))
+    let broker = http_broker(Arc::new(
+        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+    ))
     .unwrap();
     let mut call = request(&upstream.base);
     call.headers
@@ -982,11 +976,9 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
         ),
     ] {
         provider.auth = serde_json::from_value(auth).unwrap();
-        let broker = http_broker(Arc::new(Grant::new(
-            &provider,
-            &connection,
-            Some(&credentials),
-        )))
+        let broker = http_broker(Arc::new(
+            Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+        ))
         .unwrap();
         assert_eq!(
             broker
@@ -999,11 +991,9 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
     }
     provider.auth = serde_json::from_value(json!({"type":"bearer"})).unwrap();
     model::save_secret(&credentials, &connection.id, "bad\nsecret").unwrap();
-    let broker = http_broker(Arc::new(Grant::new(
-        &provider,
-        &connection,
-        Some(&credentials),
-    )))
+    let broker = http_broker(Arc::new(
+        Grant::new(&provider, &connection, Some(&credentials)).unwrap(),
+    ))
     .unwrap();
     assert_eq!(
         broker
@@ -1035,7 +1025,10 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
     );
     let providers = providers(root.path(), Extension::Llm, &body, &upstream.base).await;
     let running = providers.running("openrouter", Extension::Llm).unwrap();
-    let broker = http_broker(Arc::new(Grant::new(running.provider(), &connection, None))).unwrap();
+    let broker = http_broker(Arc::new(
+        Grant::new(running.provider(), &connection, None).unwrap(),
+    ))
+    .unwrap();
     for _ in 0..2 {
         let services = BrokerServices::new(Arc::clone(&broker), "owner".into());
         running
