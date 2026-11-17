@@ -33,7 +33,12 @@ pub fn connect(endpoint: &str, token: &str) -> Result<(HttpClient, ClientConfig)
     let mut bearer = HeaderValue::from_str(&format!("Bearer {}", token))
         .map_err(|_| ConnectError::invalid_argument("invalid API endpoint or Bearer token"))?;
     bearer.set_sensitive(true);
-    let transport = HttpClient::plaintext();
+    // The contract puts the full-duplex voice stream on HTTP/2
+    // (docs/api.md §6), and the host's plain listener accepts h2c prior
+    // knowledge. `plaintext()` would negotiate HTTP/1.1, which the contract
+    // does not name for that path and which a proxy may buffer until the
+    // input ends.
+    let transport = HttpClient::plaintext_http2_only();
     let config = ClientConfig::new(
         endpoint
             .as_str()

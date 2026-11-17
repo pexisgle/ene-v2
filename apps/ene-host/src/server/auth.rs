@@ -43,15 +43,10 @@ pub(super) async fn authenticate(
         .and_then(|header| header.strip_prefix("Bearer "))
         .is_some_and(|value| bool::from(value.as_bytes().ct_eq(guard.token.as_bytes())));
     // A browser Origin must be the host itself or a configured authority; Host
-    // is required where the protocol does not carry the authority itself, and
-    // anything present must be loopback or explicitly trusted.
-    let host_ok = host_allowed(request.version(), request.headers(), &guard.allowed);
-    let origin_ok = match request.headers().get(http::header::ORIGIN) {
-        Some(header) => header
-            .to_str()
-            .is_ok_and(|value| origin_allowed(value, &guard.allowed)),
-        None => true,
-    };
+    // and the HTTP/2 authority are required where the protocol carries them,
+    // and anything present must be loopback or explicitly trusted.
+    let host_ok = host_allowed(request.headers(), request.uri().authority(), &guard.allowed);
+    let origin_ok = single_origin(request.headers(), &guard.allowed);
     if !allowed || !host_ok || !origin_ok {
         return ConnectError::unauthenticated("owner credential required")
             .into_http_response(request.headers())
@@ -60,13 +55,12 @@ pub(super) async fn authenticate(
     next.run(request).await
 }
 
-/// The `Host` authority this transport carries. HTTP/2 and HTTP/3 send the
-/// authority in the protocol (`:authority`), so an absent `Host` is accepted
-/// there; every other version, HTTP/1.1 included, must name one. Whatever is
-/// present is still checked, and a repeated `Host` is never trusted.
+/// The destination this request names. HTTP/1.1 carries it in `Host`, HTTP/2
+/// and HTTP/3 in the protocol's authority; a request that carries both must
+/// agree, and a repeated `Host` is never trusted.
 fn host_allowed(
-    version: http::Version,
     headers: &http::HeaderMap,
+    uri: Option<&Authority>,
     allowed: &[ValidatedAuthority],
 ) -> bool {
     let mut values = headers.get_all(http::header::HOST).iter();
@@ -74,13 +68,48 @@ fn host_allowed(
     if values.next().is_some() {
         return false;
     }
-    match host {
-        Some(header) => header
-            .to_str()
-            .ok()
-            .and_then(authority)
-            .is_some_and(|host| host.is_loopback() || configured(&host, allowed)),
-        None => matches!(version, http::Version::HTTP_2 | http::Version::HTTP_3),
+    let host = match host {
+        Some(header) => match header.to_str().ok().and_then(authority) {
+            Some(host) => Some(host),
+            None => return false,
+        },
+        None => None,
+    };
+    let uri = match uri {
+        Some(uri) => match authority(uri.as_str()) {
+            Some(uri) => Some(uri),
+            None => return false,
+        },
+        None => None,
+    };
+    let trusted =
+        |authority: &ValidatedAuthority| authority.is_loopback() || configured(authority, allowed);
+    match (host, uri) {
+        (Some(host), Some(uri)) => same(&host, &uri) && trusted(&host),
+        (Some(host), None) => trusted(&host),
+        (None, Some(uri)) => trusted(&uri),
+        (None, None) => false,
+    }
+}
+
+/// Whether two spellings name the same destination.
+fn same(left: &ValidatedAuthority, right: &ValidatedAuthority) -> bool {
+    left.0.host().eq_ignore_ascii_case(right.0.host())
+        && left.0.port().map(|port| port.as_u16()) == right.0.port().map(|port| port.as_u16())
+}
+
+/// One `Origin`, when the request has one: a repeated or conflicting value is
+/// never trusted.
+fn single_origin(headers: &http::HeaderMap, allowed: &[ValidatedAuthority]) -> bool {
+    let mut values = headers.get_all(http::header::ORIGIN).iter();
+    match values.next() {
+        Some(header) => {
+            values.next().is_none()
+                && header
+                    .to_str()
+                    .is_ok_and(|value| origin_allowed(value, allowed))
+        }
+        None => true,
     }
 }
 
@@ -195,84 +224,95 @@ mod tests {
         headers
     }
 
+    fn uri(value: &str) -> Authority {
+        value.parse().unwrap()
+    }
+
     #[test]
-    fn http_1_1_requires_a_host_and_http_2_carries_the_authority_itself() {
-        use http::Version;
-        assert!(host_allowed(
-            Version::HTTP_11,
-            &hosts(&["127.0.0.1:1234"]),
-            &[]
-        ));
-        assert!(host_allowed(Version::HTTP_11, &hosts(&["[::1]"]), &[]));
-        assert!(!host_allowed(Version::HTTP_11, &hosts(&[]), &[]));
+    fn a_request_names_its_destination_in_host_or_authority() {
+        // HTTP/1.1 carries the destination in `Host`.
+        assert!(host_allowed(&hosts(&["127.0.0.1:1234"]), None, &[]));
+        assert!(host_allowed(&hosts(&["[::1]"]), None, &[]));
+        assert!(!host_allowed(&hosts(&[]), None, &[]));
+        assert!(!host_allowed(&hosts(&["example.com"]), None, &[]));
         assert!(!host_allowed(
-            Version::HTTP_11,
-            &hosts(&["example.com"]),
-            &[]
-        ));
-        assert!(!host_allowed(
-            Version::HTTP_11,
             &hosts(&["localhost", "localhost"]),
+            None,
             &[]
         ));
-        assert!(host_allowed(Version::HTTP_2, &hosts(&[]), &[]));
+        // HTTP/2 and HTTP/3 carry it in the protocol's authority.
+        assert!(host_allowed(&hosts(&[]), Some(&uri("127.0.0.1:1234")), &[]));
         assert!(host_allowed(
-            Version::HTTP_2,
             &hosts(&["localhost:1234"]),
+            Some(&uri("localhost:1234")),
+            &[]
+        ));
+        assert!(!host_allowed(&hosts(&[]), Some(&uri("example.com")), &[]));
+        // Both spellings must agree when both are present.
+        assert!(!host_allowed(
+            &hosts(&["localhost:1"]),
+            Some(&uri("localhost:2")),
             &[]
         ));
         assert!(!host_allowed(
-            Version::HTTP_2,
-            &hosts(&["example.com"]),
+            &hosts(&["localhost:1234"]),
+            Some(&uri("example.com:1234")),
             &[]
         ));
-        assert!(host_allowed(Version::HTTP_3, &hosts(&[]), &[]));
+        // An unreadable or userinfo-bearing spelling is refused.
         let mut unreadable = http::HeaderMap::new();
         unreadable.insert(
             http::header::HOST,
             http::HeaderValue::from_bytes(b"\xff").unwrap(),
         );
-        assert!(!host_allowed(Version::HTTP_2, &unreadable, &[]));
+        assert!(!host_allowed(&unreadable, Some(&uri("127.0.0.1")), &[]));
+        assert!(!host_allowed(&hosts(&["user@127.0.0.1"]), None, &[]));
+        assert!(!host_allowed(
+            &hosts(&[]),
+            Some(&uri("user@127.0.0.1")),
+            &[]
+        ));
     }
 
     #[test]
     fn a_configured_authority_is_trusted_besides_loopback() {
-        use http::Version;
         let allowed = authority_list(" ene.example.com , Desk.TS.NET:443 ");
         assert_eq!(
             allowed.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["ene.example.com", "desk.ts.net:443"]
         );
         // The tunnel forwards its public name; the operator named it.
+        assert!(host_allowed(&hosts(&["ene.example.com"]), None, &allowed));
         assert!(host_allowed(
-            Version::HTTP_11,
-            &hosts(&["ene.example.com"]),
-            &allowed
-        ));
-        assert!(host_allowed(
-            Version::HTTP_11,
             &hosts(&["ene.example.com:8443"]),
+            None,
             &allowed
         ));
-        assert!(host_allowed(
-            Version::HTTP_11,
-            &hosts(&["desk.ts.net:443"]),
-            &allowed
-        ));
+        assert!(host_allowed(&hosts(&["desk.ts.net:443"]), None, &allowed));
         // A named port is exact, and an unnamed host is not a wildcard.
+        assert!(!host_allowed(&hosts(&["desk.ts.net:8443"]), None, &allowed));
+        assert!(!host_allowed(&hosts(&["evil.example.com"]), None, &allowed));
         assert!(!host_allowed(
-            Version::HTTP_11,
-            &hosts(&["desk.ts.net:8443"]),
-            &allowed
-        ));
-        assert!(!host_allowed(
-            Version::HTTP_11,
-            &hosts(&["evil.example.com"]),
-            &allowed
-        ));
-        assert!(!host_allowed(
-            Version::HTTP_11,
             &hosts(&["127.0.0.1.evil.com"]),
+            None,
+            &allowed
+        ));
+        // The same list gates the authority HTTP/2 carries.
+        assert!(host_allowed(
+            &hosts(&[]),
+            Some(&uri("ene.example.com:443")),
+            &allowed
+        ));
+        // An entry that names a port does not match another one.
+        assert!(!host_allowed(
+            &hosts(&[]),
+            Some(&uri("desk.ts.net:8443")),
+            &allowed
+        ));
+        // Disagreeing spellings are refused even when both are named.
+        assert!(!host_allowed(
+            &hosts(&["ene.example.com"]),
+            Some(&uri("desk.ts.net:443")),
             &allowed
         ));
         // Origins use the same list and keep the same shape rules.
@@ -284,12 +324,29 @@ mod tests {
         // An entry with no port still matches a default-port origin.
         assert!(origin_allowed("https://ene.example.com", &allowed));
         // Nothing is trusted when the list is empty, whatever the listener.
+        assert!(!host_allowed(&hosts(&["ene.example.com"]), None, &[]));
         assert!(!host_allowed(
-            Version::HTTP_11,
-            &hosts(&["ene.example.com"]),
+            &hosts(&[]),
+            Some(&uri("ene.example.com")),
             &[]
         ));
         assert!(!origin_allowed("https://ene.example.com", &[]));
+    }
+
+    #[test]
+    fn a_repeated_origin_is_refused() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(
+            http::header::ORIGIN,
+            http::HeaderValue::from_static("http://127.0.0.1:1234"),
+        );
+        assert!(single_origin(&headers, &[]));
+        headers.append(
+            http::header::ORIGIN,
+            http::HeaderValue::from_static("http://127.0.0.1:1234"),
+        );
+        assert!(!single_origin(&headers, &[]));
+        assert!(single_origin(&hosts(&["127.0.0.1"]), &[]));
     }
 
     #[test]
@@ -302,18 +359,9 @@ mod tests {
 
     #[test]
     fn authority_ports_stay_lexical_and_origin_loopback_stays_broader() {
-        use http::Version;
         let allowed = authority_list("Example.COM:0443,[2001:db8::1]:443");
-        assert!(host_allowed(
-            Version::HTTP_11,
-            &hosts(&["EXAMPLE.com:0443"]),
-            &allowed
-        ));
-        assert!(!host_allowed(
-            Version::HTTP_11,
-            &hosts(&["example.com:443"]),
-            &allowed
-        ));
+        assert!(host_allowed(&hosts(&["EXAMPLE.com:0443"]), None, &allowed));
+        assert!(!host_allowed(&hosts(&["example.com:443"]), None, &allowed));
         assert!(!origin_allowed("https://example.com:0443", &allowed));
         assert!(origin_allowed("https://[2001:db8::1]", &allowed));
         for value in [
@@ -325,16 +373,10 @@ mod tests {
             "[::1]evil",
         ] {
             assert!(authority(value).is_none(), "{value}");
-            assert!(
-                !host_allowed(Version::HTTP_11, &hosts(&[value]), &allowed),
-                "{value}"
-            );
+            assert!(!host_allowed(&hosts(&[value]), None, &allowed), "{value}");
         }
         for host in ["127.0.0.2", "[0:0:0:0:0:0:0:1]", "LOCALHOST"] {
-            assert!(
-                !host_allowed(Version::HTTP_11, &hosts(&[host]), &[]),
-                "{host}"
-            );
+            assert!(!host_allowed(&hosts(&[host]), None, &[]), "{host}");
             assert!(origin_allowed(&format!("http://{host}"), &[]), "{host}");
         }
     }

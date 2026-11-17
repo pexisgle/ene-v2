@@ -283,3 +283,111 @@ async fn process_starts_over_a_companion_whose_model_was_never_bound() {
     );
     stop(&mut child).await;
 }
+
+/// The client helper opens a full-duplex stream: the host answers while the
+/// caller's input stream is still open. The voice input contract names
+/// HTTP/2, and the host's plain listener accepts h2c prior knowledge.
+#[tokio::test]
+async fn process_client_opens_the_bidirectional_voice_stream() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let runtime = temp.path().join("runtime");
+    let mut child = spawn(&state, &runtime);
+    let (endpoint, token) = discovery(&runtime).await;
+    let (transport, config) = ene_rpc::connect(&endpoint, &token).unwrap();
+    let settings = ene_rpc::SettingsServiceClient::new(transport.clone(), config.clone());
+    let host = ene_rpc::HostServiceClient::new(transport.clone(), config.clone());
+    let clients = ene_rpc::ClientServiceClient::new(transport.clone(), config.clone());
+    let voice = ene_rpc::VoiceServiceClient::new(transport, config);
+    settings
+        .update_settings(ene_rpc::UpdateSettingsRequest {
+            expected_revision: 1,
+            connections: vec![ene_rpc::ConnectionInput {
+                id: "stt".into(),
+                name: "stt".into(),
+                enabled: true,
+                kind: ene_rpc::ConnectionKind::CONNECTION_KIND_STT.into(),
+                config: Some(ene_rpc::ConnectionConfig {
+                    config: Some(ene_rpc::connection_config::Config::Stt(Box::new(
+                        ene_rpc::SttConnection {
+                            endpoint: Some(ene_rpc::ConnectionEndpoint {
+                                adapter: "openai".into(),
+                                endpoint: "https://api.openai.com/v1".into(),
+                                ..Default::default()
+                            })
+                            .into(),
+                            language_hints: vec!["en".into()],
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("the STT connection is stored");
+    settings
+        .register_credentials(ene_rpc::CredentialRequest {
+            id: "stt".into(),
+            secret: Some("dummy-key".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("the credential is stored for this session");
+    let companion = host
+        .create_companion(ene_rpc::CreateCompanionRequest {
+            name: "Mio".into(),
+            mind: "kind".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("a companion")
+        .view()
+        .id
+        .to_owned();
+    clients
+        .register_client(ene_rpc::RegisterClientRequest {
+            id: "c1".into(),
+            name: "desk".into(),
+            platform: "linux".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("a client");
+    let activation = clients
+        .activate(ene_rpc::ActivationRequest {
+            companion_id: companion,
+            client_id: "c1".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("the client becomes active")
+        .view()
+        .revision;
+    let mut call = voice
+        .stream_audio_input()
+        .await
+        .expect("the microphone stream opens");
+    call.send(ene_rpc::AudioInputChunk {
+        client_id: "c1".into(),
+        pcm_data: vec![0; 1_024],
+        sample_rate: 24_000,
+        activation_revision: activation,
+        ..Default::default()
+    })
+    .await
+    .expect("an audio frame");
+    let answered = tokio::time::timeout(
+        Duration::from_secs(10),
+        call.message::<ene_rpc::TranscriptionEvent>(),
+    )
+    .await
+    .expect("the host answers before the input stream closes")
+    .expect("the answer is not a transport failure")
+    .expect("the host sends a frame");
+    assert!(answered.view().is_speaking);
+    stop(&mut child).await;
+}
