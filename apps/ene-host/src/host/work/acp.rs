@@ -24,6 +24,7 @@ use agent_client_protocol::{
 };
 use bevy_ecs::prelude::*;
 
+use futures_util::StreamExt as _;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
 #[cfg(unix)]
@@ -42,13 +43,18 @@ use std::{
     },
     time::Duration,
 };
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
+use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 /// How many ACP events may queue before a backend waits. A child that
 /// floods notifications is slowed instead of grown.
 const QUEUE: usize = 256;
+
+/// The longest stderr line the host keeps. A diagnostic longer than this is
+/// not buffered: the reader closes the pipe, so the agent's next write fails
+/// instead of blocking on a pipe nobody drains.
+const MAX_STDERR_LINE: usize = 64 * 1024;
 
 /// How many commands may wait for the backend before a control call reports
 /// that it could not be delivered.
@@ -431,12 +437,7 @@ async fn run_backend(
     };
     let mut owned = tokio::task::JoinSet::new();
     if let Some(stderr) = child.stderr().take() {
-        owned.spawn(async move {
-            let mut lines = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "ene_host::acp", %line, "ACP agent stderr");
-            }
-        });
+        owned.spawn(drain_stderr(stderr));
     }
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
     let error = {
@@ -716,6 +717,27 @@ impl ActiveRun {
 
     fn finish(&self) {
         *crate::host::lock(&self.run_id) = None;
+    }
+}
+
+/// Forwards the agent's diagnostics until the pipe ends or a line exceeds
+/// [`MAX_STDERR_LINE`]. Reading stops there on purpose: the capped reader
+/// closes the pipe, so the agent sees a failed write rather than a full pipe
+/// and the host never buffers an unbounded line.
+async fn drain_stderr(stderr: impl tokio::io::AsyncRead + Unpin) {
+    let mut lines = FramedRead::new(stderr, LinesCodec::new_with_max_length(MAX_STDERR_LINE));
+    while let Some(line) = lines.next().await {
+        match line {
+            Ok(line) => tracing::debug!(target: "ene_host::acp", %line, "ACP agent stderr"),
+            Err(error) => {
+                tracing::debug!(
+                    target: "ene_host::acp",
+                    %error,
+                    "an ACP agent stderr line exceeded the cap; its diagnostics are no longer read"
+                );
+                return;
+            }
+        }
     }
 }
 
@@ -1096,6 +1118,26 @@ fn network_isolated(options: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    /// A line that never ends must stop the reader at the cap instead of
+    /// growing the host's memory with the agent's output.
+    #[tokio::test]
+    async fn an_unterminated_stderr_line_stops_at_the_cap() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let feed = tokio::spawn(async move {
+            let chunk = vec![b'x'; 4_096];
+            loop {
+                if writer.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), drain_stderr(reader))
+            .await
+            .expect("the reader stops at the cap instead of buffering forever");
+        feed.abort();
+    }
 
     /// A child that handles `SIGTERM` must be asked before it is killed: a
     /// kill-only stop would leave `graceful` empty even though the process

@@ -59,7 +59,7 @@ sha2.workspace = true
 subtle = "2"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
-tokio-util = { workspace = true, features = ["rt", "compat"] }
+tokio-util = { workspace = true, features = ["rt", "compat", "codec"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
