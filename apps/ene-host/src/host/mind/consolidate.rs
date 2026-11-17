@@ -317,33 +317,48 @@ fn turn_query(turns: &[Turn]) -> String {
     crate::host::db::truncate(&query, MAX_QUERY_CHARS)
 }
 
-/// What the background extraction task posts back to the ECS thread. The
-/// batch travels with the result because it holds the commit input.
-type Reply = (Batch, std::result::Result<Vec<Fact>, String>);
+/// What the background extraction task posts back to the ECS thread.
+///
+/// The batch is the one the task filled in, and it is present only when the
+/// task reached its result. A task that stopped early has no commit input,
+/// only the companion whose slot it held.
+struct Reply {
+    companion: String,
+    batch: Option<Batch>,
+    result: std::result::Result<Vec<Fact>, String>,
+}
 
 /// The one report a background job makes. A job that panics, or is dropped
-/// before it reports, still sends an error: the companion's slot is released
+/// before it reports, still sends a failure: the companion's slot is released
 /// and the retry delay applies, instead of staying claimed forever.
 struct Report {
     sender: crossbeam_channel::Sender<Reply>,
-    batch: Batch,
+    companion: String,
     sent: bool,
 }
 
 impl Report {
-    fn send(mut self, result: std::result::Result<Vec<Fact>, String>) {
+    /// Reports the batch the task filled in, together with its result. The
+    /// caller moves the batch here, so the commit reads the same value the
+    /// extraction wrote its context into.
+    fn send(mut self, batch: Batch, result: std::result::Result<Vec<Fact>, String>) {
         self.sent = true;
-        let _ = self.sender.send((self.batch.clone(), result));
+        let _ = self.sender.send(Reply {
+            companion: self.companion.clone(),
+            batch: Some(batch),
+            result,
+        });
     }
 }
 
 impl Drop for Report {
     fn drop(&mut self) {
         if !self.sent {
-            let _ = self.sender.send((
-                self.batch.clone(),
-                Err("the consolidation task stopped before it reported".into()),
-            ));
+            let _ = self.sender.send(Reply {
+                companion: self.companion.clone(),
+                batch: None,
+                result: Err("the consolidation task stopped before it reported".into()),
+            });
         }
     }
 }
@@ -572,7 +587,7 @@ fn start(
     let credentials = sources.credentials.cloned();
     let report = Report {
         sender,
-        batch: batch.clone(),
+        companion: companion_id.to_owned(),
         sent: false,
     };
     runtime.spawn(async move {
@@ -591,7 +606,7 @@ fn start(
         }
         .await
         .map_err(|error: HostError| error.to_string());
-        report.send(result);
+        report.send(batch, result);
     });
 }
 
@@ -600,13 +615,18 @@ fn drain_consolidation(
     mut jobs: ResMut<Consolidation>,
     mut notifier: Option<ResMut<Notifier>>,
 ) {
-    while let Ok((batch, result)) = jobs.receiver.try_recv() {
-        let message = match result {
-            Ok(facts) => match store.consolidate(&batch, &facts) {
+    while let Ok(reply) = jobs.receiver.try_recv() {
+        let Reply {
+            companion,
+            batch,
+            result,
+        } = reply;
+        let message = match (batch, result) {
+            (Some(batch), Ok(facts)) => match store.consolidate(&batch, &facts) {
                 Ok(commit) => {
-                    jobs.succeed(&batch.companion_id);
+                    jobs.succeed(&companion);
                     tracing::debug!(
-                        companion = %batch.companion_id,
+                        companion = %companion,
                         inserted = commit.inserted,
                         updated = commit.updated,
                         cursor = %commit.cursor,
@@ -616,12 +636,14 @@ fn drain_consolidation(
                 }
                 Err(error) => error.to_string(),
             },
-            Err(error) => error,
+            (_, Err(error)) => error,
+            // The sender only reports facts with the batch it filled in.
+            (None, Ok(_)) => ("the consolidation task reported facts without its batch").into(),
         };
-        jobs.fail(&batch.companion_id, Instant::now());
+        jobs.fail(&companion, Instant::now());
         if let Some(notifier) = notifier.as_mut() {
             notifier.notice(
-                Some(&batch.companion_id),
+                Some(&companion),
                 "consolidation_failed",
                 &crate::host::db::truncate(&message, 300),
             );
@@ -634,6 +656,7 @@ mod tests {
     use super::*;
     use crate::host::db::memories::MemoryRecord;
     use rig_core::conversation::MessageId;
+    use std::sync::Arc;
 
     fn answer(conversation: &mut CoreConversation, user: &str, reply: &str) -> MessageId {
         let start = conversation.push(Message::user(user));
@@ -668,18 +691,436 @@ mod tests {
         assert!(!jobs.begin("ene", now), "one job per companion");
         drop(Report {
             sender: jobs.sender(),
-            batch: batch(None, "1"),
+            companion: "ene".into(),
             sent: false,
         });
-        let (reported, result) = jobs.receiver.try_recv().expect("the guard reports");
-        assert!(result.is_err(), "a missing report is a failure");
-        assert_eq!(reported.companion_id, "ene");
-        jobs.fail(&reported.companion_id, Instant::now());
+        let reported = jobs.receiver.try_recv().expect("the guard reports");
+        assert!(reported.result.is_err(), "a missing report is a failure");
+        assert!(
+            reported.batch.is_none(),
+            "an early stop has no commit input to report"
+        );
+        assert_eq!(reported.companion, "ene");
+        jobs.fail(&reported.companion, Instant::now());
         assert!(!jobs.running.contains("ene"), "the slot is free again");
         assert!(
             jobs.begin("ene", now + RETRY_DELAY + Duration::from_secs(1)),
             "the next attempt after the retry delay starts"
         );
+    }
+
+    // === The job path end to end: start -> extraction -> Report -> drain ===
+
+    fn companion() -> crate::host::mind::Companion {
+        use crate::host::json::JsonDoc;
+        use crate::host::mind::{Assignment, Assignments};
+        let assignment = Assignment {
+            connection_id: "c1".into(),
+            model_id: "test-model".into(),
+        };
+        crate::host::mind::Companion {
+            id: "ene".into(),
+            name: "ene".into(),
+            mind: "kind".into(),
+            profile: Default::default(),
+            profile_revision: 1,
+            state: Default::default(),
+            state_revision: 1,
+            body: JsonDoc::empty(),
+            voice: JsonDoc::empty(),
+            assignments: Assignments {
+                companion: assignment.clone(),
+                task: assignment.clone(),
+                consolidation: Some(assignment),
+                ..Default::default()
+            },
+            persona: None,
+            voice_identifier: None,
+            revision: 1,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// A store with one LLM connection and the companion's consolidation
+    /// assignment, which is what `start` resolves its model through.
+    fn configured(base: &str) -> Store {
+        use crate::host::settings::{
+            Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
+        };
+        let store = store();
+        let revision = store.settings_revision().unwrap();
+        store
+            .update_settings(
+                revision,
+                &[(
+                    Connection {
+                        id: "c1".into(),
+                        name: "fixture".into(),
+                        enabled: true,
+                        kind: ConnectionKind::Llm,
+                        config: ConnectionConfig::Llm(LlmConnection {
+                            endpoint: Endpoint {
+                                adapter: "openrouter".into(),
+                                endpoint: base.into(),
+                                options_schema: String::new(),
+                                options: String::new(),
+                            },
+                            model_ids: vec!["test-model".into()],
+                        }),
+                        credential_state: CredentialState::Registered,
+                        revision: 1,
+                        last_check: None,
+                    },
+                    0,
+                )],
+            )
+            .unwrap();
+        store.insert_companion(&companion()).unwrap();
+        store
+    }
+
+    struct Setup {
+        store: Store,
+        credentials: Credentials,
+        embeddings: Embeddings,
+        models: Models,
+        providers: crate::host::providers::Providers,
+    }
+
+    fn setup(base: &str) -> Setup {
+        let store = configured(base);
+        let credentials = Credentials::new(true);
+        credentials.remember("c1", "test-key".into());
+        Setup {
+            store,
+            credentials,
+            embeddings: Embeddings::default(),
+            models: Models::default(),
+            providers: crate::host::providers::Providers::none(),
+        }
+    }
+
+    fn sources<'a>(setup: &'a Setup, runtime: Option<&'a tokio::runtime::Handle>) -> Sources<'a> {
+        Sources {
+            store: &setup.store,
+            runtime,
+            embeddings: &setup.embeddings,
+            credentials: Some(&setup.credentials),
+            models: &setup.models,
+            providers: &setup.providers,
+        }
+    }
+
+    /// A local OpenAI-compatible endpoint that answers one extraction call
+    /// with `facts`. `hold` keeps the answer back until the test releases it.
+    struct ExtractionServer {
+        base: String,
+        requested: tokio::sync::oneshot::Receiver<()>,
+        release: Arc<tokio::sync::Notify>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn serve_extraction(facts: serde_json::Value, hold: bool) -> ExtractionServer {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (requested, received) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server_release = Arc::clone(&release);
+        let task = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let Ok(read) = socket.read(&mut chunk).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+                let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&buffer[..end]);
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if buffer.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            eprintln!(
+                "SERVER REQUEST: {}",
+                String::from_utf8_lossy(&buffer[..buffer.len().min(400)])
+            );
+            let _ = requested.send(());
+            if hold {
+                server_release.notified().await;
+            }
+            let arguments = serde_json::json!({ "facts": facts }).to_string();
+            let body = serde_json::json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": { "name": "submit", "arguments": arguments }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+            })
+            .to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+            let _ = socket.flush().await;
+        });
+        ExtractionServer {
+            base,
+            requested: received,
+            release,
+            task,
+        }
+    }
+
+    /// Runs the drain exactly as the host's Update schedule does, until the
+    /// companion's slot is released by a real reply.
+    async fn drain_until_settled(app: &mut App) {
+        let started = Instant::now();
+        loop {
+            app.update();
+            if app.world().resource::<Consolidation>().running.is_empty() {
+                return;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the job did not settle"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn drain_app(store: &Store, jobs: Consolidation) -> App {
+        let mut app = App::new();
+        app.insert_resource(store.clone())
+            .insert_resource(jobs)
+            .insert_resource(Notifier::new())
+            .add_systems(Update, drain_consolidation);
+        app
+    }
+
+    fn notices(notifier: &mut Notifier) -> Vec<String> {
+        notifier.flush();
+        let cursor = notifier.cursor();
+        let start = ene_rpc::Cursor {
+            epoch: cursor.epoch,
+            seq: 0,
+            ..Default::default()
+        };
+        notifier
+            .replay(&start)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|event| match event.event.as_ref()? {
+                ene_rpc::notification::Event::Generic(host) => {
+                    host.payload.as_option().map(|payload| payload.json.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn turn() -> Vec<Turn> {
+        vec![Turn {
+            turn_id: "5".into(),
+            text: "ユーザー: 紅茶の店はどこ\n".into(),
+        }]
+    }
+
+    fn fact() -> serde_json::Value {
+        serde_json::json!([{
+            "content": "紅茶の店は新宿にある",
+            "importance": 7,
+            "audience": "",
+            "supersedes": "m1",
+            "cited_memory_ids": []
+        }])
+    }
+
+    /// The normal path: the job retrieves a non-empty context, the model
+    /// supersedes the existing memory, and the drain commits the batch the
+    /// task filled in. An empty context would insert a second row instead.
+    #[tokio::test]
+    async fn a_job_commits_the_context_it_retrieved_and_updates_the_memory() {
+        let server = serve_extraction(fact(), false).await;
+        let setup = setup(&server.base);
+        let existing = setup
+            .store
+            .insert_memory(new_memory("m1", "東京都の紅茶の店"))
+            .unwrap();
+        let mut jobs = Consolidation::default();
+        {
+            let runtime = tokio::runtime::Handle::current();
+            let mut sources = sources(&setup, Some(&runtime));
+            start(&mut sources, &mut jobs, "ene", None, turn(), Instant::now());
+        }
+        let mut app = drain_app(&setup.store, jobs);
+        drain_until_settled(&mut app).await;
+        let updated = setup.store.memory(&existing.id).unwrap().unwrap();
+        assert_eq!(updated.content, "紅茶の店は新宿にある");
+        assert_eq!(updated.importance, 7);
+        assert_eq!(
+            setup.store.consolidation_cursor("ene").unwrap(),
+            Some("5".into())
+        );
+        let count: i64 = setup
+            .store
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "the superseded memory is updated, not inserted again"
+        );
+        assert!(app.world().resource::<Consolidation>().running.is_empty());
+        server.task.abort();
+    }
+
+    /// The revision the batch captured is checked at commit time: a memory
+    /// changed while the model ran turns into a conflict, and neither the
+    /// memory nor the cursor moves.
+    #[tokio::test]
+    async fn a_job_that_loses_the_revision_conflict_rolls_back_memory_and_cursor() {
+        let server = serve_extraction(fact(), true).await;
+        let setup = setup(&server.base);
+        let existing = setup
+            .store
+            .insert_memory(new_memory("m1", "東京都の紅茶の店"))
+            .unwrap();
+        let mut jobs = Consolidation::default();
+        {
+            let runtime = tokio::runtime::Handle::current();
+            let mut sources = sources(&setup, Some(&runtime));
+            start(&mut sources, &mut jobs, "ene", None, turn(), Instant::now());
+        }
+        tokio::time::timeout(Duration::from_secs(10), server.requested)
+            .await
+            .expect("the extraction starts")
+            .unwrap();
+        // The memory changes while the model is still reading its context.
+        setup
+            .store
+            .control_memory(
+                &existing.id,
+                crate::host::db::memories::MemoryActionKind::Share,
+                Some("other"),
+            )
+            .unwrap();
+        let changed = setup.store.memory(&existing.id).unwrap().unwrap();
+        assert_ne!(changed.memory_revision, existing.memory_revision);
+        server.release.notify_one();
+        let mut app = drain_app(&setup.store, jobs);
+        drain_until_settled(&mut app).await;
+        let after = setup.store.memory(&existing.id).unwrap().unwrap();
+        assert_eq!(after.content, existing.content, "the update rolled back");
+        assert_eq!(after.memory_revision, changed.memory_revision);
+        assert_eq!(
+            setup.store.consolidation_cursor("ene").unwrap(),
+            None,
+            "the cursor did not advance"
+        );
+        let jobs = app.world().resource::<Consolidation>();
+        assert!(jobs.retry_at.contains_key("ene"), "the failure is retried");
+        assert!(jobs.running.is_empty());
+        let mut app = app;
+        let mut notifier = app.world_mut().resource_mut::<Notifier>();
+        let notices = notices(&mut notifier);
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.contains("memory changed while consolidation was running")),
+            "{notices:?}"
+        );
+        server.task.abort();
+    }
+
+    /// A task dropped before it reports (the owner went away) still frees the
+    /// slot through the drop guard and reports a failure the drain records.
+    #[tokio::test]
+    async fn a_job_dropped_before_it_reports_releases_the_slot_and_retries() {
+        let server = serve_extraction(serde_json::json!([]), true).await;
+        let setup = setup(&server.base);
+        let mut jobs = Consolidation::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        {
+            let handle = runtime.handle().clone();
+            let mut sources = sources(&setup, Some(&handle));
+            start(&mut sources, &mut jobs, "ene", None, turn(), Instant::now());
+        }
+        tokio::task::spawn_blocking(move || {
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), server.requested)
+                    .await
+                    .expect("the extraction starts")
+                    .unwrap();
+            });
+            // The owner goes away while the task is waiting for the provider.
+            runtime.shutdown_timeout(Duration::from_millis(100));
+        })
+        .await
+        .unwrap();
+        let mut app = drain_app(&setup.store, jobs);
+        drain_until_settled(&mut app).await;
+        {
+            let jobs = app.world().resource::<Consolidation>();
+            assert!(!jobs.running.contains("ene"), "the slot is released");
+            assert!(jobs.retry_at.contains_key("ene"));
+        }
+        {
+            let mut notifier = app.world_mut().resource_mut::<Notifier>();
+            let notices = notices(&mut notifier);
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice
+                        .contains("the consolidation task stopped before it reported")),
+                "{notices:?}"
+            );
+        }
+        assert!(
+            app.world_mut()
+                .resource_mut::<Consolidation>()
+                .begin("ene", Instant::now() + RETRY_DELAY + Duration::from_secs(1)),
+            "a retry can start after the delay"
+        );
+        server.task.abort();
     }
 
     fn new_memory(id: &str, content: &str) -> MemoryRecord {
