@@ -7,14 +7,12 @@
 //! broker, so no credential ever enters the guest.
 use super::{BoxFuture, HttpResult, SAMPLE_RATE, SetupError, SttEngine, TtsEngine};
 use crate::host::{
-    error::HostError,
     model::Credentials,
     providers::{BrokerServices, Grant, Providers},
     settings::{Connection, ConnectionKind},
 };
 use ene_plugin::{
-    AudioFormat, Extension, Operation as PluginOperation, SpeechCapabilities, SynthesisRequest,
-    TranscriptionRequest,
+    AudioFormat, Extension, Operation as PluginOperation, SynthesisRequest, TranscriptionRequest,
 };
 use ene_plugin_runtime::{instance::Services, service::HttpBroker};
 use std::sync::Arc;
@@ -170,9 +168,3 @@ fn model_of(connection: &Connection) -> String {
 fn options_of(connection: &Connection) -> serde_json::Value {
     serde_json::from_str(&connection.endpoint().options).unwrap_or(serde_json::Value::Null)
 }
-
-/// Keeps the capability type referenced by the contract this module relies on.
-const _: fn() = || {
-    let _ = std::mem::size_of::<SpeechCapabilities>();
-    let _ = std::mem::size_of::<HostError>();
-};

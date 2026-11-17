@@ -7,7 +7,6 @@
 //! the transport (the driver, the fold, telemetry, error enrichment) is rig's,
 //! so a plugin model behaves like a built-in one.
 use super::super::providers::Running;
-use crate::host::error::HostError;
 use ene_plugin::{EmbeddingRequest, Operation as PluginOperation};
 use ene_plugin_runtime::instance::Services;
 use futures_util::stream;
@@ -141,6 +140,3 @@ impl Services for NoServices {
         Box::pin(async { Ok(()) })
     }
 }
-
-/// Keeps the import used when the module is compiled without the callers.
-const _: fn(&HostError) = |_| {};
