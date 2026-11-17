@@ -7,24 +7,20 @@ use super::{
     db::{self, Result, Store},
     delegation,
     error::HostError,
-    model::{self, Credentials},
-    net,
+    model::Credentials,
     notify::Notifier,
     permission::{self, ApprovalDecision, ApprovalStatus},
-    providers::Providers,
     resources::HostRuntime,
-    settings::{Connection, ConnectionConfig, ConnectionKind, Endpoint},
+    settings::{Connection, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use futures_util::{StreamExt, stream::FuturesOrdered};
 use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
-use serde::{Deserialize, de::DeserializeOwned};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
-    io::Cursor,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
@@ -46,7 +42,6 @@ const PLAYBACK_GRACE: Duration = Duration::from_secs(3);
 const TRANSCRIPTION_MEMORY: usize = 128;
 const MAX_SENTENCES: u32 = 64;
 const AUDIO_QUEUE: usize = 32;
-const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// Completed companion utterances the host relays to the peers without a new
 /// user input before it stops the autonomous chain (voice-avatar.md §5.3).
 const MAX_RELAY: u32 = 5;
@@ -80,292 +75,11 @@ pub(crate) trait SttEngine: Send + Sync + 'static {
     ) -> BoxFuture<'a, HttpResult<String>>;
 }
 
+/// Engines a test injects to stand in for the plugin path.
 #[derive(Resource, Default)]
-struct Engines {
-    tts: Option<Arc<dyn TtsEngine>>,
-    stt: Option<Arc<dyn SttEngine>>,
-}
-
-#[derive(Deserialize, Default)]
-struct Options {
-    protocol: Option<String>,
-    model: Option<String>,
-    voice: Option<String>,
-    language: Option<String>,
-    path: Option<String>,
-    audio_query_path: Option<String>,
-    synthesis_path: Option<String>,
-    speaker: Option<u64>,
-    speed: Option<f64>,
-    timeout_ms: Option<u64>,
-}
-
-fn engine_setup(
-    connection: &Connection,
-    credentials: Option<&Credentials>,
-    label: &str,
-) -> std::result::Result<(String, Option<String>, Options), SetupError> {
-    let endpoint = connection.endpoint();
-    let base = base_url(endpoint, label)?;
-    let options = options(endpoint, label)?;
-    let secret = credential(connection, credentials, &base, label)?;
-    Ok((base, secret, options))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Protocol {
-    OpenAiTts,
-    Voicevox,
-    OpenAiStt,
-    Raw,
-}
-
-struct HttpEngine {
-    base: String,
-    protocol: Protocol,
-    model: String,
-    voice: String,
-    language: Option<String>,
-    path: String,
-    query_path: String,
-    synthesis_path: String,
-    speaker: u32,
-    speed: Option<f32>,
-    /// The engine's own request budget, from the connection options.
-    timeout: Duration,
-    secret: Option<String>,
-}
-
-impl HttpEngine {
-    fn new(
-        connection: Connection,
-        credentials: Option<&Credentials>,
-        kind: ConnectionKind,
-    ) -> std::result::Result<Self, SetupError> {
-        let tts = kind == ConnectionKind::Tts;
-        let label = if tts { "TTS" } else { "STT" };
-        let endpoint = connection.endpoint().clone();
-        let (base, secret, options) = engine_setup(&connection, credentials, label)?;
-        let protocol = match (tts, nonempty(options.protocol).as_deref()) {
-            (true, None) if endpoint.adapter == "voicevox" => Protocol::Voicevox,
-            (true, None | Some("openai")) => Protocol::OpenAiTts,
-            (true, Some("voicevox")) => Protocol::Voicevox,
-            (false, None | Some("openai")) => Protocol::OpenAiStt,
-            (false, Some("raw")) => Protocol::Raw,
-            (_, Some(other)) => {
-                return Err(SetupError::Unsupported(format!(
-                    "the {label} adapter protocol `{other}` is not supported"
-                )));
-            }
-        };
-        let default_voice = match &connection.config {
-            ConnectionConfig::Tts(config) if tts => config.voice_ids.first().cloned(),
-            _ => None,
-        };
-        let hints: &[String] = match &connection.config {
-            ConnectionConfig::Stt(config) if !tts => &config.language_hints,
-            _ => &[],
-        };
-        // Bound the deadline this connection can set on the shared client.
-        let timeout = Duration::from_millis(
-            options
-                .timeout_ms
-                .unwrap_or(if tts { 20_000 } else { 30_000 })
-                .clamp(1_000, 300_000),
-        );
-        Ok(Self {
-            base,
-            protocol,
-            model: nonempty(options.model)
-                .unwrap_or_else(|| if tts { "tts-1" } else { "whisper-1" }.into()),
-            voice: nonempty(options.voice)
-                .or(default_voice)
-                .unwrap_or_else(|| "alloy".into()),
-            language: nonempty(options.language).or_else(|| hints.first().cloned()),
-            path: path(
-                options.path,
-                if tts {
-                    "/audio/speech"
-                } else {
-                    "/audio/transcriptions"
-                },
-            ),
-            query_path: path(options.audio_query_path, "/audio_query"),
-            synthesis_path: path(options.synthesis_path, "/synthesis"),
-            speaker: options.speaker.unwrap_or(1).min(u64::from(u32::MAX)) as u32,
-            speed: options.speed.map(|speed| speed as f32),
-            timeout,
-            secret,
-        })
-    }
-
-    /// Applies the engine's deadline and bearer token, checks the status, and
-    /// reads the response body up to the shared size limit.
-    async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
-        let response = post(call.timeout(self.timeout), self.secret.as_deref(), what).await?;
-        net::read_body(response, MAX_BODY_BYTES, what).await
-    }
-
-    /// Rig 0.46's reqwest transport reads successful bodies without a cap.
-    /// Keep this wire on `exchange` so custom paths retain the bounded read
-    /// and the connection's request deadline.
-    async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
-        let mut body = serde_json::json!({
-            "model": self.model, "voice": if voice.is_empty() { &self.voice } else { &voice },
-            "input": text, "response_format": "pcm",
-        });
-        if let Some(speed) = self.speed {
-            body["speed"] = serde_json::json!(speed);
-        }
-        let call = net::client()?
-            .post(format!("{}{}", self.base, self.path))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_string());
-        Ok((self.exchange(call, "TTS").await?, SAMPLE_RATE))
-    }
-
-    async fn voicevox(&self, text: String) -> HttpResult<(Vec<u8>, u32)> {
-        let encoded: String = url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
-        let client = net::client()?;
-        let call = client.post(format!(
-            "{}{}?text={encoded}&speaker={}",
-            self.base, self.query_path, self.speaker
-        ));
-        let mut body: serde_json::Value =
-            serde_json::from_slice(&self.exchange(call, "TTS").await?)
-                .map_err(|_| "the TTS endpoint answered a non-JSON audio query".to_owned())?;
-        if let Some(speed) = self.speed {
-            body["speedScale"] = serde_json::json!(speed);
-        }
-        let call = client
-            .post(format!(
-                "{}{}?speaker={}",
-                self.base, self.synthesis_path, self.speaker
-            ))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_string());
-        parse_wav(&self.exchange(call, "TTS").await?)
-    }
-
-    async fn openai_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm, sample_rate)?)
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
-            .map_err(|error| format!("the STT multipart body: {error}"))?;
-        let mut form = reqwest::multipart::Form::new()
-            .part("file", file)
-            .text("model", self.model.clone());
-        if let Some(language) = &self.language {
-            form = form.text("language", language.clone());
-        }
-        let call = net::client()?
-            .post(format!("{}{}", self.base, self.path))
-            .multipart(form.text("response_format", "json"));
-        let body = self.exchange(call, "STT").await?;
-        let value: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|_| "the STT endpoint answered a non-JSON transcript".to_owned())?;
-        Ok(value["text"].as_str().unwrap_or_default().trim().to_owned())
-    }
-
-    async fn raw_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        let call = net::client()?
-            .post(format!("{}{}", self.base, self.path))
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(wav_wrap(&pcm, sample_rate)?);
-        String::from_utf8(self.exchange(call, "STT").await?)
-            .map(|text| text.trim().to_owned())
-            .map_err(|_| "the STT endpoint answered a non-UTF-8 transcript".to_owned())
-    }
-}
-
-impl TtsEngine for HttpEngine {
-    fn synthesize<'a>(
-        &'a self,
-        text: String,
-        voice: String,
-    ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
-        Box::pin(async move {
-            match self.protocol {
-                Protocol::OpenAiTts => self.openai_tts(text, voice).await,
-                Protocol::Voicevox => self.voicevox(text).await,
-                Protocol::OpenAiStt | Protocol::Raw => {
-                    Err("the TTS engine received an STT protocol".into())
-                }
-            }
-        })
-    }
-}
-
-impl SttEngine for HttpEngine {
-    fn transcribe<'a>(
-        &'a self,
-        pcm: Vec<u8>,
-        sample_rate: u32,
-    ) -> BoxFuture<'a, HttpResult<String>> {
-        Box::pin(async move {
-            match self.protocol {
-                Protocol::OpenAiStt => self.openai_stt(pcm, sample_rate).await,
-                Protocol::Raw => self.raw_stt(pcm, sample_rate).await,
-                Protocol::OpenAiTts | Protocol::Voicevox => {
-                    Err("the STT engine received a TTS protocol".into())
-                }
-            }
-        })
-    }
-}
-
-async fn post(
-    call: reqwest::RequestBuilder,
-    secret: Option<&str>,
-    label: &str,
-) -> HttpResult<reqwest::Response> {
-    let call = match secret {
-        Some(secret) => call.bearer_auth(secret),
-        None => call,
-    };
-    let response = call
-        .send()
-        .await
-        .map_err(|error| format!("the {label} endpoint is unreachable: {error}"))?;
-    if response.status().is_success() {
-        Ok(response)
-    } else {
-        Err(format!(
-            "the {label} endpoint answered {}",
-            response.status().as_u16()
-        ))
-    }
-}
-
-fn options<T: DeserializeOwned + Default>(
-    endpoint: &Endpoint,
-    label: &str,
-) -> std::result::Result<T, SetupError> {
-    if endpoint.options.trim().is_empty() {
-        return Ok(T::default());
-    }
-    serde_json::from_str(&endpoint.options).map_err(|error| {
-        SetupError::Unsupported(format!(
-            "the {label} connection options are not JSON: {error}"
-        ))
-    })
-}
-
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
-}
-
-fn path(value: Option<String>, default: &str) -> String {
-    nonempty(value).map_or_else(
-        || default.to_owned(),
-        |path| {
-            if path.starts_with('/') {
-                path
-            } else {
-                format!("/{path}")
-            }
-        },
-    )
+pub(crate) struct Engines {
+    pub(crate) tts: Option<Arc<dyn TtsEngine>>,
+    pub(crate) stt: Option<Arc<dyn SttEngine>>,
 }
 
 pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
@@ -376,16 +90,13 @@ pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine
         return Ok(Arc::clone(engine));
     }
     let connection = voice_connection(world, ConnectionKind::Tts)?;
-    // A plugin that serves this connection's adapter answers instead of the
-    // built-in HTTP client, so a custom protocol needs no host change.
-    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Tts)? {
-        return Ok(Arc::new(engine));
-    }
-    Ok(Arc::new(HttpEngine::new(
-        connection,
-        world.get_resource::<Credentials>(),
-        ConnectionKind::Tts,
-    )?))
+    let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Tts)? else {
+        return Err(SetupError::Unsupported(format!(
+            "the TTS adapter `{}` is not served by an installed plugin",
+            connection.endpoint().adapter
+        )));
+    };
+    Ok(Arc::new(engine))
 }
 
 pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine>, SetupError> {
@@ -396,14 +107,13 @@ pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine
         return Ok(Arc::clone(engine));
     }
     let connection = voice_connection(world, ConnectionKind::Stt)?;
-    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt)? {
-        return Ok(Arc::new(engine));
-    }
-    Ok(Arc::new(HttpEngine::new(
-        connection,
-        world.get_resource::<Credentials>(),
-        ConnectionKind::Stt,
-    )?))
+    let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt)? else {
+        return Err(SetupError::Unsupported(format!(
+            "the STT adapter `{}` is not served by an installed plugin",
+            connection.endpoint().adapter
+        )));
+    };
+    Ok(Arc::new(engine))
 }
 
 /// The plugin engine for `connection`, when a plugin serves its adapter.
@@ -455,31 +165,6 @@ fn voice_connection(
         )));
     }
     Ok(connection)
-}
-
-fn base_url(endpoint: &Endpoint, label: &str) -> std::result::Result<String, SetupError> {
-    let base = endpoint.endpoint.trim().trim_end_matches('/');
-    url::Url::parse(base)
-        .map_err(|_| SetupError::Broken(format!("the {label} connection endpoint is not a URL")))?;
-    Ok(base.to_owned())
-}
-
-/// The secret to send, if the operator registered one. A local engine that
-/// takes any key is the operator's own choice, so a missing one is not an
-/// error here.
-fn credential(
-    connection: &Connection,
-    credentials: Option<&Credentials>,
-    _base: &str,
-    _label: &str,
-) -> std::result::Result<Option<String>, SetupError> {
-    let Some(credentials) = credentials else {
-        return Ok(None);
-    };
-    // The built-in adapters answer for this path. A connection a plugin serves
-    // was resolved before the native engine was built.
-    model::connection_secret(connection, Some(credentials), &Providers::none())
-        .map_err(|error| SetupError::Broken(error.to_string()))
 }
 
 type ResamplerCache = Option<(u32, u32, rubato::Fft<f32>)>;
@@ -545,92 +230,6 @@ fn resample_mono(
         pcm.extend_from_slice(&value.to_le_bytes());
     }
     Ok(pcm)
-}
-
-fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
-    let mut wav = Cursor::new(Vec::new());
-    write_wav(&mut wav, pcm, sample_rate)?;
-    Ok(wav.into_inner())
-}
-
-fn wav_sample_count(samples: usize) -> HttpResult<u32> {
-    let count =
-        u32::try_from(samples).map_err(|_| "the audio is too large for a WAV".to_owned())?;
-    // Mono i16 uses a 44-byte header, with 36 bytes counted in the RIFF size.
-    if count
-        .checked_mul(2)
-        .and_then(|bytes| bytes.checked_add(36))
-        .is_none()
-        || samples
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(44))
-            .is_none()
-    {
-        return Err("the audio is too large for a WAV".into());
-    }
-    Ok(count)
-}
-
-fn write_wav<W: std::io::Write + std::io::Seek>(
-    wav: &mut W,
-    pcm: &[u8],
-    sample_rate: u32,
-) -> HttpResult<()> {
-    let (samples, remainder) = pcm.as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err("the audio has an odd number of PCM bytes".to_owned());
-    }
-    let count = wav_sample_count(samples.len())?;
-    if sample_rate == 0 || sample_rate.checked_mul(2).is_none() {
-        return Err("the audio sample rate cannot be written to a WAV".into());
-    }
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::new(wav, spec)
-        .map_err(|error| format!("the audio WAV header could not be created: {error}"))?;
-    let mut batch = writer.get_i16_writer(count);
-    for sample in samples {
-        batch.write_sample(i16::from_le_bytes(*sample));
-    }
-    batch
-        .flush()
-        .map_err(|error| format!("the audio WAV samples could not be written: {error}"))?;
-    writer
-        .finalize()
-        .map_err(|error| format!("the audio WAV could not be finalized: {error}"))
-}
-
-fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
-    let reader = hound::WavReader::new(Cursor::new(bytes))
-        .map_err(|_| "the TTS endpoint did not return a valid 16-bit PCM WAV".to_owned())?;
-    let spec = reader.spec();
-    if spec.sample_format != hound::SampleFormat::Int {
-        return Err("the TTS endpoint returned a WAV that is not PCM".into());
-    }
-    if spec.bits_per_sample != 16 {
-        return Err("the TTS endpoint returned audio that is not 16-bit PCM".into());
-    }
-    if spec.channels == 0 {
-        return Err("the TTS endpoint returned a WAV without channels".into());
-    }
-    let channels = usize::from(spec.channels);
-    let mut pcm = Vec::with_capacity(usize::try_from(reader.duration()).unwrap_or(0) * 2);
-    let mut frame = 0i32;
-    for (index, sample) in reader.into_samples::<i16>().enumerate() {
-        let sample = sample.map_err(|_| "the TTS endpoint returned a truncated WAV")?;
-        frame += i32::from(sample);
-        if index % channels == channels - 1 {
-            let mixed =
-                (frame / channels as i32).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-            pcm.extend_from_slice(&mixed.to_le_bytes());
-            frame = 0;
-        }
-    }
-    Ok((pcm, spec.sample_rate))
 }
 
 #[derive(Clone)]

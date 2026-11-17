@@ -350,41 +350,37 @@ mod tests {
     use rig_ecs::prelude::Update;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    type Captured = Arc<std::sync::Mutex<Vec<(u32, Vec<i16>)>>>;
+
+    struct RecordingStt(Captured);
+
+    impl SttEngine for RecordingStt {
+        fn transcribe<'a>(
+            &'a self,
+            pcm: Vec<u8>,
+            sample_rate: u32,
+        ) -> voice::BoxFuture<'a, std::result::Result<String, String>> {
+            Box::pin(async move {
+                let samples = pcm
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| i16::from_le_bytes(*pair))
+                    .collect();
+                let mut received = self.0.lock().unwrap();
+                received.push((sample_rate, samples));
+                Ok(format!("capture {}", received.len()))
+            })
+        }
+    }
+
     #[tokio::test]
     async fn microphone_stream_keeps_binding_echo_and_rate_boundaries() {
-        use crate::host::settings::{
-            Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, SttConnection,
-        };
         use connectrpc::StreamMessage;
         use w::VoiceService;
 
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let received = captured.clone();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                axum::Router::new().route(
-                    "/audio/transcriptions",
-                    axum::routing::post(move |body: bytes::Bytes| {
-                        let received = received.clone();
-                        async move {
-                            let mut wav =
-                                hound::WavReader::new(std::io::Cursor::new(body)).unwrap();
-                            let rate = wav.spec().sample_rate;
-                            let samples =
-                                wav.samples::<i16>().collect::<Result<Vec<_>, _>>().unwrap();
-                            let mut received = received.lock().unwrap();
-                            received.push((rate, samples));
-                            format!("capture {}", received.len())
-                        }
-                    }),
-                ),
-            )
-            .await
-            .unwrap();
-        });
+        let recording = RecordingStt(captured.clone());
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
         runtime
@@ -399,25 +395,10 @@ mod tests {
                     expected_revision: 0,
                 })?;
                 store.activate("ene", Some("c1"), 0)?;
-                let connection = Connection {
-                    id: "stt".into(),
-                    name: "local".into(),
-                    enabled: true,
-                    kind: ConnectionKind::Stt,
-                    config: ConnectionConfig::Stt(SttConnection {
-                        endpoint: Endpoint {
-                            adapter: "raw".into(),
-                            endpoint: format!("http://{address}"),
-                            options_schema: String::new(),
-                            options: r#"{"protocol":"raw"}"#.into(),
-                        },
-                        language_hints: Vec::new(),
-                    }),
-                    credential_state: CredentialState::Absent,
-                    revision: 1,
-                    last_check: None,
-                };
-                store.update_settings(store.settings()?.revision, &[(connection, 0)])?;
+                app.world_mut().insert_resource(voice::Engines {
+                    stt: Some(Arc::new(recording)),
+                    ..Default::default()
+                });
                 Ok(())
             })
             .await
@@ -465,8 +446,6 @@ mod tests {
             [(16_000, vec![5; 1_600]), (24_000, vec![6; 1_600])]
         );
         runtime.shutdown().await.unwrap();
-        server.abort();
-        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[derive(Resource, Default)]

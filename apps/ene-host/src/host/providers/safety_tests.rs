@@ -689,45 +689,39 @@ async fn p08_absent_plugin_keeps_native_completion_and_listing() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn p08_absent_plugin_keeps_native_speech() {
-    for kind in [ConnectionKind::Tts, ConnectionKind::Stt] {
+async fn p08_absent_plugin_leaves_speech_unavailable() {
+    for (kind, label) in [
+        (ConnectionKind::Tts, "TTS adapter"),
+        (ConnectionKind::Stt, "STT adapter"),
+    ] {
         let native = NativeEndpoint::start().await;
         let root = tempfile::tempdir().unwrap();
         let connection = connection(kind, &native.base);
         let mut world = World::new();
         world.insert_resource(store(root.path(), &connection));
         world.insert_resource(Providers::none());
-        let _failure = construction_failure::Guard::enter();
-        if kind == ConnectionKind::Tts {
-            assert_eq!(
-                voice::tts_source(&world)
-                    .unwrap()
-                    .synthesize("hello".into(), "v".into())
-                    .await
-                    .unwrap()
-                    .0,
-                [7, 0]
-            );
+        let error = if kind == ConnectionKind::Tts {
+            voice::tts_source(&world).err().expect("TTS must fail")
         } else {
-            assert_eq!(
-                voice::stt_source(&world)
-                    .unwrap()
-                    .transcribe(vec![0, 0], 24_000)
-                    .await
-                    .unwrap(),
-                "native transcript"
-            );
-        }
-        native.assert_requests(1);
+            voice::stt_source(&world).err().expect("STT must fail")
+        };
+        let SetupError::Unsupported(message) = &error else {
+            panic!("expected an unsupported adapter, got {error:?}")
+        };
+        assert!(
+            message.contains(label) && message.contains("openrouter"),
+            "{message}"
+        );
+        native.assert_requests(0);
     }
 }
 
 #[tokio::test]
-async fn p08_plugin_tts_wins_over_native() {
-    let native = NativeEndpoint::start().await;
+async fn p08_plugin_serves_tts() {
+    let declared = NativeEndpoint::start().await;
     let audio = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
-    let connection = connection(ConnectionKind::Tts, &native.base);
+    let connection = connection(ConnectionKind::Tts, &declared.base);
     let open = json!({"type":"http_open","request":{
         "method":"GET", "url":format!("{}/audio/speech", audio.base), "headers":{}
     }})
@@ -748,7 +742,7 @@ async fn p08_plugin_tts_wins_over_native() {
         assert_eq!(pcm, [7, 0]);
         assert_eq!(rate, 24_000);
     }
-    native.assert_requests(0);
+    declared.assert_requests(0);
     audio.assert_requests(2);
 }
 
@@ -809,15 +803,15 @@ async fn p08_construction_failure_is_scoped_and_not_an_invalid_destination() {
 }
 
 #[tokio::test]
-async fn p08_plugin_stt_wins_over_native() {
-    let native = NativeEndpoint::start().await;
+async fn p08_plugin_serves_stt() {
+    let declared = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
-    let connection = connection(ConnectionKind::Stt, &native.base);
+    let connection = connection(ConnectionKind::Stt, &declared.base);
     let providers = providers(
         root.path(),
         Extension::Stt,
         &reply(r#"{"text":"plugin transcript"}"#),
-        &native.base,
+        &declared.base,
     )
     .await;
     let mut world = World::new();
@@ -830,7 +824,7 @@ async fn p08_plugin_stt_wins_over_native() {
             "plugin transcript"
         );
     }
-    native.assert_requests(0);
+    declared.assert_requests(0);
 }
 
 #[tokio::test]

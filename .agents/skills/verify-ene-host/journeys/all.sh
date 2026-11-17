@@ -29,8 +29,6 @@ run chat
 run schedule
 run device
 run mcp
-run voice-tts
-run voice-stt
 run acp-sandbox
 run restart
 

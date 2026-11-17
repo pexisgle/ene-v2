@@ -44,7 +44,7 @@ cargo run --locked -p ene-host
 - **設定と接続**: `Connection` は共通ヘッダー（name / enabled / kind / revision / last_check）と種別ごとの config（LLM / TTS / STT / Embedding / MCP / ACP）を持ちます。LLMはrig-coreのカタログからモデル仕様を引き、`ConnectOptions` で資格情報・base URL・HTTPクライアントを渡してエージェントの `Connection` を組み立てます。資格情報はOSキーリング（`ENE_HOST_SESSION_CREDENTIALS` でメモリのみ）に保存し、読み出しAPIは状態だけを返します。
 - **知覚（目）**: `ClientService.ReportPerception` を受信し、アクティブウィンドウ・活動状態・クライアント要約を短い要約にして動的文脈へ渡します。古い `activation_revision` のイベントは破棄します。`set_eye_watch` は `eye.watch` を宣言・許可されたアクティブクライアントがあるときだけ公開され、ルールは解釈せず `DeviceOperation` として配送します。
 - **通知**: 1つのアウトボックスに溜め、フレームごとに起動epochと連番カーソルを付けて配信します。直近512件はカーソル再開用に保持し、`SubscribeRequest.cursor` が同epochで途切れなく続く場合は差分を再送、それ以外は `initial_state` に戻します。`client_id` 宛ての通知は他の購読者へ流しません。取りこぼしでは `resync_required` を送り、保存済み状態が正本です。
-- **音声**: TTS/STT接続が設定されていれば `VoiceService` を提供します。`Stage::Review` の文字片を文単位（`。！？\n`）で切り出して先行合成し、`generation_id`・`sequence_no`・`SentenceSkipped`・`UtteranceFinished` と `ReportPlaybackStatus` の二段階完了、Flushと端末移動時の失効を実装します。WAVは `hound`、24kHz以外のTTS音声の変換は `rubato` に委譲します。最初のマイクフレームで未決承認を1件だけ`request_id`に束縛し、確定した音声の肯定/否定で回答します（曖昧・失効・世代移動は破棄）。音声認識の`transcription_id`単位で`start_work`を原子的に調停し、再生完了の掛け合いはユーザー入力なしで5回までに制限します。接続がなければ各RPCは明示的な `unimplemented` を返します。
+- **音声**: インストール済みのWasmプロバイダーがTTS/STT接続のadapterを提供していれば `VoiceService` を提供します。`Stage::Review` の文字片を文単位（`。！？\n`）で切り出して先行合成し、`generation_id`・`sequence_no`・`SentenceSkipped`・`UtteranceFinished` と `ReportPlaybackStatus` の二段階完了、Flushと端末移動時の失効を実装します。音声のサンプルレート変換は `rubato` に委譲します。最初のマイクフレームで未決承認を1件だけ`request_id`に束縛し、確定した音声の肯定/否定で回答します（曖昧・失効・世代移動は破棄）。音声認識の`transcription_id`単位で`start_work`を原子的に調停し、再生完了の掛け合いはユーザー入力なしで5回までに制限します。接続がなければ各RPCは明示的な `unimplemented` を返し、接続はあるがadapterを提供するプラグインがない場合は `failed_precondition` を返します。
 
 ## ACPのネットワーク分離
 
@@ -76,7 +76,7 @@ CONNECTで保証するのはTCP接続先です。TLS内部のSNI、HTTPパス、
 | `src/host/autonomy.rs` | `noop`、スケジュール登録ツール、発火ループ（croner/run_at） |
 | `src/host/staged.rs` | Staged Promotion（保存済み会話＋要約＋動的文脈への直接1回呼び出し）とハートビートTick |
 | `src/host/delegation.rs` | 音声`transcription_id`単位の作業委譲調停 |
-| `src/host/voice.rs` | TTS/STTエンジン境界、文分割・世代管理・再生完了・フロア制御 |
+| `src/host/voice.rs` | TTS/STTプロバイダー境界（Wasmプラグイン）、文分割・世代管理・再生完了・フロア制御 |
 | `src/host/permission/` | `Stage::Gate`、承認保留と解決、ポリシー判定 |
 | `src/host/client/` | クライアント登録、能力ツールの公開、有効化世代、知覚、`DeviceStream` と操作台帳 |
 | `src/host/work/` | WorkSession/Run、セッション継続、ACPバックエンド、sandbox、`start_work` などのツール、`report`、質問・停止・途絶検知 |
@@ -112,10 +112,4 @@ cargo test -p ene-host --locked
 cargo clippy -p ene-host --all-targets --all-features --locked -- -D warnings
 ```
 
-実プロバイダーを呼ぶ受入テストは通常のテストでは無視します。音声入力の結合テストは、`ENE_STT_FIXTURE` に24kHz・16-bit・モノラルPCMファイルを指定し、`OPENAI_API_KEY` を設定して実行します。
-
-```sh
-cargo test -p ene-host --test voice_stt -- --ignored --nocapture
-```
-
-設定が不足したまま明示実行すると失敗します。テストは専用の一時stateディレクトリとホストプロセスを使います。
+実プロバイダーを呼ぶ受入テストは通常のテストでは無視します。テストは専用の一時stateディレクトリとホストプロセスを使います。

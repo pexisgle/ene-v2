@@ -36,7 +36,6 @@ buffa = { version = "0.9", features = ["json"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 http = "1"
-hound = "3"
 croner = { version = "4", default-features = false, features = ["jiff"] }
 rubato = "5.1"
 jsonschema = "0.61"

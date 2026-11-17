@@ -22,7 +22,6 @@ ok() { rpc "$1" "$2" >/dev/null; }
 field() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)" 2>/dev/null; }
 
 [ -n "${OPENROUTER_API_KEY:-}" ] || { echo 'OPENROUTER_API_KEY is not set' >&2; exit 2; }
-[ -n "${OPENAI_API_KEY:-}" ] || { echo 'OPENAI_API_KEY is not set' >&2; exit 2; }
 
 rm -rf "$run"; mkdir -p "$run/evidence"
 ENE_HOST_ALLOWED_CAPABILITIES='*' ENE_HOST_SESSION_CREDENTIALS=1 \
@@ -36,8 +35,7 @@ for _ in $(seq 1 200); do
 done
 
 rpc ene.host.v1.SettingsService/UpdateSettings "{\"expectedRevision\":\"1\",\"connections\":[\
-{\"id\":\"openrouter\",\"name\":\"llm\",\"enabled\":true,\"expectedRevision\":\"0\",\"kind\":\"CONNECTION_KIND_LLM\",\"config\":{\"llm\":{\"endpoint\":{\"adapter\":\"openrouter\",\"endpoint\":\"https://openrouter.ai/api/v1\"},\"modelIds\":[\"$model\"]}}},\
-{\"id\":\"openai-tts\",\"name\":\"tts\",\"enabled\":true,\"expectedRevision\":\"0\",\"kind\":\"CONNECTION_KIND_TTS\",\"config\":{\"tts\":{\"endpoint\":{\"adapter\":\"openai\",\"endpoint\":\"https://api.openai.com/v1\"},\"voiceIds\":[\"alloy\"]}}}]}" >/dev/null
+{\"id\":\"openrouter\",\"name\":\"llm\",\"enabled\":true,\"expectedRevision\":\"0\",\"kind\":\"CONNECTION_KIND_LLM\",\"config\":{\"llm\":{\"endpoint\":{\"adapter\":\"openrouter\",\"endpoint\":\"https://openrouter.ai/api/v1\"},\"modelIds\":[\"$model\"]}}}}]}" >/dev/null
 companion=$(rpc ene.host.v1.HostService/CreateCompanion "{\"name\":\"Mio\",\"mind\":\"kind\",\"assignments\":{\"companion\":{\"connectionId\":\"openrouter\",\"modelId\":\"$model\"},\"task\":{\"connectionId\":\"openrouter\",\"modelId\":\"$model\"}}}" | field 'd["id"]')
 echo "companion: $companion"
 
@@ -109,24 +107,6 @@ revision=$(grep -o '"activationRevision":"[^"]*"' "$run/evidence/frames.jsonl" 2
 ok ene.host.v1.ClientService/CompleteOperation "{\"clientId\":\"c1\",\"operationId\":\"$operation\",\"success\":true,\"output\":\"{}\",\"activationRevision\":\"$revision\"}"; check 'CompleteOperation reports the result' $?
 rpc ene.host.v1.ClientService/GetOperation "{\"id\":\"$operation\"}" | grep -q 'DEVICE_OPERATION_STATUS_COMPLETED'; check 'the operation is completed' $?
 kill -TERM "$reader" 2>/dev/null
-
-echo '=== playback status for a real utterance'
-stream ene.host.v1.VoiceService/SubscribeAudioOutput "{\"clientId\":\"c1\",\"activationRevision\":\"$activation\"}" --count 60 --timeout 120 >"$run/evidence/audio.jsonl" &
-speaker=$!
-trap 'kill -TERM "$pid" "$reader" "$speaker" 2>/dev/null; wait "$pid" 2>/dev/null' EXIT
-sleep 1
-rpc ene.host.v1.ChatService/SendMessage "{\"companionId\":\"$companion\",\"requestKey\":\"tts-1\",\"text\":\"短く一文だけで挨拶してください。\"}" >/dev/null
-utterance=''
-generation=''
-for _ in $(seq 1 60); do
-  utterance=$(grep -o '"utteranceId":"[^"]*"' "$run/evidence/audio.jsonl" 2>/dev/null | head -1 | cut -d'"' -f4)
-  generation=$(grep -o '"generationId":"[^"]*"' "$run/evidence/audio.jsonl" 2>/dev/null | head -1 | cut -d'"' -f4)
-  [ -n "$utterance" ] && break
-  sleep 1
-done
-kill -TERM "$speaker" 2>/dev/null
-[ -n "$utterance" ]; check 'the reply is synthesised to an utterance' $?
-rpc ene.host.v1.VoiceService/ReportPlaybackStatus "{\"clientId\":\"c1\",\"activationRevision\":\"$activation\",\"utteranceId\":\"$utterance\",\"generationId\":\"$generation\",\"status\":\"PLAYBACK_COMPLETED\",\"completedPcmBytes\":\"1024\"}" | grep -q '"acknowledged":true'; check 'ReportPlaybackStatus acknowledges a real utterance' $?
 
 echo "=== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

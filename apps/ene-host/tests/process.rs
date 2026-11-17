@@ -49,6 +49,50 @@ async fn stop(child: &mut Box<dyn ChildWrapper>) {
     assert!(status.success(), "host shutdown failed: {status}");
 }
 
+/// Installs an STT provider under the directory the host reads at startup.
+/// The host refuses a state directory, and the loader a package, that anyone
+/// else may write, so the fixture makes both private, as the host does for a
+/// state directory it creates itself.
+fn install_voice_stt(state: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/wasm32-unknown-unknown/release/ene_reference_wasm.wasm");
+    assert!(
+        wasm.is_file(),
+        "build the guest first: cargo build --release --target wasm32-unknown-unknown -p ene-reference-wasm ({})",
+        wasm.display()
+    );
+    let package = state.join("plugins").join("voice-stt");
+    std::fs::create_dir_all(&package).unwrap();
+    for private in [state.to_path_buf(), package.clone()] {
+        std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(package.join("main.wasm"), std::fs::read(&wasm).unwrap()).unwrap();
+    std::fs::write(
+        package.join("manifest.json"),
+        serde_json::json!({
+            "contract_version": ene_plugin::CONTRACT_VERSION,
+            "id": "voice-stt", "name": "Voice STT fixture", "version": "1",
+            "entrypoints": [{
+                "id": "main", "target": "host", "file": "main.wasm",
+                "provides": ["stt"], "uses": ["http"],
+                "provider": {
+                    "id": "voice-stt", "endpoint": "https://plugin.example",
+                    "auth": {"type": "none"},
+                    "destinations": ["https://plugin.example"]
+                }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for file in ["main.wasm", "manifest.json"] {
+        std::fs::set_permissions(package.join(file), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn process_publishes_private_discovery_authenticates_and_stops() {
     let temp = tempfile::tempdir().unwrap();
@@ -292,6 +336,7 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
     let runtime = temp.path().join("runtime");
+    install_voice_stt(&state);
     let mut child = spawn(&state, &runtime);
     let (endpoint, token) = discovery(&runtime).await;
     let (transport, config) = ene_rpc::connect(&endpoint, &token).unwrap();
@@ -311,8 +356,8 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
                     config: Some(ene_rpc::connection_config::Config::Stt(Box::new(
                         ene_rpc::SttConnection {
                             endpoint: Some(ene_rpc::ConnectionEndpoint {
-                                adapter: "openai".into(),
-                                endpoint: "https://api.openai.com/v1".into(),
+                                adapter: "voice-stt".into(),
+                                endpoint: "https://plugin.example".into(),
                                 ..Default::default()
                             })
                             .into(),
@@ -329,14 +374,6 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
         })
         .await
         .expect("the STT connection is stored");
-    settings
-        .register_credentials(ene_rpc::CredentialRequest {
-            id: "stt".into(),
-            secret: Some("dummy-key".into()),
-            ..Default::default()
-        })
-        .await
-        .expect("the credential is stored for this session");
     let companion = host
         .create_companion(ene_rpc::CreateCompanionRequest {
             name: "Mio".into(),
