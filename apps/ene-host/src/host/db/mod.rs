@@ -19,7 +19,7 @@ use std::{
 
 /// A baseline schema version. Databases with another version are refused, as
 /// this alpha has no in-place migration path.
-pub(crate) const VERSION: i64 = 5;
+pub(crate) const VERSION: i64 = 6;
 
 fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;

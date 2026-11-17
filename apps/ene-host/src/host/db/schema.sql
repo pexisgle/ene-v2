@@ -148,6 +148,14 @@ CREATE TABLE IF NOT EXISTS policy_rules (
     created_at TEXT NOT NULL
 );
 
+-- Free-text policies: prose the decision engine reads, never a mechanical
+-- gate (docs/design/permissions.md §3.1).
+CREATE TABLE IF NOT EXISTS policy_texts (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- Approval requests outlive the effect that asked, so a restart can expire
 -- them instead of silently running the operation.
 CREATE TABLE IF NOT EXISTS approval_requests (

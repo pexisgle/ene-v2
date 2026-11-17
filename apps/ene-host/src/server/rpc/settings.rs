@@ -153,6 +153,56 @@ impl w::SettingsService for Services {
         .await
     }
 
+    async fn list_policy_texts(
+        &self,
+        _: RequestContext,
+        _: ServiceRequest<'_, w::Empty>,
+    ) -> ServiceResult<w::PolicyTexts> {
+        self.read(|app| {
+            let store = app.world().resource::<Store>();
+            Ok(w::PolicyTexts {
+                items: store
+                    .policy_texts()?
+                    .iter()
+                    .map(wire::policy_text)
+                    .collect(),
+                ..Default::default()
+            })
+        })
+        .await
+    }
+
+    async fn update_policy_texts(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::UpdatePolicyTextsRequest>,
+    ) -> ServiceResult<w::PolicyTexts> {
+        let request = request.to_owned_message();
+        let mut texts = Vec::with_capacity(request.add_or_update.len());
+        for text in request.add_or_update {
+            texts.push(wire::policy_text_from(&text));
+        }
+        let remove_ids = request.remove_ids;
+        self.call(move |app| {
+            let store = app.world().resource::<Store>().clone();
+            let updated = store.apply_policy_texts(&texts, &remove_ids)?;
+            let items: Vec<w::PolicyText> = updated.iter().map(wire::policy_text).collect();
+            app.world_mut().resource_mut::<Notifier>().push(
+                None,
+                None,
+                w::notification::Event::PolicyTextsUpdated(Box::new(w::PolicyTextsUpdated {
+                    texts: items.clone(),
+                    ..Default::default()
+                })),
+            );
+            Ok(w::PolicyTexts {
+                items,
+                ..Default::default()
+            })
+        })
+        .await
+    }
+
     async fn list_providers(
         &self,
         _: RequestContext,

@@ -61,6 +61,7 @@ impl Store {
             revision,
             connections,
             updated_at,
+            policy_texts: self.policy_texts()?,
         })
     }
 

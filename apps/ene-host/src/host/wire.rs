@@ -5,7 +5,7 @@ use super::{
     json::JsonDoc,
     mind::memory::Memory,
     mind::{Assignment, Assignments, Companion, Profile, State},
-    permission::{Approval, ApprovalStatus, PolicyEffect, PolicyRule},
+    permission::{Approval, ApprovalStatus, PolicyEffect, PolicyRule, PolicyText},
     settings::{
         AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
         EmbeddingConnection, Endpoint, LlmConnection, McpConnection, Settings, SttConnection,
@@ -286,6 +286,7 @@ pub(crate) fn settings(value: &Settings) -> w::Settings {
         revision: value.revision,
         connections: value.connections.iter().map(connection).collect(),
         updated_at: value.updated_at.clone(),
+        policy_texts: value.policy_texts.iter().map(policy_text).collect(),
         ..Default::default()
     }
 }
@@ -324,6 +325,10 @@ pub(crate) fn policy_rule(value: &PolicyRule) -> w::PolicyRule {
         ..Default::default()
     }
 }
+
+wire_copy!(policy_text, PolicyText => w::PolicyText { id, text, created_at });
+
+wire_copy!(exact policy_text_from, w::PolicyText => PolicyText { id, text, created_at });
 
 wire_enum!(capability_approval: CapabilityApproval => w::CapabilityApproval {
     Unspecified, Auto, Confirm

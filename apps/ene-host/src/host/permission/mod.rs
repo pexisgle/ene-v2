@@ -1,9 +1,11 @@
-//! Approval requests, saved policy rules and the decision the Gate applies.
+//! Approval requests, saved policy rules, free-text policies and the
+//! decision the Gate applies.
 //!
 //! The pipeline follows docs/design/permissions.md §3: hard denial, explicit
-//! every-time confirmation, saved rules, then the user. The alpha does not run
-//! the auxiliary decision model yet, so an unregistered device operation falls
-//! through to the confirmation card (fail-safe).
+//! every-time confirmation, saved rules, then the Decision API, then the
+//! user. A call the rules do not decide is held with a pending approval and
+//! judged by the decision model in the background; the card appears only
+//! when the model requires approval or the call fails (fail-safe).
 use super::client::{BUILTIN_TOOLS, CapabilityApproval, CapabilitySpec};
 use super::db::{digest, truncate};
 use super::error::{Failure, HostError, Result};
@@ -37,6 +39,20 @@ pub(crate) struct PolicyRule {
     /// Exact normalised arguments text, or an exact string argument value.
     pub(crate) pattern: String,
     pub(crate) effect: PolicyEffect,
+    pub(crate) created_at: String,
+}
+
+/// The most characters one free-text policy may carry. The decision engine
+/// reads the stored text as-is, so the storage bound is the prompt bound.
+pub(crate) const MAX_POLICY_TEXT_CHARS: usize = 500;
+
+/// A free-text policy the decision engine reads (docs/design/permissions.md
+/// §3.1: one of the User Policies it judges an unregistered operation
+/// against). It is prose, so it never gates mechanically.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PolicyText {
+    pub(crate) id: String,
+    pub(crate) text: String,
     pub(crate) created_at: String,
 }
 
@@ -333,16 +349,23 @@ fn within_tool_limits(id: &str, name: &str, reply_calls: usize) -> bool {
         && reply_calls <= MAX_REPLY_TOOL_CALLS
 }
 
+use super::background::{self, AbortOnDropHandle};
 use super::client::Client;
 use super::db::Store;
+use super::mind::Role;
+use super::model::{self, Credentials};
 use super::notify::Notifier;
+use super::resources::HostRuntime;
 use super::tools::run_tool;
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use rig_core::completion::{CompletionRequest, Message as CompletionMessage};
 use rig_core::effect::EffectId;
+use rig_core::{DynModel, operation::Completion};
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// The arguments of the head's `resolve_approval` tool
 /// (docs/design/permissions.md §4.2).
@@ -382,8 +405,14 @@ pub(crate) struct GatePlugin;
 
 impl Plugin for GatePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(AgentPass, gate.in_set(Stage::Gate))
-            .add_systems(Update, expire_orphaned_approvals.after(AgentLoop))
+        app.init_resource::<Decisions>()
+            .add_systems(AgentPass, gate.in_set(Stage::Gate))
+            .add_systems(
+                Update,
+                (expire_orphaned_approvals, collect_decisions)
+                    .chain()
+                    .after(AgentLoop),
+            )
             .add_open_tool::<ResolveApprovalArgs, _>(
                 "resolve_approval",
                 "Approve or deny one pending approval request of this companion. Call it when \
@@ -407,6 +436,15 @@ fn gate(world: &mut World) {
         query
             .iter(world)
             .filter(|(call, _, _, _)| world.get::<Approved>(*call).is_none())
+            // A decision already answered the call (a denial, or the head's
+            // own refusal): it is settled for the kernel and must not be
+            // judged again. Without this filter a denial releases the hold,
+            // the call is `ReadyToStart` again, and a second decision runs.
+            .filter(|(call, _, _, _)| {
+                world
+                    .get::<Decision>(*call)
+                    .is_none_or(|decision| decision.get().is_none())
+            })
             .map(|(call, request, agent, effect)| {
                 (
                     call,
@@ -499,6 +537,7 @@ fn gate(world: &mut World) {
                 let hold = world.spawn(HoldOf(call)).id();
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let (normalized, hash) = canonicalise(&tool_name, &arguments);
+                let arguments_view = truncate(&normalized, DECISION_ARGUMENT_CHARS);
                 let approval = Approval {
                     request_id: request_id.clone(),
                     session_id: companion_id.clone(),
@@ -520,20 +559,28 @@ fn gate(world: &mut World) {
                 world
                     .resource_mut::<Approvals>()
                     .by_request
-                    .insert(request_id, Hold { call, hold });
-                let mut notifier = world.resource_mut::<Notifier>();
-                notifier.push(
-                    Some(&companion_id),
-                    None,
-                    w::notification::Event::ApprovalRequested(Box::new(w::ApprovalRequested {
-                        request: Some(crate::host::wire::approval(&approval)).into(),
-                        ..Default::default()
-                    })),
-                );
-                notifier.notice(
-                    Some(&companion_id),
-                    "approval_required",
-                    &format!("{target}: approval is required before this operation runs"),
+                    .insert(request_id.clone(), Hold { call, hold });
+                // The mechanical rules did not decide, so the decision model
+                // judges first (docs/design/permissions.md §3). The card is
+                // pushed by `collect_decisions`, only when the model requires
+                // approval or the call fails.
+                let inputs = DecisionInputs {
+                    tool_name: tool_name.clone(),
+                    target: target.clone(),
+                    arguments: arguments_view,
+                    request: request_context(world, &store, agent, &run_id),
+                    policies: store.policy_texts().unwrap_or_default(),
+                    rules: rules.clone(),
+                };
+                start_decision(
+                    world,
+                    &store,
+                    Pending {
+                        request: request_id,
+                        companion: companion_id.clone(),
+                        target,
+                    },
+                    inputs,
                 );
             }
         }
@@ -604,6 +651,372 @@ fn resolve_capability(
 /// The client the call must be sent to.
 fn target_client(companion_id: &str, store: &Store, work_id: Option<&str>) -> Option<String> {
     store.target(companion_id, work_id).ok().flatten()
+}
+
+// === Decision Engine =======================================================
+
+/// How long the decision model may take. The docs call the Decision API
+/// 軽量・高速 (docs/features/settings/permissions.md): the held call waits on
+/// it, so the budget is short — the same one the host gives a connection
+/// probe — and a timeout fails safe to the card instead of stalling the
+/// operation (docs/design/permissions.md §3.1).
+const DECISION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The most decisions one host runs at once. One reply can hold dozens of
+/// calls, and a flood of model calls must not queue them all; beyond the cap
+/// the card is the honest answer.
+const MAX_IN_FLIGHT_DECISIONS: usize = 8;
+
+/// The per-string bounds the decision prompt enforces
+/// (docs/design/permissions.md §3.1: 入力遮断 — bounded inputs only).
+const DECISION_ARGUMENT_CHARS: usize = 2_000;
+const DECISION_REQUEST_CHARS: usize = 1_000;
+const DECISION_RULE_CHARS: usize = 200;
+const DECISION_REASON_CHARS: usize = 300;
+/// The most policies and rules each prompt lists.
+const DECISION_LIST: usize = 32;
+
+/// The bounded inputs one decision reads. The candidate action, the user's
+/// request, the user's policies and the saved rules — never the agent's
+/// chain-of-thought or raw external data (docs §3.1).
+struct DecisionInputs {
+    tool_name: String,
+    /// The capability target string, the same one the card would show.
+    target: String,
+    /// Canonical arguments, truncated.
+    arguments: String,
+    /// The user's request: the companion's newest user message, or the run's
+    /// instruction for a hand.
+    request: String,
+    policies: Vec<PolicyText>,
+    rules: Vec<PolicyRule>,
+}
+
+/// One decision the gate asked for: the approval it decides and the card
+/// context it fails safe to.
+struct Pending {
+    request: String,
+    companion: String,
+    target: String,
+}
+
+/// One decision in flight: what it decides, the task, and the model that
+/// runs it (the engine the resolution log names).
+struct InFlight {
+    pending: Pending,
+    task: AbortOnDropHandle<DecisionOutcome>,
+    engine: String,
+}
+
+type DecisionOutcome = std::result::Result<ModelDecision, String>;
+
+/// One answer from the decision engine, with the short reason it gave.
+struct ModelDecision {
+    allow: bool,
+    reason: String,
+}
+
+/// Background decision state keyed by request id: one decision per pending
+/// approval, at most [`MAX_IN_FLIGHT_DECISIONS`] on the runtime at once. The
+/// same take-finished shape as `CompactionState`.
+#[derive(Resource, Default)]
+pub(crate) struct Decisions {
+    running: HashMap<String, InFlight>,
+}
+
+impl Decisions {
+    fn is_running(&self, request: &str) -> bool {
+        self.running.contains_key(request)
+    }
+
+    fn count(&self) -> usize {
+        self.running.len()
+    }
+
+    fn start(
+        &mut self,
+        pending: Pending,
+        task: AbortOnDropHandle<DecisionOutcome>,
+        engine: String,
+    ) {
+        debug_assert!(
+            !self.is_running(&pending.request),
+            "one decision per request"
+        );
+        self.running.insert(
+            pending.request.clone(),
+            InFlight {
+                pending,
+                task,
+                engine,
+            },
+        );
+    }
+
+    /// Takes the one finished task, with the approval it decides.
+    fn take_finished(&mut self) -> Option<InFlight> {
+        let request = self
+            .running
+            .iter()
+            .find_map(|(request, flight)| flight.task.is_finished().then(|| request.clone()))?;
+        self.running.remove(&request)
+    }
+}
+
+/// The decision engine's instruction, in the same voice as the summarizer's
+/// (host/compaction.rs): judge only, answer in the one JSON shape, never
+/// continue the chat.
+const DECISION_SYSTEM_PROMPT: &str = "あなたはデスクトップ常駐AIコンパニオンの権限判定エンジンです。機械的な許可ルールを通らず保留中の端末操作を、依頼文脈・ユーザーの自由文ポリシー・保存済みルールに照らして判定します。操作が安全で依頼とポリシーに適合するなら allow、危険・ポリシー抵触・依頼文脈と合わない・判断に迷うなら require_approval としてください。判定だけを次のJSON形式で返し、それ以外の文章は一切書かないでください:\n{\"decision\": \"allow\" | \"require_approval\", \"reason\": \"一行の短い理由\"}";
+
+/// The one question the decision model gets. Every string is bounded, every
+/// list capped, so the prompt is the whole input surface.
+fn decision_prompt(inputs: &DecisionInputs) -> String {
+    let mut prompt = format!(
+        "[依頼]\n{}\n\n[操作]\nツール: {}\n対象: {}\n引数: {}",
+        or_none(&inputs.request),
+        truncate(&inputs.tool_name, MAX_TOOL_IDENTIFIER_BYTES),
+        truncate(&inputs.target, DECISION_ARGUMENT_CHARS),
+        truncate(&inputs.arguments, DECISION_ARGUMENT_CHARS),
+    );
+    prompt.push_str("\n\n[ユーザーの自由文ポリシー]");
+    let policies: Vec<_> = inputs.policies.iter().take(DECISION_LIST).collect();
+    if policies.is_empty() {
+        prompt.push_str("\n(なし)");
+    } else {
+        for policy in policies {
+            prompt.push_str(&format!(
+                "\n- {}",
+                truncate(&policy.text, MAX_POLICY_TEXT_CHARS)
+            ));
+        }
+    }
+    prompt.push_str("\n\n[保存済みルール（参考）]");
+    let rules: Vec<_> = inputs.rules.iter().take(DECISION_LIST).collect();
+    if rules.is_empty() {
+        prompt.push_str("\n(なし)");
+    } else {
+        for rule in rules {
+            prompt.push_str(&format!(
+                "\n- {} / {} → {}",
+                truncate(&rule.tool_name, MAX_TOOL_IDENTIFIER_BYTES),
+                truncate(&rule.pattern, DECISION_RULE_CHARS),
+                rule.effect.as_str(),
+            ));
+        }
+    }
+    prompt
+}
+
+fn or_none(text: &str) -> &str {
+    if text.trim().is_empty() {
+        "(なし)"
+    } else {
+        text
+    }
+}
+
+/// The decision engine's reply: strict JSON, both fields required, nothing
+/// else accepted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionReply {
+    decision: String,
+    reason: String,
+}
+
+/// Asks the decision model one question and parses its strict JSON reply.
+/// Every input was bounded before the spawn, so this never reads the world.
+async fn run_decision(model: DynModel<Completion>, inputs: DecisionInputs) -> DecisionOutcome {
+    let request = CompletionRequest::new(decision_prompt(&inputs)).preamble(DECISION_SYSTEM_PROMPT);
+    let response = tokio::time::timeout(DECISION_TIMEOUT, model.call(request))
+        .await
+        .map_err(|_| "the decision model timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    let reply: DecisionReply = serde_json::from_str(response.text().trim())
+        .map_err(|_| "the decision reply was not the strict JSON asked for".to_owned())?;
+    let allow = match reply.decision.as_str() {
+        "allow" => true,
+        "require_approval" => false,
+        _ => return Err("the decision reply named an unknown verdict".to_owned()),
+    };
+    Ok(ModelDecision {
+        allow,
+        reason: truncate(reply.reason.trim(), DECISION_REASON_CHARS),
+    })
+}
+
+/// The user's request the decision judges the operation against: the run's
+/// instruction for a hand, else the companion's newest user message.
+fn request_context(world: &World, store: &Store, agent: Entity, run_id: &str) -> String {
+    if !run_id.is_empty()
+        && let Ok(Some(run)) = store.run(run_id)
+    {
+        return truncate(&run.instruction, DECISION_REQUEST_CHARS);
+    }
+    world
+        .get::<Conversation>(agent)
+        .map(latest_user_text)
+        .unwrap_or_default()
+}
+
+/// The newest non-empty user message of a conversation.
+fn latest_user_text(conversation: &Conversation) -> String {
+    conversation
+        .entries()
+        .rev()
+        .filter(|entry| matches!(entry.message, CompletionMessage::User { .. }))
+        .find_map(|entry| super::agent::entry_text(&entry))
+        .map(|text| truncate(&text, DECISION_REQUEST_CHARS))
+        .unwrap_or_default()
+}
+
+/// Starts the background decision for a fresh pending approval, or shows the
+/// card straight away when the decision cannot run — no model, no runtime, no
+/// free slot: every failure is the user's call, never a silent run
+/// (docs/features/settings/permissions.md: 失敗時は安全側).
+fn start_decision(world: &mut World, store: &Store, pending: Pending, inputs: DecisionInputs) {
+    let Some(runtime) = world.get_resource::<HostRuntime>().map(|r| r.0.clone()) else {
+        push_card(world, &pending);
+        return;
+    };
+    let (Some(credentials), Some(models)) = (
+        world.get_resource::<Credentials>().cloned(),
+        world.get_resource::<Models>(),
+    ) else {
+        push_card(world, &pending);
+        return;
+    };
+    let busy = {
+        let decisions = world.resource::<Decisions>();
+        decisions.is_running(&pending.request) || decisions.count() >= MAX_IN_FLIGHT_DECISIONS
+    };
+    if busy {
+        push_card(world, &pending);
+        return;
+    }
+    let Ok(Some(companion)) = store.companion(&pending.companion) else {
+        push_card(world, &pending);
+        return;
+    };
+    let providers = world
+        .get_resource::<super::providers::Providers>()
+        .cloned()
+        .unwrap_or_default();
+    // The Decision role falls back to the task model when unassigned; a
+    // connect failure fails safe to the card.
+    let model = match model::connect(
+        store,
+        &credentials,
+        models.0.catalog(),
+        &companion,
+        Role::Decision,
+        &providers,
+    ) {
+        Ok(model) => model,
+        Err(error) => {
+            tracing::warn!(
+                companion = %pending.companion,
+                %error,
+                "no decision model answers; the card is shown"
+            );
+            push_card(world, &pending);
+            return;
+        }
+    };
+    let engine = model.spec().map(|spec| spec.id.clone()).unwrap_or_default();
+    let wake = world.get_resource::<Wake>().cloned();
+    let task = background::spawn(&runtime, wake.as_ref(), run_decision(model, inputs));
+    world
+        .resource_mut::<Decisions>()
+        .start(pending, task, engine);
+}
+
+/// Lands one finished decision. An allow resolves the approval exactly as
+/// the user's approve does (`submit`), with a log naming the engine; a
+/// require-approval answer, a timeout, an invalid reply or a failed call
+/// shows the card the gate would have shown. A decision that arrives after
+/// the approval was answered or expired drops (docs/design/permissions.md
+/// §4.2: an approval is resolved once).
+fn collect_decisions(world: &mut World) {
+    let Some(flight) = world.resource_mut::<Decisions>().take_finished() else {
+        return;
+    };
+    let request = flight.pending.request.clone();
+    let outcome = background::take(flight.task)
+        .unwrap_or_else(|| Err("the decision task ended without a result".to_owned()));
+    let store = world.resource::<Store>().clone();
+    let Ok(Some(approval)) = store.approval(&request) else {
+        tracing::debug!(request = %request, "a late decision dropped: no such approval");
+        return;
+    };
+    if approval.status != ApprovalStatus::Pending {
+        tracing::debug!(
+            request = %request,
+            "a late decision dropped: the approval was already answered"
+        );
+        return;
+    }
+    match outcome {
+        Ok(decision) if decision.allow => {
+            match submit(world, &request, ApprovalDecision::Approve) {
+                Ok(_) => tracing::info!(
+                    companion = %flight.pending.companion,
+                    engine = %flight.engine,
+                    reason = %decision.reason,
+                    request = %request,
+                    "the decision engine allowed the operation"
+                ),
+                Err(error) => tracing::debug!(
+                    %error,
+                    request = %request,
+                    "a late decision dropped: the approval was already answered"
+                ),
+            }
+        }
+        Ok(decision) => {
+            tracing::info!(
+                companion = %flight.pending.companion,
+                engine = %flight.engine,
+                reason = %decision.reason,
+                request = %request,
+                "the decision engine requires the user's approval"
+            );
+            push_card(world, &flight.pending);
+        }
+        Err(why) => {
+            tracing::warn!(%why, request = %request, "the decision failed; the card is shown");
+            push_card(world, &flight.pending);
+        }
+    }
+}
+
+/// The approval card and its notice, the ones the Confirm branch pushed
+/// before the Decision API. Only a still-pending approval is carded.
+fn push_card(world: &mut World, pending: &Pending) {
+    let store = world.resource::<Store>().clone();
+    let Ok(Some(approval)) = store.approval(&pending.request) else {
+        return;
+    };
+    if approval.status != ApprovalStatus::Pending {
+        return;
+    }
+    let mut notifier = world.resource_mut::<Notifier>();
+    notifier.push(
+        Some(&pending.companion),
+        None,
+        w::notification::Event::ApprovalRequested(Box::new(w::ApprovalRequested {
+            request: Some(crate::host::wire::approval(&approval)).into(),
+            ..Default::default()
+        })),
+    );
+    notifier.notice(
+        Some(&pending.companion),
+        "approval_required",
+        &format!(
+            "{}: approval is required before this operation runs",
+            pending.target
+        ),
+    );
 }
 
 fn decide(world: &mut World, call: Entity, outcome: Outcome) {
@@ -828,5 +1241,762 @@ mod tool_limit_tests {
         assert!(within_tool_limits(&"i".repeat(256), &"n".repeat(256), 64));
         assert!(!within_tool_limits(&"i".repeat(257), "lookup", 1));
         assert!(!within_tool_limits("id", &"n".repeat(257), 1));
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+    use crate::host::{
+        json::JsonDoc,
+        mind::{Assignment, Assignments, Companion, Profile, State},
+        notify::Notifier,
+    };
+    use rig_core::catalog::{Catalog, Connector, ModelSpec};
+    use rig_core::completion::Message;
+    use rig_core::conversation::Conversation as History;
+    use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
+    use rig_core::providers::registry::ProviderId;
+    use rig_core::test_utils::MockCompletionModel;
+    use rig_ecs::session_log::SessionStore;
+    use rig_memory::DirStore;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const USER_REQUEST: &str = "デスクトップのスクリーンショットを取って";
+    /// Longer than every prompt bound, so a truncation assert can find its tail.
+    const HUGE: &str = "huge-path-";
+    /// A stall no test waits out: on the paused clock it only has to exceed
+    /// [`DECISION_TIMEOUT`].
+    const STALL: Duration = Duration::from_secs(600);
+
+    #[test]
+    fn the_reply_is_strict_json() {
+        let inputs = || DecisionInputs {
+            tool_name: "device_request".into(),
+            target: "device.files /tmp/a".into(),
+            arguments: "{}".into(),
+            request: USER_REQUEST.into(),
+            policies: Vec::new(),
+            rules: Vec::new(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (reply, allow) in [
+            (r#"{"decision":"allow","reason":"安全な操作"}"#, Some(true)),
+            (
+                r#"{"decision":"require_approval","reason":"外部送信のため確認"}"#,
+                Some(false),
+            ),
+            // An unknown verdict, a missing field, an extra field and plain
+            // text are all one thing: not the JSON asked for.
+            (r#"{"decision":"maybe","reason":"?"}"#, None),
+            (r#"{"decision":"allow"}"#, None),
+            (r#"{"decision":"allow","reason":"r","extra":1}"#, None),
+            ("はい、いいですよ", None),
+        ] {
+            let model: DynModel<Completion> = MockCompletionModel::text(reply).into();
+            let decision = runtime.block_on(run_decision(model, inputs()));
+            match allow {
+                Some(allow) => {
+                    let decision = decision.expect(reply);
+                    assert_eq!(decision.allow, allow, "{reply}");
+                    assert!(!decision.reason.is_empty(), "{reply}");
+                }
+                None => assert!(decision.is_err(), "{reply} must fail safe"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_prompt_carries_only_the_bounded_inputs() {
+        // Built the way the gate builds them: every string truncated before
+        // the inputs exist.
+        let inputs = DecisionInputs {
+            tool_name: "device_request".into(),
+            target: truncate(
+                &format!("device.files {}", HUGE.repeat(400)),
+                DECISION_ARGUMENT_CHARS,
+            ),
+            arguments: truncate(
+                &serde_json::json!({"path": HUGE.repeat(400)}).to_string(),
+                DECISION_ARGUMENT_CHARS,
+            ),
+            request: truncate(
+                &format!("{USER_REQUEST} {}", HUGE.repeat(400)),
+                DECISION_REQUEST_CHARS,
+            ),
+            policies: vec![PolicyText {
+                id: "p1".into(),
+                text: "外部への送信は常に確認する".into(),
+                created_at: String::new(),
+            }],
+            rules: vec![PolicyRule {
+                id: "r1".into(),
+                tool_name: "body_motion".into(),
+                pattern: "*".into(),
+                effect: PolicyEffect::Allow,
+                created_at: String::new(),
+            }],
+        };
+        let prompt = decision_prompt(&inputs);
+        assert!(prompt.contains("device_request"));
+        assert!(prompt.contains(USER_REQUEST));
+        assert!(prompt.contains("外部への送信は常に確認する"));
+        assert!(prompt.contains("body_motion / * → allow"));
+        // Every oversized string is cut at its bound, so the far end of the
+        // huge fixture appears in none of them, and the prompt holds the
+        // bounded prefix of each.
+        let tail = HUGE.repeat(400);
+        for bounded in [&inputs.target, &inputs.arguments, &inputs.request] {
+            assert!(
+                !bounded.contains(&tail[DECISION_ARGUMENT_CHARS..]),
+                "the bound must have cut the tail"
+            );
+        }
+        assert!(prompt.contains(&tail[..1_900]));
+        assert!(prompt.contains("[保存済みルール（参考）]"));
+    }
+
+    #[test]
+    fn an_empty_prompt_section_says_so() {
+        let prompt = decision_prompt(&DecisionInputs {
+            tool_name: "device_request".into(),
+            target: "device.files /tmp/a".into(),
+            arguments: "{}".into(),
+            request: String::new(),
+            policies: Vec::new(),
+            rules: Vec::new(),
+        });
+        assert!(prompt.contains("[依頼]\n(なし)"));
+        assert!(prompt.contains("[ユーザーの自由文ポリシー]\n(なし)"));
+        assert!(prompt.contains("[保存済みルール（参考）]\n(なし)"));
+    }
+
+    // === One gated call on a real world ==================================
+
+    /// A local OpenAI-compatible endpoint that answers every completion with
+    /// `text` after `delay`, keeping the request bodies it saw. The stalled
+    /// variants answer nothing a test waits for (compaction.rs's `serve`).
+    struct Provider {
+        base: String,
+        bodies: Arc<std::sync::Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn serve(text: &'static str, delay: Duration) -> Provider {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&bodies);
+        let answer = completion(text);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let body = loop {
+                    let Ok(read) = socket.read(&mut chunk).await else {
+                        break None;
+                    };
+                    if read == 0 {
+                        break None;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buffer[..end]);
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if buffer.len() >= end + 4 + length {
+                        break Some(String::from_utf8_lossy(&buffer[end + 4..]).to_string());
+                    }
+                };
+                let Some(body) = body else {
+                    return;
+                };
+                seen.lock().unwrap().push(body);
+                tokio::time::sleep(delay).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    answer.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(answer.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        Provider { base, bodies, task }
+    }
+
+    fn completion(text: &str) -> String {
+        serde_json::json!({
+            "id": "chatcmpl-decision",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": text },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        })
+        .to_string()
+    }
+
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            // The timeout test fires DECISION_TIMEOUT without waiting it out.
+            .start_paused(true)
+            .build()
+            .unwrap()
+    }
+
+    /// Advances the world and the paused runtime until every decision lands.
+    /// The parked sleep lets the runtime advance the clock to whichever
+    /// timer is due: the model reply or the decision timeout.
+    fn settle(app: &mut App, runtime: &tokio::runtime::Runtime) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut free = 0;
+        while std::time::Instant::now() < deadline {
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            });
+            app.update();
+            if app.world().resource::<Decisions>().running.is_empty() {
+                free += 1;
+                if free >= 2 {
+                    return;
+                }
+            } else {
+                free = 0;
+            }
+        }
+        panic!("the decision did not settle in time");
+    }
+
+    fn companion(assignments: Assignments) -> Companion {
+        let now = crate::host::db::now();
+        Companion {
+            id: "ene".into(),
+            name: "ene".into(),
+            mind: "kind".into(),
+            profile: Profile::default(),
+            profile_revision: 1,
+            state: State::default(),
+            state_revision: 1,
+            body: JsonDoc::empty(),
+            voice: JsonDoc::empty(),
+            assignments,
+            persona: None,
+            voice_identifier: None,
+            revision: 1,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// The Decision role assigned, so the gate asks the model at `provider`.
+    fn decision_companion() -> Companion {
+        let assignment = Assignment {
+            connection_id: "c1".into(),
+            model_id: "gpt-4o-mini".into(),
+        };
+        companion(Assignments {
+            task: assignment.clone(),
+            decision: Some(assignment),
+            ..Default::default()
+        })
+    }
+
+    /// Only the task model assigned: the Decision role falls back to it.
+    fn task_only_companion() -> Companion {
+        companion(Assignments {
+            task: Assignment {
+                connection_id: "c1".into(),
+                model_id: "gpt-4o-mini".into(),
+            },
+            ..Default::default()
+        })
+    }
+
+    /// The catalog the decision connects through (compaction.rs's `models`).
+    fn models() -> Models {
+        let provider = ProviderId::catalog("openrouter").unwrap();
+        let mut catalog = Catalog::builtin().clone();
+        catalog.insert(ModelSpec::new(provider, "gpt-4o-mini").with_context_window(128_000));
+        Models(Connector::new(catalog))
+    }
+
+    /// The settings row the decision connects through: an OpenRouter adapter
+    /// aimed at `endpoint`.
+    fn connection_row(endpoint: &str) -> crate::host::settings::Connection {
+        use crate::host::settings::{
+            ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
+        };
+        crate::host::settings::Connection {
+            id: "c1".into(),
+            name: "main".into(),
+            enabled: true,
+            kind: ConnectionKind::Llm,
+            config: ConnectionConfig::Llm(LlmConnection {
+                endpoint: Endpoint {
+                    adapter: "openrouter".into(),
+                    endpoint: endpoint.into(),
+                    options_schema: String::new(),
+                    options: "{}".into(),
+                },
+                model_ids: vec!["gpt-4o-mini".into()],
+            }),
+            credential_state: CredentialState::Absent,
+            revision: 1,
+            last_check: None,
+        }
+    }
+
+    fn files_spec() -> CapabilitySpec {
+        CapabilitySpec {
+            name: "device.files".into(),
+            description: "files capability".into(),
+            input_schema:
+                r#"{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}"#
+                    .into(),
+            approval: CapabilityApproval::Confirm,
+            approval_target: "{path}".into(),
+            ..Default::default()
+        }
+    }
+
+    /// One confirm-gated `device.files` client, activated for the companion.
+    /// The gate reads clients from the store, so the world needs no client
+    /// plugin machinery.
+    fn register_files_client(store: &Store) {
+        let capability = "device.files".to_owned();
+        store
+            .register_client_with_grants(
+                &crate::host::db::clients::ClientDeclaration {
+                    id: "c1",
+                    name: "c1",
+                    platform: "linux",
+                    capabilities: &[capability],
+                    specs: std::slice::from_ref(&files_spec()),
+                    expected_revision: 0,
+                },
+                &["device.files".to_owned()],
+            )
+            .unwrap();
+        store.activate("ene", Some("c1")).unwrap();
+    }
+
+    /// A headless world around one gated `device_request`: the store, a
+    /// client with a confirm-gated `device.files` capability, a companion
+    /// whose Decision model answers at `provider`, and the gate and collect
+    /// systems. The runtime is the caller's (paused, so a stall costs
+    /// nothing); the store lives in `_root`.
+    struct DecisionWorld {
+        app: App,
+        agent: Entity,
+        _root: tempfile::TempDir,
+    }
+
+    impl DecisionWorld {
+        fn at(runtime: &tokio::runtime::Runtime, provider: &str, owner: Companion) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+            store
+                .update_settings(
+                    store.settings_revision().unwrap(),
+                    &[(connection_row(provider), 0)],
+                )
+                .unwrap();
+            store.insert_companion(&owner).unwrap();
+            register_files_client(&store);
+            let credentials = Credentials::new(true);
+            credentials.remember("c1", "test-key".into());
+            // The kernel's start system runs on `Res<SessionLog>`, which the
+            // restore of a session log inserts: the gate never runs without
+            // it, so the world carries the plugins a real start does.
+            let logs = DirStore::open(root.path().join("rig")).unwrap();
+            let mut app = App::new();
+            app.set_error_handler(bevy_ecs::error::warn)
+                .insert_resource(store)
+                .insert_resource(credentials)
+                .insert_resource(SessionStore::new(logs))
+                .insert_resource(Notifier::new())
+                .insert_resource(Approvals::default())
+                .insert_resource(models())
+                .insert_resource(HostRuntime(runtime.handle().clone()))
+                // The gate only sees a call the kernel has a handler for: a
+                // `device_request` with no registered tool is dropped before
+                // the gate runs, so the client plugin that registers it is
+                // part of this world.
+                .add_plugins((
+                    AgentPlugin,
+                    SessionLogPlugin,
+                    super::super::client::ClientPlugin,
+                    GatePlugin,
+                ));
+            app.finish();
+            if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
+                time.set_max_delta(Duration::from_secs(60));
+            }
+            let mut history = History::new();
+            history.push(Message::user(USER_REQUEST));
+            // `Agent` and `AgentId` are the kernel's own identity for an
+            // agent: without them the start stage finds no agent for the call
+            // and drops it, so the gate never runs.
+            let agent = app
+                .world_mut()
+                .spawn((
+                    Agent,
+                    AgentId(crate::host::agent::companion_agent_id("ene")),
+                    super::super::agent::CompanionAgent {
+                        companion_id: "ene".into(),
+                    },
+                    Conversation(history),
+                ))
+                .id();
+            Self {
+                app,
+                agent,
+                _root: root,
+            }
+        }
+
+        fn store(&self) -> Store {
+            self.app.world().resource::<Store>().clone()
+        }
+
+        /// Spawns one gated `device_request` call, the way a model reply does.
+        fn gated_call(&mut self, path: &str) -> Entity {
+            let call = ToolCall {
+                id: CallId::from_wire("call-1"),
+                function: ToolFunction::new(
+                    ToolName::new("device_request").unwrap(),
+                    serde_json::json!({"capability": "device.files", "input": {"path": path}}),
+                ),
+                native: None,
+            };
+            self.app
+                .world_mut()
+                .spawn((
+                    rig_ecs::tools::ToolRequest { call },
+                    rig_ecs::stage::Effect::default(),
+                    rig_ecs::stage::ForAgent(self.agent),
+                    rig_ecs::stage::Admitted,
+                ))
+                .id()
+        }
+
+        /// The one pending approval, once the gate has held the call.
+        fn pending(&self) -> Approval {
+            self.store()
+                .approvals(ApprovalStatus::Pending)
+                .unwrap()
+                .pop()
+                .expect("one held approval")
+        }
+
+        fn events(&mut self) -> Vec<w::Notification> {
+            let mut receiver = self.app.world().resource::<Notifier>().subscribe();
+            self.app.world_mut().resource_mut::<Notifier>().flush();
+            let mut seen = Vec::new();
+            while let Ok(event) = receiver.try_recv() {
+                seen.push(event);
+            }
+            seen
+        }
+    }
+
+    /// What one notification stream says about cards and resolutions.
+    fn cards(events: &[w::Notification]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| {
+                let request = match event.event.as_ref()? {
+                    w::notification::Event::ApprovalRequested(request) => request,
+                    _ => return None,
+                };
+                request
+                    .request
+                    .as_option()
+                    .map(|request| request.request_id.clone())
+            })
+            .collect()
+    }
+
+    fn notices(events: &[w::Notification], code: &str) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event.as_ref(),
+                    Some(w::notification::Event::Generic(inner))
+                        if inner.kind == "notice"
+                            && inner.payload.as_option().is_some_and(|payload| {
+                                payload.json.contains(code)
+                            })
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_safe_operation_the_model_allows_runs_without_a_card() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"allow","reason":"依頼どおりの安全な操作です"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        assert!(
+            world.app.world().resource::<Decisions>().running.len() == 1,
+            "the gate started one decision"
+        );
+        settle(&mut world.app, &runtime);
+
+        let events = world.events();
+        assert!(cards(&events).is_empty(), "no card: {events:?}");
+        assert_eq!(notices(&events, "approval_resolved"), 1);
+        let approval = world.store().approval(&request).unwrap().unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Approved);
+        assert!(world.app.world().get::<Approved>(call).is_some());
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<Approvals>()
+                .by_request
+                .is_empty(),
+            "the hold is released"
+        );
+        assert_eq!(
+            world
+                .store()
+                .approvals(ApprovalStatus::Pending)
+                .unwrap()
+                .len(),
+            0
+        );
+        let bodies = provider.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1, "one decision call");
+        provider.task.abort();
+    }
+
+    #[test]
+    fn an_operation_that_breaks_a_free_text_policy_is_carded_once() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"require_approval","reason":"ポリシー: 外部への送信は常に確認"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        world
+            .store()
+            .apply_policy_texts(
+                &[PolicyText {
+                    id: "p1".into(),
+                    text: "外部への送信は常に確認する".into(),
+                    created_at: String::new(),
+                }],
+                &[],
+            )
+            .unwrap();
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        settle(&mut world.app, &runtime);
+
+        let events = world.events();
+        assert_eq!(cards(&events), vec![request.clone()], "exactly one card");
+        assert_eq!(notices(&events, "approval_required"), 1);
+        let approval = world.store().approval(&request).unwrap().unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Pending);
+        assert!(world.app.world().get::<Approved>(call).is_none());
+        assert_eq!(
+            world.app.world().resource::<Approvals>().by_request.len(),
+            1,
+            "the call stays held"
+        );
+        // The card the user answers is the real one: submission works.
+        let resolved = submit(world.app.world_mut(), &request, ApprovalDecision::Deny).unwrap();
+        assert_eq!(resolved.status, ApprovalStatus::Denied);
+        provider.task.abort();
+    }
+
+    #[test]
+    fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
+        let runtime = paused_runtime();
+        // The endpoint stalls past the deadline: only the timeout answers.
+        let provider =
+            runtime.block_on(serve(r#"{"decision":"allow","reason":"遅すぎる"}"#, STALL));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        settle(&mut world.app, &runtime);
+        let events = world.events();
+        assert_eq!(cards(&events), vec![request.clone()], "the timeout cards");
+        assert!(
+            world.store().approval(&request).unwrap().unwrap().status == ApprovalStatus::Pending
+        );
+        assert!(world.app.world().get::<Approved>(call).is_none());
+        assert!(provider.bodies.lock().unwrap().len() <= 1);
+        provider.task.abort();
+
+        // The reply is prose, not the JSON asked for.
+        let provider = runtime.block_on(serve("はい、承認します", Duration::ZERO));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        settle(&mut world.app, &runtime);
+        let events = world.events();
+        assert_eq!(
+            cards(&events),
+            vec![request.clone()],
+            "the invalid reply cards"
+        );
+        assert!(
+            world.store().approval(&request).unwrap().unwrap().status == ApprovalStatus::Pending
+        );
+        assert!(world.app.world().get::<Approved>(call).is_none());
+        provider.task.abort();
+    }
+
+    #[test]
+    fn the_prompt_the_model_received_carries_the_bounded_inputs() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"require_approval","reason":"対象が大きすぎる"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        world
+            .store()
+            .apply_policy_texts(
+                &[PolicyText {
+                    id: "p1".into(),
+                    text: "外部への送信は常に確認する".into(),
+                    created_at: String::new(),
+                }],
+                &[],
+            )
+            .unwrap();
+        // A rule for another tool reaches the prompt as reference, without
+        // deciding the call.
+        world
+            .store()
+            .apply_policy_rules(
+                &[PolicyRule {
+                    id: "r1".into(),
+                    tool_name: "body_motion".into(),
+                    pattern: "*".into(),
+                    effect: PolicyEffect::Allow,
+                    created_at: String::new(),
+                }],
+                &[],
+            )
+            .unwrap();
+        let _ = world.gated_call("/tmp/a");
+        world.app.update();
+        settle(&mut world.app, &runtime);
+
+        let bodies = provider.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1, "one decision call");
+        let body = &bodies[0];
+        assert!(body.contains("device_request"), "{body}");
+        assert!(body.contains(USER_REQUEST), "{body}");
+        assert!(body.contains("外部への送信は常に確認する"), "{body}");
+        assert!(body.contains("body_motion / * → allow"), "{body}");
+        // The canonical arguments reach the prompt; the body embeds it as a
+        // JSON string, so its quotes travel escaped.
+        let arguments = r#"{"capability":"device.files","input":{"path":"/tmp/a"}}"#;
+        assert!(
+            body.contains(&arguments.replace('"', "\\\"")),
+            "the canonical arguments: {body}"
+        );
+        assert!(
+            body.contains("require_approval"),
+            "the system prompt demands the JSON shape: {body}"
+        );
+        provider.task.abort();
+    }
+
+    #[test]
+    fn a_late_decision_drops_when_the_user_answered_first() {
+        let runtime = paused_runtime();
+        // The model allows, but only after the user already denied.
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"allow","reason":"安全だった"}"#,
+            Duration::from_secs(1),
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        let denied = submit(world.app.world_mut(), &request, ApprovalDecision::Deny).unwrap();
+        assert_eq!(denied.status, ApprovalStatus::Denied);
+        settle(&mut world.app, &runtime);
+
+        let events = world.events();
+        assert!(cards(&events).is_empty(), "a late allow shows no card");
+        assert!(
+            world.store().approval(&request).unwrap().unwrap().status == ApprovalStatus::Denied,
+            "the deny stands"
+        );
+        assert!(
+            world
+                .store()
+                .resolve_approval(&request, ApprovalStatus::Approved)
+                .is_err(),
+            "the approval is resolved once"
+        );
+        assert!(world.app.world().get::<Approved>(call).is_none());
+        assert!(world.app.world().resource::<Decisions>().running.is_empty());
+        provider.task.abort();
+    }
+
+    #[test]
+    fn the_decision_role_falls_back_to_the_task_model() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"allow","reason":"依頼どおりの操作"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, task_only_companion());
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        settle(&mut world.app, &runtime);
+
+        assert_eq!(
+            provider.bodies.lock().unwrap().len(),
+            1,
+            "the task model answered"
+        );
+        let approval = world.store().approval(&request).unwrap().unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Approved);
+        assert!(world.app.world().get::<Approved>(call).is_some());
+        provider.task.abort();
     }
 }

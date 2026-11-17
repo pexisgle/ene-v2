@@ -168,6 +168,7 @@ fn kind_of(event: &w::notification::Event) -> &'static str {
         w::notification::Event::WorkEvent(_) => "work",
         w::notification::Event::ApprovalRequested(_) => "approval",
         w::notification::Event::PolicyRulesUpdated(_) => "policy",
+        w::notification::Event::PolicyTextsUpdated(_) => "policy_text",
         w::notification::Event::SettingsUpdated(_) => "settings",
         w::notification::Event::ClientUpdated(_) => "client",
         w::notification::Event::DeviceOperation(_) => "device_operation",

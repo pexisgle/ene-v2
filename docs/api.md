@@ -48,6 +48,8 @@ MemoryViewは本文、短い説明、出所・取得方法、時刻、共有範�
 ### 作業
 
 WorkViewは親、WorkSession、進行中RunInfoを持つ。runには実行状態、終了理由、失敗、`WaitingInput`中の承認要求（`pending_request_id`）がある。
+
+WorkSessionの実行バックエンドは親のtask接続で選ぶ。接続が`CONNECTION_KIND_ACP`で、その`endpoint.adapter`が名指すハーネスプラグイン（manifest `provides: ["harness"]`）が導入済みなら、そのプラグインが「手」になる（ABI 8: `Start` が `cwd` を運び、`Prompt` が生存中のセッションへ追加ターンを届ける）。それ以外はプロセス内Rigエージェントのままである。ACP接続に必須なのは`endpoint.adapter`だけで、従来の`command`/`args`は任意の外部エージェント起動用に残る。
 ## クライアント能力とデバイス操作
 
 クライアントは`RegisterClient`で、自身が提供できる能力を`capabilities`（能力名の一覧）と`capability_specs`（説明・入力スキーマ・プリセット・ツール名・承認要否）で宣言する。ホストは宣言を検証し、ユーザーの許可に基づいて`granted_capabilities`を決める。クライアントは自分自身へ権限を付与できない。`SetCapabilities`でクライアントが更新できるのは宣言であり、`granted_capabilities`はホストの許可判断の結果としてのみ変化する。
@@ -96,7 +98,7 @@ WorkViewは親、WorkSession、進行中RunInfoを持つ。runには実行状態
 wire契約は以下の6つのConnect-RPCサービスで構成される：
 - **`HostService`**: システム状態スナップショット（アクティブ端末の`Activation`を含む）、単一イベントストリーム（`Subscribe`）、コンパニオン・心・記憶の取得・操作（`ListMemories` 含む）。
 - **`ChatService`**: 会話メッセージの送信（`SendMessage`）、停止（`Stop`）、会話履歴取得（`GetHistory`, `GetMessage`）。
-- **`SettingsService`**: 設定、接続（`Connection`の種別oneof: LLM / TTS / STT / Embedding / MCP / ACP）、LLMプロバイダ・モデル一覧、ポリシー・承認ルール（`PolicyRule`）、未決承認要求の確認と回答（`SubmitApproval`）。
+- **`SettingsService`**: 設定、接続（`Connection`の種別oneof: LLM / TTS / STT / Embedding / MCP / ACP）、LLMプロバイダ・モデル一覧、ポリシー・承認ルール（`PolicyRule`）、自由文ポリシー（`PolicyText`: Decision Engine の判定入力。`ListPolicyTexts` / `UpdatePolicyTexts` で管理し、変更は `Settings.policy_texts` と `PolicyTextsUpdated` で配信）、未決承認要求の確認と回答（`SubmitApproval`）。
 - **`WorkService`**: 作業セッションの開始（`StartWork`）、一覧（`ListWorks`）、詳細取得（`GetWork`）、直接指示（`SendWork`）、緊急停止（`StopWork`）、クローズ（`CloseWork`）。
 - **`VoiceService`**: 双方向マイク音声入力ストリーム（`StreamAudioInput` / 要HTTP/2）、音声ストリーム購読（`SubscribeAudioOutput`）、音声出力の再生担当はアクティブクライアント1台とし、複数クライアントでの同時再生を前提にしない。音声入出力は`client_id`とアクティブ状態で束縛し、端末移動後の旧クライアント由来データを破棄する。ブラウザのConnect-Web等、HTTP/2双方向ストリーミングを利用できない環境向けには、チャンク分割アップロード等の代替経路を将来許容する（AlphaではHTTP/2を必須とする）。
 - **`ClientService`**: クライアント端末の登録（能力・スキーマの宣言）、アクティブクライアントの切り替え（`Activate`）、端末操作ストリーム（`DeviceStream`）。操作は送出時点のアクティブクライアントへ配送し、結果は操作IDで照合する。
@@ -186,6 +188,7 @@ message Notification {
     Snapshot initial_state = 19;
     ResyncRequired resync_required = 20;
     Activation activation_updated = 21;  // Activate によるアクティブクライアント/revisionの変更
+    PolicyTextsUpdated policy_texts_updated = 22;  // UpdatePolicyTexts による自由文ポリシー変更
   }
 }
 
@@ -530,6 +533,19 @@ message UpdatePolicyRulesRequest {
 }
 message PolicyRulesUpdated { repeated PolicyRule rules = 1; }
 
+// ユーザーが自由文で書くポリシー。Decision Engine の判定入力（docs/design/permissions.md §3.1）。
+message PolicyText {
+  string id = 1;
+  string text = 2;
+  string created_at = 3;
+}
+message PolicyTexts { repeated PolicyText items = 1; }
+message UpdatePolicyTextsRequest {
+  repeated PolicyText add_or_update = 1;
+  repeated string remove_ids = 2;
+}
+message PolicyTextsUpdated { repeated PolicyText texts = 1; }
+
 // Settings & Connections ---------------------------------------------------
 
 enum ConnectionKind {
@@ -608,6 +624,7 @@ message Settings {
   uint64 revision = 1;
   repeated Connection connections = 2;
   string updated_at = 3;
+  repeated PolicyText policy_texts = 4;  // 自由文ポリシー。SettingsUpdated でも配信される
 }
 message ConnectionInput {
   string id = 1;
@@ -893,6 +910,8 @@ service SettingsService {
   rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
   rpc ListPolicyRules(Empty) returns (PolicyRules);
   rpc UpdatePolicyRules(UpdatePolicyRulesRequest) returns (PolicyRules);
+  rpc ListPolicyTexts(Empty) returns (PolicyTexts);
+  rpc UpdatePolicyTexts(UpdatePolicyTextsRequest) returns (PolicyTexts);
   // LLM接続のプロバイダカタログ。TTS/STT/MCP/ACPはConnectionのoneofで扱う。
   rpc ListProviders(Empty) returns (LlmProviders);
   // LLM接続のモデル一覧。
