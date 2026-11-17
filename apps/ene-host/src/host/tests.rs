@@ -734,6 +734,15 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
         .unwrap()[0]
         .clone();
     assert_eq!(request.capability.as_deref(), Some("device.files"));
+    assert_eq!(
+        request.normalized_arguments,
+        permission::canonicalise(
+            "device_request",
+            &serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}}),
+        )
+        .0,
+        "the stored arguments are the same canonical form the hash covers"
+    );
     let approval = permission::submit(
         harness.app.world_mut(),
         &request.request_id,
@@ -1034,6 +1043,11 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
     // work session.
     assert_eq!(request.tool_name, "device_files");
     assert_eq!(request.capability.as_deref(), Some("device.files"));
+    assert_eq!(
+        request.normalized_arguments,
+        permission::canonicalise("device_files", &serde_json::json!({"path": "/tmp/a"})).0,
+        "the stored arguments are the same canonical form the hash covers"
+    );
     assert_eq!(request.work_id, None);
     assert!(
         harness

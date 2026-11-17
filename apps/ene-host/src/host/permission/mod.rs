@@ -492,14 +492,15 @@ fn gate(world: &mut World) {
             Verdict::Confirm { target } => {
                 let hold = world.spawn(HoldOf(call)).id();
                 let request_id = uuid::Uuid::new_v4().to_string();
+                let (normalized, hash) = canonicalise(&tool_name, &arguments);
                 let approval = Approval {
                     request_id: request_id.clone(),
                     session_id: companion_id.clone(),
                     run_id: run_id.clone(),
                     work_id: work_id.clone(),
-                    action_payload_hash: canonicalise(&tool_name, &arguments).1,
+                    action_payload_hash: hash,
                     tool_name: tool_name.clone(),
-                    normalized_arguments: arguments.to_string(),
+                    normalized_arguments: normalized,
                     status: ApprovalStatus::Pending,
                     created_at: super::db::now(),
                     resolved_at: None,
