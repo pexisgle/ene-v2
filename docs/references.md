@@ -13,6 +13,8 @@
 <a id="alpha-mind"></a>
 ### 人格・心
 
+キャラクターの編集欄と推論時の扱いは、AIRI・SillyTavern・Kindroidの公式資料とMRBenchの評価方法を踏まえて[心の設定とキャラクター定義](design/character-profile.md)にまとめた。
+
 | 参照 | 取り入れるもの | そのまま採らないもの |
 | --- | --- | --- |
 | [AIRIのカード](research/mind-sources.md#p02)、[SillyTavern](research/mind-sources.md#p11)、[MRPrompt](research/mind-sources.md#r03) | 小さな人格の核、関連する側面・例・背景の利用 | 全設定の常時投入、固定台詞表、カードの指示を権限へ昇格させること |
