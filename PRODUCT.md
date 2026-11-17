@@ -38,6 +38,7 @@ web
 
 - 製品名は ene。
 - チャットツールではなく「暮らすキャラクター」という枠組みが製品の身元。機能追加でこの枠組みを薄めない。
+- 見た目は kawaii を基調にする（ユーザー指定）。水準の参照は Desktop Mate、Project AIRI。骨格はカテゴリ標準（macOS システム設定、Linear、Raycast）を守り、可愛さで標準の読みやすさを崩さない。
 
 ## Evidence on Hand
 
