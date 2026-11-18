@@ -1,6 +1,6 @@
 [package]
 name = "ene-plugin"
-description = "Plugin manifests, extension APIs and worker communication contracts"
+description = "Plugin manifests, extension APIs and Extism guest SDK"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,5 +9,12 @@ publish.workspace = true
 workspace = true
 [dependencies]
 ene-rpc = { path = "../ene-rpc" }
+# Types only: the ACP SDK does not build for `wasm32-unknown-unknown`.
+agent-client-protocol-schema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# The guest side of the Extism ABI: bump together with the host SDK in
+# `ene-plugin-runtime`, never on its own.
+extism-pdk = { version = "=1.4.1", default-features = false }

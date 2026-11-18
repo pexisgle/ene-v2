@@ -6,7 +6,7 @@ mod mtoon;
 
 pub(crate) use constraint::*;
 pub(crate) use mtoon::*;
-pub use vrm_spec::vrmc_vrm_1_0::{ExpressionPresetName, HumanBoneName, Meta as VrmMeta};
+pub use vrm_spec::vrmc_vrm_1_0::{ExpressionPresetName, HumanBoneName};
 pub(crate) use vrm_spec::{
     vrmc_spring_bone_1_0::VrmcSpringBoneSchema as Springs,
     vrmc_vrm_1_0::{

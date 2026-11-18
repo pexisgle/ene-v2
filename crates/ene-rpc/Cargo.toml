@@ -8,7 +8,7 @@ publish.workspace = true
 [lints]
 workspace = true
 [features]
-client = ["connectrpc/client-tls", "dep:http", "dep:rustls", "dep:webpki-roots", "dep:url"]
+client = ["connectrpc/client", "dep:http", "dep:url"]
 
 [dependencies]
 serde.workspace = true
@@ -17,11 +17,8 @@ buffa.workspace = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 http = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
-webpki-roots = { version = "1", optional = true }
 connectrpc.workspace = true
 
 [build-dependencies]
 buffa-build = "0.9"
 connectrpc-build = "0.9"
-protoc-bin-vendored = "3"

@@ -35,101 +35,179 @@ pub(crate) struct Pose {
     pub translation: Option<Vec3>,
 }
 
+#[derive(Component, Clone, Default, Reflect)]
+#[reflect(Component, Clone)]
+pub(crate) struct ExpressionInput {
+    pub value: Option<f32>,
+}
+
+#[derive(Component, Clone, Default, Reflect)]
+#[reflect(Component, Clone)]
+pub(crate) struct GazeInput {
+    pub rotation: Option<Quat>,
+}
+
+/// The bind-pose orientation of one bone, used to move rotations between the
+/// pose space a VRMA clip was authored in and this model's local bone space.
+///
+/// `specification/VRMC_vrm_animation-1.0/how_to_transform_human_pose.md`
+/// defines the intermediate `NormalizedLocalRotation` for a source model with
+/// world rest rotation `W` and local rest rotation `L`:
+///
+/// ```text
+/// model     = W * L^-1 * local * W^-1
+/// local     = L * W^-1 * model * W
+/// ```
+///
+/// `model` is the rotation a clip stores; `local` is the bone's local
+/// rotation. Using a different `W`/`L` on each side lets one clip drive models
+/// whose T-poses differ.
+#[derive(Clone, Copy, Reflect)]
+pub(crate) struct RestFrame {
+    pub local: Quat,
+    pub global: Quat,
+}
+
+impl RestFrame {
+    /// Converts a clip rotation into this model's local bone space.
+    pub(crate) fn localize(self, rotation: Quat) -> Quat {
+        self.local * self.global.inverse() * rotation * self.global
+    }
+
+    /// Converts this model's local bone rotation into clip space.
+    pub(crate) fn normalize(self, rotation: Quat) -> Quat {
+        self.global * self.local.inverse() * rotation * self.global.inverse()
+    }
+}
+
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct RestPose {
     pub local: Transform,
-    pub global_rotation: Quat,
+    pub frame: RestFrame,
     pub translation_from_normalized: bevy::math::Mat3A,
 }
 
 pub(crate) fn setup(app: &mut App) {
     app.register_type::<Pose>()
         .register_type::<RestPose>()
+        .register_type::<ExpressionInput>()
+        .register_type::<GazeInput>()
         .add_systems(PostUpdate, reset.before(AnimationSystems))
         .add_systems(PostUpdate, apply.in_set(VrmSystems::Pose));
 }
 
 fn reset(
     mut poses: Query<&mut Pose>,
-    roots: Query<&crate::expressions::Binds>,
-    mut transforms: Query<&mut Transform, Changed<Transform>>,
+    mut expressions: Query<&mut ExpressionInput>,
+    mut gazes: Query<&mut GazeInput>,
 ) {
     for mut pose in &mut poses {
         if pose.rotation.is_some() || pose.translation.is_some() {
             *pose = Pose::default();
         }
     }
-    for binds in &roots {
-        for binding in &binds.bindings {
-            let entity = binding.target;
-            if let Ok(mut transform) = transforms.get_mut(entity)
-                && transform.translation != Vec3::ZERO
-            {
-                transform.translation = Vec3::ZERO;
-            }
-        }
+    for mut input in &mut expressions {
+        input.value = None;
+    }
+    for mut input in &mut gazes {
+        input.rotation = None;
     }
 }
 
 fn apply(mut poses: Query<(&Pose, &RestPose, &mut Transform)>) {
     for (pose, rest, mut transform) in &mut poses {
-        let mut next = *transform;
-        if let Some(rotation) = pose.rotation {
-            next.rotation =
-                denormalize_rotation(rest.local.rotation, rest.global_rotation, rotation);
-        }
-        if let Some(translation) = pose.translation {
-            next.translation =
-                rest.local.translation + rest.translation_from_normalized * translation;
-        }
-        transform.set_if_neq(next);
+        // A stopped animation leaves no input for its bones. Restore the rest
+        // pose instead of freezing the last frame, so stopping a clip and
+        // switching to one that does not bind a bone both return to rest.
+        let rotation = pose.rotation.map_or(rest.local.rotation, |rotation| {
+            rest.frame.localize(rotation)
+        });
+        let translation = pose
+            .translation
+            .map_or(rest.local.translation, |translation| {
+                rest.local.translation + rest.translation_from_normalized * translation
+            });
+        transform.set_if_neq(Transform {
+            rotation,
+            translation,
+            ..*transform
+        });
     }
 }
 
-fn normalize_rotation(local: Quat, global: Quat, value: Quat) -> Quat {
-    global * local.inverse() * value * global.inverse()
-}
-pub(crate) fn denormalize_rotation(local: Quat, global: Quat, value: Quat) -> Quat {
-    local * global.inverse() * value * global
-}
+#[derive(Component)]
+#[component(clone_behavior = Ignore)]
+pub(crate) struct NativeNode(pub usize);
 
-/// Collects the animation target id for every node reachable from a scene.
-///
-/// Mirrors `bevy_gltf` 0.20.0's path derivation (`node_name` + `collect_path`)
-/// so that curves from unselected scenes are grouped exactly as they are in the
-/// native `AnimationClip`.
-// ponytail: bevy_gltf keeps `node_name`/`collect_path` private; drop this copy
-// when Bevy exposes node target paths. Recheck the path rules on upgrades.
-fn collect_target(
-    node: &gltf::Node,
-    current: &[Name],
-    targets: &mut HashMap<usize, AnimationTargetId>,
+#[derive(Component)]
+#[component(clone_behavior = Ignore)]
+pub(crate) struct NativeSceneRoot;
+
+fn collect_native_targets(
+    world: &World,
+    entity: Entity,
     visited: &mut HashSet<usize>,
+    targets: &mut HashMap<usize, AnimationTargetId>,
 ) {
-    let mut path = current.to_vec();
-    path.push(Name::new(
-        node.name()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| format!("GltfNode{}", node.index())),
-    ));
-    visited.insert(node.index());
-    for child in node.children() {
-        if !visited.contains(&child.index()) {
-            collect_target(&child, &path, targets, visited);
+    let node = world.get::<NativeNode>(entity).expect("native source node");
+    if !visited.insert(node.0) {
+        return;
+    }
+    if let Some(children) = world.get::<Children>(entity) {
+        for child in children.iter() {
+            if world.get::<NativeNode>(child).is_some() {
+                collect_native_targets(world, child, visited, targets);
+            }
         }
     }
-    targets.insert(node.index(), AnimationTargetId::from_names(path.iter()));
+    let id = if let Some(id) = world.get::<AnimationTargetId>(entity) {
+        *id
+    } else {
+        // Skipped native channels still participate in collision checks.
+        // Read Bevy's actual names, excluding its synthetic scene root.
+        let mut path = Vec::new();
+        let mut current = Some(entity);
+        while let Some(id) = current {
+            let entity = world.entity(id);
+            if !entity.contains::<NativeNode>() {
+                break;
+            }
+            path.push(entity.get::<Name>().expect("native node name").clone());
+            current = entity.get::<ChildOf>().map(ChildOf::parent);
+        }
+        AnimationTargetId::from_names(path.iter().rev())
+    };
+    targets.insert(node.0, id);
 }
 
-fn motion_targets(document: &gltf::Document) -> HashMap<usize, AnimationTargetId> {
+fn motion_targets(
+    document: &gltf::Document,
+    context: &bevy::asset::LoadContext<'_>,
+) -> std::io::Result<HashMap<usize, AnimationTargetId>> {
     let mut targets = HashMap::default();
     for scene in document.scenes() {
-        for node in scene.nodes() {
-            collect_target(&node, &[], &mut targets, &mut HashSet::default());
+        let label = format!("Scene{}", scene.index());
+        let world = &context
+            .get_labeled(&label)
+            .and_then(|asset| asset.get::<WorldAsset>())
+            .ok_or_else(|| invalid("VRMA native scene unavailable"))?
+            .world;
+        let root = world
+            .iter_entities()
+            .find(|entity| entity.contains::<NativeSceneRoot>())
+            .ok_or_else(|| invalid("VRMA native scene root unavailable"))?;
+        if let Some(children) = root.get::<Children>() {
+            // Native curves use first-visited descendants per source root and
+            // last-root/last-scene overwrite. ECS iteration order cannot decide it.
+            for entity in children.iter() {
+                if world.get::<NativeNode>(entity).is_some() {
+                    collect_native_targets(world, entity, &mut HashSet::default(), &mut targets);
+                }
+            }
         }
     }
-    targets
+    Ok(targets)
 }
 
 fn motion_bones(motion: &schema::Motion) -> HashMap<usize, schema::HumanBoneName> {
@@ -204,7 +282,7 @@ pub(crate) fn retarget_motion(
         .as_ref()
         .and_then(|look_at| look_at.node)
         .map(schema::index);
-    let targets = motion_targets(source);
+    let targets = motion_targets(source, context)?;
     let mut clips = Vec::new();
     for animation in source.animations() {
         let label = format!("Animation{}", animation.index());
@@ -251,7 +329,7 @@ pub(crate) fn retarget_motion(
             // Bevy skips channels it cannot decode (for example sparse sampler inputs).
             // Match by property/evaluator instead of channel position, and skip a channel
             // whose native curve is absent rather than failing the whole VRMA.
-            let Some(curve) = native.curves().get(id).and_then(|curves| {
+            let Some(curve) = native.curves().get(&native_id).and_then(|curves| {
                 curves.iter().find(|curve| match property {
                     gltf::animation::Property::Rotation => curve.0.evaluator_id() == rot_id,
                     gltf::animation::Property::Translation => curve.0.evaluator_id() == trans_id,
@@ -279,7 +357,10 @@ pub(crate) fn retarget_motion(
                 .entity(entity)
                 .components::<(&Transform, &GlobalTransform)>();
             let global = GlobalTransform::from(root_inv * global.affine());
-            let global_rot = global.rotation().normalize();
+            let frame = RestFrame {
+                local: local.rotation,
+                global: global.rotation().normalize(),
+            };
             let eval = curve.0.evaluator_id();
             if eval == rot_id
                 && let Some(bone) = bone
@@ -292,9 +373,7 @@ pub(crate) fn retarget_motion(
                             pose.rotation.get_or_insert(Quat::IDENTITY)
                         }),
                         FunctionCurve::new(domain, move |t| {
-                            normalize_rotation(
-                                local.rotation,
-                                global_rot,
+                            frame.normalize(
                                 *curve
                                     .0
                                     .sample_clamped(t)
@@ -328,9 +407,40 @@ pub(crate) fn retarget_motion(
             } else if eval == trans_id
                 && let Some(expression) = expression
             {
-                clip.add_variable_curve_to_target(expression_target(expression), curve.clone());
+                let curve = Arc::new(curve.clone());
+                clip.add_curve_to_target(
+                    expression_target(expression),
+                    AnimatableCurve::new(
+                        AnimatedField::new_unchecked("value", |input: &mut ExpressionInput| {
+                            input.value.get_or_insert(0.)
+                        }),
+                        FunctionCurve::new(domain, move |t| {
+                            curve
+                                .0
+                                .sample_clamped(t)
+                                .downcast::<Vec3>()
+                                .expect("translation curve")
+                                .x
+                        }),
+                    ),
+                );
             } else if eval == rot_id && gaze_node == Some(node) {
-                clip.add_variable_curve_to_target(gaze_target(), curve.clone());
+                let curve = Arc::new(curve.clone());
+                clip.add_curve_to_target(
+                    gaze_target(),
+                    AnimatableCurve::new(
+                        AnimatedField::new_unchecked("rotation", |input: &mut GazeInput| {
+                            input.rotation.get_or_insert(Quat::IDENTITY)
+                        }),
+                        FunctionCurve::new(domain, move |t| {
+                            *curve
+                                .0
+                                .sample_clamped(t)
+                                .downcast::<Quat>()
+                                .expect("rotation curve")
+                        }),
+                    ),
+                );
             }
         }
         if clip.curves().is_empty() {
@@ -342,4 +452,80 @@ pub(crate) fn retarget_motion(
         return Err(invalid("VRMA requires an animation"));
     }
     Ok(clips)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn app_with_bone(rest: Transform) -> (App, Entity) {
+        let mut app = App::new();
+        let entity = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                RestPose {
+                    local: rest,
+                    frame: RestFrame {
+                        local: rest.rotation,
+                        global: Quat::IDENTITY,
+                    },
+                    translation_from_normalized: bevy::math::Mat3A::IDENTITY,
+                },
+                Pose::default(),
+            ))
+            .id();
+        (app, entity)
+    }
+
+    #[test]
+    fn bones_without_animation_input_return_to_rest() {
+        let rest = Transform::from_xyz(0., 1., 0.).with_rotation(Quat::from_rotation_z(0.4));
+        let (mut app, entity) = app_with_bone(rest);
+
+        app.world_mut().get_mut::<Pose>(entity).unwrap().rotation =
+            Some(Quat::from_rotation_x(0.5));
+        app.world_mut()
+            .run_system_once(apply)
+            .expect("apply animation pose");
+        let animated = *app.world().get::<Transform>(entity).unwrap();
+        assert!(
+            animated
+                .rotation
+                .abs_diff_eq(rest.rotation * Quat::from_rotation_x(0.5), 1e-6)
+        );
+        assert!(
+            animated.translation.abs_diff_eq(rest.translation, 1e-6),
+            "a rotation-only pose must not inherit a previous translation"
+        );
+
+        {
+            let mut pose = app.world_mut().get_mut::<Pose>(entity).unwrap();
+            pose.rotation = Some(Quat::from_rotation_x(0.5));
+            pose.translation = Some(Vec3::new(2., 3., 4.));
+        }
+        app.world_mut()
+            .run_system_once(apply)
+            .expect("apply animation pose");
+        let animated = *app.world().get::<Transform>(entity).unwrap();
+        assert!(
+            animated
+                .translation
+                .abs_diff_eq(rest.translation + Vec3::new(2., 3., 4.), 1e-6)
+        );
+
+        // The next frame has no animation input at all.
+        *app.world_mut().get_mut::<Pose>(entity).unwrap() = Pose::default();
+        app.world_mut()
+            .run_system_once(apply)
+            .expect("apply rest pose");
+        let at_rest = *app.world().get::<Transform>(entity).unwrap();
+        assert!(at_rest.rotation.abs_diff_eq(rest.rotation, 1e-6));
+        assert!(at_rest.translation.abs_diff_eq(rest.translation, 1e-6));
+        assert!(
+            at_rest.scale.abs_diff_eq(Vec3::ONE, 1e-6),
+            "scale is untouched"
+        );
+    }
 }

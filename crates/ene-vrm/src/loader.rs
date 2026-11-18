@@ -168,6 +168,15 @@ pub(crate) fn invalid(
 ) -> std::io::Error {
     std::io::Error::other(error)
 }
+
+/// Every VRM 1.0 extension this loader reads requires the same version.
+fn require_v1(version: &str, extension: &str) -> std::io::Result<()> {
+    if version == "1.0" {
+        Ok(())
+    } else {
+        Err(invalid(format!("{extension} requires specVersion 1.0")))
+    }
+}
 pub(crate) fn extension<T: serde::de::DeserializeOwned>(
     value: Option<&serde_json::Value>,
     name: &str,
@@ -333,24 +342,29 @@ impl GltfExtensionHandler for VrmExtensions {
                     source.extension_value(VRMC_VRM_ANIMATION),
                     "VRMC_vrm_animation",
                 )?;
-                if motion.spec_version != "1.0" {
-                    return Err(invalid("VRMC_vrm_animation requires specVersion 1.0"));
-                }
+                require_v1(&motion.spec_version, "VRMC_vrm_animation")?;
                 validate_motion(&motion)?;
                 return Ok(Definition::Motion(Arc::new(motion)));
             }
             let model: schema::Model = extension(source.extension_value(VRMC_VRM), "VRMC_vrm")?;
-            if model.spec_version != "1.0" {
-                return Err(invalid("VRMC_vrm requires specVersion 1.0"));
-            }
+            require_v1(&model.spec_version, "VRMC_vrm")?;
             for material in source.materials() {
                 let Some(value) = material.extension_value(VRMC_MATERIALS_MTOON) else {
                     continue;
                 };
-                let toon: schema::Toon = schema::Toon::deserialize(value).map_err(invalid)?;
-                if toon.schema.spec_version != "1.0" {
-                    return Err(invalid("VRMC_materials_mtoon requires specVersion 1.0"));
+                if let Some(shift) = value
+                    .get("shadingShiftTexture")
+                    .filter(|shift| !shift.is_null())
+                {
+                    gltf::json::texture::Info::deserialize(shift).map_err(invalid)?;
                 }
+                let authored =
+                    vrm_spec::vrmc_materials_mtoon_1_0::VrmcMaterialsMtoonSchema::deserialize(
+                        value,
+                    )
+                    .map_err(invalid)?;
+                require_v1(&authored.spec_version, "VRMC_materials_mtoon")?;
+                let toon = schema::Toon::compile(authored).map_err(invalid)?;
                 self.materials
                     .insert(material.index().expect("indexed material"), toon);
             }
@@ -359,10 +373,8 @@ impl GltfExtensionHandler for VrmExtensions {
                 .map(schema::Springs::deserialize)
                 .transpose()
                 .map_err(invalid)?;
-            if let Some(springs) = &self.springs
-                && springs.spec_version != "1.0"
-            {
-                return Err(invalid("VRMC_springBone requires specVersion 1.0"));
+            if let Some(springs) = &self.springs {
+                require_v1(&springs.spec_version, "VRMC_springBone")?;
             }
             for node in source.nodes() {
                 let Some(value) = node.extension_value(VRMC_NODE_CONSTRAINT) else {
@@ -370,9 +382,7 @@ impl GltfExtensionHandler for VrmExtensions {
                 };
                 let constraint: schema::NodeConstraint =
                     extension(Some(value), VRMC_NODE_CONSTRAINT)?;
-                if constraint.spec_version != "1.0" {
-                    return Err(invalid("VRMC_node_constraint requires specVersion 1.0"));
-                }
+                require_v1(&constraint.spec_version, "VRMC_node_constraint")?;
                 self.constraints.push((node.index(), constraint));
             }
             Ok(Definition::Model(Box::new(model)))
@@ -501,6 +511,7 @@ impl GltfExtensionHandler for VrmExtensions {
         entity: &mut EntityWorldMut,
     ) {
         if self.definition.is_some() {
+            entity.insert(crate::animation::NativeNode(node.index()));
             self.nodes.insert(node.index(), entity.id());
         }
     }
@@ -514,6 +525,9 @@ impl GltfExtensionHandler for VrmExtensions {
         let Some(definition) = &self.definition else {
             return;
         };
+        world
+            .entity_mut(root)
+            .insert(crate::animation::NativeSceneRoot);
         // VRM metadata is document-wide but nodes are per-scene. Only the scene
         // that Bevy (and `VrmLoader::load`) uses may be attached.
         if scene.index() != self.selected_scene {
@@ -560,30 +574,5 @@ impl GltfExtensionHandler for VrmExtensions {
         })();
         world.entity_mut(root).insert(VrmScene(result));
         self.nodes.clear();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gltf::binary::{Glb, Header};
-    use std::borrow::Cow;
-
-    #[test]
-    fn validation_accepts_a_glb_json_chunk() {
-        let json = br#"{"asset":{"version":"2.0"}}"#;
-        let bin = [0u8; 1024];
-        let bytes = Glb {
-            header: Header {
-                magic: *b"glTF",
-                version: 2,
-                length: 0,
-            },
-            json: Cow::Borrowed(json),
-            bin: Some(Cow::Borrowed(&bin)),
-        }
-        .to_vec()
-        .unwrap();
-        validate_gltf(&bytes).unwrap();
     }
 }

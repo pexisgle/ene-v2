@@ -1,5 +1,22 @@
-// VRM constraint math adapted from bevy_vrm1, Copyright 2025 elm,
-// under MIT OR Apache-2.0; see LICENSE-bevy_vrm1-*.
+//! `VRMC_node_constraint` (1.0) evaluation.
+//!
+//! A constrained node copies one aspect of a source node's local rotation:
+//!
+//! - [`Rule::Copy`] transfers the whole rotation delta,
+//! - [`Rule::Twist`] keeps only the part of the delta that turns around one
+//!   axis, and
+//! - [`Rule::PointAt`] rotates an axis of the node towards another node.
+//!
+//! The spec evaluates every rule against rest transforms ("Local-Local" for
+//! copy/roll, world positions for aim), so this module resolves the rest pairs
+//! once while the scene is still in its bind pose and then evaluates the
+//! animated local transforms each frame. Bindings that read a node another
+//! binding writes are ordered after that writer, which is why the plan is a
+//! stable topological order rather than the extension's document order.
+//!
+//! Reference: `specification/VRMC_node_constraint-1.0/README.md` in the VRM
+//! specification.
+
 use crate::{
     VrmSystems,
     loader::{invalid, require_node},
@@ -9,63 +26,74 @@ use bevy::{
     ecs::entity::MapEntities, platform::collections::HashMap, prelude::*,
     transform::helper::TransformHelper,
 };
-use petgraph::{
-    algo::toposort,
-    graph::{DiGraph, NodeIndex},
-};
+use std::collections::VecDeque;
 
+/// What a constrained node takes from its source.
+#[derive(Clone, Copy, Reflect)]
+pub(crate) enum Rule {
+    /// `constraint.rotation`: copy the source's rest-to-current delta.
+    Copy,
+    /// `constraint.roll`: copy only the twist around the axis.
+    Twist(Vec3),
+    /// `constraint.aim`: turn the axis towards the source's world position.
+    PointAt(Vec3),
+}
+
+/// One resolved constraint. Rest rotations are captured in the bind pose.
 #[derive(Clone, Reflect, MapEntities)]
-pub(crate) struct Constraint {
+pub(crate) struct Binding {
     #[entities]
     pub(crate) target: Entity,
     #[entities]
     pub(crate) source: Entity,
-    pub(crate) rest: Quat,
+    pub(crate) target_rest: Quat,
     pub(crate) source_rest: Quat,
-    pub(crate) kind: ConstraintKind,
+    pub(crate) rule: Rule,
     pub(crate) weight: f32,
 }
 
-#[derive(Clone, Copy, Reflect)]
-pub(crate) enum ConstraintKind {
-    Rotation,
-    Roll(Vec3),
-    Aim(Vec3),
-}
-
+/// Constraints of one scene root, already in evaluation order.
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
-pub(crate) struct Constraints(#[entities] pub(crate) Vec<Constraint>);
+pub(crate) struct ConstraintRig(#[entities] pub(crate) Vec<Binding>);
 
 pub(crate) fn setup(app: &mut App) {
-    app.register_type::<Constraints>()
-        .add_systems(PostUpdate, constraints.in_set(VrmSystems::Constraints));
+    app.register_type::<ConstraintRig>()
+        .add_systems(PostUpdate, run_constraints.in_set(VrmSystems::Constraints));
+}
+
+/// A definition waiting for its dependency order.
+struct Pending {
+    binding: Binding,
+    /// Nodes this binding reads besides its source: for aim, the world
+    /// position of both nodes depends on their whole ancestor chains.
+    reads: Vec<Entity>,
 }
 
 pub(crate) fn compile_constraints(
     definitions: &[(usize, schema::NodeConstraint)],
     world: &mut World,
     nodes: &HashMap<usize, Entity>,
-) -> std::io::Result<Constraints> {
+) -> std::io::Result<ConstraintRig> {
     let mut parent_query = world.query::<&ChildOf>();
     let parents = parent_query.query(world);
-    let mut pending = Vec::new();
-    for (target, def) in definitions {
-        let (source, weight, kind) = match (
-            &def.constraint.rotation,
-            &def.constraint.roll,
-            &def.constraint.aim,
+    let mut pending = Vec::with_capacity(definitions.len());
+    for (target, definition) in definitions {
+        let (source, weight, rule) = match (
+            &definition.constraint.rotation,
+            &definition.constraint.roll,
+            &definition.constraint.aim,
         ) {
-            (Some(d), None, None) => (d.source, d.weight.unwrap_or(1.), ConstraintKind::Rotation),
-            (None, Some(d), None) => (
-                d.source,
-                d.weight.unwrap_or(1.),
-                ConstraintKind::Roll(d.roll_axis.vector()),
+            (Some(copy), None, None) => (copy.source, copy.weight.unwrap_or(1.), Rule::Copy),
+            (None, Some(roll), None) => (
+                roll.source,
+                roll.weight.unwrap_or(1.),
+                Rule::Twist(roll.roll_axis.vector()),
             ),
-            (None, None, Some(d)) => (
-                d.source,
-                d.weight.unwrap_or(1.),
-                ConstraintKind::Aim(d.aim_axis.vector()),
+            (None, None, Some(aim)) => (
+                aim.source,
+                aim.weight.unwrap_or(1.),
+                Rule::PointAt(aim.aim_axis.vector()),
             ),
             _ => {
                 return Err(invalid(
@@ -78,97 +106,175 @@ pub(crate) fn compile_constraints(
             return Err(invalid("VRMC constraint weight out of range"));
         }
         let mut reads = vec![source];
-        if matches!(kind, ConstraintKind::Aim(_)) {
+        if matches!(rule, Rule::PointAt(_)) {
             for entity in [source, target] {
                 reads.extend(parents.iter_ancestors(entity));
             }
         }
-        pending.push((
-            Constraint {
+        pending.push(Pending {
+            binding: Binding {
                 target,
                 source,
-                rest: world.entity(target).components::<&Transform>().rotation,
+                target_rest: world.entity(target).components::<&Transform>().rotation,
                 source_rest: world.entity(source).components::<&Transform>().rotation,
-                kind,
+                rule,
                 weight,
             },
             reads,
-        ));
+        });
     }
-    // A constraint must run after any constraint whose target it reads. Editing
-    // the graph is simpler than rescanning the pending list for every output.
-    let mut graph = DiGraph::<(), ()>::new();
-    let indices: Vec<NodeIndex> = pending.iter().map(|_| graph.add_node(())).collect();
-    let targets: HashMap<Entity, NodeIndex> = pending
-        .iter()
-        .zip(&indices)
-        .map(|((constraint, _), &index)| (constraint.target, index))
+    let order = dependency_order(&pending)?;
+    Ok(ConstraintRig(
+        order
+            .into_iter()
+            .map(|index| pending[index].binding.clone())
+            .collect(),
+    ))
+}
+
+/// Orders bindings so a reader never runs before the binding that writes what
+/// it reads. Kahn's algorithm also reports the cycles the spec forbids.
+fn dependency_order(pending: &[Pending]) -> std::io::Result<Vec<usize>> {
+    // A node carries at most one constraint, so one writer per target is
+    // enough. A binding that reads its own output becomes a self edge and is
+    // reported as a cycle, as the spec requires.
+    let mut writer: HashMap<Entity, usize> = HashMap::default();
+    for (index, item) in pending.iter().enumerate() {
+        writer.insert(item.binding.target, index);
+    }
+    let mut followers = vec![Vec::new(); pending.len()];
+    let mut prerequisites = vec![0usize; pending.len()];
+    for (index, item) in pending.iter().enumerate() {
+        let mut read_by: Vec<usize> = item
+            .reads
+            .iter()
+            .filter_map(|entity| writer.get(entity).copied())
+            .collect();
+        read_by.sort_unstable();
+        read_by.dedup();
+        for prerequisite in read_by {
+            // Every prerequisite writes a node this binding reads, including
+            // the binding itself for a self reference.
+            followers[prerequisite].push(index);
+            prerequisites[index] += 1;
+        }
+    }
+    let mut ready: VecDeque<usize> = (0..pending.len())
+        .filter(|&index| prerequisites[index] == 0)
         .collect();
-    for ((_, reads), &index) in pending.iter().zip(&indices) {
-        for &read in reads {
-            if let Some(&dependency) = targets.get(&read) {
-                graph.add_edge(dependency, index, ());
+    let mut order = Vec::with_capacity(pending.len());
+    while let Some(next) = ready.pop_front() {
+        order.push(next);
+        for &follower in &followers[next] {
+            prerequisites[follower] -= 1;
+            if prerequisites[follower] == 0 {
+                ready.push_back(follower);
             }
         }
     }
-    let ordered = toposort(&graph, None)
-        .map_err(|_| invalid("VRMC constraint cycle"))?
-        .into_iter()
-        .map(|index| pending[index.index()].0.clone())
-        .collect();
-    Ok(Constraints(ordered))
+    if order.len() == pending.len() {
+        Ok(order)
+    } else {
+        Err(invalid("VRMC constraint cycle"))
+    }
 }
 
-fn constraints(
-    rigs: Query<&Constraints>,
-    parents: Query<&ChildOf>,
+fn run_constraints(
+    rigs: Query<&ConstraintRig>,
+    hierarchy: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
     for rig in &rigs {
-        for c in &rig.0 {
-            let src_local = transforms
+        for binding in &rig.0 {
+            let source_rotation = transforms
                 .p1()
-                .get(c.source)
-                .map_or(c.source_rest, |t| t.rotation);
-            let rotation = match c.kind {
-                ConstraintKind::Rotation => c.rest * c.source_rest.inverse() * src_local,
-                ConstraintKind::Roll(axis) => {
-                    let delta = c.rest.inverse() * src_local * c.source_rest.inverse() * c.rest;
-                    let p = axis * Vec3::new(delta.x, delta.y, delta.z).dot(axis);
-                    let twist = Quat::from_xyzw(p.x, p.y, p.z, delta.w);
-                    c.rest
-                        * if twist.length_squared() > f32::EPSILON {
-                            twist.normalize()
-                        } else {
-                            Quat::IDENTITY
-                        }
-                }
-                ConstraintKind::Aim(axis) => {
-                    let (Ok(src), Ok(dst)) = (
-                        transforms.p0().compute_global_transform(c.source),
-                        transforms.p0().compute_global_transform(c.target),
+                .get(binding.source)
+                .map_or(binding.source_rest, |transform| transform.rotation);
+            let rotation = match binding.rule {
+                Rule::Copy => binding.target_rest * binding.source_rest.inverse() * source_rotation,
+                Rule::Twist(axis) => twist_about(
+                    axis,
+                    binding.target_rest,
+                    binding.source_rest,
+                    source_rotation,
+                ),
+                Rule::PointAt(axis) => {
+                    let (Ok(source), Ok(target)) = (
+                        transforms.p0().compute_global_transform(binding.source),
+                        transforms.p0().compute_global_transform(binding.target),
                     ) else {
                         continue;
                     };
-                    let parent_rot = parents
-                        .get(c.target)
+                    // The aim axis is evaluated in the target's parent space,
+                    // which is where the local rotation it writes lives.
+                    let parent_rotation = hierarchy
+                        .get(binding.target)
                         .ok()
-                        .and_then(|p| transforms.p0().compute_global_transform(p.parent()).ok())
-                        .map_or(Quat::IDENTITY, |p| p.rotation().normalize());
-                    let dir = ((parent_rot * c.rest).inverse()
-                        * (src.translation() - dst.translation()))
-                    .normalize_or_zero();
-                    if dir == Vec3::ZERO {
+                        .and_then(|parent| {
+                            transforms
+                                .p0()
+                                .compute_global_transform(parent.parent())
+                                .ok()
+                        })
+                        .map_or(Quat::IDENTITY, |parent| parent.rotation().normalize());
+                    let Some(rotation) = point_at(
+                        parent_rotation,
+                        binding.target_rest,
+                        axis,
+                        source.translation(),
+                        target.translation(),
+                    ) else {
                         continue;
-                    }
-                    c.rest * Quat::from_rotation_arc(axis, dir)
+                    };
+                    rotation
                 }
             };
-            if let Ok(mut target) = transforms.p1().get_mut(c.target) {
-                target.rotation = c.rest.slerp(rotation, c.weight);
+            if let Ok(mut target) = transforms.p1().get_mut(binding.target) {
+                target.rotation = binding.target_rest.slerp(rotation, binding.weight);
             }
         }
     }
+}
+
+/// The rotation that keeps only the part of the source delta turning around
+/// `axis`. The delta is taken from the source's rest orientation into the
+/// target's rest space, then split into swing and twist; the twist is the
+/// rotation about the axis and the swing is dropped. This is the
+/// swing-twist decomposition of the rotation the spec describes as
+/// `fromToQuat.inverse * deltaSrcQuatInDst`, without building the arc.
+fn twist_about(axis: Vec3, target_rest: Quat, source_rest: Quat, source: Quat) -> Quat {
+    let delta = source_rest.inverse() * source;
+    let in_parent = source_rest * delta * source_rest.inverse();
+    let in_target = target_rest.inverse() * in_parent * target_rest;
+    let about_axis = axis.dot(in_target.xyz());
+    let twist = Quat::from_xyzw(
+        axis.x * about_axis,
+        axis.y * about_axis,
+        axis.z * about_axis,
+        in_target.w,
+    );
+    let twist = if twist.length_squared() > f32::EPSILON {
+        twist.normalize()
+    } else {
+        Quat::IDENTITY
+    };
+    target_rest * twist
+}
+
+/// The smallest rotation of the target's rest orientation that points `axis`
+/// at `source` (both in world space), expressed as a local rotation.
+fn point_at(
+    parent_rotation: Quat,
+    target_rest: Quat,
+    axis: Vec3,
+    source: Vec3,
+    target: Vec3,
+) -> Option<Quat> {
+    // Express the direction in the target's rest space so the rotation is
+    // applied around the rest pose, not the already constrained pose.
+    let direction = (parent_rotation * target_rest).inverse() * (source - target);
+    let direction = direction.try_normalize()?;
+    Some(target_rest * Quat::from_rotation_arc(axis, direction))
 }
 
 #[cfg(test)]
@@ -176,24 +282,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rotation_roll_and_aim_constraints_preserve_rest_axes_and_reject_cycles() {
+    fn constraints_copy_twist_and_aim_from_rest_frames_and_reject_cycles() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin));
         crate::runtime::setup(&mut app);
         let source_rest = Quat::from_euler(EulerRot::XYZ, 0.2, -0.1, 0.4);
         let rest = Quat::from_euler(EulerRot::XYZ, 0.1, 0.5, -0.2);
+
+        // A twist constraint keeps the rest axes and only accepts rotation
+        // about the chosen axis. A half turn around an orthogonal axis is
+        // dropped entirely.
         for axis in [
             schema::RollAxis::X,
             schema::RollAxis::Y,
             schema::RollAxis::Z,
         ] {
-            let v = axis.vector();
-            let w = 0.35;
-            let swing = v.any_orthonormal_vector();
+            let axis = axis.vector();
+            let weight = 0.35;
+            let swing = axis.any_orthonormal_vector();
             for (delta, expected) in [
                 (
-                    Quat::from_axis_angle(swing, 0.8) * Quat::from_axis_angle(v, 0.6),
-                    rest * Quat::from_axis_angle(v, 0.6 * w),
+                    Quat::from_axis_angle(swing, 0.8) * Quat::from_axis_angle(axis, 0.6),
+                    rest * Quat::from_axis_angle(axis, 0.6 * weight),
                 ),
                 (Quat::from_axis_angle(swing, std::f32::consts::PI), rest),
             ] {
@@ -206,13 +316,13 @@ mod tests {
                 let target = app.world_mut().spawn(Transform::from_rotation(rest)).id();
                 let rig = app
                     .world_mut()
-                    .spawn(Constraints(vec![Constraint {
+                    .spawn(ConstraintRig(vec![Binding {
                         target,
                         source,
-                        rest,
+                        target_rest: rest,
                         source_rest,
-                        kind: ConstraintKind::Roll(v),
-                        weight: w,
+                        rule: Rule::Twist(axis),
+                        weight,
                     }]))
                     .id();
                 for _ in 0..3 {
@@ -228,6 +338,7 @@ mod tests {
                 app.world_mut().entity_mut(rig).despawn();
             }
         }
+
         let source = app
             .world_mut()
             .spawn(
@@ -245,17 +356,22 @@ mod tests {
             .id();
         let nodes = HashMap::from_iter([(0, source), (1, parent), (2, target)]);
         let order = |defs: &[(usize, schema::NodeConstraint)], world: &mut World| {
-            compile_constraints(defs, world, &nodes).map(|c| {
-                c.0.iter()
-                    .map(|x| defs.iter().position(|(i, _)| nodes[i] == x.target).unwrap())
+            compile_constraints(defs, world, &nodes).map(|rig| {
+                rig.0
+                    .iter()
+                    .map(|binding| {
+                        defs.iter()
+                            .position(|(index, _)| nodes[index] == binding.target)
+                            .unwrap()
+                    })
                     .collect::<Vec<_>>()
             })
         };
-        let rot = |s| schema::NodeConstraint {
+        let copy = |source| schema::NodeConstraint {
             spec_version: "1.0".into(),
             constraint: schema::Constraint {
                 rotation: Some(schema::Rotation {
-                    source: s,
+                    source,
                     weight: Some(1.),
                 }),
                 roll: None,
@@ -274,19 +390,24 @@ mod tests {
                 }),
             },
         };
+        // A binding on node 1 writes what node 2's binding reads, so 1 runs
+        // first regardless of document order.
         assert_eq!(
-            order(&[(2, rot(1)), (1, rot(0))], app.world_mut()).unwrap(),
+            order(&[(2, copy(1)), (1, copy(0))], app.world_mut()).unwrap(),
             vec![1, 0]
         );
-        assert!(order(&[(0, rot(1)), (1, rot(0))], app.world_mut()).is_err());
-        assert!(order(&[(0, rot(0))], app.world_mut()).is_err());
+        // A dependency loop and a self reference are both rejected.
+        assert!(order(&[(0, copy(1)), (1, copy(0))], app.world_mut()).is_err());
+        assert!(order(&[(0, copy(0))], app.world_mut()).is_err());
+        // Aim reads the ancestor world positions, so a constraint writing the
+        // parent must run earlier.
         assert_eq!(
-            order(&[(2, aim()), (1, rot(0))], app.world_mut()).unwrap(),
+            order(&[(2, aim()), (1, copy(0))], app.world_mut()).unwrap(),
             vec![1, 0]
         );
-        assert!(order(&[(2, aim()), (1, rot(2))], app.world_mut()).is_err());
+        assert!(order(&[(2, aim()), (1, copy(2))], app.world_mut()).is_err());
         assert_eq!(
-            order(&[(2, rot(0)), (1, rot(0))], app.world_mut())
+            order(&[(2, copy(0)), (1, copy(0))], app.world_mut())
                 .unwrap()
                 .len(),
             2
@@ -306,31 +427,33 @@ mod tests {
                 aim: None,
             },
         };
-        let err = match compile_constraints(&[(2, both)], app.world_mut(), &nodes) {
-            Err(err) => err,
+        let error = match compile_constraints(&[(2, both)], app.world_mut(), &nodes) {
+            Err(error) => error,
             Ok(_) => panic!("two constraint kinds must be rejected"),
         };
-        assert!(err.to_string().contains("exactly one"));
+        assert!(error.to_string().contains("exactly one"));
 
-        let rot_target = app.world_mut().spawn(Transform::from_rotation(rest)).id();
+        // Copy and aim share one plan: the copied rotation must be visible to
+        // the aim target in the same frame.
+        let rotated = app.world_mut().spawn(Transform::from_rotation(rest)).id();
         app.world_mut()
             .entity_mut(target)
             .insert(Transform::IDENTITY);
-        app.world_mut().spawn(Constraints(vec![
-            Constraint {
-                target: rot_target,
+        app.world_mut().spawn(ConstraintRig(vec![
+            Binding {
+                target: rotated,
                 source,
-                rest,
+                target_rest: rest,
                 source_rest,
-                kind: ConstraintKind::Rotation,
+                rule: Rule::Copy,
                 weight: 0.35,
             },
-            Constraint {
+            Binding {
                 target,
                 source,
-                rest: Quat::IDENTITY,
+                target_rest: Quat::IDENTITY,
                 source_rest: Quat::IDENTITY,
-                kind: ConstraintKind::Aim(Vec3::Z),
+                rule: Rule::PointAt(Vec3::Z),
                 weight: 1.,
             },
         ]));
@@ -338,7 +461,7 @@ mod tests {
             app.update();
             assert!(
                 app.world()
-                    .get::<Transform>(rot_target)
+                    .get::<Transform>(rotated)
                     .unwrap()
                     .rotation
                     .abs_diff_eq(rest * Quat::from_rotation_z(0.21), 1e-5)

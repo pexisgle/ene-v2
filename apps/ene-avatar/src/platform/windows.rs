@@ -1,7 +1,7 @@
 use super::{windows_input::input, windows_outputs::outputs};
 use crate::{
     control,
-    desktop::{self, Drag, HitRegions, Output},
+    desktop::{self, HitRegions, Output},
 };
 use ::windows::Win32::{
     Foundation::{HWND, POINT},
@@ -10,6 +10,7 @@ use ::windows::Win32::{
 use bevy::{
     camera::visibility::VisibilitySystems,
     ecs::system::NonSendMarker,
+    picking::{hover::PointerCaptureMap, pointer::PointerId},
     prelude::*,
     window::{CursorOptions, Monitor, RawHandleWrapper},
     winit::{UpdateMode, WinitMonitors, WinitSettings},
@@ -79,14 +80,18 @@ fn read_monitors(
         .collect()
 }
 
-fn hit_test(drag: Res<Drag>, mut windows: Query<(&Output, &HitRegions, &mut CursorOptions)>) {
+fn hit_test(
+    capture: Res<PointerCaptureMap>,
+    mut windows: Query<(&Output, &HitRegions, &mut CursorOptions)>,
+) {
     let Some(point) = cursor_position() else {
         return;
     };
     for (output, regions, mut cursor) in &mut windows {
         let local = (point - output.origin) / output.units_per_logical_pixel;
         // shortcut: input switching follows rendering FPS; keep it here unless measured lag is unacceptable.
-        let hit = drag.entity.is_some() || regions.0.iter().any(|(_, r)| r.contains(local));
+        let hit = capture.is_captured(&PointerId::Mouse)
+            || regions.0.iter().any(|(_, r)| r.contains(local));
         if cursor.hit_test != hit {
             cursor.hit_test = hit;
         }
@@ -115,8 +120,12 @@ fn window_styles(windows: Query<&RawHandleWrapper, With<Output>>, _main_thread: 
     }
 }
 
-fn cancel_lost_capture(handles: Query<&RawHandleWrapper, With<Output>>, mut drag: ResMut<Drag>) {
-    if drag.entity.is_none() {
+fn cancel_lost_capture(
+    handles: Query<&RawHandleWrapper, With<Output>>,
+    capture: Res<PointerCaptureMap>,
+    mut commands: Commands,
+) {
+    if !capture.is_captured(&PointerId::Mouse) {
         return;
     }
     let mut info = GUITHREADINFO {
@@ -134,6 +143,9 @@ fn cancel_lost_capture(handles: Query<&RawHandleWrapper, With<Output>>, mut drag
         }
     });
     if !captured {
-        drag.entity = None;
+        commands.queue(|world: &mut World| {
+            desktop::cancel_pointer(world);
+            desktop::pointer(world);
+        });
     }
 }

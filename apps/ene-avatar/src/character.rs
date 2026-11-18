@@ -137,12 +137,18 @@ pub fn setup(app: &mut App) {
 pub fn reload(world: &mut World, entity: Entity) {
     let character = world.get::<Character>(entity).unwrap();
     let server = world.resource::<AssetServer>();
-    let model = server.load(character.config.model.clone());
-    let motion = character
-        .config
-        .motion
-        .as_ref()
-        .map(|path| server.load(GltfAssetLabel::Animation(0).from_asset(path.clone())));
+    // Bevy denies paths outside its approved roots. The client selected these
+    // files explicitly, so approve exactly these two loads and nothing else.
+    let model = server
+        .load_builder()
+        .override_unapproved()
+        .load(character.config.model.clone());
+    let motion = character.config.motion.as_ref().map(|path| {
+        server
+            .load_builder()
+            .override_unapproved()
+            .load(GltfAssetLabel::Animation(0).from_asset(path.clone()))
+    });
     // Loaded owners must be reloaded to retry failed textures and other dependencies.
     let retrying = matches!(
         server.get_load_states(model.id()),

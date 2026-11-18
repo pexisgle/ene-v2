@@ -1,7 +1,9 @@
 //! Desktop output placement, cameras, hit regions, and pointer interaction.
 
 mod pointer;
-pub(crate) use pointer::{Drag, PointerInput, pointer};
+#[cfg(any(windows, test))]
+pub(crate) use pointer::pointer;
+pub(crate) use pointer::{NativeInput, cancel_pointer};
 
 use crate::character::{AvatarState, Character, Config};
 use bevy::{camera::visibility::VisibilitySystems, prelude::*};
@@ -15,17 +17,9 @@ pub fn setup(app: &mut App) {
     app.insert_resource(Time::<Virtual>::from_max_delta(
         std::time::Duration::from_secs(2),
     ));
-    app.init_resource::<Drag>()
-        .add_message::<PointerInput>()
-        .add_systems(PreUpdate, pointer)
+    app.add_plugins(pointer::setup)
         .add_systems(Update, (cameras, place_avatars, depth_range).chain())
         .add_systems(Update, sync_virtual_time)
-        .add_observer(|_: On<Remove<Output>>, mut drag: ResMut<Drag>| drag.entity = None)
-        .add_observer(|event: On<Remove<Character>>, mut drag: ResMut<Drag>| {
-            if drag.entity == Some(event.entity) {
-                drag.entity = None;
-            }
-        })
         .add_systems(
             PostUpdate,
             regions
@@ -232,6 +226,15 @@ fn regions(
 mod tests {
     use super::*;
     use crate::character::Notification;
+    use bevy::picking::{
+        events::PointerState,
+        hover::PointerCaptureMap,
+        pointer::{PointerAction, PointerButton, PointerId, PointerMap, PointerPressState},
+    };
+
+    const PRESS: PointerAction = PointerAction::Press(PointerButton::Primary);
+    const RELEASE: PointerAction = PointerAction::Release(PointerButton::Primary);
+    const MOVE: PointerAction = PointerAction::Move { delta: Vec2::ZERO };
 
     fn output(app: &mut App, name: &str, origin: Vec2, scale: f32) -> Entity {
         app.world_mut()
@@ -271,7 +274,13 @@ mod tests {
             ChildOf(actor),
         ));
         app.update();
-        assert!(!app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+        assert_eq!(
+            app.world().get::<HitRegions>(screen).unwrap().0,
+            vec![(
+                actor,
+                Rect::from_corners(Vec2::new(48., 47.), Vec2::new(53., 52.))
+            )]
+        );
         app.world_mut().get_mut::<Character>(actor).unwrap().state = AvatarState::Suspended;
         app.update();
         assert!(app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
@@ -288,7 +297,36 @@ mod tests {
     }
 
     #[test]
-    fn dragging_preserves_logical_offset_across_dpi_and_cancels_on_removal() {
+    fn regions_preserve_padding_clipping_and_visibility_gate() {
+        let mut app = App::new();
+        app.add_systems(Update, regions);
+        let screen = output(&mut app, "left", Vec2::ZERO, 1.);
+        app.world_mut().entity_mut(screen).insert(Camera::default());
+        let actor = actor(&mut app, "a");
+        let mesh = app
+            .world_mut()
+            .spawn((
+                Mesh3d::default(),
+                Aabb::from_min_max(Vec3::ZERO, Vec3::splat(2.)),
+                GlobalTransform::default(),
+                InheritedVisibility::VISIBLE,
+                ChildOf(actor),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<HitRegions>(screen).unwrap().0,
+            vec![(actor, Rect::from_corners(Vec2::ZERO, Vec2::new(4., 2.)))]
+        );
+        app.world_mut()
+            .entity_mut(mesh)
+            .insert(InheritedVisibility::HIDDEN);
+        app.update();
+        assert!(app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn dragging_preserves_logical_offset_across_dpi() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, setup))
             .add_message::<Notification>();
@@ -306,15 +344,13 @@ mod tests {
         app.update();
         app.world_mut().get_mut::<HitRegions>(left).unwrap().0 =
             vec![(actor, Rect::from_corners(Vec2::ZERO, Vec2::splat(100.)))];
-        for (screen, local, button) in [
-            (left, Vec2::new(10., 20.), true),
-            (right, Vec2::new(5., 10.), false),
+        for (screen, local, action) in [
+            (left, Vec2::new(10., 20.), PRESS),
+            (right, Vec2::new(5., 10.), RELEASE),
         ] {
-            app.world_mut().write_message(PointerInput {
-                output: screen,
-                local,
-                button: Some(button),
-            });
+            app.world_mut()
+                .resource_mut::<NativeInput>()
+                .send(screen, local, action);
             app.update();
         }
         let config = &app.world().get::<Character>(actor).unwrap().config;
@@ -327,11 +363,355 @@ mod tests {
                 .next()
                 .is_none()
         );
-        assert!(app.world().resource::<Drag>().entity.is_none());
-        for entity in [right, actor] {
-            app.world_mut().resource_mut::<Drag>().entity = Some(actor);
-            app.world_mut().despawn(entity);
-            assert!(app.world().resource::<Drag>().entity.is_none());
+        assert_released(&app);
+    }
+
+    fn interaction_app() -> (App, Entity, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, pointer::setup))
+            .add_message::<Notification>();
+        let screen = output(&mut app, "left", Vec2::ZERO, 1.);
+        let actor = actor(&mut app, "a");
+        app.world_mut().get_mut::<HitRegions>(screen).unwrap().0 =
+            vec![(actor, Rect::from_corners(Vec2::ZERO, Vec2::splat(100.)))];
+        (app, screen, actor)
+    }
+
+    fn actor(app: &mut App, id: &str) -> Entity {
+        let mut character = Character::new(
+            id.into(),
+            Config {
+                position: Some([50., 50.]),
+                ..default()
+            },
+        );
+        character.state = AvatarState::Ready;
+        app.world_mut()
+            .spawn((character, Transform::from_xyz(50., -50., 0.)))
+            .id()
+    }
+
+    fn send(app: &mut App, output: Entity, position: Vec2, action: PointerAction) {
+        app.world_mut()
+            .resource_mut::<NativeInput>()
+            .send(output, position, action);
+    }
+
+    fn notifications(app: &mut App) -> Vec<serde_json::Value> {
+        app.world_mut()
+            .resource_mut::<Messages<Notification>>()
+            .drain()
+            .map(|notification| notification.0)
+            .collect()
+    }
+
+    fn assert_released(app: &App) {
+        let world = app.world();
+        assert!(
+            !world
+                .resource::<PointerCaptureMap>()
+                .is_captured(&PointerId::Mouse)
+        );
+        let pointer = world
+            .resource::<PointerMap>()
+            .get_entity(PointerId::Mouse)
+            .unwrap();
+        assert!(
+            !world
+                .get::<PointerPressState>(pointer)
+                .unwrap()
+                .is_any_pressed()
+        );
+        if let Some(state) = world
+            .resource::<PointerState>()
+            .get(PointerId::Mouse, PointerButton::Primary)
+        {
+            assert!(state.pressing.is_empty());
+            assert!(state.dragging.is_empty());
         }
+    }
+
+    #[test]
+    fn first_sample_hits_and_four_pixels_remains_a_click() {
+        let (mut app, screen, actor) = interaction_app();
+        send(&mut app, screen, Vec2::splat(50.), PRESS);
+        send(&mut app, screen, Vec2::new(54., 50.), RELEASE);
+        app.update();
+        assert_eq!(
+            notifications(&mut app),
+            vec![serde_json::json!({"event":"click", "character":"a"})]
+        );
+        assert_eq!(
+            app.world().get::<Character>(actor).unwrap().config.position,
+            Some([50., 50.])
+        );
+        assert_released(&app);
+    }
+
+    #[test]
+    fn subthreshold_release_outside_bounds_preserves_captured_click_and_next_gesture() {
+        for scale in [1., 1.5, 2.] {
+            for separate_updates in [false, true] {
+                let (mut app, screen, actor) = interaction_app();
+                app.world_mut()
+                    .get_mut::<Output>(screen)
+                    .unwrap()
+                    .units_per_logical_pixel = scale;
+                let bounds = app.world().get::<HitRegions>(screen).unwrap().0[0].1;
+                let press = Vec2::new(99., 50.);
+                let release = Vec2::new(102., 50.);
+                assert!(bounds.contains(press));
+                assert!(!bounds.contains(release));
+                assert!(press.distance(release) <= 4.);
+                send(&mut app, screen, press, PRESS);
+                if separate_updates {
+                    app.update();
+                    assert!(notifications(&mut app).is_empty());
+                    assert!(
+                        app.world()
+                            .resource::<PointerCaptureMap>()
+                            .is_captured(&PointerId::Mouse)
+                    );
+                }
+                send(&mut app, screen, release, RELEASE);
+                app.update();
+                assert_eq!(
+                    notifications(&mut app),
+                    vec![serde_json::json!({"event":"click", "character":"a"})]
+                );
+                assert_released(&app);
+                for action in [PRESS, RELEASE] {
+                    send(&mut app, screen, Vec2::splat(50.), action);
+                    if separate_updates {
+                        app.update();
+                    }
+                }
+                if !separate_updates {
+                    app.update();
+                }
+                assert_eq!(
+                    notifications(&mut app),
+                    vec![serde_json::json!({"event":"click", "character":"a"})]
+                );
+                let character = app.world().get::<Character>(actor).unwrap();
+                assert_eq!(character.config.position, Some([50., 50.]));
+                assert_eq!(character.config.monitor, None);
+                assert_eq!(
+                    app.world().get::<Transform>(actor).unwrap().translation,
+                    Vec3::new(50., -50., 0.)
+                );
+                assert_released(&app);
+            }
+        }
+    }
+
+    #[test]
+    fn dragging_latches_above_four_pixels_and_release_alone_can_move() {
+        for positions in [
+            vec![Vec2::new(55., 50.), Vec2::splat(50.)],
+            vec![Vec2::new(80., 50.)],
+        ] {
+            let (mut app, screen, actor) = interaction_app();
+            send(&mut app, screen, Vec2::splat(50.), PRESS);
+            for &position in &positions[..positions.len() - 1] {
+                send(&mut app, screen, position, MOVE);
+            }
+            send(&mut app, screen, *positions.last().unwrap(), RELEASE);
+            app.update();
+            assert_eq!(
+                app.world().get::<Character>(actor).unwrap().config.position,
+                Some(positions.last().unwrap().to_array())
+            );
+            assert!(notifications(&mut app).is_empty());
+            assert_released(&app);
+        }
+    }
+
+    #[test]
+    fn drag_latch_survives_updates_and_a_new_press_can_click() {
+        let (mut app, screen, _) = interaction_app();
+        for (position, action) in [
+            (Vec2::splat(50.), PRESS),
+            (Vec2::new(55., 50.), MOVE),
+            (Vec2::splat(50.), MOVE),
+            (Vec2::splat(50.), RELEASE),
+        ] {
+            send(&mut app, screen, position, action);
+            app.update();
+        }
+        assert!(notifications(&mut app).is_empty());
+        for action in [PRESS, RELEASE] {
+            send(&mut app, screen, Vec2::splat(50.), action);
+        }
+        app.update();
+        assert_eq!(
+            notifications(&mut app),
+            vec![serde_json::json!({"event":"click", "character":"a"})]
+        );
+        assert_released(&app);
+    }
+
+    #[test]
+    fn queued_drag_keeps_the_first_hit_and_ignores_later_targets() {
+        let (mut app, screen, first) = interaction_app();
+        let second = actor(&mut app, "b");
+        app.world_mut().get_mut::<HitRegions>(screen).unwrap().0 = vec![
+            (first, Rect::from_corners(Vec2::ZERO, Vec2::splat(40.))),
+            (
+                second,
+                Rect::from_corners(Vec2::splat(60.), Vec2::splat(100.)),
+            ),
+        ];
+        send(&mut app, screen, Vec2::splat(20.), MOVE);
+        send(&mut app, screen, Vec2::splat(20.), PRESS);
+        send(&mut app, screen, Vec2::splat(80.), MOVE);
+        send(&mut app, screen, Vec2::splat(80.), RELEASE);
+        app.update();
+        assert_eq!(
+            app.world().get::<Character>(first).unwrap().config.position,
+            Some([110., 110.])
+        );
+        assert_eq!(
+            app.world()
+                .get::<Character>(second)
+                .unwrap()
+                .config
+                .position,
+            Some([50., 50.])
+        );
+        assert!(notifications(&mut app).is_empty());
+        assert_released(&app);
+    }
+
+    #[test]
+    fn backend_delegates_depth_blocking_and_deduplicates_mesh_regions() {
+        let (mut app, screen, first) = interaction_app();
+        let second = actor(&mut app, "b");
+        let (front, back) = if first.to_bits() > second.to_bits() {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let rect = Rect::from_corners(Vec2::ZERO, Vec2::splat(100.));
+        app.world_mut().get_mut::<HitRegions>(screen).unwrap().0 =
+            vec![(front, rect), (back, rect), (front, rect)];
+        for action in [PRESS, RELEASE] {
+            send(&mut app, screen, Vec2::splat(50.), action);
+        }
+        app.update();
+        let expected = app.world().get::<Character>(front).unwrap().id.clone();
+        assert_eq!(
+            notifications(&mut app),
+            vec![serde_json::json!({"event":"click", "character":expected})]
+        );
+        app.world_mut()
+            .entity_mut(front)
+            .insert(bevy::picking::Pickable::IGNORE);
+        for action in [PRESS, RELEASE] {
+            send(&mut app, screen, Vec2::splat(50.), action);
+        }
+        app.update();
+        let expected = app.world().get::<Character>(back).unwrap().id.clone();
+        assert_eq!(
+            notifications(&mut app),
+            vec![serde_json::json!({"event":"click", "character":expected})]
+        );
+    }
+
+    #[test]
+    fn identical_local_coordinates_cross_outputs_and_preserve_logical_offset() {
+        let (mut app, left, actor) = interaction_app();
+        app.world_mut().get_mut::<Output>(left).unwrap().origin = Vec2::new(-100., 0.);
+        app.world_mut()
+            .get_mut::<Transform>(actor)
+            .unwrap()
+            .translation
+            .x = -50.;
+        let right = output(&mut app, "right", Vec2::ZERO, 2.);
+        send(&mut app, left, Vec2::new(10., 20.), PRESS);
+        send(&mut app, right, Vec2::new(10., 20.), RELEASE);
+        app.update();
+        let config = &app.world().get::<Character>(actor).unwrap().config;
+        assert_eq!(config.monitor.as_deref(), Some("right"));
+        assert_eq!(config.position, Some([50., 50.]));
+        assert!(notifications(&mut app).is_empty());
+        assert_released(&app);
+    }
+
+    #[test]
+    fn cancellation_and_removal_clear_library_capture_and_press_without_phantom_clicks() {
+        for cause in 0..4 {
+            let (mut app, screen, actor) = interaction_app();
+            send(&mut app, screen, Vec2::splat(50.), PRESS);
+            app.update();
+            assert!(
+                app.world()
+                    .resource::<PointerCaptureMap>()
+                    .is_captured(&PointerId::Mouse)
+            );
+            match cause {
+                0 => {
+                    send(&mut app, screen, Vec2::splat(500.), MOVE);
+                    cancel_pointer(app.world_mut());
+                }
+                1 => {
+                    app.world_mut().despawn(actor);
+                }
+                2 => {
+                    app.world_mut().despawn(screen);
+                }
+                _ => {
+                    cancel_pointer(app.world_mut());
+                }
+            }
+            app.update();
+            assert_released(&app);
+            let position = app
+                .world()
+                .get::<Character>(actor)
+                .map(|character| character.config.position);
+            send(&mut app, screen, Vec2::splat(50.), RELEASE);
+            app.update();
+            assert_eq!(
+                app.world()
+                    .get::<Character>(actor)
+                    .map(|character| character.config.position),
+                position
+            );
+            assert!(notifications(&mut app).is_empty());
+            assert_released(&app);
+        }
+    }
+
+    #[test]
+    fn native_cancellation_between_queued_press_and_release_stays_ordered() {
+        let (mut app, screen, _) = interaction_app();
+        send(&mut app, screen, Vec2::splat(50.), PRESS);
+        cancel_pointer(app.world_mut());
+        send(&mut app, screen, Vec2::splat(50.), RELEASE);
+        app.update();
+        assert!(notifications(&mut app).is_empty());
+        assert_released(&app);
+    }
+
+    #[test]
+    fn nonprimary_buttons_and_empty_regions_do_not_click() {
+        let (mut app, screen, actor) = interaction_app();
+        for action in [
+            PointerAction::Press(PointerButton::Secondary),
+            PointerAction::Release(PointerButton::Secondary),
+        ] {
+            send(&mut app, screen, Vec2::splat(50.), action);
+        }
+        for action in [PRESS, RELEASE] {
+            send(&mut app, screen, Vec2::splat(150.), action);
+        }
+        app.world_mut().get_mut::<Character>(actor).unwrap().state = AvatarState::Suspended;
+        for action in [PRESS, RELEASE] {
+            send(&mut app, screen, Vec2::splat(50.), action);
+        }
+        app.update();
+        assert!(notifications(&mut app).is_empty());
+        assert_released(&app);
     }
 }

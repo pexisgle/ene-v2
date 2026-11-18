@@ -57,7 +57,13 @@ pub(super) fn outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::window::HasWindows;
+    use bevy::{
+        picking::{
+            hover::PointerCaptureMap,
+            pointer::{PointerAction, PointerButton, PointerId},
+        },
+        window::HasWindows,
+    };
 
     #[test]
     fn disconnected_outputs_are_removed_even_after_winit_reassigns_windows() {
@@ -120,12 +126,33 @@ mod tests {
         app.world_mut()
             .entity_mut(right_window)
             .insert(OnMonitor(left));
-        app.world_mut().resource_mut::<desktop::Drag>().entity = Some(left_window);
+        let mut character = crate::character::Character::new("a".into(), default());
+        character.state = crate::character::AvatarState::Ready;
+        let actor = app.world_mut().spawn(character).id();
+        app.world_mut()
+            .get_mut::<desktop::HitRegions>(left_window)
+            .unwrap()
+            .0 = vec![(actor, Rect::from_corners(Vec2::ZERO, Vec2::splat(100.)))];
+        app.world_mut().resource_mut::<desktop::NativeInput>().send(
+            left_window,
+            Vec2::splat(50.),
+            PointerAction::Press(PointerButton::Primary),
+        );
+        desktop::pointer(app.world_mut());
+        assert!(
+            app.world()
+                .resource::<PointerCaptureMap>()
+                .is_captured(&PointerId::Mouse)
+        );
         app.update();
         assert!(app.world().get_entity(right_window).is_err());
         assert_eq!(window_for(&mut app, left), left_window);
         assert_eq!(count(&mut app), 1);
-        assert!(app.world().resource::<desktop::Drag>().entity.is_none());
+        assert!(
+            !app.world()
+                .resource::<PointerCaptureMap>()
+                .is_captured(&PointerId::Mouse)
+        );
 
         disconnect(&mut app, left);
         app.update();

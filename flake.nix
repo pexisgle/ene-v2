@@ -27,13 +27,13 @@
       devShells.${system}.default =
         pkgs.mkShell {
           packages = [ rustToolchain ] ++ (with pkgs; [
+            buf
             clang
             lld
             pkg-config
             python3
             git
             just
-            bubblewrap
           ]);
 
           buildInputs = desktopLibraries;

@@ -1,7 +1,7 @@
 use crate::schema::{OutlineMode, Toon, ToonParams, UvTransform};
 use bevy::{
     asset::embedded_asset,
-    camera::visibility::{NoFrustumCulling, RenderLayers},
+    camera::visibility::NoFrustumCulling,
     mesh::{MeshVertexBufferLayoutRef, morph::MeshMorphWeights, skinning::SkinnedMesh},
     pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     platform::collections::HashMap,
@@ -42,11 +42,6 @@ pub(crate) fn texture_space(slot: usize) -> TextureSpace {
 #[derive(Component, Clone, Reflect)]
 #[reflect(Component, Clone)]
 pub(crate) struct MaterialSlot(pub usize);
-
-/// Marks an entity spawned as the outline pass of another mesh entity.
-#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
-#[reflect(Component, Clone)]
-pub(crate) struct Outline;
 
 /// Authored `KHR_texture_transform` of the material's base color texture.
 ///
@@ -143,6 +138,9 @@ impl MaterialExtension for MToonExtension {
         _: &MeshVertexBufferLayoutRef,
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // VRMC_materials_mtoon-1.0 "Vertex Colors": MToon ignores vertex
+        // colors, so drop the def Bevy's standard material pipeline adds for
+        // the glTF COLOR_0 attribute instead of multiplying base color by it.
         descriptor
             .vertex
             .shader_defs
@@ -197,16 +195,11 @@ impl MToonExtension {
                 .or_else(|| images.get(index))
                 .cloned()
         };
-        let mut params = ToonParams::from(&toon.schema);
+        let mut params = toon.params;
         params.texture_flags = textures
             .iter()
             .enumerate()
             .fold(0, |flags, (i, t)| flags | (u32::from(t.is_some()) << i));
-        params.shading_shift_texture_scale = toon
-            .shading_shift_texture
-            .as_ref()
-            .and_then(|x| x.scale)
-            .unwrap_or(1.);
         params.texture_uvs = toon.texture_uvs();
         let mut rest_uv = [UvTransform::default(); 6];
         for (index, info) in textures.into_iter().enumerate() {
@@ -234,28 +227,12 @@ impl MToonExtension {
 pub(crate) fn setup(app: &mut App) {
     embedded_asset!(app, "shaders/mtoon.wesl");
     embedded_asset!(app, "shaders/outline.wesl");
-    bevy::shader::load_shader_library!(app, "shaders/toon.wesl");
+    bevy::shader::load_shader_library!(app, "shaders/mtoon_common.wesl");
     app.add_plugins(MaterialPlugin::<MToonMaterial>::default())
         .register_type::<MaterialSlot>()
         .register_type::<BaseUv>()
         .register_type::<EmissiveStrength>()
-        .register_type::<UvTransform>()
-        .register_type::<Outline>()
-        .add_systems(PostUpdate, sync_outline_layers);
-}
-
-/// `RenderLayers` is per-entity, not inherited through `ChildOf`. Copy it from
-/// the body so an outline follows the same camera as the primitive at runtime.
-fn sync_outline_layers(
-    mut outlines: Query<(&ChildOf, &mut RenderLayers), With<Outline>>,
-    sources: Query<&RenderLayers, Without<Outline>>,
-) {
-    for (parent, mut layers) in &mut outlines {
-        let next = sources.get(parent.parent()).cloned().unwrap_or_default();
-        if *layers != next {
-            *layers = next;
-        }
-    }
+        .register_type::<UvTransform>();
 }
 
 pub(crate) fn add_outlines(
@@ -269,13 +246,11 @@ pub(crate) fn add_outlines(
         .collect();
     for (entity, material) in meshes {
         // A child (identity transform) inherits the primitive's visibility and
-        // is despawned with it. `RenderLayers` is copied by `sync_outline_layers`.
+        // is despawned with it.
         let outline = world
             .spawn((
                 MeshMaterial3d(material),
                 NoFrustumCulling,
-                Outline,
-                RenderLayers::default(),
                 Transform::IDENTITY,
                 ChildOf(entity),
             ))
@@ -336,9 +311,11 @@ mod tests {
     /// update so the synthetic GPU tests are deterministic.
     fn gpu_app(clear: ClearColor) -> App {
         use bevy::render::RenderPlugin;
-        let plugins = DefaultPlugins
-            .build()
-            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+        let mut plugins = DefaultPlugins.build();
+        if plugins.contains::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>() {
+            plugins =
+                plugins.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+        }
         #[cfg(windows)]
         let plugins = plugins.disable::<bevy::winit::WinitPlugin>();
         let mut app = App::new();
@@ -383,7 +360,9 @@ mod tests {
         let mut app = gpu_app(ClearColor(Color::NONE));
         app.init_resource::<Capture>();
         let color = Color::linear_rgb(0.25, 0.5, 0.75);
-        let toon: schema::Toon = serde_json::from_value(json!({"specVersion":"1.0"})).unwrap();
+        let toon =
+            schema::Toon::compile(serde_json::from_value(json!({"specVersion":"1.0"})).unwrap())
+                .unwrap();
         let material = app
             .world_mut()
             .resource_mut::<Assets<MToonMaterial>>()
@@ -472,6 +451,158 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GPU; runs in CI with lavapipe"]
+    fn review_transformed_shading_shift_gradient_matches_reference_pixels() {
+        use bevy::{
+            camera::{Exposure, RenderTarget, ScalingMode},
+            core_pipeline::tonemapping::Tonemapping,
+            render::view::screenshot::{Screenshot, ScreenshotCaptured},
+        };
+        #[derive(Resource, Default)]
+        struct Capture(Option<Image>);
+
+        let mut app = gpu_app(ClearColor(Color::NONE));
+        app.init_resource::<Capture>();
+        app.insert_resource(GlobalAmbientLight {
+            brightness: 0.,
+            ..default()
+        });
+        let mut image = Image::new(
+            Extent3d {
+                width: 16,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            (0..16u8).flat_map(|x| [x * 17, 0, 0, 255]).collect(),
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::default(),
+        );
+        image.sampler = bevy::image::ImageSampler::nearest();
+        let gradient = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+        let mut mesh = Mesh::from(Rectangle::new(2., 2.));
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() {
+            VertexAttributeValues::Float32x3(positions) => positions.clone(),
+            _ => panic!("rectangle positions"),
+        };
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.9, 0.1]; positions.len()]);
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_UV_1,
+            positions
+                .iter()
+                .map(|p| [(p[0] + 1.) / 2., (1. - p[1]) / 2.])
+                .collect::<Vec<_>>(),
+        );
+        let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+        let body = app.world_mut().spawn(Mesh3d(mesh)).id();
+        let target =
+            app.world_mut()
+                .resource_mut::<Assets<Image>>()
+                .add(Image::new_target_texture(
+                    32,
+                    32,
+                    TextureFormat::Rgba8UnormSrgb,
+                    None,
+                ));
+        app.world_mut().spawn((
+            Camera3d::default(),
+            Projection::Orthographic(OrthographicProjection {
+                scaling_mode: ScalingMode::Fixed {
+                    width: 2.,
+                    height: 2.,
+                },
+                ..OrthographicProjection::default_3d()
+            }),
+            RenderTarget::Image(target.clone().into()),
+            Transform::from_xyz(0., 0., 3.),
+            Exposure::BLENDER,
+            Tonemapping::Linear,
+            Msaa::Off,
+        ));
+        app.world_mut().spawn(DirectionalLight {
+            illuminance: std::f32::consts::PI / Exposure::BLENDER.exposure(),
+            ..default()
+        });
+        for (scale, rotation, offset) in [
+            ([-0.6f32, 0.4], std::f32::consts::FRAC_PI_3, [0.7f32, 0.1]),
+            ([0., -0.75], std::f32::consts::FRAC_PI_2, [0.9, 0.2]),
+        ] {
+            let toon = schema::Toon::compile(
+                serde_json::from_value(json!({
+                    "specVersion":"1.0", "shadeColorFactor":[0,0,0],
+                    "shadingShiftFactor":-2, "shadingToonyFactor":0,
+                    "shadingShiftTexture":{"index":0,"scale":2,"texCoord":0,
+                        "extensions":{"KHR_texture_transform":{
+                            "texCoord":1,"scale":scale,"rotation":rotation,"offset":offset
+                        }}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let material =
+                app.world_mut()
+                    .resource_mut::<Assets<MToonMaterial>>()
+                    .add(MToonMaterial {
+                        base: StandardMaterial {
+                            base_color: Color::WHITE,
+                            ..default()
+                        },
+                        extension: MToonExtension::new(
+                            &toon,
+                            std::slice::from_ref(&gradient),
+                            &HashMap::default(),
+                        ),
+                    });
+            app.world_mut()
+                .entity_mut(body)
+                .insert(MeshMaterial3d(material));
+            for _ in 0..30 {
+                app.update();
+            }
+            assert_specialized_pipelines_ok(&app, &[body]);
+            app.world_mut()
+                .spawn(Screenshot::image(target.clone()))
+                .observe(
+                    |event: On<ScreenshotCaptured>, mut capture: ResMut<Capture>| {
+                        capture.0 = Some(event.image.clone());
+                    },
+                );
+            let image = (0..1000)
+                .find_map(|_| {
+                    app.update();
+                    app.world_mut().resource_mut::<Capture>().0.take()
+                })
+                .expect("GPU screenshot did not complete")
+                .try_into_dynamic()
+                .unwrap()
+                .to_rgba8();
+            for y in [6, 15, 24] {
+                for x in [5, 14, 25] {
+                    let uv = [(x as f32 + 0.5) / 32., (y as f32 + 0.5) / 32.];
+                    let u = offset[0]
+                        + rotation.cos() * scale[0] * uv[0]
+                        + rotation.sin() * scale[1] * uv[1];
+                    let texel = (u.clamp(0., 1.) * 16.).floor().min(15.);
+                    let linear = texel / 15.;
+                    let expected = Color::linear_rgb(linear, linear, linear)
+                        .to_srgba()
+                        .to_u8_array();
+                    let actual = image.get_pixel(x, y).0;
+                    eprintln!(
+                        "shift scale={scale:?} pixel=({x},{y}) u={u} actual={actual:?} expected={expected:?}"
+                    );
+                    for channel in 0..4 {
+                        assert!(
+                            actual[channel].abs_diff(expected[channel]) <= 2,
+                            "scale={scale:?}, ({x},{y}): rendered {actual:?}, expected {expected:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; runs in CI with lavapipe"]
     fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         use bevy::mesh::PrimitiveTopology;
         use bevy::render::{
@@ -528,14 +659,17 @@ mod tests {
                 RenderAssetUsages::default(),
             ));
         let converted = HashMap::from([((0usize, TextureSpace::Linear), mask_image)]);
-        let toon: schema::Toon = serde_json::from_value(json!({
-            "specVersion":"1.0",
-            "shadeMultiplyTexture":{"index":0,"texCoord":1},
-            "uvAnimationMaskTexture":{"index":0,"texCoord":1},
-            "outlineWidthMode":"screenCoordinates",
-            "outlineWidthFactor":0.01,
-            "outlineWidthMultiplyTexture":{"index":0,"texCoord":1}
-        }))
+        let toon = schema::Toon::compile(
+            serde_json::from_value(json!({
+                "specVersion":"1.0",
+                "shadeMultiplyTexture":{"index":0,"texCoord":1},
+                "uvAnimationMaskTexture":{"index":0,"texCoord":1},
+                "outlineWidthMode":"screenCoordinates",
+                "outlineWidthFactor":0.01,
+                "outlineWidthMultiplyTexture":{"index":0,"texCoord":1}
+            }))
+            .unwrap(),
+        )
         .unwrap();
         let body_material =
             app.world_mut()
@@ -613,16 +747,19 @@ mod tests {
                 morph.clone(),
             ))
             .id();
-        app.world_mut().spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(outline_material),
-            Visibility::Visible,
-            NoFrustumCulling,
-            Transform::IDENTITY,
-            ChildOf(body),
-            skin,
-            morph,
-        ));
+        let outline = app
+            .world_mut()
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(outline_material),
+                Visibility::Visible,
+                NoFrustumCulling,
+                Transform::IDENTITY,
+                ChildOf(body),
+                skin,
+                morph,
+            ))
+            .id();
 
         let target =
             app.world_mut()
@@ -658,12 +795,6 @@ mod tests {
                 pipeline.state
             );
         }
-        let entities: Vec<Entity> = app
-            .world_mut()
-            .query_filtered::<Entity, With<MeshMaterial3d<MToonMaterial>>>()
-            .iter(app.world())
-            .collect();
-        assert_eq!(entities.len(), 2, "body and outline materials");
-        assert_specialized_pipelines_ok(&app, &entities);
+        assert_specialized_pipelines_ok(&app, &[body, outline]);
     }
 }

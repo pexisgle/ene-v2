@@ -1,7 +1,12 @@
 //! Replay native pointer events before consulting the current cursor position.
 
-use crate::desktop::{Output, PointerInput};
-use bevy::{input::ButtonState, prelude::*, window::WindowEvent};
+use crate::desktop::{NativeInput, Output};
+use bevy::{
+    input::ButtonState,
+    picking::pointer::{PointerAction, PointerButton},
+    prelude::*,
+    window::WindowEvent,
+};
 use std::collections::HashMap;
 
 pub(super) fn input(
@@ -9,18 +14,23 @@ pub(super) fn input(
     mut events: MessageReader<WindowEvent>,
     outputs: Query<&Output>,
     mut positions: Local<HashMap<Entity, Vec2>>,
-    mut pointer: MessageWriter<PointerInput>,
+    mut pointer: ResMut<NativeInput>,
 ) {
     positions.retain(|entity, _| outputs.contains(*entity));
     for event in events.read() {
         let (window, button) = match event {
             WindowEvent::CursorMoved(event) => {
                 positions.insert(event.window, event.position);
-                (event.window, None)
+                (event.window, PointerAction::Move { delta: Vec2::ZERO })
             }
-            WindowEvent::MouseButtonInput(event) if event.button == MouseButton::Left => {
-                (event.window, Some(event.state == ButtonState::Pressed))
-            }
+            WindowEvent::MouseButtonInput(event) if event.button == MouseButton::Left => (
+                event.window,
+                if event.state == ButtonState::Pressed {
+                    PointerAction::Press(PointerButton::Primary)
+                } else {
+                    PointerAction::Release(PointerButton::Primary)
+                },
+            ),
             _ => continue,
         };
         let Ok(output) = outputs.get(window) else {
@@ -34,11 +44,7 @@ pub(super) fn input(
                 (point - output.origin) / output.units_per_logical_pixel
             }
         };
-        pointer.write(PointerInput {
-            output: window,
-            local,
-            button,
-        });
+        pointer.send(window, local, button);
     }
 }
 
@@ -47,24 +53,20 @@ mod tests {
     use super::*;
     use crate::{
         character::{AvatarState, Character, Notification},
-        desktop::{self, Drag, HitRegions},
+        desktop::{self, HitRegions},
     };
     use bevy::{input::mouse::MouseButtonInput, window::CursorMoved};
 
     fn test_app() -> (App, [Entity; 2], Entity) {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Drag>()
+        app.add_plugins((MinimalPlugins, desktop::setup))
             .add_message::<WindowEvent>()
-            .add_message::<PointerInput>()
             .add_message::<Notification>()
             .add_systems(
-                Update,
-                (
-                    (|| Some(Vec2::new(200., 50.))).pipe(input),
-                    desktop::pointer,
-                )
-                    .chain(),
+                PreUpdate,
+                (|| Some(Vec2::new(200., 50.)))
+                    .pipe(input)
+                    .before(desktop::pointer),
             );
         let mut regions = Vec::new();
         for (name, x) in [("a", 50.), ("b", 200.)] {
@@ -137,7 +139,11 @@ mod tests {
         let config = &app.world().get::<Character>(avatar).unwrap().config;
         assert_eq!(config.monitor.as_deref(), Some("right"));
         assert_eq!(config.position, Some([50., 50.]));
-        assert!(app.world().resource::<Drag>().entity.is_none());
+        assert!(
+            !app.world()
+                .resource::<bevy::picking::hover::PointerCaptureMap>()
+                .is_captured(&bevy::picking::pointer::PointerId::Mouse)
+        );
         assert!(
             app.world_mut()
                 .resource_mut::<Messages<Notification>>()
@@ -146,5 +152,32 @@ mod tests {
                 .is_none(),
             "a drag must not become a click"
         );
+    }
+
+    #[test]
+    fn first_button_uses_native_cursor_fallback_but_motion_cache_takes_precedence() {
+        for cached in [false, true] {
+            let (mut app, [output, _], _) = test_app();
+            if cached {
+                app.world_mut()
+                    .write_message(moved(output, Vec2::splat(50.)));
+            }
+            for state in [ButtonState::Pressed, ButtonState::Released] {
+                app.world_mut().write_message(button(output, state));
+            }
+            app.update();
+            let clicks: Vec<_> = app
+                .world_mut()
+                .resource_mut::<Messages<Notification>>()
+                .drain()
+                .map(|event| event.0)
+                .collect();
+            assert_eq!(
+                clicks,
+                vec![
+                    serde_json::json!({"event":"click", "character":if cached { "a" } else { "b" }})
+                ]
+            );
+        }
     }
 }
