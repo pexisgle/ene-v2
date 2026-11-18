@@ -26,8 +26,9 @@ SOURCE = ROOT / "apps/ene-desktop/src/session.rs"
 COVERAGE = Path(__file__).with_name("coverage.md")
 TEST_NAME = "only_the_claim_naming_the_current_binding_executes"
 
-# What the property assumes about each guard. The first two are ownership
-# checks; the third is the one the property is named after.
+# What the property assumes about each guard. Both are ownership checks: the
+# client that executes is the one the operation was addressed to, on the device
+# stream it currently holds, while it is the active device for a companion.
 GUARDS = (
     (
         "client identity",
@@ -38,8 +39,8 @@ GUARDS = (
         r"if !our_subscription\.is_empty\(\)\s*&&\s*claim\.subscription_id != our_subscription",
     ),
     (
-        "held generation",
-        r"Some\(binding\) if binding\.revision == claim\.activation_revision => Ok\(\(\)\)",
+        "active device",
+        r"None => Err\(\"this client is not the active device for any companion\"\.into\(\)\)",
     ),
 )
 

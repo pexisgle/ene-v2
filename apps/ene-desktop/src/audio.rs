@@ -96,12 +96,6 @@ impl Filter {
     }
 }
 
-/// One sentence still queued for the device.
-struct Sentence {
-    sequence_no: u32,
-    remaining: usize,
-}
-
 /// What the mixer knows about the utterance being played.
 #[derive(Default)]
 struct Deck {
@@ -110,28 +104,6 @@ struct Deck {
     utterance: String,
     /// Decoded, resampled, device-rate mono samples waiting to be played.
     pending: VecDeque<f32>,
-    /// The sentences those samples belong to, in order.
-    queue: VecDeque<Sentence>,
-    /// Sentence indexes that played to the end. The host emits at most 64
-    /// sentences per utterance, so one word holds every one of them.
-    played: u64,
-    /// Samples written to the device for the current utterance.
-    played_samples: u64,
-    /// Set when the device reported a stream error.
-    failed: bool,
-}
-
-/// How far the audible stream has actually got.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Progress {
-    pub utterance: String,
-    pub generation: u64,
-    /// Sentence indexes that played to their end, in order.
-    pub played: Vec<u32>,
-    pub played_samples: u64,
-    /// Whether the queue is empty, which is what "played" means.
-    pub drained: bool,
-    pub failed: bool,
 }
 
 /// The device-side player. One client owns one deck.
@@ -148,7 +120,7 @@ pub struct Player {
     flushed: Arc<AtomicU64>,
     /// RMS of the buffer the device last played, for lip sync.
     level: Arc<AtomicU32>,
-    /// Software mute: drains the deck and reports progress without audible output.
+    /// Software mute: drains the deck without audible output.
     muted: Arc<AtomicBool>,
 }
 
@@ -246,13 +218,7 @@ impl Player {
 
     /// Queues one wire chunk. A chunk for a flushed or superseded generation is
     /// dropped, which is what makes a late arrival harmless.
-    pub fn push(
-        &mut self,
-        utterance: &str,
-        generation: u64,
-        sequence_no: u32,
-        pcm: &[u8],
-    ) -> Result<(), String> {
+    pub fn push(&mut self, utterance: &str, generation: u64, pcm: &[u8]) -> Result<(), String> {
         if generation <= self.flushed.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -268,24 +234,8 @@ impl Player {
         if deck.generation != generation || deck.utterance != utterance {
             // A new utterance always wins: the old audio is dropped, never mixed.
             deck.pending.clear();
-            deck.queue.clear();
-            deck.played = 0;
-            deck.played_samples = 0;
-            deck.failed = false;
             deck.generation = generation;
             deck.utterance = utterance.to_owned();
-        }
-        if let Some(last) = deck.queue.back_mut()
-            && last.sequence_no == sequence_no
-        {
-            // Every chunk of one sentence shares its sequence number, so they
-            // extend the same entry instead of looking like duplicates.
-            last.remaining += samples.len();
-        } else {
-            deck.queue.push_back(Sentence {
-                sequence_no,
-                remaining: samples.len(),
-            });
         }
         deck.pending.extend(samples);
         Ok(())
@@ -298,7 +248,6 @@ impl Player {
             && deck.generation <= generation
         {
             deck.pending.clear();
-            deck.queue.clear();
             deck.utterance.clear();
         }
     }
@@ -309,23 +258,6 @@ impl Player {
             .lock()
             .map(|deck| !deck.pending.is_empty())
             .unwrap_or(false)
-    }
-
-    /// What actually reached the device, for `ReportPlaybackStatus`.
-    pub fn progress(&self) -> Progress {
-        let Ok(deck) = self.deck.lock() else {
-            return Progress::default();
-        };
-        Progress {
-            utterance: deck.utterance.clone(),
-            generation: deck.generation,
-            played: (0..64)
-                .filter(|index| deck.played & (1 << index) != 0)
-                .collect(),
-            played_samples: deck.played_samples,
-            drained: deck.pending.is_empty(),
-            failed: deck.failed,
-        }
     }
 
     /// The device rate the wire audio is played at.
@@ -382,23 +314,9 @@ fn fill_with<T: Copy>(
     let mut audible = 0u64;
     for frame in output.chunks_mut(channels) {
         let sample = deck.pending.pop_front().unwrap_or(0.);
-        if sample != 0. || !deck.pending.is_empty() {
-            deck.played_samples += 1;
-        }
         energy += f64::from(sample) * f64::from(sample);
         if sample != 0. {
             audible += 1;
-        }
-        if let Some(sentence) = deck.queue.front_mut() {
-            sentence.remaining = sentence.remaining.saturating_sub(1);
-            if sentence.remaining == 0 {
-                let finished = deck.queue.pop_front();
-                if let Some(sentence) = finished
-                    && sentence.sequence_no < 64
-                {
-                    deck.played |= 1 << sentence.sequence_no;
-                }
-            }
         }
         let written = if is_muted { silence } else { to_device(sample) };
         for slot in frame.iter_mut() {
@@ -800,26 +718,6 @@ mod tests {
         assert!(produced <= expected, "no more than the input produces");
     }
 
-    #[test]
-    fn a_sentence_keeps_one_queue_entry_across_its_chunks() {
-        let deck = Arc::new(Mutex::new(Deck::default()));
-        {
-            let mut deck = deck.lock().unwrap();
-            deck.utterance = "u".into();
-            deck.generation = 1;
-            for _ in 0..3 {
-                match deck.queue.back_mut() {
-                    Some(last) if last.sequence_no == 7 => last.remaining += 4,
-                    _ => deck.queue.push_back(Sentence {
-                        sequence_no: 7,
-                        remaining: 4,
-                    }),
-                }
-            }
-            assert_eq!(deck.queue.len(), 1, "one sentence, one entry");
-            assert_eq!(deck.queue[0].remaining, 12);
-        }
-    }
     /// The mouth follows what the device actually played: audible samples raise
     /// the level, and a drained deck reports silence.
     #[test]
@@ -848,10 +746,6 @@ mod tests {
             let mut guard = deck.lock().unwrap();
             guard.utterance = "u".into();
             guard.generation = 1;
-            guard.queue.push_back(Sentence {
-                sequence_no: 2,
-                remaining: 4,
-            });
             guard.pending.extend([0.5f32, -0.5, 0.5, -0.5]);
         }
         let level = AtomicU32::new(0);
@@ -860,10 +754,7 @@ mod tests {
         fill(&mut output, 1, &deck, &level, &muted);
         assert_eq!(output, [0., 0., 0., 0.]);
         assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
-        let guard = deck.lock().unwrap();
-        assert!(guard.pending.is_empty());
-        assert_eq!(guard.played_samples, 4);
-        assert_eq!(guard.played, 1 << 2);
+        assert!(deck.lock().unwrap().pending.is_empty());
     }
 
     #[test]
@@ -948,10 +839,6 @@ mod tests {
             let mut guard = deck.lock().unwrap();
             guard.utterance = "u".into();
             guard.generation = 1;
-            guard.queue.push_back(Sentence {
-                sequence_no: 1,
-                remaining: 2,
-            });
             guard.pending.extend([0.5f32, -0.5]);
         }
         let level = AtomicU32::new(0);
@@ -961,7 +848,6 @@ mod tests {
         assert_eq!(output_i16[0], output_i16[1]);
         assert!(output_i16[0] > 16_000 && output_i16[2] < -16_000);
         assert!((f32::from_bits(level.load(Ordering::Relaxed)) - 0.5).abs() < 1e-4);
-        assert_eq!(deck.lock().unwrap().played, 1 << 1);
 
         let sink = Mutex::new(VecDeque::new());
         let cap_level = AtomicU32::new(0);

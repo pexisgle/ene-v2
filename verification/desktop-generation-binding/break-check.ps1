@@ -15,8 +15,8 @@ $original = [System.IO.File]::ReadAllText($source)
 Copy-Item $source $backup -Force
 Write-Host "backed up to $backup"
 
-$guard = '        Some(binding) if binding.revision == claim.activation_revision => Ok(()),'
-$weakened = '        Some(_) => Ok(()),'
+$guard = '    if claim.client_id != our_id {'
+$weakened = '    if false && claim.client_id != our_id {'
 if (-not $original.Contains($guard)) {
     throw 'the guard this check mutates is not written the way the script expects; read admits first'
 }
@@ -24,7 +24,7 @@ if (-not $original.Contains($guard)) {
 $failed = $false
 try {
     [System.IO.File]::WriteAllText($source, $original.Replace($guard, $weakened), (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host '== mutation applied: the revision arm accepts any generation =='
+    Write-Host '== mutation applied: the identity arm accepts any client id =='
     Push-Location $root
     try {
         $output = & cargo test -p ene-desktop --lib only_the_claim_naming_the_current_binding_executes 2>&1

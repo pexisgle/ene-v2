@@ -568,6 +568,9 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
                 upsert_activation(&mut snapshot.activations, *activation);
             }
         }
+        // The settings surface reads the texts from `SettingsUpdated`, which the
+        // host rewrites on every change, so this carries no extra state.
+        Some(w::notification::Event::PolicyTextsUpdated(_)) => {}
         // Work stays behind the companion's dialogue; the window has no surface
         // a work event would refresh.
         Some(w::notification::Event::WorkEvent(_)) => {}
@@ -639,16 +642,13 @@ fn upsert_by_revision<T>(
     }
 }
 
-/// Keeps one activation per companion, newest revision.
+/// Keeps one activation per companion, latest notification winning.
 fn upsert_activation(activations: &mut Vec<w::Activation>, activation: w::Activation) {
     match activations
         .iter()
         .position(|current| current.companion_id == activation.companion_id)
     {
-        Some(index) if activations[index].revision <= activation.revision => {
-            activations[index] = activation;
-        }
-        Some(_) => {}
+        Some(index) => activations[index] = activation,
         None => activations.push(activation),
     }
 }

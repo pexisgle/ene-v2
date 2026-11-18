@@ -12,9 +12,9 @@
 //! - The discovery file is read on every attempt. The host rewrites its port and
 //!   token on each start, so a cached endpoint is a dead endpoint.
 //! - Operations are executed only from `ClientService.DeviceStream`, and only
-//!   when `client_id`, `subscription_id` and `activation_revision` all still
-//!   name this client's current binding. The `device_operation` notification is
-//!   an observation, never an instruction.
+//!   when `client_id` and `subscription_id` both still name this client's
+//!   current binding. The `device_operation` notification is an observation,
+//!   never an instruction.
 //! - Nothing is retried blindly. A dropped link reconnects; a request the
 //!   operator made is their decision to repeat, so it moves to the window's
 //!   "unsent" list with its `request_key` intact.
@@ -44,8 +44,6 @@ const MAX_RETRY: Duration = Duration::from_secs(30);
 const SAMPLE: Duration = Duration::from_secs(20);
 /// How often captured audio goes to the host.
 const CAPTURE: Duration = Duration::from_millis(100);
-/// How often playback progress is checked for a report.
-const REPORT: Duration = Duration::from_millis(200);
 /// How often the playback amplitude goes to the renderer (about 60 Hz).
 const LIP: Duration = Duration::from_millis(16);
 
@@ -81,21 +79,10 @@ impl Default for Options {
 /// reconnects, so a request can never use a token the host has already rotated.
 pub type Connection = Arc<RwLock<Option<Host>>>;
 
-/// The generation this client was granted for one companion.
+/// The companion this client is the active device for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Binding {
     companion_id: String,
-    revision: u64,
-}
-
-/// One utterance whose playback the client must report.
-struct Playback {
-    utterance: String,
-    generation: u64,
-    revision: u64,
-    /// The host finished sending the sentences, so a drained deck is complete.
-    finished: bool,
-    skipped: Vec<u32>,
 }
 
 /// Why one attempt at serving the host ended.
@@ -137,8 +124,6 @@ pub struct Session {
     sensor: Sensor,
     /// The companion the operator asked to serve while a request was in flight.
     pending: Option<String>,
-    /// The utterance being played, if its outcome still has to be reported.
-    playback: Option<Playback>,
     /// Capabilities this machine can honour, declared at registration.
     specs: Vec<w::ClientCapabilitySpec>,
     /// The last amplitude sent to the renderer, so silence sends nothing new.
@@ -229,7 +214,6 @@ impl Session {
             last_ui_audio: (0., 0., false),
             pending: None,
             specs,
-            playback: None,
         }
     }
 
@@ -395,7 +379,6 @@ impl Session {
         if ours {
             self.binding = current.map(|activation| Binding {
                 companion_id: activation.companion_id,
-                revision: activation.revision,
             });
             self.pending = None;
             return Ok(());
@@ -408,7 +391,7 @@ impl Session {
             tracing::info!("another client is the active device for {wanted}");
             return Ok(());
         }
-        match self.activate(host, &wanted, current.as_ref()).await {
+        match self.activate(host, &wanted).await {
             Ok(binding) => {
                 self.binding = Some(binding);
                 self.may_activate = false;
@@ -425,7 +408,6 @@ impl Session {
         &mut self,
         host: &Host,
         companion_id: &str,
-        current: Option<&w::Activation>,
     ) -> Result<Binding, connectrpc::ConnectError> {
         if let Some(previous) = self.binding.clone()
             && previous.companion_id != companion_id
@@ -434,13 +416,11 @@ impl Session {
             // has no active device for the companion this client is leaving.
             self.release(host, &previous).await?;
         }
-        let expected = current.map_or(0, |activation| activation.revision);
         let activation = host
             .client
             .activate(w::ActivationRequest {
                 companion_id: companion_id.to_owned(),
                 client_id: self.options.id.clone(),
-                expected_revision: expected,
                 release: false,
                 ..Default::default()
             })
@@ -450,12 +430,10 @@ impl Session {
             .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))?;
         tracing::info!(
             companion = %activation.companion_id,
-            revision = activation.revision,
             "the client is the active device"
         );
         Ok(Binding {
             companion_id: activation.companion_id,
-            revision: activation.revision,
         })
     }
 
@@ -469,7 +447,6 @@ impl Session {
             .activate(w::ActivationRequest {
                 companion_id: binding.companion_id.clone(),
                 client_id: String::new(),
-                expected_revision: binding.revision,
                 release: true,
                 ..Default::default()
             })
@@ -496,12 +473,11 @@ impl Session {
         // The audio subscription is what gives this client the speech floor, so
         // it is opened only while this client is the active device.
         let mut output = match self.binding.clone() {
-            Some(binding) => {
+            Some(_) => {
                 match host
                     .voice
                     .subscribe_audio_output(w::SubscribeAudioRequest {
                         client_id: self.options.id.clone(),
-                        activation_revision: binding.revision,
                         ..Default::default()
                     })
                     .await
@@ -536,7 +512,6 @@ impl Session {
         };
         let mut sample = interval(SAMPLE);
         let mut capture = interval(CAPTURE);
-        let mut report = interval(REPORT);
         let mut lip = interval(LIP);
         loop {
             tokio::select! {
@@ -557,7 +532,7 @@ impl Session {
                     Err(error) => return self.classify(error),
                 },
                 frame = audio_message(&mut output) => match frame {
-                    Some(Ok(event)) => self.play(&host, event).await,
+                    Some(Ok(event)) => self.play(event).await,
                     Some(Err(error)) => {
                         // A host without TTS answers `unimplemented` or
                         // `failed_precondition`; that is a client without audio,
@@ -602,10 +577,9 @@ impl Session {
                         mic_send = None;
                     }
                 }
-                _ = lip.tick() => self.pump_lip(),
-                _ = report.tick() => {
+                _ = lip.tick() => {
                     self.drain_renderer();
-                    self.report_playback(&host).await;
+                    self.pump_lip();
                 }
                 _ = sample.tick() => self.sample(&host).await,
                 frame = subscription.message() => match frame {
@@ -728,7 +702,6 @@ impl Session {
             success,
             output,
             failure: failure.into(),
-            activation_revision: operation.activation_revision,
             ..Default::default()
         }
     }
@@ -738,7 +711,6 @@ impl Session {
         let claim = Claim {
             client_id: &operation.client_id,
             subscription_id: &operation.subscription_id,
-            activation_revision: operation.activation_revision,
         };
         admits(
             &self.options.id,
@@ -853,13 +825,9 @@ impl Session {
                     .is_some_and(|binding| binding.companion_id == activation.companion_id)
                 {
                     let ours = activation.client_id.as_deref() == Some(self.options.id.as_str());
-                    if ours {
-                        if let Some(binding) = self.binding.as_mut() {
-                            binding.revision = activation.revision;
-                        }
-                    } else {
+                    if !ours {
                         // Another device holds this companion now. Old audio and
-                        // old generations must not be reused for it.
+                        // old streams must not be reused for it.
                         self.binding = None;
                         self.stop_playback();
                         self.sensor.apply(None);
@@ -967,7 +935,6 @@ impl Session {
         if let Some(player) = self.player.as_mut() {
             player.flush(u64::MAX);
         }
-        self.playback = None;
     }
 
     /// Opens the avatar renderer, reporting why it is unavailable when it is.
@@ -1034,93 +1001,36 @@ impl Session {
     }
 
     /// Plays one audio event. Only one utterance is audible at a time.
-    async fn play(&mut self, host: &Host, event: w::audio_output_event::Event) {
-        let Some(binding) = self.binding.clone() else {
-            return;
-        };
+    async fn play(&mut self, event: w::audio_output_event::Event) {
         match event {
             w::audio_output_event::Event::Chunk(chunk) => {
-                if self
-                    .playback
-                    .as_ref()
-                    .is_none_or(|playback| playback.utterance != chunk.utterance_id)
-                {
-                    tracing::info!(
-                        utterance = %chunk.utterance_id,
-                        generation = chunk.generation_id,
-                        rate = chunk.sample_rate,
-                        "audio output started"
-                    );
-                    // A new utterance ends the previous one by construction, so
-                    // the previous one is reported before it is overwritten.
-                    self.playback = Some(Playback {
-                        utterance: chunk.utterance_id.clone(),
-                        generation: chunk.generation_id,
-                        revision: binding.revision,
-                        finished: false,
-                        skipped: Vec::new(),
-                    });
-                }
+                tracing::debug!(
+                    utterance = %chunk.utterance_id,
+                    generation = chunk.generation_id,
+                    rate = chunk.sample_rate,
+                    "audio output chunk"
+                );
                 let Some(player) = self.player.as_mut() else {
                     return;
                 };
-                if let Err(error) = player.push(
-                    &chunk.utterance_id,
-                    chunk.generation_id,
-                    chunk.sequence_no,
-                    &chunk.pcm_data,
-                ) {
+                if let Err(error) =
+                    player.push(&chunk.utterance_id, chunk.generation_id, &chunk.pcm_data)
+                {
                     tracing::warn!("the audio chunk was not played: {error}");
                 }
             }
             w::audio_output_event::Event::Flush(flush) => {
-                // Report what was heard before the flush erases the evidence:
-                // an interrupted utterance did play, and the host releases the
-                // speech floor on that report.
-                if let Some(playback) = self.playback.take() {
-                    let progress = self
-                        .player
-                        .as_ref()
-                        .map(Player::progress)
-                        .unwrap_or_default();
-                    if progress.utterance == playback.utterance {
-                        self.send_playback(
-                            host,
-                            playback.utterance.clone(),
-                            playback.generation,
-                            playback.revision,
-                            w::playback_status_report::Status::PlaybackInterrupted,
-                            &progress.played,
-                            &playback.skipped,
-                            progress.played_samples.saturating_mul(2),
-                        )
-                        .await;
-                    }
-                }
                 if let Some(player) = self.player.as_mut() {
                     player.flush(flush.flush_generation_id);
                 }
                 tracing::info!(reason = ?flush.reason, "the host flushed playback");
             }
-            w::audio_output_event::Event::Skipped(skipped) => {
-                tracing::warn!(
-                    utterance = %skipped.utterance_id,
-                    sequence = skipped.sequence_no,
-                    reason = %skipped.reason,
-                    "the host skipped a sentence"
-                );
-                if let Some(playback) = self.playback.as_mut()
-                    && playback.utterance == skipped.utterance_id
-                {
-                    playback.skipped.push(skipped.sequence_no);
-                }
-            }
             w::audio_output_event::Event::Finished(finished) => {
-                if let Some(playback) = self.playback.as_mut()
-                    && playback.utterance == finished.utterance_id
-                {
-                    playback.finished = true;
-                }
+                tracing::debug!(
+                    utterance = %finished.utterance_id,
+                    sentences = finished.total_sentences,
+                    "the host finished sending an utterance"
+                );
             }
         }
     }
@@ -1136,134 +1046,11 @@ impl Session {
         }
     }
 
-    /// Reports a completed or failed utterance once its audio actually drained.
-    ///
-    /// Receiving every chunk is not playing every chunk, so this waits for the
-    /// deck to empty. The host has its own deadline and will release the speech
-    /// floor without this report, which is why a missed report is not fatal.
-    async fn report_playback(&mut self, host: &Host) {
-        let Some(playback) = self.playback.as_ref() else {
-            return;
-        };
-        let Some(player) = self.player.as_ref() else {
-            self.playback = None;
-            return;
-        };
-        let progress = player.progress();
-        if progress.utterance != playback.utterance {
-            self.playback = None;
-            return;
-        }
-        if progress.failed {
-            let (utterance, generation, revision) = (
-                playback.utterance.clone(),
-                playback.generation,
-                playback.revision,
-            );
-            self.playback = None;
-            self.send_playback(
-                host,
-                utterance,
-                generation,
-                revision,
-                w::playback_status_report::Status::PlaybackFailed,
-                &[],
-                &[],
-                0,
-            )
-            .await;
-            return;
-        }
-        if !progress.drained || !playback.finished {
-            return;
-        }
-        let (utterance, generation, revision, skipped) = (
-            playback.utterance.clone(),
-            playback.generation,
-            playback.revision,
-            playback.skipped.clone(),
-        );
-        let played = progress.played.clone();
-        let bytes = progress.played_samples.saturating_mul(2);
-        self.playback = None;
-        self.send_playback(
-            host,
-            utterance,
-            generation,
-            revision,
-            w::playback_status_report::Status::PlaybackCompleted,
-            &played,
-            &skipped,
-            bytes,
-        )
-        .await;
-    }
-
-    /// Sends one playback report.
-    #[allow(clippy::too_many_arguments)]
-    async fn send_playback(
-        &mut self,
-        host: &Host,
-        utterance: String,
-        generation: u64,
-        revision: u64,
-        status: w::playback_status_report::Status,
-        played: &[u32],
-        skipped: &[u32],
-        bytes: u64,
-    ) {
-        let report = w::PlaybackStatusReport {
-            utterance_id: utterance,
-            generation_id: generation,
-            status: status.into(),
-            completed_sentence_count: played.len() as u32,
-            played_sequence_nos: played.to_vec(),
-            skipped_sequence_nos: skipped.to_vec(),
-            completed_pcm_bytes: bytes,
-            client_id: self.options.id.clone(),
-            activation_revision: revision,
-            ..Default::default()
-        };
-        let reported = (
-            report.utterance_id.clone(),
-            format!("{:?}", report.status),
-            report.completed_sentence_count,
-            report.completed_pcm_bytes,
-        );
-        match host.voice.report_playback_status(report).await {
-            Ok(response) => match response.view().to_owned_message() {
-                Ok(result) => {
-                    if result.acknowledged {
-                        tracing::debug!(
-                            utterance = %reported.0,
-                            status = %reported.1,
-                            sentences = reported.2,
-                            bytes = reported.3,
-                            "playback reported"
-                        );
-                    } else {
-                        // The host no longer owns this utterance for this
-                        // generation. Nothing to retry.
-                        tracing::info!("the playback report was not acknowledged");
-                    }
-                }
-                Err(error) => tracing::warn!("the playback answer did not decode: {error}"),
-            },
-            Err(error) => {
-                if persistent(&error) {
-                    tracing::info!("the host has no playback reporting: {error}");
-                } else {
-                    tracing::warn!("the playback report was not sent: {error}");
-                }
-            }
-        }
-    }
-
-    /// Samples the OS and reports what it observed, bound to this generation.
+    /// Samples the OS and reports what it observed.
     async fn sample(&mut self, host: &Host) {
-        let Some(binding) = self.binding.clone() else {
+        if self.binding.is_none() {
             return;
-        };
+        }
         let reports = self.sensor.observe(perception::observe());
         for report in reports {
             let event = match report {
@@ -1305,7 +1092,6 @@ impl Session {
             };
             let event = w::PerceptionEvent {
                 client_id: self.options.id.clone(),
-                activation_revision: binding.revision,
                 timestamp: String::new(),
                 ..event
             };
@@ -1457,9 +1243,9 @@ async fn transcription_message(
 
 /// One captured block, when the microphone is due and has audio.
 ///
-/// The chunk carries the generation at capture time, and the software flag the
-/// host uses to drop audio captured while the companion speaks. Without echo
-/// cancellation that flag is the only protection, so it is reported honestly.
+/// The chunk carries the software flag the host uses to drop audio captured
+/// while the companion speaks. Without echo cancellation that flag is the only
+/// protection, so it is reported honestly.
 async fn capture_tick(
     capture: &mut tokio::time::Interval,
     microphone: &mut Option<Microphone>,
@@ -1468,7 +1254,7 @@ async fn capture_tick(
     speaking: bool,
 ) -> Option<w::AudioInputChunk> {
     capture.tick().await;
-    let binding = binding.as_ref()?;
+    binding.as_ref()?;
     let microphone = microphone.as_mut()?;
     let pcm = microphone.take();
     (!pcm.is_empty()).then(|| w::AudioInputChunk {
@@ -1476,7 +1262,6 @@ async fn capture_tick(
         pcm_data: pcm,
         sample_rate: audio::WIRE_RATE,
         is_companion_speaking: speaking,
-        activation_revision: binding.revision,
         ..Default::default()
     })
 }
@@ -1485,17 +1270,16 @@ async fn capture_tick(
 struct Claim<'a> {
     client_id: &'a str,
     subscription_id: &'a str,
-    activation_revision: u64,
 }
 
 /// Whether this client may execute the operation, or why it must not.
 ///
-/// An operation is executable only when all three parts of the claim still name
-/// this client's own identity, its current device stream, and the activation
-/// generation it holds. A client that executed a stale claim would move the
-/// wrong character, or report a result the host attributes to another device's
-/// generation. The tests below enumerate every combination of the three fields
-/// in both directions, so this decision is checked in full rather than sampled.
+/// An operation is executable only when both parts of the claim still name this
+/// client's own identity and its current device stream, and this client is the
+/// active device for some companion. A client that executed a stale claim would
+/// move the wrong character, or report a result the host attributes to another
+/// device's stream. The tests below enumerate every combination of the fields,
+/// so this decision is checked in full rather than sampled.
 fn admits(
     our_id: &str,
     our_subscription: &str,
@@ -1512,11 +1296,7 @@ fn admits(
         return Err("this operation belongs to an older device stream".into());
     }
     match binding {
-        Some(binding) if binding.revision == claim.activation_revision => Ok(()),
-        Some(binding) => Err(format!(
-            "this operation was accepted for generation {}, and this client holds {} for `{}`",
-            claim.activation_revision, binding.revision, binding.companion_id
-        )),
+        Some(_) => Ok(()),
         None => Err("this client is not the active device for any companion".into()),
     }
 }
@@ -1525,79 +1305,69 @@ fn admits(
 mod tests {
     use super::*;
 
-    fn held(revision: u64) -> Binding {
+    fn held() -> Binding {
         Binding {
             companion_id: "companion".into(),
-            revision,
         }
     }
 
     /// Every case the guard can distinguish: our own identity, our own
-    /// subscription, and the generation we hold, each against every operation
-    /// claim the host could send.
+    /// subscription, and whether we hold the companion, each against every
+    /// operation claim the host could send.
     #[test]
     fn only_the_claim_naming_the_current_binding_executes() {
         let our_ids = ["desktop", ""];
         let our_subscriptions = ["sub-1", ""];
         let claim_ids = ["desktop", "other", ""];
         let claim_subscriptions = ["sub-1", "sub-2", ""];
-        let claim_revisions = [0u64, 1, 2, 3];
-        let held_bindings = [None, Some(1u64), Some(2u64)];
+        let held_bindings = [false, true];
 
         let mut cases = 0usize;
         for our_id in our_ids {
             for our_subscription in our_subscriptions {
                 for claim_id in claim_ids {
                     for claim_subscription in claim_subscriptions {
-                        for claim_revision in claim_revisions {
-                            for held_revision in held_bindings {
-                                let binding = held_revision.map(held);
-                                let claim = Claim {
-                                    client_id: claim_id,
-                                    subscription_id: claim_subscription,
-                                    activation_revision: claim_revision,
-                                };
-                                // Stated independently of `admits`.
-                                let expected = claim_id == our_id
-                                    && (our_subscription.is_empty()
-                                        || claim_subscription == our_subscription)
-                                    && binding
-                                        .as_ref()
-                                        .is_some_and(|held| held.revision == claim_revision);
-                                let allowed =
-                                    admits(our_id, our_subscription, binding.as_ref(), &claim);
-                                assert_eq!(
-                                    allowed.is_ok(),
-                                    expected,
-                                    "id {our_id:?}/{claim_id:?} subscription {our_subscription:?}/\
-{claim_subscription:?} revision {held_revision:?}/{claim_revision:?}: {allowed:?}"
-                                );
-                                cases += 1;
-                            }
+                        for holds in held_bindings {
+                            let binding = holds.then(held);
+                            let claim = Claim {
+                                client_id: claim_id,
+                                subscription_id: claim_subscription,
+                            };
+                            // Stated independently of `admits`.
+                            let expected = claim_id == our_id
+                                && (our_subscription.is_empty()
+                                    || claim_subscription == our_subscription)
+                                && holds;
+                            let allowed =
+                                admits(our_id, our_subscription, binding.as_ref(), &claim);
+                            assert_eq!(
+                                allowed.is_ok(),
+                                expected,
+                                "id {our_id:?}/{claim_id:?} subscription {our_subscription:?}/\
+{claim_subscription:?} holds {holds:?}: {allowed:?}"
+                            );
+                            cases += 1;
                         }
                     }
                 }
             }
         }
-        assert_eq!(cases, 2 * 2 * 3 * 3 * 4 * 3, "the domain changed size");
+        assert_eq!(cases, 2 * 2 * 3 * 3 * 2, "the domain changed size");
     }
 
     #[test]
     fn a_refusal_says_which_part_does_not_match() {
-        let binding = held(2);
+        let binding = held();
         let stale = Claim {
             client_id: "desktop",
             subscription_id: "sub-1",
-            activation_revision: 1,
         };
-        let refused = admits("desktop", "sub-1", Some(&binding), &stale).unwrap_err();
-        assert!(refused.contains("generation 1"), "{refused}");
-        assert!(refused.contains("holds 2"), "{refused}");
+        let refused = admits("desktop", "sub-2", Some(&binding), &stale).unwrap_err();
+        assert!(refused.contains("older device stream"), "{refused}");
 
         let elsewhere = Claim {
             client_id: "desk-1",
             subscription_id: "sub-1",
-            activation_revision: 2,
         };
         let refused = admits("desktop", "sub-1", Some(&binding), &elsewhere).unwrap_err();
         assert!(refused.contains("desk-1"), "{refused}");
