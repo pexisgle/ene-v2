@@ -61,7 +61,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 uuid.workspace = true
-which.workspace = true
 
 [dev-dependencies]
 bevy_time = "=0.20.0"
