@@ -113,11 +113,20 @@ pub struct Chat {
     pub stop_requested: bool,
 }
 
+/// Live speech-to-text recognition subtitle shown while listening.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveTranscription {
+    pub text: String,
+    pub is_final: bool,
+    pub is_speaking: bool,
+}
+
 /// What the window should refetch because a notification invalidated it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Effects {
     pub history: bool,
     pub approvals: bool,
+    pub mind: bool,
 }
 
 /// Everything the window draws.
@@ -138,6 +147,14 @@ pub struct Model {
     pub models: BTreeMap<String, Vec<w::Model>>,
     /// The last connection check per connection id.
     pub checks: BTreeMap<String, w::ConnectionCheck>,
+    pub audio_output_rms: f32,
+    pub audio_input_rms: f32,
+    pub companion_speaking: bool,
+    pub mic_muted: bool,
+    pub output_muted: bool,
+    pub avatar_scale: f32,
+    pub transcription: Option<LiveTranscription>,
+    pub minds: BTreeMap<String, w::MindView>,
 }
 
 impl Model {
@@ -157,6 +174,14 @@ impl Model {
             providers: None,
             models: BTreeMap::new(),
             checks: BTreeMap::new(),
+            audio_output_rms: 0.0,
+            audio_input_rms: 0.0,
+            companion_speaking: false,
+            mic_muted: false,
+            output_muted: false,
+            avatar_scale: 100.0,
+            transcription: None,
+            minds: BTreeMap::new(),
         }
     }
 
@@ -239,6 +264,9 @@ impl Model {
                     // A preview belongs to the link that produced it. Keeping it
                     // would show a half answer as if it were still arriving.
                     self.streaming.clear();
+                    self.companion_speaking = false;
+                    self.audio_output_rms = 0.0;
+                    self.transcription = None;
                     // The request may or may not have reached the host, so it
                     // moves to "unsent" with its key intact: a retry is safe.
                     for sending in std::mem::take(&mut self.chat.sending) {
@@ -369,11 +397,60 @@ impl Model {
                         .activations
                         .retain(|activation| activation.companion_id != companion_id);
                 }
+                self.minds.remove(&companion_id);
                 if self.selected.as_deref() == Some(companion_id.as_str()) {
                     self.selected = None;
                     self.chat = Chat::default();
                     self.streaming.clear();
                 }
+            }
+            Update::AudioLevel {
+                output,
+                input,
+                speaking,
+            } => {
+                self.audio_output_rms = output;
+                self.audio_input_rms = input;
+                self.companion_speaking = speaking;
+            }
+            Update::AudioMute {
+                mic_muted,
+                output_muted,
+            } => {
+                self.mic_muted = mic_muted;
+                self.output_muted = output_muted;
+                if mic_muted {
+                    self.audio_input_rms = 0.0;
+                }
+                if output_muted {
+                    self.audio_output_rms = 0.0;
+                }
+            }
+            Update::Transcription {
+                text,
+                is_final,
+                is_speaking,
+            } => {
+                if text.trim().is_empty() && is_final && !is_speaking {
+                    self.transcription = None;
+                } else {
+                    self.transcription = Some(LiveTranscription {
+                        text,
+                        is_final,
+                        is_speaking,
+                    });
+                }
+            }
+            Update::MindLoaded { companion_id, view } => {
+                self.minds.insert(companion_id, *view);
+            }
+            Update::PolicyRules(rules) => {
+                if let Some(snapshot) = self.snapshot.as_mut() {
+                    snapshot.policy_rules = rules;
+                }
+            }
+            Update::AvatarScaleChanged(scale) => {
+                self.avatar_scale = scale;
             }
             // The window clears the field that held the secret; nothing about a
             // credential is kept in the model, and a resnapshot is the window's
@@ -509,7 +586,12 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
         // Observation only: execution flows through `ClientService.DeviceStream`.
         Some(w::notification::Event::DeviceOperation(_))
         | Some(w::notification::Event::DeviceOperationResult(_)) => {}
-        Some(w::notification::Event::MindUpdated(_)) | None => {}
+        Some(w::notification::Event::MindUpdated(updated)) => {
+            effects.mind |= model.companion_id() == Some(updated.companion_id.as_str())
+                || (!updated.companion_id.is_empty()
+                    && model.chat.companion_id == updated.companion_id);
+        }
+        None => {}
     }
 }
 
@@ -847,5 +929,53 @@ mod tests {
             version: "1".into(),
         })));
         assert!(effects.history && effects.approvals);
+    }
+
+    #[test]
+    fn audio_levels_and_transcription_reset_when_link_drops() {
+        let mut model = with_chat();
+        model.apply(Update::Link(Box::new(Link::Live {
+            version: "1".into(),
+        })));
+        model.apply(Update::AudioLevel {
+            output: 0.4,
+            input: 0.2,
+            speaking: true,
+        });
+        model.apply(Update::Transcription {
+            text: "こんにちは".into(),
+            is_final: false,
+            is_speaking: true,
+        });
+        assert!(model.companion_speaking);
+        assert!(model.transcription.is_some());
+
+        model.apply(Update::Link(Box::new(Link::Lost {
+            reason: "closed".into(),
+            retry_in: Duration::from_secs(1),
+        })));
+        assert!(!model.companion_speaking);
+        assert_eq!(model.audio_output_rms, 0.0);
+        assert!(model.transcription.is_none());
+    }
+
+    #[test]
+    fn mind_updated_requests_refresh_only_for_active_companion() {
+        let mut model = with_chat();
+        let other = model.apply(Update::Notification(Box::new(notification(
+            w::notification::Event::MindUpdated(Box::new(w::MindUpdated {
+                companion_id: "other".into(),
+                ..Default::default()
+            })),
+        ))));
+        assert!(!other.mind);
+
+        let mine = model.apply(Update::Notification(Box::new(notification(
+            w::notification::Event::MindUpdated(Box::new(w::MindUpdated {
+                companion_id: "ene".into(),
+                ..Default::default()
+            })),
+        ))));
+        assert!(mine.mind);
     }
 }

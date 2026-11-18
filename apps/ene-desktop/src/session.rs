@@ -139,10 +139,18 @@ pub struct Session {
     pending: Option<String>,
     /// The utterance being played, if its outcome still has to be reported.
     playback: Option<Playback>,
-    /// The capabilities this machine can honour, declared at registration.
+    /// Capabilities this machine can honour, declared at registration.
     specs: Vec<w::ClientCapabilitySpec>,
     /// The last amplitude sent to the renderer, so silence sends nothing new.
     last_lip: Option<f32>,
+    /// Software mute for the microphone.
+    mic_muted: bool,
+    /// Software mute for speaker output.
+    output_muted: bool,
+    /// Current avatar display scale percentage.
+    avatar_scale: f32,
+    /// Last audio state forwarded to the UI, to avoid spamming idle frames.
+    last_ui_audio: (f32, f32, bool),
 }
 
 /// One validated `body.motion` request, before anything is sent anywhere.
@@ -215,6 +223,10 @@ impl Session {
             microphone: None,
             sensor: Sensor::default(),
             last_lip: None,
+            mic_muted: false,
+            output_muted: false,
+            avatar_scale: 100.,
+            last_ui_audio: (0., 0., false),
             pending: None,
             specs,
             playback: None,
@@ -504,18 +516,19 @@ impl Session {
             }
             None => None,
         };
-        let mut microphone = match self.binding.clone() {
+        let (mut mic_send, mut mic_recv) = match self.binding.clone() {
             Some(_) => match host.voice.stream_audio_input().await {
                 Ok(stream) => {
                     self.open_microphone();
-                    Some(stream)
+                    let (send, recv) = stream.into_split();
+                    (Some(send), Some(recv))
                 }
                 Err(error) => {
                     tracing::info!("no microphone stream: {error}");
-                    None
+                    (None, None)
                 }
             },
-            None => None,
+            None => (None, None),
         };
         let mut subscription = match self.subscribe(&host).await {
             Ok(stream) => stream,
@@ -559,12 +572,34 @@ impl Session {
                     }
                     None => output = None,
                 },
-                Some(chunk) = capture_tick(&mut capture, &mut self.microphone, &self.binding, &self.options.id, self.player.as_ref().is_some_and(Player::playing)) => {
-                    if let Some(stream) = microphone.as_mut()
+                frame = transcription_message(&mut mic_recv) => match frame {
+                    Some(Ok(event)) => {
+                        let _ = self.updates.send(Update::Transcription {
+                            text: event.text,
+                            is_final: event.is_final,
+                            is_speaking: event.is_speaking,
+                        });
+                    }
+                    Some(Err(error)) => {
+                        if persistent(&error) {
+                            tracing::info!("the host has no speech recognition: {error}");
+                        } else {
+                            tracing::warn!("the transcription stream ended: {error}");
+                        }
+                        mic_recv = None;
+                        mic_send = None;
+                    }
+                    None => {
+                        mic_recv = None;
+                        mic_send = None;
+                    }
+                },
+                Some(chunk) = capture_tick(&mut capture, &mut self.microphone, &self.binding, &self.options.id, self.player.as_ref().is_some_and(|player| player.playing() && !player.is_muted())) => {
+                    if let Some(stream) = mic_send.as_mut()
                         && let Err(error) = stream.send(chunk).await
                     {
                         tracing::info!("the microphone stream closed: {error}");
-                        microphone = None;
+                        mic_send = None;
                     }
                 }
                 _ = lip.tick() => self.pump_lip(),
@@ -764,6 +799,20 @@ impl Session {
     /// the level stops changing, so repeats of the last value are dropped.
     fn pump_lip(&mut self) {
         let level = self.player.as_ref().map_or(0., Player::level);
+        let input = self.microphone.as_ref().map_or(0., Microphone::level);
+        let speaking = self.player.as_ref().is_some_and(Player::playing);
+        let (prev_out, prev_in, prev_speaking) = self.last_ui_audio;
+        if (level - prev_out).abs() >= 0.015
+            || (input - prev_in).abs() >= 0.015
+            || speaking != prev_speaking
+        {
+            self.last_ui_audio = (level, input, speaking);
+            let _ = self.updates.send(Update::AudioLevel {
+                output: level,
+                input,
+                speaking,
+            });
+        }
         if self
             .last_lip
             .is_some_and(|last| (last - level).abs() < 0.005)
@@ -848,6 +897,67 @@ impl Session {
                 Step::Continue
             }
             Command::Refresh => Step::Restart,
+            Command::SetMicMuted(muted) => {
+                self.mic_muted = muted;
+                if let Some(microphone) = self.microphone.as_ref() {
+                    microphone.set_muted(muted);
+                }
+                let _ = self.updates.send(Update::AudioMute {
+                    mic_muted: self.mic_muted,
+                    output_muted: self.output_muted,
+                });
+                Step::Continue
+            }
+            Command::SetOutputMuted(muted) => {
+                self.output_muted = muted;
+                if let Some(player) = self.player.as_ref() {
+                    player.set_muted(muted);
+                }
+                let _ = self.updates.send(Update::AudioMute {
+                    mic_muted: self.mic_muted,
+                    output_muted: self.output_muted,
+                });
+                Step::Continue
+            }
+            Command::SetAvatarScale(scale) => {
+                let scale = scale.clamp(50., 200.);
+                self.avatar_scale = scale;
+                if let (Some(avatar), Some(model)) =
+                    (self.avatar.as_mut(), self.options.model.as_ref())
+                {
+                    if let Err(error) = avatar.set_scale(&self.options.id, model, scale) {
+                        let _ = self.updates.send(Update::Failed {
+                            context: "アバターのサイズ変更",
+                            message: error,
+                        });
+                    } else {
+                        let _ = self.updates.send(Update::AvatarScaleChanged(scale));
+                        self.devices().await;
+                    }
+                } else {
+                    let _ = self.updates.send(Update::Failed {
+                        context: "アバターのサイズ変更",
+                        message: "アバター描画プロセスまたはモデルが設定されていません".into(),
+                    });
+                }
+                Step::Continue
+            }
+            Command::CenterAvatar => {
+                if let Some(avatar) = self.avatar.as_mut() {
+                    if let Err(error) = avatar.center(&self.options.id) {
+                        let _ = self.updates.send(Update::Failed {
+                            context: "アバターの中央移動",
+                            message: error,
+                        });
+                    }
+                } else {
+                    let _ = self.updates.send(Update::Failed {
+                        context: "アバターの中央移動",
+                        message: "アバター描画プロセスが起動していません".into(),
+                    });
+                }
+                Step::Continue
+            }
             Command::Quit => Step::Stop,
         }
     }
@@ -867,10 +977,15 @@ impl Session {
         };
         match Avatar::spawn(&program) {
             Ok(mut avatar) => {
-                if let Some(model) = self.options.model.as_ref()
-                    && let Err(error) = avatar.show(&self.options.id, model, None)
-                {
-                    tracing::warn!("the renderer did not show the model: {error}");
+                if let Some(model) = self.options.model.as_ref() {
+                    if let Err(error) = avatar.show(&self.options.id, model, None) {
+                        tracing::warn!("the renderer did not show the model: {error}");
+                    } else if (self.avatar_scale - 100.).abs() > f32::EPSILON
+                        && let Err(error) =
+                            avatar.set_scale(&self.options.id, model, self.avatar_scale)
+                    {
+                        tracing::warn!("the renderer did not apply scale: {error}");
+                    }
                 }
                 self.avatar = Some(avatar);
                 self.devices().await;
@@ -887,6 +1002,7 @@ impl Session {
         if self.player.is_none() {
             match Player::open() {
                 Ok(player) => {
+                    player.set_muted(self.output_muted);
                     tracing::info!(
                         rate = player.rate(),
                         channels = player.channels(),
@@ -909,7 +1025,10 @@ impl Session {
             return;
         }
         match Microphone::open() {
-            Ok(microphone) => self.microphone = Some(microphone),
+            Ok(microphone) => {
+                microphone.set_muted(self.mic_muted);
+                self.microphone = Some(microphone);
+            }
             Err(error) => tracing::warn!("no microphone: {error}"),
         }
     }
@@ -1312,6 +1431,25 @@ async fn audio_message(
                 .event
                 .ok_or_else(|| connectrpc::ConnectError::internal("an empty audio event")),
         ),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
+/// One live transcription event from the bidirectional voice input stream.
+async fn transcription_message(
+    input: &mut Option<
+        connectrpc::client::BidiRecvHalf<
+            <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
+            w::__buffa::view::TranscriptionEventView<'static>,
+        >,
+    >,
+) -> Option<Result<w::TranscriptionEvent, connectrpc::ConnectError>> {
+    let Some(stream) = input.as_mut() else {
+        return std::future::pending().await;
+    };
+    match stream.message::<w::TranscriptionEvent>().await {
+        Ok(Some(message)) => Some(Ok(message.to_owned_message())),
         Ok(None) => None,
         Err(error) => Some(Err(error)),
     }

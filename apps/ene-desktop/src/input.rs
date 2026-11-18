@@ -13,10 +13,10 @@
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
+    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, div, fill, hsla, point, prelude::*, px, relative, rgba, size,
+    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -39,6 +39,36 @@ gpui::actions!(
     ]
 );
 
+/// Visual palette for a [`Draft`] input field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldLook {
+    pub bg: Hsla,
+    pub border: Hsla,
+    pub border_focused: Hsla,
+    pub text: Hsla,
+    pub placeholder: Hsla,
+    pub caret: Hsla,
+    pub selection: Hsla,
+    pub pill: bool,
+    pub borderless: bool,
+}
+
+impl Default for FieldLook {
+    fn default() -> Self {
+        Self {
+            bg: rgb(0xffffff).into(),
+            border: rgb(0xf3c4d5).into(),
+            border_focused: rgb(0xcf2e68).into(),
+            text: rgb(0x3b232c).into(),
+            placeholder: rgb(0x7d4b5e).into(),
+            caret: rgb(0xcf2e68).into(),
+            selection: rgba(0xcf2e6833).into(),
+            pill: false,
+            borderless: false,
+        }
+    }
+}
+
 /// An editable field. One entity per input the window shows.
 pub struct Draft {
     focus: FocusHandle,
@@ -55,6 +85,8 @@ pub struct Draft {
     /// text is wider than it.
     scroll: Pixels,
     selecting: bool,
+    masked: bool,
+    look: FieldLook,
 }
 
 impl Draft {
@@ -75,7 +107,31 @@ impl Draft {
             last_bounds: None,
             scroll: px(0.),
             selecting: false,
+            masked: false,
+            look: FieldLook::default(),
         }
+    }
+
+    /// Enables or disables bullet masking (for secrets / API keys).
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        if self.masked != masked {
+            self.masked = masked;
+            cx.notify();
+        }
+    }
+
+    /// Whether the field hides its characters behind bullets.
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
+    /// Updates the field's visual theme without re-notifying if unchanged.
+    pub fn apply_look(&mut self, look: FieldLook) {
+        self.look = look;
+    }
+
+    pub fn look(&self) -> &FieldLook {
+        &self.look
     }
 
     /// Updates the hint shown while the field is empty.
@@ -263,14 +319,14 @@ impl Draft {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected.is_empty() {
+        if !self.masked && !self.selected.is_empty() {
             let text = self.content[self.selected.clone()].to_owned();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected.is_empty() {
+        if !self.masked && !self.selected.is_empty() {
             let text = self.content[self.selected.clone()].to_owned();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.replace_text_in_range(None, "", window, cx);
@@ -324,11 +380,32 @@ impl Draft {
         if self.content.is_empty() {
             return 0;
         }
-        clamp_index(
-            &self.content,
-            line.closest_index_for_x(position.x - bounds.left() + self.scroll),
-        )
+        let shaped_index = line.closest_index_for_x(position.x - bounds.left() + self.scroll);
+        if self.masked {
+            unmasked_offset(&self.content, shaped_index)
+        } else {
+            clamp_index(&self.content, shaped_index)
+        }
     }
+}
+
+const MASK_CHAR: char = '•';
+
+/// Converts a UTF-8 byte offset in `content` to the byte offset in its
+/// bullet-masked representation (`MASK_CHAR` repeated per scalar).
+fn masked_offset(content: &str, byte_idx: usize) -> usize {
+    let clamped = clamp_index(content, byte_idx);
+    content[..clamped].chars().count() * MASK_CHAR.len_utf8()
+}
+
+/// Converts a UTF-8 byte offset in the bullet-masked string back to a valid
+/// UTF-8 byte offset in `content`.
+fn unmasked_offset(content: &str, masked_byte_idx: usize) -> usize {
+    let char_index = masked_byte_idx / MASK_CHAR.len_utf8();
+    content
+        .char_indices()
+        .nth(char_index)
+        .map_or(content.len(), |(byte_idx, _)| byte_idx)
 }
 
 /// Collapses a paste into one line, so a pasted block stays a message.
@@ -468,15 +545,23 @@ impl EntityInputHandler for Draft {
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let (start, end) = if self.masked {
+            (
+                masked_offset(&self.content, range.start),
+                masked_offset(&self.content, range.end),
+            )
+        } else {
+            (range.start, range.end)
+        };
         // The candidate window opens here, so the geometry has to be real, and it
         // moves with the text when the field is scrolled.
         Some(Bounds::from_corners(
             point(
-                bounds.left() + line.x_for_index(range.start) - self.scroll,
+                bounds.left() + line.x_for_index(start) - self.scroll,
                 bounds.top(),
             ),
             point(
-                bounds.left() + line.x_for_index(range.end) - self.scroll,
+                bounds.left() + line.x_for_index(end) - self.scroll,
                 bounds.bottom(),
             ),
         ))
@@ -491,7 +576,12 @@ impl EntityInputHandler for Draft {
         let local = self.last_bounds?.localize(&point)?;
         let line = self.last_layout.as_ref()?;
         let index = line.index_for_x(point.x - local.x + self.scroll)?;
-        Some(self.offset_to_utf16(index))
+        let content_index = if self.masked {
+            unmasked_offset(&self.content, index)
+        } else {
+            index
+        };
+        Some(self.offset_to_utf16(content_index))
     }
 }
 
@@ -551,13 +641,34 @@ impl gpui::Element for FieldElement {
     ) -> Prepaint {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected = input.selected.clone();
-        let cursor = input.cursor();
+        let masked = input.masked && !content.is_empty();
+        let look = input.look;
+        let selected = if masked {
+            masked_offset(&content, input.selected.start)
+                ..masked_offset(&content, input.selected.end)
+        } else {
+            input.selected.clone()
+        };
+        let cursor = if masked {
+            masked_offset(&content, input.cursor())
+        } else {
+            input.cursor()
+        };
+        let marked = input.marked.as_ref().map(|range| {
+            if masked {
+                masked_offset(&content, range.start)..masked_offset(&content, range.end)
+            } else {
+                range.clone()
+            }
+        });
         let style = window.text_style();
         let (text, color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0.4, 0.45))
+            (input.placeholder.clone(), look.placeholder)
+        } else if masked {
+            let bullets: String = std::iter::repeat_n(MASK_CHAR, content.chars().count()).collect();
+            (SharedString::from(bullets), look.text)
         } else {
-            (content, style.color)
+            (content, look.text)
         };
         let run = TextRun {
             len: text.len(),
@@ -567,7 +678,7 @@ impl gpui::Element for FieldElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = match input.marked.as_ref() {
+        let runs = match marked.as_ref() {
             Some(marked) => vec![
                 TextRun {
                     len: marked.start,
@@ -601,15 +712,16 @@ impl gpui::Element for FieldElement {
         // past the border and over whatever sits next to it.
         let caret = line.x_for_index(cursor);
         let offset = (caret - bounds.size.width + px(4.)).max(px(0.));
+        let caret_shift = if cursor == 0 { px(3.) } else { px(1.) };
         let (selection, cursor) = if selected.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + caret - offset, bounds.top()),
+                        point(bounds.left() + caret - offset - caret_shift, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    gpui::blue(),
+                    look.caret,
                 )),
             )
         } else {
@@ -625,7 +737,7 @@ impl gpui::Element for FieldElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x3311ff30),
+                    look.selection,
                 )),
                 None,
             )
@@ -684,8 +796,9 @@ impl gpui::Element for FieldElement {
 }
 
 impl Render for Draft {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus.is_focused(_window);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.focus.is_focused(window);
+        let look = self.look;
         div()
             .id("field")
             .key_context(self.context)
@@ -694,15 +807,21 @@ impl Render for Draft {
             .flex()
             .items_center()
             .w_full()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(if focused {
-                rgba(0x2563ebff)
-            } else {
-                rgba(0x00000022)
+            .when(look.borderless, |this| this.px(px(4.)).py_1())
+            .when(!look.borderless, |this| {
+                this.px_3()
+                    .py(px(7.))
+                    .bg(look.bg)
+                    .when(look.pill, |this| this.rounded_full())
+                    .when(!look.pill, |this| this.rounded_xl())
+                    .border_2()
+                    .border_color(if focused {
+                        look.border_focused
+                    } else {
+                        look.border
+                    })
             })
+            .text_color(look.text)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -719,7 +838,12 @@ impl Render for Draft {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .child(FieldElement { input: cx.entity() })
+            .child(
+                div()
+                    .w_full()
+                    .pl(px(4.))
+                    .child(FieldElement { input: cx.entity() }),
+            )
     }
 }
 
@@ -795,5 +919,25 @@ mod tests {
         let windows_key = gpui::Keystroke::parse("cmd-v").expect("cmd-v parses");
         assert!(windows_key.modifiers.platform);
         assert!(!windows_key.modifiers.secondary());
+    }
+
+    #[test]
+    fn masked_offsets_round_trip_utf8_boundaries() {
+        let text = "aあbい";
+        let bullet_len = super::MASK_CHAR.len_utf8();
+        assert_eq!(super::masked_offset(text, 0), 0);
+        assert_eq!(super::masked_offset(text, 1), bullet_len);
+        assert_eq!(super::masked_offset(text, 4), 2 * bullet_len);
+        assert_eq!(super::masked_offset(text, 5), 3 * bullet_len);
+        assert_eq!(super::masked_offset(text, text.len()), 4 * bullet_len);
+        // An interior byte clamps down safely rather than panicking.
+        assert_eq!(super::masked_offset(text, 2), bullet_len);
+
+        assert_eq!(super::unmasked_offset(text, 0), 0);
+        assert_eq!(super::unmasked_offset(text, bullet_len), 1);
+        assert_eq!(super::unmasked_offset(text, 2 * bullet_len), 4);
+        assert_eq!(super::unmasked_offset(text, 3 * bullet_len), 5);
+        assert_eq!(super::unmasked_offset(text, 4 * bullet_len), text.len());
+        assert_eq!(super::unmasked_offset(text, 99), text.len());
     }
 }

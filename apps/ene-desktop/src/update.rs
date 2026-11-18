@@ -84,6 +84,29 @@ pub enum Update {
     Resnapshot,
     /// A companion was created; the window opens it.
     Created(String),
+    /// Current audio amplitudes for UI meters.
+    AudioLevel {
+        output: f32,
+        input: f32,
+        speaking: bool,
+    },
+    /// Current local mute flags.
+    AudioMute { mic_muted: bool, output_muted: bool },
+    /// Live STT recognition status from `StreamAudioInput`.
+    Transcription {
+        text: String,
+        is_final: bool,
+        is_speaking: bool,
+    },
+    /// A companion's `MindView` loaded from `HostService.GetMind`.
+    MindLoaded {
+        companion_id: String,
+        view: Box<w::MindView>,
+    },
+    /// The host's permission policy rules, refetched or updated.
+    PolicyRules(Vec<w::PolicyRule>),
+    /// Avatar scale confirmed by the renderer session.
+    AvatarScaleChanged(f32),
 }
 
 /// What the window asks the session to do, because the session owns it.
@@ -101,6 +124,14 @@ pub enum Command {
     /// opened once per connection, so a connection added while the window is
     /// open is invisible until the session reconnects.
     Refresh,
+    /// Mute or unmute local microphone capture.
+    SetMicMuted(bool),
+    /// Mute or unmute local speaker playback.
+    SetOutputMuted(bool),
+    /// Adjust avatar size percentage (50..=200).
+    SetAvatarScale(f32),
+    /// Center the avatar on screen.
+    CenterAvatar,
     /// Stop serving and exit. Sent when the window closes.
     Quit,
 }

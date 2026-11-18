@@ -21,5 +21,8 @@ mod update;
 pub use host::{Connect, Discovery, Host};
 pub use session::{Connection, Options, Session};
 pub use state::{Link, Model};
-pub use ui::{Desktop, bind as bind_actions, focus_chat};
+pub use ui::{
+    CompanionPod, Desktop, EmbeddedAssets, Hub, PodMode, SettingsSection, SettingsStudio,
+    bind as bind_actions, focus_chat, initial_pod_bounds,
+};
 pub use update::{Command, Update};

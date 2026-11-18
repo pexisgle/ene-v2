@@ -47,7 +47,7 @@ web
 - 実装: `apps/ene-host`（Connect-RPCホスト）、`apps/ene-desktop`、`apps/ene-avatar`、`crates/`。
 - 検証手順: `verification/`（approval-binding、avatar-integration、desktop-generation-binding）。
 - 未整備: マーケティングコピー、製品スクリーンショット、利用者の証言、ベンチマークは存在しない。捏造しない。
-- `prototypes/ene-desktop-ux` はディレクトリの骨組みだけで、確定した画面はない。視覚的な正解はまだ存在しない。
+- 既存の `apps/ene-desktop` のUI実装はあくまで参考扱いであり、踏襲せず一から作り直す。確定した画面や視覚的な正解はまだ存在しない。
 
 ## Product Principles
 

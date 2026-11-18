@@ -24,7 +24,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -148,6 +148,8 @@ pub struct Player {
     flushed: Arc<AtomicU64>,
     /// RMS of the buffer the device last played, for lip sync.
     level: Arc<AtomicU32>,
+    /// Software mute: drains the deck and reports progress without audible output.
+    muted: Arc<AtomicBool>,
 }
 
 impl Player {
@@ -170,12 +172,14 @@ impl Player {
         let deck = Arc::new(Mutex::new(Deck::default()));
         let flushed = Arc::new(AtomicU64::new(0));
         let level = Arc::new(AtomicU32::new(0));
+        let muted = Arc::new(AtomicBool::new(false));
         let sink = deck.clone();
         let rms = level.clone();
+        let out_muted = muted.clone();
         let stream = device
             .build_output_stream(
                 supported.config(),
-                move |output: &mut [f32], _| fill(output, channels, &sink, &rms),
+                move |output: &mut [f32], _| fill(output, channels, &sink, &rms, &out_muted),
                 |error| tracing::error!("audio output failed: {error}"),
                 None,
             )
@@ -193,7 +197,20 @@ impl Player {
             _stream: stream,
             flushed,
             level,
+            muted,
         })
+    }
+
+    /// Mutes or unmutes local speaker output without stalling host playback tracking.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+        if muted {
+            self.level.store(0f32.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
     }
 
     /// The mouth amplitude the device last played, in 0..=1.
@@ -296,13 +313,20 @@ impl Player {
 }
 
 /// Fills one device buffer from the deck, duplicating mono into every channel.
-fn fill(output: &mut [f32], channels: usize, deck: &Arc<Mutex<Deck>>, level: &AtomicU32) {
+fn fill(
+    output: &mut [f32],
+    channels: usize,
+    deck: &Arc<Mutex<Deck>>,
+    level: &AtomicU32,
+    muted: &AtomicBool,
+) {
     let Ok(mut deck) = deck.try_lock() else {
         // The session thread is queueing; silence one buffer rather than block.
         output.fill(0.);
         level.store(0f32.to_bits(), Ordering::Relaxed);
         return;
     };
+    let is_muted = muted.load(Ordering::Relaxed);
     let mut energy = 0f64;
     let mut audible = 0u64;
     for frame in output.chunks_mut(channels) {
@@ -325,13 +349,14 @@ fn fill(output: &mut [f32], channels: usize, deck: &Arc<Mutex<Deck>>, level: &At
                 }
             }
         }
+        let written = if is_muted { 0. } else { sample };
         for slot in frame.iter_mut() {
-            *slot = sample;
+            *slot = written;
         }
     }
     // The RMS of what this buffer actually sent is the mouth opening. Silence
-    // when nothing played, so a drained deck closes the mouth.
-    let rms = if audible == 0 {
+    // when nothing played or when muted, so a drained or muted deck closes the mouth.
+    let rms = if is_muted || audible == 0 {
         0.
     } else {
         (energy / audible as f64).sqrt() as f32
@@ -404,6 +429,8 @@ pub struct Microphone {
     _stream: cpal::Stream,
     frames: Arc<Mutex<VecDeque<f32>>>,
     filter: Option<Filter>,
+    muted: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
 }
 
 impl Microphone {
@@ -428,23 +455,16 @@ impl Microphone {
         // instead of growing without bound.
         let capacity = rate as usize * 2;
         let frames = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
+        let muted = Arc::new(AtomicBool::new(false));
+        let level = Arc::new(AtomicU32::new(0));
         let sink = frames.clone();
+        let cap_muted = muted.clone();
+        let cap_level = level.clone();
         let stream = device
             .build_input_stream(
                 supported.config(),
                 move |input: &[f32], _| {
-                    let Ok(mut sink) = sink.try_lock() else {
-                        return;
-                    };
-                    for frame in input.chunks(channels) {
-                        if sink.len() >= capacity {
-                            break;
-                        }
-                        // Average the channels: the wire is mono and the device
-                        // may route the microphone to any one of them.
-                        let sum: f32 = frame.iter().sum();
-                        sink.push_back(sum / channels as f32);
-                    }
+                    push_captured(input, channels, capacity, &sink, &cap_muted, &cap_level);
                 },
                 |error| tracing::error!("audio input failed: {error}"),
                 None,
@@ -459,11 +479,44 @@ impl Microphone {
             filter: (rate != WIRE_RATE)
                 .then(|| Filter::new(rate, WIRE_RATE))
                 .transpose()?,
+            muted,
+            level,
         })
+    }
+
+    /// Mutes or unmutes microphone capture. Muting clears buffered frames and
+    /// stops sending samples to the host.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+        if muted {
+            self.level.store(0f32.to_bits(), Ordering::Relaxed);
+            if let Ok(mut frames) = self.frames.try_lock() {
+                frames.clear();
+            }
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+
+    /// The latest captured microphone RMS amplitude, in 0..=1.
+    pub fn level(&self) -> f32 {
+        if self.is_muted() {
+            0.
+        } else {
+            f32::from_bits(self.level.load(Ordering::Relaxed))
+        }
     }
 
     /// Takes the frames captured since the last call, as wire PCM.
     pub fn take(&mut self) -> Vec<u8> {
+        if self.is_muted() {
+            if let Ok(mut frames) = self.frames.lock() {
+                frames.clear();
+            }
+            return Vec::new();
+        }
         let samples: Vec<f32> = match self.frames.lock() {
             Ok(mut frames) => frames.drain(..).collect(),
             Err(_) => return Vec::new(),
@@ -474,6 +527,42 @@ impl Microphone {
         };
         encode(&samples)
     }
+}
+
+fn push_captured(
+    input: &[f32],
+    channels: usize,
+    capacity: usize,
+    sink: &Mutex<VecDeque<f32>>,
+    muted: &AtomicBool,
+    level: &AtomicU32,
+) {
+    if muted.load(Ordering::Relaxed) || channels == 0 {
+        level.store(0f32.to_bits(), Ordering::Relaxed);
+        return;
+    }
+    let Ok(mut sink) = sink.try_lock() else {
+        return;
+    };
+    let mut energy = 0f64;
+    let mut count = 0u64;
+    for frame in input.chunks(channels) {
+        // Average the channels: the wire is mono and the device
+        // may route the microphone to any one of them.
+        let sum: f32 = frame.iter().sum();
+        let mono = sum / channels as f32;
+        energy += f64::from(mono) * f64::from(mono);
+        count += 1;
+        if sink.len() < capacity {
+            sink.push_back(mono);
+        }
+    }
+    let rms = if count == 0 {
+        0.
+    } else {
+        (energy / count as f64).sqrt().clamp(0., 1.) as f32
+    };
+    level.store(rms.to_bits(), Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -549,13 +638,58 @@ mod tests {
             .pending
             .extend([0.5f32, -0.5, 0.5, -0.5]);
         let level = AtomicU32::new(0);
+        let muted = AtomicBool::new(false);
         let mut output = vec![0.; 4];
-        fill(&mut output, 1, &deck, &level);
+        fill(&mut output, 1, &deck, &level, &muted);
         let rms = f32::from_bits(level.load(Ordering::Relaxed));
         assert!((rms - 0.5).abs() < 1e-6, "{rms}");
 
         let mut output = vec![0.; 4];
-        fill(&mut output, 1, &deck, &level);
+        fill(&mut output, 1, &deck, &level, &muted);
+        assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
+    }
+
+    #[test]
+    fn muted_playback_silences_output_and_level_while_advancing_deck() {
+        let deck = Arc::new(Mutex::new(Deck::default()));
+        {
+            let mut guard = deck.lock().unwrap();
+            guard.utterance = "u".into();
+            guard.generation = 1;
+            guard.queue.push_back(Sentence {
+                sequence_no: 2,
+                remaining: 4,
+            });
+            guard.pending.extend([0.5f32, -0.5, 0.5, -0.5]);
+        }
+        let level = AtomicU32::new(0);
+        let muted = AtomicBool::new(true);
+        let mut output = vec![1.; 4];
+        fill(&mut output, 1, &deck, &level, &muted);
+        assert_eq!(output, [0., 0., 0., 0.]);
+        assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
+        let guard = deck.lock().unwrap();
+        assert!(guard.pending.is_empty());
+        assert_eq!(guard.played_samples, 4);
+        assert_eq!(guard.played, 1 << 2);
+    }
+
+    #[test]
+    fn muted_capture_drops_samples_and_clears_rms() {
+        let sink = Mutex::new(VecDeque::new());
+        let muted = AtomicBool::new(false);
+        let level = AtomicU32::new(0);
+        push_captured(&[0.5, -0.5, 0.5, -0.5], 2, 64, &sink, &muted, &level);
+        assert_eq!(sink.lock().unwrap().len(), 2);
+        assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
+
+        push_captured(&[0.5, 0.5, -0.5, -0.5], 2, 64, &sink, &muted, &level);
+        let rms = f32::from_bits(level.load(Ordering::Relaxed));
+        assert!((rms - 0.5).abs() < 1e-6, "{rms}");
+
+        muted.store(true, Ordering::Relaxed);
+        push_captured(&[0.9, 0.9], 2, 64, &sink, &muted, &level);
+        assert_eq!(sink.lock().unwrap().len(), 4);
         assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
     }
 }

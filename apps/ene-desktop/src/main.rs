@@ -7,8 +7,11 @@
 //! are `Send` futures spawned on the same runtime, so there is exactly one
 //! runtime in the process.
 
-use ene_desktop::{Command, Connection, Desktop, Options, Session, bind_actions, focus_chat};
-use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use ene_desktop::{
+    Command, CompanionPod, Connection, EmbeddedAssets, Hub, Options, PodMode, Session,
+    bind_actions, focus_chat, initial_pod_bounds,
+};
+use gpui::{AnyWindowHandle, App, AppContext as _, Application, WindowBounds, WindowOptions};
 use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -64,59 +67,74 @@ fn main() {
 
     let quit = commands_tx.clone();
     let shown = path.display().to_string();
-    Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1080.), px(760.)), cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(720.), px(480.))),
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("ene".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            move |_window, cx| {
-                cx.new(|cx| {
-                    Desktop::new(
-                        cx,
-                        options(),
-                        connection.clone(),
-                        commands_tx.clone(),
-                        updates_tx.clone(),
-                        updates_rx,
-                        handle.clone(),
-                        shown.clone(),
-                    )
-                })
-            },
-        );
-        match opened {
-            Ok(window) => {
-                let view = window.update(cx, |view, window, cx| {
-                    focus_chat(view, window, cx);
-                    cx.entity().downgrade()
+    Application::new()
+        .with_assets(EmbeddedAssets)
+        .run(move |cx: &mut App| {
+            let hub = cx.new(|cx| {
+                Hub::new(
+                    cx,
+                    options(),
+                    connection.clone(),
+                    commands_tx.clone(),
+                    updates_tx.clone(),
+                    updates_rx,
+                    handle.clone(),
+                    shown.clone(),
+                )
+            });
+            let bounds = initial_pod_bounds(cx);
+            let open_section = std::env::var("ENE_DESKTOP_OPEN_SETTINGS")
+                .ok()
+                .and_then(|val| match val.trim().to_ascii_lowercase().as_str() {
+                    "companions" => Some(ene_desktop::SettingsSection::Companions),
+                    "connections" | "1" | "true" => Some(ene_desktop::SettingsSection::Connections),
+                    "device" => Some(ene_desktop::SettingsSection::Device),
+                    _ => None,
                 });
-                match view {
-                    Ok(view) => bind_actions(cx, view),
-                    Err(error) => {
-                        eprintln!("ene-desktop: the window content is unavailable: {error:#}");
+            let hub_for_pod = hub.clone();
+            let opened = cx.open_window(
+                WindowOptions {
+                    kind: gpui::WindowKind::PopUp,
+                    window_background: gpui::WindowBackgroundAppearance::Transparent,
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(PodMode::MiniVoice.min_size()),
+                    is_movable: true,
+                    is_resizable: false,
+                    titlebar: None,
+                    ..Default::default()
+                },
+                move |_window, cx| cx.new(|cx| CompanionPod::new(hub_for_pod.clone(), cx)),
+            );
+            match opened {
+                Ok(window) => {
+                    let pod_any: AnyWindowHandle = window.into();
+                    let view = window.update(cx, |view, window, cx| {
+                        focus_chat(view, window, cx);
+                        cx.entity().downgrade()
+                    });
+                    match view {
+                        Ok(view) => bind_actions(cx, view),
+                        Err(error) => {
+                            eprintln!("ene-desktop: the window content is unavailable: {error:#}");
+                        }
+                    }
+                    cx.on_window_closed(move |cx| {
+                        if cx.windows().is_empty() || !cx.windows().contains(&pod_any) {
+                            cx.quit();
+                        }
+                    })
+                    .detach();
+                    cx.activate(true);
+                    if let Some(section) = open_section {
+                        hub.update(cx, |hub, cx| hub.open_settings(section, cx));
                     }
                 }
-                cx.on_window_closed(|cx| {
-                    if cx.windows().is_empty() {
-                        cx.quit();
-                    }
-                })
-                .detach();
-                cx.activate(true);
+                Err(error) => {
+                    eprintln!("ene-desktop: the window did not open: {error:#}");
+                    cx.quit();
+                }
             }
-            Err(error) => {
-                eprintln!("ene-desktop: the window did not open: {error:#}");
-                cx.quit();
-            }
-        }
-    });
+        });
 
     // The window is gone. The session stops serving, kills its child and returns;
     // joining it is what makes the exit orderly rather than a race.

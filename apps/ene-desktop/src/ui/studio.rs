@@ -1,0 +1,462 @@
+//! Standalone `設定 — ene` window with 38px Strawberry-Milk titlebar,
+//! 196px 3-chapter sidebar (`コンパニオン`, `接続`, `この端末`), and flat content pane.
+
+use super::icons::{Icon, icon};
+use super::theme::{Theme, ui_font_fallbacks, ui_font_family};
+use super::widgets::{Tone, circle_icon_button, pill_button};
+use super::{Hub, SettingsSection, window_draft};
+use crate::{input::Draft, state::NoticeKind};
+use ene_rpc as w;
+use gpui::{
+    AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Subscription, Window,
+    WindowControlArea, div, prelude::*, px,
+};
+use std::collections::BTreeMap;
+
+/// Settings window managing companions, connections and local device permissions.
+pub struct SettingsStudio {
+    pub(crate) hub: Entity<Hub>,
+    drafts: BTreeMap<String, Entity<Draft>>,
+    initialized: bool,
+    // Companions state
+    pub(crate) creating_companion: bool,
+    pub(crate) expanded_companion_id: Option<String>,
+    pub(crate) mind_disclosure_open: bool,
+    pub(crate) delete_armed_companion: Option<String>,
+    last_created_ping: u64,
+    // Connections state
+    pub(crate) adding_connection: bool,
+    pub(crate) custom_kind: w::ConnectionKind,
+    pub(crate) expanded_connection_id: Option<String>,
+    pub(crate) revealed_secret_for: Option<String>,
+    pub(crate) revoke_armed_for: Option<String>,
+    pub(crate) advanced_roles_open: bool,
+    last_cleared_secret_seq: u64,
+    // Device & Policy state
+    pub(crate) delete_armed_policy: Option<String>,
+    pub(crate) adding_policy_open: bool,
+    pub(crate) new_policy_effect: w::PolicyEffect,
+    _observe: Subscription,
+}
+
+impl SettingsStudio {
+    pub fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
+        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+        Self {
+            hub,
+            drafts: BTreeMap::new(),
+            initialized: false,
+            creating_companion: false,
+            expanded_companion_id: None,
+            mind_disclosure_open: false,
+            delete_armed_companion: None,
+            last_created_ping: 0,
+            adding_connection: false,
+            custom_kind: w::ConnectionKind::Llm,
+            expanded_connection_id: None,
+            revealed_secret_for: None,
+            revoke_armed_for: None,
+            advanced_roles_open: false,
+            last_cleared_secret_seq: 0,
+            delete_armed_policy: None,
+            adding_policy_open: false,
+            new_policy_effect: w::PolicyEffect::Allow,
+            _observe,
+        }
+    }
+
+    pub(crate) fn draft(
+        &mut self,
+        cx: &mut Context<Self>,
+        key: impl Into<String>,
+        placeholder: &'static str,
+        initial: Option<&str>,
+        theme: &Theme,
+    ) -> Entity<Draft> {
+        window_draft(
+            &mut self.drafts,
+            cx,
+            key,
+            placeholder,
+            initial,
+            theme.field_look(false, false),
+        )
+    }
+
+    pub(crate) fn masked_draft(
+        &mut self,
+        cx: &mut Context<Self>,
+        key: impl Into<String>,
+        placeholder: &'static str,
+        masked: bool,
+        theme: &Theme,
+    ) -> Entity<Draft> {
+        let entity = self.draft(cx, key, placeholder, None, theme);
+        if entity.read(cx).is_masked() != masked {
+            entity.update(cx, |draft, cx| draft.set_masked(masked, cx));
+        }
+        entity
+    }
+
+    fn sync_hub_events(&mut self, cx: &mut Context<Self>) {
+        let (created_ping, cleared, active_comp) = {
+            let hub = self.hub.read(cx);
+            (
+                hub.created_ping,
+                hub.cleared_secret_for.clone(),
+                hub.model.companion_id().map(str::to_owned),
+            )
+        };
+        if !self.initialized {
+            self.initialized = true;
+            self.expanded_companion_id = active_comp;
+            self.last_created_ping = created_ping;
+            self.last_cleared_secret_seq = cleared.as_ref().map_or(0, |(_, seq)| *seq);
+            return;
+        }
+        if created_ping != self.last_created_ping {
+            self.last_created_ping = created_ping;
+            self.creating_companion = false;
+            self.expanded_companion_id = active_comp;
+            for key in ["new:name", "new:mind", "new:persona"] {
+                if let Some(d) = self.drafts.get(key).cloned() {
+                    d.update(cx, |draft, cx| draft.clear(cx));
+                }
+            }
+        }
+        if let Some((conn_id, seq)) = cleared
+            && seq != self.last_cleared_secret_seq
+        {
+            self.last_cleared_secret_seq = seq;
+            let key = format!("conn:secret:{conn_id}");
+            if let Some(d) = self.drafts.get(&key).cloned() {
+                d.update(cx, |draft, cx| draft.clear(cx));
+            }
+            if self.revealed_secret_for.as_deref() == Some(conn_id.as_str()) {
+                self.revealed_secret_for = None;
+            }
+        }
+    }
+
+    fn render_titlebar(&self, theme: &Theme) -> AnyElement {
+        div()
+            .flex_none()
+            .w_full()
+            .h(px(38.))
+            .bg(theme.bg_milk)
+            .border_b_1()
+            .border_color(theme.border_title)
+            .px(px(14.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(theme.ink)
+                            .child("設定 — ene"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(circle_icon_button(
+                        "studio-win-min",
+                        Icon::Minimize,
+                        24.,
+                        12.,
+                        Tone::Ghost,
+                        true,
+                        theme,
+                        |window, _| window.minimize_window(),
+                    ))
+                    .child(circle_icon_button(
+                        "studio-win-max",
+                        Icon::Maximize,
+                        24.,
+                        12.,
+                        Tone::Ghost,
+                        true,
+                        theme,
+                        |window, _| window.zoom_window(),
+                    ))
+                    .child(circle_icon_button(
+                        "studio-win-close",
+                        Icon::Close,
+                        24.,
+                        12.,
+                        Tone::Danger,
+                        true,
+                        theme,
+                        |window, _| window.remove_window(),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_sidebar(
+        &self,
+        active: SettingsSection,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut items: Vec<AnyElement> = Vec::new();
+        for section in SettingsSection::ALL {
+            let is_active = section == active;
+            let hub = self.hub.clone();
+            items.push(
+                div()
+                    .id(SharedString::from(section.key()))
+                    .w_full()
+                    .px(px(14.))
+                    .py(px(9.))
+                    .rounded_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.))
+                    .cursor_pointer()
+                    .bg(if is_active {
+                        theme.accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(!is_active, |this| {
+                        this.hover(|this| this.bg(theme.bg_surface.alpha(0.65)))
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
+                        hub.update(cx, |hub, cx| {
+                            hub.settings_section = section;
+                            if section == SettingsSection::Connections {
+                                hub.load_providers(cx);
+                                hub.load_models(cx);
+                            } else if section == SettingsSection::Device {
+                                hub.load_policy_rules(cx);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .child(icon(
+                        section.icon(),
+                        15.,
+                        if is_active {
+                            theme.accent_fg
+                        } else {
+                            theme.ink_muted
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(if is_active {
+                                gpui::FontWeight::BOLD
+                            } else {
+                                gpui::FontWeight::MEDIUM
+                            })
+                            .text_color(if is_active {
+                                theme.accent_fg
+                            } else {
+                                theme.ink
+                            })
+                            .child(section.label()),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let _ = cx;
+
+        div()
+            .flex_none()
+            .w(px(196.))
+            .h_full()
+            .bg(theme.bg_milk)
+            .border_r_1()
+            .border_color(theme.border_title)
+            .p(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .children(items)
+            .into_any_element()
+    }
+
+    fn render_notices(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let notices = self.hub.read(cx).model.notices.clone();
+        if notices.is_empty() {
+            return None;
+        }
+        let mut strips: Vec<AnyElement> = Vec::new();
+        for (idx, notice) in notices.into_iter().enumerate() {
+            let is_conflict = notice.kind == NoticeKind::Conflict;
+            let hub_reload = self.hub.clone();
+            let hub_dismiss = self.hub.clone();
+            strips.push(
+                div()
+                    .w_full()
+                    .rounded(px(12.))
+                    .bg(if is_conflict {
+                        theme.amber_soft
+                    } else {
+                        theme.danger_soft
+                    })
+                    .px(px(12.))
+                    .py(px(8.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(if is_conflict {
+                                theme.amber_fg
+                            } else {
+                                theme.danger_fg
+                            })
+                            .child(format!("{}: {}", notice.context, notice.message)),
+                    )
+                    .when(is_conflict, |this| {
+                        this.child(pill_button(
+                            SharedString::from(format!("studio-notice-reload-{idx}")),
+                            "再読み込み",
+                            Some(Icon::Refresh),
+                            Tone::Soft,
+                            true,
+                            theme,
+                            move |_, cx| {
+                                hub_reload.update(cx, |hub, cx| {
+                                    hub.resnapshot();
+                                    hub.refresh_active_data(cx);
+                                    hub.dismiss_notice(idx, cx);
+                                });
+                            },
+                        ))
+                    })
+                    .child(circle_icon_button(
+                        SharedString::from(format!("studio-notice-close-{idx}")),
+                        Icon::Close,
+                        22.,
+                        11.,
+                        Tone::Ghost,
+                        true,
+                        theme,
+                        move |_, cx| {
+                            hub_dismiss.update(cx, |hub, cx| hub.dismiss_notice(idx, cx));
+                        },
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        Some(
+            div()
+                .flex_none()
+                .px(px(28.))
+                .pt(px(16.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .children(strips)
+                .into_any_element(),
+        )
+    }
+}
+
+impl Render for SettingsStudio {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_hub_events(cx);
+        let (section, theme) = {
+            let hub = self.hub.read(cx);
+            (hub.settings_section, hub.theme())
+        };
+
+        let notice_block = self.render_notices(&theme, cx);
+        let section_body = match section {
+            SettingsSection::Companions => self.render_companions(&theme, cx),
+            SettingsSection::Connections => self.render_connections(&theme, cx),
+            SettingsSection::Device => self.render_device(&theme, cx),
+        };
+
+        div()
+            .size_full()
+            .bg(theme.bg_surface)
+            .text_color(theme.ink)
+            .font({
+                let mut f = gpui::font(ui_font_family());
+                f.fallbacks = Some(ui_font_fallbacks());
+                f
+            })
+            .flex()
+            .flex_col()
+            .child(self.render_titlebar(&theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(self.render_sidebar(section, &theme, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .bg(theme.bg_surface)
+                            .flex()
+                            .flex_col()
+                            .when_some(notice_block, |this, n| this.child(n))
+                            .child(
+                                div()
+                                    .id("studio-content-scroll")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .px(px(28.))
+                                    .py(px(22.))
+                                    .child(section_body),
+                            ),
+                    ),
+            )
+    }
+}
+
+/// Shared clean field block with label and zero decorative kickers.
+pub(crate) fn labeled_field(
+    label: &'static str,
+    field: Entity<Draft>,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(theme.ink_muted)
+                .child(label),
+        )
+        .child(field)
+        .into_any_element()
+}

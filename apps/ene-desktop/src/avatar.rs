@@ -75,6 +75,12 @@ impl Shown {
             "size_percent": self.size_percent,
         })
     }
+
+    fn with_scale(&self, size_percent: f32) -> Self {
+        let mut next = self.clone();
+        next.size_percent = size_percent.clamp(50., 200.);
+        next
+    }
 }
 
 /// The request body for a face change. `None` is the renderer's "clear it".
@@ -228,6 +234,29 @@ impl Avatar {
     /// given, so it survives a later motion change.
     pub fn expression(&mut self, character: &str, name: Option<&str>) -> Result<(), String> {
         self.call("expression", expression_request(character, name))?;
+        Ok(())
+    }
+
+    /// Updates the character's display scale while keeping motion and placement.
+    pub fn set_scale(
+        &mut self,
+        character: &str,
+        model: &Path,
+        size_percent: f32,
+    ) -> Result<(), String> {
+        let clamped = size_percent.clamp(50., 200.);
+        let (op, next) = match self.shown.get(character) {
+            Some(current) => ("set", current.with_scale(clamped)),
+            None => ("add", Shown::new(model).with_scale(clamped)),
+        };
+        self.call(op, json!({"character": character, "config": next.config()}))?;
+        self.shown.insert(character.to_owned(), next);
+        Ok(())
+    }
+
+    /// Centers the character on the primary monitor.
+    pub fn center(&mut self, character: &str) -> Result<(), String> {
+        self.call("center", json!({"character": character}))?;
         Ok(())
     }
 
@@ -445,5 +474,21 @@ mod tests {
         let parsed: Value =
             serde_json::from_str(lip_sync_line("ene", -1.0).unwrap().trim_end()).unwrap();
         assert_eq!(parsed["rms"], 0.0);
+    }
+
+    #[test]
+    fn scaling_keeps_motion_and_placement_fields() {
+        let mut shown = Shown::new(Path::new("/models/ene.vrm"));
+        shown.motion = Some("/motions/nod.vrma".into());
+        shown.monitor = Some("eDP-1".into());
+        shown.position = Some([120., 240.]);
+        let scaled = shown.with_scale(250.0);
+        assert_eq!(scaled.size_percent, 200.0);
+        assert_eq!(scaled.motion.as_deref(), Some("/motions/nod.vrma"));
+        assert_eq!(scaled.monitor.as_deref(), Some("eDP-1"));
+        assert_eq!(scaled.position, Some([120., 240.]));
+
+        let min_scaled = shown.with_scale(10.0);
+        assert_eq!(min_scaled.size_percent, 50.0);
     }
 }
