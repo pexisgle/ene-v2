@@ -2,14 +2,14 @@
 //! 196px 3-chapter sidebar (`コンパニオン`, `接続`, `この端末`), and flat content pane.
 
 use super::icons::{Icon, icon};
-use super::theme::{Theme, ui_font_fallbacks, ui_font_family};
-use super::widgets::{Tone, circle_icon_button, pill_button};
+use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
+use super::widgets::{Tone, circle_icon_button, pill_button, window_drag_area};
 use super::{Hub, SettingsSection, window_draft};
 use crate::{input::Draft, state::NoticeKind};
 use ene_rpc as w;
 use gpui::{
     AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Subscription, Window,
-    WindowControlArea, div, prelude::*, px,
+    div, prelude::*, px,
 };
 use std::collections::BTreeMap;
 
@@ -153,19 +153,13 @@ impl SettingsStudio {
             .justify_between()
             .gap(px(8.))
             .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.ink)
-                            .child("設定 — ene"),
-                    ),
+                window_drag_area(div().flex_1().h_full().flex().items_center(), true).child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme.ink)
+                        .child("設定 — ene"),
+                ),
             )
             .child(
                 div()
@@ -400,7 +394,7 @@ impl Render for SettingsStudio {
             .bg(theme.bg_surface)
             .text_color(theme.ink)
             .font({
-                let mut f = gpui::font(ui_font_family());
+                let mut f = gpui::font(resolve_ui_font_family(cx));
                 f.fallbacks = Some(ui_font_fallbacks());
                 f
             })

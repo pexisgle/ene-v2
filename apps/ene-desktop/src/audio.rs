@@ -163,12 +163,6 @@ impl Player {
         let supported = pick_output(&device)?;
         let rate = supported.sample_rate();
         let channels = supported.channels() as usize;
-        if supported.sample_format() != cpal::SampleFormat::F32 {
-            return Err(format!(
-                "the output device uses {} samples, which this client does not convert",
-                supported.sample_format()
-            ));
-        }
         let deck = Arc::new(Mutex::new(Deck::default()));
         let flushed = Arc::new(AtomicU64::new(0));
         let level = Arc::new(AtomicU32::new(0));
@@ -176,14 +170,46 @@ impl Player {
         let sink = deck.clone();
         let rms = level.clone();
         let out_muted = muted.clone();
-        let stream = device
-            .build_output_stream(
+        let stream = match supported.sample_format() {
+            cpal::SampleFormat::F32 => device.build_output_stream(
                 supported.config(),
-                move |output: &mut [f32], _| fill(output, channels, &sink, &rms, &out_muted),
+                move |output: &mut [f32], _| {
+                    fill_with(output, channels, &sink, &rms, &out_muted, 0.0f32, |s| s);
+                },
                 |error| tracing::error!("audio output failed: {error}"),
                 None,
-            )
-            .map_err(|error| format!("the output stream could not start: {error}"))?;
+            ),
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                supported.config(),
+                move |output: &mut [i16], _| {
+                    fill_with(output, channels, &sink, &rms, &out_muted, 0i16, f32_to_i16);
+                },
+                |error| tracing::error!("audio output failed: {error}"),
+                None,
+            ),
+            cpal::SampleFormat::U16 => device.build_output_stream(
+                supported.config(),
+                move |output: &mut [u16], _| {
+                    fill_with(
+                        output,
+                        channels,
+                        &sink,
+                        &rms,
+                        &out_muted,
+                        U16_SILENCE,
+                        f32_to_u16,
+                    );
+                },
+                |error| tracing::error!("audio output failed: {error}"),
+                None,
+            ),
+            other => {
+                return Err(format!(
+                    "the output device uses {other} samples, which this client does not convert"
+                ));
+            }
+        }
+        .map_err(|error| format!("the output stream could not start: {error}"))?;
         stream
             .play()
             .map_err(|error| format!("the output stream could not start: {error}"))?;
@@ -312,17 +338,42 @@ impl Player {
     }
 }
 
+const U16_SILENCE: u16 = 32_768;
+
+fn f32_to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1., 1.) * 32_767.).round() as i16
+}
+
+fn f32_to_u16(sample: f32) -> u16 {
+    ((sample.clamp(-1., 1.) * 32_767.).round() + 32_768.) as u16
+}
+
+fn i16_to_f32(sample: i16) -> f32 {
+    f32::from(sample) / 32_768.0
+}
+
+fn u16_to_f32(sample: u16) -> f32 {
+    (f32::from(sample) - 32_768.0) / 32_768.0
+}
+
 /// Fills one device buffer from the deck, duplicating mono into every channel.
-fn fill(
-    output: &mut [f32],
+fn fill_with<T: Copy>(
+    output: &mut [T],
     channels: usize,
     deck: &Arc<Mutex<Deck>>,
     level: &AtomicU32,
     muted: &AtomicBool,
+    silence: T,
+    to_device: impl Fn(f32) -> T,
 ) {
+    if channels == 0 {
+        output.fill(silence);
+        level.store(0f32.to_bits(), Ordering::Relaxed);
+        return;
+    }
     let Ok(mut deck) = deck.try_lock() else {
         // The session thread is queueing; silence one buffer rather than block.
-        output.fill(0.);
+        output.fill(silence);
         level.store(0f32.to_bits(), Ordering::Relaxed);
         return;
     };
@@ -349,7 +400,7 @@ fn fill(
                 }
             }
         }
-        let written = if is_muted { 0. } else { sample };
+        let written = if is_muted { silence } else { to_device(sample) };
         for slot in frame.iter_mut() {
             *slot = written;
         }
@@ -362,6 +413,17 @@ fn fill(
         (energy / audible as f64).sqrt() as f32
     };
     level.store(rms.to_bits(), Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn fill(
+    output: &mut [f32],
+    channels: usize,
+    deck: &Arc<Mutex<Deck>>,
+    level: &AtomicU32,
+    muted: &AtomicBool,
+) {
+    fill_with(output, channels, deck, level, muted, 0.0f32, |s| s);
 }
 
 /// Decodes the wire's 16-bit signed little-endian mono PCM.
@@ -387,38 +449,129 @@ pub fn encode(samples: &[f32]) -> Vec<u8> {
     pcm
 }
 
-/// Picks the device configuration closest to the wire format, so the common
-/// case needs no conversion at all.
-///
-/// The callback writes `f32`, so a device that only offers another sample format
-/// is refused with a reason instead of being driven with the wrong type. The
-/// first device this client met advertised `u8` as its first range, which is
-/// why the choice prefers `f32` and the wire rate rather than taking the first.
-fn pick_output(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
-    if let Ok(ranges) = device.supported_output_configs() {
-        let mut best: Option<(u8, cpal::SupportedStreamConfig)> = None;
-        for range in ranges {
-            let config = range.with_sample_rate(range.min_sample_rate());
-            let score = u8::from(config.sample_format() == cpal::SampleFormat::F32) * 2
-                + u8::from(config.sample_rate() == WIRE_RATE);
-            if best.as_ref().is_none_or(|(current, _)| score > *current) {
-                best = Some((score, config));
-            }
+fn choose_rate(min_rate: u32, max_rate: u32) -> u32 {
+    let (lo, hi) = (min_rate.min(max_rate), min_rate.max(max_rate));
+    if (lo..=hi).contains(&WIRE_RATE) {
+        WIRE_RATE
+    } else if (lo..=hi).contains(&48_000) {
+        48_000
+    } else if (lo..=hi).contains(&44_100) {
+        44_100
+    } else {
+        48_000.clamp(lo, hi)
+    }
+}
+
+fn format_score(format: cpal::SampleFormat) -> u8 {
+    match format {
+        cpal::SampleFormat::F32 => 3,
+        cpal::SampleFormat::I16 => 2,
+        cpal::SampleFormat::U16 => 1,
+        _ => 0,
+    }
+}
+
+fn score_candidate(
+    channels: u16,
+    min_rate: u32,
+    max_rate: u32,
+    format: cpal::SampleFormat,
+) -> (u8, u8, u8, u32) {
+    let rate = choose_rate(min_rate, max_rate);
+    let fmt = format_score(format);
+    let ch = match channels {
+        0 => 0,
+        1 => 3,
+        2 => 2,
+        _ => 1,
+    };
+    if fmt == 0 || ch == 0 {
+        return (0, 0, 0, rate);
+    }
+    let rate_score = if rate == WIRE_RATE {
+        2
+    } else if rate == 48_000 || rate == 44_100 {
+        1
+    } else {
+        0
+    };
+    (fmt, rate_score, ch, rate)
+}
+
+/// Picks the device configuration closest to the wire format (`24 kHz` mono),
+/// preferring `F32` over `I16`/`U16` and avoiding `min_sample_rate()` on
+/// continuous ALSA/PipeWire ranges (`1..=384000 Hz`).
+fn pick_config_from_ranges(
+    ranges: impl IntoIterator<Item = cpal::SupportedStreamConfigRange>,
+    direction: &str,
+) -> Result<Option<cpal::SupportedStreamConfig>, String> {
+    let mut best: Option<((u8, u8, u8), cpal::SupportedStreamConfig)> = None;
+    let mut rejected: Option<(cpal::SampleFormat, u32)> = None;
+    for range in ranges {
+        let (fmt, rate_score, ch, rate) = score_candidate(
+            range.channels(),
+            range.min_sample_rate(),
+            range.max_sample_rate(),
+            range.sample_format(),
+        );
+        if fmt == 0 || ch == 0 {
+            rejected.get_or_insert((range.sample_format(), rate));
+            continue;
         }
-        if let Some((score, config)) = best {
-            if score < 2 {
-                return Err(format!(
-                    "the output device offers {} at {} Hz, and this client converts only 32-bit float",
-                    config.sample_format(),
-                    config.sample_rate()
-                ));
-            }
-            return Ok(config);
+        let score = (fmt, rate_score, ch);
+        if best.as_ref().is_none_or(|(current, _)| score > *current) {
+            best = Some((score, range.with_sample_rate(rate)));
         }
     }
-    device
+    if let Some((_, config)) = best {
+        return Ok(Some(config));
+    }
+    if let Some((fmt, rate)) = rejected {
+        return Err(format!(
+            "the {direction} device offers {fmt} at {rate} Hz, and this client converts only 32-bit float or 16-bit PCM"
+        ));
+    }
+    Ok(None)
+}
+
+fn validate_default_config(
+    config: cpal::SupportedStreamConfig,
+    direction: &str,
+) -> Result<cpal::SupportedStreamConfig, String> {
+    if format_score(config.sample_format()) == 0 {
+        return Err(format!(
+            "the {direction} device uses {} samples, which this client does not convert",
+            config.sample_format()
+        ));
+    }
+    if config.channels() == 0 {
+        return Err(format!("the {direction} device reports zero channels"));
+    }
+    Ok(config)
+}
+
+fn pick_output(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    if let Ok(ranges) = device.supported_output_configs()
+        && let Some(config) = pick_config_from_ranges(ranges, "output")?
+    {
+        return Ok(config);
+    }
+    let fallback = device
         .default_output_config()
-        .map_err(|error| format!("the output device has no default config: {error}"))
+        .map_err(|error| format!("the output device has no default config: {error}"))?;
+    validate_default_config(fallback, "output")
+}
+
+fn pick_input(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    if let Ok(ranges) = device.supported_input_configs()
+        && let Some(config) = pick_config_from_ranges(ranges, "input")?
+    {
+        return Ok(config);
+    }
+    let fallback = device
+        .default_input_config()
+        .map_err(|error| format!("the input device has no default config: {error}"))?;
+    validate_default_config(fallback, "input")
 }
 
 /// The capture side: microphone frames at the wire rate.
@@ -440,17 +593,9 @@ impl Microphone {
         let device = host
             .default_input_device()
             .ok_or("the machine has no default input device")?;
-        let supported = device
-            .default_input_config()
-            .map_err(|error| format!("the input device has no default config: {error}"))?;
+        let supported = pick_input(&device)?;
         let rate = supported.sample_rate();
         let channels = supported.channels() as usize;
-        if supported.sample_format() != cpal::SampleFormat::F32 {
-            return Err(format!(
-                "the input device uses {} samples, which this client does not convert",
-                supported.sample_format()
-            ));
-        }
         // Two seconds of headroom: past that, a stalled reader loses old audio
         // instead of growing without bound.
         let capacity = rate as usize * 2;
@@ -460,16 +605,50 @@ impl Microphone {
         let sink = frames.clone();
         let cap_muted = muted.clone();
         let cap_level = level.clone();
-        let stream = device
-            .build_input_stream(
+        let stream = match supported.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
                 supported.config(),
                 move |input: &[f32], _| {
-                    push_captured(input, channels, capacity, &sink, &cap_muted, &cap_level);
+                    push_captured_with(
+                        input,
+                        channels,
+                        capacity,
+                        &sink,
+                        &cap_muted,
+                        &cap_level,
+                        |s| s,
+                    );
                 },
                 |error| tracing::error!("audio input failed: {error}"),
                 None,
-            )
-            .map_err(|error| format!("the input stream could not start: {error}"))?;
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                supported.config(),
+                move |input: &[i16], _| {
+                    push_captured_with(
+                        input, channels, capacity, &sink, &cap_muted, &cap_level, i16_to_f32,
+                    );
+                },
+                |error| tracing::error!("audio input failed: {error}"),
+                None,
+            ),
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                supported.config(),
+                move |input: &[u16], _| {
+                    push_captured_with(
+                        input, channels, capacity, &sink, &cap_muted, &cap_level, u16_to_f32,
+                    );
+                },
+                |error| tracing::error!("audio input failed: {error}"),
+                None,
+            ),
+            other => {
+                return Err(format!(
+                    "the input device uses {other} samples, which this client does not convert"
+                ));
+            }
+        }
+        .map_err(|error| format!("the input stream could not start: {error}"))?;
         stream
             .play()
             .map_err(|error| format!("the input stream could not start: {error}"))?;
@@ -529,13 +708,14 @@ impl Microphone {
     }
 }
 
-fn push_captured(
-    input: &[f32],
+fn push_captured_with<T: Copy>(
+    input: &[T],
     channels: usize,
     capacity: usize,
     sink: &Mutex<VecDeque<f32>>,
     muted: &AtomicBool,
     level: &AtomicU32,
+    to_f32: impl Fn(T) -> f32,
 ) {
     if muted.load(Ordering::Relaxed) || channels == 0 {
         level.store(0f32.to_bits(), Ordering::Relaxed);
@@ -549,7 +729,7 @@ fn push_captured(
     for frame in input.chunks(channels) {
         // Average the channels: the wire is mono and the device
         // may route the microphone to any one of them.
-        let sum: f32 = frame.iter().sum();
+        let sum: f32 = frame.iter().copied().map(&to_f32).sum();
         let mono = sum / channels as f32;
         energy += f64::from(mono) * f64::from(mono);
         count += 1;
@@ -563,6 +743,18 @@ fn push_captured(
         (energy / count as f64).sqrt().clamp(0., 1.) as f32
     };
     level.store(rms.to_bits(), Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn push_captured(
+    input: &[f32],
+    channels: usize,
+    capacity: usize,
+    sink: &Mutex<VecDeque<f32>>,
+    muted: &AtomicBool,
+    level: &AtomicU32,
+) {
+    push_captured_with(input, channels, capacity, sink, muted, level, |s| s);
 }
 
 #[cfg(test)]
@@ -691,5 +883,102 @@ mod tests {
         push_captured(&[0.9, 0.9], 2, 64, &sink, &muted, &level);
         assert_eq!(sink.lock().unwrap().len(), 4);
         assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
+    }
+
+    #[test]
+    fn continuous_alsa_range_picks_wire_rate_and_mono_over_1hz_or_64ch() {
+        let ranges = vec![
+            cpal::SupportedStreamConfigRange::new(
+                64,
+                1,
+                384_000,
+                cpal::SupportedBufferSize::Unknown,
+                cpal::SampleFormat::F32,
+            ),
+            cpal::SupportedStreamConfigRange::new(
+                1,
+                1,
+                384_000,
+                cpal::SupportedBufferSize::Unknown,
+                cpal::SampleFormat::F32,
+            ),
+            cpal::SupportedStreamConfigRange::new(
+                2,
+                1,
+                384_000,
+                cpal::SupportedBufferSize::Unknown,
+                cpal::SampleFormat::I16,
+            ),
+        ];
+        let picked = pick_config_from_ranges(ranges, "output")
+            .unwrap()
+            .expect("a config is picked");
+        assert_eq!(picked.sample_rate(), WIRE_RATE);
+        assert_eq!(picked.channels(), 1);
+        assert_eq!(picked.sample_format(), cpal::SampleFormat::F32);
+    }
+
+    #[test]
+    fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
+        let ranges = vec![
+            cpal::SupportedStreamConfigRange::new(
+                2,
+                48_000,
+                48_000,
+                cpal::SupportedBufferSize::Unknown,
+                cpal::SampleFormat::U8,
+            ),
+            cpal::SupportedStreamConfigRange::new(
+                2,
+                48_000,
+                48_000,
+                cpal::SupportedBufferSize::Unknown,
+                cpal::SampleFormat::I16,
+            ),
+        ];
+        let picked = pick_config_from_ranges(ranges, "input")
+            .unwrap()
+            .expect("i16 fallback is accepted");
+        assert_eq!(picked.sample_rate(), 48_000);
+        assert_eq!(picked.channels(), 2);
+        assert_eq!(picked.sample_format(), cpal::SampleFormat::I16);
+
+        let deck = Arc::new(Mutex::new(Deck::default()));
+        {
+            let mut guard = deck.lock().unwrap();
+            guard.utterance = "u".into();
+            guard.generation = 1;
+            guard.queue.push_back(Sentence {
+                sequence_no: 1,
+                remaining: 2,
+            });
+            guard.pending.extend([0.5f32, -0.5]);
+        }
+        let level = AtomicU32::new(0);
+        let muted = AtomicBool::new(false);
+        let mut output_i16 = vec![0i16; 4];
+        fill_with(&mut output_i16, 2, &deck, &level, &muted, 0i16, f32_to_i16);
+        assert_eq!(output_i16[0], output_i16[1]);
+        assert!(output_i16[0] > 16_000 && output_i16[2] < -16_000);
+        assert!((f32::from_bits(level.load(Ordering::Relaxed)) - 0.5).abs() < 1e-4);
+        assert_eq!(deck.lock().unwrap().played, 1 << 1);
+
+        let sink = Mutex::new(VecDeque::new());
+        let cap_level = AtomicU32::new(0);
+        let cap_muted = AtomicBool::new(false);
+        push_captured_with(
+            &output_i16,
+            2,
+            16,
+            &sink,
+            &cap_muted,
+            &cap_level,
+            i16_to_f32,
+        );
+        let captured: Vec<f32> = sink.lock().unwrap().iter().copied().collect();
+        assert_eq!(captured.len(), 2);
+        assert!((captured[0] - 0.5).abs() < 1e-3);
+        assert!((captured[1] + 0.5).abs() < 1e-3);
+        assert!((f32::from_bits(cap_level.load(Ordering::Relaxed)) - 0.5).abs() < 1e-3);
     }
 }

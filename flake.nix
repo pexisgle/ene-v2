@@ -18,6 +18,7 @@
       desktopLibraries = with pkgs; [
         alsa-lib
         fontconfig
+        libxcb
         libxkbcommon
         wayland
         libglvnd

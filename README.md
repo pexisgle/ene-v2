@@ -27,7 +27,7 @@
 ```sh
 nix develop
 just verify
-just run-host
+just run
 ```
 
 direnvを使う場合は、リポジトリのルートで一度`direnv allow`を実行すると、ディレクトリへ入るたびに開発環境が有効になります。
@@ -86,6 +86,7 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just fetch-assets [asset]` | 開発用VRM・VRMAを取得（省略時は全件、`vrma`でモーションのみ、個別名も指定可能） |
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |
+| `just run` | ホストとデスクトップクライアント（アバター描画付き）を同時に起動 |
 | `just run-host` | 認証付きホストAPIを起動 |
 | `just run-desktop` | [ホストへ接続するデスクトップクライアント](apps/ene-desktop/README.md)を起動 |
 | `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |

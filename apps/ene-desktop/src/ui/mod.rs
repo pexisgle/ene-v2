@@ -712,6 +712,8 @@ impl Hub {
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         window_min_size: Some(size(px(680.), px(480.))),
+                        window_decorations: Some(gpui::WindowDecorations::Client),
+                        app_id: Some("ene-desktop".into()),
                         titlebar: Some(gpui::TitlebarOptions {
                             title: Some("設定 — ene".into()),
                             appears_transparent: true,

@@ -97,8 +97,57 @@ impl Theme {
 }
 
 /// Primary Japanese UI font family.
+#[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
 pub fn ui_font_family() -> &'static str {
     "Yu Gothic UI"
+}
+
+/// Resolves the UI font family for the current OS, picking an installed font on
+/// Linux where GPUI 0.2.2 ignores `FontFallbacks`.
+pub fn resolve_ui_font_family(cx: &gpui::App) -> gpui::SharedString {
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        let _ = cx;
+        gpui::SharedString::new_static(ui_font_family())
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        static RESOLVED_FONT: std::sync::OnceLock<gpui::SharedString> = std::sync::OnceLock::new();
+        RESOLVED_FONT
+            .get_or_init(|| {
+                let names = cx.text_system().all_font_names();
+                pick_linux_ui_font(&names).into()
+            })
+            .clone()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+fn pick_linux_ui_font(available: &[String]) -> String {
+    const LINUX_UI_FONTS: &[&str] = &[
+        "Noto Sans CJK JP",
+        "BIZ UDPGothic",
+        "IBM Plex Sans JP",
+        "IPAPGothic",
+        "IPAGothic",
+        "VL PGothic",
+        "Hiragino Sans",
+        "Noto Sans",
+        "Ubuntu",
+        "Adwaita Sans",
+        "Cantarell",
+        "DejaVu Sans",
+    ];
+    for candidate in LINUX_UI_FONTS {
+        if available.iter().any(|name| name == candidate) {
+            return (*candidate).to_owned();
+        }
+    }
+    available
+        .iter()
+        .find(|name| !name.starts_with('.'))
+        .cloned()
+        .unwrap_or_else(|| ".SystemUIFont".to_owned())
 }
 
 pub fn ui_font_fallbacks() -> FontFallbacks {
@@ -108,6 +157,27 @@ pub fn ui_font_fallbacks() -> FontFallbacks {
         "BIZ UDPGothic".to_owned(),
         "Noto Sans CJK JP".to_owned(),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_font_picker_prefers_japanese_ui_font_when_installed() {
+        let fonts = vec![
+            "DejaVu Sans".to_owned(),
+            "Noto Sans CJK HK".to_owned(),
+            "Noto Sans CJK JP".to_owned(),
+        ];
+        assert_eq!(pick_linux_ui_font(&fonts), "Noto Sans CJK JP");
+    }
+
+    #[test]
+    fn linux_font_picker_falls_back_to_installed_non_hidden_family() {
+        let fonts = vec![".SystemUIFont".to_owned(), "Liberation Sans".to_owned()];
+        assert_eq!(pick_linux_ui_font(&fonts), "Liberation Sans");
+    }
 }
 
 /// Deterministic pastel companion badge colors.

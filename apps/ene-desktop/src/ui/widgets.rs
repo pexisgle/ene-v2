@@ -365,3 +365,26 @@ where
         .child(label.into())
         .into_any_element()
 }
+
+/// Marks a container as a draggable window title/handle region across platforms.
+///
+/// Windows uses `WindowControlArea::Drag` in `WM_NCHITTEST`, while GPUI's
+/// Wayland and X11 backends leave `on_hit_test_window_control` empty and expect
+/// an explicit `window.start_window_move()` on left mouse-down.
+pub fn window_drag_area(div: gpui::Div, double_click_zoom: bool) -> gpui::Div {
+    let div = div.window_control_area(gpui::WindowControlArea::Drag);
+    #[cfg(not(windows))]
+    let div = div.on_mouse_down(
+        MouseButton::Left,
+        move |event: &MouseDownEvent, window: &mut Window, _cx: &mut gpui::App| {
+            if double_click_zoom && event.click_count == 2 {
+                window.zoom_window();
+            } else {
+                window.start_window_move();
+            }
+        },
+    );
+    #[cfg(windows)]
+    let _ = double_click_zoom;
+    div
+}

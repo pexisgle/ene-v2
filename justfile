@@ -39,6 +39,76 @@ build-test-plugins:
 # The build scratch lives in target/tmp: sccache puts its per-compile directory
 # under the system temp, and when Windows cleanup removes one mid-build rustc
 # fails to write its dep-info. A workspace path is not cleaned by anything.
+
+# Start the host and desktop client together for local interactive testing.
+[unix]
+run: avatar
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/tmp
+    export TMPDIR="$PWD/target/tmp"
+    state_dir="${ENE_HOST_STATE_DIR:-$PWD/target/run/host/state}"
+    runtime_dir="${ENE_HOST_RUNTIME_DIR:-$PWD/target/run/host/runtime}"
+    connection="${ENE_HOST_CONNECTION:-$runtime_dir/connection.json}"
+    renderer="${ENE_DESKTOP_RENDERER:-$PWD/target/release/ene-avatar}"
+    allowed_caps="${ENE_HOST_ALLOWED_CAPABILITIES:-*}"
+
+    cargo build --locked -p ene-host -p ene-desktop
+
+    host_pid=""
+    desktop_pid=""
+    marker=$(mktemp "$TMPDIR/ene-run.XXXXXX")
+    cleanup() {
+      local status=$?
+      trap - EXIT
+      trap '' INT TERM
+      rm -f "$marker"
+      if [ -n "$desktop_pid" ] && kill -0 "$desktop_pid" 2>/dev/null; then
+        kill -TERM "$desktop_pid" 2>/dev/null || true
+        wait "$desktop_pid" 2>/dev/null || true
+      fi
+      if [ -n "$host_pid" ] && kill -0 "$host_pid" 2>/dev/null; then
+        kill -TERM "$host_pid" 2>/dev/null || true
+        wait "$host_pid" 2>/dev/null || true
+      fi
+      exit "$status"
+    }
+    trap cleanup EXIT
+    trap 'exit 0' INT TERM
+
+    ENE_HOST_STATE_DIR="$state_dir" \
+    ENE_HOST_RUNTIME_DIR="$runtime_dir" \
+    ENE_HOST_ALLOWED_CAPABILITIES="$allowed_caps" \
+      "$PWD/target/debug/ene-host" &
+    host_pid=$!
+
+    deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      if ! kill -0 "$host_pid" 2>/dev/null; then
+        wait "$host_pid" || exit $?
+        echo "just run: ene-host exited before publishing $connection" >&2
+        exit 1
+      fi
+      if [ -s "$connection" ] && ! [ "$marker" -nt "$connection" ]; then
+        break
+      fi
+      sleep 0.05
+    done
+    if [ ! -s "$connection" ] || [ "$marker" -nt "$connection" ]; then
+      echo "just run: ene-host did not publish $connection within 30s" >&2
+      exit 1
+    fi
+
+    ENE_HOST_CONNECTION="$connection" \
+    ENE_DESKTOP_RENDERER="$renderer" \
+      "$PWD/target/debug/ene-desktop" &
+    desktop_pid=$!
+    wait "$desktop_pid"
+
+[windows]
+run: avatar
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $state = if ($env:ENE_HOST_STATE_DIR) { $env:ENE_HOST_STATE_DIR } else { Join-Path $PWD 'target\run\host\state' }; $runtime = if ($env:ENE_HOST_RUNTIME_DIR) { $env:ENE_HOST_RUNTIME_DIR } else { Join-Path $PWD 'target\run\host\runtime' }; $conn = if ($env:ENE_HOST_CONNECTION) { $env:ENE_HOST_CONNECTION } else { Join-Path $runtime 'connection.json' }; $renderer = if ($env:ENE_DESKTOP_RENDERER) { $env:ENE_DESKTOP_RENDERER } else { Join-Path $PWD 'target\release\ene-avatar.exe' }; $caps = if ($env:ENE_HOST_ALLOWED_CAPABILITIES) { $env:ENE_HOST_ALLOWED_CAPABILITIES } else { '*' }; cargo build --locked -p ene-host -p ene-desktop; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $env:ENE_HOST_STATE_DIR = $state; $env:ENE_HOST_RUNTIME_DIR = $runtime; $env:ENE_HOST_ALLOWED_CAPABILITIES = $caps; $started = [DateTime]::UtcNow; $hostProc = Start-Process -FilePath (Join-Path $PWD 'target\debug\ene-host.exe') -NoNewWindow -PassThru; try { $deadline = $started.AddSeconds(30); while ([DateTime]::UtcNow -lt $deadline) { if ($hostProc.HasExited) { exit $hostProc.ExitCode }; if ((Test-Path $conn) -and ((Get-Item $conn).LastWriteTimeUtc -ge $started)) { break }; Start-Sleep -Milliseconds 50 }; if (-not ((Test-Path $conn) -and ((Get-Item $conn).LastWriteTimeUtc -ge $started))) { Write-Error "just run: ene-host did not publish $conn within 30s"; exit 1 }; $env:ENE_HOST_CONNECTION = $conn; $env:ENE_DESKTOP_RENDERER = $renderer; & (Join-Path $PWD 'target\debug\ene-desktop.exe'); exit $LASTEXITCODE } finally { if ($hostProc -and -not $hostProc.HasExited) { Stop-Process -Id $hostProc.Id -Force -ErrorAction SilentlyContinue; $hostProc.WaitForExit() } }
+
 [unix]
 run-host:
     mkdir -p target/tmp && TMPDIR="$PWD/target/tmp" ENE_HOST_STATE_DIR="$PWD/target/run/host/state" ENE_HOST_RUNTIME_DIR="$PWD/target/run/host/runtime" cargo run --locked -p ene-host

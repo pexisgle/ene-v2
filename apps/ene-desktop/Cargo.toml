@@ -33,6 +33,15 @@ uuid.workspace = true
 # window therefore needs them named here.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui = { workspace = true, features = ["wayland", "x11"] }
+# gpui 0.2.2 pulls zed-async-tar -> xattr 0.2.3, which uses libc::ENOATTR
+# removed on Linux in libc 0.2.190.
+libc = ">=0.2.186, <0.2.190"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["screensaver"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

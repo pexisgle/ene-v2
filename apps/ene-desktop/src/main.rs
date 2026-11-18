@@ -67,9 +67,39 @@ fn main() {
 
     let quit = commands_tx.clone();
     let shown = path.display().to_string();
+    #[cfg(unix)]
+    let shutdown_rx = {
+        let (sig_tx, sig_rx) = tokio::sync::oneshot::channel::<()>();
+        handle.spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = async {
+                    match sigterm.as_mut() {
+                        Some(stream) => {
+                            stream.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
+            }
+            let _ = sig_tx.send(());
+        });
+        Some(sig_rx)
+    };
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
+            #[cfg(unix)]
+            if let Some(rx) = shutdown_rx {
+                cx.spawn(async move |cx| {
+                    if rx.await.is_ok() {
+                        let _ = cx.update(|cx| cx.quit());
+                    }
+                })
+                .detach();
+            }
             let hub = cx.new(|cx| {
                 Hub::new(
                     cx,
@@ -94,8 +124,13 @@ fn main() {
             let hub_for_pod = hub.clone();
             let opened = cx.open_window(
                 WindowOptions {
+                    #[cfg(windows)]
                     kind: gpui::WindowKind::PopUp,
+                    #[cfg(not(windows))]
+                    kind: gpui::WindowKind::Floating,
                     window_background: gpui::WindowBackgroundAppearance::Transparent,
+                    window_decorations: Some(gpui::WindowDecorations::Client),
+                    app_id: Some("ene-desktop".into()),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(PodMode::MiniVoice.min_size()),
                     is_movable: true,

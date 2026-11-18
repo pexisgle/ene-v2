@@ -2,8 +2,10 @@
 //! first-run onboarding, collapsible history, capsule composer and 3 orb controls.
 
 use super::icons::{Icon, icon};
-use super::theme::{Theme, ui_font_fallbacks, ui_font_family};
-use super::widgets::{Tone, companion_badge, floating_orb_button, pill_button, status_pill};
+use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
+use super::widgets::{
+    Tone, companion_badge, floating_orb_button, pill_button, status_pill, window_drag_area,
+};
 use super::{Hub, NewCompanionSpec, PodMode, SettingsSection};
 use crate::{
     input::{self, Draft},
@@ -12,8 +14,8 @@ use crate::{
 use ene_rpc as w;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, KeyBinding, MouseButton, MouseDownEvent, Pixels,
-    ScrollHandle, SharedString, Size, Subscription, WeakEntity, Window, WindowControlArea, actions,
-    div, point, prelude::*, px,
+    ScrollHandle, SharedString, Size, Subscription, WeakEntity, Window, actions, div, point,
+    prelude::*, px,
 };
 
 const MAX_INPUT: usize = 4000;
@@ -313,22 +315,24 @@ impl CompanionPod {
             self.render_mini_body(&streaming_preview, is_busy, stop_requested, &theme, cx)
         };
 
-        let drag_strip = div()
-            .w_full()
-            .h(if expanded { px(14.) } else { px(6.) })
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_end()
-            .window_control_area(WindowControlArea::Drag)
-            .when(expanded, |this| {
-                this.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme.ink_placeholder)
-                        .child("履歴"),
-                )
-            });
+        let drag_strip = window_drag_area(
+            div()
+                .w_full()
+                .h(if expanded { px(14.) } else { px(6.) })
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end(),
+            false,
+        )
+        .when(expanded, |this| {
+            this.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.ink_placeholder)
+                    .child("履歴"),
+            )
+        });
 
         let badge = div()
             .absolute()
@@ -377,12 +381,7 @@ impl CompanionPod {
             .flex_row()
             .items_center()
             .pr(px(12.))
-            .child(
-                div()
-                    .flex_1()
-                    .h(px(12.))
-                    .window_control_area(WindowControlArea::Drag),
-            )
+            .child(window_drag_area(div().flex_1().h(px(12.)), false))
             .child(
                 div()
                     .size(px(12.))
@@ -1548,7 +1547,7 @@ impl Render for CompanionPod {
             .size_full()
             .bg(gpui::transparent_black())
             .font({
-                let mut f = gpui::font(ui_font_family());
+                let mut f = gpui::font(resolve_ui_font_family(cx));
                 f.fallbacks = Some(ui_font_fallbacks());
                 f
             })
