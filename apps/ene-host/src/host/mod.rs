@@ -108,6 +108,7 @@ impl Runtime {
         options: Options,
     ) -> std::result::Result<Self, StartError> {
         let store = Store::open(&state.join("host.sqlite3")).map_err(boxed)?;
+        store.seed_initial_companion().map_err(boxed)?;
         // A unit test has no operator to ask for a keyring, and the machine it
         // runs on may have none. Keeping the store in memory there makes the
         // tests independent of the platform backend; the binary still reads
@@ -629,5 +630,34 @@ mod runtime_tests {
                 Err(HostError::Unavailable(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_seeds_ene_once_and_does_not_resurrect_after_delete() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let snap = runtime.read(snapshot).await.unwrap();
+        assert!(
+            snap.companions
+                .iter()
+                .any(|c| c.id == "ene" && c.name == "ene"),
+            "fresh host must include seeded ene companion"
+        );
+        runtime
+            .call(|app| {
+                super::mind::delete(app.world_mut(), "ene")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+
+        let restarted = Runtime::start(state.path()).await.unwrap();
+        let snap = restarted.read(snapshot).await.unwrap();
+        assert!(
+            snap.companions.is_empty(),
+            "deleted initial companion must stay deleted after restart"
+        );
+        restarted.shutdown().await.unwrap();
     }
 }

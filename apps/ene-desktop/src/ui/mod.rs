@@ -14,21 +14,24 @@ pub mod theme;
 mod widgets;
 
 pub use icons::EmbeddedAssets;
-pub use pod::{CompanionPod, Desktop, bind, focus_chat, initial_pod_bounds};
+pub use pod::{
+    CompanionPod, Desktop, bind, focus_chat, initial_pod_bounds, initial_pod_bounds_for_mode,
+};
 pub use studio::SettingsStudio;
 
 use crate::{
     session::{Connection, Options},
-    state::{Chat, Model, NoticeKind},
+    state::{Chat, Device, Link, Model, NoticeKind},
+    tray::{TrayAction, TrayHandle, TrayState},
     update::{Command, Update},
 };
 use buffa::view::MessageView;
 use ene_rpc as w;
 use gpui::{
-    AppContext as _, Bounds, Context, Pixels, Size, Task, WindowBounds, WindowHandle,
-    WindowOptions, px, size,
+    App, AppContext as _, Bounds, Context, Entity, Pixels, Size, Task, WeakEntity, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, px, size,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// Inputs collected from the simplified companion creation form.
@@ -181,10 +184,17 @@ pub struct Hub {
     pub pod_mode: PodMode,
     pub settings_section: SettingsSection,
     pub settings_window: Option<WindowHandle<SettingsStudio>>,
+    pub pod_window: Option<WindowHandle<CompanionPod>>,
+    pod_view: Option<WeakEntity<CompanionPod>>,
+    pod_visible: bool,
     pub pod_scroll_ping: u64,
     pub cleared_secret_for: Option<(String, u64)>,
     pub created_ping: u64,
+    setup_pending: bool,
+    setup_error: Option<&'static str>,
     auto_assigned_revisions: BTreeMap<String, u64>,
+    tray: Option<TrayHandle>,
+    _tray_pump: Option<Task<()>>,
     _pump: Task<()>,
 }
 
@@ -197,6 +207,8 @@ impl Hub {
         commands: UnboundedSender<Command>,
         updates_tx: UnboundedSender<Update>,
         mut updates: UnboundedReceiver<Update>,
+        tray: Option<TrayHandle>,
+        tray_rx: Option<UnboundedReceiver<TrayAction>>,
         runtime: tokio::runtime::Handle,
         discovery: String,
     ) -> Self {
@@ -206,6 +218,18 @@ impl Hub {
                     break;
                 }
             }
+        });
+        let tray_pump = tray_rx.map(|mut actions| {
+            cx.spawn(async move |this, cx| {
+                while let Some(action) = actions.recv().await {
+                    if this
+                        .update(cx, |this, cx| this.handle_tray_action(action, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
         });
         Self {
             model: Model::new(discovery),
@@ -217,11 +241,158 @@ impl Hub {
             pod_mode: PodMode::MiniVoice,
             settings_section: SettingsSection::Companions,
             settings_window: None,
+            pod_window: None,
+            pod_view: None,
+            pod_visible: true,
             pod_scroll_ping: 0,
             cleared_secret_for: None,
             created_ping: 0,
+            setup_pending: false,
+            setup_error: None,
             auto_assigned_revisions: BTreeMap::new(),
+            tray,
+            _tray_pump: tray_pump,
             _pump: pump,
+        }
+    }
+
+    pub fn is_tray_resident(&self) -> bool {
+        self.tray.as_ref().is_some_and(TrayHandle::is_resident)
+    }
+
+    pub fn is_pod_visible(&self) -> bool {
+        self.pod_visible && self.pod_window.is_some()
+    }
+
+    pub(crate) fn pod_view(&self) -> Option<WeakEntity<CompanionPod>> {
+        self.pod_view.clone()
+    }
+
+    pub(crate) fn register_pod_window(
+        &mut self,
+        handle: WindowHandle<CompanionPod>,
+        view: WeakEntity<CompanionPod>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pod_window = Some(handle);
+        self.pod_view = Some(view);
+        self.pod_visible = true;
+        self.sync_tray_state();
+        cx.notify();
+    }
+
+    pub fn hide_pod(&mut self, cx: &mut Context<Self>) {
+        self.pod_visible = false;
+        pod::set_pod_window_visible(false);
+        self.sync_tray_state();
+        cx.notify();
+    }
+
+    pub fn open_pod(&mut self, mode: Option<PodMode>, cx: &mut Context<Self>) {
+        if let Some(next) = mode {
+            self.pod_mode = next;
+            if next == PodMode::ExpandedChat {
+                self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
+            }
+        }
+        self.pod_visible = true;
+        let existing = self.pod_window;
+        self.sync_tray_state();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let _ = cx.update(|cx| {
+                let Some(hub) = this.upgrade() else {
+                    return;
+                };
+                if let Some(handle) = existing
+                    && handle
+                        .update(cx, |view, window, cx| {
+                            pod::set_pod_window_visible(true);
+                            view.sync_mode_and_focus(window, cx);
+                            window.activate_window();
+                            cx.activate(true);
+                            cx.notify();
+                        })
+                        .is_ok()
+                {
+                    return;
+                }
+                if open_pod_window(cx, hub).is_some() {
+                    cx.activate(true);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn toggle_pod(&mut self, mode: Option<PodMode>, cx: &mut Context<Self>) {
+        if self.is_pod_visible() && mode.is_none_or(|m| m == self.pod_mode) {
+            self.hide_pod(cx);
+        } else {
+            self.open_pod(mode, cx);
+        }
+    }
+
+    pub fn sync_window_closed(&mut self, cx: &mut App) {
+        let windows = cx.windows();
+        if self
+            .settings_window
+            .is_some_and(|handle| !windows.contains(&handle.into()))
+        {
+            self.settings_window = None;
+        }
+        if self
+            .pod_window
+            .is_some_and(|handle| !windows.contains(&handle.into()))
+        {
+            self.pod_window = None;
+            self.pod_view = None;
+            self.pod_visible = false;
+        }
+        self.sync_tray_state();
+        if windows.is_empty() || (!self.is_tray_resident() && self.pod_window.is_none()) {
+            cx.quit();
+        }
+    }
+
+    fn sync_tray_state(&self) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        let name = self
+            .model
+            .companion()
+            .map(|c| c.name.as_str())
+            .unwrap_or("ene");
+        let status = match &self.model.link {
+            Link::Live { .. } if !self.model.approvals().is_empty() => "確認待ち",
+            Link::Live { .. } if self.model.work_active => "作業中",
+            Link::Live { .. } if self.model.companion_speaking => "発話中",
+            Link::Live { .. } if !self.model.streaming.is_empty() => "生成中",
+            Link::Live { .. } => "待機中",
+            Link::Connecting { .. } => "接続中",
+            _ => "未接続",
+        };
+        tray.update(TrayState {
+            pod_open: self.is_pod_visible(),
+            pod_mode: self.pod_mode,
+            mic_muted: self.model.mic_muted,
+            avatar_ready: matches!(self.model.devices.avatar, Device::Ready(_)),
+            tooltip: format!("{name} — {status}"),
+        });
+    }
+
+    fn handle_tray_action(&mut self, action: TrayAction, cx: &mut Context<Self>) {
+        match action {
+            TrayAction::ActivatePod => self.open_pod(None, cx),
+            TrayAction::OpenChat => self.open_pod(Some(PodMode::ExpandedChat), cx),
+            TrayAction::OpenMiniPod => self.open_pod(Some(PodMode::MiniVoice), cx),
+            TrayAction::HidePod => self.hide_pod(cx),
+            TrayAction::OpenSettings(section) => self.open_settings(section, cx),
+            TrayAction::CenterAvatar => self.center_avatar(),
+            TrayAction::ToggleMicMute => self.toggle_mic_mute(cx),
+            TrayAction::Quit => cx.quit(),
         }
     }
 
@@ -231,6 +402,12 @@ impl Hub {
 
     pub(crate) fn host(&self) -> Option<crate::host::Host> {
         self.connection.read().ok()?.clone()
+    }
+
+    fn has_audio_connection(&self, kind: w::ConnectionKind) -> bool {
+        self.model
+            .settings()
+            .is_some_and(|s| s.connections.iter().any(|c| c.enabled && c.kind == kind))
     }
 
     pub(crate) fn live(&self) -> bool {
@@ -279,6 +456,23 @@ impl Hub {
                     .map_or(1, |(_, seq)| seq + 1);
                 self.cleared_secret_for = Some((connection_id.clone(), next_seq));
             }
+            Update::Checked {
+                connection_id: id,
+                check,
+            } if check.healthy
+                && self.model.settings().is_some_and(|s| {
+                    s.connections
+                        .iter()
+                        .any(|c| &c.id == id && c.kind == w::ConnectionKind::Llm)
+                }) =>
+            {
+                self.setup_error = None;
+            }
+            Update::SetupFinished(ok) => {
+                self.setup_pending = false;
+                self.setup_error = (!ok).then_some("接続を確認できませんでした。選んだサービスのキーとネットワークを確認して、もう一度登録してください。");
+                self.resnapshot();
+            }
             Update::Resnapshot => self.resnapshot(),
             Update::Created(id) => {
                 let created_id = id.clone();
@@ -292,6 +486,7 @@ impl Hub {
         if let Update::SendFailed { reason, .. } = &update {
             tracing::warn!(reason = %reason, "the message was not accepted");
         }
+        let history_arrived = matches!(&update, Update::History { .. });
         let settings_changed = matches!(
             &update,
             Update::Notification(notification)
@@ -300,13 +495,31 @@ impl Hub {
                     Some(w::notification::Event::SettingsUpdated(_))
                 )
         );
-        let models_arrived = matches!(&update, Update::Models { .. });
-        let message_created = matches!(
+        let companion_or_snapshot = matches!(
             &update,
             Update::Notification(notification)
                 if matches!(
                     notification.event,
-                    Some(w::notification::Event::MessageCreated(_))
+                    Some(
+                        w::notification::Event::InitialState(_)
+                            | w::notification::Event::Companion(_)
+                            | w::notification::Event::SettingsUpdated(_)
+                    )
+                )
+        );
+        let models_or_check = matches!(
+            &update,
+            Update::Providers(_) | Update::Models { .. } | Update::Checked { .. }
+        );
+        let message_arrived = matches!(
+            &update,
+            Update::Notification(notification)
+                if matches!(
+                    notification.event,
+                    Some(
+                        w::notification::Event::MessageCreated(_)
+                            | w::notification::Event::MessageDelta(_)
+                    )
                 )
         );
         let had_companion = self.model.companion_id().is_some();
@@ -318,14 +531,14 @@ impl Hub {
             let _ = self.commands.send(Command::Refresh);
             self.load_models(cx);
         }
-        if settings_changed || models_arrived || selected_now {
+        if companion_or_snapshot || models_or_check || selected_now {
             self.maybe_auto_assign_default_model();
         }
         if conflicted {
             self.resnapshot();
             self.refresh_active_data(cx);
         }
-        if self.model.approvals().len() > had_approvals || message_created {
+        if self.model.approvals().len() > had_approvals || message_arrived || history_arrived {
             self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
         }
         if effects.history || selected_now {
@@ -344,11 +557,12 @@ impl Hub {
             self.load_models(cx);
             self.load_policy_rules(cx);
         }
+        self.sync_tray_state();
         cx.notify();
     }
 
     fn maybe_auto_assign_default_model(&mut self) {
-        if !self.live() {
+        if !self.live() || self.setup_pending || self.model.providers.is_none() {
             return;
         }
         let Some(companion) = self.model.companion().cloned() else {
@@ -361,16 +575,40 @@ impl Hub {
         {
             return;
         }
-        let Some((conn_id, model_id, _)) = self.model_choices().into_iter().next() else {
+        let Some(settings) = self.model.settings() else {
+            return;
+        };
+        let providers = self.model.providers.as_deref().unwrap_or_default();
+        let enabled_llm_ids: HashSet<&str> = settings
+            .connections
+            .iter()
+            .filter(|c| can_start_chat(c, providers))
+            .map(|c| c.id.as_str())
+            .collect();
+        let Some((conn_id, model_id, _)) = self
+            .model_choices()
+            .into_iter()
+            .find(|(id, _, _)| enabled_llm_ids.contains(id.as_str()))
+        else {
             return;
         };
         let assignments = companion.assignments.as_option();
-        let needs_companion = assignments
-            .and_then(|a| ModelRoleSlot::Companion.current(a))
-            .is_none();
-        let needs_task = assignments
-            .and_then(|a| ModelRoleSlot::Task.current(a))
-            .is_none();
+        let is_valid = |slot: ModelRoleSlot| -> bool {
+            assignments
+                .and_then(|a| slot.current(a))
+                .is_some_and(|assigned| {
+                    !assigned.connection_id.is_empty()
+                        && !assigned.model_id.is_empty()
+                        && settings.connections.iter().any(|c| {
+                            c.id == assigned.connection_id
+                                && c.enabled
+                                && c.kind == w::ConnectionKind::Llm
+                                && !needs_key(c, providers)
+                        })
+                })
+        };
+        let needs_companion = !is_valid(ModelRoleSlot::Companion);
+        let needs_task = !is_valid(ModelRoleSlot::Task);
         if !needs_companion && !needs_task {
             return;
         }
@@ -598,6 +836,14 @@ impl Hub {
         let _ = self.send_keyed(text.to_owned(), request_key.to_owned(), cx);
     }
 
+    pub(crate) fn dismiss_unsent(&mut self, request_key: &str, cx: &mut Context<Self>) {
+        self.model
+            .chat
+            .unsent
+            .retain(|item| item.request_key != request_key);
+        cx.notify();
+    }
+
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
         let _ = self.commands.send(Command::StopPlayback);
         let Some(companion) = self.model.companion_id().map(str::to_owned) else {
@@ -631,8 +877,10 @@ impl Hub {
         self.model.mic_muted = next;
         if next {
             self.model.audio_input_rms = 0.0;
+            self.model.transcription = None;
         }
         let _ = self.commands.send(Command::SetMicMuted(next));
+        self.sync_tray_state();
         cx.notify();
     }
 
@@ -643,6 +891,7 @@ impl Hub {
             self.model.audio_output_rms = 0.0;
         }
         let _ = self.commands.send(Command::SetOutputMuted(next));
+        self.sync_tray_state();
         cx.notify();
     }
 
@@ -669,6 +918,10 @@ impl Hub {
     pub(crate) fn set_pod_mode(&mut self, mode: PodMode, cx: &mut Context<Self>) {
         if self.pod_mode != mode {
             self.pod_mode = mode;
+            if mode == PodMode::ExpandedChat {
+                self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
+            }
+            self.sync_tray_state();
             cx.notify();
         }
     }
@@ -1251,107 +1504,75 @@ impl Hub {
         );
     }
 
-    /// Creates an LLM connection, optionally registers its secret, probes it,
-    /// and fetches models in one flow for first-run onboarding.
     pub(crate) fn quick_connect_llm(
         &mut self,
         provider: w::LlmProvider,
         secret: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(settings) = self.model.settings().cloned() else {
+        let Some(settings) = self.model.settings() else {
             return;
         };
-        let Some(host) = self.host() else {
+        let Some(host) = self.host() else { return };
+        if self.setup_pending {
             return;
-        };
-        let conn_id = uuid::Uuid::new_v4().to_string();
-        let companion = self.model.companion_id().map(str::to_owned);
-        let input = llm_provider_input(conn_id.clone(), provider, Vec::new());
-        let updates = self.updates.clone();
-        self.runtime.spawn(async move {
-            let updated = match host
-                .settings
-                .update_settings(w::UpdateSettingsRequest {
-                    expected_revision: settings.revision,
-                    connections: vec![input],
-                    ..Default::default()
+        }
+        // Reuse a failed attempt only at the exact catalog endpoint.
+        let existing = settings.connections.iter().find(|c| {
+            c.enabled
+                && llm_endpoint(c).is_some_and(|ep| {
+                    ep.adapter == provider.adapter && ep.endpoint == provider.endpoint
                 })
-                .await
-            {
-                Ok(resp) => match resp.view().to_owned_message().map_err(decode) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = updates.send(failure("接続の作成", e));
-                        return;
-                    }
-                },
-                Err(e) => {
-                    let _ = updates.send(failure("接続の作成", e));
-                    return;
+        });
+        let id = existing
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let revision = settings.revision;
+        let create = existing.is_none();
+        let models = default_models_for_adapter(&provider.adapter)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let input = llm_provider_input(id.clone(), provider, models);
+        self.setup_pending = true;
+        self.setup_error = None;
+        self.request_with(
+            "AI接続",
+            async move {
+                if create {
+                    host.settings
+                        .update_settings(w::UpdateSettingsRequest {
+                            expected_revision: revision,
+                            connections: vec![input],
+                            ..Default::default()
+                        })
+                        .await?;
                 }
-            };
-            let _ = updates.send(Update::Notification(Box::new(w::Notification {
-                kind: "settings".into(),
-                event: Some(w::notification::Event::SettingsUpdated(Box::new(
-                    w::SettingsUpdated {
-                        settings: Some(updated).into(),
-                        ..Default::default()
-                    },
-                ))),
-                ..Default::default()
-            })));
-
-            if !secret.trim().is_empty() {
-                if let Err(e) = host
+                if !secret.is_empty() {
+                    host.settings
+                        .register_credentials(w::CredentialRequest {
+                            id: id.clone(),
+                            secret: Some(secret),
+                            ..Default::default()
+                        })
+                        .await?;
+                }
+                let probe = host
                     .settings
-                    .register_credentials(w::CredentialRequest {
-                        id: conn_id.clone(),
-                        secret: Some(secret),
+                    .check_connection(w::CheckRequest {
+                        id,
+                        request_key: uuid::Uuid::new_v4().to_string(),
                         ..Default::default()
                     })
-                    .await
-                {
-                    let _ = updates.send(failure("APIキーの登録", e));
-                    return;
-                }
-                let _ = updates.send(Update::CredentialRegistered {
-                    connection_id: conn_id.clone(),
-                });
-            }
-
-            if let Ok(check_resp) = host
-                .settings
-                .check_connection(w::CheckRequest {
-                    id: conn_id.clone(),
-                    request_key: uuid::Uuid::new_v4().to_string(),
-                    companion_id: companion,
-                    ..Default::default()
-                })
-                .await
-                && let Ok(res) = check_resp.view().to_owned_message()
-            {
-                let _ = updates.send(Update::Checked {
-                    connection_id: conn_id.clone(),
-                    check: res.check.into_option().unwrap_or_default(),
-                });
-            }
-
-            if let Ok(models_resp) = host
-                .settings
-                .list_models(w::ModelsRequest {
-                    id: conn_id.clone(),
-                    ..Default::default()
-                })
-                .await
-                && let Ok(models) = models_resp.view().to_owned_message()
-            {
-                let _ = updates.send(Update::Models {
-                    connection_id: conn_id,
-                    models: models.items,
-                });
-            }
-        });
+                    .await?
+                    .view()
+                    .to_owned_message()
+                    .map_err(decode)?;
+                Ok(probe.check.as_option().is_some_and(|check| check.healthy))
+            },
+            Update::SetupFinished,
+            |_, _| Update::SetupFinished(false),
+        );
         cx.notify();
     }
 
@@ -1624,13 +1845,19 @@ impl Hub {
             if connection.kind != w::ConnectionKind::Llm || !connection.enabled {
                 continue;
             }
-            let configured = match connection
+            let (configured, adapter) = match connection
                 .config
                 .as_option()
                 .and_then(|config| config.config.as_ref())
             {
-                Some(w::connection_config::Config::Llm(llm)) => llm.model_ids.clone(),
-                _ => Vec::new(),
+                Some(w::connection_config::Config::Llm(llm)) => (
+                    llm.model_ids.clone(),
+                    llm.endpoint
+                        .as_option()
+                        .map(|ep| ep.adapter.as_str())
+                        .unwrap_or_default(),
+                ),
+                _ => (Vec::new(), ""),
             };
             let fetched = self
                 .model
@@ -1638,7 +1865,15 @@ impl Hub {
                 .get(&connection.id)
                 .cloned()
                 .unwrap_or_default();
-            if configured.is_empty() {
+            if !configured.is_empty() {
+                for id in configured {
+                    choices.push((
+                        connection.id.clone(),
+                        id.clone(),
+                        format!("{} / {id}", connection.name),
+                    ));
+                }
+            } else if !fetched.is_empty() {
                 for model in fetched {
                     let label = if model.name.is_empty() {
                         format!("{} / {}", connection.name, model.id)
@@ -1648,12 +1883,29 @@ impl Hub {
                     choices.push((connection.id.clone(), model.id, label));
                 }
             } else {
-                for id in configured {
-                    choices.push((
-                        connection.id.clone(),
-                        id.clone(),
-                        format!("{} / {id}", connection.name),
-                    ));
+                let checked = self
+                    .model
+                    .checks
+                    .get(&connection.id)
+                    .or_else(|| connection.last_check.as_option())
+                    .map(|check| check.resources.clone())
+                    .unwrap_or_default();
+                if !checked.is_empty() {
+                    for id in checked {
+                        choices.push((
+                            connection.id.clone(),
+                            id.clone(),
+                            format!("{} / {id}", connection.name),
+                        ));
+                    }
+                } else {
+                    for id in default_models_for_adapter(adapter) {
+                        choices.push((
+                            connection.id.clone(),
+                            (*id).to_owned(),
+                            format!("{} / {id}", connection.name),
+                        ));
+                    }
                 }
             }
         }
@@ -1670,13 +1922,19 @@ impl Hub {
             if connection.kind != w::ConnectionKind::Llm {
                 continue;
             }
-            let configured = match connection
+            let (configured, adapter) = match connection
                 .config
                 .as_option()
                 .and_then(|config| config.config.as_ref())
             {
-                Some(w::connection_config::Config::Llm(llm)) => llm.model_ids.clone(),
-                _ => Vec::new(),
+                Some(w::connection_config::Config::Llm(llm)) => (
+                    llm.model_ids.clone(),
+                    llm.endpoint
+                        .as_option()
+                        .map(|ep| ep.adapter.as_str())
+                        .unwrap_or_default(),
+                ),
+                _ => (Vec::new(), ""),
             };
             let fetched = self
                 .model
@@ -1684,23 +1942,179 @@ impl Hub {
                 .get(&connection.id)
                 .cloned()
                 .unwrap_or_default();
-            if fetched.is_empty() {
-                for id in configured {
-                    choices.push((connection.id.clone(), id.clone(), id));
-                }
-            } else {
+            if !fetched.is_empty() {
                 for model in fetched {
                     let name = if model.name.is_empty() {
                         model.id.clone()
                     } else {
                         model.name
                     };
-                    choices.push((connection.id.clone(), model.id, name));
+                    choices.push((
+                        connection.id.clone(),
+                        model.id,
+                        format!("{} / {name}", connection.name),
+                    ));
+                }
+            } else if !configured.is_empty() {
+                for id in configured {
+                    choices.push((
+                        connection.id.clone(),
+                        id.clone(),
+                        format!("{} / {id}", connection.name),
+                    ));
+                }
+            } else {
+                let checked = self
+                    .model
+                    .checks
+                    .get(&connection.id)
+                    .or_else(|| connection.last_check.as_option())
+                    .map(|check| check.resources.clone())
+                    .unwrap_or_default();
+                if !checked.is_empty() {
+                    for id in checked {
+                        choices.push((
+                            connection.id.clone(),
+                            id.clone(),
+                            format!("{} / {id}", connection.name),
+                        ));
+                    }
+                } else {
+                    for id in default_models_for_adapter(adapter) {
+                        choices.push((
+                            connection.id.clone(),
+                            (*id).to_owned(),
+                            format!("{} / {id}", connection.name),
+                        ));
+                    }
                 }
             }
         }
         choices
     }
+
+    /// Model choices across embedding connections for the embedding role slot.
+    pub(crate) fn all_embedding_models(&self) -> Vec<(String, String, String)> {
+        let Some(settings) = self.model.settings() else {
+            return Vec::new();
+        };
+        let mut choices = Vec::new();
+        for connection in &settings.connections {
+            if connection.kind != w::ConnectionKind::Embedding {
+                continue;
+            }
+            let model_id = match connection
+                .config
+                .as_option()
+                .and_then(|config| config.config.as_ref())
+            {
+                Some(w::connection_config::Config::Embedding(emb))
+                    if !emb.model_id.trim().is_empty() =>
+                {
+                    emb.model_id.trim().to_owned()
+                }
+                _ => "text-embedding-3-small".to_owned(),
+            };
+            choices.push((
+                connection.id.clone(),
+                model_id.clone(),
+                format!("{} / {model_id}", connection.name),
+            ));
+        }
+        choices
+    }
+}
+
+pub(crate) fn default_models_for_adapter(adapter: &str) -> &'static [&'static str] {
+    match adapter.trim().to_ascii_lowercase().as_str() {
+        "openai" | "openai-responses" => &["gpt-5.4-mini", "gpt-5.4"],
+        "anthropic" => &["claude-sonnet-4-6"],
+        "gemini" | "google" => &["gemini-2.5-flash"],
+        "openrouter" | "openrouter-wasm" => &["openai/gpt-5.4-mini"],
+        "ollama" | "vllm" | "lmstudio" => &["qwen2.5:7b"],
+        _ => &[],
+    }
+}
+
+/// Opens the floating companion pod window and registers it with `Hub`.
+pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<WindowHandle<CompanionPod>> {
+    let mode = hub.read(cx).pod_mode;
+    let bounds = initial_pod_bounds_for_mode(mode, cx);
+    let hub_for_pod = hub.clone();
+    let opened = cx.open_window(
+        WindowOptions {
+            #[cfg(windows)]
+            kind: WindowKind::PopUp,
+            #[cfg(not(windows))]
+            kind: WindowKind::Floating,
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            app_id: Some("ene-desktop".into()),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(PodMode::MiniVoice.min_size()),
+            is_movable: true,
+            is_resizable: false,
+            titlebar: None,
+            ..Default::default()
+        },
+        move |_window, cx| cx.new(|cx| CompanionPod::new(hub_for_pod.clone(), cx)),
+    );
+    match opened {
+        Ok(window) => {
+            let hub_close = hub.clone();
+            if let Ok(view) = window.update(cx, |view, window, cx| {
+                focus_chat(view, window, cx);
+                window.on_window_should_close(cx, move |_window, cx| {
+                    let should_hide = hub_close.read(cx).is_tray_resident()
+                        || hub_close.read(cx).settings_window.is_some();
+                    if should_hide {
+                        hub_close.update(cx, |hub, cx| hub.hide_pod(cx));
+                        false
+                    } else {
+                        true
+                    }
+                });
+                cx.entity().downgrade()
+            }) {
+                hub.update(cx, |hub, cx| hub.register_pod_window(window, view, cx));
+            }
+            Some(window)
+        }
+        Err(error) => {
+            eprintln!("ene-desktop: the window did not open: {error:#}");
+            None
+        }
+    }
+}
+
+fn llm_endpoint(conn: &w::Connection) -> Option<&w::ConnectionEndpoint> {
+    match conn.config.as_option()?.config.as_ref()? {
+        w::connection_config::Config::Llm(llm) => llm.endpoint.as_option(),
+        _ => None,
+    }
+}
+
+fn can_start_chat(conn: &w::Connection, providers: &[w::LlmProvider]) -> bool {
+    conn.enabled
+        && conn.kind == w::ConnectionKind::Llm
+        && !needs_key(conn, providers)
+        && conn
+            .last_check
+            .as_option()
+            .is_none_or(|check| check.healthy)
+}
+
+fn needs_key(conn: &w::Connection, providers: &[w::LlmProvider]) -> bool {
+    !matches!(conn.credential_state.as_str(), "registered" | "environment")
+        && llm_endpoint(conn).is_some_and(|ep| {
+            providers.iter().any(|p| {
+                p.requires_credentials
+                    && p.adapter == ep.adapter
+                    && (ep.endpoint.trim().is_empty()
+                        || p.endpoint.trim_end_matches('/')
+                            == ep.endpoint.trim().trim_end_matches('/'))
+            })
+        })
 }
 
 fn llm_provider_input(
@@ -1784,4 +2198,37 @@ pub(crate) fn window_draft(
         entity.update(cx, |draft, _| draft.apply_look(look));
     }
     entity
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    #[test]
+    fn a_public_model_list_does_not_make_an_unregistered_connection_ready() {
+        let provider = w::LlmProvider {
+            requires_credentials: true,
+            adapter: "openrouter".into(),
+            endpoint: "https://openrouter.ai/api/v1".into(),
+            ..Default::default()
+        };
+        let input = llm_provider_input("first".into(), provider.clone(), vec![]);
+        let mut conn = w::Connection {
+            enabled: true,
+            kind: input.kind,
+            config: input.config,
+            last_check: Some(w::ConnectionCheck {
+                healthy: true,
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        let catalog = std::slice::from_ref(&provider);
+        assert!(!can_start_chat(&conn, catalog));
+        conn.credential_state = "registered".into();
+        assert!(can_start_chat(&conn, catalog));
+        conn.last_check = Some(w::ConnectionCheck::default()).into();
+        assert!(!can_start_chat(&conn, catalog));
+    }
 }

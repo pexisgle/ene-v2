@@ -117,12 +117,20 @@ impl Avatar {
     /// Spawns the renderer. `program` is the `ene-avatar` binary; the caller
     /// resolves it so a missing binary is an error before any model loads.
     pub fn spawn(program: &Path) -> Result<Self, String> {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // The renderer logs to stderr; inherit it so its diagnostics are
             // visible next to this client's own.
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command
             .spawn()
             .map_err(|error| format!("{}: {error}", program.display()))?;
         let stdin = child.stdin.take().ok_or("the renderer has no stdin")?;
@@ -391,10 +399,118 @@ pub fn asset_cache() -> Option<PathBuf> {
     }
 }
 
-/// The default model the fetch script installs.
+/// Normalizes `.` and `..` segments onto an absolute path without `\\?\` verbatim
+/// prefixes so `ene-avatar` (`AssetPath::try_parse`) accepts the path reliably.
+fn normalize_path(path: &Path) -> Option<PathBuf> {
+    let abs = std::path::absolute(path).ok()?;
+    let mut normalized = PathBuf::new();
+    for component in abs.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::Prefix(prefix) => {
+                if let std::path::Prefix::VerbatimDisk(drive) = prefix.kind() {
+                    normalized.push(format!("{}:", char::from(drive)));
+                } else {
+                    normalized.push(prefix.as_os_str());
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Some(normalized)
+}
+
+/// Adds user data directory candidates for `ENE.vrm` without pulling `shell32.dll`
+/// into Windows test binaries via `directories::ProjectDirs`.
+fn push_user_model_candidates(candidates: &mut Vec<PathBuf>) {
+    #[cfg(windows)]
+    {
+        for var in ["APPDATA", "LOCALAPPDATA"] {
+            if let Some(root) = std::env::var_os(var) {
+                let base = PathBuf::from(root).join("ene");
+                candidates.push(base.join("data").join("models").join("ENE.vrm"));
+                candidates.push(base.join("models").join("ENE.vrm"));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(dirs) = directories::ProjectDirs::from("", "", "ene") {
+            candidates.push(dirs.data_dir().join("models").join("ENE.vrm"));
+        }
+    }
+}
+
+/// Searches standard development and installed layouts for the bundled `ENE.vrm`.
+pub fn bundled_ene_model() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("assets").join("ENE.vrm"));
+        candidates.push(
+            dir.join("..")
+                .join("share")
+                .join("ene")
+                .join("assets")
+                .join("ENE.vrm"),
+        );
+        candidates.push(
+            dir.join("..")
+                .join("Resources")
+                .join("assets")
+                .join("ENE.vrm"),
+        );
+        candidates.push(dir.join("..").join("assets").join("ENE.vrm"));
+        candidates.push(dir.join("..").join("..").join("assets").join("ENE.vrm"));
+    }
+    candidates.push(PathBuf::from("assets").join("ENE.vrm"));
+    push_user_model_candidates(&mut candidates);
+    if let Some(cache) = asset_cache() {
+        candidates.push(cache.join("models").join("ENE.vrm"));
+    }
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("assets")
+            .join("ENE.vrm"),
+    );
+
+    candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .find_map(|path| normalize_path(&path))
+}
+
+/// The default model: the bundled `ENE.vrm` first, then the fetched sample cache.
 pub fn default_model() -> Option<PathBuf> {
+    if let Some(path) = bundled_ene_model() {
+        return Some(path);
+    }
     let path = asset_cache()?.join("models").join("Seed-san.vrm");
     path.is_file().then_some(path)
+}
+
+/// Searches adjacent and Cargo build directories for the `ene-avatar` renderer binary.
+pub fn default_renderer() -> Option<PathBuf> {
+    let binary = format!("ene-avatar{}", std::env::consts::EXE_SUFFIX);
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidates = [
+        dir.join(&binary),
+        dir.join("..").join("release").join(&binary),
+        dir.join("..").join("debug").join(&binary),
+    ];
+    candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .find_map(|path| normalize_path(&path))
 }
 
 /// The motion file for a preset name, when the fetch script installed one.
@@ -490,5 +606,41 @@ mod tests {
 
         let min_scaled = shown.with_scale(10.0);
         assert_eq!(min_scaled.size_percent, 50.0);
+    }
+
+    #[test]
+    fn normalize_path_cleans_parent_segments_without_verbatim_prefix() {
+        let normalized = normalize_path(Path::new("assets/../assets/ENE.vrm")).unwrap();
+        let text = normalized.to_string_lossy();
+        assert!(
+            !text.starts_with(r"\\?\"),
+            "unexpected verbatim prefix: {text}"
+        );
+        assert!(text.ends_with("ENE.vrm"), "unexpected suffix: {text}");
+        assert!(
+            !normalized.components().any(|c| matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )),
+            "unnormalized components remained: {normalized:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_ene_model_resolves_workspace_asset() {
+        let workspace_asset = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("assets")
+            .join("ENE.vrm");
+        if workspace_asset.is_file() {
+            let found = bundled_ene_model().expect("bundled ENE.vrm resolves");
+            assert!(found.is_file(), "resolved path does not exist: {found:?}");
+            assert!(
+                found.is_absolute(),
+                "resolved path is not absolute: {found:?}"
+            );
+            assert_eq!(found.file_name().and_then(|n| n.to_str()), Some("ENE.vrm"));
+        }
     }
 }

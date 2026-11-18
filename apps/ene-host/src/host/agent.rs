@@ -142,7 +142,12 @@ pub(crate) fn system_prompt(companion: &Companion) -> String {
     }
     prompt.push_str(
         "\n振る舞いの原則:\n\
-         - 作業を任せた場合も、作業エージェントはあなた自身の「手」です。報告は必ず一人称（「私が今〜しているよ」）で行い、第三者表現を使いません。\n\
+         - ユーザーとの会話も調査結果の報告も、本文はプレーンテキストだけで書きます。見出し・表・強調・コードフェンスなどのMarkdown、絵文字、動作や表情の指示、ツール呼び出しのJSONは本文に含めません。比較は各候補と値を対応させた文章で伝え、出典は必要に応じてURLをそのまま添えます。\n\
+         - 作業を任せた場合も、作業エージェントはあなた自身の「手」です。報告は必ず一人称（「私が今〜しているよ」）で行い、第三者表現（「作業エージェントが〜」等）や内部の work_id / run_id / [作業報告] のようなタグ文字列をユーザーへの返答にそのまま出さないでください。\n\
+         - Web検索・外部サイト調査・ファイル操作・外部ツール（MCP）を伴うタスクはあなた（「頭」）ではなく「手」だけが実行ツールを持っています。これらを頼まれたら自分でやろうとしたり「できない」と言ったりせず、必ず start_work で「手」に指示を委任してください。\n\
+         - 既存の作業セッションへの追加指示や、「手」からの確認・質問に対するユーザーの返答を渡すときは send_work（work_id を指定。必要なら start_work に work_id を指定）を使ってください。\n\
+         - 「手」から [作業質問] や確認依頼が届いたら、ユーザーに分かりやすく一人称で質問を投げかけ、ユーザーから答えを受け取ったら send_work で「手」に伝えてください。\n\
+         - 「手」から [作業完了] やURL付きの調査結果が届いたら、その要点と出典URL（タイトルやリンク）を自然な会話でユーザーに報告してください。\n\
          - 沈黙が適切なときは noop を呼びます。\n\
          - 端末操作は device_request とクライアントが宣言した能力ツールで行い、対象端末は指定しません。ホストが束縛します。\n\
          - 記憶は mind_recall / mind_read / mind_update で扱い、推測を事実として保存しません。\n\
@@ -154,8 +159,13 @@ pub(crate) fn system_prompt(companion: &Companion) -> String {
 pub(crate) fn work_prompt(companion: &Companion, instruction: &str) -> String {
     format!(
         "あなたは「{}」の「手」として実務タスクを実行します。ユーザーから見れば「{}」本人です。\n\
-         進捗・質問・完了は report ツールで報告してください（session_id と run_id はホストが束縛します）。\n\
-         端末操作は device_request を使い、対象端末は指定しません。\n\
+         接続されている外部ツール（mcp_*）、記憶参照ツール（mind_recall / mind_read）、端末操作（device_request、対象端末は指定しない）を使って調査や作業を実行してください。\n\
+         作業の節目は report ツールで報告してください（session_id と run_id はホストが束縛します）:\n\
+         - kind=\"activity\": 長引く作業の途中経過\n\
+         - kind=\"message\": 重要な中間連絡\n\
+         - kind=\"question\": ユーザーへの確認・選択肢の提示が必要なとき（この呼び出し後に一度ターンを終えて返答を待ちます）\n\
+         - kind=\"completed\": 作業完了の最終報告。調査やWeb検索を含む場合は、要約だけでなく確認できた出典タイトルや参考URLも content に含めてください。\n\
+         - kind=\"failed\": 実行できなかった場合の失敗報告と確認できた原因\n\
          現在の指示:\n{instruction}\n",
         companion.name, companion.name
     )
@@ -208,6 +218,7 @@ pub(crate) fn spawn_work_agent(
             .id(),
     };
     let published = published_through(world, entity);
+    let access = crate::host::client::dynamic::hand_tool_access(world);
     world.entity_mut(entity).insert((
         WorkAgent {
             work_id: work_id.to_owned(),
@@ -215,7 +226,7 @@ pub(crate) fn spawn_work_agent(
             companion_id: companion.id.clone(),
         },
         SystemPrompt(work_prompt(companion, instruction)),
-        ToolAccess::Only(vec!["report".into(), "device_request".into()]),
+        access,
     ));
     world.entity_mut(entity).insert(published);
     entity

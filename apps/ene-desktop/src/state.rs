@@ -155,6 +155,7 @@ pub struct Model {
     pub avatar_scale: f32,
     pub transcription: Option<LiveTranscription>,
     pub minds: BTreeMap<String, w::MindView>,
+    pub work_active: bool,
 }
 
 impl Model {
@@ -182,6 +183,7 @@ impl Model {
             avatar_scale: 100.0,
             transcription: None,
             minds: BTreeMap::new(),
+            work_active: false,
         }
     }
 
@@ -195,6 +197,13 @@ impl Model {
         self.selected
             .as_deref()
             .or_else(|| self.snapshot.as_ref()?.active_companion_id.as_deref())
+            .or_else(|| {
+                self.snapshot
+                    .as_ref()?
+                    .companions
+                    .first()
+                    .map(|item| item.id.as_str())
+            })
     }
 
     /// The companion record for the shown id.
@@ -330,7 +339,10 @@ impl Model {
                 messages,
             } => {
                 if self.chat.companion_id == companion_id {
-                    self.chat.messages = messages;
+                    self.chat.messages = messages
+                        .into_iter()
+                        .filter(is_user_facing_message)
+                        .collect();
                     self.chat.loading = false;
                     self.chat.error = None;
                     // A recorded user message means the send landed, so its
@@ -421,6 +433,7 @@ impl Model {
                 self.output_muted = output_muted;
                 if mic_muted {
                     self.audio_input_rms = 0.0;
+                    self.transcription = None;
                 }
                 if output_muted {
                     self.audio_output_rms = 0.0;
@@ -431,7 +444,7 @@ impl Model {
                 is_final,
                 is_speaking,
             } => {
-                if text.trim().is_empty() && is_final && !is_speaking {
+                if is_final || (text.trim().is_empty() && !is_speaking) {
                     self.transcription = None;
                 } else {
                     self.transcription = Some(LiveTranscription {
@@ -455,10 +468,31 @@ impl Model {
             // The window clears the field that held the secret; nothing about a
             // credential is kept in the model, and a resnapshot is the window's
             // own request.
-            Update::CredentialRegistered { connection_id: _ } | Update::Resnapshot => {}
+            Update::SetupFinished(_)
+            | Update::CredentialRegistered { connection_id: _ }
+            | Update::Resnapshot => {}
         }
         effects
     }
+}
+
+/// Whether a host message should be visible in user-facing chat bubbles.
+pub fn is_user_facing_message(message: &w::Message) -> bool {
+    if !message.work_id.trim().is_empty() {
+        return false;
+    }
+    if matches!(
+        message.role.as_known(),
+        Some(w::MessageRole::Agent | w::MessageRole::Context)
+    ) {
+        return false;
+    }
+    let trimmed = message.text.trim();
+    !(trimmed.starts_with("[Output of ")
+        || trimmed.starts_with("[作業報告")
+        || trimmed.starts_with("[作業結果")
+        || trimmed.starts_with("[hand ")
+        || trimmed.starts_with("The hand finished"))
 }
 
 /// Merges one host notification into the display copy.
@@ -469,6 +503,10 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
             snapshot
                 .companions
                 .sort_by(|left, right| left.name.cmp(&right.name));
+            model.work_active = snapshot
+                .work_sessions
+                .iter()
+                .any(|session| matches!(session.status.as_known(), Some(w::WorkStatus::Active)));
             model.snapshot = Some(snapshot);
             effects.approvals = false;
         }
@@ -493,6 +531,7 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
         Some(w::notification::Event::MessageCreated(created)) => {
             if let Some(message) = created.message.into_option()
                 && message.companion_id == model.chat.companion_id
+                && is_user_facing_message(&message)
             {
                 // The recorded message is the answer; any preview for this
                 // companion is now stale.
@@ -522,6 +561,16 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
                 if terminal {
                     model.streaming.clear();
                     model.chat.stop_requested = false;
+                }
+                if turn.status.as_known() == Some(w::TurnStatus::Failed)
+                    && let Some(failure) = turn.failure.as_option()
+                    && !failure.message.trim().is_empty()
+                {
+                    model.notice(
+                        NoticeKind::Failed,
+                        "応答に失敗しました",
+                        failure.message.clone(),
+                    );
                 }
                 model.chat.turn = Some(*turn);
             }
@@ -573,7 +622,21 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
         Some(w::notification::Event::PolicyTextsUpdated(_)) => {}
         // Work stays behind the companion's dialogue; the window has no surface
         // a work event would refresh.
-        Some(w::notification::Event::WorkEvent(_)) => {}
+        Some(w::notification::Event::WorkEvent(work)) => {
+            model.work_active = match &work.detail {
+                Some(w::work_event::Detail::RunStarted(_)) => true,
+                Some(w::work_event::Detail::StatusChanged(changed)) => {
+                    matches!(changed.status.as_known(), Some(w::WorkStatus::Active))
+                }
+                Some(w::work_event::Detail::RunFinished(finished)) => matches!(
+                    finished.state.as_known(),
+                    Some(
+                        w::RunStatus::Starting | w::RunStatus::Running | w::RunStatus::WaitingInput
+                    )
+                ),
+                None => false,
+            };
+        }
         Some(w::notification::Event::ResyncRequired(_)) => {
             model.streaming.clear();
         }
@@ -583,7 +646,41 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
                 && let Ok(value) = serde_json::from_str::<serde_json::Value>(&document.json)
                 && let Some(message) = value.get("message").and_then(|item| item.as_str())
             {
-                model.notice(NoticeKind::Failed, "ホストからの通知", message.to_owned());
+                let code = value
+                    .get("code")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default();
+                match code {
+                    "approval_resolved" => {
+                        let req_id = message.split(':').next().unwrap_or_default().trim();
+                        if !req_id.is_empty()
+                            && let Some(snapshot) = model.snapshot.as_mut()
+                        {
+                            snapshot
+                                .pending_approvals
+                                .retain(|item| item.request_id != req_id);
+                        }
+                    }
+                    "approval_required" | "host_ready" => {}
+                    "model_unavailable" => {
+                        let has_enabled_llm = model.settings().is_some_and(|settings| {
+                            settings
+                                .connections
+                                .iter()
+                                .any(|c| c.kind == w::ConnectionKind::Llm && c.enabled)
+                        });
+                        if has_enabled_llm {
+                            model.notice(
+                                NoticeKind::Failed,
+                                "ホストからの通知",
+                                message.to_owned(),
+                            );
+                        }
+                    }
+                    _ => {
+                        model.notice(NoticeKind::Failed, "ホストからの通知", message.to_owned());
+                    }
+                }
             }
         }
         // Observation only: execution flows through `ClientService.DeviceStream`.
@@ -977,5 +1074,53 @@ mod tests {
             })),
         ))));
         assert!(mine.mind);
+    }
+
+    #[test]
+    fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
+        let mut model = with_chat();
+        let internal = w::Message {
+            id: "w1".into(),
+            companion_id: "ene".into(),
+            work_id: "work-1".into(),
+            role: w::MessageRole::Agent.into(),
+            text: "[作業報告 (work_id: work-1)] ...".into(),
+            sequence: 1,
+            ..Default::default()
+        };
+        assert!(!is_user_facing_message(&internal));
+        model.apply(Update::History {
+            companion_id: "ene".into(),
+            messages: vec![internal, message("u1", 2, w::MessageRole::User, "調べて")],
+        });
+        assert_eq!(model.chat.messages.len(), 1);
+        assert_eq!(model.chat.messages[0].text, "調べて");
+
+        model.apply(Update::Notification(Box::new(notification(
+            w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
+                work_id: "work-1".into(),
+                run_id: "run-1".into(),
+                kind: w::WorkEventKind::RunStarted.into(),
+                detail: Some(w::work_event::Detail::RunStarted(Box::default())),
+                ..Default::default()
+            })),
+        ))));
+        assert!(model.work_active);
+
+        model.apply(Update::Notification(Box::new(notification(
+            w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
+                work_id: "work-1".into(),
+                run_id: "run-1".into(),
+                kind: w::WorkEventKind::RunFinished.into(),
+                detail: Some(w::work_event::Detail::RunFinished(Box::new(
+                    w::WorkRunFinished {
+                        state: w::RunStatus::Completed.into(),
+                        ..Default::default()
+                    },
+                ))),
+                ..Default::default()
+            })),
+        ))));
+        assert!(!model.work_active);
     }
 }

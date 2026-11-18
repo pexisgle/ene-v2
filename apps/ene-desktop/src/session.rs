@@ -748,7 +748,8 @@ impl Session {
             .model
             .as_ref()
             .ok_or("no model is configured for the renderer")?;
-        avatar.show(&self.options.id, model, plan.clip.as_deref())?;
+        let clip = plan.clip.or_else(|| avatar::motion("nod"));
+        avatar.show(&self.options.id, model, clip.as_deref())?;
         // A face is separate from the motion: `neutral` clears it, and the
         // renderer keeps it across later motion changes.
         if let Some(name) = &plan.expression {
@@ -945,7 +946,10 @@ impl Session {
         match Avatar::spawn(&program) {
             Ok(mut avatar) => {
                 if let Some(model) = self.options.model.as_ref() {
-                    if let Err(error) = avatar.show(&self.options.id, model, None) {
+                    let initial_motion = avatar::motion("nod");
+                    if let Err(error) =
+                        avatar.show(&self.options.id, model, initial_motion.as_deref())
+                    {
                         tracing::warn!("the renderer did not show the model: {error}");
                     } else if (self.avatar_scale - 100.).abs() > f32::EPSILON
                         && let Err(error) =

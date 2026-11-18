@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 //! Starts the desktop client: one window, one session, one owner per resource.
 //!
 //! The session runs on its own thread with a single-threaded Tokio runtime,
@@ -8,10 +10,10 @@
 //! runtime in the process.
 
 use ene_desktop::{
-    Command, CompanionPod, Connection, EmbeddedAssets, Hub, Options, PodMode, Session,
-    bind_actions, focus_chat, initial_pod_bounds,
+    Command, Connection, EmbeddedAssets, Hub, Options, PodMode, Session, Tray, TrayAction,
+    TrayState, bind_actions, default_renderer, open_pod_window,
 };
-use gpui::{AnyWindowHandle, App, AppContext as _, Application, WindowBounds, WindowOptions};
+use gpui::{App, AppContext as _, Application};
 use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -67,31 +69,39 @@ fn main() {
 
     let quit = commands_tx.clone();
     let shown = path.display().to_string();
-    #[cfg(unix)]
+    let (tray_tx, tray_rx) = unbounded_channel::<TrayAction>();
+    let tray = Tray::spawn(TrayState::default(), tray_tx);
+    let tray_handle = tray.as_ref().map(Tray::handle);
+    let tray_rx = tray_handle.is_some().then_some(tray_rx);
+
     let shutdown_rx = {
         let (sig_tx, sig_rx) = tokio::sync::oneshot::channel::<()>();
         handle.spawn(async move {
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = async {
-                    match sigterm.as_mut() {
-                        Some(stream) => {
-                            stream.recv().await;
+            #[cfg(unix)]
+            let received = {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => result.is_ok(),
+                    result = async {
+                        match sigterm.as_mut() {
+                            Some(stream) => stream.recv().await.is_some(),
+                            None => std::future::pending::<bool>().await,
                         }
-                        None => std::future::pending::<()>().await,
-                    }
-                } => {}
+                    } => result,
+                }
+            };
+            #[cfg(not(unix))]
+            let received = tokio::signal::ctrl_c().await.is_ok();
+            if received {
+                let _ = sig_tx.send(());
             }
-            let _ = sig_tx.send(());
         });
         Some(sig_rx)
     };
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
-            #[cfg(unix)]
             if let Some(rx) = shutdown_rx {
                 cx.spawn(async move |cx| {
                     if rx.await.is_ok() {
@@ -108,11 +118,15 @@ fn main() {
                     commands_tx.clone(),
                     updates_tx.clone(),
                     updates_rx,
+                    tray_handle,
+                    tray_rx,
                     handle.clone(),
                     shown.clone(),
                 )
             });
-            let bounds = initial_pod_bounds(cx);
+            let open_chat = std::env::var("ENE_DESKTOP_OPEN_SETTINGS")
+                .ok()
+                .is_some_and(|val| val.trim().eq_ignore_ascii_case("chat"));
             let open_section = std::env::var("ENE_DESKTOP_OPEN_SETTINGS")
                 .ok()
                 .and_then(|val| match val.trim().to_ascii_lowercase().as_str() {
@@ -121,58 +135,28 @@ fn main() {
                     "device" => Some(ene_desktop::SettingsSection::Device),
                     _ => None,
                 });
-            let hub_for_pod = hub.clone();
-            let opened = cx.open_window(
-                WindowOptions {
-                    #[cfg(windows)]
-                    kind: gpui::WindowKind::PopUp,
-                    #[cfg(not(windows))]
-                    kind: gpui::WindowKind::Floating,
-                    window_background: gpui::WindowBackgroundAppearance::Transparent,
-                    window_decorations: Some(gpui::WindowDecorations::Client),
-                    app_id: Some("ene-desktop".into()),
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(PodMode::MiniVoice.min_size()),
-                    is_movable: true,
-                    is_resizable: false,
-                    titlebar: None,
-                    ..Default::default()
-                },
-                move |_window, cx| cx.new(|cx| CompanionPod::new(hub_for_pod.clone(), cx)),
-            );
-            match opened {
-                Ok(window) => {
-                    let pod_any: AnyWindowHandle = window.into();
-                    let view = window.update(cx, |view, window, cx| {
-                        focus_chat(view, window, cx);
-                        cx.entity().downgrade()
-                    });
-                    match view {
-                        Ok(view) => bind_actions(cx, view),
-                        Err(error) => {
-                            eprintln!("ene-desktop: the window content is unavailable: {error:#}");
-                        }
-                    }
-                    cx.on_window_closed(move |cx| {
-                        if cx.windows().is_empty() || !cx.windows().contains(&pod_any) {
-                            cx.quit();
-                        }
-                    })
-                    .detach();
-                    cx.activate(true);
-                    if let Some(section) = open_section {
-                        hub.update(cx, |hub, cx| hub.open_settings(section, cx));
-                    }
-                }
-                Err(error) => {
-                    eprintln!("ene-desktop: the window did not open: {error:#}");
-                    cx.quit();
-                }
+            if open_chat {
+                hub.update(cx, |hub, _cx| hub.pod_mode = PodMode::ExpandedChat);
+            }
+            bind_actions(cx, hub.clone());
+            if open_pod_window(cx, hub.clone()).is_none() {
+                cx.quit();
+                return;
+            }
+            let hub_closed = hub.clone();
+            cx.on_window_closed(move |cx| {
+                hub_closed.update(cx, |hub, cx| hub.sync_window_closed(cx));
+            })
+            .detach();
+            cx.activate(true);
+            if let Some(section) = open_section {
+                hub.update(cx, |hub, cx| hub.open_settings(section, cx));
             }
         });
 
     // The window is gone. The session stops serving, kills its child and returns;
     // joining it is what makes the exit orderly rather than a race.
+    drop(tray);
     let _ = quit.send(Command::Quit);
     let _ = worker.join();
 }
@@ -198,7 +182,9 @@ fn options() -> Options {
         id: std::env::var("ENE_DESKTOP_CLIENT_ID").unwrap_or(defaults.id),
         name: std::env::var("ENE_DESKTOP_CLIENT_NAME").unwrap_or(defaults.name),
         platform: defaults.platform,
-        renderer: std::env::var_os("ENE_DESKTOP_RENDERER").map(PathBuf::from),
+        renderer: std::env::var_os("ENE_DESKTOP_RENDERER")
+            .map(PathBuf::from)
+            .or_else(default_renderer),
         model: std::env::var_os("ENE_DESKTOP_MODEL")
             .map(PathBuf::from)
             .or(defaults.model),

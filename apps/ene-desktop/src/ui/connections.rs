@@ -11,7 +11,6 @@ use super::widgets::{
 use super::{ModelRoleSlot, SettingsStudio};
 use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
-use std::collections::BTreeMap;
 
 impl SettingsStudio {
     pub(crate) fn render_connections(
@@ -19,7 +18,7 @@ impl SettingsStudio {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (live, connections, providers, checks, companion, all_models) = {
+        let (live, connections, providers, checks, companion, all_models, embedding_models) = {
             let hub = self.hub.read(cx);
             (
                 hub.live(),
@@ -31,6 +30,7 @@ impl SettingsStudio {
                 hub.model.checks.clone(),
                 hub.model.companion().cloned(),
                 hub.all_llm_models(),
+                hub.all_embedding_models(),
             )
         };
 
@@ -116,7 +116,14 @@ impl SettingsStudio {
             },
         );
         let adv_panel = if adv_open {
-            Some(self.render_advanced_roles_panel(companion.as_ref(), &all_models, live, theme, cx))
+            Some(self.render_advanced_roles_panel(
+                companion.as_ref(),
+                &all_models,
+                &embedding_models,
+                live,
+                theme,
+                cx,
+            ))
         } else {
             None
         };
@@ -340,70 +347,77 @@ impl SettingsStudio {
                     )
                     .child(voice_chips),
             )
-            .child(
-                div()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .pt(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.ink_muted)
-                            .child("カスタム接続"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap(px(6.))
-                            .children(kind_chips),
-                    )
-                    .child(labeled_field("名前", name_d, theme))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(10.))
-                            .child(div().flex_1().min_w_0().child(labeled_field(
-                                "アダプタ / コマンド",
-                                adapter_d,
-                                theme,
-                            )))
-                            .child(div().flex_1().min_w_0().child(labeled_field(
-                                "URL / 引数",
-                                target_d,
-                                theme,
-                            ))),
-                    )
-                    .child(div().flex().flex_row().justify_end().child(pill_button(
-                        "add-custom-submit",
-                        "追加",
-                        Some(Icon::Plus),
-                        Tone::Primary,
-                        live && !c_name.is_empty(),
-                        theme,
-                        move |_, cx| {
-                            let input = build_custom_connection_input(
-                                custom_kind,
-                                &c_name,
-                                &c_adapter,
-                                &c_target,
-                            );
-                            hub_custom.update(cx, |hub, cx| {
-                                hub.upsert_connection("接続の追加", input, cx);
-                            });
-                            studio_done.update(cx, |this, cx| {
-                                this.adding_connection = false;
-                                cx.notify();
-                            });
-                        },
-                    ))),
-            )
+            .child(disclosure_row(
+                "custom-connection",
+                "カスタム接続",
+                self.custom_connection_open,
+                theme,
+                {
+                    let studio = cx.entity();
+                    move |_, cx| {
+                        studio.update(cx, |this, cx| {
+                            this.custom_connection_open = !this.custom_connection_open;
+                            cx.notify();
+                        })
+                    }
+                },
+            ))
+            .when(self.custom_connection_open, |panel| {
+                panel.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(6.))
+                                .children(kind_chips),
+                        )
+                        .child(labeled_field("名前", name_d, theme))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(10.))
+                                .child(div().flex_1().min_w_0().child(labeled_field(
+                                    "アダプタ / コマンド",
+                                    adapter_d,
+                                    theme,
+                                )))
+                                .child(div().flex_1().min_w_0().child(labeled_field(
+                                    "URL / 引数",
+                                    target_d,
+                                    theme,
+                                ))),
+                        )
+                        .child(div().flex().flex_row().justify_end().child(pill_button(
+                            "add-custom-submit",
+                            "追加",
+                            Some(Icon::Plus),
+                            Tone::Primary,
+                            live && !c_name.is_empty(),
+                            theme,
+                            move |_, cx| {
+                                let input = build_custom_connection_input(
+                                    custom_kind,
+                                    &c_name,
+                                    &c_adapter,
+                                    &c_target,
+                                );
+                                hub_custom.update(cx, |hub, cx| {
+                                    hub.upsert_connection("接続の追加", input, cx);
+                                });
+                                studio_done.update(cx, |this, cx| {
+                                    this.adding_connection = false;
+                                    cx.notify();
+                                });
+                            },
+                        ))),
+                )
+            })
             .into_any_element()
     }
 
@@ -422,6 +436,12 @@ impl SettingsStudio {
             .unwrap_or(w::ConnectionKind::Unspecified);
         let expanded = self.expanded_connection_id.as_deref() == Some(id.as_str());
 
+        let is_unsupported_check = check.is_some_and(|c| {
+            !c.healthy
+                && c.failure
+                    .as_option()
+                    .is_some_and(|f| f.code == "unsupported")
+        });
         let (state_label, state_dot, state_bg, state_fg) = if !conn.enabled {
             (
                 "無効",
@@ -429,9 +449,31 @@ impl SettingsStudio {
                 theme.bg_blush,
                 theme.ink_muted,
             )
+        } else if super::needs_key(
+            conn,
+            self.hub
+                .read(cx)
+                .model
+                .providers
+                .as_deref()
+                .unwrap_or_default(),
+        ) {
+            (
+                "キー登録が必要",
+                theme.amber,
+                theme.amber_soft,
+                theme.amber_fg,
+            )
+        } else if is_unsupported_check {
+            ("設定済み", theme.mint, theme.mint_soft, theme.mint_fg)
         } else {
             match check.map(|c| c.healthy) {
-                Some(true) => ("接続中", theme.mint, theme.mint_soft, theme.mint_fg),
+                Some(true) => (
+                    "接続先を確認済み",
+                    theme.mint,
+                    theme.mint_soft,
+                    theme.mint_fg,
+                ),
                 Some(false) => (
                     "接続エラー",
                     theme.danger,
@@ -502,7 +544,13 @@ impl SettingsStudio {
                     ))
                     .child(pill_button(
                         SharedString::from(format!("conn-edit-{id}")),
-                        if expanded { "閉じる" } else { "編集" },
+                        if expanded {
+                            "閉じる"
+                        } else if state_label == "キー登録が必要" {
+                            "キーを登録"
+                        } else {
+                            "編集"
+                        },
                         None,
                         if expanded { Tone::Soft } else { Tone::Ghost },
                         true,
@@ -558,7 +606,7 @@ impl SettingsStudio {
         let err_strip = check
             .filter(|c| !c.healthy)
             .and_then(|c| c.failure.as_option())
-            .filter(|f| !f.message.trim().is_empty())
+            .filter(|f| f.code != "unsupported" && !f.message.trim().is_empty())
             .map(|f| {
                 div()
                     .rounded(px(10.))
@@ -1117,6 +1165,7 @@ impl SettingsStudio {
         &self,
         companion: Option<&w::Companion>,
         all_models: &[(String, String, String)],
+        embedding_models: &[(String, String, String)],
         live: bool,
         theme: &Theme,
         _cx: &mut Context<Self>,
@@ -1135,24 +1184,28 @@ impl SettingsStudio {
                 .into_any_element();
         };
         let assignments = comp.assignments.as_option().cloned().unwrap_or_default();
-        let mut by_conn: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-        for (cid, mid, label) in all_models {
-            by_conn
-                .entry(cid.clone())
-                .or_default()
-                .push((mid.clone(), label.clone()));
-        }
 
         let mut rows = Vec::new();
         for (idx, slot) in ModelRoleSlot::ALL.into_iter().enumerate() {
+            let slot_models = if slot == ModelRoleSlot::Embedding {
+                embedding_models
+            } else {
+                all_models
+            };
             let current = slot.current(&assignments);
             let current_text = current
                 .as_ref()
-                .map(|m| m.model_id.clone())
+                .map(|m| {
+                    slot_models
+                        .iter()
+                        .find(|(cid, mid, _)| cid == &m.connection_id && mid == &m.model_id)
+                        .map(|(_, _, label)| label.clone())
+                        .unwrap_or_else(|| format!("{} / {}", m.connection_id, m.model_id))
+                })
                 .unwrap_or_else(|| slot.fallback_hint().to_owned());
 
             let mut chips = Vec::new();
-            for (cid, mid, label) in all_models {
+            for (cid, mid, label) in slot_models {
                 let selected = current
                     .as_ref()
                     .is_some_and(|c| c.connection_id == *cid && c.model_id == *mid);
@@ -1334,14 +1387,39 @@ fn apply_connection_edits(
             stt.language_hints = split_comma(list_raw);
         }
         Some(w::connection_config::Config::Embedding(emb)) => {
-            emb.endpoint = updated_ep(emb.endpoint.as_option());
-            emb.model_id = list_raw.trim().to_owned();
+            let mut ep_val = updated_ep(emb.endpoint.as_option())
+                .into_option()
+                .unwrap_or_default();
+            if ep_val.adapter.trim().is_empty() {
+                ep_val.adapter = "openai".to_owned();
+            }
+            emb.endpoint = Some(ep_val).into();
+            let trimmed = list_raw.trim();
+            emb.model_id = if trimmed.is_empty() {
+                "text-embedding-3-small".to_owned()
+            } else {
+                trimmed.to_owned()
+            };
+            if emb.dimensions == 0 {
+                emb.dimensions = 1536;
+            }
         }
         Some(w::connection_config::Config::Mcp(mcp)) => {
-            mcp.endpoint = updated_ep(mcp.endpoint.as_option());
+            let mut ep_val = updated_ep(mcp.endpoint.as_option())
+                .into_option()
+                .unwrap_or_default();
+            ep_val.adapter = "mcp".to_owned();
             if let Some(cmd) = command {
-                mcp.command = cmd.to_owned();
+                let trimmed = cmd.trim();
+                if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                    ep_val.endpoint = trimmed.to_owned();
+                    mcp.command.clear();
+                    mcp.args.clear();
+                } else {
+                    mcp.command = trimmed.to_owned();
+                }
             }
+            mcp.endpoint = Some(ep_val).into();
             mcp.allowed_tools = split_comma(list_raw);
         }
         Some(w::connection_config::Config::Acp(acp)) => {
@@ -1394,25 +1472,50 @@ fn build_custom_connection_input(
             ..Default::default()
         })),
         w::ConnectionKind::Embedding => {
+            let mut emb_ep = ep;
+            if emb_ep.adapter.trim().is_empty() {
+                emb_ep.adapter = "openai".to_owned();
+            }
             w::connection_config::Config::Embedding(Box::new(w::EmbeddingConnection {
-                endpoint: Some(ep).into(),
+                endpoint: Some(emb_ep).into(),
+                model_id: "text-embedding-3-small".to_owned(),
+                dimensions: 1536,
                 ..Default::default()
             }))
         }
-        w::ConnectionKind::Mcp => w::connection_config::Config::Mcp(Box::new(w::McpConnection {
-            command: adapter_or_cmd.to_owned(),
-            args: url_or_args.split_whitespace().map(str::to_owned).collect(),
-            endpoint: Some(w::ConnectionEndpoint {
-                endpoint: if url_or_args.starts_with("http") {
-                    url_or_args.to_owned()
-                } else {
-                    String::new()
-                },
+        w::ConnectionKind::Mcp => {
+            let first = adapter_or_cmd.trim();
+            let second = url_or_args.trim();
+            let http_url = if second.starts_with("http://") || second.starts_with("https://") {
+                Some(second)
+            } else if first.starts_with("http://") || first.starts_with("https://") {
+                Some(first)
+            } else {
+                None
+            };
+            let (command, args, endpoint_url) = if let Some(url) = http_url {
+                (String::new(), Vec::new(), url.to_owned())
+            } else {
+                (
+                    first.to_owned(),
+                    second.split_whitespace().map(str::to_owned).collect(),
+                    String::new(),
+                )
+            };
+            w::connection_config::Config::Mcp(Box::new(w::McpConnection {
+                command,
+                args,
+                endpoint: Some(w::ConnectionEndpoint {
+                    adapter: "mcp".to_owned(),
+                    endpoint: endpoint_url,
+                    options_schema: String::new(),
+                    options: "{}".into(),
+                    ..Default::default()
+                })
+                .into(),
                 ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        })),
+            }))
+        }
         w::ConnectionKind::Acp => w::connection_config::Config::Acp(Box::new(w::AcpConnection {
             command: adapter_or_cmd.to_owned(),
             args: url_or_args.split_whitespace().map(str::to_owned).collect(),

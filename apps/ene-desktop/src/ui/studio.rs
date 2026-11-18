@@ -26,6 +26,7 @@ pub struct SettingsStudio {
     last_created_ping: u64,
     // Connections state
     pub(crate) adding_connection: bool,
+    pub(crate) custom_connection_open: bool,
     pub(crate) custom_kind: w::ConnectionKind,
     pub(crate) expanded_connection_id: Option<String>,
     pub(crate) revealed_secret_for: Option<String>,
@@ -52,6 +53,7 @@ impl SettingsStudio {
             delete_armed_companion: None,
             last_created_ping: 0,
             adding_connection: false,
+            custom_connection_open: false,
             custom_kind: w::ConnectionKind::Llm,
             expanded_connection_id: None,
             revealed_secret_for: None,

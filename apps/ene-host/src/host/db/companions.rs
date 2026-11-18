@@ -1,7 +1,7 @@
 //! Companions and their mind: persistence and revision checks.
 use super::{Result, Store, json_column, now, require, to_json};
 use crate::host::mind::{Companion, Profile};
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
 
 fn row_to_companion(row: &Row<'_>) -> rusqlite::Result<Companion> {
     Ok(Companion {
@@ -46,31 +46,44 @@ impl Store {
 
     pub(crate) fn insert_companion(&self, companion: &Companion) -> Result<()> {
         let connection = self.conn()?;
-        connection
-            .prepare_cached(
-                "INSERT INTO companions (id, name, mind, profile, profile_revision, state, \
-             state_revision, body, voice, assignments, persona, voice_identifier, revision, \
-             created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            )?
-            .execute(params![
-                companion.id,
-                companion.name,
-                companion.mind,
-                to_json(&companion.profile)?,
-                companion.profile_revision,
-                to_json(&companion.state)?,
-                companion.state_revision,
-                to_json(&companion.body)?,
-                to_json(&companion.voice)?,
-                to_json(&companion.assignments)?,
-                companion.persona,
-                companion.voice_identifier,
-                companion.revision,
-                companion.created_at,
-                companion.updated_at,
-            ])?;
-        Ok(())
+        insert_companion_with(&connection, companion)
+    }
+
+    /// Seeds the initial `ene` companion once on a fresh host installation.
+    ///
+    /// Recording a one-time marker in `bootstrap_state` ensures that user edits
+    /// or deletions are preserved across restarts instead of resurrecting `ene`.
+    pub(crate) fn seed_initial_companion(&self) -> Result<bool> {
+        const KEY: &str = "default_companion_ene";
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let applied: Option<String> = transaction
+            .query_row(
+                "SELECT applied_at FROM bootstrap_state WHERE key = ?1",
+                [KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if applied.is_some() {
+            return Ok(false);
+        }
+        let stamp = now();
+        transaction.execute(
+            "INSERT INTO bootstrap_state (key, applied_at) VALUES (?1, ?2)",
+            params![KEY, stamp],
+        )?;
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM companions", [], |row| row.get(0))?;
+        let inserted = if count == 0 {
+            let companion = crate::host::mind::default_ene_companion(&stamp);
+            companion.validate()?;
+            insert_companion_with(&transaction, &companion)?;
+            true
+        } else {
+            false
+        };
+        transaction.commit()?;
+        Ok(inserted)
     }
 
     /// Saves an edited companion with an optimistic revision check.
@@ -133,5 +146,60 @@ impl Store {
             .prepare_cached("DELETE FROM companions WHERE id = ?1")?
             .execute([id])?;
         Ok(deleted > 0)
+    }
+}
+
+fn insert_companion_with(connection: &rusqlite::Connection, companion: &Companion) -> Result<()> {
+    connection
+        .prepare_cached(
+            "INSERT INTO companions (id, name, mind, profile, profile_revision, state, \
+         state_revision, body, voice, assignments, persona, voice_identifier, revision, \
+         created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        )?
+        .execute(params![
+            companion.id,
+            companion.name,
+            companion.mind,
+            to_json(&companion.profile)?,
+            companion.profile_revision,
+            to_json(&companion.state)?,
+            companion.state_revision,
+            to_json(&companion.body)?,
+            to_json(&companion.voice)?,
+            to_json(&companion.assignments)?,
+            companion.persona,
+            companion.voice_identifier,
+            companion.revision,
+            companion.created_at,
+            companion.updated_at,
+        ])?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_ene_companion_seeds_once_and_respects_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+
+        assert!(store.seed_initial_companion().unwrap());
+        let seeded = store
+            .companion("ene")
+            .unwrap()
+            .expect("default ene companion must be seeded");
+        assert_eq!(seeded.name, "ene");
+        assert_eq!(seeded.body.schema, "ene.body.v1");
+        assert_eq!(seeded.body.json["model"], "ENE.vrm");
+        assert!(!seeded.profile.facets.is_empty());
+        assert!(!seeded.profile.examples.is_empty());
+
+        assert!(!store.seed_initial_companion().unwrap());
+        assert!(store.delete_companion("ene").unwrap());
+        assert!(!store.seed_initial_companion().unwrap());
+        assert!(store.companions().unwrap().is_empty());
     }
 }

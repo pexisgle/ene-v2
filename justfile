@@ -1,6 +1,11 @@
 [windows]
 set shell := ["powershell.exe", "-NoLogo", "-Command"]
 
+# Cargo 1.100's per-crate build-dir layout expands large crates' rustc arguments
+# past Windows' 32 KiB CreateProcess limit; sccache flattens Cargo's response
+# file on `dep-info` probes and fails with `os error 206`.
+cargo_wrapper := if os_family() == "windows" { "--config \"build.rustc-wrapper=''\"" } else { "" }
+
 default:
     @just --list
 
@@ -11,16 +16,16 @@ fmt-check:
     cargo fmt --all -- --check
 
 check:
-    cargo check --workspace --all-targets --all-features --locked
+    cargo check {{cargo_wrapper}} --workspace --all-targets --all-features --locked
 
 clippy:
-    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    cargo clippy {{cargo_wrapper}} --workspace --all-targets --all-features --locked -- -D warnings
 
 test: build-test-plugins
-    cargo test --workspace --all-features --locked
+    cargo test {{cargo_wrapper}} --workspace --all-features --locked
 
 build:
-    cargo build --workspace --all-targets --all-features --locked
+    cargo build {{cargo_wrapper}} --workspace --all-targets --all-features --locked
 
 [windows]
 fetch-assets asset="all":
@@ -34,7 +39,7 @@ fetch-assets asset="all":
 verify: fmt-check clippy
 
 build-test-plugins:
-    cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
+    cargo build {{cargo_wrapper}} --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
 
 # The build scratch lives in target/tmp: sccache puts its per-compile directory
 # under the system temp, and when Windows cleanup removes one mid-build rustc
@@ -107,7 +112,7 @@ run: avatar
 
 [windows]
 run: avatar
-    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $state = if ($env:ENE_HOST_STATE_DIR) { $env:ENE_HOST_STATE_DIR } else { Join-Path $PWD 'target\run\host\state' }; $runtime = if ($env:ENE_HOST_RUNTIME_DIR) { $env:ENE_HOST_RUNTIME_DIR } else { Join-Path $PWD 'target\run\host\runtime' }; $conn = if ($env:ENE_HOST_CONNECTION) { $env:ENE_HOST_CONNECTION } else { Join-Path $runtime 'connection.json' }; $renderer = if ($env:ENE_DESKTOP_RENDERER) { $env:ENE_DESKTOP_RENDERER } else { Join-Path $PWD 'target\release\ene-avatar.exe' }; $caps = if ($env:ENE_HOST_ALLOWED_CAPABILITIES) { $env:ENE_HOST_ALLOWED_CAPABILITIES } else { '*' }; cargo build --locked -p ene-host -p ene-desktop; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $env:ENE_HOST_STATE_DIR = $state; $env:ENE_HOST_RUNTIME_DIR = $runtime; $env:ENE_HOST_ALLOWED_CAPABILITIES = $caps; $started = [DateTime]::UtcNow; $hostProc = Start-Process -FilePath (Join-Path $PWD 'target\debug\ene-host.exe') -NoNewWindow -PassThru; try { $deadline = $started.AddSeconds(30); while ([DateTime]::UtcNow -lt $deadline) { if ($hostProc.HasExited) { exit $hostProc.ExitCode }; if ((Test-Path $conn) -and ((Get-Item $conn).LastWriteTimeUtc -ge $started)) { break }; Start-Sleep -Milliseconds 50 }; if (-not ((Test-Path $conn) -and ((Get-Item $conn).LastWriteTimeUtc -ge $started))) { Write-Error "just run: ene-host did not publish $conn within 30s"; exit 1 }; $env:ENE_HOST_CONNECTION = $conn; $env:ENE_DESKTOP_RENDERER = $renderer; & (Join-Path $PWD 'target\debug\ene-desktop.exe'); exit $LASTEXITCODE } finally { if ($hostProc -and -not $hostProc.HasExited) { Stop-Process -Id $hostProc.Id -Force -ErrorAction SilentlyContinue; $hostProc.WaitForExit() } }
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $state = if ($env:ENE_HOST_STATE_DIR) { $env:ENE_HOST_STATE_DIR } else { Join-Path $PWD 'target\run\host\state' }; $runtime = if ($env:ENE_HOST_RUNTIME_DIR) { $env:ENE_HOST_RUNTIME_DIR } else { Join-Path $PWD 'target\run\host\runtime' }; $conn = if ($env:ENE_HOST_CONNECTION) { $env:ENE_HOST_CONNECTION } else { Join-Path $runtime 'connection.json' }; $renderer = if ($env:ENE_DESKTOP_RENDERER) { $env:ENE_DESKTOP_RENDERER } else { Join-Path $PWD 'target\release\ene-avatar.exe' }; $caps = if ($env:ENE_HOST_ALLOWED_CAPABILITIES) { $env:ENE_HOST_ALLOWED_CAPABILITIES } else { '*' }; cargo build {{cargo_wrapper}} --locked -p ene-host -p ene-desktop; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $env:ENE_HOST_STATE_DIR = $state; $env:ENE_HOST_RUNTIME_DIR = $runtime; $env:ENE_HOST_ALLOWED_CAPABILITIES = $caps; $marker = Join-Path $env:TMP ("ene-run-{0}.tmp" -f [guid]::NewGuid().ToString('N')); New-Item -ItemType File -Force $marker | Out-Null; $markerTime = (Get-Item $marker).LastWriteTimeUtc; $hostProc = $null; $desktopProc = $null; try { $hostProc = Start-Process -FilePath (Join-Path $PWD 'target\debug\ene-host.exe') -NoNewWindow -PassThru; $null = $hostProc.Handle; $deadline = [DateTime]::UtcNow.AddSeconds(30); while ([DateTime]::UtcNow -lt $deadline) { if ($hostProc.HasExited) { $hostProc.WaitForExit(); $code = if ($null -ne $hostProc.ExitCode) { $hostProc.ExitCode } else { 1 }; Write-Error ("just run: ene-host exited early with code {0} (0x{0:x8})" -f $code); exit $code }; if ((Test-Path $conn) -and ((Get-Item $conn).Length -gt 0) -and ((Get-Item $conn).LastWriteTimeUtc -ge $markerTime)) { break }; Start-Sleep -Milliseconds 50 }; if (-not ((Test-Path $conn) -and ((Get-Item $conn).Length -gt 0) -and ((Get-Item $conn).LastWriteTimeUtc -ge $markerTime))) { Write-Error "just run: ene-host did not publish $conn within 30s"; exit 1 }; $env:ENE_HOST_CONNECTION = $conn; $env:ENE_DESKTOP_RENDERER = $renderer; $desktopProc = Start-Process -FilePath (Join-Path $PWD 'target\debug\ene-desktop.exe') -PassThru; $null = $desktopProc.Handle; while (-not $desktopProc.HasExited) { if ($hostProc.HasExited) { $hostProc.WaitForExit(); $code = if ($null -ne $hostProc.ExitCode) { $hostProc.ExitCode } else { 1 }; Write-Error ("just run: ene-host exited while desktop was running (code {0}, 0x{0:x8})" -f $code); exit $code }; Start-Sleep -Milliseconds 100 }; $desktopProc.WaitForExit(); $code = if ($null -ne $desktopProc.ExitCode) { $desktopProc.ExitCode } else { 0 }; exit $code } finally { if ($marker) { Remove-Item -Force -ErrorAction SilentlyContinue $marker }; if ($desktopProc -and -not $desktopProc.HasExited) { Stop-Process -Id $desktopProc.Id -Force -ErrorAction SilentlyContinue; $desktopProc.WaitForExit() }; if ($hostProc -and -not $hostProc.HasExited) { Stop-Process -Id $hostProc.Id -Force -ErrorAction SilentlyContinue; $hostProc.WaitForExit() } }
 
 [unix]
 run-host:
@@ -115,7 +120,7 @@ run-host:
 
 [windows]
 run-host:
-    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $env:ENE_HOST_STATE_DIR = (Join-Path $PWD 'target\run\host\state'); $env:ENE_HOST_RUNTIME_DIR = (Join-Path $PWD 'target\run\host\runtime'); cargo run --locked -p ene-host
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $env:ENE_HOST_STATE_DIR = (Join-Path $PWD 'target\run\host\state'); $env:ENE_HOST_RUNTIME_DIR = (Join-Path $PWD 'target\run\host\runtime'); cargo run {{cargo_wrapper}} --locked -p ene-host
 
 # The renderer the client spawns; release, because a debug Bevy build cannot hold a frame rate.
 [unix]
@@ -124,7 +129,7 @@ avatar:
 
 [windows]
 avatar:
-    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; cargo build --release --locked -p ene-avatar --bin ene-avatar
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; cargo build {{cargo_wrapper}} --release --locked -p ene-avatar --bin ene-avatar
 
 # Connect to a running host as the desktop client.
 [unix]
@@ -133,13 +138,13 @@ run-desktop: avatar
 
 [windows]
 run-desktop: avatar
-    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $env:ENE_HOST_CONNECTION = (Join-Path $PWD 'target\run\host\runtime\connection.json'); $env:ENE_DESKTOP_RENDERER = (Join-Path $PWD 'target\release\ene-avatar.exe'); cargo run --locked -p ene-desktop
+    $env:TMP = (Join-Path $PWD 'target\tmp'); $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null; $env:ENE_HOST_CONNECTION = (Join-Path $PWD 'target\run\host\runtime\connection.json'); $env:ENE_DESKTOP_RENDERER = (Join-Path $PWD 'target\release\ene-avatar.exe'); cargo run {{cargo_wrapper}} --locked -p ene-desktop
 
 # Control the transparent renderer using JSON Lines on stdin.
 run-avatar:
-    cargo run --release --locked -p ene-avatar
+    cargo run {{cargo_wrapper}} --release --locked -p ene-avatar
 
 # Build the renderer and launch its interactive CLI example.
 run-avatar-cli:
-    cargo build --release --locked -p ene-avatar --bin ene-avatar
-    cargo run --release --locked -p ene-avatar --example control
+    cargo build {{cargo_wrapper}} --release --locked -p ene-avatar --bin ene-avatar
+    cargo run {{cargo_wrapper}} --release --locked -p ene-avatar --example control

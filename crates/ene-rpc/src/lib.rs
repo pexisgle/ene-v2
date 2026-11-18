@@ -9,6 +9,8 @@ pub mod rpc {
 }
 
 pub use rpc::*;
+mod speech;
+pub use speech::plain_reply;
 
 #[cfg(all(feature = "client", not(target_family = "wasm")))]
 mod client;

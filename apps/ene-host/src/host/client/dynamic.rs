@@ -49,7 +49,7 @@ use tokio::sync::{mpsc, oneshot};
 /// How many capability calls may queue before a handler waits.
 const QUEUE: usize = 64;
 
-const WORK_AGENT_TOOLS: &[&str] = &["device_request", "report"];
+const WORK_AGENT_TOOLS: &[&str] = &["device_request", "mind_read", "mind_recall", "report"];
 
 /// One active companion/client a shared tool dispatches for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,10 +349,10 @@ fn granted_names(
     granted
 }
 
-/// The tools a parent agent is offered: the host's built-ins (without
-/// `report`, which belongs to the hand), the capability tools its active client
-/// granted, and every tool the host serves itself such as an MCP server's.
-fn parent_names(granted: &[String], host: &std::collections::HashSet<String>) -> Vec<String> {
+/// The tools a parent agent is offered: the host's minimal built-ins (without
+/// `report`, which belongs to the hand) and the capability tools its active
+/// client granted. External MCP tools belong exclusively to the hand.
+fn parent_names(granted: &[String]) -> Vec<String> {
     let mut names: Vec<String> = BUILTIN_TOOLS
         .iter()
         .copied()
@@ -360,17 +360,37 @@ fn parent_names(granted: &[String], host: &std::collections::HashSet<String>) ->
         .map(str::to_owned)
         .collect();
     names.extend(granted.iter().cloned());
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The tools a work agent ("hand") is offered: its built-in execution/mind
+/// tools (`device_request`, `mind_read`, `mind_recall`, `report`) plus every
+/// tool the host serves itself, such as connected MCP server tools.
+pub(crate) fn hand_names(host: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut names: Vec<String> = WORK_AGENT_TOOLS
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect();
     names.extend(host.iter().cloned());
     names.sort();
     names.dedup();
     names
 }
 
-/// Limits what each parent agent is offered: the host's built-in parent tools
-/// plus only the capability tools granted to that companion's active client.
-/// A hand keeps `report` and `device_request`; it never sees a capability
-/// tool. This corrects the `ToolAccess::All` that a freshly spawned or
-/// restored parent starts with.
+/// Initial `ToolAccess` for a newly spawned or restored work agent.
+pub(crate) fn hand_tool_access(world: &mut World) -> ToolAccess {
+    let host = crate::host::mcp::tool_names(world);
+    ToolAccess::Only(hand_names(&host))
+}
+
+/// Limits what each parent agent is offered ("head": minimal built-ins + active
+/// client capability tools) and what each work agent is offered ("hand":
+/// `report`, `device_request`, `mind_read`, `mind_recall` + all MCP tools).
+/// This corrects the `ToolAccess::All` that a freshly spawned or restored
+/// agent starts with.
 fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {
     let granted = granted_names(world, entities);
     let parents: Vec<(Entity, String)> = {
@@ -383,17 +403,14 @@ fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {
     let host = crate::host::mcp::tool_names(world);
     for (entity, companion) in parents {
         let granted: &[String] = granted.get(&companion).map_or(&[], Vec::as_slice);
-        let names = parent_names(granted, &host);
+        let names = parent_names(granted);
         set_access(world, entity, &names);
     }
     let hands: Vec<Entity> = {
         let mut query = world.query_filtered::<Entity, With<WorkAgent>>();
         query.iter(world).collect()
     };
-    let hand_tools: Vec<String> = WORK_AGENT_TOOLS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect();
+    let hand_tools = hand_names(&host);
     for entity in hands {
         set_access(world, entity, &hand_tools);
     }

@@ -496,12 +496,80 @@ fn pick_input(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, Stri
 ///
 /// The callback only copies device samples into a bounded ring. Conversion to
 /// the wire format happens in [`Microphone::take`], on the session thread.
+const VAD_START_RMS: f32 = 0.018;
+const VAD_CONTINUE_RMS: f32 = 0.010;
+const VAD_HANGOVER_TICKS: u8 = 5;
+const VAD_PRE_ROLL_SAMPLES: usize = 2_400;
+
+struct VoiceGate {
+    active: bool,
+    hangover: u8,
+    pre_roll: VecDeque<f32>,
+}
+
+impl VoiceGate {
+    fn new() -> Self {
+        Self {
+            active: false,
+            hangover: 0,
+            pre_roll: VecDeque::with_capacity(VAD_PRE_ROLL_SAMPLES),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.active = false;
+        self.hangover = 0;
+        self.pre_roll.clear();
+    }
+
+    fn push_pre_roll(&mut self, samples: &[f32]) {
+        for &sample in samples {
+            if self.pre_roll.len() >= VAD_PRE_ROLL_SAMPLES {
+                self.pre_roll.pop_front();
+            }
+            self.pre_roll.push_back(sample);
+        }
+    }
+
+    fn process(&mut self, samples: &[f32]) -> Vec<f32> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
+        let rms = (samples.iter().map(|sample| sample * sample).sum::<f32>()
+            / samples.len() as f32)
+            .sqrt();
+        if self.active {
+            if rms >= VAD_CONTINUE_RMS {
+                self.hangover = VAD_HANGOVER_TICKS;
+                return samples.to_vec();
+            }
+            if self.hangover > 0 {
+                self.hangover -= 1;
+                return samples.to_vec();
+            }
+            self.active = false;
+            self.push_pre_roll(samples);
+            Vec::new()
+        } else if rms >= VAD_START_RMS {
+            self.active = true;
+            self.hangover = VAD_HANGOVER_TICKS;
+            let mut out: Vec<f32> = self.pre_roll.drain(..).collect();
+            out.extend_from_slice(samples);
+            out
+        } else {
+            self.push_pre_roll(samples);
+            Vec::new()
+        }
+    }
+}
+
 pub struct Microphone {
     _stream: cpal::Stream,
     frames: Arc<Mutex<VecDeque<f32>>>,
     filter: Option<Filter>,
     muted: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+    voice_gate: VoiceGate,
 }
 
 impl Microphone {
@@ -578,6 +646,7 @@ impl Microphone {
                 .transpose()?,
             muted,
             level,
+            voice_gate: VoiceGate::new(),
         })
     }
 
@@ -609,6 +678,7 @@ impl Microphone {
     /// Takes the frames captured since the last call, as wire PCM.
     pub fn take(&mut self) -> Vec<u8> {
         if self.is_muted() {
+            self.voice_gate.reset();
             if let Ok(mut frames) = self.frames.lock() {
                 frames.clear();
             }
@@ -622,7 +692,11 @@ impl Microphone {
             Some(filter) => filter.push(&samples).unwrap_or_default(),
             None => samples,
         };
-        encode(&samples)
+        let gated = self.voice_gate.process(&samples);
+        if gated.is_empty() {
+            return Vec::new();
+        }
+        encode(&gated)
     }
 }
 
@@ -678,6 +752,25 @@ fn push_captured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_gate_drops_silence_and_passes_speech_with_preroll_and_hangover() {
+        let mut gate = VoiceGate::new();
+        let silence = vec![0.002f32; 480];
+        assert!(gate.process(&silence).is_empty());
+        assert!(gate.process(&silence).is_empty());
+
+        let speech = vec![0.05f32; 480];
+        let started = gate.process(&speech);
+        // Includes buffered pre-roll from the preceding silence ticks plus speech.
+        assert_eq!(started.len(), 480 * 3);
+
+        // Hangover keeps transmitting for VAD_HANGOVER_TICKS quiet chunks before closing.
+        for _ in 0..VAD_HANGOVER_TICKS {
+            assert_eq!(gate.process(&silence).len(), 480);
+        }
+        assert!(gate.process(&silence).is_empty());
+    }
 
     #[test]
     fn wire_pcm_round_trips_through_samples() {

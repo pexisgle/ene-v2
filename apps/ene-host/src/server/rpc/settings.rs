@@ -38,6 +38,29 @@ impl w::SettingsService for Services {
             let expected = input.expected_revision;
             inputs.push((wire::connection_from(input)?, expected));
         }
+        // Pre-start enabled plugins referenced in `inputs` so that when
+        // `SettingsUpdated` fires on reload inside `self.call`, newly enabled
+        // plugin adapters (e.g. openrouter-wasm) are already running.
+        for (conn, _) in &inputs {
+            if !conn.enabled {
+                continue;
+            }
+            let adapter = conn.endpoint().adapter.clone();
+            if self.runtime.providers().get(&adapter).is_none() {
+                continue;
+            }
+            let extension = match conn.kind {
+                crate::host::settings::ConnectionKind::Embedding => {
+                    ene_plugin::Extension::Embedding
+                }
+                crate::host::settings::ConnectionKind::Llm => ene_plugin::Extension::Llm,
+                crate::host::settings::ConnectionKind::Tts => ene_plugin::Extension::Tts,
+                crate::host::settings::ConnectionKind::Stt => ene_plugin::Extension::Stt,
+                crate::host::settings::ConnectionKind::Acp => ene_plugin::Extension::Harness,
+                crate::host::settings::ConnectionKind::Mcp => continue,
+            };
+            let _ = self.runtime.providers().start(&adapter, extension).await;
+        }
         let view = self
             .call(move |app| {
                 let store = app.world().resource::<Store>().clone();
@@ -309,8 +332,33 @@ impl w::SettingsService for Services {
         let credentials = self.runtime.credentials();
         // The probe performs a network request, so it must not run on the ECS
         // thread; the connection was captured above.
-        let check =
-            model::probe(&store, &credentials, &connection, &self.runtime.providers()).await;
+        let check = if connection.kind == crate::host::settings::ConnectionKind::Mcp {
+            let tools = self
+                .runtime
+                .read({
+                    let id = connection.id.clone();
+                    move |app| Ok(crate::host::mcp::server_tool_names(app.world(), &id))
+                })
+                .await
+                .unwrap_or_default();
+            crate::host::settings::Check {
+                healthy: true,
+                checked_at: crate::host::db::now(),
+                failure: None,
+                capabilities: Vec::new(),
+                resources: tools.unwrap_or_default(),
+            }
+        } else if connection.kind == crate::host::settings::ConnectionKind::Tts
+            && connection
+                .endpoint()
+                .adapter
+                .eq_ignore_ascii_case("voicevox")
+            && self.runtime.providers().get("voicevox").is_none()
+        {
+            probe_voicevox_tts(&connection).await
+        } else {
+            model::probe(&store, &credentials, &connection, &self.runtime.providers()).await
+        };
         let request_id = request.request_key.to_owned();
         let resource_id = request.resource_id.map(str::to_owned);
         let id = connection.id;
@@ -369,6 +417,83 @@ fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {
         effect,
         created_at: rule.created_at,
     })
+}
+
+async fn probe_voicevox_tts(
+    connection: &crate::host::settings::Connection,
+) -> crate::host::settings::Check {
+    let checked_at = crate::host::db::now();
+    let base = connection.endpoint().endpoint.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        "http://127.0.0.1:50021"
+    } else {
+        base
+    };
+    let url = format!("{base}/speakers");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return crate::host::settings::Check {
+                healthy: false,
+                checked_at,
+                failure: Some(crate::host::error::Failure::new(
+                    "connection_check",
+                    error.to_string(),
+                )),
+                capabilities: Vec::new(),
+                resources: Vec::new(),
+            };
+        }
+    };
+    match client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => {
+            let mut resources = Vec::new();
+            if let Ok(speakers) = response.json::<Vec<serde_json::Value>>().await {
+                for speaker in speakers {
+                    if let Some(styles) = speaker.get("styles").and_then(|s| s.as_array()) {
+                        for style in styles {
+                            if let Some(id) = style.get("id").and_then(|v| v.as_u64()) {
+                                resources.push(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            if resources.is_empty() {
+                resources.extend(["1".to_owned(), "3".to_owned()]);
+            }
+            crate::host::settings::Check {
+                healthy: true,
+                checked_at,
+                failure: None,
+                capabilities: Vec::new(),
+                resources,
+            }
+        }
+        Ok(response) => crate::host::settings::Check {
+            healthy: false,
+            checked_at,
+            failure: Some(crate::host::error::Failure::new(
+                "connection_check",
+                format!("HTTP {}", response.status().as_u16()),
+            )),
+            capabilities: Vec::new(),
+            resources: Vec::new(),
+        },
+        Err(error) => crate::host::settings::Check {
+            healthy: false,
+            checked_at,
+            failure: Some(crate::host::error::Failure::new(
+                "connection_check",
+                error.to_string(),
+            )),
+            capabilities: Vec::new(),
+            resources: Vec::new(),
+        },
+    }
 }
 
 fn model_item(id: String, spec: &ModelSpec) -> w::Model {

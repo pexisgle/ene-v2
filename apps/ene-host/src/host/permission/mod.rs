@@ -146,21 +146,44 @@ pub(crate) fn decide_capability(
     spec: Option<&CapabilitySpec>,
     capability: &str,
     tool_name: &str,
-    arguments: &Value,
+    call_arguments: &Value,
 ) -> Verdict {
     if let Some(prefix) = hard_denied(capability) {
         return Verdict::Deny {
             reason: format!("`{capability}` is hard-blocked by the host ({prefix}*)"),
         };
     }
-    let (normalized, _) = canonicalise(tool_name, arguments);
+    let empty = serde_json::json!({});
+    let arguments = if tool_name == "device_request" {
+        call_arguments.get("input").unwrap_or(&empty)
+    } else {
+        call_arguments
+    };
+    let normalized = canonical_json(arguments);
+    let target_summary = target(spec, capability, arguments);
     let mut denied: Option<&PolicyRule> = None;
     let mut confirm = false;
     let mut allowed = false;
-    for rule in rules
-        .iter()
-        .filter(|rule| matches(rule, tool_name, &normalized, arguments))
-    {
+    for rule in rules.iter().filter(|rule| {
+        // The approval card stores the whole device request, including the capability.
+        if tool_name == "device_request"
+            && rule.tool_name == tool_name
+            && rule.effect == PolicyEffect::Allow
+            && rule.pattern.starts_with('{')
+            && let Ok(saved) = serde_json::from_str::<Value>(&rule.pattern)
+            && saved.get("capability").is_some()
+        {
+            return &saved == call_arguments;
+        }
+        matches(
+            rule,
+            capability,
+            tool_name,
+            &normalized,
+            &target_summary,
+            arguments,
+        )
+    }) {
         match rule.effect {
             PolicyEffect::Deny => {
                 denied = Some(rule);
@@ -180,7 +203,7 @@ pub(crate) fn decide_capability(
     }
     if confirm {
         return Verdict::Confirm {
-            target: target(spec, capability, arguments),
+            target: target_summary,
         };
     }
     if allowed {
@@ -191,23 +214,52 @@ pub(crate) fn decide_capability(
         // A declared capability that expects confirmation, an undeclared one
         // and an unknown approval all fail safe to the card.
         _ => Verdict::Confirm {
-            target: target(spec, capability, arguments),
+            target: target_summary,
         },
     }
 }
 
-fn matches(rule: &PolicyRule, tool_name: &str, normalized: &str, arguments: &Value) -> bool {
-    if rule.tool_name != "*" && rule.tool_name != tool_name {
+fn matches(
+    rule: &PolicyRule,
+    capability: &str,
+    tool_name: &str,
+    normalized: &str,
+    target_summary: &str,
+    arguments: &Value,
+) -> bool {
+    let tool_matches = rule.tool_name == "*"
+        || rule.tool_name == tool_name
+        || rule.tool_name == capability
+        || rule.tool_name.strip_suffix('*').is_some_and(|prefix| {
+            !prefix.is_empty() && (tool_name.starts_with(prefix) || capability.starts_with(prefix))
+        });
+    if !tool_matches {
         return false;
     }
-    rule.pattern == "*"
-        || rule.pattern == normalized
-        || arguments
-            .as_object()
-            .into_iter()
-            .flat_map(|object| object.values())
-            .filter_map(Value::as_str)
-            .any(|value| value == rule.pattern)
+    let pattern_matches = |value: &str| {
+        rule.pattern == "*"
+            || rule.pattern == value
+            || rule
+                .pattern
+                .strip_suffix('*')
+                .is_some_and(|prefix| !prefix.is_empty() && value.starts_with(prefix))
+    };
+    pattern_matches(normalized)
+        || pattern_matches(target_summary)
+        || json_contains_matching_str(arguments, &pattern_matches)
+}
+
+fn json_contains_matching_str(value: &Value, predicate: &impl Fn(&str) -> bool) -> bool {
+    match value {
+        Value::String(s) => predicate(s),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| json_contains_matching_str(item, predicate)),
+        Value::Object(map) => map
+            .values()
+            .any(|item| json_contains_matching_str(item, predicate)),
+        _ => false,
+    }
 }
 
 fn target(spec: Option<&CapabilitySpec>, capability: &str, arguments: &Value) -> String {
@@ -292,7 +344,7 @@ mod tests {
             Some(&spec(CapabilityApproval::Auto)),
             "device.files",
             "device_request",
-            &json!({"path": "/tmp/x"}),
+            &json!({"capability":"device.files","input":{"path": "/tmp/x"}}),
         );
         assert!(matches!(verdict, Verdict::Confirm { .. }));
         let allow_only = decide_capability(
@@ -300,7 +352,7 @@ mod tests {
             Some(&spec(CapabilityApproval::Auto)),
             "device.files",
             "device_request",
-            &json!({"path": "/tmp/y"}),
+            &json!({"capability":"device.files","input":{"path": "/tmp/y"}}),
         );
         assert_eq!(allow_only, Verdict::Allow);
         let wildcard = decide_capability(
@@ -318,7 +370,7 @@ mod tests {
             Some(&spec(CapabilityApproval::Auto)),
             "device.files",
             "device_request",
-            &json!({"path": "/tmp/x"}),
+            &json!({"capability":"device.files","input":{"path": "/tmp/x"}}),
         );
         assert!(matches!(verdict, Verdict::Deny { .. }));
         // A saved allow bypasses a capability's default confirmation, but not
@@ -328,7 +380,7 @@ mod tests {
             Some(&spec(CapabilityApproval::Confirm)),
             "device.files",
             "device_request",
-            &json!({"path": "/tmp/x"}),
+            &json!({"capability":"device.files","input":{"path": "/tmp/x"}}),
         );
         assert_eq!(verdict, Verdict::Allow);
     }
@@ -513,7 +565,7 @@ fn gate(world: &mut World) {
                 continue;
             }
         };
-        let Some((capability, input, spec)) = resolved else {
+        let Some((capability, spec)) = resolved else {
             refuse(world, call, &format!("unknown device tool `{tool_name}`"));
             continue;
         };
@@ -525,7 +577,7 @@ fn gate(world: &mut World) {
             );
             continue;
         }
-        let verdict = decide_capability(&rules, spec.as_ref(), &capability, &tool_name, &input);
+        let verdict = decide_capability(&rules, spec.as_ref(), &capability, &tool_name, &arguments);
         world.entity_mut(call).insert(CallBinding {
             client_id: client_id.clone(),
             capability: capability.clone(),
@@ -603,7 +655,7 @@ fn binding_of(world: &World, agent: Entity) -> (String, Option<String>, String) 
     }
 }
 
-/// The capability a device tool call names, with its input and declaration.
+/// The capability a device tool call names, with its declaration.
 /// The client is already resolved, so the hand resolves against the client it
 /// is bound to, not against the companion's active client. A capability tool
 /// is parent-only and must be published for the calling agent's bound client;
@@ -617,7 +669,7 @@ fn resolve_capability(
     client: &Client,
     tool_name: &str,
     arguments: &Value,
-) -> Result<Option<(String, Value, Option<CapabilitySpec>)>> {
+) -> Result<Option<(String, Option<CapabilitySpec>)>> {
     if tool_name == "device_request" {
         let Some(capability) = arguments.get("capability").and_then(Value::as_str) else {
             return Ok(None);
@@ -625,13 +677,8 @@ fn resolve_capability(
         if !client.capabilities.iter().any(|name| name == capability) {
             return Ok(None);
         }
-        let input = arguments
-            .get("input")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
         return Ok(Some((
             capability.to_owned(),
-            input,
             client.spec(capability).cloned(),
         )));
     }
@@ -645,7 +692,7 @@ fn resolve_capability(
     let Some(spec) = super::client::dynamic::tool_spec_for(world, client, tool_name)? else {
         return Ok(None);
     };
-    Ok(Some((spec.name.clone(), arguments.clone(), Some(spec))))
+    Ok(Some((spec.name.clone(), Some(spec))))
 }
 
 /// The client the call must be sent to.
@@ -1138,6 +1185,39 @@ pub(crate) fn submit(
             }
             world.entity_mut(hold.call).insert(Approved);
             let approval = store.resolve_approval(request_id, ApprovalStatus::Approved)?;
+            if matches!(decision, ApprovalDecision::AlwaysApprove) {
+                let pattern = if approval.normalized_arguments.trim().is_empty() {
+                    "*".to_owned()
+                } else {
+                    approval.normalized_arguments.clone()
+                };
+                let rule = PolicyRule {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    tool_name: approval.tool_name.clone(),
+                    pattern,
+                    effect: PolicyEffect::Allow,
+                    created_at: String::new(),
+                };
+                match store.apply_policy_rules(&[rule], &[]) {
+                    Ok(rules) => {
+                        let wire_rules = rules.iter().map(crate::host::wire::policy_rule).collect();
+                        let mut notifier = world.resource_mut::<Notifier>();
+                        notifier.push(
+                            None,
+                            None,
+                            w::notification::Event::PolicyRulesUpdated(Box::new(
+                                w::PolicyRulesUpdated {
+                                    rules: wire_rules,
+                                    ..Default::default()
+                                },
+                            )),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to persist AlwaysApprove policy rule");
+                    }
+                }
+            }
             notify_resolved(world, &approval);
             Ok(approval)
         }
@@ -1251,6 +1331,7 @@ mod decision_tests {
         json::JsonDoc,
         mind::{Assignment, Assignments, Companion, Profile, State},
         notify::Notifier,
+        resources::{DeviceHub, DeviceTimeout, Waiting},
     };
     use rig_core::catalog::{Catalog, Connector, ModelSpec};
     use rig_core::completion::Message;
@@ -1640,6 +1721,9 @@ mod decision_tests {
                 .insert_resource(SessionStore::new(logs))
                 .insert_resource(Notifier::new())
                 .insert_resource(Approvals::default())
+                .init_resource::<DeviceHub>()
+                .init_resource::<Waiting>()
+                .insert_resource(DeviceTimeout(Duration::from_secs(30)))
                 .insert_resource(models())
                 .insert_resource(HostRuntime(runtime.handle().clone()))
                 // The gate only sees a call the kernel has a handler for: a
@@ -1997,6 +2081,65 @@ mod decision_tests {
         let approval = world.store().approval(&request).unwrap().unwrap();
         assert_eq!(approval.status, ApprovalStatus::Approved);
         assert!(world.app.world().get::<Approved>(call).is_some());
+        provider.task.abort();
+    }
+
+    #[test]
+    fn always_approve_persists_allow_rule_and_skips_second_prompt() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"require_approval","reason":"外部ファイル操作"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        let call1 = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        let approved = submit(
+            world.app.world_mut(),
+            &request,
+            ApprovalDecision::AlwaysApprove,
+        )
+        .unwrap();
+        assert_eq!(approved.status, ApprovalStatus::Approved);
+        assert!(world.app.world().get::<Approved>(call1).is_some());
+
+        let rules = world.store().policy_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].effect, PolicyEffect::Allow);
+
+        // A second matching call is auto-approved directly from the saved rule
+        // without asking the decision model or raising a second approval card.
+        let calls_before = provider.bodies.lock().unwrap().len();
+        let call2 = world.gated_call("/tmp/a");
+        world.app.update();
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<Waiting>()
+                .by_operation
+                .values()
+                .any(|wait| wait.call == call2)
+        );
+        assert!(
+            world
+                .store()
+                .approvals(ApprovalStatus::Pending)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(provider.bodies.lock().unwrap().len(), calls_before);
+        world.gated_call("/tmp/b");
+        world.app.update();
+        assert_eq!(
+            world
+                .store()
+                .approvals(ApprovalStatus::Pending)
+                .unwrap()
+                .len(),
+            1
+        );
         provider.task.abort();
     }
 }

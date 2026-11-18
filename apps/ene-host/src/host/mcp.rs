@@ -479,6 +479,20 @@ pub(crate) fn tool_names(world: &mut World) -> HashSet<String> {
         .collect()
 }
 
+/// Raw tool names currently registered for a specific connected MCP server id.
+pub(crate) fn server_tool_names(world: &World, id: &str) -> Option<Vec<String>> {
+    let server = world.resource::<McpServers>().0.get(id)?;
+    let catalog = server.registry.snapshot();
+    let mut names: Vec<String> = catalog
+        .definitions()
+        .iter()
+        .map(|def| def.name.as_str().to_owned())
+        .collect();
+    names.sort();
+    names.dedup();
+    Some(names)
+}
+
 fn refresh_access(world: &mut World) {
     if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
         tracing::warn!(%error, "the MCP tools are not offered");
@@ -1171,9 +1185,11 @@ mod tests {
     }
 
     /// The whole path: a listed MCP tool is attached to the real host app,
-    /// offered to the parent, passes the gate and runs.
+    /// offered exclusively to the work agent ("hand", never the head), passes
+    /// the gate and runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_mcp_tool_runs_through_the_gate() {
+        use crate::host::agent::{CompanionAgent, WorkAgent};
         use crate::host::tests::Harness;
         use rig_core::completion::Message;
         use rig_core::message::{ToolResultContent, UserContent};
@@ -1193,6 +1209,10 @@ mod tests {
                 MockStreamEvent::text("呼んだよ"),
                 MockStreamEvent::final_response_with_default_usage(),
             ],
+            vec![
+                MockStreamEvent::text("完了を確認したよ"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
         ]);
         let world = harness.app.world_mut();
         world.init_resource::<McpServers>();
@@ -1210,12 +1230,36 @@ mod tests {
         project_servers(world);
         assert!(tool_names(world).contains("mcp_notes_echo"));
 
-        harness
-            .accept("k1", "ノート読んで")
-            .expect("the message is accepted");
+        let head_allows_mcp = world
+            .query_filtered::<&ToolAccess, With<CompanionAgent>>()
+            .iter(world)
+            .any(|access| access.allows("mcp_notes_echo"));
+        assert!(
+            !head_allows_mcp,
+            "companion head must not receive general MCP tools"
+        );
+
+        let companion_id = harness.companion.clone();
+        crate::host::work::start(
+            harness.app.world_mut(),
+            ene_rpc::StartWorkRequest {
+                companion_id,
+                instruction: "ノート読んで".into(),
+                ..Default::default()
+            },
+        )
+        .expect("work session starts");
+
         harness.run_until(|world| {
+            let hand_allows_mcp = world
+                .query_filtered::<&ToolAccess, With<WorkAgent>>()
+                .iter(world)
+                .any(|access| access.allows("mcp_notes_echo"));
+            if !hand_allows_mcp {
+                return false;
+            }
             world
-                .query::<&Conversation>()
+                .query_filtered::<&Conversation, With<WorkAgent>>()
                 .iter(world)
                 .any(|conversation| {
                     conversation.entries().any(|entry| match entry.message {

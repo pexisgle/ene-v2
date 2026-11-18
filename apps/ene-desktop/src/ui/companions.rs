@@ -282,7 +282,7 @@ impl SettingsStudio {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let name_d = self.draft(cx, "new:name", "例: エネ", None, theme);
+        let name_d = self.draft(cx, "new:name", "例: ene", None, theme);
         let mind_d = self.draft(
             cx,
             "new:mind",

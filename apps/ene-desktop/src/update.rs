@@ -47,7 +47,9 @@ pub enum Update {
     },
     /// The host accepted a stop request. The turn itself ends later, and the
     /// window says so.
-    StopRequested { companion_id: String },
+    StopRequested {
+        companion_id: String,
+    },
     /// The conversation the window asked for.
     History {
         companion_id: String,
@@ -59,6 +61,7 @@ pub enum Update {
     },
     /// The provider catalog.
     Providers(Vec<w::LlmProvider>),
+    SetupFinished(bool),
     /// The declared models of one connection.
     Models {
         connection_id: String,
@@ -73,13 +76,21 @@ pub enum Update {
     Approvals(Vec<w::ApprovalRequest>),
     /// An approval is no longer pending: another device resolved it, or it
     /// expired. The window refetches and stops offering the card.
-    ApprovalStale { message: String },
+    ApprovalStale {
+        message: String,
+    },
     /// An approval was resolved by this window.
-    Resolved { request_id: String },
+    Resolved {
+        request_id: String,
+    },
     /// A companion no longer exists on the host.
-    Gone { companion_id: String },
+    Gone {
+        companion_id: String,
+    },
     /// A connection's credential is registered; the field that held it clears.
-    CredentialRegistered { connection_id: String },
+    CredentialRegistered {
+        connection_id: String,
+    },
     /// The window should refetch the host's whole state.
     Resnapshot,
     /// A companion was created; the window opens it.
@@ -91,7 +102,10 @@ pub enum Update {
         speaking: bool,
     },
     /// Current local mute flags.
-    AudioMute { mic_muted: bool, output_muted: bool },
+    AudioMute {
+        mic_muted: bool,
+        output_muted: bool,
+    },
     /// Live STT recognition status from `StreamAudioInput`.
     Transcription {
         text: String,

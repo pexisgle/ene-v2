@@ -314,25 +314,74 @@ pub(crate) fn connect(
     Ok(model)
 }
 
-/// Lists the models a connection declares, with whatever the catalog knows.
+/// Adapter-default model candidates when neither `model_ids` nor `last_check`
+/// has populated a concrete list, ordered with reliable tool-capable defaults first.
+fn default_models_for(adapter: &str) -> &'static [&'static str] {
+    match adapter {
+        "openrouter" | "openrouter-wasm" => &[
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "anthropic/claude-3.5-haiku",
+            "google/gemini-2.5-flash",
+        ],
+        "openai" => &["gpt-4o-mini", "gpt-4o"],
+        "anthropic" => &["claude-3-5-haiku-latest", "claude-sonnet-4-20250514"],
+        "gemini" => &["gemini-2.5-flash", "gemini-2.5-pro"],
+        _ => &[],
+    }
+}
+
+/// Lists the models a connection serves, preferring explicit `model_ids`, then
+/// probed `last_check.resources` (promoting known tool-capable defaults to the
+/// front), and falling back to adapter defaults when empty.
 pub(crate) fn models(connection: &Connection) -> Vec<(String, ModelSpec)> {
     let ConnectionConfig::Llm(config) = &connection.config else {
         return Vec::new();
     };
     let catalog = Catalog::builtin();
-    config
-        .model_ids
-        .iter()
+    let adapter = connection.endpoint().adapter.as_str();
+    let preferred = default_models_for(adapter);
+    let ids: Vec<String> = if !config.model_ids.is_empty() {
+        config.model_ids.clone()
+    } else if let Some(resources) = connection
+        .last_check
+        .as_ref()
+        .map(|check| &check.resources)
+        .filter(|resources| !resources.is_empty())
+    {
+        let mut ordered = Vec::with_capacity(resources.len().min(MAX_MODELS));
+        for &pref in preferred {
+            if let Some(found) = resources.iter().find(|id| id.as_str() == pref) {
+                ordered.push(found.clone());
+            }
+        }
+        for id in resources {
+            if ordered.len() >= MAX_MODELS {
+                break;
+            }
+            if !ordered.iter().any(|existing| existing == id) {
+                ordered.push(id.clone());
+            }
+        }
+        ordered
+    } else {
+        preferred.iter().map(|id| (*id).to_owned()).collect()
+    };
+    ids.into_iter()
         .take(MAX_MODELS)
         .map(|model| {
-            let provider = provider_of(&connection.endpoint().adapter)
+            let provider = provider_of(adapter)
                 .unwrap_or_else(|| ProviderId::catalog("openai").expect("openai is registered"));
             let reference = format!("{}/{}", provider.vendor(), model);
             let spec = catalog
                 .resolve(&reference)
                 .map(|resolved| resolved.spec.clone())
-                .unwrap_or_else(|_| ModelSpec::new(provider, model.clone()));
-            (model.clone(), spec)
+                .unwrap_or_else(|_| {
+                    let mut spec = ModelSpec::new(provider, model.clone());
+                    spec.tools = true;
+                    spec
+                });
+            (model, spec)
         })
         .collect()
 }
@@ -433,6 +482,23 @@ async fn list_models(
     }
     let secret = connection_secret(connection, Some(credentials), providers)
         .map_err(|error| error.to_string())?;
+    // OpenRouter's model list is public even when the supplied key is invalid.
+    if adapter == "openrouter" && base.trim_end_matches('/') == "https://openrouter.ai/api/v1" {
+        let key = secret.as_deref().ok_or("OpenRouterのAPIキーが未登録です")?;
+        let response = net::client()?
+            .get("https://openrouter.ai/api/v1/key")
+            .bearer_auth(key)
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "OpenRouterのキーを確認できませんでした（{}）",
+                response.status()
+            ));
+        }
+    }
     let config = provider_config(adapter, base, secret, providers);
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {

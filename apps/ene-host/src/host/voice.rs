@@ -15,16 +15,19 @@ use super::{
     db::{self, Result, Store},
     delegation,
     error::HostError,
-    model::Credentials,
+    model::{self, Credentials},
+    net,
     notify::Notifier,
+    providers::Providers,
     resources::HostRuntime,
-    settings::{Connection, ConnectionKind},
+    settings::{Connection, ConnectionConfig, ConnectionKind, Endpoint},
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use futures_util::{StreamExt, stream::FuturesOrdered};
 use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
+use serde::{Deserialize, de::DeserializeOwned};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
@@ -42,6 +45,7 @@ const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const STT_TIMEOUT: Duration = Duration::from_secs(30);
 const AUDIO_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_SENTENCE_CHARS: usize = 240;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const STT_SILENCE_WINDOW: Duration = Duration::from_millis(700);
 pub(crate) const MIN_STT_BYTES: usize = 3_200;
 pub(crate) const MAX_STT_BYTES: usize = 48_000 * 20;
@@ -85,6 +89,404 @@ pub(crate) struct Engines {
     pub(crate) stt: Option<Arc<dyn SttEngine>>,
 }
 
+#[derive(Deserialize, Default)]
+struct SpeechOptions {
+    protocol: Option<String>,
+    model: Option<String>,
+    voice: Option<String>,
+    language: Option<String>,
+    path: Option<String>,
+    audio_query_path: Option<String>,
+    synthesis_path: Option<String>,
+    speaker: Option<u64>,
+    speed: Option<f64>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Protocol {
+    OpenAiTts,
+    Voicevox,
+    OpenAiStt,
+    Raw,
+}
+
+struct HttpEngine {
+    base: String,
+    protocol: Protocol,
+    model: String,
+    voice: String,
+    language: Option<String>,
+    path: String,
+    query_path: String,
+    synthesis_path: String,
+    speaker: u32,
+    speed: Option<f32>,
+    timeout: Duration,
+    secret: Option<String>,
+}
+
+impl HttpEngine {
+    fn new(
+        connection: Connection,
+        credentials: Option<&Credentials>,
+        providers: Option<&Providers>,
+        kind: ConnectionKind,
+    ) -> std::result::Result<Self, SetupError> {
+        let tts = kind == ConnectionKind::Tts;
+        let label = if tts { "TTS" } else { "STT" };
+        let endpoint = connection.endpoint().clone();
+        let base = base_url(&endpoint, label)?;
+        let options: SpeechOptions = parse_options(&endpoint, label)?;
+        let secret = match credentials {
+            Some(creds) => model::connection_secret(
+                &connection,
+                Some(creds),
+                providers.unwrap_or(&Providers::none()),
+            )
+            .map_err(|error| SetupError::Broken(error.to_string()))?,
+            None => None,
+        };
+        let protocol = match (tts, nonempty(options.protocol).as_deref()) {
+            (true, None) if endpoint.adapter == "voicevox" => Protocol::Voicevox,
+            (true, None | Some("openai")) => Protocol::OpenAiTts,
+            (true, Some("voicevox")) => Protocol::Voicevox,
+            (false, None | Some("openai")) => Protocol::OpenAiStt,
+            (false, Some("raw")) => Protocol::Raw,
+            (_, Some(other)) => {
+                return Err(SetupError::Unsupported(format!(
+                    "the {label} adapter protocol `{other}` is not supported"
+                )));
+            }
+        };
+        let default_voice = match &connection.config {
+            ConnectionConfig::Tts(config) if tts => config.voice_ids.first().cloned(),
+            _ => None,
+        };
+        let hints: &[String] = match &connection.config {
+            ConnectionConfig::Stt(config) if !tts => &config.language_hints,
+            _ => &[],
+        };
+        let default_speaker = default_voice
+            .as_deref()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(3);
+        let timeout = Duration::from_millis(
+            options
+                .timeout_ms
+                .unwrap_or(if tts { 20_000 } else { 30_000 })
+                .clamp(1_000, 300_000),
+        );
+        Ok(Self {
+            base,
+            protocol,
+            model: nonempty(options.model)
+                .unwrap_or_else(|| if tts { "tts-1" } else { "whisper-1" }.into()),
+            voice: nonempty(options.voice)
+                .or(default_voice)
+                .unwrap_or_else(|| "alloy".into()),
+            language: nonempty(options.language).or_else(|| hints.first().cloned()),
+            path: endpoint_path(
+                options.path,
+                if tts {
+                    "/audio/speech"
+                } else {
+                    "/audio/transcriptions"
+                },
+            ),
+            query_path: endpoint_path(options.audio_query_path, "/audio_query"),
+            synthesis_path: endpoint_path(options.synthesis_path, "/synthesis"),
+            speaker: options
+                .speaker
+                .map(|s| s.min(u64::from(u32::MAX)) as u32)
+                .unwrap_or(default_speaker),
+            speed: options.speed.map(|speed| speed as f32),
+            timeout,
+            secret,
+        })
+    }
+
+    async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
+        let response = post(call.timeout(self.timeout), self.secret.as_deref(), what).await?;
+        read_response_body(response, MAX_BODY_BYTES, what).await
+    }
+
+    async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "voice": if voice.trim().is_empty() { &self.voice } else { voice.trim() },
+            "input": text,
+            "response_format": "pcm",
+        });
+        if let Some(speed) = self.speed {
+            body["speed"] = serde_json::json!(speed);
+        }
+        let call = net::client()?
+            .post(format!("{}{}", self.base, self.path))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        Ok((self.exchange(call, "TTS").await?, SAMPLE_RATE))
+    }
+
+    async fn voicevox(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
+        let speaker = voice.trim().parse::<u32>().ok().unwrap_or(self.speaker);
+        let encoded: String = url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
+        let client = net::client()?;
+        let call = client.post(format!(
+            "{}{}?text={encoded}&speaker={speaker}",
+            self.base, self.query_path
+        ));
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&self.exchange(call, "TTS").await?)
+                .map_err(|_| "the TTS endpoint answered a non-JSON audio query".to_owned())?;
+        if let Some(speed) = self.speed {
+            body["speedScale"] = serde_json::json!(speed);
+        }
+        let call = client
+            .post(format!(
+                "{}{}?speaker={speaker}",
+                self.base, self.synthesis_path
+            ))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        parse_wav(&self.exchange(call, "TTS").await?)
+    }
+
+    async fn openai_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
+        let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm, sample_rate)?)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|error| format!("the STT multipart body: {error}"))?;
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", file)
+            .text("model", self.model.clone());
+        if let Some(language) = &self.language {
+            form = form.text("language", language.clone());
+        }
+        let call = net::client()?
+            .post(format!("{}{}", self.base, self.path))
+            .multipart(form.text("response_format", "json"));
+        let body = self.exchange(call, "STT").await?;
+        let value: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|_| "the STT endpoint answered a non-JSON transcript".to_owned())?;
+        Ok(value["text"].as_str().unwrap_or_default().trim().to_owned())
+    }
+
+    async fn raw_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
+        let call = net::client()?
+            .post(format!("{}{}", self.base, self.path))
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(wav_wrap(&pcm, sample_rate)?);
+        String::from_utf8(self.exchange(call, "STT").await?)
+            .map(|text| text.trim().to_owned())
+            .map_err(|_| "the STT endpoint answered a non-UTF-8 transcript".to_owned())
+    }
+}
+
+impl TtsEngine for HttpEngine {
+    fn synthesize<'a>(
+        &'a self,
+        text: String,
+        voice: String,
+    ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
+        Box::pin(async move {
+            match self.protocol {
+                Protocol::OpenAiTts => self.openai_tts(text, voice).await,
+                Protocol::Voicevox => self.voicevox(text, voice).await,
+                Protocol::OpenAiStt | Protocol::Raw => {
+                    Err("the TTS engine received an STT protocol".into())
+                }
+            }
+        })
+    }
+}
+
+impl SttEngine for HttpEngine {
+    fn transcribe<'a>(
+        &'a self,
+        pcm: Vec<u8>,
+        sample_rate: u32,
+    ) -> BoxFuture<'a, HttpResult<String>> {
+        Box::pin(async move {
+            match self.protocol {
+                Protocol::OpenAiStt => self.openai_stt(pcm, sample_rate).await,
+                Protocol::Raw => self.raw_stt(pcm, sample_rate).await,
+                Protocol::OpenAiTts | Protocol::Voicevox => {
+                    Err("the STT engine received a TTS protocol".into())
+                }
+            }
+        })
+    }
+}
+
+async fn post(
+    call: reqwest::RequestBuilder,
+    secret: Option<&str>,
+    label: &str,
+) -> HttpResult<reqwest::Response> {
+    let call = match secret {
+        Some(secret) => call.bearer_auth(secret),
+        None => call,
+    };
+    let response = call
+        .send()
+        .await
+        .map_err(|error| format!("the {label} endpoint is unreachable: {error}"))?;
+    if response.status().is_success() {
+        Ok(response)
+    } else {
+        Err(format!(
+            "the {label} endpoint answered {}",
+            response.status().as_u16()
+        ))
+    }
+}
+
+async fn read_response_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> HttpResult<Vec<u8>> {
+    let mut out = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("the {label} response failed: {error}"))?
+    {
+        if out.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("the {label} response exceeded the host limit"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+fn base_url(endpoint: &Endpoint, label: &str) -> std::result::Result<String, SetupError> {
+    let base = endpoint.endpoint.trim().trim_end_matches('/');
+    url::Url::parse(base)
+        .map_err(|_| SetupError::Broken(format!("the {label} connection endpoint is not a URL")))?;
+    Ok(base.to_owned())
+}
+
+fn parse_options<T: DeserializeOwned + Default>(
+    endpoint: &Endpoint,
+    label: &str,
+) -> std::result::Result<T, SetupError> {
+    if endpoint.options.trim().is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_str(&endpoint.options).map_err(|error| {
+        SetupError::Unsupported(format!(
+            "the {label} connection options are not JSON: {error}"
+        ))
+    })
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn endpoint_path(value: Option<String>, default: &str) -> String {
+    nonempty(value).map_or_else(
+        || default.to_owned(),
+        |path| {
+            if path.starts_with('/') {
+                path
+            } else {
+                format!("/{path}")
+            }
+        },
+    )
+}
+
+fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
+    if !pcm.len().is_multiple_of(2) {
+        return Err("the audio has an odd number of PCM bytes".into());
+    }
+    let data_len =
+        u32::try_from(pcm.len()).map_err(|_| "the audio is too large for a WAV".to_owned())?;
+    if sample_rate == 0
+        || sample_rate.checked_mul(2).is_none()
+        || data_len.checked_add(36).is_none()
+    {
+        return Err("the audio sample rate or length cannot be written to a WAV".into());
+    }
+    let byte_rate = sample_rate * 2;
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    Ok(wav)
+}
+
+fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("the TTS endpoint did not return a valid WAV".into());
+    }
+    let mut offset = 12usize;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+    let mut bits_per_sample = 0u16;
+    let mut audio_format = 0u16;
+    let mut data_slice: Option<&[u8]> = None;
+
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+        let end = offset.saturating_add(size).min(bytes.len());
+        let chunk = &bytes[offset..end];
+        if id == b"fmt " && chunk.len() >= 16 {
+            audio_format = u16::from_le_bytes([chunk[0], chunk[1]]);
+            channels = u16::from_le_bytes([chunk[2], chunk[3]]);
+            sample_rate = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            bits_per_sample = u16::from_le_bytes([chunk[14], chunk[15]]);
+        } else if id == b"data" {
+            data_slice = Some(chunk);
+            break;
+        }
+        offset = end + (size % 2);
+    }
+
+    if audio_format != 1 || bits_per_sample != 16 || channels == 0 || sample_rate == 0 {
+        return Err("the TTS endpoint returned an unsupported WAV format".into());
+    }
+    let data = data_slice
+        .ok_or_else(|| "the TTS endpoint returned a WAV without audio data".to_owned())?;
+    let ch = usize::from(channels);
+    if ch == 1 {
+        let even = data.len() - (data.len() % 2);
+        return Ok((data[..even].to_vec(), sample_rate));
+    }
+    let frame_bytes = ch * 2;
+    let mut pcm = Vec::with_capacity((data.len() / frame_bytes) * 2);
+    for frame in data.chunks_exact(frame_bytes) {
+        let mut sum = 0i32;
+        for c in 0..ch {
+            sum += i32::from(i16::from_le_bytes([frame[c * 2], frame[c * 2 + 1]]));
+        }
+        let mixed = (sum / ch as i32).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        pcm.extend_from_slice(&mixed.to_le_bytes());
+    }
+    Ok((pcm, sample_rate))
+}
+
 pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
     if let Some(engine) = world
         .get_resource::<Engines>()
@@ -93,13 +495,25 @@ pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine
         return Ok(Arc::clone(engine));
     }
     let connection = voice_connection(world, ConnectionKind::Tts)?;
-    let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Tts)? else {
-        return Err(SetupError::Unsupported(format!(
-            "the TTS adapter `{}` is not served by an installed plugin",
-            connection.endpoint().adapter
-        )));
-    };
-    Ok(Arc::new(engine))
+    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Tts)? {
+        return Ok(Arc::new(engine));
+    }
+    if matches!(
+        connection.endpoint().adapter.as_str(),
+        "voicevox" | "openai"
+    ) {
+        let engine = HttpEngine::new(
+            connection,
+            world.get_resource::<Credentials>(),
+            world.get_resource::<Providers>(),
+            ConnectionKind::Tts,
+        )?;
+        return Ok(Arc::new(engine));
+    }
+    Err(SetupError::Unsupported(format!(
+        "the TTS adapter `{}` is not served by an installed plugin",
+        connection.endpoint().adapter
+    )))
 }
 
 pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine>, SetupError> {
@@ -110,13 +524,22 @@ pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine
         return Ok(Arc::clone(engine));
     }
     let connection = voice_connection(world, ConnectionKind::Stt)?;
-    let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt)? else {
-        return Err(SetupError::Unsupported(format!(
-            "the STT adapter `{}` is not served by an installed plugin",
-            connection.endpoint().adapter
-        )));
-    };
-    Ok(Arc::new(engine))
+    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt)? {
+        return Ok(Arc::new(engine));
+    }
+    if connection.endpoint().adapter == "openai" {
+        let engine = HttpEngine::new(
+            connection,
+            world.get_resource::<Credentials>(),
+            world.get_resource::<Providers>(),
+            ConnectionKind::Stt,
+        )?;
+        return Ok(Arc::new(engine));
+    }
+    Err(SetupError::Unsupported(format!(
+        "the STT adapter `{}` is not served by an installed plugin",
+        connection.endpoint().adapter
+    )))
 }
 
 /// The plugin engine for `connection`, when a plugin serves its adapter.

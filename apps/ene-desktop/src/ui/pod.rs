@@ -14,8 +14,7 @@ use crate::{
 use ene_rpc as w;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, KeyBinding, MouseButton, MouseDownEvent, Pixels,
-    ScrollHandle, SharedString, Size, Subscription, WeakEntity, Window, actions, div, point,
-    prelude::*, px,
+    ScrollHandle, SharedString, Size, Subscription, Window, actions, div, point, prelude::*, px,
 };
 
 const MAX_INPUT: usize = 4000;
@@ -27,7 +26,12 @@ pub type Desktop = CompanionPod;
 
 /// Computes default bottom-right floating placement on the primary display.
 pub fn initial_pod_bounds(cx: &App) -> Bounds<Pixels> {
-    let size = PodMode::MiniVoice.size();
+    initial_pod_bounds_for_mode(PodMode::MiniVoice, cx)
+}
+
+/// Computes bottom-right placement sized for the requested pod mode.
+pub fn initial_pod_bounds_for_mode(mode: PodMode, cx: &App) -> Bounds<Pixels> {
+    let size = mode.size();
     if let Some(display) = cx.primary_display() {
         let screen = display.bounds();
         let x = (screen.right() - size.width - px(28.)).max(screen.left() + px(16.));
@@ -45,7 +49,8 @@ pub struct CompanionPod {
     onboard_key: Entity<Draft>,
     onboard_name: Entity<Draft>,
     selected_provider_id: Option<String>,
-    onboarding_step: Option<u8>,
+    choosing_provider: bool,
+    key_focused: bool,
     roster_open: bool,
     last_size: Size<Pixels>,
     title_initialized: bool,
@@ -64,7 +69,7 @@ impl CompanionPod {
         });
         let onboard_name = cx.new(|cx| {
             let mut draft = Draft::new(cx, "コンパニオン名", "TextField");
-            draft.set("エネ", cx);
+            draft.set("ene", cx);
             draft
         });
         let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
@@ -74,7 +79,8 @@ impl CompanionPod {
             onboard_key,
             onboard_name,
             selected_provider_id: None,
-            onboarding_step: None,
+            choosing_provider: false,
+            key_focused: false,
             roster_open: false,
             last_size: PodMode::MiniVoice.size(),
             title_initialized: false,
@@ -84,9 +90,36 @@ impl CompanionPod {
         }
     }
 
+    fn needs_connection(&self, cx: &App) -> bool {
+        let hub = self.hub.read(cx);
+        hub.live()
+            && hub.model.settings().is_some_and(|settings| {
+                hub.setup_pending
+                    || hub.setup_error.is_some()
+                    || hub.model.providers.as_deref().is_none_or(|providers| {
+                        !settings
+                            .connections
+                            .iter()
+                            .any(|c| super::can_start_chat(c, providers))
+                    })
+            })
+    }
+
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
-        let handle = self.chat_input.read(cx).focus_handle();
+        let field = if self.needs_connection(cx) {
+            &self.onboard_key
+        } else {
+            &self.chat_input
+        };
+        let handle = field.read(cx).focus_handle();
         window.focus(&handle);
+    }
+
+    pub(crate) fn sync_mode_and_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let desired = self.desired_size(cx);
+        self.apply_size(desired, window, cx);
+        self.focus_input(window, cx);
+        ensure_pod_topmost();
     }
 
     fn toggle_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -106,31 +139,52 @@ impl CompanionPod {
             .model
             .snapshot()
             .is_none_or(|snap| snap.companions.is_empty());
-        let has_llm = hub.model.settings().is_some_and(|settings| {
-            settings
-                .connections
-                .iter()
-                .any(|c| c.kind == w::ConnectionKind::Llm && c.enabled)
-        });
-        let in_onboarding =
-            hub.live() && (!has_llm || companions_empty || self.onboarding_step.is_some());
+        let in_onboarding = self.needs_connection(cx) || (hub.live() && companions_empty);
         if in_onboarding {
             let h = if hub.model.notices.is_empty() {
-                376.
+                432.
             } else {
-                428.
+                476.
             };
             gpui::size(px(444.), px(h))
         } else if !hub.model.approvals().is_empty() || self.roster_open {
             gpui::size(px(444.), px(376.))
-        } else if hub.model.transcription.is_some()
-            || !hub.model.notices.is_empty()
-            || hub.model.companion_speaking
-            || !hub.model.streaming.is_empty()
-        {
-            gpui::size(px(444.), px(264.))
         } else {
-            PodMode::MiniVoice.size()
+            let speech_text = active_mini_speech_text(&hub.model);
+            let mut estimated_lines = 0usize;
+            for line in speech_text.lines() {
+                let chars = line.chars().count();
+                estimated_lines += chars.max(1).div_ceil(24);
+            }
+            estimated_lines = estimated_lines.clamp(2, 7);
+            let mut h = 152.0 + (estimated_lines as f32) * 20.0;
+            if estimated_lines > 6 || hub.model.chat.messages.is_empty() {
+                h += 40.0;
+            }
+            if !extract_urls(&speech_text).is_empty() {
+                h += 28.0;
+            }
+            if hub.model.transcription.is_some() {
+                h += 38.0;
+            }
+            if !hub.model.notices.is_empty() {
+                h += 46.0;
+            }
+            let turn_failed = hub
+                .model
+                .chat
+                .turn
+                .as_ref()
+                .and_then(|t| t.status.as_known())
+                == Some(w::TurnStatus::Failed);
+            if hub.model.companion_speaking
+                || !hub.model.streaming.is_empty()
+                || hub.model.chat.stop_requested
+                || turn_failed
+            {
+                h += 36.0;
+            }
+            gpui::size(px(444.), px(h.clamp(188., 400.)))
         }
     }
 
@@ -154,7 +208,7 @@ impl CompanionPod {
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
-        if self.chat_input.read(cx).composing() {
+        if self.needs_connection(cx) || self.chat_input.read(cx).composing() {
             return;
         }
         let text = self.chat_input.read(cx).text().trim().to_owned();
@@ -177,24 +231,12 @@ impl CompanionPod {
             .model
             .snapshot()
             .is_none_or(|snap| snap.companions.is_empty());
-        let has_llm = hub.model.settings().is_some_and(|settings| {
-            settings
-                .connections
-                .iter()
-                .any(|c| c.kind == w::ConnectionKind::Llm && c.enabled)
-        });
-        let has_tts = hub.model.settings().is_some_and(|settings| {
-            settings
-                .connections
-                .iter()
-                .any(|c| c.kind == w::ConnectionKind::Tts && c.enabled)
-        });
         let approvals = hub.model.approvals().to_vec();
         let notices = hub.model.notices.clone();
         let companion_name = companion
             .as_ref()
             .map(|c| c.name.clone())
-            .unwrap_or_else(|| "エネ".to_owned());
+            .unwrap_or_else(|| "ene".to_owned());
 
         let streaming_preview: String = hub
             .model
@@ -207,16 +249,27 @@ impl CompanionPod {
         let stop_requested = hub.model.chat.stop_requested;
         let is_busy = speaking || !streaming_preview.is_empty() || stop_requested;
 
-        let in_onboarding =
-            live && (!has_llm || companions_empty || self.onboarding_step.is_some());
+        let in_onboarding = self.needs_connection(cx) || (live && companions_empty);
 
         let status_word = match &hub.model.link {
             Link::Connecting { .. } => "接続中",
             Link::Lost { .. } | Link::Unset { .. } | Link::Unusable { .. } => "未接続",
             Link::Live { .. } if !approvals.is_empty() => "確認待ち",
             Link::Live { .. } if in_onboarding => "初期設定",
+            Link::Live { .. } if hub.model.work_active => "作業中",
             Link::Live { .. } if speaking => "発話中",
-            Link::Live { .. } if !streaming_preview.is_empty() => "生成中",
+            Link::Live { .. } if !hub.model.chat.sending.is_empty() => "送信中",
+            Link::Live { .. }
+                if !streaming_preview.is_empty()
+                    || hub
+                        .model
+                        .chat
+                        .turn
+                        .as_ref()
+                        .is_some_and(|t| t.status == w::TurnStatus::Streaming) =>
+            {
+                "返答を考え中"
+            }
             Link::Live { .. } if hub.model.transcription.is_some() => "音声入力中",
             Link::Live { .. } => "待機中",
         };
@@ -299,16 +352,7 @@ impl CompanionPod {
         } else if let Some(approval) = approvals.first().cloned() {
             self.render_approval_body(&approval, approvals.len(), &theme)
         } else if in_onboarding {
-            let effective_step = if !has_llm {
-                0
-            } else if self.onboarding_step == Some(1) {
-                1
-            } else if companions_empty {
-                self.onboarding_step.unwrap_or(1).max(1)
-            } else {
-                2
-            };
-            self.render_onboarding_body(effective_step, has_tts, companions_empty, &theme, cx)
+            self.render_onboarding_body(self.needs_connection(cx), &theme, cx)
         } else if expanded {
             self.render_expanded_timeline(&streaming_preview, is_busy, stop_requested, &theme, cx)
         } else {
@@ -508,10 +552,17 @@ impl CompanionPod {
                         .py(px(6.))
                         .text_xs()
                         .text_color(theme.ink_muted)
-                        .line_clamp(2)
-                        .child(args),
+                        .id("approval-arguments")
+                        .max_h(px(96.))
+                        .overflow_y_scroll()
+                        .child(args.clone()),
                 )
             })
+            .child(div().text_xs().child(if args.is_empty() {
+                "常に許可すると、次回からこの操作を引数にかかわらず許可します。"
+            } else {
+                "常に許可すると、次回からこの操作を同じ引数で許可します。"
+            }))
             .child(
                 div()
                     .flex()
@@ -568,275 +619,236 @@ impl CompanionPod {
 
     fn render_onboarding_body(
         &self,
-        step: u8,
-        has_tts: bool,
-        companions_empty: bool,
+        needs_connection: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let step_pill = |idx: u8, title: &'static str| -> AnyElement {
-            let done = step > idx;
-            let current = step == idx;
-            let (bg, fg) = if done {
-                (theme.mint_soft, theme.mint_fg)
-            } else if current {
-                (theme.accent_soft, theme.accent_soft_fg)
-            } else {
-                (theme.bg_blush, theme.ink_muted)
-            };
-            status_pill(title, None, bg, fg)
-        };
-
-        let header = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(6.))
-            .child(step_pill(0, "1 AI接続"))
-            .child(step_pill(1, "2 音声（任意）"))
-            .child(step_pill(2, "3 対話開始"));
-
-        let body: AnyElement = match step {
-            0 => {
-                let providers = self
-                    .hub
-                    .read(cx)
-                    .model
-                    .providers
-                    .clone()
-                    .unwrap_or_default();
-                let picked = self
-                    .selected_provider_id
-                    .as_deref()
-                    .and_then(|id| providers.iter().find(|p| p.id == id))
-                    .or_else(|| providers.iter().find(|p| p.id == "openrouter"))
-                    .or_else(|| providers.first())
-                    .cloned();
-
-                let mut provider_chips = Vec::new();
-                for p in providers.iter().take(5) {
-                    let pid = p.id.clone();
-                    let prov_needs_key = p.requires_credentials;
-                    let active = picked.as_ref().is_some_and(|sel| sel.id == pid);
-                    let pod = cx.entity();
-                    provider_chips.push(pill_button(
-                        SharedString::from(format!("onboard-prov-{}", p.id)),
-                        p.name.clone(),
-                        active.then_some(Icon::Check),
-                        if active { Tone::Primary } else { Tone::Ghost },
-                        true,
-                        theme,
-                        move |_, cx| {
-                            pod.update(cx, |this, cx| {
-                                this.selected_provider_id = Some(pid.clone());
-                                let hint = if prov_needs_key {
-                                    "APIキーを入力…"
-                                } else {
-                                    "APIキー（任意）"
-                                };
-                                this.onboard_key
-                                    .update(cx, |d, cx| d.set_placeholder(hint, cx));
-                                cx.notify();
-                            });
-                        },
-                    ));
-                }
-
-                let look = theme.field_look(false, false);
-                self.onboard_key.update(cx, |d, _| d.apply_look(look));
-                let secret = self.onboard_key.read(cx).text().trim().to_owned();
-                let needs_key = picked.as_ref().is_some_and(|p| p.requires_credentials);
-                let can_connect = picked
-                    .as_ref()
-                    .is_some_and(|_| !needs_key || !secret.is_empty());
-
-                let hub_connect = self.hub.clone();
-                let hub_settings = self.hub.clone();
-                let pod = cx.entity();
-
-                div()
+        if needs_connection {
+            let providers = self
+                .hub
+                .read(cx)
+                .model
+                .providers
+                .clone()
+                .unwrap_or_default();
+            if providers.is_empty() {
+                let hub = self.hub.clone();
+                return div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .when(providers.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.ink_muted)
-                                .child("接続先を読み込んでいます…"),
-                        )
-                    })
-                    .when(!provider_chips.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_wrap()
-                                .gap(px(6.))
-                                .children(provider_chips),
-                        )
-                    })
-                    .child(self.onboard_key.clone())
-                    .child(
+                    .child("接続先を読み込んでいます…")
+                    .child(pill_button(
+                        "setup-settings",
+                        "接続設定を開く",
+                        None,
+                        Tone::Ghost,
+                        true,
+                        theme,
+                        move |_, cx| {
+                            hub.update(cx, |hub, cx| {
+                                hub.open_settings(SettingsSection::Connections, cx)
+                            })
+                        },
+                    ))
+                    .into_any_element();
+            }
+            let picked = self
+                .selected_provider_id
+                .as_deref()
+                .and_then(|id| providers.iter().find(|p| p.id == id))
+                .or_else(|| providers.iter().find(|p| p.id == "openrouter"))
+                .or_else(|| providers.first())
+                .cloned();
+
+            let mut provider_chips = Vec::new();
+            for p in &providers {
+                let pid = p.id.clone();
+                let prov_needs_key = p.requires_credentials;
+                let active = picked.as_ref().is_some_and(|sel| sel.id == pid);
+                let pod = cx.entity();
+                provider_chips.push(pill_button(
+                    SharedString::from(format!("onboard-prov-{}", p.id)),
+                    p.name.clone(),
+                    active.then_some(Icon::Check),
+                    if active { Tone::Primary } else { Tone::Ghost },
+                    true,
+                    theme,
+                    move |_, cx| {
+                        pod.update(cx, |this, cx| {
+                            if !active {
+                                this.onboard_key.update(cx, |d, cx| d.clear(cx));
+                            }
+                            this.choosing_provider = false;
+                            this.selected_provider_id = Some(pid.clone());
+                            let hint = if prov_needs_key {
+                                "APIキーを入力…"
+                            } else {
+                                "APIキー（任意）"
+                            };
+                            this.onboard_key
+                                .update(cx, |d, cx| d.set_placeholder(hint, cx));
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
+
+            let look = theme.field_look(false, false);
+            self.onboard_key.update(cx, |d, _| d.apply_look(look));
+            let secret = self.onboard_key.read(cx).text().trim().to_owned();
+            let needs_key = picked.as_ref().is_some_and(|p| p.requires_credentials);
+            let can_connect = picked
+                .as_ref()
+                .is_some_and(|_| !needs_key || !secret.is_empty());
+
+            let hub_connect = self.hub.clone();
+            let hub_settings = self.hub.clone();
+            let pod = cx.entity();
+            let selector = cx.entity();
+            let hub = self.hub.read(cx);
+            let pending = hub.setup_pending;
+            let name = picked
+                .as_ref()
+                .map(|p| p.name.as_str())
+                .unwrap_or("AIサービス");
+            let keys_url = picked.as_ref().and_then(|p| match p.id.as_str() {
+                "openrouter" => Some("https://openrouter.ai/settings/keys"),
+                "openai" => Some("https://platform.openai.com/api-keys"),
+                "anthropic" => Some("https://console.anthropic.com/settings/keys"),
+                "google" | "gemini" => Some("https://aistudio.google.com/apikey"),
+                _ => None,
+            });
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child("eneと話す準備"),
+                )
+                .child(div().text_sm().child(if needs_key {
+                    format!("会話は{name}に送られます。{name}の設定で発行したAPIキーを貼り付けてください。")
+                } else {
+                    format!("会話は{name}に送られます。接続して会話を始めてください。")
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .when_some(keys_url, |row, url| {
+                            row.child(pill_button(
+                                "setup-keys",
+                                "キーの取得先を開く",
+                                None,
+                                Tone::Soft,
+                                !pending,
+                                theme,
+                                move |_, cx| cx.open_url(url),
+                            ))
+                        })
+                        .child(pill_button(
+                            "setup-choose",
+                            "接続先を変更",
+                            None,
+                            Tone::Ghost,
+                            !pending,
+                            theme,
+                            move |_, cx| {
+                                selector.update(cx, |this, cx| {
+                                    this.choosing_provider = !this.choosing_provider;
+                                    cx.notify();
+                                })
+                            },
+                        )),
+                )
+                .when(self.choosing_provider && !pending, |this| {
+                    this.child(
                         div()
                             .flex()
                             .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.))
+                            .flex_wrap()
+                            .gap(px(6.))
+                            .children(provider_chips)
                             .child(pill_button(
-                                "onboard-open-connections",
-                                "詳細設定を開く",
-                                Some(Icon::Plug),
+                                "setup-local",
+                                "自分の接続先を設定",
+                                None,
                                 Tone::Ghost,
                                 true,
                                 theme,
                                 move |_, cx| {
                                     hub_settings.update(cx, |hub, cx| {
-                                        hub.open_settings(SettingsSection::Connections, cx);
-                                    });
-                                },
-                            ))
-                            .child(pill_button(
-                                "onboard-connect-llm",
-                                "接続して次へ",
-                                Some(Icon::Check),
-                                Tone::Primary,
-                                can_connect,
-                                theme,
-                                move |_, cx| {
-                                    if let Some(provider) = picked.clone() {
-                                        hub_connect.update(cx, |hub, cx| {
-                                            hub.quick_connect_llm(provider, secret.clone(), cx);
-                                        });
-                                        pod.update(cx, |this, cx| {
-                                            this.onboard_key.update(cx, |d, cx| d.clear(cx));
-                                            this.onboarding_step = Some(1);
-                                            cx.notify();
-                                        });
-                                    }
+                                        hub.open_settings(SettingsSection::Connections, cx)
+                                    })
                                 },
                             )),
                     )
-                    .into_any_element()
-            }
-            1 => {
-                let hub_tts = self.hub.clone();
-                let pod_next = cx.entity();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.ink_muted)
-                            .child(if has_tts {
-                                "音声合成の接続が有効になっています。"
-                            } else {
-                                "VOICEVOX（127.0.0.1:50021）を使う場合は追加できます。"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.))
-                            .when(!has_tts, |this| {
-                                this.child(pill_button(
-                                    "onboard-add-voicevox",
-                                    "VOICEVOXを追加",
-                                    Some(Icon::Volume),
-                                    Tone::Soft,
-                                    true,
-                                    theme,
-                                    move |_, cx| {
-                                        hub_tts.update(cx, |hub, cx| {
-                                            hub.add_voicevox_preset(3, None, cx);
-                                        });
-                                    },
-                                ))
-                            })
-                            .child(pill_button(
-                                "onboard-voice-next",
-                                if companions_empty {
-                                    "次へ"
-                                } else {
-                                    "対話を始める"
-                                },
-                                Some(Icon::Check),
-                                Tone::Primary,
-                                true,
-                                theme,
-                                move |_, cx| {
-                                    pod_next.update(cx, |this, cx| {
-                                        this.onboarding_step =
-                                            if companions_empty { Some(2) } else { None };
-                                        cx.notify();
-                                    });
-                                },
-                            )),
-                    )
-                    .into_any_element()
-            }
-            _ => {
-                let look = theme.field_look(false, false);
-                self.onboard_name.update(cx, |d, _| d.apply_look(look));
-                let name = self.onboard_name.read(cx).text().trim().to_owned();
-                let hub_start = self.hub.clone();
-                let pod_done = cx.entity();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .when(companions_empty, |this| {
-                        this.child(self.onboard_name.clone())
-                    })
-                    .child(div().flex().flex_row().justify_end().child(pill_button(
-                        "onboard-finish",
-                        "対話を始める",
-                        Some(Icon::Sparkles),
-                        Tone::Primary,
-                        !companions_empty || !name.is_empty(),
-                        theme,
-                        move |_, cx| {
-                            if companions_empty {
-                                let final_name = if name.is_empty() {
-                                    "エネ".to_owned()
-                                } else {
-                                    name.clone()
-                                };
-                                hub_start.update(cx, |hub, cx| {
-                                    hub.create_companion(
-                                        NewCompanionSpec {
-                                            name: final_name,
-                                            persona: "柔らかく親しみやすい口調で会話します。"
-                                                .into(),
-                                            mind: "相手を思いやりながら率直に対話する。".into(),
-                                            voice_identifier: None,
-                                        },
-                                        cx,
-                                    );
-                                });
-                            }
-                            pod_done.update(cx, |this, cx| {
-                                this.onboarding_step = None;
+                })
+                .child(self.onboard_key.clone())
+                .when_some(hub.setup_error, |row, err| {
+                    row.child(div().text_xs().text_color(theme.danger_fg).child(err))
+                })
+                .child(div().flex().justify_end().child(pill_button(
+                    "onboard-connect-llm",
+                    if pending {
+                        "登録を確認中…".to_owned()
+                    } else {
+                        format!("{name}に接続")
+                    },
+                    Some(Icon::Check),
+                    Tone::Primary,
+                    can_connect && !pending,
+                    theme,
+                    move |_, cx| {
+                        if let Some(provider) = picked.clone() {
+                            hub_connect.update(cx, |hub, cx| {
+                                hub.quick_connect_llm(provider, secret.clone(), cx)
+                            });
+                            pod.update(cx, |this, cx| {
+                                this.onboard_key.update(cx, |d, cx| d.clear(cx));
                                 cx.notify();
                             });
-                        },
-                    )))
-                    .into_any_element()
-            }
-        };
+                        }
+                    },
+                )))
+                .into_any_element();
+        }
+        let look = theme.field_look(false, false);
+        self.onboard_name.update(cx, |d, _| d.apply_look(look));
+        let name = self.onboard_name.read(cx).text().trim().to_owned();
+        let hub_start = self.hub.clone();
 
         div()
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .child(header)
-            .child(body)
+            .gap(px(8.))
+            .child("コンパニオンの名前")
+            .child(self.onboard_name.clone())
+            .child(div().flex().flex_row().justify_end().child(pill_button(
+                "onboard-finish",
+                "対話を始める",
+                Some(Icon::Sparkles),
+                Tone::Primary,
+                !name.is_empty(),
+                theme,
+                move |_, cx| {
+                    hub_start.update(cx, |hub, cx| {
+                        hub.create_companion(
+                            NewCompanionSpec {
+                                name: name.clone(),
+                                persona: "柔らかく親しみやすい口調で会話します。".into(),
+                                mind: "相手を思いやりながら率直に対話する。".into(),
+                                voice_identifier: None,
+                            },
+                            cx,
+                        );
+                    });
+                },
+            )))
             .into_any_element()
     }
 
@@ -849,22 +861,35 @@ impl CompanionPod {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hub = self.hub.read(cx);
-        let latest_reply = hub
-            .model
-            .chat
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role != w::MessageRole::User)
-            .map(|m| m.text.clone());
-
         let speech_text = if !streaming_preview.is_empty() {
             streaming_preview.to_owned()
-        } else if let Some(reply) = latest_reply {
-            reply
         } else {
-            "下の入力欄からメッセージを送るか、マイクから話しかけてみてください。".to_owned()
+            active_mini_speech_text(&hub.model)
         };
+        let display_text = if streaming_preview.is_empty() {
+            speech_text.clone()
+        } else {
+            preview_text(streaming_preview)
+        };
+        let long_reply = display_text
+            .lines()
+            .map(|line| line.chars().count().max(1).div_ceil(24))
+            .sum::<usize>()
+            > 6;
+        let url_pills = render_url_pills(&speech_text, "mini", theme);
+        let failed_turn = hub
+            .model
+            .chat
+            .turn
+            .as_ref()
+            .filter(|turn| turn.status.as_known() == Some(w::TurnStatus::Failed))
+            .map(|turn| {
+                turn.failure
+                    .as_option()
+                    .map(|f| f.message.clone())
+                    .filter(|msg| !msg.trim().is_empty())
+                    .unwrap_or_else(|| "応答の生成に失敗しました".to_owned())
+            });
 
         let transcription = hub.model.transcription.clone();
         let hub_stop = self.hub.clone();
@@ -875,11 +900,64 @@ impl CompanionPod {
             .gap(px(8.))
             .child(
                 div()
+                    .id("pod-mini-reply-scroll")
+                    .max_h(px(144.))
+                    .overflow_y_scroll()
                     .text_sm()
                     .text_color(theme.ink)
-                    .line_clamp(3)
-                    .child(speech_text),
+                    .child(display_text),
             )
+            .when(long_reply, |row| {
+                let more = self.hub.clone();
+                row.child(pill_button(
+                    "pod-more",
+                    "全文を読む",
+                    None,
+                    Tone::Soft,
+                    true,
+                    theme,
+                    move |_, cx| {
+                        more.update(cx, |hub, cx| hub.set_pod_mode(PodMode::ExpandedChat, cx))
+                    },
+                ))
+            })
+            .when(
+                hub.model.chat.messages.is_empty()
+                    && !hub.model.chat.loading
+                    && hub.model.chat.sending.is_empty()
+                    && !is_busy,
+                |body| {
+                    let greeting = self.hub.clone();
+                    body.child(pill_button(
+                        "pod-greet",
+                        "「こんにちは」を送る",
+                        Some(Icon::Send),
+                        Tone::Primary,
+                        hub.model
+                            .companion()
+                            .and_then(|c| c.assignments.as_option())
+                            .and_then(|a| a.companion.as_option())
+                            .is_some(),
+                        theme,
+                        move |_, cx| {
+                            greeting.update(cx, |hub, cx| hub.send("こんにちは".into(), cx));
+                        },
+                    ))
+                },
+            )
+            .when_some(url_pills, |this, pills| this.child(pills))
+            .when_some(failed_turn, |this, reason| {
+                this.child(
+                    div()
+                        .rounded(px(10.))
+                        .bg(theme.danger_soft)
+                        .px(px(10.))
+                        .py(px(5.))
+                        .text_xs()
+                        .text_color(theme.danger_fg)
+                        .child(format!("エラー: {reason}")),
+                )
+            })
             .when_some(transcription, |this, live_stt| {
                 this.child(
                     div()
@@ -963,8 +1041,12 @@ impl CompanionPod {
             );
         }
 
-        for msg in &hub.model.chat.messages {
+        for (msg_idx, msg) in hub.model.chat.messages.iter().enumerate() {
             let is_user = msg.role == w::MessageRole::User;
+            let body_text = msg.text.clone();
+            let url_pills = (!is_user)
+                .then(|| render_url_pills(&msg.text, &format!("exp-{msg_idx}"), theme))
+                .flatten();
             rows.push(
                 div()
                     .w_full()
@@ -988,14 +1070,18 @@ impl CompanionPod {
                                     .bg(theme.bg_blush)
                                     .text_color(theme.ink)
                             })
-                            .text_sm()
-                            .child(SharedString::from(msg.text.clone())),
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(div().text_sm().child(SharedString::from(body_text)))
+                            .when_some(url_pills, |this, pills| this.child(pills)),
                     )
                     .into_any_element(),
             );
         }
 
         if !streaming_preview.is_empty() {
+            let url_pills = render_url_pills(streaming_preview, "exp-stream", theme);
             rows.push(
                 div()
                     .w_full()
@@ -1011,9 +1097,48 @@ impl CompanionPod {
                             .rounded_bl(px(4.))
                             .bg(theme.bg_blush)
                             .text_color(theme.ink)
-                            .text_sm()
-                            .child(SharedString::from(streaming_preview.to_owned())),
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(SharedString::from(preview_text(streaming_preview))),
+                            )
+                            .when_some(url_pills, |this, pills| this.child(pills)),
                     )
+                    .into_any_element(),
+            );
+        }
+
+        if hub
+            .model
+            .chat
+            .turn
+            .as_ref()
+            .and_then(|t| t.status.as_known())
+            == Some(w::TurnStatus::Failed)
+            && streaming_preview.is_empty()
+        {
+            let msg = hub
+                .model
+                .chat
+                .turn
+                .as_ref()
+                .and_then(|t| t.failure.as_option())
+                .map(|f| f.message.clone())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "応答の生成に失敗しました".to_owned());
+            rows.push(
+                div()
+                    .w_full()
+                    .rounded(px(12.))
+                    .bg(theme.danger_soft)
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_xs()
+                    .text_color(theme.danger_fg)
+                    .child(format!("エラー: {msg}"))
                     .into_any_element(),
             );
         }
@@ -1115,6 +1240,17 @@ impl CompanionPod {
             )
         };
 
+        let mic_ready = mic_ready
+            && self
+                .hub
+                .read(cx)
+                .has_audio_connection(w::ConnectionKind::Stt);
+        let hub = self.hub.read(cx);
+        let output_ready = matches!(hub.model.devices.output, Device::Ready(_))
+            && hub.has_audio_connection(w::ConnectionKind::Tts);
+        let output_on = live && output_ready && !hub.model.output_muted;
+        let hub_output = self.hub.clone();
+
         let look = theme.field_look(true, true);
         self.chat_input
             .update(cx, |draft, _| draft.apply_look(look));
@@ -1123,25 +1259,25 @@ impl CompanionPod {
         let too_long = draft_text.chars().count() > MAX_INPUT;
         let can_send = live && companion.is_some() && !draft_text.trim().is_empty() && !too_long;
 
-        let comp_name = companion
-            .as_ref()
-            .map(|c| c.name.as_str())
-            .unwrap_or("エネ");
+        let comp_name = companion.as_ref().map(|c| c.name.as_str()).unwrap_or("ene");
         let comp_id = companion.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
         let mut unsent_rows: Vec<AnyElement> = Vec::new();
         for (idx, item) in unsent.into_iter().enumerate() {
             let key = item.request_key;
             let text = item.text;
+            let reason = item.reason;
             let retry_text = text.clone();
+            let dismiss_key = key.clone();
             let hub_retry = self.hub.clone();
+            let hub_dismiss = self.hub.clone();
             unsent_rows.push(
                 div()
                     .w_full()
-                    .rounded_full()
+                    .rounded(px(14.))
                     .bg(theme.danger_soft)
                     .px(px(12.))
-                    .py(px(5.))
+                    .py(px(6.))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1150,10 +1286,25 @@ impl CompanionPod {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_xs()
-                            .text_color(theme.danger_fg)
-                            .truncate()
-                            .child(format!("未送信: {text}")),
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.danger_fg)
+                                    .truncate()
+                                    .child(format!("未送信: {text}")),
+                            )
+                            .when(!reason.trim().is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.ink_muted)
+                                        .truncate()
+                                        .child(reason),
+                                )
+                            }),
                     )
                     .child(pill_button(
                         SharedString::from(format!("pod-retry-{idx}")),
@@ -1168,12 +1319,26 @@ impl CompanionPod {
                             });
                         },
                     ))
+                    .child(pill_button(
+                        SharedString::from(format!("pod-dismiss-unsent-{idx}")),
+                        "×",
+                        None,
+                        Tone::Ghost,
+                        true,
+                        &theme,
+                        move |_, cx| {
+                            hub_dismiss.update(cx, |hub, cx| {
+                                hub.dismiss_unsent(&dismiss_key, cx);
+                            });
+                        },
+                    ))
                     .into_any_element(),
             );
         }
 
         let hub_mic = self.hub.clone();
         let hub_settings = self.hub.clone();
+        let hub_close = self.hub.clone();
         let pod_toggle = cx.entity();
 
         let capsule = div()
@@ -1265,32 +1430,63 @@ impl CompanionPod {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(if mic_muted {
+                    .bg(if !mic_ready || mic_muted {
                         theme.bg_blush
                     } else {
                         theme.mint_soft
                     })
                     .cursor_pointer()
-                    .hover(|this| {
-                        this.bg(if mic_muted {
-                            theme.bg_milk
-                        } else {
-                            theme.mint_soft.alpha(0.84)
-                        })
-                    })
-                    .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
-                        hub_mic.update(cx, |hub, cx| hub.toggle_mic_mute(cx));
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        hub_mic.update(cx, |hub, cx| {
+                            if mic_ready {
+                                hub.toggle_mic_mute(cx)
+                            } else {
+                                hub.open_settings(SettingsSection::Device, cx)
+                            }
+                        });
                     })
                     .child(icon(
-                        if mic_muted { Icon::MicOff } else { Icon::Mic },
-                        14.,
-                        if mic_muted {
-                            theme.ink_muted
-                        } else if mic_ready && live {
-                            theme.mint_fg
+                        if mic_ready && !mic_muted {
+                            Icon::Mic
                         } else {
-                            theme.ink_muted
+                            Icon::MicOff
                         },
+                        14.,
+                        theme.ink_muted,
+                    )),
+            )
+            .child(
+                div()
+                    .id("pod-speaker-btn")
+                    .flex_none()
+                    .size(px(30.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(if output_on {
+                        theme.mint_soft
+                    } else {
+                        theme.bg_blush
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        hub_output.update(cx, |hub, cx| {
+                            if output_ready {
+                                hub.toggle_output_mute(cx)
+                            } else {
+                                hub.open_settings(SettingsSection::Device, cx)
+                            }
+                        })
+                    })
+                    .child(icon(
+                        if output_on {
+                            Icon::Volume
+                        } else {
+                            Icon::VolumeOff
+                        },
+                        14.,
+                        theme.ink_muted,
                     )),
             );
 
@@ -1332,8 +1528,14 @@ impl CompanionPod {
                 false,
                 true,
                 &theme,
-                |_, cx| {
-                    cx.quit();
+                move |_, cx| {
+                    let should_hide = hub_close.read(cx).is_tray_resident()
+                        || hub_close.read(cx).settings_window.is_some();
+                    if should_hide {
+                        hub_close.update(cx, |hub, cx| hub.hide_pod(cx));
+                    } else {
+                        cx.quit();
+                    }
                 },
             ));
 
@@ -1527,14 +1729,23 @@ impl Render for CompanionPod {
             #[cfg(windows)]
             if let Some(hwnd) = current_pod_hwnd() {
                 suppress_dwm_frame(hwnd);
+                apply_hwnd_topmost(hwnd);
             }
         }
+        let needs_key = self.needs_connection(cx);
+        if needs_key != self.key_focused {
+            self.key_focused = needs_key;
+            self.focus_input(window, cx);
+        }
         let desired = self.desired_size(cx);
-        let (scroll_ping, theme) = {
+        let (scroll_ping, pod_visible, theme) = {
             let hub = self.hub.read(cx);
-            (hub.pod_scroll_ping, hub.theme())
+            (hub.pod_scroll_ping, hub.is_pod_visible(), hub.theme())
         };
         self.apply_size(desired, window, cx);
+        if pod_visible {
+            ensure_pod_topmost();
+        }
         if scroll_ping != self.last_scroll_ping {
             self.last_scroll_ping = scroll_ping;
             self.scroll.scroll_to_bottom();
@@ -1558,7 +1769,7 @@ impl Render for CompanionPod {
             .justify_end()
             .gap(px(10.))
             .child(self.render_bubble_stage(cx))
-            .child(self.render_capsule_dock(cx))
+            .when(!needs_key, |root| root.child(self.render_capsule_dock(cx)))
             .when(roster_open, |this| {
                 this.child(self.render_roster_popover(&theme, cx))
             })
@@ -1566,19 +1777,25 @@ impl Render for CompanionPod {
 }
 
 /// Binds keyboard shortcuts (`Enter` send in `ChatInput`, `Esc` stop/collapse) globally.
-pub fn bind(cx: &mut App, view: WeakEntity<CompanionPod>) {
+pub fn bind(cx: &mut App, hub: Entity<Hub>) {
     input::bind(cx);
     cx.bind_keys([
         KeyBinding::new("enter", Submit, Some("ChatInput")),
         KeyBinding::new("escape", CancelOrStop, None),
     ]);
 
-    let submit_view = view.clone();
+    let submit_hub = hub.clone();
     cx.on_action(move |_: &Submit, cx: &mut App| {
-        let _ = submit_view.update(cx, |this, cx| this.submit(cx));
+        let Some(view) = submit_hub.read(cx).pod_view() else {
+            return;
+        };
+        let _ = view.update(cx, |this, cx| this.submit(cx));
     });
 
     cx.on_action(move |_: &CancelOrStop, cx: &mut App| {
+        let Some(view) = hub.read(cx).pod_view() else {
+            return;
+        };
         let _ = view.update(cx, |this, cx| {
             if this.roster_open {
                 this.roster_open = false;
@@ -1601,6 +1818,204 @@ pub fn bind(cx: &mut App, view: WeakEntity<CompanionPod>) {
 /// Focuses the pod capsule input field when the window opens.
 pub fn focus_chat(pod: &CompanionPod, window: &mut Window, cx: &mut App) {
     pod.focus_input(window, cx);
+}
+
+pub(crate) fn set_pod_window_visible(visible: bool) {
+    #[cfg(windows)]
+    if let Some(hwnd) = current_pod_hwnd() {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
+        unsafe {
+            let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+        if visible {
+            apply_hwnd_topmost(hwnd);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = visible;
+}
+
+pub(crate) fn ensure_pod_topmost() {
+    #[cfg(windows)]
+    if let Some(hwnd) = current_pod_hwnd() {
+        apply_hwnd_topmost(hwnd);
+    }
+}
+
+fn active_mini_speech_text(model: &crate::state::Model) -> String {
+    let streaming: String = model
+        .streaming
+        .iter()
+        .filter(|((c, _), _)| c == &model.chat.companion_id)
+        .map(|(_, text)| text.as_str())
+        .collect();
+    if !streaming.is_empty() {
+        return streaming;
+    }
+    if !model.chat.sending.is_empty()
+        || model
+            .chat
+            .turn
+            .as_ref()
+            .is_some_and(|t| t.status == w::TurnStatus::Streaming)
+    {
+        return "返答を考えています…".to_owned();
+    }
+    model
+        .chat
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role != w::MessageRole::User)
+        .map(|m| m.text.clone())
+        .unwrap_or_else(|| "こんにちは。まずはひとこと送ってみてください。".to_owned())
+}
+
+fn preview_text(raw: &str) -> String {
+    // Hold an unfinished control line or table until its shape is known.
+    let (complete, tail) = raw.rsplit_once('\n').unwrap_or(("", raw));
+    let (prefix, previous) = complete.rsplit_once('\n').unwrap_or(("", complete));
+    if previous.trim_start().starts_with('|')
+        && (tail.is_empty() || tail.trim_matches(['|', '-', ':', ' ']).is_empty())
+        && !prefix
+            .lines()
+            .any(|line| line.starts_with('|') && line.contains("---"))
+    {
+        return w::plain_reply(prefix);
+    }
+    if tail.trim_start().starts_with(['[', '|']) {
+        w::plain_reply(complete)
+    } else {
+        w::plain_reply(raw)
+    }
+}
+
+fn short_url_label(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let trimmed = without_scheme.trim_end_matches('/');
+    if trimmed.chars().count() <= 32 {
+        trimmed.to_owned()
+    } else {
+        let head: String = trimmed.chars().take(29).collect();
+        format!("{head}…")
+    }
+}
+
+fn extract_urls(raw: &str) -> Vec<(String, String)> {
+    let mut urls: Vec<(String, String)> = Vec::new();
+    let mut push_unique = |label: String, url: String| {
+        if urls.len() >= 4 || urls.iter().any(|(_, existing)| existing == &url) {
+            return;
+        }
+        let clean_label = if label.trim().is_empty() {
+            short_url_label(&url)
+        } else {
+            label
+        };
+        urls.push((clean_label, url));
+    };
+
+    let mut rest = raw;
+    while let Some(open) = rest.find('[') {
+        let after_open = &rest[open + 1..];
+        if let Some(mid) = after_open.find("](")
+            && let Some(close) = after_open[mid + 2..].find(')')
+        {
+            let label = after_open[..mid].trim();
+            let url = after_open[mid + 2..mid + 2 + close].trim();
+            if url.starts_with("http://") || url.starts_with("https://") {
+                push_unique(label.to_owned(), url.to_owned());
+                rest = &after_open[mid + 2 + close + 1..];
+                continue;
+            }
+        }
+        rest = after_open;
+    }
+
+    for token in raw.split_whitespace() {
+        let candidate = token.trim_start_matches(['(', '[', '<', '"', '\'', '「', '『']);
+        if let Some(pos) = candidate
+            .find("https://")
+            .or_else(|| candidate.find("http://"))
+        {
+            let slice = &candidate[pos..];
+            let end = slice
+                .find(|ch: char| {
+                    matches!(
+                        ch,
+                        ')' | ']' | '>' | '"' | '\'' | ',' | '。' | '、' | '」' | '』'
+                    ) || ch.is_whitespace()
+                })
+                .unwrap_or(slice.len());
+            let clean = slice[..end].trim_end_matches(['.', ';', ':']);
+            if clean.starts_with("http://") || clean.starts_with("https://") {
+                push_unique(short_url_label(clean), clean.to_owned());
+            }
+        }
+    }
+    urls
+}
+
+fn render_url_pills(raw: &str, id_prefix: &str, theme: &Theme) -> Option<AnyElement> {
+    let urls = extract_urls(raw);
+    if urls.is_empty() {
+        return None;
+    }
+    let chips: Vec<AnyElement> = urls
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (label, url))| {
+            let hover_bg = theme.accent_soft;
+            let open_url = url.clone();
+            div()
+                .id(SharedString::from(format!("{id_prefix}-url-{idx}")))
+                .rounded_full()
+                .bg(theme.accent_soft)
+                .border_1()
+                .border_color(theme.border)
+                .px(px(8.))
+                .py(px(2.))
+                .text_xs()
+                .text_color(theme.accent_soft_fg)
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover_bg))
+                .on_click(move |_, _, cx| {
+                    cx.open_url(&open_url);
+                })
+                .child(label)
+                .into_any_element()
+        })
+        .collect();
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(6.))
+            .children(chips)
+            .into_any_element(),
+    )
+}
+
+#[cfg(windows)]
+fn apply_hwnd_topmost(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -1641,7 +2056,7 @@ fn anchor_window_bottom(hwnd_raw: isize, target_bottom: i32) {
     use windows::Win32::{
         Foundation::{HWND, RECT},
         UI::WindowsAndMessaging::{
-            GetWindowRect, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+            GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowPos,
         },
     };
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
@@ -1654,18 +2069,29 @@ fn anchor_window_bottom(hwnd_raw: isize, target_bottom: i32) {
     unsafe {
         let _ = SetWindowPos(
             hwnd,
-            None,
+            Some(HWND_TOPMOST),
             rect.left,
             new_top,
             0,
             0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }
 
 #[cfg(windows)]
 fn suppress_dwm_frame(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            (style & !(WS_EX_TOOLWINDOW.0 as isize)) | WS_EX_APPWINDOW.0 as isize,
+        );
+    }
     #[link(name = "dwmapi")]
     unsafe extern "system" {
         fn DwmSetWindowAttribute(
@@ -1695,5 +2121,46 @@ fn suppress_dwm_frame(hwnd: windows::Win32::Foundation::HWND) {
             4,
         );
         let _ = DwmSetWindowAttribute(hwnd.0, DWMWA_BORDER_COLOR, (&raw const color).cast(), 4);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_waits_for_table_columns_and_motion_data() {
+        for partial in [
+            "|価格|幅|",
+            "|価格|幅|\n",
+            "|価格|幅|\n|--",
+            "[{\"motion\":",
+        ] {
+            assert_eq!(preview_text(partial), "");
+        }
+    }
+
+    #[test]
+    fn clean_display_text_and_extract_urls_handle_markdown_links() {
+        let raw = "### 結果\n- **公式**: [Antigravity](https://example.com/docs) を確認\nhttps://example.com/raw。";
+        let clean = preview_text(raw);
+        assert!(
+            clean.contains("公式: Antigravity (https://example.com/docs) を確認"),
+            "{clean}"
+        );
+        let urls = extract_urls(raw);
+        assert_eq!(
+            urls,
+            vec![
+                (
+                    "Antigravity".to_owned(),
+                    "https://example.com/docs".to_owned()
+                ),
+                (
+                    "example.com/raw".to_owned(),
+                    "https://example.com/raw".to_owned()
+                ),
+            ]
+        );
     }
 }

@@ -23,6 +23,8 @@ impl SettingsStudio {
             avatar_scale,
             rules,
             client_caps,
+            tray_resident,
+            pod_visible,
         ) = {
             let hub = self.hub.read(cx);
             let our_id = hub.options.id.clone();
@@ -48,14 +50,35 @@ impl SettingsStudio {
                 hub.model.avatar_scale,
                 rules,
                 caps,
+                hub.is_tray_resident(),
+                hub.is_pod_visible(),
             )
         };
 
         let header = div()
-            .text_size(px(22.))
-            .font_weight(FontWeight::BOLD)
-            .text_color(theme.ink)
-            .child("この端末");
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .child(
+                div()
+                    .text_size(px(22.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.ink)
+                    .child("この端末"),
+            )
+            .when(tray_resident, |this| {
+                this.child(pill_button(
+                    "dev-quit-app",
+                    "ene を終了",
+                    Some(Icon::Close),
+                    Tone::Danger,
+                    true,
+                    theme,
+                    |_, cx| cx.quit(),
+                ))
+            });
 
         let (link_text, link_dot, link_bg, link_fg) = match &link {
             Link::Live { version } => (
@@ -79,10 +102,21 @@ impl SettingsStudio {
         };
 
         let hub_activate = self.hub.clone();
+        let hub_pod = self.hub.clone();
         let hub_mic = self.hub.clone();
         let hub_out = self.hub.clone();
         let hub_center = self.hub.clone();
 
+        let mic_configured = self
+            .hub
+            .read(cx)
+            .has_audio_connection(w::ConnectionKind::Stt);
+        let output_configured = self
+            .hub
+            .read(cx)
+            .has_audio_connection(w::ConnectionKind::Tts);
+        let mic_ready = mic_configured && matches!(devices.input, Device::Ready(_));
+        let output_ready = output_configured && matches!(devices.output, Device::Ready(_));
         let avatar_ready = matches!(devices.avatar, Device::Ready(_));
         let mut scale_chips = Vec::new();
         for pct in [75.0f32, 100.0, 125.0, 150.0] {
@@ -151,24 +185,84 @@ impl SettingsStudio {
             ))
             .child(row_frame(
                 true,
-                "マイク入力",
-                Some(device_pill(&devices.input, !mic_muted, theme)),
-                toggle_switch("dev-mic-toggle", !mic_muted, true, theme, move |_, cx| {
-                    hub_mic.update(cx, |hub, cx| hub.toggle_mic_mute(cx));
+                "声で話す",
+                Some(if mic_configured {
+                    device_pill(&devices.input, !mic_muted, theme)
+                } else {
+                    status_pill(
+                        "音声認識の接続が必要",
+                        None,
+                        theme.amber_soft,
+                        theme.amber_fg,
+                    )
                 }),
+                toggle_switch(
+                    "dev-mic-toggle",
+                    mic_ready && !mic_muted,
+                    mic_ready,
+                    theme,
+                    move |_, cx| {
+                        hub_mic.update(cx, |hub, cx| hub.toggle_mic_mute(cx));
+                    },
+                ),
                 theme,
             ))
             .child(row_frame(
                 true,
-                "スピーカー出力",
-                Some(device_pill(&devices.output, !output_muted, theme)),
+                "返事を読み上げる",
+                Some(if output_configured {
+                    device_pill(&devices.output, !output_muted, theme)
+                } else {
+                    status_pill(
+                        "読み上げの接続が必要",
+                        None,
+                        theme.amber_soft,
+                        theme.amber_fg,
+                    )
+                }),
                 toggle_switch(
                     "dev-out-toggle",
-                    !output_muted,
-                    true,
+                    output_ready && !output_muted,
+                    output_ready,
                     theme,
                     move |_, cx| {
                         hub_out.update(cx, |hub, cx| hub.toggle_output_mute(cx));
+                    },
+                ),
+                theme,
+            ))
+            .child(row_frame(
+                true,
+                "対話ウィンドウ",
+                Some(if pod_visible {
+                    status_pill("表示中", Some(theme.mint), theme.mint_soft, theme.mint_fg)
+                } else {
+                    status_pill(
+                        "トレイ待機中",
+                        Some(theme.ink_placeholder),
+                        theme.bg_blush,
+                        theme.ink_muted,
+                    )
+                }),
+                pill_button(
+                    "dev-pod-toggle",
+                    if pod_visible { "隠す" } else { "開く" },
+                    Some(if pod_visible {
+                        Icon::Minimize
+                    } else {
+                        Icon::ChatBubble
+                    }),
+                    if pod_visible { Tone::Ghost } else { Tone::Soft },
+                    true,
+                    theme,
+                    move |_, cx| {
+                        hub_pod.update(cx, |hub, cx| {
+                            if pod_visible {
+                                hub.hide_pod(cx);
+                            } else {
+                                hub.open_pod(None, cx);
+                            }
+                        });
                     },
                 ),
                 theme,
