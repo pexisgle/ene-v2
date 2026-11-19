@@ -224,7 +224,11 @@ fn start_local_host(host: &std::path::Path) -> std::io::Result<std::process::Chi
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new(host);
     if std::env::var_os("ENE_HOST_ALLOWED_CAPABILITIES").is_none() {
-        command.env("ENE_HOST_ALLOWED_CAPABILITIES", "body.motion");
+        let capabilities = ene_desktop::WORKSPACE_FILE_CAPABILITIES.join(",");
+        command.env(
+            "ENE_HOST_ALLOWED_CAPABILITIES",
+            format!("body.motion,{capabilities}"),
+        );
     }
     command
         .creation_flags(CREATE_NO_WINDOW)

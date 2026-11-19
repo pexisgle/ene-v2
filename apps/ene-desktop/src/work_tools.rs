@@ -26,6 +26,14 @@ const MAX_RESULTS: usize = 500;
 const COMMAND_TIMEOUT: u64 = 30;
 
 pub(crate) const PREFIX: &str = "work.";
+pub const WORKSPACE_FILE_CAPABILITIES: &[&str] = &[
+    "work.read",
+    "work.write",
+    "work.edit",
+    "work.grep",
+    "work.find",
+    "work.ls",
+];
 
 #[cfg(windows)]
 const SHELL: &str = "powershell";

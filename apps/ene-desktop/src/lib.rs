@@ -33,3 +33,4 @@ pub use ui::{
     open_pod_window,
 };
 pub use update::{Command, Update};
+pub use work_tools::WORKSPACE_FILE_CAPABILITIES;

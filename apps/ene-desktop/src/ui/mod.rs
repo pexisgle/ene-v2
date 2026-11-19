@@ -1462,9 +1462,6 @@ impl Hub {
         effect: w::PolicyEffect,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.host() else {
-            return;
-        };
         let rule = w::PolicyRule {
             id: uuid::Uuid::new_v4().to_string(),
             tool_name,
@@ -1472,37 +1469,40 @@ impl Hub {
             effect: effect.into(),
             ..Default::default()
         };
-        self.request(
+        self.update_policy_rules(
             "許可ルールの追加",
-            async move {
-                let response = host
-                    .settings
-                    .update_policy_rules(w::UpdatePolicyRulesRequest {
-                        add_or_update: vec![rule],
-                        ..Default::default()
-                    })
-                    .await?;
-                response.view().to_owned_message().map_err(decode)
+            w::UpdatePolicyRulesRequest {
+                add_or_update: vec![rule],
+                ..Default::default()
             },
-            |rules| Update::PolicyRules(rules.items),
+            cx,
         );
-        cx.notify();
     }
 
     pub(crate) fn remove_policy_rule(&mut self, id: String, cx: &mut Context<Self>) {
+        self.update_policy_rules(
+            "許可ルールの削除",
+            w::UpdatePolicyRulesRequest {
+                remove_ids: vec![id],
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    fn update_policy_rules(
+        &mut self,
+        context: &'static str,
+        request: w::UpdatePolicyRulesRequest,
+        cx: &mut Context<Self>,
+    ) {
         let Some(host) = self.host() else {
             return;
         };
         self.request(
-            "許可ルールの削除",
+            context,
             async move {
-                let response = host
-                    .settings
-                    .update_policy_rules(w::UpdatePolicyRulesRequest {
-                        remove_ids: vec![id],
-                        ..Default::default()
-                    })
-                    .await?;
+                let response = host.settings.update_policy_rules(request).await?;
                 response.view().to_owned_message().map_err(decode)
             },
             |rules| Update::PolicyRules(rules.items),

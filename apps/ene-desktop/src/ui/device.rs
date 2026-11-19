@@ -6,9 +6,37 @@ use super::icons::Icon;
 use super::studio::labeled_field;
 use super::theme::Theme;
 use super::widgets::{Tone, disclosure_row, kind_pill, pill_button, status_pill, toggle_switch};
+use crate::WORKSPACE_FILE_CAPABILITIES;
 use crate::state::{Device, Link};
 use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
+
+const SKIP_FILE_CONFIRMATION_PREFIX: &str = "desktop.skip-file-confirmation:";
+
+fn is_file_confirmation_rule(rule: &w::PolicyRule) -> bool {
+    rule.id
+        .strip_prefix(SKIP_FILE_CONFIRMATION_PREFIX)
+        .is_some_and(|capability| WORKSPACE_FILE_CAPABILITIES.contains(&capability))
+}
+
+fn file_confirmation_request(skip: bool) -> w::UpdatePolicyRulesRequest {
+    let mut request = w::UpdatePolicyRulesRequest::default();
+    for &capability in WORKSPACE_FILE_CAPABILITIES {
+        let id = format!("{SKIP_FILE_CONFIRMATION_PREFIX}{capability}");
+        if skip {
+            request.add_or_update.push(w::PolicyRule {
+                id,
+                tool_name: capability.into(),
+                pattern: "*".into(),
+                effect: w::PolicyEffect::Allow.into(),
+                ..Default::default()
+            });
+        } else {
+            request.remove_ids.push(id);
+        }
+    }
+    request
+}
 
 impl SettingsStudio {
     pub(crate) fn render_device(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -438,8 +466,13 @@ impl SettingsStudio {
             .text_color(theme.ink)
             .child("許可ルール");
 
+        let skip_file_confirmation = rules.iter().any(is_file_confirmation_rule);
+        let hub_confirmation = self.hub.clone();
         let mut rule_items: Vec<AnyElement> = Vec::new();
-        for (idx, rule) in rules.into_iter().enumerate() {
+        for rule in rules
+            .into_iter()
+            .filter(|rule| !is_file_confirmation_rule(rule))
+        {
             let (eff_text, dot, bg, fg) = match rule.effect.as_known() {
                 Some(w::PolicyEffect::Allow) => {
                     ("許可", theme.mint, theme.mint_soft, theme.mint_fg)
@@ -508,7 +541,8 @@ impl SettingsStudio {
 
             rule_items.push(
                 div()
-                    .when(idx > 0, |this| this.border_t_1().border_color(theme.border))
+                    .border_t_1()
+                    .border_color(theme.border)
                     .px(px(16.))
                     .py(px(12.))
                     .flex()
@@ -550,6 +584,8 @@ impl SettingsStudio {
         if rule_items.is_empty() {
             rule_items.push(
                 div()
+                    .border_t_1()
+                    .border_color(theme.border)
                     .px(px(16.))
                     .py(px(14.))
                     .text_xs()
@@ -567,6 +603,37 @@ impl SettingsStudio {
             .rounded(px(14.))
             .flex()
             .flex_col()
+            .child(row_frame(
+                false,
+                "作業フォルダーのファイル操作",
+                None,
+                pill_button(
+                    "dev-file-confirmation",
+                    if skip_file_confirmation {
+                        "省略を解除"
+                    } else {
+                        "確認を省略"
+                    },
+                    None,
+                    if skip_file_confirmation {
+                        Tone::Soft
+                    } else {
+                        Tone::Ghost
+                    },
+                    live,
+                    theme,
+                    move |_, cx| {
+                        hub_confirmation.update(cx, |hub, cx| {
+                            hub.update_policy_rules(
+                                "ファイル操作の確認設定",
+                                file_confirmation_request(!skip_file_confirmation),
+                                cx,
+                            );
+                        });
+                    },
+                ),
+                theme,
+            ))
             .children(rule_items);
 
         let studio_add_pol = cx.entity();
@@ -751,5 +818,50 @@ fn device_pill(device: &Device, active_flag: bool, theme: &Theme) -> AnyElement 
             theme.danger_soft,
             theme.danger_fg,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_confirmation_removes_only_its_own_rules() {
+        let enabled = file_confirmation_request(true);
+        let disabled = file_confirmation_request(false);
+        assert!(enabled.remove_ids.is_empty() && disabled.add_or_update.is_empty());
+        assert_eq!(
+            enabled
+                .add_or_update
+                .iter()
+                .map(|rule| rule.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "work.read",
+                "work.write",
+                "work.edit",
+                "work.grep",
+                "work.find",
+                "work.ls"
+            ],
+        );
+        assert_eq!(
+            disabled.remove_ids,
+            enabled
+                .add_or_update
+                .iter()
+                .map(|rule| rule.id.clone())
+                .collect::<Vec<_>>(),
+        );
+        assert!(enabled.add_or_update.iter().all(|rule| {
+            is_file_confirmation_rule(rule)
+                && rule.pattern == "*"
+                && rule.effect.as_known() == Some(w::PolicyEffect::Allow)
+        }));
+        assert!(!is_file_confirmation_rule(&w::PolicyRule {
+            id: "manual-write-rule".into(),
+            tool_name: "work.write".into(),
+            ..Default::default()
+        }));
     }
 }
